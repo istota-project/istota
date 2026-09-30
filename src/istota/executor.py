@@ -5043,6 +5043,25 @@ def _user_email_address_map(config: Config) -> dict[str, list[str]]:
     return address_map
 
 
+def _front_stage_cutoff(
+    task: db.Task, conn: "db.sqlite3.Connection | None", config: Config,
+) -> db.AudienceCutoff:
+    """Where this task's room's front stage starts (multiplayer D3).
+
+    Every reader here that puts the room's own transcript in front of the
+    model takes it: the task answers into the room, in front of whoever reads
+    it now, so it may draw only on what all of them were present for. A side
+    room's view of its parent is `side_rooms.parent_context`, which reads the
+    parent whole and does not come through here.
+    """
+    if not task.conversation_token:
+        return db.AudienceCutoff()
+    if conn is not None:
+        return db.front_stage_cutoff(conn, task.conversation_token)
+    with db.get_db(config.db_path) as temp_conn:
+        return db.front_stage_cutoff(temp_conn, task.conversation_token)
+
+
 def _ensure_reply_parent_in_history(
     task: db.Task,
     history: list[db.ConversationMessage],
@@ -5102,6 +5121,12 @@ def _ensure_reply_parent_in_history(
     else:
         with db.get_db(config.db_path) as temp_conn:
             parent_task, parent_sender = _lookup(temp_conn)
+
+    # A parent from before an epoch the room's audience did not share stays
+    # out of context; the citation the replier chose to show is still quoted
+    # in the request itself.
+    if parent_task and parent_task.id <= _front_stage_cutoff(task, conn, config).task_id:
+        return history, None
 
     if parent_task:
         parent_msg = db.ConversationMessage(
@@ -5264,6 +5289,12 @@ def _build_talk_api_context(
         with db.get_db(config.db_path) as temp_conn:
             raw_messages = db.get_cached_talk_messages(temp_conn, task.conversation_token, limit=limit)
 
+    talk_floor = _front_stage_cutoff(task, conn, config).talk_message_id
+    if talk_floor:
+        raw_messages = [
+            m for m in raw_messages if (m.get("id") or 0) > talk_floor
+        ]
+
     if not raw_messages:
         logger.info("No messages from Talk API for token %s", task.conversation_token)
         # No reply-to fallback here any more: `build_prompt` renders the
@@ -5376,6 +5407,7 @@ def _build_db_context(
     # own: a shared room's history carries co-members' turns, and checking theirs
     # against this user's addresses would mark them external for no reason.
     own_email_addresses = _user_email_address_map(config)
+    cutoff = _front_stage_cutoff(task, conn, config)
 
     if conn is not None:
         history = db.get_conversation_history(
@@ -5383,6 +5415,7 @@ def _build_db_context(
             limit=config.conversation.lookback_count,
             exclude_source_types=_exclude_types,
             user_email_addresses=own_email_addresses,
+            after=cutoff,
         )
     else:
         with db.get_db(config.db_path) as temp_conn:
@@ -5391,6 +5424,7 @@ def _build_db_context(
                 limit=config.conversation.lookback_count,
                 exclude_source_types=_exclude_types,
                 user_email_addresses=own_email_addresses,
+                after=cutoff,
             )
 
     # Inject recent scheduled/briefing tasks in the same channel — these are
@@ -5407,6 +5441,7 @@ def _build_db_context(
             limit=config.conversation.previous_tasks_count,
             exclude_source_types=_prev_exclude,
             user_email_addresses=own_email_addresses,
+            after=cutoff,
         )
     else:
         with db.get_db(config.db_path) as temp_conn:
@@ -5415,6 +5450,7 @@ def _build_db_context(
                 limit=config.conversation.previous_tasks_count,
                 exclude_source_types=_prev_exclude,
                 user_email_addresses=own_email_addresses,
+                after=cutoff,
             )
 
     if prev_tasks:
@@ -5612,6 +5648,7 @@ def _recall_memories(
         logger.debug("Memory recall search failed", exc_info=True)
         return None
 
+    results = _drop_pre_cutoff_turns(config, conn, task, results)
     if not results:
         return None
 
@@ -5620,6 +5657,43 @@ def _recall_memories(
         snippet = r.content[:300].strip()
         parts.append(f"- [{r.source_type}] {snippet}")
     return "\n".join(parts)
+
+
+def _drop_pre_cutoff_turns(config: Config, conn, task: db.Task, results: list) -> list:
+    """Recall's share of the front-stage rule: an indexed conversation chunk
+    whose task is this room's, from before its cutoff, is the transcript by
+    another road — the `channel:` namespace serves it to every task here."""
+    if not results or not task.conversation_token:
+        return results
+    candidates = [
+        int(r.source_id) for r in results
+        if r.source_type == "conversation" and str(r.source_id).isdigit()
+    ]
+    if not candidates:
+        return results
+
+    def _hidden(c) -> set[int]:
+        cutoff = db.front_stage_cutoff(c, task.conversation_token)
+        if not cutoff.task_id:
+            return set()
+        return db.pre_cutoff_room_task_ids(c, task.conversation_token, cutoff, candidates)
+
+    try:
+        if conn is not None:
+            hidden = _hidden(conn)
+        else:
+            with db.get_db(config.db_path) as temp_conn:
+                hidden = _hidden(temp_conn)
+    except Exception:
+        # The cutoff cannot be read, so which chunks are safe cannot be
+        # known: recall nothing of the conversation index rather than guess.
+        logger.debug("Front-stage cutoff read failed for recall", exc_info=True)
+        return [r for r in results if r.source_type != "conversation"]
+    return [
+        r for r in results
+        if not (r.source_type == "conversation" and str(r.source_id).isdigit()
+                and int(r.source_id) in hidden)
+    ]
 
 
 def _recall_playbooks(

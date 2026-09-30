@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from . import sqlite_util
 from .user_scope import is_scopable_user_id
@@ -1139,6 +1139,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_room_data_grants(conn)
     _migrate_side_rooms(conn)
     _migrate_room_policy(conn)
+    _migrate_room_epochs(conn)
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
@@ -2647,6 +2648,7 @@ def get_conversation_history(
     limit: int = 10,
     exclude_source_types: list[str] | None = None,
     user_email_addresses: Mapping[str, Sequence[str]] | None = None,
+    after: "AudienceCutoff | None" = None,
 ) -> list[ConversationMessage]:
     """
     Get completed conversation history for a conversation token.
@@ -2670,15 +2672,18 @@ def get_conversation_history(
             than taking one list, because a shared room's turns are not all the
             requesting user's. Omitting it fails safe — every email turn is then
             attributed to its envelope sender.
+        after: A front-stage reader's `front_stage_cutoff`: turns from before
+            an epoch the current audience did not share are left out. Omitted
+            by a reader that is not front stage (`!export`).
     """
     if _messages_caught_up(conn, conversation_token):
         return _conversation_history_from_messages(
             conn, conversation_token, exclude_task_id, limit, exclude_source_types,
-            user_email_addresses,
+            user_email_addresses, after=after,
         )
     return _conversation_history_from_tasks(
         conn, conversation_token, exclude_task_id, limit, exclude_source_types,
-        user_email_addresses,
+        user_email_addresses, after=after,
     )
 
 
@@ -2689,6 +2694,8 @@ def _conversation_history_from_tasks(
     limit: int,
     exclude_source_types: list[str] | None,
     user_email_addresses: Mapping[str, Sequence[str]] | None = None,
+    *,
+    after: "AudienceCutoff | None" = None,
 ) -> list[ConversationMessage]:
     """Legacy path: reconstruct history from completed `tasks` rows."""
     # `withheld_from_room` excludes an exchange that keeps this token for context
@@ -2718,6 +2725,10 @@ def _conversation_history_from_tasks(
         placeholders = ", ".join("?" for _ in exclude_source_types)
         query += f" AND source_type NOT IN ({placeholders})"
         params.extend(exclude_source_types)
+
+    if after is not None and after.task_id:
+        query += " AND id > ?"
+        params.append(after.task_id)
 
     # Get most recent N, then reverse for oldest-first order
     # Use id as tiebreaker for same-second timestamps
@@ -2750,6 +2761,8 @@ def _conversation_history_from_messages(
     limit: int,
     exclude_source_types: list[str] | None,
     user_email_addresses: Mapping[str, Sequence[str]] | None = None,
+    *,
+    after: "AudienceCutoff | None" = None,
 ) -> list[ConversationMessage]:
     """Unified path: re-pair `messages` user/assistant rows (keyed on task_id)
     back into the (prompt, result) ConversationMessage shape callers expect.
@@ -2798,6 +2811,12 @@ def _conversation_history_from_messages(
         placeholders = ", ".join("?" for _ in exclude_source_types)
         query += f" AND (mu.task_id IS NULL OR t.source_type NOT IN ({placeholders}))"
         params.extend(exclude_source_types)
+
+    # A turn is on the side of the join its user row is on: an answer that
+    # landed after the join still answered something the joiner never saw.
+    if after is not None and after.message_id:
+        query += " AND mu.id > ?"
+        params.append(after.message_id)
 
     query += " ORDER BY COALESCE(t.created_at, mu.created_at) DESC, mu.id DESC LIMIT ?"
     params.append(limit)
@@ -3077,6 +3096,7 @@ def get_previous_tasks(
     limit: int = 3,
     exclude_source_types: list[str] | None = None,
     user_email_addresses: Mapping[str, Sequence[str]] | None = None,
+    after: "AudienceCutoff | None" = None,
 ) -> list[ConversationMessage]:
     """
     Get the most recent completed tasks in a conversation.
@@ -3119,6 +3139,10 @@ def get_previous_tasks(
     if exclude_task_id is not None:
         query += " AND id != ?"
         params.append(exclude_task_id)
+
+    if after is not None and after.task_id:
+        query += " AND id > ?"
+        params.append(after.task_id)
 
     query += " ORDER BY created_at DESC, id DESC LIMIT ?"
     params.append(limit)
@@ -4173,6 +4197,7 @@ def delete_web_chat_room(
     conn.execute("DELETE FROM room_participants WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_data_grants WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_policy WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_epochs WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM rooms WHERE token = ?", (token,))
     # Drop every participant's handle for the token, not just the requester's
     # (room_id): a promoted web room can accrue handles for other members, and
@@ -4341,12 +4366,26 @@ def register_room(
     return room
 
 
-def add_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
-    """Idempotently record that `user_id` is a participant in `room_token`."""
+def add_room_member(
+    conn: sqlite3.Connection, room_token: str, user_id: str,
+    *, acknowledged: bool = False,
+) -> None:
+    """Idempotently record that `user_id` is a participant in `room_token`.
+
+    A member reads the room, so a new one grows its audience and starts an
+    epoch unless `acknowledged` — see `note_audience_join`.
+    """
+    joining = not is_room_member(conn, room_token, user_id)
+    audience = audience_persons(conn, room_token) if joining else set()
     conn.execute(
         "INSERT OR IGNORE INTO room_members (room_token, user_id) VALUES (?, ?)",
         (room_token, user_id),
     )
+    if joining:
+        note_audience_join(
+            conn, room_token, f"u:{user_id}", audience,
+            reason="member_add", acknowledged=acknowledged,
+        )
 
 
 def remove_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
@@ -4488,11 +4527,14 @@ def add_web_room_member(
     counts them in the room's audience before they have said anything.
     """
     added = not is_room_member(conn, room_token, user_id)
-    add_room_member(conn, room_token, user_id)
+    # The add endpoint refuses without `acknowledge_history`, so the creator
+    # has said the new member may read what came before: no epoch (D3).
+    add_room_member(conn, room_token, user_id, acknowledged=True)
     undismiss_room(conn, room_token, user_id)
     upsert_room_participant(
         conn, room_token=room_token, surface="web", surface_ref=user_id,
         kind="principal", user_id=user_id, display_name=display_name,
+        acknowledged=True,
     )
     return added
 
@@ -4526,8 +4568,12 @@ def upsert_room_participant(
     kind: str,
     user_id: str | None = None,
     display_name: str | None = None,
+    acknowledged: bool = False,
 ) -> int:
     """Record a participant as present in a room; the row's id.
+
+    A human who was not already in the room's audience grows it, which starts
+    an epoch unless `acknowledged` — see `note_audience_join`.
 
     Keyed on the *present* row — `(room_token, surface, surface_ref)` with
     `left_at IS NULL`, the partial unique index — so a participant still here is
@@ -4539,6 +4585,12 @@ def upsert_room_participant(
     """
     if kind not in PARTICIPANT_KINDS:
         raise ValueError(f"unknown participant kind: {kind!r}")
+    joining = kind != "agent" and conn.execute(
+        "SELECT 1 FROM room_participants WHERE room_token = ? AND surface = ? "
+        "AND surface_ref = ? AND left_at IS NULL",
+        (room_token, surface, surface_ref),
+    ).fetchone() is None
+    audience = audience_persons(conn, room_token) if joining else set()
     row = conn.execute(
         "INSERT INTO room_participants "
         "(room_token, surface, surface_ref, user_id, kind, display_name) "
@@ -4550,6 +4602,12 @@ def upsert_room_participant(
         "RETURNING id",
         (room_token, surface, surface_ref, user_id or None, kind, display_name or None),
     ).fetchone()
+    if joining:
+        note_audience_join(
+            conn, room_token,
+            f"u:{user_id}" if user_id else f"{surface}:{surface_ref}", audience,
+            reason=f"{surface}_join", acknowledged=acknowledged,
+        )
     return int(row[0])
 
 
@@ -4603,6 +4661,184 @@ def room_is_shared(conn: sqlite3.Connection, room_token: str) -> bool:
         "SELECT COUNT(*) FROM room_members WHERE room_token = ?", (room_token,),
     ).fetchone()[0]
     return members > 1
+
+
+# ---------------------------------------------------------------------------
+# Audience epochs (multiplayer Stage 14, D3)
+# ---------------------------------------------------------------------------
+
+_AUDIENCE_PERSONS_SQL = (
+    "SELECT CASE WHEN user_id IS NOT NULL THEN 'u:' || user_id "
+    "  ELSE surface || ':' || surface_ref END "
+    "FROM room_participants "
+    "WHERE room_token = ? AND left_at IS NULL AND kind != 'agent' "
+    "UNION SELECT 'u:' || user_id FROM room_members WHERE room_token = ?"
+)
+
+
+def audience_persons(conn: sqlite3.Connection, room_token: str) -> set[str]:
+    """Who reads a room now: present human participants and members.
+
+    Spelled as `room_is_shared` counts them — `u:<user>` for an istota user on
+    any surface, `<surface>:<ref>` for anyone else — so one person on Talk and
+    web is one reader.
+    """
+    return {
+        r[0] for r in conn.execute(_AUDIENCE_PERSONS_SQL, (room_token, room_token))
+    }
+
+
+def _canonical_room_token(conn: sqlite3.Connection, token: str) -> str:
+    if get_room(conn, token) is not None:
+        return token
+    return find_room_token_by_ref(conn, token) or token
+
+
+def _room_ref_tokens(conn: sqlite3.Connection, room_token: str) -> list[str]:
+    """The canonical token plus every surface ref bound to it: the values a
+    `tasks.conversation_token` or a Talk cache row for this room can carry."""
+    refs = [room_token]
+    for row in conn.execute(
+        "SELECT surface_ref FROM room_bindings WHERE room_token = ?", (room_token,),
+    ):
+        if row[0] not in refs:
+            refs.append(row[0])
+    return refs
+
+
+def note_audience_join(
+    conn: sqlite3.Connection,
+    room_token: str,
+    person: str,
+    audience_before: set[str],
+    *,
+    reason: str,
+    acknowledged: bool = False,
+) -> int | None:
+    """Start an epoch if `person` joining grew the room's audience; its number.
+
+    Splits only when somebody else was already reading the room (a room's
+    first reader has nothing to be kept from), the person was not among them
+    (the same user on a second surface is not a join), and nobody acknowledged
+    the history for them. Web's add endpoint does; Talk, email and WhatsApp
+    have no such act, so their joins always split. Surface-neutral: every
+    surface's joins arrive through `upsert_room_participant` and
+    `add_room_member`, which call this.
+
+    The boundaries are the highest ids in the whole store, not the room's: a
+    later row only ever gets a higher id, so nothing written before the join
+    can read as after it.
+    """
+    if acknowledged or not audience_before or person in audience_before:
+        return None
+    refs = _room_ref_tokens(conn, room_token)
+    placeholders = ", ".join("?" for _ in refs)
+    row = conn.execute(
+        "INSERT INTO room_epochs (room_token, epoch, reason, person, "
+        "  after_message_id, after_task_id, after_talk_message_id) "
+        "SELECT ?, COALESCE(MAX(epoch), 0) + 1, ?, ?, "
+        "  (SELECT COALESCE(MAX(id), 0) FROM messages), "
+        "  (SELECT COALESCE(MAX(id), 0) FROM tasks), "
+        "  (SELECT COALESCE(MAX(message_id), 0) FROM talk_messages "
+        f"   WHERE conversation_token IN ({placeholders})) "
+        "FROM room_epochs WHERE room_token = ? "
+        "RETURNING epoch",
+        (room_token, reason, person, *refs, room_token),
+    ).fetchone()
+    return int(row[0])
+
+
+def audience_baseline_observed(
+    conn: sqlite3.Connection, room_token: str, surface: str,
+) -> bool:
+    """Whether `surface`'s roster has been observed for this room before."""
+    return conn.execute(
+        "SELECT 1 FROM room_epochs WHERE room_token = ? AND epoch = 0 "
+        "AND reason = ?", (room_token, f"baseline:{surface}"),
+    ).fetchone() is not None
+
+
+def mark_audience_baseline(
+    conn: sqlite3.Connection, room_token: str, surface: str,
+) -> None:
+    """Record that `surface`'s roster has now been observed for this room.
+
+    The first roster a room is seen with is who its transcript was written
+    for — a new room's founders, or on the day this shipped every existing
+    room's people — not somebody joining. That observation writes this row
+    instead of epochs, and only a later roster can grow the audience.
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO room_epochs (room_token, epoch, reason) "
+        "VALUES (?, 0, ?)", (room_token, f"baseline:{surface}"),
+    )
+
+
+@dataclass(frozen=True)
+class AudienceCutoff:
+    """Where a room's front stage starts, in each id space a reader keys on.
+
+    A row whose id is at or below its boundary is from before an epoch that
+    somebody reading the room now was not present for. Zero everywhere means
+    no limit, which is every room that has never split.
+    """
+    message_id: int = 0
+    task_id: int = 0
+    talk_message_id: int = 0
+
+    def __bool__(self) -> bool:
+        return bool(self.message_id or self.task_id or self.talk_message_id)
+
+
+def front_stage_cutoff(conn: sqlite3.Connection, token: str | None) -> AudienceCutoff:
+    """The cutoff for front-stage readers of the room `token` names.
+
+    The latest epoch started by anybody still in the audience: the current
+    audience was present, throughout, for every epoch from there on. An earlier
+    stint of somebody who left and came back is dropped with the rest, the
+    conservative side of "epochs they were present for", and a joiner who has
+    left no longer narrows anything. `token` may be the canonical token or any
+    surface ref for the room; an unknown token has no epochs.
+    """
+    if not token:
+        return AudienceCutoff()
+    room_token = _canonical_room_token(conn, token)
+    row = conn.execute(
+        "SELECT MAX(after_message_id), MAX(after_task_id), "
+        "  MAX(after_talk_message_id) "
+        "FROM room_epochs WHERE room_token = ? AND epoch > 0 "
+        f"AND person IN ({_AUDIENCE_PERSONS_SQL})",
+        (room_token, room_token, room_token),
+    ).fetchone()
+    return AudienceCutoff(
+        message_id=row[0] or 0, task_id=row[1] or 0, talk_message_id=row[2] or 0,
+    )
+
+
+def pre_cutoff_room_task_ids(
+    conn: sqlite3.Connection, token: str, cutoff: AudienceCutoff,
+    candidates: Iterable[int],
+) -> set[int]:
+    """Which of `candidates` are this room's tasks from before `cutoff`.
+
+    A task id below the cutoff with no row left (retention) counts as one:
+    nothing says which room it was in, and the rule is to hide rather than
+    guess.
+    """
+    ids = {int(c) for c in candidates if int(c) <= cutoff.task_id}
+    if not ids:
+        return set()
+    refs = _room_ref_tokens(conn, _canonical_room_token(conn, token))
+    id_marks = ", ".join("?" for _ in ids)
+    ref_marks = ", ".join("?" for _ in refs)
+    elsewhere = {
+        r[0] for r in conn.execute(
+            f"SELECT id FROM tasks WHERE id IN ({id_marks}) "
+            f"AND conversation_token NOT IN ({ref_marks})",
+            (*ids, *refs),
+        )
+    }
+    return ids - elsewhere
 
 
 def list_member_rooms(
@@ -5184,13 +5420,17 @@ def find_confirmation_exchange(
 
 def get_messages(
     conn: sqlite3.Connection, room_token: str, limit: int | None = None,
-    *, roles: tuple[str, ...] | None = None,
+    *, roles: tuple[str, ...] | None = None, after_id: int = 0,
 ) -> list[Message]:
     """A room's messages, oldest-first (by id). With `limit`, returns the most
     recent `limit` messages, still oldest-first. With `roles`, only rows of
-    those roles are returned and counted against `limit`."""
+    those roles are returned and counted against `limit`. With `after_id`, only
+    rows with a higher id (a front-stage reader's `front_stage_cutoff`)."""
     where = "room_token = ?"
     params: list = [room_token]
+    if after_id:
+        where += " AND id > ?"
+        params.append(after_id)
     if roles is not None:
         if not roles:
             return []
@@ -7305,6 +7545,47 @@ def _migrate_room_policy(conn: sqlite3.Connection) -> None:
     try:
         conn.execute(
             "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_policy_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+
+
+# Kept equal to schema.sql's copy by tests/test_audience_epochs.py.
+_ROOM_EPOCHS_DDL = """
+CREATE TABLE IF NOT EXISTS room_epochs (
+    id                    INTEGER PRIMARY KEY,
+    room_token            TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    epoch                 INTEGER NOT NULL,
+    started_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    reason                TEXT NOT NULL,
+    person                TEXT,
+    after_message_id      INTEGER NOT NULL DEFAULT 0,
+    after_task_id         INTEGER NOT NULL DEFAULT 0,
+    after_talk_message_id INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+_ROOM_EPOCHS_INDEXES = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_room_epochs_epoch\n"
+    "    ON room_epochs (room_token, epoch) WHERE epoch > 0",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_room_epochs_baseline\n"
+    "    ON room_epochs (room_token, reason) WHERE epoch = 0",
+)
+
+
+def _migrate_room_epochs(conn: sqlite3.Connection) -> None:
+    """Create `room_epochs`, empty (multiplayer Stage 14).
+
+    Markered (`room_epochs_v1`) and never backfilled: nothing recorded when
+    anybody joined a room before this, so every existing room starts in epoch
+    0, and its next roster observation is its baseline rather than a join.
+    """
+    conn.execute(_ROOM_EPOCHS_DDL)
+    for statement in _ROOM_EPOCHS_INDEXES:
+        conn.execute(statement)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_epochs_v1')"
         )
     except sqlite3.OperationalError:
         return  # marker table not created yet (very early fresh install)
@@ -10107,6 +10388,11 @@ def get_completed_channel_tasks_since(
 
     Returns list of Task objects ordered by id ascending.
 
+    Limited to the epochs the room's current audience shared
+    (`front_stage_cutoff`): `CHANNEL.md` is front-stage memory, read by every
+    later task in the room, so a turn from before somebody joined must not
+    reach them through it.
+
     Excludes a guest's turn (multiplayer D2): a guest's words are extracted into
     nobody's memory, and `CHANNEL.md` is read by every later task in the room.
     Excludes ``withheld_from_room`` (ISSUE-255): the channel sleep cycle distils
@@ -10126,9 +10412,12 @@ def get_completed_channel_tasks_since(
     """
     params: list = [conversation_token, since_datetime]
 
+    floor = front_stage_cutoff(conn, conversation_token).task_id
     if after_task_id is not None:
+        floor = max(floor, after_task_id)
+    if after_task_id is not None or floor:
         query += " AND id > ?"
-        params.append(after_task_id)
+        params.append(floor)
 
     query += " ORDER BY id ASC"
 

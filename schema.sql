@@ -1486,6 +1486,36 @@ CREATE TABLE IF NOT EXISTS room_policy (
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Audience epochs (multiplayer Stage 14, D3). A row with `epoch > 0` records
+-- that the room's audience grew without the history being acknowledged: who
+-- joined (`person`, spelled as `db.room_is_shared` counts humans: `u:<user>`
+-- or `<surface>:<ref>`) and where the transcript stood at that moment, as the
+-- highest `messages.id`, `tasks.id` and cached Talk message id then. Ids rather
+-- than `started_at`, whose one-second resolution cannot order a join against a
+-- turn in the same second. Front-stage readers drop everything at or below the
+-- highest boundary of any epoch whose joiner is still in the audience
+-- (`db.front_stage_cutoff`); a side room reads its parent whole. A row with
+-- `epoch = 0` is not an epoch: it records that a surface's audience has been
+-- observed once (`reason = 'baseline:<surface>'`), since the first roster a
+-- room is seen with is who the transcript was written for, not a join.
+-- Never backfilled. The FK cascade is decorative; room deletion hand-deletes.
+-- Kept equal to `db._ROOM_EPOCHS_DDL` by tests/test_audience_epochs.py.
+CREATE TABLE IF NOT EXISTS room_epochs (
+    id                    INTEGER PRIMARY KEY,
+    room_token            TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    epoch                 INTEGER NOT NULL,
+    started_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    reason                TEXT NOT NULL,
+    person                TEXT,
+    after_message_id      INTEGER NOT NULL DEFAULT 0,
+    after_task_id         INTEGER NOT NULL DEFAULT 0,
+    after_talk_message_id INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_room_epochs_epoch
+    ON room_epochs (room_token, epoch) WHERE epoch > 0;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_room_epochs_baseline
+    ON room_epochs (room_token, reason) WHERE epoch = 0;
+
 -- The speech gate's audit trail: one row per decision about whether the bot
 -- replies to an inbound turn. An operator-facing tuning log, not a second
 -- transcript: `message_id` points at the turn rather than copying its body,

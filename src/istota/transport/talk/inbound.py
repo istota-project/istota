@@ -710,8 +710,10 @@ def _apply_room_pass(
                     origin="talk", name=plan.display_name,
                 )
                 db.add_room_binding(conn, plan.canonical, "talk", plan.token)
+                # Founders, not joiners: the room is registered the first
+                # time it is seen, so these are who it was already written for.
                 for uid in member_ids[1:]:
-                    db.add_room_member(conn, plan.canonical, uid)
+                    db.add_room_member(conn, plan.canonical, uid, acknowledged=True)
 
         last_message_id = plan.last_message_id
         if plan.needs_cursor_init:
@@ -1457,10 +1459,17 @@ def _sync_talk_roster(
     who ever spoke. Called only with a roster that was actually fetched: an
     empty list means the fetch failed or the room is a DM, never that everyone
     left. The bot itself is not recorded.
+
+    Anybody new on a roster after the first one starts an audience epoch
+    (D3). Talk has no history acknowledgment of its own — people are added in
+    Talk's UI, not through istota — so a Talk join always splits. The first
+    roster observed for a room is its baseline instead: nothing recorded
+    anybody joining before it.
     """
     room_token = db.resolve_room_token(conn, "talk", conversation_token) or conversation_token
     if db.get_room(conn, room_token) is None:
         return
+    baseline = not db.audience_baseline_observed(conn, room_token, "talk")
     present: list[str] = []
     for entry in roster:
         actor_id = entry.get("actorId") or ""
@@ -1475,11 +1484,14 @@ def _sync_talk_roster(
             surface_ref=ref.surface_ref,
             kind=classify_participant(conn, config, room_token, ref),
             user_id=ref.user_id, display_name=ref.display_name,
+            acknowledged=baseline,
         )
         present.append(ref.surface_ref)
     db.sync_room_roster(
         conn, room_token=room_token, surface="talk", present=present,
     )
+    if baseline:
+        db.mark_audience_baseline(conn, room_token, "talk")
 
 
 #: How many classifier calls one batch runs at once.

@@ -184,6 +184,9 @@ def load_window(
     stored row that the caller has not stored yet — the turn being decided,
     classified ahead of the write that records it, and anything before it in
     the same batch. They take the newest places in the window.
+
+    Stored turns start at the room's front-stage cutoff (D3): the verdict
+    decides what the bot says in front of the room as it is now.
     """
     if window_messages <= 0:
         return []
@@ -193,6 +196,7 @@ def load_window(
     if room_rows > 0:
         messages = db.get_messages(
             conn, room_token, limit=room_rows, roles=("user", "assistant"),
+            after_id=db.front_stage_cutoff(conn, room_token).message_id,
         )
         stored = window_turns(
             messages, bot_name=bot_name, max_message_chars=max_message_chars,
