@@ -51,7 +51,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from istota import __version__ as _ISTOTA_VERSION
+from istota.build_info import RUNNING_VERSION as _ISTOTA_VERSION
 from istota import usage as usage_types
 from istota.claude_runtime_env import without_claude_runtime_env
 from istota.agent.events import AgentEvent, _describe_tool_use, _lone_relay_ask, _tool_invocation
