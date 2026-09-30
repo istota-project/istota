@@ -2344,59 +2344,99 @@ def _native_web_fetch_enabled(
     return True
 
 
-def _build_triage_completer(task: "db.Task", config: Config):
-    """Conversation-context triage completer, routed through the task's brain.
+def build_oneshot_completer(
+    config: Config,
+    *,
+    user_id: str,
+    source_type: str,
+    brain_kind: str | None = None,
+    timeout: float,
+    origin: str,
+):
+    """A task-free one-shot completer, routed through the brain the arguments name.
 
-    Per-source-type brain routing decides the transport:
-    - claude_code (and tmux) → None, so context triage uses the `claude` CLI.
+    The routing is ``resolve_brain_kind(source_type, config.brain,
+    override=brain_kind)``, so ``brain_kind`` is a task's pinned kind and goes
+    through the same allowlist a task's does.
+
+    - claude_code (and tmux) → None. None is the routing answer, not a failure:
+      the caller runs its tool-less ``claude`` CLI path (``context._run_triage``).
     - native → a native provider completer. If it can't be built (missing key /
-      bad config), returns a completer that always yields None so triage fails
-      open (includes all older messages) instead of shelling out to the `claude`
-      CLI the native brain isn't using.
+      bad config), a completer that always yields None, so the caller treats the
+      call as failed rather than shelling out to a CLI the native brain isn't
+      using. What a failed call *means* (fail open for triage, fail closed for
+      the speech gate) is the caller's.
 
-    The completer carries its own usage sink, because it is the object that
-    performs the inference on this path (ISSUE-272). The CLI path's sink is
-    passed separately — see ``_build_triage_usage_sink``.
+    Needs no ``db.Task``: a caller that runs before a task exists passes the
+    fields itself. The completer carries its own usage sink (ISSUE-272), which
+    writes a task-less ``task_usage`` row under ``origin``.
     """
     from .brain import resolve_brain_kind
 
-    routed = resolve_brain_kind(task.source_type, config.brain, override=task.brain)
+    routed = resolve_brain_kind(source_type, config.brain, override=brain_kind)
     if routed.kind != "native":
         return None
 
-    native = _native_with_user_key(routed.native, config, task.user_id)
+    native = _native_with_user_key(routed.native, config, user_id)
     completer = _build_native_completer(
         native,
-        config.conversation.selection_timeout,
-        on_usage=_build_triage_usage_sink(task, config),
+        timeout,
+        on_usage=_oneshot_usage_sink(
+            config, user_id=user_id, source_type=source_type, origin=origin,
+        ),
     )
     if completer is None:
         return lambda _prompt: None
     return completer
 
 
-def _build_triage_usage_sink(task: "db.Task", config: Config):
-    """Record one conversation-context triage inference as a `task_usage` row.
+def _build_triage_completer(task: "db.Task", config: Config):
+    """Conversation-context triage completer, routed through the task's brain.
 
-    ``origin="context_triage"``, and **no ``task_id``** — the same shape the
-    other task-less origins use. A triage inference is not one of the task's own
-    attempts, and a row carrying the id would take an ``attempt_seq`` in that
-    task's sequence, which is meant to count brain attempts. ``user_id`` and
-    ``source_type`` are available here (unlike the ownerless sleep-cycle pass),
-    so the row is still attributable.
+    ``build_oneshot_completer`` with the task's fields: None means the CLI path,
+    and an unbuildable native completer yields None so triage fails open. The
+    CLI path's sink is passed separately — see ``_build_triage_usage_sink``.
+    """
+    return build_oneshot_completer(
+        config,
+        user_id=task.user_id,
+        source_type=task.source_type,
+        brain_kind=task.brain,
+        timeout=config.conversation.selection_timeout,
+        origin="context_triage",
+    )
 
-    Opens its own short connection (``conn=None``): prompt assembly holds no
-    write transaction, so there is no caller connection to reuse.
+
+def _oneshot_usage_sink(
+    config: Config, *, user_id: str, source_type: str, origin: str,
+):
+    """Record one task-less one-shot inference as a `task_usage` row.
+
+    **No ``task_id``** — the same shape the other task-less origins use. Such an
+    inference is not one of a task's own attempts, and a row carrying the id
+    would take an ``attempt_seq`` in that task's sequence, which is meant to
+    count brain attempts. ``user_id`` and ``source_type`` keep it attributable.
+
+    Opens its own short connection (``conn=None``): neither caller holds a write
+    transaction to reuse.
     """
     def _sink(usage, *, model="", brain_kind="", stop_reason="", success=False):
         persist_brain_usage(
-            config, None, usage=usage, origin="context_triage",
-            user_id=task.user_id or "", source_type=task.source_type or "",
+            config, None, usage=usage, origin=origin,
+            user_id=user_id or "", source_type=source_type or "",
             brain_kind=brain_kind, model=model,
             stop_reason=stop_reason, success=success,
         )
 
     return _sink
+
+
+def _build_triage_usage_sink(task: "db.Task", config: Config):
+    """The conversation-context triage sink (``origin="context_triage"``)."""
+    return _oneshot_usage_sink(
+        config, user_id=task.user_id, source_type=task.source_type,
+        origin="context_triage",
+    )
 
 
 # Credential-related env var patterns to strip from subprocess environments
