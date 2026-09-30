@@ -924,6 +924,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         _add_columns(conn, "messages", {
             "author_user_id": "TEXT",
             "author_label": "TEXT",
+            # The `room_participants` row that wrote the turn (multiplayer D1);
+            # backfilled by `_migrate_room_participants`.
+            "author_participant_id": "INTEGER",
         })
         # The citation, so the transcript can render a reply as a reply after
         # retention has deleted the task row that also carries it.
@@ -1119,6 +1122,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # long as that failure persists. Attributing a row that a later re-run then
     # deletes costs nothing.
     _migrate_messages_author(conn)
+    # After the author backfill, which is what it reads.
+    _migrate_room_participants(conn)
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
@@ -4120,6 +4125,7 @@ def delete_web_chat_room(
     conn.execute("DELETE FROM room_read_state WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_members WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_dismissals WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_participants WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM rooms WHERE token = ?", (token,))
     # Drop every participant's handle for the token, not just the requester's
     # (room_id): a promoted web room can accrue handles for other members, and
@@ -4391,6 +4397,106 @@ def list_room_members(conn: sqlite3.Connection, room_token: str) -> list[str]:
         (room_token,),
     ).fetchall()
     return [r["user_id"] for r in rows]
+
+
+def note_member_turn(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
+    """An istota user spoke in this room: make them a member and clear their hide.
+
+    Every sender is a member, so a shared room surfaces in each participant's
+    web list (ISSUE-134), and re-engagement un-hides — the sender's own
+    tombstone only, never a co-member's. One helper because two paths reach it:
+    `record_inbound` for every stored turn, and the Talk poller for a turn it
+    consumes before ingest (a `!command`, a confirmation answer).
+    """
+    add_room_member(conn, room_token, user_id)
+    undismiss_room(conn, room_token, user_id)
+
+
+PARTICIPANT_KINDS = ("principal", "guest", "agent")
+
+
+def upsert_room_participant(
+    conn: sqlite3.Connection,
+    *,
+    room_token: str,
+    surface: str,
+    surface_ref: str,
+    kind: str,
+    user_id: str | None = None,
+    display_name: str | None = None,
+) -> int:
+    """Record a participant as present in a room; the row's id.
+
+    Keyed on the *present* row — `(room_token, surface, surface_ref)` with
+    `left_at IS NULL`, the partial unique index — so a participant still here is
+    one row however often they speak, and one who left and came back is a new
+    row. `kind` is overwritten with the caller's current classification (a guest
+    who became a member is a principal from their next turn); `user_id` and
+    `display_name` are overwritten only by a value, so a later ref that could
+    not be mapped does not erase an earlier mapping.
+    """
+    if kind not in PARTICIPANT_KINDS:
+        raise ValueError(f"unknown participant kind: {kind!r}")
+    row = conn.execute(
+        "INSERT INTO room_participants "
+        "(room_token, surface, surface_ref, user_id, kind, display_name) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (room_token, surface, surface_ref) WHERE left_at IS NULL "
+        "DO UPDATE SET kind = excluded.kind, "
+        "  user_id = COALESCE(excluded.user_id, room_participants.user_id), "
+        "  display_name = COALESCE(excluded.display_name, room_participants.display_name) "
+        "RETURNING id",
+        (room_token, surface, surface_ref, user_id or None, kind, display_name or None),
+    ).fetchone()
+    return int(row[0])
+
+
+def sync_room_roster(
+    conn: sqlite3.Connection,
+    *,
+    room_token: str,
+    surface: str,
+    present: Sequence[str],
+) -> int:
+    """Stamp `left_at` on every present participant of `surface` not in `present`.
+
+    `present` is the surface's own roster, as refs. Only that surface's rows are
+    touched: a surface reports who is on it, never who is on another. The
+    caller upserts the present ones itself. Returns how many rows left. A caller
+    whose roster fetch failed must not call this — an empty list here means
+    everyone left.
+    """
+    placeholders = ", ".join("?" for _ in present)
+    exclusion = f"AND surface_ref NOT IN ({placeholders})" if present else ""
+    cur = conn.execute(
+        "UPDATE room_participants SET left_at = datetime('now') "
+        f"WHERE room_token = ? AND surface = ? AND left_at IS NULL {exclusion}",
+        (room_token, surface, *present),
+    )
+    return cur.rowcount or 0
+
+
+def room_is_shared(conn: sqlite3.Connection, room_token: str) -> bool:
+    """More than one human is in this room: present participants, or members.
+
+    Humans are counted, not rows — one istota user present on both Talk and web
+    is one person — and agents are not humans. The member half covers the
+    istota users who read the room in the web view without being in the
+    surface's roster: they are part of whoever reads an answer posted there.
+    """
+    humans = conn.execute(
+        "SELECT COUNT(DISTINCT CASE WHEN user_id IS NOT NULL THEN 'u:' || user_id "
+        "  ELSE surface || ':' || surface_ref END) "
+        "FROM room_participants "
+        "WHERE room_token = ? AND left_at IS NULL AND kind != 'agent'",
+        (room_token,),
+    ).fetchone()[0]
+    if humans > 1:
+        return True
+    members = conn.execute(
+        "SELECT COUNT(*) FROM room_members WHERE room_token = ?", (room_token,),
+    ).fetchone()[0]
+    return members > 1
 
 
 def list_member_rooms(
@@ -4761,6 +4867,7 @@ def add_message(
     author_user_id: str | None = None,
     author_label: str | None = None,
     delivery_reference: str | None = None,
+    author_participant_id: int | None = None,
 ) -> int:
     """Append a message to a room's canonical transcript. Returns the new id.
 
@@ -4782,8 +4889,8 @@ def add_message(
         "INSERT INTO messages "
         "(room_token, role, body, title, task_id, origin_surface, external_ids, "
         " attachments, attachment_paths, client_msg_id, reply_to_message_id, "
-        " author_user_id, author_label, delivery_reference) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        " author_user_id, author_label, delivery_reference, author_participant_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         (
             room_token,
             role,
@@ -4802,6 +4909,7 @@ def add_message(
             author_user_id or None,
             author_label or None,
             delivery_reference or None,
+            author_participant_id,
         ),
     ).fetchone()
     return int(row["id"])
@@ -6722,6 +6830,97 @@ def _migrate_messages_author(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO _migration_state (name) "
         "VALUES ('messages_author_v1')"
+    )
+
+
+# Kept equal to schema.sql's copy by the fresh-versus-upgraded parity test in
+# tests/test_room_participants.py.
+_ROOM_PARTICIPANTS_DDL = """
+CREATE TABLE IF NOT EXISTS room_participants (
+    id           INTEGER PRIMARY KEY,
+    room_token   TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    surface      TEXT NOT NULL,
+    surface_ref  TEXT NOT NULL,
+    user_id      TEXT,
+    kind         TEXT NOT NULL CHECK (kind IN ('principal', 'guest', 'agent')),
+    display_name TEXT,
+    joined_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    left_at      TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_room_participants_present
+    ON room_participants (room_token, surface, surface_ref) WHERE left_at IS NULL;
+"""
+
+
+def _migrate_room_participants(conn: sqlite3.Connection) -> None:
+    """Create `room_participants` and backfill it from the turns already stored.
+
+    Every distinct istota author of a Talk or web `role='user'` row in a
+    registered room becomes a present participant — `principal` when they are a
+    member now, `guest` otherwise — joined at their first turn, and each of
+    those rows is linked through `messages.author_participant_id`. For both
+    surfaces the author's user id *is* the surface ref: a Talk actor reaches
+    `author_user_id` only as a configured user, whose actor id is the key.
+
+    Email rows are not backfilled, deliberately: email joins a room's transcript
+    without joining the room, and its sender is not in the room's audience.
+    Nobody who never wrote is backfilled either; the Talk roster sync adds them
+    on the room's next group turn.
+
+    Markered (`room_participants_v1`), and idempotent regardless: the insert
+    ignores a present row and the link touches only unlinked rows. Runs after
+    `_migrate_messages_author`, whose columns it reads. The DDL runs on every
+    boot, before the marker check, so a fresh install has the table before
+    `schema.sql` does.
+    """
+    # `execute` per statement rather than `executescript`, which would commit
+    # whatever transaction the migrations above left open.
+    for statement in _ROOM_PARTICIPANTS_DDL.split(";"):
+        if statement.strip():
+            conn.execute(statement)
+    try:
+        already = conn.execute(
+            "SELECT 1 FROM _migration_state WHERE name = 'room_participants_v1'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+    if already:
+        return
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO room_participants "
+            "(room_token, surface, surface_ref, user_id, kind, joined_at) "
+            "SELECT m.room_token, m.origin_surface, m.author_user_id, "
+            "  m.author_user_id, "
+            "  CASE WHEN EXISTS (SELECT 1 FROM room_members rm "
+            "    WHERE rm.room_token = m.room_token AND rm.user_id = m.author_user_id) "
+            "  THEN 'principal' ELSE 'guest' END, "
+            "  MIN(m.created_at) "
+            "FROM messages m "
+            "WHERE m.role = 'user' AND m.origin_surface IN ('talk', 'web') "
+            "AND m.author_user_id IS NOT NULL AND m.author_label IS NULL "
+            "AND m.room_token IN (SELECT token FROM rooms) "
+            "GROUP BY m.room_token, m.origin_surface, m.author_user_id"
+        )
+        conn.execute(
+            "UPDATE messages SET author_participant_id = ("
+            "  SELECT p.id FROM room_participants p "
+            "  WHERE p.room_token = messages.room_token "
+            "  AND p.surface = messages.origin_surface "
+            "  AND p.surface_ref = messages.author_user_id AND p.left_at IS NULL"
+            ") "
+            "WHERE role = 'user' AND author_participant_id IS NULL "
+            "AND origin_surface IN ('talk', 'web') "
+            "AND author_user_id IS NOT NULL AND author_label IS NULL"
+        )
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            return  # fresh install, nothing to fold yet
+        logger.warning("room participants backfill failed: %s", e)
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO _migration_state (name) "
+        "VALUES ('room_participants_v1')"
     )
 
 

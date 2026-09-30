@@ -1250,6 +1250,35 @@ CREATE TABLE IF NOT EXISTS room_dismissals (
     PRIMARY KEY (room_token, user_id)
 );
 
+-- Everyone seen in a room, istota user or not (multiplayer D1). `room_members`
+-- keeps its meaning — istota users who see the room in their web sidebar —
+-- while this records every author and, where a surface reports one, every
+-- rostered participant. `kind` is classified deterministically at write time:
+-- 'principal' (an istota user who is a member), 'guest' (a human who is not)
+-- or 'agent' (a bot, the bot itself included). `surface_ref` is the surface's
+-- own identity: a Talk actor id (prefixed `<actorType>/` for anything but a
+-- user), a web user id, an email address.
+--
+-- History, not a set: leaving stamps `left_at`, and coming back is a new row.
+-- So "currently present" is `left_at IS NULL`, and that is the upsert key —
+-- the partial unique index below, not a table constraint. A UNIQUE over
+-- `joined_at` would identify nothing an upsert could name, and two joins in one
+-- second would collide. The FK cascade is decorative (foreign_keys unset);
+-- room deletion hand-deletes from here.
+CREATE TABLE IF NOT EXISTS room_participants (
+    id           INTEGER PRIMARY KEY,
+    room_token   TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    surface      TEXT NOT NULL,
+    surface_ref  TEXT NOT NULL,
+    user_id      TEXT,
+    kind         TEXT NOT NULL CHECK (kind IN ('principal', 'guest', 'agent')),
+    display_name TEXT,
+    joined_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    left_at      TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_room_participants_present
+    ON room_participants (room_token, surface, surface_ref) WHERE left_at IS NULL;
+
 -- One row per (room, surface) the room is exposed on.
 CREATE TABLE IF NOT EXISTS room_bindings (
     room_token   TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
@@ -1317,10 +1346,17 @@ CREATE TABLE IF NOT EXISTS messages (
     -- exact defect these columns exist to end. Break the tie toward the more
     -- cautious answer.
     author_user_id TEXT,   -- an istota user id, when the writer is one
-    -- An external sender, already sanitized through `db.external_email_sender`
-    -- on the way in — so it is an addr-spec or the fixed unattributed
-    -- sentinel, never a raw `From:` header. Readers render it as-is.
+    -- An external sender, already sanitized on the way in — an email addr-spec
+    -- (`db.external_email_sender`), the fixed unattributed sentinel, or a room
+    -- guest's flattened display name (`transport.participants.guest_label`),
+    -- never raw surface text. Readers render it as-is.
     author_label   TEXT,
+    -- The `room_participants` row that wrote this turn. Set on every stored
+    -- room-surface user row; NULL for assistant and system rows, for an email
+    -- turn mirrored into a room (email joins a room's transcript without
+    -- joining the room), and for rows older than the table the backfill could
+    -- not attribute. A guest turn has this and no `author_user_id`.
+    author_participant_id INTEGER,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 -- No index on either author column: they are projected, never filtered.
@@ -1401,7 +1437,7 @@ CREATE TABLE IF NOT EXISTS speech_gate_decisions (
     user_id    TEXT NOT NULL,
     message_id INTEGER,
     spoke      INTEGER NOT NULL,
-    -- 'agent_author'|'not_multi_human'|'addressed'|'mode_off'|'mode_mention'|'classifier'|'failed'
+    -- 'agent_author'|'guest_author'|'not_multi_human'|'addressed'|'mode_off'|'mode_mention'|'classifier'|'failed'
     rung       TEXT NOT NULL,
     reason     TEXT,
     model      TEXT,
