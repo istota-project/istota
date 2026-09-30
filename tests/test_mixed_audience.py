@@ -173,6 +173,21 @@ class TestTheCardAndTheGrantCommandSaySo:
         assert "guest" in reply.text and "ignored" in reply.text
         assert "guest" in listing.text and "ignored" in listing.text
 
+    def test_room_share_says_nothing_about_guests_where_the_policy_is_off(self, config):
+        import asyncio
+
+        from istota import commands
+        from istota.config import RoomsConfig
+
+        config.rooms = RoomsConfig(shared_room_data_policy="off")
+        token = _room(config, shared=True)
+        _guest(config, token)
+        with db.get_db(config.db_path) as conn:
+            reply = asyncio.run(commands.dispatch(
+                config, "alice", token, "!room share calendar", surface="web", conn=conn,
+            ))
+        assert "ignored" not in reply.text
+
 
 # ---------------------------------------------------------------------------
 # The side-room answer (D4 item 1)
@@ -307,9 +322,43 @@ class TestARestrictedTasksOwnDirectories:
         binds = _binds(seen["argv"])
         assert str(talk.resolve()) not in binds
         assert str(own) not in seen["prompt"]
-        copied = [p for p in _rw(seen["argv"]) if "/room-task-" in p]
-        assert copied and (config.temp_dir / "alice" / "room-task-1" / "attachments"
-                           / "ticket.pdf").read_bytes() == b"%PDF-1.4 ticket"
+        staged = (config.temp_dir / ".control" / "alice" / "task_1"
+                  / "room-attachments" / "ticket.pdf")
+        assert staged.read_bytes() == b"%PDF-1.4 ticket"
+        assert str(staged.resolve()) in seen["prompt"]
+
+    def test_a_later_unrestricted_attempt_writes_where_the_scheduler_reads(
+        self, config,
+    ):
+        # Attempt 1 ran restricted and made the task's own directory; the
+        # member then shared everything, so attempt 2 is unrestricted. Its
+        # deferred ops must still land where `task_deferred_dir` looks.
+        from istota.executor import task_deferred_dir, task_temp_dir
+
+        _run(config, _room(config, shared=True))
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, 1)
+        assert task_temp_dir(config, task, restricted=False) == task_deferred_dir(config, task)
+        assert task_deferred_dir(config, task).name == "room-task-1"
+
+    def test_a_skill_cli_host_path_refuses_the_talk_dir_when_restricted(
+        self, tmp_path, monkeypatch,
+    ):
+        from istota.skill_host_paths import WITHHELD_SCOPES_VAR, resolve_host_path
+
+        mount = tmp_path / "mount"
+        (mount / "Users" / "alice").mkdir(parents=True)
+        (mount / "Talk").mkdir()
+        other = mount / "Talk" / "other-room.ogg"
+        other.write_bytes(b"not yours")
+        monkeypatch.setenv("ISTOTA_WORKSPACE_PATH", str(mount))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv(WITHHELD_SCOPES_VAR, "calendar")
+        refused, _ = resolve_host_path(other, writable=False, operation="read")
+        assert refused is None
+        monkeypatch.delenv(WITHHELD_SCOPES_VAR)
+        ok, err = resolve_host_path(other, writable=False, operation="read")
+        assert ok is not None, err
 
     def test_control_a_private_task_binds_the_talk_dir(self, config):
         (config.workspace_path / "Talk").mkdir()

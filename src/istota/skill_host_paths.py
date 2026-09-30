@@ -278,7 +278,9 @@ def env_host_roots(
             os.environ.get("ISTOTA_CONVERSATION_TOKEN", "").strip() if channel else ""
         ),
         writable=writable,
-        talk=talk,
+        # A task its room restricts has no `{mount}/Talk` in its sandbox; its
+        # own attachments were staged where the sandbox binds them.
+        talk=talk and not _withheld_from_env(),
         own_workspace=not _files_withheld(),
     )
 

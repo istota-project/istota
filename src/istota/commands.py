@@ -1544,7 +1544,7 @@ def _room_share(config, conn, room, user_id: str, sub: str, arg: str) -> str:
             f"Shared by you here: {', '.join(shown) or 'nothing'}.\n"
             f"Withheld: {', '.join(withheld) or 'nothing'}.\n"
             "`!room share <scope>` grants one, `!room unshare <scope>` takes it "
-            "back, `!room share all|none` does every one." + _guest_note(conn, room)
+            "back, `!room share all|none` does every one." + _guest_note(config, conn, room)
         )
     if sub == "unshare" and arg in ("", "all"):
         if not arg:
@@ -1555,7 +1555,7 @@ def _room_share(config, conn, room, user_id: str, sub: str, arg: str) -> str:
         return "Nothing of yours is shared in this room now."
     if sub == "share" and arg == "all":
         room_scopes.grant_scopes(conn, room.token, user_id, scopes)
-        return "Everything of yours is shared in this room now." + _share_note(conn, room)
+        return "Everything of yours is shared in this room now." + _share_note(config, conn, room)
     if arg not in scopes:
         return (
             f"`{arg}` is not a scope. Scopes: {', '.join(scopes)}."
@@ -1566,12 +1566,12 @@ def _room_share(config, conn, room, user_id: str, sub: str, arg: str) -> str:
     room_scopes.grant_scopes(conn, room.token, user_id, [arg])
     return (
         f"`{arg}` is shared in this room: everyone who reads it sees answers "
-        "that use it." + _share_note(conn, room)
+        "that use it." + _share_note(config, conn, room)
     )
 
 
-def _share_note(conn, room) -> str:
-    guest = _guest_note(conn, room)
+def _share_note(config, conn, room) -> str:
+    guest = _guest_note(config, conn, room)
     if guest:
         return guest
     if db.room_is_shared(conn, room.token):
@@ -1579,10 +1579,16 @@ def _share_note(conn, room) -> str:
     return " The room is private right now, so the grant applies once someone else joins."
 
 
-def _guest_note(conn, room) -> str:
-    """While a guest reads the room every grant is ignored (multiplayer D3)."""
-    from . import room_policy
+def _guest_note(config, conn, room) -> str:
+    """While a guest reads the room every grant is ignored (multiplayer D3).
 
+    Not said where the disclosure policy is ``off``: nothing is withheld from
+    a member's turn there, guest or no guest.
+    """
+    from . import room_policy, room_scopes
+
+    if config.rooms.shared_room_data_policy == room_scopes.POLICY_OFF:
+        return ""
     if room_policy.audience_class(conn, room.token) != room_policy.MIXED:
         return ""
     return (

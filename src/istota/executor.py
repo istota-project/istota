@@ -557,8 +557,12 @@ def task_temp_dir(
     base = get_user_temp_dir(config, task.user_id)
     if task.guest_participant_id is not None:
         return base / f"{EMISSARY_DIR_PREFIX}{int(task.id)}"
-    if restricted:
-        return base / f"{RESTRICTED_DIR_PREFIX}{int(task.id)}"
+    own = base / f"{RESTRICTED_DIR_PREFIX}{int(task.id)}"
+    # An earlier attempt that ran restricted made it, and `task_deferred_dir`
+    # reads it from then on, so a later unrestricted attempt writes there too.
+    # It is the narrower of the two, so keeping it widens nothing.
+    if restricted or own.is_dir():
+        return own
     return base
 
 
@@ -582,16 +586,21 @@ def task_deferred_dir(config: Config, task: "db.Task") -> Path:
 
 
 def stage_restricted_attachments(
-    config: Config, attachments: "list[str] | None", task_dir: Path,
+    config: Config, attachments: "list[str] | None", dest_dir: Path,
 ) -> "list[str] | None":
-    """Copy a restricted task's own Talk attachments into ``task_dir``.
+    """Copy a restricted task's own Talk attachments into ``dest_dir``.
 
     The sandbox of a task its room restricts binds no ``{mount}/Talk``, since
     that directory is flat and holds the attachments of every conversation the
-    bot is in. The files this task was sent are copied to
-    ``{task_dir}/attachments/`` and the list names the copies. Anything else is
-    left as given: a path outside ``Talk`` is bound, or withheld, by its own
-    rule. A symlink, or a path resolving outside ``Talk``, is not copied.
+    bot is in. The files this task was sent are copied into ``dest_dir`` and
+    the list names the copies. Anything else is left as given: a path outside
+    ``Talk`` is bound, or withheld, by its own rule. A symlink, or a path
+    resolving outside ``Talk``, is not copied.
+
+    ``dest_dir`` is under the task's control directory, which no task can
+    write: the daemon writes here, and a destination the model could reach
+    would let it plant a symlink for a retry of the same task to write
+    through. Each copy is still opened ``O_EXCL | O_NOFOLLOW``.
     """
     mount = config.workspace_path
     if not attachments or not mount:
@@ -600,7 +609,6 @@ def stage_restricted_attachments(
         talk = (Path(mount) / "Talk").resolve()
     except OSError:
         return attachments
-    dest_dir = task_dir / "attachments"
     staged: list[str] = []
     used: set[str] = set()
     for raw in attachments:
@@ -620,15 +628,19 @@ def stage_restricted_attachments(
             n += 1
             name = f"{stem}-{n}{suffix}"
         used.add(name)
+        dest = dest_dir / name
         try:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(resolved, dest_dir / name, follow_symlinks=False)
+            dest_dir.mkdir(mode=0o700, exist_ok=True)
+            dest.unlink(missing_ok=True)  # a retry's own earlier copy
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as out, open(resolved, "rb") as src:
+                shutil.copyfileobj(src, out)
         except OSError as exc:
             logger.warning("could not stage attachment %s for a restricted task: %s",
                            resolved.name, exc)
             staged.append(raw)
             continue
-        staged.append(str(dest_dir / name))
+        staged.append(str(dest))
     return staged
 
 
@@ -7263,11 +7275,15 @@ def execute_task(
     # Ensure the task's temp directory exists: the per-user one, or a
     # restricted task's own directory inside it.
     user_temp_dir = task_temp_dir(config, task, restricted=bool(_withheld))
-    user_temp_dir.mkdir(parents=True, exist_ok=True)
-    if user_temp_dir.is_symlink():
-        # Bound read-write into the sandbox under this name: a link planted
-        # here would put wherever it points in front of the room.
-        msg = f"task temp directory {user_temp_dir} is a symlink; refusing it"
+    # Bound read-write into the sandbox under this name: a link planted here
+    # would put wherever it points in front of the room. Checked before the
+    # mkdir, which raises on a dangling one; failed by return, not by raise.
+    try:
+        if user_temp_dir.is_symlink():
+            raise OSError("is a symlink")
+        user_temp_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        msg = f"task temp directory {user_temp_dir} is unusable: {exc}"
         logger.error("Task %s: %s", task.id, msg)
         return False, msg, None, None
 
@@ -7348,11 +7364,11 @@ def execute_task(
 
     # A task its room restricts is not given the flat Talk attachments
     # directory, which holds every conversation's files; the ones this task
-    # was sent are copied into its own directory instead. In memory only, as
-    # the image renditions below are.
+    # was sent are copied into its control directory instead, which the
+    # sandbox binds read-only. In memory only, as the image renditions are.
     if _withheld:
         task.attachments = stage_restricted_attachments(
-            config, task.attachments, user_temp_dir,
+            config, task.attachments, control_dir / "room-attachments",
         )
 
     # Pre-transcribe audio attachments so skill selection sees real text.

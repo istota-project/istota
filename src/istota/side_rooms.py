@@ -559,7 +559,9 @@ def queue_side_answer(conn, config, *, actor_user_id: str, task_id: int) -> dict
         existing = conn.execute(
             "SELECT task_id FROM messages WHERE delivery_reference = ?", (reference,),
         ).fetchone()
-        if existing is not None and existing["task_id"] is not None:
+        if existing is not None:
+            if existing["task_id"] is None:
+                raise RequestError("request_conflict")
             return {"status": "queued", "task_id": int(existing["task_id"])}
         parent = canonical_token(conn, task.conversation_token)
         room = db.get_room(conn, parent) if parent else None

@@ -201,6 +201,11 @@ def memory_masks(config: Config, user_dir: Path) -> list[Path]:
     config) and ``playbooks/``. Only directories that exist and are not
     symlinks: a mask needs a mountpoint, and bwrap would create a missing one
     on the host inside the read-write workspace bind.
+
+    Residual, stated rather than closed: a directory that does not exist yet
+    is unmasked, so a task with ``files`` granted can create one there (a
+    playbook that later private tasks recall), and a symlinked one is left
+    unmasked and reachable through its target.
     """
     bot = user_dir / config.bot_dir_name
     out = []
