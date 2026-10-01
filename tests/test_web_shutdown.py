@@ -232,7 +232,7 @@ class TestLifespanWiring:
         import istota.web_app as mod
 
         calls: list[int] = []
-        monkeypatch.setattr(mod, "_reload_config", lambda: None)
+        monkeypatch.setattr(mod, "_reload_config", lambda app: None)
         monkeypatch.setattr(mod, "_publish_config", lambda app: None)
         monkeypatch.setattr(signal, "signal", lambda *a, **k: None)
         monkeypatch.setattr(

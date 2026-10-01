@@ -134,6 +134,16 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
+it('places Security directly after Identity for an email session', async () => {
+  renderPage({
+    ...person(),
+    auth: { method: 'email', email: 'alice@example.com', can_change_password: true },
+  });
+  const identity = await screen.findByRole('heading', { name: 'Identity' });
+  const security = await screen.findByRole('heading', { name: 'Security' });
+  expect(identity.closest('section')?.nextElementSibling).toBe(security.closest('section'));
+});
+
 describe('the profile-picture control', () => {
   it('offers only the formats the server will decode', async () => {
     // Not `image/*`, which the picker would read as TIFF, BMP, AVIF and SVG

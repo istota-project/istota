@@ -407,6 +407,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         "heartbeat_silent": "INTEGER DEFAULT 0",
         "skip_log_channel": "INTEGER DEFAULT 0",
         "scheduled_job_id": "INTEGER",
+        "credential_grants_initialized": "INTEGER NOT NULL DEFAULT 0",
         "briefing_name": "TEXT",
         "command": "TEXT",
         "queue": "TEXT DEFAULT 'foreground'",
@@ -1156,6 +1157,37 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_google_oauth_encryption(conn)
 
     conn.executescript("""
+CREATE TABLE IF NOT EXISTS credential_grants (
+    user_id TEXT NOT NULL, name TEXT NOT NULL,
+    scope_mode TEXT NOT NULL CHECK (scope_mode IN ('all', 'rooms')),
+    methods TEXT NOT NULL, allow_scheduled INTEGER NOT NULL,
+    policy_revision INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, name)
+);
+CREATE TABLE IF NOT EXISTS credential_grant_rooms (
+    user_id TEXT NOT NULL, name TEXT NOT NULL, conversation_token TEXT NOT NULL,
+    PRIMARY KEY (user_id, name, conversation_token)
+);
+CREATE TABLE IF NOT EXISTS credential_task_grants (
+    task_id INTEGER NOT NULL, user_id TEXT NOT NULL, name TEXT NOT NULL,
+    policy_revision INTEGER NOT NULL,
+    PRIMARY KEY (task_id, name)
+);
+    """)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS credential_bindings (
+            user_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            hosts TEXT NOT NULL,
+            headers TEXT NOT NULL,
+            revealable INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, name)
+        );
+    """)
+    conn.executescript("""
         CREATE TABLE IF NOT EXISTS signup_tags (
             tag TEXT PRIMARY KEY, user_id TEXT NOT NULL, slug TEXT NOT NULL,
             reserved_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -1274,23 +1306,35 @@ def get_db(
         yield conn
 
 
-@contextmanager
-def get_db_if_exists(
-    db_path: Path | str | None,
-) -> Iterator[sqlite3.Connection | None]:
-    """`get_db` for an optional reader: yields None when no database is there.
+def database_present(db_path: "Path | str | None") -> bool:
+    """Whether `db_path` names an existing database file.
 
     `sqlite3.connect` creates a missing file, and `Config.db_path` defaults to
-    the relative `data/istota.db`, so a reader that only means to look would
-    otherwise leave an empty database in whatever directory it ran from, and
-    every later reader there would hit "no such table" (ISSUE-570). The caller
-    treats None as "nothing to read".
+    the relative `data/istota.db`, so opening one to find out leaves a stray
+    database in the cwd (ISSUE-570, ISSUE-571).
     """
-    if not db_path or not Path(db_path).is_file():
+    return bool(db_path) and Path(db_path).is_file()
+
+
+@contextmanager
+def get_db_if_present(
+    db_path: "Path | str | None", conn: "sqlite3.Connection | None" = None,
+) -> Iterator["sqlite3.Connection | None"]:
+    """The caller's connection, else one on an existing database, else None.
+
+    For the optional reads and writes that open the framework database only
+    when no connection was passed: a missing database means there is nothing
+    to read, and nowhere a write could matter, since a real task's row lives
+    in that database. Each caller skips on None.
+    """
+    if conn is not None:
+        yield conn
+        return
+    if not database_present(db_path):
         yield None
         return
-    with get_db(Path(db_path)) as conn:
-        yield conn
+    with get_db(Path(db_path)) as opened:
+        yield opened
 
 
 def find_task_by_talk_message_id(
@@ -4207,6 +4251,11 @@ def delete_web_chat_room(
     # than one member, and a co-member's row would otherwise outlive its room.
     conn.execute(
         "DELETE FROM task_events WHERE task_id IN "
+        "(SELECT id FROM tasks WHERE conversation_token = ?)",
+        (token,),
+    )
+    conn.execute(
+        "DELETE FROM credential_task_grants WHERE task_id IN "
         "(SELECT id FROM tasks WHERE conversation_token = ?)",
         (token,),
     )
@@ -9500,6 +9549,13 @@ def cleanup_old_tasks(conn: sqlite3.Connection, retention_days: int) -> int:
             AND completed_at < datetime('now', '-' || ? || ' days')
         )
         """,
+        (retention_days,),
+    )
+
+    conn.execute(
+        "DELETE FROM credential_task_grants WHERE task_id IN "
+        "(SELECT id FROM tasks WHERE status IN ('completed', 'failed', 'cancelled') "
+        "AND completed_at < datetime('now', '-' || ? || ' days'))",
         (retention_days,),
     )
 

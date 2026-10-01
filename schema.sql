@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     locked_by TEXT,
     started_at TEXT,
     completed_at TEXT,
+    credential_grants_initialized INTEGER NOT NULL DEFAULT 0,
     attempt_count INTEGER DEFAULT 0,
     max_attempts INTEGER DEFAULT 3,
 
@@ -324,6 +325,7 @@ CREATE TABLE IF NOT EXISTS istota_file_tasks (
     task_id INTEGER,
     result_summary TEXT,
     error_message TEXT,
+    credential_grants_initialized INTEGER NOT NULL DEFAULT 0,
     attempt_count INTEGER DEFAULT 0,
     max_attempts INTEGER DEFAULT 3,
     file_path TEXT NOT NULL,
@@ -2030,3 +2032,72 @@ BEGIN
     WHERE origin_task_id=OLD.id;
     UPDATE message_relays SET recipient_task_id=NULL WHERE recipient_task_id=OLD.id;
 END;
+
+-- Login identifiers are independent of inbound email routing patterns.
+CREATE TABLE IF NOT EXISTS web_auth_identities (
+    user_id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL DEFAULT '',
+    credential_epoch INTEGER NOT NULL DEFAULT 1,
+    disabled INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_login_at TEXT
+);
+
+-- Retain session revocation when a removable email identity is deleted.
+CREATE TABLE IF NOT EXISTS web_auth_retired_epochs (
+    user_id TEXT PRIMARY KEY,
+    credential_epoch INTEGER NOT NULL
+);
+
+-- Only digests of random, single-use credentials are stored.
+CREATE TABLE IF NOT EXISTS web_auth_tokens (
+    id INTEGER PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_by TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_web_auth_tokens_user ON web_auth_tokens(user_id, purpose);
+
+CREATE TABLE IF NOT EXISTS web_auth_attempts (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_web_auth_attempts ON web_auth_attempts(kind, key, at);
+
+CREATE TABLE IF NOT EXISTS credential_bindings (
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    hosts TEXT NOT NULL,
+    headers TEXT NOT NULL,
+    revealable INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS credential_grants (
+    user_id TEXT NOT NULL, name TEXT NOT NULL,
+    scope_mode TEXT NOT NULL CHECK (scope_mode IN ('all', 'rooms')),
+    methods TEXT NOT NULL, allow_scheduled INTEGER NOT NULL,
+    policy_revision INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, name)
+);
+CREATE TABLE IF NOT EXISTS credential_grant_rooms (
+    user_id TEXT NOT NULL, name TEXT NOT NULL, conversation_token TEXT NOT NULL,
+    PRIMARY KEY (user_id, name, conversation_token)
+);
+CREATE TABLE IF NOT EXISTS credential_task_grants (
+    task_id INTEGER NOT NULL, user_id TEXT NOT NULL, name TEXT NOT NULL,
+    policy_revision INTEGER NOT NULL,
+    PRIMARY KEY (task_id, name)
+);

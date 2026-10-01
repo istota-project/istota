@@ -4,7 +4,7 @@ import json
 import logging
 import time
 
-from . import __version__
+from .build_info import RUNNING_VERSION
 from .config import Config
 from .nextcloud import dav_files_url, dav_request
 
@@ -42,7 +42,7 @@ def write_status(config: Config, active_workers: int, pending_fg: int, pending_b
     now = time.time()
     status = {
         "bot_name": config.bot_name,
-        "version": __version__,
+        "version": RUNNING_VERSION,
         "status": "online",
         "started_at": int(_daemon_start_time),
         "uptime_seconds": int(now - _daemon_start_time) if _daemon_start_time else 0,

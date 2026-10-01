@@ -370,20 +370,21 @@ def test_extract_live_state_and_password_reflections(monkeypatch, passwords, ent
     field.evaluate.assert_called_once_with(browse_api._EXTRACT_ELEMENT_JS)
 
 
-def test_credential_fill_registers_before_fallback_and_failed_input(monkeypatch):
+def test_credential_fill_registers_before_failed_evaluation(monkeypatch):
     page = mock.Mock()
-    page.fill.side_effect = RuntimeError('input failed')
+    page.wait_for_selector.return_value.evaluate.side_effect = RuntimeError('input failed')
+    page.wait_for_selector.return_value.owner_frame.return_value.url = 'https://example.com/login'
     monkeypatch.setattr(browse_api, '_credential_values', set())
     monkeypatch.setattr(browse_api.visual, 'bring_to_front',
                         lambda *a, display: types.SimpleNamespace(ok=False, detail='hidden'))
     with pytest.raises(RuntimeError, match='input failed'):
         browse_api._selector_action({}, page, {
             'type': 'fill', 'selector': '#token', 'value': 'api-secret',
-            'credential': True,
+            'credential': True, 'bound_hosts': ['example.com'],
         })
     assert browse_api._credential_values == {'api-secret'}
     page.wait_for_selector.return_value.evaluate.assert_called_once_with(
-        'el => { el.__istotaCredential = true; }')
+        browse_api._CREDENTIAL_FILL_JS, {'value': 'api-secret', 'origin': 'https://example.com'})
 
 
 def test_credential_fill_waits_for_field_before_marking(monkeypatch):
@@ -397,17 +398,20 @@ def test_credential_fill_waits_for_field_before_marking(monkeypatch):
 
     page.wait_for_selector.side_effect = wait_for_field
     page.eval_on_selector.side_effect = RuntimeError('field not inserted yet')
-    handle.evaluate.side_effect = lambda script: events.append('mark')
-    page.fill.side_effect = lambda *args, **kwargs: events.append('fill')
+    handle.owner_frame.return_value.url = 'https://example.com/login'
+    def evaluate(script, args):
+        events.append('fill')
+        return {'ok': True}
+    handle.evaluate.side_effect = evaluate
     monkeypatch.setattr(browse_api, '_credential_values', set())
     monkeypatch.setattr(browse_api.visual, 'bring_to_front',
                         lambda *a, display: types.SimpleNamespace(ok=False, detail='hidden'))
     result = browse_api._selector_action({}, page, {
         'type': 'fill', 'selector': '#password', 'value': 'fixture-secret',
-        'credential': True,
+        'credential': True, 'bound_hosts': ['example.com'],
     })
     assert result['ok'] is True
-    assert events == ['wait', 'mark', 'fill']
+    assert events == ['wait', 'fill']
     page.wait_for_selector.assert_called_once_with(
         '#password', state='visible', timeout=browse_api.SELECTOR_TIMEOUT_MS)
 
@@ -481,3 +485,41 @@ def test_captcha_names_operator_instance_and_routes_console(navigation, monkeypa
     assert unquote(parse_qs(urlsplit(path).query)["token"][0]) == inst.user_id
     if endpoint == "interact":
         assert result["actions"] == []
+
+
+@pytest.mark.parametrize("origin,hosts", [
+    ("https://evil.example", ["portal.example"]),
+    ("http://portal.example", ["portal.example"]),
+    ("https://portal.example:8443", ["portal.example"]),
+    ("https://portal.example", []),
+])
+def test_credential_origin_refused_before_input(monkeypatch, origin, hosts):
+    page = mock.Mock()
+    page.wait_for_selector.return_value.owner_frame.return_value.url = origin
+    monkeypatch.setattr(browse_api, "_credential_values", set())
+    result = browse_api._selector_action({}, page, {
+        "type": "fill", "selector": "#password", "value": "fixture-password",
+        "credential": True, "bound_hosts": hosts,
+    })
+    assert result["error"] == "credential_origin_mismatch"
+    page.fill.assert_not_called()
+    page.wait_for_selector.return_value.fill.assert_not_called()
+
+
+def test_credential_fill_never_dispatches_to_current_focus(monkeypatch):
+    page = mock.Mock()
+    handle = page.wait_for_selector.return_value
+    handle.owner_frame.return_value.url = "https://portal.example/login"
+    handle.evaluate.return_value = {"ok": True}
+    monkeypatch.setattr(browse_api, "_credential_values", set())
+    result = browse_api._selector_action({}, page, {
+        "type": "fill", "selector": "#password", "value": "fixture-password",
+        "credential": True, "bound_hosts": ["portal.example"],
+    })
+    assert result["ok"] is True
+    # Patchright's handle.fill internally calls page.keyboard.insertText.
+    # It can target another frame if a focus handler steals the focus.
+    handle.fill.assert_not_called()
+    page.fill.assert_not_called()
+    handle.evaluate.assert_called_once_with(browse_api._CREDENTIAL_FILL_JS,
+                                           {"value": "fixture-password", "origin": "https://portal.example"})

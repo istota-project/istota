@@ -30,20 +30,20 @@ from istota.config import (
 
 class TestWebAuthConfig:
     def test_auth_defaults_to_nextcloud(self):
-        assert WebConfig().auth == "nextcloud"
-        assert Config().web.auth == "nextcloud"
+        assert WebConfig().auth == ["nextcloud"]
+        assert Config().web.auth == ["nextcloud"]
 
     def test_parse_auth_none(self, tmp_path):
         p = tmp_path / "config.toml"
         p.write_text('[web]\nauth = "none"\n')
         cfg = load_config(p)
-        assert cfg.web.auth == "none"
+        assert cfg.web.auth == ["none"]
 
     def test_parse_auth_invalid_falls_back(self, tmp_path):
         p = tmp_path / "config.toml"
         p.write_text('[web]\nauth = "wide-open"\n')
         cfg = load_config(p)
-        assert cfg.web.auth == "nextcloud"
+        assert cfg.web.auth == ["nextcloud"]
 
     def test_port_default_unchanged(self):
         assert WebConfig().port == 8766
@@ -53,21 +53,21 @@ class TestWebAuthConfig:
         p.write_text("")
         monkeypatch.setenv("ISTOTA_WEB_AUTH", "none")
         cfg = load_config(p)
-        assert cfg.web.auth == "none"
+        assert cfg.web.auth == ["none"]
 
     def test_env_override_wins_over_toml(self, tmp_path, monkeypatch):
         p = tmp_path / "config.toml"
         p.write_text('[web]\nauth = "nextcloud"\n')
         monkeypatch.setenv("ISTOTA_WEB_AUTH", "none")
         cfg = load_config(p)
-        assert cfg.web.auth == "none"
+        assert cfg.web.auth == ["none"]
 
     def test_env_override_invalid_ignored(self, tmp_path, monkeypatch):
         p = tmp_path / "config.toml"
         p.write_text('[web]\nauth = "none"\n')
         monkeypatch.setenv("ISTOTA_WEB_AUTH", "bogus")
         cfg = load_config(p)
-        assert cfg.web.auth == "none"  # TOML value retained
+        assert cfg.web.auth == ["none"]  # TOML value retained
 
 
 # ---------------------------------------------------------------------------
@@ -299,19 +299,19 @@ class TestLoopbackGuard:
     def test_guard_noop_for_nextcloud_auth(self):
         from istota.web_app import assert_no_auth_bind_safe
         # Must not raise even on a public host when auth is on.
-        assert_no_auth_bind_safe("nextcloud", "0.0.0.0")
+        assert_no_auth_bind_safe(["nextcloud"], "0.0.0.0")
 
     def test_guard_allows_loopback(self):
         from istota.web_app import assert_no_auth_bind_safe
         for host in ("127.0.0.1", "::1", "localhost"):
-            assert_no_auth_bind_safe("none", host)
+            assert_no_auth_bind_safe(["none"], host)
 
     def test_guard_refuses_non_loopback(self):
         from istota.web_app import assert_no_auth_bind_safe
         with pytest.raises(RuntimeError):
-            assert_no_auth_bind_safe("none", "0.0.0.0")
+            assert_no_auth_bind_safe(["none"], "0.0.0.0")
         with pytest.raises(RuntimeError):
-            assert_no_auth_bind_safe("none", "192.168.1.10")
+            assert_no_auth_bind_safe(["none"], "192.168.1.10")
 
 
 @_needs_web_deps

@@ -12,7 +12,9 @@ the case the mechanism was designed around.
 things against different authorities: a host path is checked against a root
 list this process derives from its own environment, and a credential name is
 looked up in the user's `vault_entries` namespace, which only the daemon holds
-and which this process can reach only by asking over the proxy socket. They
+and which this process reaches through its private inherited fd. Older
+callers without that fd still use the proxy socket until reveal enforcement
+lands. They
 share a shape — a stamp on the argument, read back at the parse — and nothing
 else, so a credential is not a seventh `_hostpath` mode. What they do share is
 the parser walk: `actions_on_path` descends the verbs an invocation actually
@@ -70,6 +72,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from collections.abc import Sequence
 
 from istota.credential_shim import ProxyError, fetch_credential
@@ -89,10 +92,8 @@ FORMS = (NAME, PAIR)
 #: inlined so the coverage walk and this module cannot disagree on the spelling.
 STAMP = "istota_credential_ref"
 
-#: What the proxy records this request as. A claim rather than a fact — the
-#: proxy sees a socket, not a process — so it decides a log level and nothing
-#: else, and `skill` is the one that says the value is going somewhere other
-#: than the model's own context.
+#: The compatibility socket's audit label. Private-fd requests have their
+#: skill provenance supplied by the server, independent of this claim.
 MODE = "skill"
 
 
@@ -112,11 +113,12 @@ class SecretValue:
     needs either.
     """
 
-    __slots__ = ("name", "_value")
+    __slots__ = ("name", "_value", "bound_hosts")
 
-    def __init__(self, name: str, value: str) -> None:
+    def __init__(self, name: str, value: str, bound_hosts=()) -> None:
         self.name = name
         self._value = value
+        self.bound_hosts = tuple(bound_hosts)
 
     def reveal(self) -> str:
         """The plaintext. The one call that hands it over, so it is greppable."""
@@ -218,7 +220,10 @@ def _resolve_name(name: str, operation: str) -> tuple[SecretValue | None, str | 
     if not name:
         return None, f"Empty credential name: {operation} refused."
     try:
-        return SecretValue(name, fetch_credential(name, MODE)), None
+        value, hosts = fetch_credential(
+            name, MODE, binding=True, credential_fd=os.environ.get("ISTOTA_CRED_FD"),
+        )
+        return SecretValue(name, value, hosts), None
     except ProxyError as exc:
         return None, f"{operation} refused: {exc}"
 

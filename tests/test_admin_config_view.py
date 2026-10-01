@@ -265,3 +265,31 @@ class TestLabels:
     def test_general_section_is_labelled_as_top_level(self):
         payload = view.build_config_view(Config())
         assert payload["sections"][0]["label"] == "General"
+
+
+@pytest.mark.parametrize("name", [
+    "auth", "auth_enrol_ttl_hours", "auth_reset_ttl_hours",
+    "auth_login_link_ttl_minutes", "auth_min_password_length",
+    "auth_throttle_window_seconds", "auth_throttle_max_email",
+    "auth_throttle_max_ip", "auth_mail_link_max_email",
+])
+def test_web_auth_settings_are_visible(name):
+    cfg = Config()
+    field = _fields(view.build_config_view(cfg), "web")[name]
+    assert field["secret"] is False
+    assert field["value"] == getattr(cfg.web, name)
+
+
+def test_unlisted_auth_and_password_fields_stay_secret():
+    from dataclasses import dataclass
+
+    @dataclass
+    class ExtraConfig(Config):
+        auth_value: str = "private-auth-value"
+        password_value: str = "private-password-value"
+
+    payload = view.build_config_view(ExtraConfig())
+    fields = _all_fields(payload)
+    for name in ("auth_value", "password_value"):
+        assert fields[name]["secret"] is True
+        assert fields[name]["value"] is None

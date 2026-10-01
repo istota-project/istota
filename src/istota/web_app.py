@@ -2,13 +2,17 @@
 
 Run as: uvicorn istota.web_app:app --host 127.0.0.1 --port 8766
 
-Provides an OIDC-authenticated web UI using Nextcloud as the identity provider.
+Email and Nextcloud authentication with signed, revocable sessions.
 SvelteKit frontend served as static files, Python handles auth and API.
 """
 
 import asyncio
 import base64
 import hashlib
+import hmac
+import ipaddress
+import secrets
+from collections import OrderedDict, deque
 import contextlib
 import importlib
 import json
@@ -17,7 +21,6 @@ import math
 import os
 import platform
 import re
-import secrets
 import shutil
 import signal
 import sqlite3
@@ -54,12 +57,13 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import db as _db
 from . import user_profiles
-from . import web_shutdown
-from .build_info import build_description
+from . import web_auth, web_auth_mail, web_shutdown
+from .build_info import RUNNING_VERSION, build_description
 from .brain import make_brain
 from .chat_files import ChatFileError, resolve_chat_file
 from .config import load_config
@@ -174,42 +178,43 @@ class _CacheHeaderStatics(StaticFiles):
 _STATIC_DIR = _resolve_static_dir()
 
 
-def _reload_config():
+def _reload_config(launch_app: FastAPI | None = None):
     """Load config and register OAuth clients.
 
     Web auth uses NC's built-in OAuth2 provider (auth-only). Google is
     a separate, unrelated OAuth client used only by the google_workspace skill.
     """
     global _config, _oauth
-    _config = load_config()
-    _oauth = OAuth()
-    if _config.web.oauth2_client_id:
+    config = load_config()
+    _assert_no_auth_launch_safe(config.web.auth, launch_app or app)
+    oauth = OAuth()
+    if config.web.oauth2_client_id:
         # NC built-in OAuth2 — no metadata discovery, register endpoints directly.
-        provider = _config.web.oauth2_provider.rstrip("/")
-        _oauth.register(
+        provider = config.web.oauth2_provider.rstrip("/")
+        oauth.register(
             name="nextcloud",
-            client_id=_config.web.oauth2_client_id,
-            client_secret=_config.web.oauth2_client_secret,
+            client_id=config.web.oauth2_client_id,
+            client_secret=config.web.oauth2_client_secret,
             authorize_url=f"{provider}/index.php/apps/oauth2/authorize",
             access_token_url=(
-                _config.web.oauth2_token_endpoint
+                config.web.oauth2_token_endpoint
                 or f"{provider}/index.php/apps/oauth2/api/v1/token"
             ),
             client_kwargs={"scope": ""},  # NC built-in OAuth2 ignores scope
         )
-    if _config.google_workspace.enabled and _config.google_workspace.client_id:
-        _oauth.register(
+    if config.google_workspace.enabled and config.google_workspace.client_id:
+        oauth.register(
             name="google",
-            client_id=_config.google_workspace.client_id,
-            client_secret=_config.google_workspace.client_secret,
+            client_id=config.google_workspace.client_id,
+            client_secret=config.google_workspace.client_secret,
             server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
-            client_kwargs={"scope": " ".join(_config.google_workspace.scopes)},
+            client_kwargs={"scope": " ".join(config.google_workspace.scopes)},
             authorize_params={"access_type": "offline", "prompt": "consent"},
         )
     # token_storage = "encrypted" without the web-only key is a deploy
     # misconfiguration: fail loud once, then run as ephemeral (the
     # web_tokens.feature_enabled gate is False everywhere downstream).
-    if _config.web.token_storage == "encrypted":
+    if config.web.token_storage == "encrypted":
         from . import web_tokens as _wt  # noqa: PLC0415
         if not _wt.token_key_available():
             logger.error(
@@ -218,6 +223,8 @@ def _reload_config():
                 "\"ephemeral\" (no post-as-user mirroring, no read sync). "
                 "Provision the key for the web unit only.",
             )
+
+    _config, _oauth = config, oauth
 
 
 def _publish_config(app: FastAPI) -> None:
@@ -239,7 +246,7 @@ def _reload_config_on_signal(app: FastAPI) -> None:
     so — the same shape `webhook_receiver._maybe_reload_for_signal` already uses.
     """
     try:
-        _reload_config()
+        _reload_config(app)
         _publish_config(app)
     except Exception as e:
         logger.error(
@@ -254,7 +261,7 @@ async def lifespan(app: FastAPI):
     # See `build_info`: the web service is restarted last by the Ansible deploy,
     # so it is the one that stays stale longest.
     logger.info("STARTUP Running %s", build_description())
-    _reload_config()
+    _reload_config(app)
     _publish_config(app)
     signal.signal(signal.SIGHUP, lambda *_: _reload_config_on_signal(app))
     # Wrap the stop signals so the SSE streams below can end themselves instead
@@ -280,40 +287,21 @@ async def lifespan(app: FastAPI):
 #   3. No real secret found → fail closed. There is deliberately no constant
 #      fallback. For local dev/test, ISTOTA_WEB_ALLOW_INSECURE_SESSION=1 opts
 #      into a random per-process key (sessions don't survive a restart).
-_ALLOW_INSECURE_SESSION_ENV = "ISTOTA_WEB_ALLOW_INSECURE_SESSION"
+from .web_session_secret import (
+    ALLOW_INSECURE_SESSION_ENV as _ALLOW_INSECURE_SESSION_ENV,
+    resolve as _resolve_web_session_secret,
+)
 
 
 def _resolve_session_secret() -> str:
-    env_secret = os.environ.get("ISTOTA_WEB_SESSION_SECRET_KEY", "").strip()
-    if env_secret:
-        return env_secret
-
-    # config.toml (Docker-persisted) secret. Best-effort: a missing or
-    # unreadable config must not crash import — it just means none was found.
+    # Loading can fail at import time; the resolver still honors an env key.
     try:
-        _cfg = load_config()
-        config_secret = (_cfg.web.session_secret_key or "").strip()
+        config = load_config()
     except Exception:  # pragma: no cover - defensive
-        _cfg = None
-        config_secret = ""
-    if config_secret:
-        return config_secret
-
-    # No-auth (standalone local) mode never reads the session — the middleware
-    # is still constructed, so it needs *a* key, but a random per-process one is
-    # fine (there is nothing to forge without an auth flow). Do not crash import.
-    if _cfg is not None and getattr(_cfg.web, "auth", "nextcloud") == "none":
-        return secrets.token_hex(32)
-
-    if os.environ.get(_ALLOW_INSECURE_SESSION_ENV, "").strip().lower() in ("1", "true", "yes"):
-        logger.warning(
-            "No web session secret configured; signing with a random per-process "
-            "key because %s is set. Sessions will not survive a restart. Do not "
-            "use this in production.",
-            _ALLOW_INSECURE_SESSION_ENV,
-        )
-        return secrets.token_hex(32)
-
+        config = None
+    secret = _resolve_web_session_secret(config, os.environ)
+    if secret:
+        return secret
     raise RuntimeError(
         "No web session signing secret configured. Set "
         "ISTOTA_WEB_SESSION_SECRET_KEY (or web.session_secret_key in config.toml) "
@@ -373,14 +361,13 @@ def is_loopback_host(host: str) -> bool:
     return host.strip().lower() in ("127.0.0.1", "::1", "localhost")
 
 
-def assert_no_auth_bind_safe(auth: str, host: str) -> None:
+def assert_no_auth_bind_safe(auth: list[str], host: str) -> None:
     """Refuse to serve no-auth on a non-loopback bind.
 
-    Raises ``RuntimeError`` when ``auth == "none"`` and ``host`` is not a
-    loopback address — structurally prevents an unauthenticated instance from
-    being exposed on the network. A no-op for ``auth == "nextcloud"``.
+    The lifespan separately requires proof that the local launcher performed
+    this check; a loopback bind alone can sit behind a public proxy.
     """
-    if auth != "none":
+    if "none" not in auth:
         return
     if not is_loopback_host(host):
         raise RuntimeError(
@@ -391,13 +378,24 @@ def assert_no_auth_bind_safe(auth: str, host: str) -> None:
         )
 
 
+def _assert_no_auth_launch_safe(auth: list[str], launch_app: FastAPI) -> None:
+    if "none" not in auth:
+        return
+    host = getattr(launch_app.state, "local_no_auth_bind", None)
+    if not isinstance(host, str) or not is_loopback_host(host):
+        raise RuntimeError(
+            '[web] auth = ["none"] requires istota serve with a verified '
+            "loopback bind; direct uvicorn and public proxy deployments are refused."
+        )
+
+
 def _no_auth_mode() -> bool:
     """Whether the web app is running with authentication bypassed.
 
     Single-user local (standalone) shape: ``[web] auth = "none"``. Server
     deployments leave the default ``"nextcloud"`` and this is always False.
     """
-    return bool(_config) and getattr(_config.web, "auth", "nextcloud") == "none"
+    return bool(_config) and _config.web.has_method("none")
 
 
 def _local_user() -> dict:
@@ -430,7 +428,66 @@ def _require_api_auth(request: Request) -> dict:
     user = _get_session_user(request)
     if not user:
         raise _UnauthorizedException()
+    _session_auth(request)
     return user
+
+
+def _session_auth(request: Request) -> dict:
+    """Validate the cookie against the enabled method and live credential."""
+    if _no_auth_mode():
+        return {"method": "none", "epoch": 0}
+    user = _get_session_user(request)
+    if not user or not _config:
+        raise _UnauthorizedException()
+    auth = request.session.get("auth") or {}
+    if not isinstance(auth, dict):
+        raise _UnauthorizedException()
+    method = auth.get("method") or "nextcloud"
+    if method not in ("nextcloud", "email") or not _config.web.has_method(method):
+        raise _UnauthorizedException()
+    try:
+        identity = web_auth.get_identity(_config.db_path, user["username"])
+        epoch = identity.credential_epoch if identity else web_auth.get_retired_epoch(_config.db_path, user["username"])
+        if method == "email" and (
+            identity is None or user_profiles.get_profile(_config.db_path, user["username"]) is None
+        ):
+            raise _UnauthorizedException()
+    except _UnauthorizedException:
+        raise
+    except Exception:
+        logger.warning("Session credential lookup failed", exc_info=True)
+        raise _UnauthorizedException() from None
+    if identity and identity.disabled:
+        raise _UnauthorizedException()
+    if not auth.get("method"):
+        # A generationless cookie cannot inherit an identity's current epoch.
+        if epoch != 0:
+            raise _UnauthorizedException()
+        auth = {"method": "nextcloud", "epoch": 0}
+        request.session["auth"] = auth
+    if auth.get("epoch") != epoch:
+        raise _UnauthorizedException()
+    request.state.web_auth_identity = identity
+    return auth
+
+
+async def _stream_authorized(request: Request, *, admin: bool = False) -> bool:
+    try:
+        user = await asyncio.to_thread(_require_api_auth, request)
+        return not admin or _user_is_web_admin(user["username"])
+    except _UnauthorizedException:
+        return False
+
+
+async def _authenticated_stream(request: Request, frames, *, admin: bool = False):
+    """Check again after reads and between frames, including buffered batches."""
+    try:
+        async for frame in frames:
+            if not await _stream_authorized(request, admin=admin):
+                return
+            yield frame
+    finally:
+        await frames.aclose()
 
 
 def _user_is_web_admin(username: str) -> bool:
@@ -487,12 +544,9 @@ def _get_external_origin() -> tuple[str, str]:
     request headers, which can be forged. Scheme is `http` when hostname is
     a literal localhost / loopback (Docker dev path); otherwise `https`.
     """
-    if not _config or not _config.site.hostname:
-        raise ValueError("site.hostname must be configured when web app is enabled")
-    host = _config.site.hostname
-    bare = host.split(":")[0]
-    scheme = "http" if bare in ("localhost", "127.0.0.1", "::1") else "https"
-    return host, scheme
+    from .web_origin import external_origin
+
+    return external_origin(_config)
 
 
 class _ForbiddenException(Exception):
@@ -636,7 +690,7 @@ body {
 .card {
   width: 100%;
   max-width: 22rem;
-  padding: 2.25rem 1.75rem 1.75rem;
+  padding: 1.75rem 1.5rem 1.5rem;
   background: var(--surface-card);
   border: 1px solid var(--border-subtle);
   border-radius: 1rem;
@@ -647,9 +701,9 @@ body {
    badge chrome — and light theme inverts it to near-black rather than shipping
    a second asset. Mirrors .app-nav .app-name .sigil in app.css. */
 .mark {
-  height: 4.5rem;
+  height: 3.25rem;
   width: auto;
-  margin: 0 auto 1.25rem;
+  margin: 0 auto 1rem;
   display: block;
 }
 :root[data-theme='light'] .mark { filter: invert(1); }
@@ -665,7 +719,7 @@ h1 {
   letter-spacing: -0.01em;
 }
 .tagline {
-  margin: 0.4rem 0 1.75rem;
+  margin: 0.4rem 0 1.25rem;
   font-size: 0.85rem;
   color: var(--text-muted);
 }
@@ -678,18 +732,20 @@ h1 {
   padding: 0.7rem 1rem;
   border-radius: 0.6rem;
   border: 1px solid var(--border-default);
+  font-family: inherit;
   font-size: 0.9rem;
+  line-height: 1.4;
   font-weight: 500;
   text-decoration: none;
   color: var(--text-primary);
   background: var(--surface-raised);
   transition: border-color 0.15s, background 0.15s, transform 0.15s;
 }
-a.btn:hover {
+.btn:hover {
   border-color: var(--accent-amber);
   transform: translateY(-1px);
 }
-a.btn:focus-visible {
+.btn:focus-visible, input:focus-visible, .recovery:focus-visible {
   outline: 2px solid var(--accent-amber);
   outline-offset: 2px;
 }
@@ -717,7 +773,7 @@ a.btn:focus-visible {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  margin: 1rem 0 0.25rem;
+  margin: 1.25rem 0;
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -729,6 +785,54 @@ a.btn:focus-visible {
   height: 1px;
   background: var(--border-subtle);
 }
+form { display: grid; gap: 0.75rem; width: 100%; text-align: left; }
+label { font-size: 0.85rem; color: var(--text-muted); }
+input { box-sizing: border-box; width: 100%; padding: 0.7rem; font: inherit;
+  font-size: 16px; color: var(--text-primary); background: var(--surface-base);
+  border: 1px solid var(--border-default); border-radius: 0.4rem; }
+button.btn { cursor: pointer; }
+.btn-primary { background: var(--text-primary); color: var(--surface-base); }
+.email-login {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.email-choice {
+  padding: 0.65rem 0.5rem;
+  border-bottom: 2px solid var(--border-default);
+  cursor: pointer;
+}
+.email-login > input:checked + label {
+  color: var(--text-primary);
+  border-color: var(--accent-blue);
+}
+.email-login > input:focus-visible + label {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
+.email-panel { display: none; grid-column: 1 / -1; padding-top: 1.25rem; }
+#email-password:checked ~ .password-panel,
+#email-link:checked ~ .link-panel { display: block; }
+.form-field { display: grid; gap: 0.4rem; }
+.password-label { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
+.recovery { color: var(--text-muted); font-size: 0.75rem; text-decoration: none; }
+.recovery:hover { color: var(--text-primary); text-decoration: underline; }
+.form-help { margin: 0; color: var(--text-muted); font-size: 0.8rem; line-height: 1.5; }
+.form-error { color: var(--text-primary); }
 footer {
   font-size: 0.72rem;
   color: var(--text-dim);
@@ -741,7 +845,7 @@ footer a {
 footer a:hover { color: var(--accent-amber); border-bottom-color: var(--accent-amber); }
 @media (prefers-reduced-motion: reduce) {
   .btn { transition: none; }
-  a.btn:hover { transform: none; }
+  .btn:hover { transform: none; }
 }
 """
 
@@ -862,80 +966,440 @@ def _login_page_mark() -> str:
         return _LOGIN_SIGIL_MARK
 
 
-def _render_login_page(bot_name: str, version: str, mark: str) -> str:
-    """The unauthenticated landing page: one card, one working way in."""
-    name = escape(bot_name)
-    return (
-        f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
-        f'<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f'<title>Sign in &middot; {name}</title>'
-        f'<link rel="icon" href="/istota/favicon.png">'
-        f'<script>{_LOGIN_PAGE_THEME_SCRIPT}</script>'
-        f'<style>{_LOGIN_PAGE_CSS}</style></head><body>'
-        f'<main class="card">'
-        f'{mark}'
-        f'<h1>{name}</h1>'
-        f'<p class="tagline">Sign in to continue</p>'
-        f'<a class="btn" href="/istota/login?go=1">{_CLOUD_ICON}'
-        f'Log in with Nextcloud</a>'
-        f'<div class="divider">or</div>'
-        f'<div class="btn btn-disabled" aria-disabled="true">{_MAIL_ICON}'
-        f'Log in with email <span class="soon">Coming soon</span></div>'
-        f'</main>'
-        f'<footer>Running <a href="{ISTOTA_SITE_URL}" target="_blank" '
-        f'rel="noopener">Istota</a> v{escape(version)}</footer>'
-        f'</body></html>'
-    )
+_AUTH_PAGE_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
+_LOGIN_FAILURE_SECONDS = 0.150
+_password_slots = asyncio.Semaphore(4)
+# Bounded memory and per-key windows: random addresses cannot spend a global
+# quota. This cheap gate precedes the database's authoritative reservation.
+_login_ingress: OrderedDict[tuple, deque] = OrderedDict()
+_LOGIN_INGRESS_KEYS = 4096
 
 
-def _render_login_error_page(
-    bot_name: str, version: str, headline: str, detail: str, mark: str
-) -> str:
-    """A login failure the user can act on, in the same card as the login page.
+def _csrf_token(request: Request, purpose: str) -> str:
+    key = f"csrf.{purpose}"
+    if key not in request.session:
+        request.session[key] = secrets.token_urlsafe(32)
+    return request.session[key]
 
-    ``headline`` and ``detail`` are always caller-supplied fixed strings —
-    never provider- or exception-derived text, which is attacker-influenceable
-    and would be reflected straight into a browser response.
+
+def _check_csrf(request: Request, purpose: str, submitted: object) -> bool:
+    expected = request.session.get(f"csrf.{purpose}")
+    return (isinstance(expected, str) and isinstance(submitted, str)
+            and hmac.compare_digest(expected.encode(), submitted.encode()))
+
+
+def _client_ip(request: Request) -> str | None:
+    hops = _config.web.trusted_proxy_hops
+    if hops <= 0:
+        return None
+    forwarded = request.headers.get("x-forwarded-for", "").split(",")
+    if len(forwarded) < hops:
+        return None
+    try:
+        return str(ipaddress.ip_address(forwarded[-hops].strip()))
+    except ValueError:
+        return None
+
+
+def _admit_password_request(email: str, ip: str | None, policy: web_auth.Policy) -> bool:
+    # Called without an await on the event loop: check and reservation are one
+    # operation. Refusals never extend either window.
+    now = time.monotonic()
+    keys = [(str(_config.db_path), "email", email, policy.throttle_max_email)]
+    if ip is not None:
+        keys.append((str(_config.db_path), "ip", ip, policy.throttle_max_ip))
+    for root, kind, value, maximum in keys:
+        times = _login_ingress.get((root, kind, value))
+        if times is not None:
+            while times and times[0] <= now - policy.throttle_window_seconds:
+                times.popleft()
+        if maximum <= 0 or (times is not None and len(times) >= maximum):
+            return False
+    for root, kind, value, _ in keys:
+        key = (root, kind, value)
+        if key not in _login_ingress:
+            if len(_login_ingress) >= _LOGIN_INGRESS_KEYS:
+                _login_ingress.popitem(last=False)
+            _login_ingress[key] = deque()
+        _login_ingress[key].append(now)
+        _login_ingress.move_to_end(key)
+    return True
+
+
+def _render_form_page(bot_name: str, headline: str, body: str, mark: str) -> str:
+    """Shared auth card. Body is rendered HTML; scalar callers escape fields.
+
+    Unauthenticated, so it names no version: an exact version tells a visitor
+    which advisories apply (ISSUE-569). `/admin` carries it instead.
     """
     name = escape(bot_name)
     return (
-        f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
-        f'<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f'<title>Sign-in failed &middot; {name}</title>'
-        f'<link rel="icon" href="/istota/favicon.png">'
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<title>{escape(headline)} &middot; {name}</title>'
+        '<link rel="icon" href="/istota/favicon.png">'
         f'<script>{_LOGIN_PAGE_THEME_SCRIPT}</script>'
         f'<style>{_LOGIN_PAGE_CSS}</style></head><body>'
-        f'<main class="card">'
-        f'{mark}'
-        f'<h1>{name}</h1>'
-        f'<p class="tagline">{escape(headline)}</p>'
-        f'<p class="tagline">{escape(detail)}</p>'
-        f'<a class="btn" href="/istota/login">Try signing in again</a>'
-        f'</main>'
+        f'<main class="card">{mark}<h1>{name}</h1>'
+        f'<p class="tagline">{escape(headline)}</p>{body}</main>'
         f'<footer>Running <a href="{ISTOTA_SITE_URL}" target="_blank" '
-        f'rel="noopener">Istota</a> v{escape(version)}</footer>'
-        f'</body></html>'
+        'rel="noopener">Istota</a></footer></body></html>'
+    )
+
+
+def _render_login_page(
+    bot_name: str, mark: str, *, methods: list[str],
+    login_csrf: str = "", link_csrf: str = "", error: str | None = None,
+    email_prefill: str = "",
+) -> str:
+    body = f'<p class="form-error">{escape(error)}</p>' if error else ""
+    if "nextcloud" in methods:
+        body += (f'<a class="btn" href="/istota/login?go=1">{_CLOUD_ICON}'
+                 'Log in with Nextcloud</a>')
+    if "email" in methods:
+        if "nextcloud" in methods:
+            body += '<div class="divider">or</div>'
+        body += (
+            '<fieldset class="email-login"><legend class="visually-hidden">Sign in with email</legend>'
+            '<input class="visually-hidden" type="radio" name="email-method" id="email-password" checked>'
+            '<label class="email-choice" for="email-password">Password</label>'
+            '<input class="visually-hidden" type="radio" name="email-method" id="email-link">'
+            '<label class="email-choice" for="email-link">Email link</label>'
+            '<div class="email-panel password-panel">'
+            '<form method="post" action="/istota/login/email">'
+            f'<input type="hidden" name="csrf_token" value="{escape(login_csrf)}">'
+            '<div class="form-field"><label for="login-email">Email</label>'
+            f'<input id="login-email" type="email" name="email" value="{escape(email_prefill)}" '
+            'autocomplete="username" required></div>'
+            '<div class="form-field"><div class="password-label"><label for="login-password">Password</label>'
+            '<a class="recovery" href="/istota/auth/reset">Forgot password?</a></div>'
+            '<input id="login-password" type="password" name="password" '
+            'autocomplete="current-password" required></div>'
+            '<button class="btn btn-primary" type="submit">Log in</button></form></div>'
+            '<div class="email-panel link-panel">'
+            '<form method="post" action="/istota/auth/login-link/request">'
+            f'<input type="hidden" name="csrf_token" value="{escape(link_csrf)}">'
+            '<div class="form-field"><label for="link-email">Email</label>'
+            f'<input id="link-email" type="email" name="email" value="{escape(email_prefill)}" '
+            'autocomplete="email" aria-describedby="link-help" required></div>'
+            '<p class="form-help" id="link-help">We’ll email you a one-time sign-in link. No password needed.</p>'
+            f'<button class="btn btn-primary" type="submit">{_MAIL_ICON}Send sign-in link</button>'
+            '</form></div></fieldset>'
+            '<script>'
+            'const passwordEmail = document.getElementById("login-email");'
+            'const linkEmail = document.getElementById("link-email");'
+            'document.getElementById("email-link").addEventListener("change", () => {'
+            'linkEmail.value = passwordEmail.value;});'
+            'document.getElementById("email-password").addEventListener("change", () => {'
+            'passwordEmail.value = linkEmail.value;});'
+            '</script>'
+        )
+    return _render_form_page(bot_name, "Sign in to continue", body, mark)
+
+
+def _render_login_error_page(
+    bot_name: str, headline: str, detail: str, mark: str,
+) -> str:
+    body = (f'<p class="tagline">{escape(detail)}</p>'
+            '<a class="btn" href="/istota/login">Try signing in again</a>')
+    return _render_form_page(bot_name, headline, body, mark)
+
+
+async def _auth_error(headline: str, detail: str, status_code: int) -> HTMLResponse:
+    mark = await asyncio.get_running_loop().run_in_executor(_login_mark_executor, _login_page_mark)
+    return HTMLResponse(
+        _render_login_error_page(_config.bot_name, headline, detail, mark),
+        status_code=status_code, headers=_AUTH_PAGE_HEADERS,
     )
 
 
 @auth_router.get("/login")
 async def login(request: Request):
-    if _oauth is None or not hasattr(_oauth, "nextcloud"):
-        return Response("Auth not configured", status_code=500)
-    # An abandoned reconnect (the user closed the provider's consent page) leaves
-    # its landing marker in the session, and only a *completed* callback consumes
-    # one — so an ordinary login some time later would land on settings. Starting
-    # a plain login is the statement that this is not that reconnect.
     request.session.pop(_POST_LOGIN_KEY, None)
-    if not request.query_params.get("go"):
-        from . import __version__
+    if request.query_params.get("go"):
+        if not _config.web.has_method("nextcloud"):
+            raise HTTPException(status_code=404)
+        if _oauth is None or not hasattr(_oauth, "nextcloud"):
+            return Response("Auth not configured", status_code=500, headers=_AUTH_PAGE_HEADERS)
+        return await _oauth.nextcloud.authorize_redirect(request, _nc_redirect_uri(request))
+    mark = await asyncio.get_running_loop().run_in_executor(_login_mark_executor, _login_page_mark)
+    return HTMLResponse(_render_login_page(
+        _config.bot_name, mark, methods=_config.web.auth,
+        login_csrf=_csrf_token(request, "login"),
+        link_csrf=_csrf_token(request, "login-link-request"),
+    ), headers=_AUTH_PAGE_HEADERS)
 
-        bot_name = _config.bot_name if _config else "Istota"
-        mark = await asyncio.get_running_loop().run_in_executor(
-            _login_mark_executor, _login_page_mark,
+
+@auth_router.post("/login/email")
+async def login_email(request: Request):
+    started = time.monotonic()
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    form = await request.form()
+    if not _check_csrf(request, "login", form.get("csrf_token")):
+        return await _auth_error("This form expired", "Reload and try again.", 403)
+    email = form.get("email", "")
+    password = form.get("password", "")
+    status, identity = "bad", None
+    if isinstance(email, str) and isinstance(password, str) and len(email) <= 320:
+        email = web_auth.normalize_email(email)
+        ip = _client_ip(request)
+        policy = web_auth.policy_from_config(_config)
+        if _admit_password_request(email, ip, policy):
+            status, identity = await _run_password_work(
+                web_auth.authenticate, _config.db_path, policy, email, password, ip=ip,
+            )
+    if status == "ok" and identity is not None:
+        # authenticate has already checked the live profile atomically with
+        # the credential. Never seed one here, even after an operator deletion.
+        try:
+            profile = await asyncio.to_thread(user_profiles.get_profile, _config.db_path, identity.user_id)
+        except Exception:
+            logger.warning("Login profile lookup failed", exc_info=True)
+            profile = None
+        if profile is not None:
+            request.session.clear()
+            request.session["user"] = {"username": identity.user_id, "display_name": profile.display_name}
+            request.session["auth"] = {"method": "email", "epoch": identity.credential_epoch}
+            return RedirectResponse("/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
+    await asyncio.sleep(max(0, _LOGIN_FAILURE_SECONDS - (time.monotonic() - started)))
+    return await _auth_error("Sign-in failed", "Email or password was not accepted.", 400)
+
+
+async def _run_password_work(function, *args, **kwargs):
+    """Keep a KDF slot until the worker ends, including on client disconnect."""
+    slots = _password_slots
+    await slots.acquire()
+    work = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+
+    def finished(task):
+        slots.release()
+        # Retrieve exceptions even if the HTTP caller stopped awaiting it.
+        if not task.cancelled():
+            task.exception()
+
+    work.add_done_callback(finished)
+    return await asyncio.shield(work)
+
+
+async def _auth_form(headline: str, body: str, status_code: int = 200) -> HTMLResponse:
+    mark = await asyncio.get_running_loop().run_in_executor(_login_mark_executor, _login_page_mark)
+    return HTMLResponse(
+        _render_form_page(_config.bot_name, headline, body, mark),
+        status_code=status_code, headers=_AUTH_PAGE_HEADERS,
+    )
+
+
+async def _invalid_auth_link() -> HTMLResponse:
+    return await _auth_error("This link is invalid", "It may have expired or already been used. Request a new link.", 400)
+
+
+async def _peek_auth_link(token: object, *, login: bool = False):
+    if not isinstance(token, str):
+        return None
+    try:
+        record = await asyncio.to_thread(web_auth.peek_token, _config.db_path, token)
+    except Exception:
+        logger.warning("Auth link lookup failed")
+        return None
+    purposes = {"login"} if login else {"enrol", "reset"}
+    return record if record and record.purpose in purposes else None
+
+
+async def _finish_link_sign_in(request: Request, result) -> Response:
+    if result is None:
+        return await _invalid_auth_link()
+    user_id, email, epoch = result
+    try:
+        profile = await asyncio.to_thread(user_profiles.get_profile, _config.db_path, user_id)
+        identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user_id)
+    except Exception:
+        logger.warning("Auth link session lookup failed")
+        return await _invalid_auth_link()
+    if (profile is None or identity is None or identity.disabled
+            or identity.email != email or identity.credential_epoch != epoch):
+        return await _invalid_auth_link()
+    request.session.clear()
+    request.session["user"] = {"username": user_id, "display_name": profile.display_name}
+    request.session["auth"] = {"method": "email", "epoch": epoch}
+    return RedirectResponse("/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
+
+
+async def _set_password_form(request: Request, token: str, purpose: str, error: str = ""):
+    headline = "Reset your password" if purpose == "reset" else "Set your password"
+    body = f'<p class="form-error">{escape(error)}</p>' if error else ""
+    body += (
+        '<form method="post" action="/istota/auth/set-password">'
+        f'<input type="hidden" name="token" value="{escape(token)}">'
+        f'<input type="hidden" name="csrf_token" value="{escape(_csrf_token(request, "set-password"))}">'
+        '<label for="new-password">New password</label>'
+        '<input id="new-password" type="password" name="password" autocomplete="new-password" required>'
+        '<label for="confirm-password">Confirm password</label>'
+        '<input id="confirm-password" type="password" name="confirm_password" autocomplete="new-password" required>'
+        '<button class="btn" type="submit">Set password and sign in</button></form>'
+    )
+    return await _auth_form(headline, body, 400 if error else 200)
+
+
+@auth_router.get("/auth/set-password")
+async def set_password_page(request: Request):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    token = request.query_params.get("token", "")
+    record = await _peek_auth_link(token)
+    if record is None:
+        return await _invalid_auth_link()
+    return await _set_password_form(request, token, record.purpose)
+
+
+@auth_router.post("/auth/set-password")
+async def set_password_submit(request: Request):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    form = await request.form()
+    token = form.get("token", "")
+    record = await _peek_auth_link(token)
+    if record is None:
+        return await _invalid_auth_link()
+    if not _check_csrf(request, "set-password", form.get("csrf_token")):
+        return await _auth_error("This form expired", "Reload and try again.", 403)
+    password = form.get("password", "")
+    if not isinstance(password, str) or password != form.get("confirm_password"):
+        return await _set_password_form(request, token, record.purpose, "Passwords must match.")
+    policy = web_auth.policy_from_config(_config)
+    error = web_auth.password_policy_error(password, policy, email=record.email, user_id=record.user_id)
+    if error:
+        return await _set_password_form(request, token, record.purpose, error)
+    try:
+        result = await _run_password_work(
+            web_auth.consume_and_set_password, _config.db_path, token, record.purpose, password, policy,
         )
-        return HTMLResponse(_render_login_page(bot_name, __version__, mark))
-    return await _oauth.nextcloud.authorize_redirect(request, _nc_redirect_uri(request))
+    except Exception:
+        logger.warning("Auth link password update failed")
+        return await _invalid_auth_link()
+    return await _finish_link_sign_in(request, result)
+
+
+@auth_router.get("/auth/login-link")
+async def login_link_page(request: Request):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    token = request.query_params.get("token", "")
+    if await _peek_auth_link(token, login=True) is None:
+        return await _invalid_auth_link()
+    body = (
+        '<form method="post" action="/istota/auth/login-link">'
+        f'<input type="hidden" name="token" value="{escape(token)}">'
+        f'<input type="hidden" name="csrf_token" value="{escape(_csrf_token(request, "login-link"))}">'
+        '<button class="btn" type="submit">Sign in</button></form>'
+    )
+    return await _auth_form("Confirm sign-in", body)
+
+
+@auth_router.post("/auth/login-link")
+async def login_link_submit(request: Request):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    form = await request.form()
+    token = form.get("token", "")
+    if await _peek_auth_link(token, login=True) is None:
+        return await _invalid_auth_link()
+    if not _check_csrf(request, "login-link", form.get("csrf_token")):
+        return await _auth_error("This form expired", "Reload and try again.", 403)
+    try:
+        result = await asyncio.to_thread(web_auth.consume_login_token, _config.db_path, token)
+    except Exception:
+        logger.warning("Auth sign-in link consumption failed")
+        return await _invalid_auth_link()
+    return await _finish_link_sign_in(request, result)
+
+
+_mail_link_pending: set[tuple[str, str]] = set()
+_mail_link_lock = threading.Lock()
+
+
+def _send_requested_auth_link(config, email: str, purpose: str, pending_key: tuple[str, str]):
+    # BackgroundTask runs this synchronous function through anyio's threadpool.
+    # Its finally also runs if the HTTP request is cancelled during delivery.
+    try:
+        from .web_origin import external_origin
+
+        host, scheme = external_origin(config)
+        issued = web_auth.issue_mail_link_if_allowed(
+            config.db_path, web_auth.policy_from_config(config), email, purpose,
+        )
+        if issued is None:
+            return
+        token, identity = issued
+        profile = user_profiles.get_profile(config.db_path, identity.user_id)
+        if profile is None:
+            return
+        path = "login-link" if purpose == "login" else "set-password"
+        link = f"{scheme}://{host}/istota/auth/{path}?token={token}"
+        if purpose == "login":
+            message = web_auth_mail.build_login_link_email(
+                config.bot_name, profile.display_name, link, config.web.auth_login_link_ttl_minutes,
+            )
+        else:
+            message = web_auth_mail.build_reset_email(
+                config.bot_name, profile.display_name, link, config.web.auth_reset_ttl_hours,
+            )
+        web_auth_mail.send_auth_email(config, identity.email, *message)
+    except Exception:
+        # Backend/SMTP exception text may contain the address or the token.
+        logger.warning("Requested auth email could not be sent")
+    finally:
+        with _mail_link_lock:
+            _mail_link_pending.discard(pending_key)
+
+
+async def _request_auth_link(request: Request, purpose: str):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    form = await request.form()
+    csrf_purpose = "reset" if purpose == "reset" else "login-link-request"
+    if not _check_csrf(request, csrf_purpose, form.get("csrf_token")):
+        return await _auth_error("This form expired", "Reload and try again.", 403)
+    response = await _auth_form(
+        "Check your email",
+        '<p class="tagline">If this address can sign in, an email with a link will arrive shortly.</p>'
+        '<a class="btn" href="/istota/login">Back to sign in</a>',
+    )
+    email = form.get("email", "")
+    if isinstance(email, str) and len(email) <= 320:
+        email = web_auth.normalize_email(email)
+        key = (str(_config.db_path), email)
+        # Reserve after the final await, so cancellation during rendering cannot
+        # leave a marker for a background task that was never handed off.
+        with _mail_link_lock:
+            if key not in _mail_link_pending:
+                _mail_link_pending.add(key)
+                response.background = BackgroundTask(_send_requested_auth_link, _config, email, purpose, key)
+    return response
+
+
+@auth_router.get("/auth/reset")
+async def reset_page(request: Request):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    body = (
+        '<form method="post" action="/istota/auth/reset">'
+        f'<input type="hidden" name="csrf_token" value="{escape(_csrf_token(request, "reset"))}">'
+        '<label for="reset-email">Email</label>'
+        '<input id="reset-email" type="email" name="email" autocomplete="email" required>'
+        '<button class="btn" type="submit">Send password reset link</button></form>'
+    )
+    return await _auth_form("Reset your password", body)
+
+
+@auth_router.post("/auth/reset")
+async def reset_submit(request: Request):
+    return await _request_auth_link(request, "reset")
+
+
+@auth_router.post("/auth/login-link/request")
+async def login_link_request(request: Request):
+    return await _request_auth_link(request, "login")
 
 
 # Where a completed OAuth round trip may land, keyed rather than stored as a
@@ -977,11 +1441,15 @@ async def reconnect(request: Request):
     as somebody else gets that account rather than a pair filed under the wrong
     name. The only thing this adds is the landing page at the far end.
     """
+    if not _config.web.has_method("nextcloud"):
+        raise HTTPException(status_code=404)
     if _oauth is None or not hasattr(_oauth, "nextcloud"):
         return Response("Auth not configured", status_code=500)
     # An action on an existing account. An anonymous caller has no connection to
     # re-establish and belongs on the login page.
-    if not request.session.get("user"):
+    try:
+        await asyncio.to_thread(_require_api_auth, request)
+    except _UnauthorizedException:
         return RedirectResponse(url="/istota/login", status_code=302)
     request.session[_POST_LOGIN_KEY] = "settings"
     return await _oauth.nextcloud.authorize_redirect(request, _nc_redirect_uri(request))
@@ -989,10 +1457,10 @@ async def reconnect(request: Request):
 
 @auth_router.get("/callback")
 async def callback(request: Request):
+    if not _config.web.has_method("nextcloud"):
+        raise HTTPException(status_code=404)
     if _oauth is None or not hasattr(_oauth, "nextcloud"):
         return Response("Auth not configured", status_code=500)
-
-    from . import __version__  # noqa: PLC0415
 
     _bot_name = _config.bot_name if _config else "Istota"
 
@@ -1005,9 +1473,9 @@ async def callback(request: Request):
         )
         return HTMLResponse(
             _render_login_error_page(
-                _bot_name, __version__, headline, detail, mark,
+                _bot_name, headline, detail, mark,
             ),
-            status_code=status,
+            status_code=status, headers=_AUTH_PAGE_HEADERS,
         )
 
     # A failure here is not a server fault and must not surface as a bare 500.
@@ -1068,6 +1536,17 @@ async def callback(request: Request):
     if not username or (_config and _config.users and username not in _config.users):
         return Response("Access denied: user not configured", status_code=403)
 
+    try:
+        identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, username)
+        epoch = identity.credential_epoch if identity else await asyncio.to_thread(
+            web_auth.get_retired_epoch, _config.db_path, username,
+        )
+    except Exception:
+        logger.warning("OAuth session credential lookup failed", exc_info=True)
+        return await _login_error(403, "Sign-in failed", "Sign-in could not be completed.")
+    if identity and identity.disabled:
+        return await _login_error(403, "Sign-in failed", "Sign-in could not be completed.")
+
     # Phase 6: auto-seed the user_profiles row on first login.
     # Idempotent — existing rows are not overwritten on subsequent logins.
     # The TOML UserConfig is passed as ``seed_from`` so the row carries the
@@ -1126,7 +1605,8 @@ async def callback(request: Request):
         "username": username,
         "display_name": display_name,
     }
-    return RedirectResponse(url=landing, status_code=302)
+    request.session["auth"] = {"method": "nextcloud", "epoch": epoch}
+    return RedirectResponse(url=landing, status_code=302, headers=_AUTH_PAGE_HEADERS)
 
 
 @auth_router.get("/logout")
@@ -1143,8 +1623,9 @@ async def logout(request: Request):
 @auth_router.get("/google/connect")
 async def google_connect(request: Request):
     """Initiate Google OAuth flow. User must be logged in."""
-    user = _get_session_user(request)
-    if not user:
+    try:
+        user = await asyncio.to_thread(_require_api_auth, request)
+    except _UnauthorizedException:
         return RedirectResponse(url="/istota/login", status_code=302)
     if not _oauth or not hasattr(_oauth, "google"):
         return Response("Google Workspace not configured", status_code=500)
@@ -1183,8 +1664,9 @@ async def google_connect(request: Request):
 @auth_router.get("/google/callback")
 async def google_callback(request: Request):
     """Handle Google OAuth callback — store tokens in DB."""
-    user = _get_session_user(request)
-    if not user:
+    try:
+        user = await asyncio.to_thread(_require_api_auth, request)
+    except _UnauthorizedException:
         return RedirectResponse(url="/istota/login", status_code=302)
     if not _oauth or not hasattr(_oauth, "google"):
         return Response("Google Workspace not configured", status_code=500)
@@ -1209,10 +1691,17 @@ async def google_callback(request: Request):
     scopes_json = json.dumps(scopes.split()) if isinstance(scopes, str) else json.dumps(scopes)
 
     from . import db
-    with db.get_db(_config.db_path) as conn:
-        db.upsert_google_token(
-            conn, user["username"], access_token, refresh_token, expiry, scopes_json,
-        )
+    try:
+        with db.get_db(_config.db_path) as conn:
+            # Revocation can occur during the provider round trip. Serialize
+            # the final check and write with credential mutations.
+            conn.execute("BEGIN IMMEDIATE")
+            _require_api_auth(request)
+            db.upsert_google_token(
+                conn, user["username"], access_token, refresh_token, expiry, scopes_json,
+            )
+    except _UnauthorizedException:
+        return RedirectResponse(url="/istota/login", status_code=302)
     logger.info("Google account connected for user %s", user["username"])
     return RedirectResponse(url="/istota/settings?google=connected", status_code=302)
 
@@ -1363,7 +1852,9 @@ def _resolve_tz(client_tz: str, fallback: str) -> str:
 
 
 @api_router.get("/me")
-async def api_me(user: dict = Depends(_require_api_auth)):
+async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
+    method = "none" if _no_auth_mode() else request.session["auth"]["method"]
+    identity = getattr(request.state, "web_auth_identity", None)
     username = user["username"]
     is_admin = _user_is_web_admin(username)
     features: dict = {
@@ -1414,6 +1905,8 @@ async def api_me(user: dict = Depends(_require_api_auth)):
         "features": features,
         "contact": contact,
         "nextcloud_token": nextcloud_token,
+        "auth": {"method": method, "email": identity.email if identity else None,
+                 "can_change_password": bool(method == "email" and identity and identity.password_hash)},
         # Content hashes for the two identities the client always renders, so
         # it can build an immutable URL for each without a round trip. A third
         # party's hash deliberately does not travel here or per message: the
@@ -1422,6 +1915,188 @@ async def api_me(user: dict = Depends(_require_api_auth)):
         # field on every row of the byte-budgeted room-event stream.
         "avatars": _avatar_hashes(username),
     }
+
+
+@api_router.post("/account/password")
+async def api_account_password(request: Request):
+    if not _config or not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    _require_api_auth(request)
+    _verify_origin(request)
+    if request.session["auth"]["method"] != "email":
+        raise HTTPException(status_code=403, detail="Sign in by email to change your password.")
+    identity = request.state.web_auth_identity
+    if not identity.password_hash:
+        raise HTTPException(status_code=400, detail="Use a password reset link to set your first password.")
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid password request.")
+    if (not isinstance(payload, dict)
+            or not isinstance(payload.get("current_password"), str)
+            or not isinstance(payload.get("new_password"), str)):
+        raise HTTPException(status_code=400, detail="Both passwords are required.")
+    policy = web_auth.policy_from_config(_config)
+    error = web_auth.password_policy_error(
+        payload["new_password"], policy, email=identity.email, user_id=identity.user_id,
+    )
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    started = time.monotonic()
+    ip = _client_ip(request)
+    changed = False
+    if _admit_password_request(identity.email, ip, policy):
+        try:
+            changed = await _run_password_work(
+                web_auth.change_password, _config.db_path, policy, identity,
+                payload["current_password"], payload["new_password"], ip=ip,
+            )
+        except Exception:
+            logger.warning("Account password update failed")
+            raise HTTPException(status_code=503, detail="Password could not be changed. Try again later.")
+    if not changed:
+        await asyncio.sleep(max(0, _LOGIN_FAILURE_SECONDS - (time.monotonic() - started)))
+        raise HTTPException(status_code=400, detail="Current password was not accepted. Try again later.")
+    request.session.clear()
+    return {"signed_out": True}
+
+
+# ---- Admin email identities ----
+
+
+def _admin_identity_view(identity):
+    if identity is None:
+        return None
+    return {"email": identity.email, "disabled": identity.disabled,
+            "last_login_at": identity.last_login_at}
+
+
+@api_router.get("/admin/users")
+async def admin_users(_: dict = Depends(_require_admin)):
+    from .user_profiles import list_profiles
+    config = _config
+    profiles = await asyncio.to_thread(list_profiles, config.db_path)
+    identities = {i.user_id: i for i in await asyncio.to_thread(web_auth.list_identities, config.db_path)}
+    users, orphans = [], []
+    for user_id in sorted(profiles.keys() | identities.keys()):
+        profile = profiles.get(user_id)
+        identity = identities.get(user_id)
+        row = {"user_id": user_id, "display_name": profile.display_name if profile else user_id,
+               "identity": _admin_identity_view(identity), "is_admin": user_id in config.admin_users,
+               "state": "nextcloud_only" if identity is None else "password_set" if identity.password_hash else "passwordless"}
+        (users if profile else orphans).append(row)
+    return {"users": users, "orphans": orphans, "email_enabled": config.web.has_method("email")}
+
+
+async def _admin_auth_write(function, *args, **kwargs):
+    try:
+        return await asyncio.to_thread(function, *args, **kwargs)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        logger.warning("Admin identity update failed")
+        raise HTTPException(status_code=503, detail="Identity could not be updated. Try again later.")
+
+
+async def _admin_send_auth_link(config, user_id: str, purpose: str):
+    if not config.web.has_method("email"):
+        raise HTTPException(status_code=400, detail="Email sign-in is not enabled.")
+    from .user_profiles import get_profile
+    from .web_origin import external_origin
+    try:
+        host, scheme = external_origin(config)
+    except ValueError:
+        raise HTTPException(status_code=500, detail="site.hostname must be configured before sending login links.")
+
+    def send():
+        identity = web_auth.get_identity(config.db_path, user_id)
+        profile = get_profile(config.db_path, user_id)
+        if identity is None:
+            raise ValueError("No email identity for this user")
+        if identity.disabled or profile is None:
+            raise ValueError("An enabled identity and a live profile are required to send a link")
+        policy = web_auth.policy_from_config(config)
+        ttl = {"enrol": policy.enrol_ttl_seconds, "reset": policy.reset_ttl_seconds,
+               "login": policy.login_link_ttl_seconds}[purpose]
+        token = web_auth.issue_token(config.db_path, user_id, purpose, ttl, expected_identity=identity)
+        route = "login-link" if purpose == "login" else "set-password"
+        link = f"{scheme}://{host}/istota/auth/{route}?token={token}"
+        builder = {"enrol": web_auth_mail.build_enrol_email, "reset": web_auth_mail.build_reset_email,
+                   "login": web_auth_mail.build_login_link_email}[purpose]
+        message = builder(config.bot_name, profile.display_name, link, ttl // (60 if purpose == "login" else 3600))
+        try:
+            return web_auth_mail.send_auth_email(config, identity.email, *message)
+        except Exception:
+            return False
+
+    sent = await _admin_auth_write(send)
+    if not sent:
+        logger.warning("Admin auth mail could not be sent user=%s purpose=%s", user_id, purpose)
+        raise HTTPException(status_code=502, detail="The invitation or sign-in link could not be sent. The identity is saved; try sending again.")
+    return {"sent": True}
+
+
+@api_router.post("/admin/users")
+async def admin_create_user(request: Request, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
+    config = _config
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user request.")
+    if (not isinstance(payload, dict) or not isinstance(payload.get("user_id"), str)
+            or not isinstance(payload.get("email"), str) or not isinstance(payload.get("display_name", ""), str)):
+        raise HTTPException(status_code=400, detail="User ID and email are required.")
+    email = web_auth.normalize_email(payload["email"])
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+", email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    if not config.web.has_method("email"):
+        raise HTTPException(status_code=400, detail="Email sign-in is not enabled.")
+    identity = await _admin_auth_write(
+        web_auth.upsert_identity, config.db_path, payload["user_id"], email,
+        create_profile=True, display_name=payload.get("display_name", ""), reject_case_collision=True,
+    )
+    return await _admin_send_auth_link(config, identity.user_id, "enrol")
+
+
+@api_router.post("/admin/users/{user_id}/invite")
+async def admin_user_invite(user_id: str, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
+    return await _admin_send_auth_link(_config, user_id, "enrol")
+
+
+@api_router.post("/admin/users/{user_id}/reset")
+async def admin_user_reset(user_id: str, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
+    return await _admin_send_auth_link(_config, user_id, "reset")
+
+
+@api_router.post("/admin/users/{user_id}/login-link")
+async def admin_user_login_link(user_id: str, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
+    return await _admin_send_auth_link(_config, user_id, "login")
+
+
+@api_router.post("/admin/users/{user_id}/disable")
+async def admin_user_disable(user_id: str, request: Request, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="A disabled boolean is required.")
+    if not isinstance(payload, dict) or not isinstance(payload.get("disabled"), bool):
+        raise HTTPException(status_code=400, detail="A disabled boolean is required.")
+    await _admin_auth_write(web_auth.set_disabled, _config.db_path, user_id, payload["disabled"],
+                            protected_admins=set(_config.admin_users))
+    return {"updated": True}
+
+
+@api_router.post("/admin/users/{user_id}/logout-all")
+async def admin_user_logout_all(user_id: str, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
+    await _admin_auth_write(web_auth.bump_epoch, _config.db_path, user_id)
+    return {"updated": True}
+
+
+@api_router.delete("/admin/users/{user_id}")
+async def admin_user_remove(user_id: str, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
+    await _admin_auth_write(web_auth.delete_identity, _config.db_path, user_id,
+                            protected_admins=set(_config.admin_users))
+    return {"removed": True}
 
 
 # ---- Admin dashboard ----
@@ -1472,7 +2147,7 @@ def _gather_admin_stats() -> dict:
     sub-aggregator is captured as an error string rather than failing the
     whole request.
     """
-    from . import __version__, db
+    from . import db
 
     # Read the global once. `_reload_config` rebinds it wholesale on SIGHUP, and
     # the subscription section below takes the deployment's own config: whether
@@ -1484,7 +2159,7 @@ def _gather_admin_stats() -> dict:
     now = datetime.now(timezone.utc)
 
     payload: dict = {
-        "system": _admin_system_section(__version__, db_path),
+        "system": _admin_system_section(RUNNING_VERSION, db_path),
         "users": [],
         "scheduler": {"jobs_total": 0, "jobs_active": 0, "jobs_paused": 0, "last_errors": []},
         "modules": {},
@@ -2978,7 +3653,8 @@ async def chat_task_stream(
     async def _generate():
         last = since_seq
         while True:
-            if await request.is_disconnected() or web_shutdown.is_shutting_down():
+            if (await request.is_disconnected() or web_shutdown.is_shutting_down()
+                    or not await _stream_authorized(request)):
                 return
             events = await asyncio.to_thread(_load_task_events, task_id, last)
             for ev in events:
@@ -3009,7 +3685,7 @@ async def chat_task_stream(
                 return
 
     return StreamingResponse(
-        _generate(),
+        _authenticated_stream(request, _generate()),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -3425,7 +4101,8 @@ async def chat_room_stream(
         _room_stream_conn_delta(1)
         try:
             while True:
-                if await request.is_disconnected() or web_shutdown.is_shutting_down():
+                if (await request.is_disconnected() or web_shutdown.is_shutting_down()
+                        or not await _stream_authorized(request)):
                     return
                 try:
                     batch = await asyncio.to_thread(
@@ -3457,6 +4134,8 @@ async def chat_room_stream(
                     # resume merely re-scans a range — harmless.
                     cursor = max(cursor, int(batch["cursor"]))
 
+                if not await _stream_authorized(request):
+                    return
                 try:
                     dels = await asyncio.to_thread(
                         _room_deletions_batch, username, del_cursor,
@@ -3479,6 +4158,8 @@ async def chat_room_stream(
                 now = time.monotonic()
                 if room_check and now - last_room_check >= room_check:
                     last_room_check = now
+                    if not await _stream_authorized(request):
+                        return
                     try:
                         fresh = await asyncio.to_thread(_room_snapshot, username)
                     except Exception:  # noqa: BLE001 — metadata is best-effort
@@ -3491,6 +4172,8 @@ async def chat_room_stream(
                                 yield f"event: room\ndata: {json.dumps(frame)}\n\n"
                         snapshot = fresh
 
+                    if not await _stream_authorized(request):
+                        return
                     try:
                         held = await asyncio.to_thread(_drafts_snapshot, username)
                     except Exception:  # noqa: BLE001 — best-effort, like rooms
@@ -3511,6 +4194,8 @@ async def chat_room_stream(
                     # survives the inbox, and `GET /chat/events` carries the
                     # same `drafts` payload for the documented polling
                     # fallback — so that frame still has consumers.
+                    if not await _stream_authorized(request):
+                        return
                     try:
                         fresh_counts = await asyncio.to_thread(
                             _notifications_snapshot, username,
@@ -3538,7 +4223,7 @@ async def chat_room_stream(
             _room_stream_conn_delta(-1)
 
     return StreamingResponse(
-        _generate(),
+        _authenticated_stream(request, _generate()),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -3784,7 +4469,8 @@ async def admin_log_stream(
         current = cursor
         idle = 0
         while True:
-            if await request.is_disconnected() or web_shutdown.is_shutting_down():
+            if (await request.is_disconnected() or web_shutdown.is_shutting_down()
+                    or not await _stream_authorized(request, admin=True)):
                 return
             try:
                 tail = await asyncio.to_thread(_read_log_tail, source_id, current, query)
@@ -3819,7 +4505,7 @@ async def admin_log_stream(
                 return
 
     return StreamingResponse(
-        _generate(),
+        _authenticated_stream(request, _generate(), admin=True),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -4490,7 +5176,8 @@ async def admin_whatsapp_pairing_stream(
         last: dict | None = None
         idle = 0
         while True:
-            if await request.is_disconnected() or web_shutdown.is_shutting_down():
+            if (await request.is_disconnected() or web_shutdown.is_shutting_down()
+                    or not await _stream_authorized(request, admin=True)):
                 return
             try:
                 frame = _pairing_stream_frame(
@@ -4531,7 +5218,7 @@ async def admin_whatsapp_pairing_stream(
                 return
 
     return StreamingResponse(
-        _generate(),
+        _authenticated_stream(request, _generate(), admin=True),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -10709,6 +11396,84 @@ async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
             _build_service_card(service, schema, stored, extra=extra)
         )
     return {"services": cards}
+
+
+def _credential_settings(username: str, action="list", name="", payload=None):
+    """Read metadata or edit the signed-in user's grants in one transaction."""
+    from . import db
+    from .credential_broker import bindings, grants
+    from .executor import effective_sandboxing
+
+    if _config is None or not _config.db_path:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    with db.get_db(_config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        # Match the developer skill's identity gate. Config tokens are not
+        # per-user vault entries, and must not appear for non-admin users.
+        available = None if _config.is_admin(username) and _config.developer.enabled else set()
+        bindings.sync_forge_bindings(conn, username, _config.developer, available_names=available)
+        if action == "existing":
+            return {"ok": True, "count": grants.grant_what_exists(conn, username)}
+        if action == "delete":
+            grants.delete_grant(conn, username, name)
+            return {"ok": True}
+        rooms = [{"token": room.token, "name": room.name or room.token}
+                 for room in db.list_member_rooms(conn, username)]
+        if action == "save":
+            payload = payload or {}
+            allowed = {"scope_mode", "methods", "allow_scheduled", "rooms"}
+            if payload.keys() - allowed:
+                raise HTTPException(status_code=400, detail="unknown credential grant field")
+            requested_rooms = payload.get("rooms", [])
+            if (not isinstance(requested_rooms, list)
+                    or any(not isinstance(r, str) or r not in {room["token"] for room in rooms}
+                           for r in requested_rooms)):
+                raise HTTPException(status_code=400, detail="room is not available to this user")
+            try:
+                grant = grants.put_grant(conn, username, name, **payload)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return {"ok": True, "grant": grant}
+        names = {row[0] for row in conn.execute(
+            "SELECT key FROM secrets WHERE user_id=? AND service='vault_entries'", (username,))}
+        names.update(row[0] for row in conn.execute(
+            "SELECT name FROM credential_bindings WHERE user_id=? AND source='config'", (username,)))
+        credentials = []
+        for credential_name in sorted(names):
+            binding = bindings.get_binding(conn, username, credential_name) or {
+                "hosts": [], "headers": [], "revealable": False, "source": "vault"}
+            credentials.append({"name": credential_name, **binding,
+                                "grant": grants.get_grant(conn, username, credential_name)})
+        existing_available = db.kv_get(conn, username, grants.NAMESPACE, "granted_existing") is None
+    return {"credentials": credentials, "rooms": rooms,
+            "grant_existing_available": existing_available, "sandboxed": effective_sandboxing(_config)}
+
+
+@api_router.get("/settings/credentials")
+async def settings_credentials(user: dict = Depends(_require_api_auth)) -> dict:
+    return await asyncio.to_thread(_credential_settings, user["username"])
+
+
+@api_router.post("/settings/credentials/grant-existing")
+async def settings_credentials_grant_existing(
+    user: dict = Depends(_require_api_auth), _csrf: None = Depends(_verify_origin),
+) -> dict:
+    return await asyncio.to_thread(_credential_settings, user["username"], "existing")
+
+
+@api_router.put("/settings/credentials/{name}")
+async def settings_credential_grant(
+    name: str, payload: dict, user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    return await asyncio.to_thread(_credential_settings, user["username"], "save", name, payload)
+
+
+@api_router.delete("/settings/credentials/{name}")
+async def settings_credential_revoke(
+    name: str, user: dict = Depends(_require_api_auth), _csrf: None = Depends(_verify_origin),
+) -> dict:
+    return await asyncio.to_thread(_credential_settings, user["username"], "delete", name)
 
 
 def _vault_settings_payload(username: str) -> dict:

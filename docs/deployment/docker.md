@@ -291,3 +291,11 @@ The Ansible shape has the actor: a cron watchdog reads `.State.Health.Status` ev
 nginx is given a generous `NGINX_CLIENT_MAX_BODY_SIZE` (default `512M`), so the binding limit on a chat attachment is the application's own `[web.chat] max_attachment_mb` — 25 MB unless you raise it in `config.toml`. This is the opposite arrangement to the Ansible deployment, which derives the nginx ceiling from the application setting so the two cannot drift; there is no equivalent variable here.
 
 The web service also runs uvicorn without `--timeout-graceful-shutdown`, so a `docker compose restart` with a browser tab holding the chat room stream open waits out the stop timeout before the container is killed.
+
+## Signing in without Nextcloud
+
+Set `ISTOTA_WEB_AUTH=email` in `docker/.env`, set `ISTOTA_WEB_SITE_HOSTNAME` to the public hostname, and configure SMTP for email sign-in links and password resets. Recreate both `istota` and `web` after changing the environment. The default remains `nextcloud`, even without a Nextcloud URL. The renderer emits web settings without OAuth provisioning; the entrypoint preserves the signing secret in the persistent config volume on every render. See [email login setup](../features/web-interface.md#email-login) for the CLI bootstrap and recovery commands. These settings change authentication only; they do not remove the stack's Nextcloud, storage or Talk services.
+
+To migrate an existing installation, set `ISTOTA_WEB_AUTH=nextcloud,email`, attach an email identity to each existing user, and inspect `istota auth list`. Once every user has an enabled identity and a working password or sign-in-link path, change the value to `email`. Existing Nextcloud sessions then stop working. Dropping Nextcloud for storage, Talk and CalDAV is a separate change.
+
+`none` is refused by the Docker web launcher. A loopback backend behind a public proxy is still public. Custom outer proxies must exclude `/istota/auth/set-password` and `/istota/auth/login-link`, or omit query strings from access logs; the shipped nginx and uvicorn suppression cannot control an outer proxy.

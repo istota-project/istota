@@ -127,7 +127,26 @@ export interface UserContact {
   talk: boolean;
 }
 
+export interface UserAuth {
+  method: 'email' | 'nextcloud' | 'none';
+  email: string | null;
+  can_change_password: boolean;
+}
+
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<{ signed_out: true }> {
+  return apiFetch('/account/password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+}
+
 export interface User {
+  // Absent on cached records from before email authentication.
+  auth?: UserAuth;
   username: string;
   display_name: string;
   bot_name: string;
@@ -497,6 +516,46 @@ export interface AdminConfigView {
   config_path: string | null;
   editable: boolean;
   sections: AdminConfigSection[];
+}
+
+export interface AdminUser {
+  user_id: string;
+  display_name: string;
+  is_admin: boolean;
+  state: 'nextcloud_only' | 'passwordless' | 'password_set';
+  identity: { email: string; disabled: boolean; last_login_at: string | null } | null;
+}
+
+export interface AdminUsers {
+  users: AdminUser[];
+  orphans: AdminUser[];
+  email_enabled: boolean;
+}
+
+export function getAdminUsers() {
+  return apiFetch<AdminUsers>('/admin/users');
+}
+
+export function createAdminUser(user: { user_id: string; email: string; display_name?: string }) {
+  return apiFetch<{ sent: boolean }>('/admin/users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(user),
+  });
+}
+
+export type AdminUserAction =
+  'invite' | 'reset' | 'login-link' | 'disable' | 'enable' | 'logout-all' | 'remove';
+
+export function adminUserAction(userId: string, action: AdminUserAction) {
+  const path = `/admin/users/${encodeURIComponent(userId)}`;
+  if (action === 'remove') return apiFetch(path, { method: 'DELETE' });
+  const disable = action === 'disable' || action === 'enable';
+  return apiFetch(`${path}/${disable ? 'disable' : action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    ...(disable ? { body: JSON.stringify({ disabled: action === 'disable' }) } : {}),
+  });
 }
 
 export async function getAdminConfig(): Promise<AdminConfigView> {
@@ -4348,3 +4407,43 @@ export async function runNotificationAction(endpoint: string): Promise<unknown> 
 }
 
 export { AuthError };
+
+export interface CredentialGrant {
+  scope_mode: 'all' | 'rooms';
+  methods: string[];
+  rooms: string[];
+  allow_scheduled: boolean;
+  policy_revision?: number;
+}
+export interface CredentialGrantsSettings {
+  credentials: {
+    name: string;
+    source: string;
+    hosts: string[];
+    headers: string[];
+    revealable: boolean;
+    grant: CredentialGrant | null;
+  }[];
+  rooms: { token: string; name: string }[];
+  grant_existing_available: boolean;
+  sandboxed: boolean;
+}
+export function getCredentialGrants(): Promise<CredentialGrantsSettings> {
+  return apiFetch('/settings/credentials');
+}
+export function saveCredentialGrant(
+  name: string,
+  grant: CredentialGrant,
+): Promise<{ ok: boolean }> {
+  return apiFetch(`/settings/credentials/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(grant),
+  });
+}
+export function revokeCredentialGrant(name: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/settings/credentials/${encodeURIComponent(name)}`, { method: 'DELETE' });
+}
+export function grantExistingCredentials(): Promise<{ ok: boolean; count: number }> {
+  return apiFetch('/settings/credentials/grant-existing', { method: 'POST' });
+}

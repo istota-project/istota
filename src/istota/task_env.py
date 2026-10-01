@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -72,6 +72,8 @@ class TaskRuntime:
     # auto-authorizes — not ``selected_skills``. `build_bwrap_cmd`'s docstring
     # says why the distinction decides what gets bound.
     authorized_skills: frozenset[str]
+    # Applied by the sandbox exec wrapper, never by the daemon or skill proxy.
+    sandbox_env: dict[str, str] = field(default_factory=dict)
 
 
 def _vault_credentials(config: Config, user_id: str) -> dict[str, str]:
@@ -181,6 +183,7 @@ def build_task_runtime(
     discovered_calendars: list | None = None,
     withheld_scopes: frozenset[str] = frozenset(),
     group_ids: "list[str] | None" = None,
+    conn: "db.sqlite3.Connection | None" = None,
 ) -> TaskRuntime:
     """Build the model's environment and the per-task proxies for one attempt.
 
@@ -366,6 +369,11 @@ def build_task_runtime(
     proxy_only_env, env = _split_credential_env(
         env, derive_proxy_only_set(skill_index),
     )
+    available_forge_names = {
+        "forge." + forge for forge in ("gitlab", "github")
+        if env.get(forge.upper() + "_TOKEN")
+    }
+    credential_env = {}
     if config.security.skill_proxy_enabled:
         from .skill_proxy import SkillProxy, effective_client_wait
         # Phase 3: credential set is derived from the loaded skill
@@ -580,6 +588,26 @@ def build_task_runtime(
                 Path(os.environ.get("HOME", "/tmp")) / ".cache" / "huggingface"
             )
 
+    # Broker consumers never receive a raw forge token, even when the skill
+    # proxy is disabled. A missing network proxy must not restore raw values.
+    if config.security.credential_broker.enabled:
+        env.pop("GITLAB_TOKEN", None)
+        env.pop("GITHUB_TOKEN", None)
+
+    # On the caller's connection when it holds one: a second connection's
+    # BEGIN IMMEDIATE would wait out the busy timeout on the caller's lock.
+    from . import db
+    if db.database_present(config.db_path):
+        with db.get_db_if_present(config.db_path, conn) as grant_conn:
+            from .credential_broker.bindings import sync_forge_bindings
+            from .credential_broker.grants import ensure_credential_grants
+            if not grant_conn.in_transaction:
+                grant_conn.execute("BEGIN IMMEDIATE")
+            sync_forge_bindings(grant_conn, task.user_id, config.developer, available_names=available_forge_names)
+            ensure_credential_grants(
+                grant_conn, task.id, task.user_id, withheld_scopes=withheld_scopes,
+            )
+
     # PATH entries contributed by setup_env hooks — today the developer
     # skill's .developer dir, so the model can type `gh` and reach the
     # wrapper rather than the real binary.
@@ -672,8 +700,23 @@ def build_task_runtime(
     # plus the unconditional seed beside them.
     _extra_ro_binds: list[Path] = [control_dir]
 
+    sandbox_env = {}
+    if config.security.credential_broker.enabled:
+        from .credential_broker.ca import load_or_create_ca, state_directory, write_trust_bundle
+
+        authority = load_or_create_ca(state_directory(config))
+        sandbox_env = write_trust_bundle(authority, control_dir / "trust")
+        if _net_proxy_ctx is not None:
+            from .credential_broker.intercept import Broker
+            _net_proxy_ctx.broker = Broker(config, task.id, task.user_id, authority)
+        else:
+            logger.warning("Credential broker enabled without a network proxy: placeholders cannot authenticate")
+        if not effective_sandboxing(config):
+            logger.warning("Credential broker enabled without effective sandboxing: values are not contained")
+
     return TaskRuntime(
         env=env,
+        sandbox_env=sandbox_env,
         proxy_ctx=_proxy_ctx,
         proxy_sock=_proxy_sock,
         net_proxy_ctx=_net_proxy_ctx,

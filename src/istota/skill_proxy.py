@@ -11,8 +11,8 @@ import socket
 import subprocess
 import sys
 import threading
-import time
 from collections.abc import Iterable
+from contextlib import contextmanager
 from pathlib import Path
 
 from istota import peer_process, skill_client
@@ -360,8 +360,7 @@ class SkillProxy:
         # this proxy spawns, for as long as it runs. Empty until the first
         # registration, so nothing is served before the task has a process.
         # Each pid maps to its start time, so a recycled number matches nothing.
-        self._roots: dict[int, int] = {}
-        self._roots_changed = threading.Condition()
+        self._peer_roots = peer_process.PeerRoots()
         for pid in (
             _default_trusted_roots() if trusted_roots is None else trusted_roots
         ):
@@ -388,26 +387,20 @@ class SkillProxy:
         authority to whatever holds it next.
         """
         pid = int(pid)
-        started = peer_process.start_time(pid)
-        if started is None:
+        if not self._peer_roots.authorize(pid):
             logger.warning(
                 "proxy_root_unregistered task_id=%s pid=%s reason=unreadable",
                 self.task_id, pid,
             )
             return
-        with self._roots_changed:
-            self._roots[pid] = started
-            self._roots_changed.notify_all()
 
     def revoke_pid(self, pid: int) -> None:
         """Stop serving ``pid``'s tree."""
-        with self._roots_changed:
-            self._roots.pop(int(pid), None)
+        self._peer_roots.revoke(pid)
 
     @property
     def trusted_roots(self) -> frozenset[int]:
-        with self._roots_changed:
-            return frozenset(self._roots)
+        return self._peer_roots.pids
 
     @property
     def socket_path(self) -> Path:
@@ -431,18 +424,9 @@ class SkillProxy:
 
     def _peer_in_task(self, pid: int | None) -> bool:
         """Whether ``pid`` descends from a root, waiting briefly for one."""
-        if pid is None:
-            return False
-        deadline = time.monotonic() + PEER_REGISTRATION_GRACE_SECONDS
-        with self._roots_changed:
-            while True:
-                roots = dict(self._roots)
-                if peer_process.descends_from(pid, roots):
-                    return True
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self._roots_changed.wait(remaining)
+        return self._peer_roots.contains(
+            pid, grace_seconds=PEER_REGISTRATION_GRACE_SECONDS,
+        )
 
     def _refuse_peer(self, conn: socket.socket, pid: int | None) -> None:
         # Drain the request, bounded, without acting on it. Closing a socket
@@ -541,6 +525,10 @@ class SkillProxy:
                         "name": name,
                     })
                     return
+                # Manifest values have no user-controlled reveal marker. Skills
+                # receive them in their host-side env, never through this read.
+                if self._refuse_brokered_credential(conn, name, "credential", "read"):
+                    return
                 self._send_response(conn, {"value": self.credential_env[name]})
                 return
 
@@ -553,7 +541,30 @@ class SkillProxy:
                 logger.info(
                     "vault_list task_id=%s count=%d", self.task_id, len(names),
                 )
-                self._send_response(conn, {"names": names})
+                reply = {"names": names}
+                if self.config is not None and self.user_id:
+                    from . import db
+                    from .credential_broker.bindings import get_binding
+                    from .credential_broker.grants import get_grant
+                    with db.get_db(self.config.db_path) as database:
+                        metadata = {name: get_binding(database, self.user_id, name)
+                                    for name in names}
+                        # Forge names are visible only when this task already
+                        # has access to the corresponding deployment token.
+                        from .credential_broker.bindings import forge_bindings
+                        for name, binding in forge_bindings(self.config.developer).items():
+                            env_name = name.split(".")[1].upper() + "_TOKEN"
+                            if env_name in self.credential_env:
+                                metadata[name] = binding
+                        granted = {name for name in metadata if get_grant(database, self.user_id, name)}
+                    reply["names"] = sorted(metadata)
+                    reply["credentials"] = [
+                        {"name": name, "bound_hosts": (binding or {}).get("hosts", []),
+                         "revealable": (binding or {}).get("revealable", False),
+                         "grant": "granted" if name in granted else "ungranted"}
+                        for name, binding in sorted(metadata.items())
+                    ]
+                self._send_response(conn, reply)
                 return
 
             if req_type == "vault_credential":
@@ -620,8 +631,8 @@ class SkillProxy:
                 merged_env.update(self.credential_env)
 
             try:
-                # A skill CLI can connect back — a stamped credential argument
-                # is resolved that way — and it descends from the daemon rather
+                # Legacy skill callers can still connect back for other proxy
+                # operations, and they descend from the daemon rather
                 # than from the task's brain, so it is registered here for as
                 # long as it runs and revoked after, so a reused pid inherits
                 # nothing. The reader is joined before the revoke, so a late
@@ -637,7 +648,9 @@ class SkillProxy:
                     self.authorize_pid(pid)
 
                 try:
-                    with peer_process.reporting_pid(_register) as preexec:
+                    with self._credential_channel(skill_timeout) as credential_fd, \
+                            peer_process.reporting_pid(_register) as preexec:
+                        merged_env["ISTOTA_CRED_FD"] = str(credential_fd)
                         result = subprocess.run(
                             cmd,
                             env=merged_env,
@@ -645,6 +658,7 @@ class SkillProxy:
                             text=True,
                             timeout=skill_timeout,
                             preexec_fn=preexec,
+                            pass_fds=(credential_fd,),
                         )
                 finally:
                     for pid in spawned:
@@ -672,6 +686,64 @@ class SkillProxy:
         finally:
             try:
                 conn.close()
+            except OSError:
+                pass
+
+    @contextmanager
+    def _credential_channel(self, timeout: int):
+        """A private endpoint owned by one skill invocation, never a task."""
+        server, child = socket.socketpair()
+        server.settimeout(timeout + CONNECTION_SLACK_SECONDS)
+        worker = threading.Thread(
+            target=self._serve_credential_channel, args=(server,), daemon=True,
+            name="skill-credential-fd",
+        )
+        try:
+            worker.start()
+            yield child.fileno()
+        finally:
+            # Shutdown wakes the reader even if the skill leaked a duplicate.
+            # Join before returning the skill result, on failures and timeouts too.
+            try:
+                server.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            child.close()
+            if worker.ident is not None:
+                worker.join()
+            server.close()
+
+    def _serve_credential_channel(self, conn: socket.socket) -> None:
+        """Only credential reads, with server-owned skill provenance."""
+        try:
+            with conn.makefile("rb") as reader:
+                while True:
+                    # Requests contain a name, not values. Bound malformed input
+                    # and retain framing when several requests arrive together.
+                    line = reader.readline(65537)
+                    if not line:
+                        return
+                    if len(line) > 65536 or not line.endswith(b"\n"):
+                        return
+                    try:
+                        request = json.loads(line)
+                    except (ValueError, UnicodeError):
+                        return
+                    if not isinstance(request, dict) or request.get("type") != "vault_credential":
+                        self._send_response(conn, {
+                            "error": "Private channel accepts credential reads only",
+                            "reason": "invalid_credential_request",
+                        })
+                        return
+                    self._serve_vault_credential(conn, request, trusted_skill=True)
+        except OSError:
+            # The owning invocation closed, timed out, or stopped reading.
+            pass
+        except Exception:
+            logger.warning("Private credential channel failed task_id=%s", self.task_id)
+        finally:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
 
@@ -852,7 +924,29 @@ class SkillProxy:
             "confirmation_readable": confirmation_readable,
         })
 
-    def _serve_vault_credential(self, conn: socket.socket, request: dict) -> None:
+    def _refuse_brokered_credential(
+        self, conn: socket.socket, name: str, request_type: str, mode: str,
+    ) -> bool:
+        """Audit a public value read, or refuse it when reveal enforcement is on."""
+        enforce = bool(self.config and self.config.security.credential_broker.enforce_reveal)
+        label = label_for_display(name)
+        logger.warning(
+            "credential_reveal task_id=%s type=%s name=%s mode=%s "
+            "action=%s reason=credential_brokered",
+            self.task_id, request_type, label, mode,
+            "refused" if enforce else "would_refuse",
+        )
+        if not enforce:
+            return False
+        self._send_response(conn, {
+            "error": "Credential is brokered; use a placeholder or a host-side skill (credential_brokered)",
+            "reason": "credential_brokered", "name": label,
+        })
+        return True
+
+    def _serve_vault_credential(
+        self, conn: socket.socket, request: dict, *, trusted_skill: bool = False,
+    ) -> None:
         """One shared credential, by name, under the per-attempt cap.
 
         Order is load-bearing: charge, then the limit, then presence. A refusal
@@ -867,7 +961,9 @@ class SkillProxy:
         # charge and past the log line. The outer handler then answers nothing
         # at all, so a malformed request would be the one shape that is neither
         # counted against the cap nor recorded in the audit trail.
-        mode = str(request.get("mode", ""))
+        # Only the private endpoint supplies this flag. A request's mode is
+        # still just an audit label on the model-facing socket.
+        mode = "skill" if trusted_skill else str(request.get("mode", ""))
         if mode not in VAULT_MODES:
             mode = VAULT_MODE_DEFAULT
         # Bounded and flattened before it reaches a log line. The name came off
@@ -905,6 +1001,36 @@ class SkillProxy:
             })
             return
 
+        live_reply = None
+        if not trusted_skill:
+            revealable = False
+            if self.config is not None and self.user_id:
+                from . import db, secrets_store
+                from .credential_broker.bindings import get_binding
+                enforce = self.config.security.credential_broker.enforce_reveal
+                with db.get_db(self.config.db_path) as database:
+                    if enforce:
+                        # Permission must describe the value returned by this
+                        # read, including during a concurrent vault rotation.
+                        database.execute("BEGIN IMMEDIATE")
+                    metadata = get_binding(database, self.user_id, name)
+                    revealable = bool(metadata and metadata["revealable"])
+                    if enforce and revealable:
+                        live_reply = secrets_store.get_secret(
+                            self.config.db_path, self.user_id, "vault_entries", name,
+                            binding=True, connection=database,
+                        )
+                        if live_reply is None:
+                            self._send_response(conn, {
+                                "error": "Credential no longer available",
+                                "reason": "vault_credential_not_present",
+                            })
+                            return
+            if not revealable and self._refuse_brokered_credential(
+                conn, name, "vault_credential", mode,
+            ):
+                return
+
         # The audit trail, and the only new observability this adds. INFO where
         # the value is being handed to something other than the model —
         # a skill CLI resolving a stamped argument, or the shim injecting into a
@@ -915,7 +1041,22 @@ class SkillProxy:
             "vault_credential task_id=%s name=%s mode=%s count=%d",
             self.task_id, label, mode, count,
         )
-        self._send_response(conn, {"value": self.vault_credentials[name]})
+        reply = live_reply if live_reply is not None else {"value": self.vault_credentials[name]}
+        if request.get("binding") is True and live_reply is None:
+            reply["bound_hosts"] = []
+            if self.config is not None and self.user_id:
+                from . import secrets_store
+                live = secrets_store.get_secret(
+                    self.config.db_path, self.user_id, "vault_entries", name, binding=True,
+                )
+                if live is None:
+                    self._send_response(conn, {"error": "Credential no longer available",
+                                               "reason": "vault_credential_not_present"})
+                    return
+                reply = live
+        if request.get("binding") is not True:
+            reply.pop("bound_hosts", None)
+        self._send_response(conn, reply)
 
     @staticmethod
     def _recv_all(conn: socket.socket) -> str:

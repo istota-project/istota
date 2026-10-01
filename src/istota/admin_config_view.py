@@ -62,6 +62,16 @@ _ALWAYS_SECRET_KEYS = frozenset({
 # operational. The default stays fail-safe: an unrecognized `*_token` field is
 # redacted until someone adds it here.
 NON_SECRET_KEYS = frozenset({
+    "web.auth",
+    "web.auth_enrol_ttl_hours",
+    "web.auth_reset_ttl_hours",
+    "web.auth_login_link_ttl_minutes",
+    "web.auth_min_password_length",
+    "web.auth_throttle_window_seconds",
+    "web.auth_throttle_max_email",
+    "web.auth_throttle_max_ip",
+    "web.auth_mail_link_max_email",
+
     "web.token_storage",              # "ephemeral" | "encrypted" — a mode, not a token
     "web.oauth2_token_endpoint",      # a URL
     "brain.native.max_tokens",        # a count

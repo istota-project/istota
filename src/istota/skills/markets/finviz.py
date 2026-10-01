@@ -15,7 +15,9 @@ import re
 from dataclasses import dataclass, field
 
 from istota.browser_owner import browser_headers, with_browser_owner
-from istota.browser_admission import browser_request, BrowserQueueTimeout
+from istota.browser_admission import (
+    BrowserAdmissionUnconfigured, BrowserQueueTimeout, browser_request,
+)
 
 
 logger = logging.getLogger("istota.skills.markets.finviz")
@@ -435,8 +437,8 @@ def fetch_finviz_data(
             environment, so a briefing passes it.
         db_path: The framework database, whose directory holds the browser
             admission lock. Required from the daemon for the same reason:
-            without ISTOTA_DB_PATH the lock falls back to a path relative to
-            the working directory, a different file from every other caller's.
+            without it or ISTOTA_DB_PATH admission falls back to the config
+            file, and is refused when that names no absolute path.
 
     Returns:
         Parsed FinVizData, or None on failure.
@@ -476,7 +478,7 @@ def fetch_finviz_data(
 
             return parse_finviz_page(text)
 
-        except BrowserQueueTimeout as e:
+        except (BrowserQueueTimeout, BrowserAdmissionUnconfigured) as e:
             logger.warning("FinViz skipped: %s", e)
             return None
         except Exception as e:

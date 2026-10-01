@@ -325,7 +325,7 @@ def run_serve(
     failure).
     """
     from . import scheduler
-    from .web_app import assert_no_auth_bind_safe
+    from .web_app import app, assert_no_auth_bind_safe, is_loopback_host
 
     bind_port = port if port is not None else config.web.port
 
@@ -397,14 +397,16 @@ def run_serve(
 
     logger.info(
         "istota serve: web UI on http://%s:%d/ (redirects to /istota, auth=%s)",
-        host, bind_port, config.web.auth,
+        host, bind_port, ",".join(config.web.auth),
     )
     print(f"istota serve — open http://{host}:{bind_port}  (Ctrl-C to stop)")
 
     try:
         # uvicorn installs its own SIGINT/SIGTERM handlers and blocks here.
+        app.state.local_no_auth_bind = host if is_loopback_host(host) else None
         server.run()
     finally:
+        app.state.local_no_auth_bind = None
         stop_supervisor.set()
         scheduler.request_shutdown()
         sched_thread.join(timeout=_SCHEDULER_JOIN_TIMEOUT_SECONDS)

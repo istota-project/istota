@@ -41,6 +41,27 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('account password', () => {
+  it('posts both password fields and returns the sign-out result', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { signed_out: true }));
+    expect(await api.changePassword('old passphrase', 'new passphrase')).toEqual({
+      signed_out: true,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/account/password',
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          current_password: 'old passphrase',
+          new_password: 'new passphrase',
+        }),
+      }),
+    );
+  });
+});
+
 describe('apiFetch', () => {
   it('reports a reachable server on a plain success', async () => {
     connectivity.noteTransport(false, 'unreachable');

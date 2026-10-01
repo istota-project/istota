@@ -3742,6 +3742,78 @@ def check_room_scope_confinement(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def check_credential_broker(config: "Config", probe: bool) -> list[CheckResult]:
+    """Read broker readiness without generating a CA or fetching secret values."""
+    import json
+    import sqlite3
+    from cryptography.hazmat.primitives import serialization
+    from .credential_broker import ca
+    from . import peer_process
+
+    prefix = "security.credential_broker"
+    if not config.security.credential_broker.enabled:
+        return [CheckResult(prefix, SKIP, "credential broker is disabled")]
+    effective, _ = _deployment_sandboxing(config, probe)
+    results = [CheckResult(
+        prefix + ".containment", OK if effective else WARN,
+        "broker enabled with effective sandboxing" if effective else
+        "broker enabled; effective sandboxing is absent or unverified, so values are not contained",
+    ), CheckResult(
+        prefix + ".proxy", OK if config.security.network.enabled else FAIL,
+        "network proxy enabled" if config.security.network.enabled else
+        "network proxy disabled; placeholders cannot authenticate",
+    ), CheckResult(
+        prefix + ".peer_check", OK if peer_process.supported() else FAIL,
+        "network proxy authenticates task process ancestry" if peer_process.supported() else
+        "kernel peer identity unavailable; network proxy refuses connections",
+    )]
+    certificate = None
+    try:
+        state = ca.state_directory(config)
+        certificate = ca.read_ca(state).certificate
+    except FileNotFoundError:
+        results.append(CheckResult(prefix + ".ca", WARN, "CA not created yet; it is generated at task setup"))
+    except Exception:
+        certificate = None
+        results.append(CheckResult(prefix + ".ca", FAIL, "CA is unreadable, invalid, or has unsafe ownership or permissions"))
+    else:
+        results.append(CheckResult(prefix + ".ca", OK, "CA is valid and private to the daemon account"))
+    bundle_found = False
+    if certificate is not None:
+        public = certificate.public_bytes(serialization.Encoding.PEM)
+        try:
+            for bundle in (Path(config.temp_dir) / ".control").glob("*/task_*/trust/ca-bundle.pem"):
+                if public in bundle.read_bytes():
+                    bundle_found = True
+                    break
+        except OSError:
+            pass
+    results.append(CheckResult(
+        prefix + ".bundle", OK if bundle_found else WARN,
+        "task trust bundle includes the current broker CA" if bundle_found else
+        "no current task trust bundle found; bundles are written at task setup",
+    ))
+    try:
+        conn = sqlite_util.connect_read_only(config.db_path)
+        try:
+            unbound = ungranted = 0
+            for hosts, granted in conn.execute(
+                "SELECT b.hosts, g.name FROM credential_bindings b LEFT JOIN credential_grants g "
+                "ON b.user_id=g.user_id AND b.name=g.name"
+            ):
+                if not json.loads(hosts):
+                    unbound += 1
+                elif granted is None:
+                    ungranted += 1
+        finally:
+            conn.close()
+        results.append(CheckResult(prefix + ".bindings", WARN if unbound or ungranted else OK,
+                                   f"{unbound} unbound; {ungranted} bound without grants"))
+    except (OSError, sqlite3.Error, ValueError):
+        results.append(CheckResult(prefix + ".bindings", WARN, "binding counts unavailable; database not ready"))
+    return results
+
+
 def check_proxy_peer_check(config: "Config", probe: bool) -> CheckResult:
     """Whether the skill proxy can tell its own task's processes from others.
 
@@ -4868,6 +4940,91 @@ def _avatar_tick_is_stale(at: object, interval: int) -> str | None:
     if age <= limit:
         return None
     return f"{limit // 3600}h" if limit >= 3600 else f"{limit}s"
+
+
+def check_web_auth(config: "Config", probe: bool = True) -> list[CheckResult]:
+    """Report login prerequisites without importing the web app or sending mail."""
+    from . import user_profiles, web_auth, web_session_secret
+    from .config import normalize_auth_methods
+
+    methods = config.web.auth
+    source = "config/default"
+    if normalize_auth_methods(os.environ.get("ISTOTA_WEB_AUTH", "")):
+        source = "ISTOTA_WEB_AUTH override"
+    results = [CheckResult(
+        "web.auth.methods", OK if methods else FAIL,
+        f"Enabled methods: {', '.join(methods) or '(empty)'}; source: {source}",
+        "Set web.auth to nextcloud, email, or local-only none." if not methods else "",
+    )]
+    names = ("site_hostname", "mail", "identities", "admins", "proxy_ip", "session_secret")
+    if not config.web.has_method("email"):
+        return results + [CheckResult(f"web.auth.{name}", SKIP, "Email login is disabled") for name in names]
+
+    hostname = bool(config.site.hostname.strip())
+    results.append(CheckResult(
+        "web.auth.site_hostname", OK if hostname else FAIL,
+        "Public hostname configured" if hostname else "site.hostname is empty; email links cannot be built",
+        "Set site.hostname to the public web hostname." if not hostname else "",
+    ))
+    identities = None
+    profiles = None
+    try:
+        identities = web_auth.list_identities(config.db_path)
+        profiles = user_profiles.list_profiles(config.db_path)
+    except Exception:
+        logger.debug("Cannot inspect web login identities", exc_info=True)
+    passwordless = sum(not row.password_hash and not row.disabled for row in identities) if identities is not None else None
+    results.append(CheckResult(
+        "web.auth.mail", OK if config.email.enabled else WARN,
+        ("Mail enabled (delivery not probed)" if config.email.enabled else "Mail disabled")
+        + f"; {passwordless if passwordless is not None else 'unknown number of'} enabled identities without passwords",
+        "Enable email delivery for self-service reset and sign-in links; use istota auth login-link <user> --print-link for operator recovery."
+        if not config.email.enabled else "",
+    ))
+    if identities is None or profiles is None:
+        for name in ("identities", "admins"):
+            results.append(CheckResult(
+                f"web.auth.{name}", FAIL, "Cannot read login identities or user profiles",
+                "Initialize the framework database and check its permissions.",
+            ))
+    else:
+        identity_ids = {row.user_id for row in identities}
+        live_ids = set(profiles)
+        missing = len(live_ids - identity_ids)
+        orphaned = len(identity_ids - live_ids)
+        disabled = sum(row.disabled for row in identities if row.user_id in live_ids)
+        limited = (methods == ["email"] and (missing or disabled)) or (passwordless and not config.email.enabled) or orphaned
+        results.append(CheckResult(
+            "web.auth.identities", WARN if limited else OK,
+            f"{len(live_ids & identity_ids)} profiles with identity; {missing} without identity; "
+            f"{orphaned} orphan identities; {disabled} disabled; {passwordless} without passwords",
+            "Use istota auth list to inspect logins; attach missing identities, repair orphans, or enable mail for passwordless users."
+            if limited else "",
+        ))
+        unsafe_admins = len(identities) > 1 and not config.admin_users
+        results.append(CheckResult(
+            "web.auth.admins", FAIL if unsafe_admins else OK,
+            "Multiple identities and an empty admin allowlist grant every user task-admin privileges"
+            if unsafe_admins else "Admin allowlist does not grant multiple email identities implicit task-admin access",
+            "Populate the admins file with explicit administrator user ids." if unsafe_admins else "",
+        ))
+    # A public hostname is evidence of the shipped proxy deployment, not proof
+    # of a particular topology. Operators must choose the trusted hop count.
+    inert_ip = hostname and config.web.trusted_proxy_hops == 0
+    results.append(CheckResult(
+        "web.auth.proxy_ip", WARN if inert_ip else OK,
+        "Public hostname with zero trusted proxy hops: proxied requests use only the email verification budget"
+        if inert_ip else "Proxy IP throttle configuration has no unresolved public-host warning",
+        "Set web.trusted_proxy_hops only when the backend is reachable exclusively through those trusted proxies."
+        if inert_ip else "",
+    ))
+    secret = web_session_secret.resolve(config, os.environ)
+    results.append(CheckResult(
+        "web.auth.session_secret", OK if secret else FAIL,
+        "Session signing secret resolves" if secret else "No session signing secret resolves",
+        "Set web.session_secret_key or ISTOTA_WEB_SESSION_SECRET_KEY." if not secret else "",
+    ))
+    return results
 
 
 def check_web_static(config: "Config", probe: bool) -> CheckResult:
@@ -9130,6 +9287,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.sandbox_effective", check_sandbox_effective),
     ("security.sandbox_credentials", check_sandbox_credentials),
     ("security.proxy_peer_check", check_proxy_peer_check),
+    ("security.credential_broker", check_credential_broker),
     ("security.skill_model_credential", check_skill_model_credential),
     ("security.secret_key", check_secret_key),
     ("security.vault_isolation", check_vault_isolation),
@@ -9159,6 +9317,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("whatsapp.baileys_bridge", check_whatsapp_baileys_bridge),
     ("whatsapp.baileys_session", check_whatsapp_baileys_session),
     ("whatsapp.pairing_relay", check_whatsapp_pairing_relay),
+    ("web.auth", check_web_auth),
     ("web.static", check_web_static),
     ("web.build_current", check_web_build_current),
     ("web.basemap", check_basemap),
@@ -9234,6 +9393,7 @@ CHECK_SCOPES: dict[str, str] = {
     # and must not go red for a deployment's own decision.
     "security.sandbox_credentials": DEPLOYMENT,
     "security.proxy_peer_check": DEPLOYMENT,
+    "security.credential_broker": DEPLOYMENT,
     "security.skill_model_credential": DEPLOYMENT,
     # Deployment, not image: a master key is a property of an install, and the
     # thing it unlocks is that install's own secrets table. A bare `docker run`
@@ -9286,6 +9446,7 @@ CHECK_SCOPES: dict[str, str] = {
     "whatsapp.baileys_bridge": DEPLOYMENT,
     "whatsapp.baileys_session": DEPLOYMENT,
     "whatsapp.pairing_relay": DEPLOYMENT,
+    "web.auth": DEPLOYMENT,
     "web.static": IMAGE,
     # Deployment, not image: it compares the bundle against the checkout it
     # was built from, and a bare `docker run` has no checkout.

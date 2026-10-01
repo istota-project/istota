@@ -46,6 +46,9 @@ def _make_config(tmp_path, users=None, mount_path=None, web=None):
                 disabled_modules=["feeds", "money", "location"],
             ),
         }
+    from istota import db
+
+    db.init_db(tmp_path / "istota.db")
     return Config(
         db_path=tmp_path / "istota.db",
         workspace_path=Path(mount_path) if mount_path else tmp_path / "mount",
@@ -116,17 +119,36 @@ class TestLoginRoute:
         assert resp.status_code == 200
         assert "Log in with Nextcloud" in resp.text
 
-    async def test_login_page_shows_logo_version_and_email_placeholder(self, client, app):
+    def test_every_auth_card_renderer_omits_the_version(self):
+        """The login, login-error and form pages share one card (ISSUE-569)."""
+        import re
+
+        from istota import web_app
+
+        pages = [
+            web_app._render_form_page("Bot", "Headline", "<p>body</p>", ""),
+            web_app._render_login_error_page("Bot", "Headline", "detail", ""),
+            web_app._render_login_page("Bot", "", methods=["nextcloud", "email"]),
+        ]
+        for html in pages:
+            assert "Running" in html
+            assert not re.search(r"\bv?\d+\.\d+\.\d+", html)
+
+    async def test_login_page_shows_logo_and_enabled_method(self, client, app):
         from istota import __version__
+        from istota.build_info import RUNNING_VERSION
 
         resp = await client.get("/istota/login")
-        # Logo + project link + running version in the footer.
+        # Logo + project link in the footer.
         assert "/istota/octopus-sigil.webp" in resp.text
         assert "istota.cynium.com" in resp.text
-        assert f"v{__version__}" in resp.text
-        # Email login is advertised but not yet an actionable control — it must
-        # not render as a link, or it would 404 into the Nextcloud flow.
-        assert "Coming soon" in resp.text
+        # ISSUE-569: an unauthenticated page names no version or commit, since
+        # an exact version tells a visitor which advisories apply.
+        assert __version__ not in resp.text
+        assert RUNNING_VERSION not in resp.text
+        # This deployment enables only Nextcloud.
+        assert "Coming soon" not in resp.text
+        assert 'name="password"' not in resp.text
         assert 'href="/istota/login?go=1"' in resp.text
         assert resp.text.count('href="/istota/login?go=1"') == 1
 
@@ -1026,6 +1048,9 @@ class TestAdminStats:
             data = resp.json()
 
             assert "system" in data
+            from istota.build_info import RUNNING_VERSION
+            # ISSUE-569: the commit-bearing label, not the bare pyproject version.
+            assert data["system"]["version"] == RUNNING_VERSION
             assert data["system"]["python_version"]
             assert isinstance(data["system"]["uptime_seconds"], int)
             assert data["system"]["db_size_bytes"] >= 0

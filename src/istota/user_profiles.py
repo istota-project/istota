@@ -668,6 +668,12 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
     ``created_at`` survives an upsert because we use ON CONFLICT instead of
     INSERT OR REPLACE. ``updated_at`` is always set to ``datetime('now')``.
     """
+    with _connect(db_path) as conn:
+        insert_profile(conn, profile, replace=replace)
+
+
+def insert_profile(conn: sqlite3.Connection, profile: UserProfile, *, replace: bool = False) -> None:
+    """Write a profile inside the caller's transaction, preserving existing rows."""
     profile.sms_phone_number = normalize_sms_phone_number(
         profile.sms_phone_number, allow_empty=True,
     )
@@ -719,8 +725,7 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         """
 
     try:
-        with _connect(db_path) as conn:
-            conn.execute(sql, values)
+        conn.execute(sql, values)
     except sqlite3.IntegrityError as exc:
         _raise_phone_conflict(exc)
 

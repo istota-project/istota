@@ -1171,6 +1171,36 @@ class WebMapConfig:
     attribution: str = ""
 
 
+def normalize_auth_methods(raw: object) -> list[str]:
+    """Normalize configured login methods; no-auth is always exclusive."""
+    if isinstance(raw, str):
+        values = raw.split(",")
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        return []
+    methods = []
+    for value in values:
+        if not isinstance(value, str):
+            logger.warning("[web] auth contains a non-string method; ignoring")
+            continue
+        method = value.strip().lower()
+        if not method:
+            continue
+        if method not in ("nextcloud", "email", "none"):
+            logger.warning("[web] auth contains unknown method %r; ignoring", method)
+            continue
+        if method not in methods:
+            methods.append(method)
+    if "none" in methods and len(methods) > 1:
+        logger.warning(
+            "[web] auth method 'none' is exclusive; dropping %s",
+            ", ".join(method for method in methods if method != "none"),
+        )
+        return ["none"]
+    return methods
+
+
 @dataclass
 class WebConfig:
     """Authenticated web interface configuration.
@@ -1180,12 +1210,18 @@ class WebConfig:
     """
     enabled: bool = False
     port: int = 8766
-    # Authentication mode. "nextcloud" (default) uses the NC OAuth2 flow below.
-    # "none" bypasses auth entirely for a single-user local install — every
-    # request is the one configured local user, who is always admin. no-auth
-    # is only permitted on a loopback bind (the web app refuses to start
-    # otherwise). Overridable by ISTOTA_WEB_AUTH.
-    auth: str = "nextcloud"
+    # Enabled login methods. "none" is exclusive and requires the direct
+    # local launcher on loopback. Overridable by ISTOTA_WEB_AUTH.
+    auth: list[str] = field(default_factory=lambda: ["nextcloud"])
+    auth_enrol_ttl_hours: int = 168
+    auth_reset_ttl_hours: int = 1
+    auth_login_link_ttl_minutes: int = 15
+    auth_min_password_length: int = 12
+    auth_throttle_window_seconds: int = 900
+    auth_throttle_max_email: int = 10
+    auth_throttle_max_ip: int = 30
+    trusted_proxy_hops: int = 0
+    auth_mail_link_max_email: int = 3
     # `oauth2_provider` is the user-facing NC URL — what the browser hits to
     # authorize. `oauth2_token_endpoint` and `oauth2_userinfo_endpoint` are
     # server-to-server; in Docker they typically point at the internal
@@ -1222,6 +1258,13 @@ class WebConfig:
     avatar_import_from_nextcloud: bool = True
     chat: WebChatConfig = field(default_factory=WebChatConfig)
     map: WebMapConfig = field(default_factory=WebMapConfig)
+
+    def __post_init__(self) -> None:
+        self.auth = normalize_auth_methods(self.auth) or ["nextcloud"]
+
+    def has_method(self, name: str) -> bool:
+        return name in self.auth
+
 
 
 @dataclass
@@ -1423,8 +1466,18 @@ class NetworkConfig:
 
 
 @dataclass
+class CredentialBrokerConfig:
+    """Opt-in credential interception and its bounded scans."""
+    enabled: bool = False
+    enforce_reveal: bool = False
+    scan_max_bytes: int = 1048576
+    leaf_validity_hours: int = 24
+
+
+@dataclass
 class SecurityConfig:
     """Security hardening configuration."""
+    credential_broker: CredentialBrokerConfig = field(default_factory=CredentialBrokerConfig)
     sandbox_enabled: bool = True  # bwrap filesystem isolation per user
     skill_proxy_enabled: bool = True  # proxy skill CLI calls via Unix socket
     skill_proxy_timeout: int = 300  # timeout for proxied skill commands (seconds)
@@ -2406,7 +2459,7 @@ class Config:
         ``[web] auth == "none"``. This is the single home for the rule so the
         admin standalone-mode notice and any other caveat surface agree.
         """
-        return (not self.nextcloud.url) and self.web.auth == "none"
+        return (not self.nextcloud.url) and self.web.auth == ["none"]
 
     @property
     def local_user_id(self) -> str:
@@ -3930,7 +3983,7 @@ def _one_of(*valid: str) -> Hook:
 # A hook takes the raw TOML value and the dotted key, and returns the value to
 # set -- or `_KEEP` to leave the dataclass default standing.
 _CONFIG_HOOKS: dict[str, Hook] = {
-    "web.auth": _one_of("nextcloud", "none"),
+    "web.auth": lambda raw, key: normalize_auth_methods(raw) or _KEEP,
     "web.token_storage": _one_of("ephemeral", "encrypted"),
     # Normalised from three historical spellings, and the retired `backend` key
     # is warned about rather than ignored -- an operator who wrote
@@ -3948,6 +4001,8 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     # An empty string means "unset" here, not a relative path of `.`.
     "security.sandbox_cache_dir": lambda raw, key: str(raw or ""),
     "security.sandbox_cache_max_gb": _positive_float,
+    "security.credential_broker.scan_max_bytes": _positive_int,
+    "security.credential_broker.leaf_validity_hours": _positive_int,
     # Each of these validates against a closed vocabulary or a path policy and
     # warns in its own terms. They are the validators the walk exists to leave
     # alone.
@@ -4260,6 +4315,8 @@ def load_config(config_path: Path | None = None) -> Config:
     # Read off the loaded config rather than off `data`, so it fires whichever
     # of the two keys the file names and whichever it inherits.
     _warn_ro_paths_over_control_tree(config)
+    if config.security.credential_broker.enabled and not config.security.sandbox_enabled:
+        logger.warning("Credential broker enabled without sandboxing: values are not contained")
 
     config.admin_users = load_admin_users()
 
@@ -4332,16 +4389,9 @@ def load_config(config_path: Path | None = None) -> Config:
 
     # Web auth-mode override (local single-user installs set ISTOTA_WEB_AUTH=none
     # instead of templating TOML). Same validation as the TOML parse.
-    _web_auth_env = os.environ.get("ISTOTA_WEB_AUTH", "").strip()
+    _web_auth_env = normalize_auth_methods(os.environ.get("ISTOTA_WEB_AUTH", ""))
     if _web_auth_env:
-        if _web_auth_env in ("nextcloud", "none"):
-            config.web.auth = _web_auth_env
-        else:
-            logger.warning(
-                "ISTOTA_WEB_AUTH=%r is not a known value (expected 'nextcloud' "
-                "or 'none'); ignoring",
-                _web_auth_env,
-            )
+        config.web.auth = _web_auth_env
 
     # Native-brain API key lives two levels deep (brain.native.api_key), so it
     # doesn't fit the flat section/field table above.

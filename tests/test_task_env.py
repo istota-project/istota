@@ -871,3 +871,94 @@ class TestTheClientWaitExport:
         runtime = task_env.build_task_runtime(config, **runtime_inputs)
 
         assert "ISTOTA_SKILL_CLIENT_WAIT" not in runtime.env
+
+
+def test_runtime_freezes_empty_credential_snapshot(tmp_path, runtime_inputs):
+    from istota import db
+    from istota.credential_broker import grants
+    from istota.credential_broker.bindings import put_binding, parse_binding
+    config = _config(tmp_path)
+    db.init_db(config.db_path)
+    with db.get_db(config.db_path) as conn:
+        identifier = db.create_task(conn, user_id="testuser", source_type="talk", prompt="test",
+                                    conversation_token="room-a")
+        runtime_inputs["task"] = db.get_task(conn, identifier)
+    task_env.build_task_runtime(config, **runtime_inputs)
+    with db.get_db(config.db_path) as conn:
+        assert conn.execute("SELECT credential_grants_initialized FROM tasks WHERE id=?", (identifier,)).fetchone()[0] == 1
+        put_binding(conn, "testuser", "portal", parse_binding("https://portal.example", {}, []))
+        grants.put_grant(conn, "testuser", "portal")
+    task_env.build_task_runtime(config, **runtime_inputs)
+    with db.get_db(config.db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM credential_task_grants").fetchone()[0] == 0
+
+
+class TestBrokerTrustSplit:
+    def test_trust_only_enters_sandbox_wrapper(self, tmp_path, runtime_inputs, monkeypatch):
+        from istota.config import CredentialBrokerConfig
+        from istota.sandbox_plan import SandboxProfile
+        from istota.tool_server import merge_proxy_env
+        import shlex
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        config = _config(tmp_path, credential_broker=CredentialBrokerConfig(enabled=True))
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+        assert runtime.sandbox_env
+        assert all(k not in runtime.env for k in runtime.sandbox_env)
+        assert all(k not in runtime.proxy_ctx.base_env for k in runtime.sandbox_env)
+        assert all(k not in runtime.proxy_ctx.credential_env for k in runtime.sandbox_env)
+        for path in runtime.sandbox_env.values():
+            assert Path(path).is_relative_to(runtime_inputs["control_dir"])
+            assert "PRIVATE KEY" not in Path(path).read_text()
+        for profile in (SandboxProfile.CLAUDE, SandboxProfile.NATIVE):
+            argv = executor.build_bwrap_cmd(
+                ["echo", "ok"], config, runtime_inputs["task"], True, [],
+                runtime_inputs["user_temp_dir"], net_proxy_sock=runtime.net_proxy_sock,
+                extra_ro_binds=runtime.extra_ro_binds, profile=profile,
+                sandbox_env=runtime.sandbox_env,
+            )
+            shell = argv[argv.index("-c") + 1]
+            for key, value in runtime.sandbox_env.items():
+                assert f"{key}={value}" in shlex.split(shell)
+            assert "ca-key.pem" not in " ".join(argv)
+        assert merge_proxy_env({}, runtime.sandbox_env) == runtime.sandbox_env
+
+    def test_disabled_has_no_ca_or_bundle(self, tmp_path, runtime_inputs):
+        config = _config(tmp_path)
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+        assert runtime.sandbox_env == {}
+        assert not (config.db_path.parent / "credential-broker").exists()
+
+    def test_ca_refuses_a_sandbox_bound_state_dir(self, tmp_path, runtime_inputs):
+        from istota.config import CredentialBrokerConfig
+        config = _config(tmp_path, credential_broker=CredentialBrokerConfig(enabled=True))
+        config.db_path = runtime_inputs["user_temp_dir"] / "test.db"
+        with pytest.raises(ValueError, match="sandbox"):
+            task_env.build_task_runtime(config, **runtime_inputs)
+
+
+@pytest.mark.parametrize("proxy_enabled", [True, False])
+def test_broker_strips_forge_tokens_without_requiring_skill_proxy(tmp_path, runtime_inputs, proxy_enabled, caplog):
+    from istota.config import CredentialBrokerConfig
+    from istota import db
+    from istota.credential_broker.bindings import get_binding
+    config = _config(tmp_path, skill_proxy_enabled=proxy_enabled,
+                     credential_broker=CredentialBrokerConfig(enabled=True))
+    config.security.network.enabled = False
+    config.developer.enabled = True
+    config.developer.gitlab_token = "fixture-forge-password"
+    runtime_inputs["skill_index"] = {"developer": _skill("developer", EnvSpec(
+        var="GITLAB_TOKEN", source="config", config_path="developer.gitlab_token", sensitive=True,
+    ))}
+    runtime_inputs["selected_skills"] = ["developer"]
+    db.init_db(config.db_path)
+    with db.get_db(config.db_path) as conn:
+        task_id = db.create_task(conn, user_id="testuser", prompt="test", source_type="talk", conversation_token="room-a")
+        runtime_inputs["task"] = db.get_task(conn, task_id)
+    runtime = task_env.build_task_runtime(config, **runtime_inputs)
+    with db.get_db(config.db_path) as conn:
+        assert get_binding(conn, "testuser", "forge.gitlab") is not None
+    assert "placeholders cannot authenticate" in caplog.text
+    assert "GITLAB_TOKEN" not in runtime.env
+    if runtime.proxy_ctx:
+        assert "GITLAB_TOKEN" not in runtime.proxy_ctx.base_env

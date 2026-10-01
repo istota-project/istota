@@ -505,6 +505,8 @@ class TestSeedForgePolicy:
         policy = json.loads((etc / "policy.json").read_text())
         for section in policy.values():
             assert section["direct_token"] is False
+            # The devbox has its own egress path, even on a broker-enabled host.
+            assert not section.get("credential_broker")
 
     def test_no_url_is_baked_in(self, tmp_path):
         """One image serves every user. A baked gitlab.com would make a

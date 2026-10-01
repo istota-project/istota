@@ -57,14 +57,18 @@ from istota import tool_server_protocol as proto
 # Set on this process by `build_bwrap_cmd`'s bridge wrapper, needed by the
 # children this process forks. `NO_PROXY=` is set to empty on purpose there, so
 # membership is what counts and a falsy value must still be carried.
-_PROXY_ENV_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY")
+_PROXY_ENV_VARS = (
+    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+    "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO",
+    "NODE_EXTRA_CA_CERTS",
+)
 
 
 def merge_proxy_env(
     subprocess_env: dict[str, str] | None,
     process_env: dict[str, str] | None = None,
 ) -> dict[str, str] | None:
-    """Fold this process's proxy variables into the env for Bash children.
+    """Fold the wrapper's proxy and trust variables into Bash children.
 
     ``None`` in and nothing to merge → ``None`` out, which is ``ToolEnv``'s
     "inherit the parent environment" and therefore already correct. ``None`` in
