@@ -3093,11 +3093,24 @@ def process_one_task(
     _own_origin_web = plan_web and task.source_type == "web"
     _own_origin_sms = plan_sms and task.source_type == "sms"
     _own_origin_whatsapp = plan_whatsapp and task.source_type == "whatsapp"
+    # An email thread room's own task (multiplayer D6): its only leg is the
+    # reply-all, which must never carry the question, and the room is shared,
+    # so the question parks and goes to the principal's side room and its
+    # private-mail view (D4 item 3).
+    _own_email_thread_room = False
+    if task.source_type == "email" and not dry_run:
+        from .transport.email.threads import thread_room_for_task
+        with db.get_db(config.db_path) as conn:
+            _thread_token = thread_room_for_task(conn, task)
+            _own_email_thread_room = bool(
+                _thread_token and db.room_is_shared(conn, _thread_token)
+            )
     _confirmable_surface = (
         (plan_talk and talk_token and not plan_ntfy)
         or _own_origin_web
         or _own_origin_sms
         or _own_origin_whatsapp
+        or _own_email_thread_room
     )
     # A no-final-answer result embeds mid-turn text the model wrote to itself,
     # not to the user, so its "should I proceed?" is not a question awaiting an
@@ -3122,7 +3135,13 @@ def process_one_task(
         with db.get_db(config.db_path) as conn:
             guest_mode = side_rooms_mod.guest_reply_mode(conn, task)
             if guest_mode == "held":
-                guest_route = side_rooms_mod.propose_guest_reply(conn, config, task, result)
+                proposed = result
+                if task.source_type == "email":
+                    # On an email thread the answer is the mail the model
+                    # composed, not its narration about composing it.
+                    from .transport.email.outbound import composed_email_body
+                    proposed = composed_email_body(config, task, result)
+                guest_route = side_rooms_mod.propose_guest_reply(conn, config, task, proposed)
         if guest_mode != "direct" and guest_route is None:
             logger.info("Task %d: guest reply has no host to propose it to; cancelled",
                         task_id)

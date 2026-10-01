@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import pytest
 
@@ -525,3 +526,41 @@ class TestTheSideRoomsWhatsAppView:
         asyncio.run(requests.drain_requests(group))
 
         assert [(r.to, r.text) for r in sent] == [(GROUP, "Thursday after 7 works")]
+
+
+class TestTheClassifierReachesTheGroup:
+    """Stage 19: classifier mode no longer fails closed in a group. The answer
+    is asked before the batch transaction and carried through to the gate."""
+
+    def test_a_classifier_yes_creates_the_task(self, group):
+        from istota import speech_gate
+
+        group.speech_gate.mode = "classifier"
+        decision = speech_gate.GateDecision(
+            True, speech_gate.RUNG_CLASSIFIER, reason="asked", model="fast",
+        )
+        with db.get_db(group.db_path) as conn:
+            (result,) = handle_whatsapp_batch(
+                conn, group, [_message("anyone know a plumber?", message_id="C1")],
+                provider=BAILEYS, classified={"C1": decision},
+            )
+
+        assert result.task_id is not None
+        assert _rows(group, "SELECT rung FROM speech_gate_decisions "
+                     "ORDER BY id DESC LIMIT 1") == [{"rung": "classifier"}]
+
+    def test_without_an_answer_it_still_fails_closed(self, group):
+        group.speech_gate.mode = "classifier"
+        (result,) = _apply(group, _message("anyone know a plumber?", message_id="C2"))
+
+        assert result.task_id is None
+
+    def test_classify_group_event_asks_the_completer_for_an_unaddressed_turn(self, group):
+        from istota.transport.whatsapp.groups import classify_group_event
+
+        group.speech_gate.mode = "classifier"
+        with patch("istota.executor.build_speech_gate_completer",
+                   return_value=lambda prompt: '{"speak": true, "reason": "asked"}'):
+            decision = classify_group_event(group, _message("plumber?", message_id="C3"))
+
+        assert decision is not None and decision.speak

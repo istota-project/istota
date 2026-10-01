@@ -198,6 +198,8 @@ class TestTurnsInTheRoom:
         """An email From is a claim, not an identity: only the routed owner's
         own address speaks as a principal."""
         config.users["dan"] = UserConfig(email_addresses=["dan@test.com"])
+        # Trusted by the host, so the mail is admitted to the room at all.
+        config.users[HOST].trusted_email_senders.append("dan@test.com")
         _start_thread(config)
         task_ids = _poll(config, sender="dan@test.com", to=(BOT,), cc=(HOST_ADDR,),
                          message_id="<d2@test.com>", references=ROOT)
@@ -539,3 +541,144 @@ class TestTheThreadRoomGate:
 
         with db.get_db(db_path) as conn:
             assert db.get_task(conn, task_ids[0]).status == "pending"
+
+
+
+# ---------------------------------------------------------------------------
+# Review fixes
+# ---------------------------------------------------------------------------
+
+
+class TestAHeldMailStaysOutOfTheRoom:
+    def test_a_held_sender_does_not_join_the_thread(self, config, db_path):
+        """Held mail does not make its sender one of the thread's people, so
+        their next mail is held again rather than passing the gate."""
+        _start_thread(config)
+        outsider = "mallory@elsewhere.example"
+        first = _poll(config, sender=outsider, to=(BOT,),
+                      message_id="<m1@elsewhere.example>", references=ROOT)
+        second = _poll(config, sender=outsider, to=(BOT,),
+                       message_id="<m2@elsewhere.example>", references=ROOT)
+
+        with db.get_db(db_path) as conn:
+            assert [db.get_task(conn, t).status for t in first + second] == [
+                "pending_confirmation", "pending_confirmation"]
+            assert not threads.is_present(conn, _room_token(), outsider)
+
+    def test_a_held_body_is_not_in_the_rooms_transcript(self, config, db_path):
+        _start_thread(config)
+        _poll(config, sender="mallory@elsewhere.example", to=(BOT,),
+              message_id="<m1@elsewhere.example>", references=ROOT, body="EVIL-BODY")
+
+        rows = _rows(db_path, "SELECT body FROM messages WHERE room_token=?",
+                     (_room_token(),))
+        assert not any("EVIL-BODY" in r["body"] for r in rows)
+
+
+class TestTheChainFindsTheRoom:
+    def test_a_reply_naming_only_a_later_message_lands_in_the_same_room(
+        self, config, db_path,
+    ):
+        _start_thread(config)
+        _poll(config, sender=ALICE, to=(HOST_ADDR,), cc=(BOB, BOT),
+              message_id="<a2@ext.example>", references=ROOT)
+        # A client that keeps In-Reply-To alone, naming Alice's message.
+        email_in_reply_to = "<a2@ext.example>"
+        _UID[0] += 1
+        uid = str(_UID[0])
+        envelope = EmailEnvelope(id=uid, subject="Re: Dinner plans", sender=BOB,
+                                 date="Mon, 01 Jan 2026 12:00:00 +0000", is_read=False)
+        email = Email(id=uid, subject="Re: Dinner plans", sender=BOB,
+                      date="Mon, 01 Jan 2026 12:00:00 +0000", body="ok",
+                      attachments=[], message_id="<b3@ext.example>",
+                      in_reply_to=email_in_reply_to, to=(ALICE, HOST_ADDR),
+                      cc=(BOT,), authentication_results=None)
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound._deliver_confirmation_prompts"),
+            patch("istota.transport.email.inbound._deliver_dmarc_alerts"),
+        ):
+            poll_emails(config)
+
+        assert len(_rows(db_path, "SELECT token FROM rooms WHERE origin='email'")) == 1
+        rows = _rows(db_path, "SELECT author_label FROM messages WHERE room_token=? "
+                     "AND role='user' ORDER BY id", (_room_token(),))
+        assert rows[-1]["author_label"] == BOB
+
+
+    def test_a_reply_to_the_bots_own_mail_alone_lands_in_the_room(self, config, db_path):
+        _start_thread(config)
+        with db.get_db(db_path) as conn:
+            db.record_sent_email(
+                conn, user_id=HOST, message_id="<bot-out@test.com>", to_addr=ALICE,
+                subject="Re: Dinner plans", conversation_token=_room_token(),
+            )
+        _poll(config, sender=ALICE, to=(HOST_ADDR, BOB), cc=(BOT,),
+              message_id="<a5@ext.example>", references="<bot-out@test.com>")
+
+        assert len(_rows(db_path, "SELECT token FROM rooms WHERE origin='email'")) == 1
+        rows = _rows(db_path, "SELECT author_label FROM messages WHERE room_token=? "
+                     "AND role='user' ORDER BY id", (_room_token(),))
+        assert rows[-1]["author_label"] == ALICE
+
+
+class TestTheReplyIsThreadedToItsTrigger:
+    @pytest.mark.asyncio
+    async def test_a_later_message_moves_the_recipients_not_the_threading(
+        self, config, db_path,
+    ):
+        task_ids = _poll(config, sender=HOST_ADDR, to=(BOT, ALICE), cc=(BOB,),
+                         message_id=ROOT)
+        # Alice answers on the thread with the bot only in Cc: recorded, no task.
+        _poll(config, sender=ALICE, to=(HOST_ADDR,), cc=(BOT,),
+              message_id="<a2@ext.example>", references=ROOT)
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+
+        with patch("istota.transport.email.outbound.reply_to_email",
+                   return_value="<out@test.com>") as reply:
+            await deliver_email_result(config, task, _structured())
+
+        kwargs = reply.call_args.kwargs
+        assert kwargs["in_reply_to"] == ROOT
+        assert kwargs["to_addr"] == ALICE
+        assert kwargs["cc"] == [HOST_ADDR]
+
+
+class TestAQuestionInAThreadRoomParks:
+    @patch("istota.scheduler.post_result_to_email", return_value=True)
+    @patch("istota.scheduler.run_coro", return_value=True)
+    def test_the_hosts_question_goes_to_the_side_room_not_the_thread(
+        self, mock_run_coro, mock_post_email, config, db_path,
+    ):
+        from istota.scheduler import process_one_task
+
+        task_ids = _start_thread(config)
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(True, "Shall I tell Alice Thursday works? Please confirm.",
+                          None, None),
+        ):
+            process_one_task(config)
+
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, task_ids[0]).status == "pending_confirmation"
+            side = db.get_side_room(conn, _room_token(), HOST)
+            assert side is not None
+            assert db.get_messages(conn, side.token)
+        mock_post_email.assert_not_called()
+
+
+class TestAGuestProposalCarriesTheComposedMail:
+    def test_the_envelope_body_not_the_narration(self, config, db_path):
+        from istota.transport.email.outbound import composed_email_body
+
+        task_ids = _start_thread(config)
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+        envelope = json.dumps({"subject": "", "body": "Thursday at 7.", "format": "plain"})
+
+        assert composed_email_body(config, task, envelope) == "Thursday at 7."
+        assert composed_email_body(config, task, "plain prose") == "plain prose"

@@ -455,15 +455,33 @@ def _record_sent_email(
         logger.warning("Failed to record sent email for task %d: %s", task.id, e)
 
 
+def composed_email_body(config: "Config", task: db.Task, result: str) -> str:
+    """The body of the mail an email task composed, or ``result`` with none.
+
+    The deferred file first, then an envelope in the result, as
+    `deliver_email_result` reads them; the file is peeked, never consumed.
+    """
+    parsed = (
+        _load_deferred_email_output(config, task, consume=False)
+        or _parse_email_output(result)
+    )
+    if parsed and parsed.get("body"):
+        return parsed["body"]
+    return result
+
+
 async def _send_thread_reply(
     config: "Config", task: db.Task, plan: "email_threads.ReplyAll", *,
     subject: str, body: str, content_type: str = "plain",
     html_body: str | None = None, room_token: str | None = None,
+    consume: bool = True,
 ) -> bool:
     """Reply-all on an email thread room's thread, through the outbound gate.
 
     True when the mail went out or was held as a draft; False when the gate
-    could not run or the send failed.
+    could not run or the send failed. ``consume`` drops the task's deferred
+    email output once accounted for; a room post carries its own body and
+    leaves the task's file alone.
     """
     held_subject = subject
     if held_subject and not held_subject.lower().startswith("re:"):
@@ -477,9 +495,11 @@ async def _send_thread_reply(
     if not may_send:
         if draft_id is None:
             return False
-        _consume_deferred_email_output(config, task)
+        if consume:
+            _consume_deferred_email_output(config, task)
         return True
-    _consume_deferred_email_output(config, task)
+    if consume:
+        _consume_deferred_email_output(config, task)
     try:
         sent_message_id = reply_to_email(
             to_addr=plan.to, subject=subject, body=body,
@@ -511,7 +531,7 @@ async def deliver_thread_post(
     """
     with db.get_db(config.db_path) as conn:
         task = db.get_task(conn, task_id)
-        plan = email_threads.reply_all(conn, config, room_token)
+        plan = email_threads.reply_all(conn, config, room_token, task_id=task_id)
     if task is None or plan is None:
         logger.warning(
             "room post into email thread %s: nothing to reply to; not sent", room_token,
@@ -519,6 +539,7 @@ async def deliver_thread_post(
         return False
     return await _send_thread_reply(
         config, task, plan, subject=plan.subject, body=body, room_token=room_token,
+        consume=False,
     )
 
 
@@ -660,7 +681,8 @@ async def deliver_email_result(
         processed_email = db.get_email_for_task(conn, task.id)
         thread_room = email_threads.thread_room_for_task(conn, task)
         thread_reply = (
-            email_threads.reply_all(conn, config, thread_room) if thread_room else None
+            email_threads.reply_all(conn, config, thread_room, task_id=task.id)
+            if thread_room else None
         )
 
     if thread_reply is not None:

@@ -6,9 +6,12 @@ the existing routing.
 
 - **The key** is the thread's root `Message-ID`: the first id in References,
   else In-Reply-To, else the message's own. The room binding is
-  ``surface='email'``, ``surface_ref=<root>``, and a later message finds the
-  room through any id in its chain, so a client that trims References still
-  lands in it. `compute_thread_id` cannot be the key: it hashes the subject and
+  ``surface='email'``, ``surface_ref=<root>``. A later message finds the room
+  through any id in its chain: the root through the binding, any other id
+  through the room's stored mail (`processed_emails`, and the bot's own
+  replies in `sent_emails`), so a client that keeps only In-Reply-To or trims
+  References from the front still lands in it rather than founding a second
+  room for the same thread. `compute_thread_id` cannot be the key: it hashes the subject and
   the sender, so every correspondent's reply on one thread hashes differently.
 - **Minting** happens only on evidence that the thread is the host's: their
   own address is on it, or it threads onto a mail the bot sent for them. A
@@ -123,14 +126,32 @@ def thread_people(config: "Config", email) -> list[tuple[str, str]]:
 def find_thread_room(conn, config: "Config", email) -> ThreadRoom | None:
     """The room this message's thread already is, or None. Reads only."""
     for mid in thread_message_ids(email):
-        token = db.resolve_room_token(conn, SURFACE, mid)
+        token = db.resolve_room_token(conn, SURFACE, mid) or _token_by_stored_mail(conn, mid)
         room = db.get_room(conn, token) if token else None
-        if room is None:
+        binding = db.get_room_binding(conn, token, SURFACE) if room else None
+        if binding is None:
             continue
         policy = room_policy.get_policy(conn, token)
         host = policy.host_user_id if policy and policy.host_user_id else room.user_id
-        return ThreadRoom(token=token, ref=mid, host=host)
+        return ThreadRoom(token=token, ref=binding.surface_ref, host=host)
     return None
+
+
+def _token_by_stored_mail(conn, message_id: str) -> str | None:
+    """The thread room a message id was stored under, by us or by the bot."""
+    row = conn.execute(
+        "SELECT thread_id FROM processed_emails WHERE message_id = ? "
+        "AND thread_id LIKE 'email-thread-%' ORDER BY id DESC LIMIT 1",
+        (message_id,),
+    ).fetchone()
+    if row is not None:
+        return row["thread_id"]
+    row = conn.execute(
+        "SELECT conversation_token FROM sent_emails WHERE message_id = ? "
+        "AND conversation_token LIKE 'email-thread-%' ORDER BY id DESC LIMIT 1",
+        (message_id,),
+    ).fetchone()
+    return row["conversation_token"] if row is not None else None
 
 
 def is_present(conn, room_token: str, sender: str | None) -> bool:
@@ -180,21 +201,23 @@ def _room_name(subject: str | None) -> str | None:
 
 def resolve_thread(
     conn, config: "Config", email, *,
-    owner_user_id: str, existing: ThreadRoom | None, may_mint: bool, ours: bool,
+    owner_user_id: str, existing: ThreadRoom | None, ours: bool,
 ) -> ThreadRoom | None:
     """Record this message's people in its thread's room, minting one if due.
 
-    ``existing`` is `find_thread_room`'s answer, asked before the caller's
-    transaction wrote anything. ``may_mint`` is False for a mail the
-    untrusted-sender gate holds; ``ours`` is that the mail threads onto one
-    the bot sent for ``owner_user_id``.
+    Only for a mail the untrusted-sender gate let through: the caller keeps a
+    held mail out of the room entirely, so neither its sender nor anyone it
+    copies becomes one of the thread's people on its strength. ``existing``
+    is `find_thread_room`'s answer, asked before the caller's transaction
+    wrote anything; ``ours`` is that the mail threads onto one the bot sent
+    for ``owner_user_id``.
     """
     people = thread_people(config, email)
     if existing is not None:
         _sync(conn, config, existing.token, people, acknowledged=False)
         return existing
     ids = thread_message_ids(email)
-    if not may_mint or not ids or len(people) < MIN_HUMANS:
+    if not ids or len(people) < MIN_HUMANS:
         return None
     owner = config.users.get(owner_user_id)
     owned = {fold(a) for a in (owner.email_addresses if owner else [])}
@@ -233,12 +256,18 @@ def thread_room_for_task(conn, task) -> str | None:
     return task.conversation_token
 
 
-def reply_all(conn, config: "Config", room_token: str) -> ReplyAll | None:
-    """Reply-all to the latest message on the thread, or None with none stored.
+def reply_all(
+    conn, config: "Config", room_token: str, *, task_id: int | None = None,
+) -> ReplyAll | None:
+    """Reply-all on the thread, or None with no message stored for it.
 
-    To is that message's sender, Cc its other recipients, the bot dropped. The
-    latest message rather than the union, so a person removed from Cc is not
-    written to again.
+    The recipients are the latest message's: To is its sender, Cc its other
+    recipients, the bot dropped. The latest rather than the union, so a
+    person removed from Cc is not written to again. The threading headers
+    answer the message that triggered ``task_id`` when it is on this thread
+    (D5: a reply is threaded to what it answers), else the latest. Only mail
+    admitted to the room is stored under its token, so a held message never
+    decides either.
     """
     row = conn.execute(
         'SELECT sender_email, recipients, message_id, "references", subject '
@@ -264,13 +293,24 @@ def reply_all(conn, config: "Config", room_token: str) -> ReplyAll | None:
         cc.append(address)
     message_id = row["message_id"]
     references = row["references"]
+    subject = row["subject"] or ""
+    if task_id is not None:
+        trigger = conn.execute(
+            'SELECT message_id, "references", subject FROM processed_emails '
+            "WHERE task_id = ? AND thread_id = ? ORDER BY id DESC LIMIT 1",
+            (task_id, room_token),
+        ).fetchone()
+        if trigger is not None and trigger["message_id"]:
+            message_id = trigger["message_id"]
+            references = trigger["references"]
+            subject = trigger["subject"] or subject
     if references and message_id:
         references = f"{references} {message_id}"
     elif message_id:
         references = message_id
     return ReplyAll(
         to=to, cc=cc, in_reply_to=message_id, references=references,
-        subject=row["subject"] or "",
+        subject=subject,
     )
 
 
