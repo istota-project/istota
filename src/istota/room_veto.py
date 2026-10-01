@@ -19,14 +19,26 @@ does not say who removed the bot; a member's ``on`` then suffices.
 
 A member's ``on`` counts as a member's only when the surface authenticated who
 sent it (`apply`'s ``authenticated``). A mail's From proves nothing, so on
-email a member's ``on`` is their agreement as a vetoer and no more; the member
-switches the room back on from the web view.
+email a member's ``on`` is their agreement as a vetoer and no more, and the
+inbound poller hears a mail-borne ``on`` at all only from a sender the
+receiving MTA authenticated; the member switches the room back on from the web
+view. An email veto is not answered on the thread, since any mail there is the
+outbound gate's to hold; its notice is the room row the web view shows.
 
+Pending work in the room is cancelled at the veto and a running task's answer
+is dropped when it finishes (`task_room_vetoed`); progress it posted while
+running stays.
+
+Replies reach a room where the command was heard: Talk and WhatsApp post them
+from the process that read the command. The web app cannot reach a WhatsApp
+group (the bridge is the scheduler's), so it queues them (`queue_notice`).
 The announcement: the first time a guest is in a room with a host, the bot
-says once what it is, who it works for and how to switch it off. Talk, web and
-WhatsApp get it from `drain_announcements`; an email thread room cannot be
-posted into except by a mail the outbound gate governs, so there it rides the
-bot's first reply-all on the thread (`with_email_notice`).
+says once what it is, who it works for and how to switch it off.
+`drain_room_notices`, a scheduler gate, posts both into Talk and WhatsApp; an
+email thread room cannot be posted into except by a mail the outbound gate
+governs, so there the announcement rides the bot's first reply-all on the
+thread (`with_email_notice`), and a held draft carrying it does not count as
+the thread being told.
 """
 
 from __future__ import annotations
@@ -343,12 +355,16 @@ def _claim_announcements(config, limit: int) -> list[dict]:
             "LEFT JOIN room_policy rp ON rp.room_token = p.room_token "
             "WHERE p.kind = 'guest' AND p.left_at IS NULL AND NOT r.archived "
             "AND r.side_of IS NULL AND (rp.room_token IS NULL OR "
-            "(rp.announced_at IS NULL AND rp.vetoed_at IS NULL)) "
+            "(rp.announced_at IS NULL AND rp.vetoed_at IS NULL "
+            " AND rp.host_user_id IS NOT NULL)) "
             "AND NOT EXISTS (SELECT 1 FROM room_bindings b WHERE "
-            "b.room_token = p.room_token AND b.surface = 'email') LIMIT ?",
+            "b.room_token = p.room_token AND b.surface = 'email') "
+            "ORDER BY p.room_token LIMIT ?",
             (limit,),
         ).fetchall()]
-        for token in due:
+        # A room that cannot be announced yet (no host present) is skipped on
+        # a read, so it costs no write lock each tick.
+        for token in [t for t in due if needs_announcement(conn, t)]:
             with write_transaction(conn):
                 if not needs_announcement(conn, token):
                     continue
@@ -396,30 +412,63 @@ async def push_to_room(config, *, room_token: str, text: str, reference: str,
             logger.warning("room %s: WhatsApp notice failed: %s", room_token, exc)
 
 
-async def push_outcome(config, room_token: str, outcome: VetoOutcome, *,
-                       talk: bool = True) -> None:
-    """After the commit: put a veto reply into the room's external surfaces."""
+def queue_notice(conn, room_token: str, outcome: VetoOutcome) -> None:
+    """Owe the room's Talk conversation and WhatsApp group a veto reply.
+
+    For a process that cannot post there itself: the web app holds no
+    WhatsApp bridge (it is the scheduler's), and a send from it would settle
+    the ledger row `failed` for good. `drain_room_notices` posts it.
+    """
+    if (db.get_room_binding(conn, room_token, "talk") is None
+            and db.get_room_binding(conn, room_token, "whatsapp") is None):
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO room_notices (room_token, body, reference) VALUES (?, ?, ?)",
+        (room_token, outcome.text, outcome.reference),
+    )
+
+
+def _claim_notices(config, limit: int) -> list[dict]:
+    from .whatsapp_requests import write_transaction
+
+    claims: list[dict] = []
+    with db.get_db(config.db_path) as conn:
+        with write_transaction(conn):
+            rows = conn.execute(
+                "SELECT id, room_token, body, reference FROM room_notices "
+                "WHERE posted_at IS NULL ORDER BY id LIMIT ?",
+                (limit,),
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    "UPDATE room_notices SET posted_at = datetime('now') WHERE id = ?",
+                    (row["id"],),
+                )
+                room = db.get_room(conn, row["room_token"])
+                if room is None:
+                    continue
+                talk = db.get_room_binding(conn, room.token, "talk")
+                claims.append({
+                    "token": room.token, "text": row["body"],
+                    "reference": row["reference"],
+                    "talk_ref": talk.surface_ref if talk else None,
+                    "whatsapp": db.get_room_binding(conn, room.token, "whatsapp")
+                    is not None,
+                    "owner": _host(conn, room.token) or room.user_id,
+                })
+    return claims
+
+
+async def drain_room_notices(config, *, limit: int = 20) -> int:
+    """Post queued veto replies, then announce the bot wherever it is owed.
+
+    Both are claimed before they are posted, so each goes out at most once.
+    Returns how many were posted.
+    """
     import asyncio
 
-    def _targets():
-        with db.get_db(config.db_path) as conn:
-            binding = db.get_room_binding(conn, room_token, "talk")
-            group = db.get_room_binding(conn, room_token, "whatsapp")
-            room = db.get_room(conn, room_token)
-            return (binding.surface_ref if binding and talk else None,
-                    group is not None, room.user_id if room else "")
-
-    talk_ref, whatsapp, owner = await asyncio.to_thread(_targets)
-    await push_to_room(config, room_token=room_token, text=outcome.text,
-                       reference=outcome.reference, talk_ref=talk_ref,
-                       whatsapp=whatsapp, owner=owner)
-
-
-async def drain_announcements(config, *, limit: int = 20) -> int:
-    """Announce the bot in every room that is owed it; how many were."""
-    import asyncio
-
-    claims = await asyncio.to_thread(_claim_announcements, config, limit)
+    claims = await asyncio.to_thread(_claim_notices, config, limit)
+    claims += await asyncio.to_thread(_claim_announcements, config, limit)
     for claim in claims:
         await push_to_room(config, room_token=claim["token"], text=claim["text"],
                            reference=claim["reference"], talk_ref=claim["talk_ref"],
@@ -460,14 +509,14 @@ __all__ = [
     "announcement_text",
     "apply",
     "command_word",
-    "drain_announcements",
+    "drain_room_notices",
     "is_vetoed",
     "is_vetoed_ref",
     "needs_announcement",
     "note_email_notice_sent",
     "parse_command",
-    "push_outcome",
     "push_to_room",
+    "queue_notice",
     "switch_off_by_removal",
     "task_room_vetoed",
     "with_email_notice",

@@ -3123,15 +3123,9 @@ def process_one_task(
         and CONFIRMATION_PATTERN.search(result)
     )
 
-    # A guest's turn under `guest_reply = held` (multiplayer D4 item 2): the
-    # answer is proposed in the host's side room as a held `room post`, and
-    # parks the task on that exact text, instead of reaching the room. From
-    # here on it is a side-routed confirmation like any other; approving it
-    # releases the post and completes the task rather than re-running it
-    # (`confirmations.approve`). A host who changed or left since the turn
-    # gets nothing, and neither does the room.
     # The room was switched off while this task ran (multiplayer D12): its
-    # answer is not recorded there and does not reach it.
+    # answer is not recorded there and does not reach it. Progress it posted
+    # while running is not taken back.
     if not dry_run:
         from .room_veto import task_room_vetoed
         with db.get_db(config.db_path) as conn:
@@ -3148,6 +3142,13 @@ def process_one_task(
                 event_writer.finish()
             return (task_id, False)
 
+    # A guest's turn under `guest_reply = held` (multiplayer D4 item 2): the
+    # answer is proposed in the host's side room as a held `room post`, and
+    # parks the task on that exact text, instead of reaching the room. From
+    # here on it is a side-routed confirmation like any other; approving it
+    # releases the post and completes the task rather than re-running it
+    # (`confirmations.approve`). A host who changed or left since the turn
+    # gets nothing, and neither does the room.
     guest_route = None
     if success and task.guest_participant_id is not None and not dry_run:
         with db.get_db(config.db_path) as conn:
@@ -8626,10 +8627,10 @@ def build_interval_gates(
 
         run_coro(drain_requests(config))
 
-    def _room_announcements(now: float) -> None:
-        from .room_veto import drain_announcements
+    def _room_notices(now: float) -> None:
+        from .room_veto import drain_room_notices
 
-        run_coro(drain_announcements(config))
+        run_coro(drain_room_notices(config))
 
     def _whatsapp_pairing(now: float) -> None:
         # Inline on the dispatch thread, deliberately: the poll's own cheap
@@ -8888,11 +8889,13 @@ def build_interval_gates(
             fixed_interval=0,
             background=True,
         ),
-        # The bot announcing itself to a room's guests (multiplayer D8): one
-        # indexed read when nobody is owed it, a post when somebody is.
+        # The bot announcing itself to a room's guests, and veto replies the
+        # web app owed a room's Talk and WhatsApp sides (multiplayer D8): two
+        # indexed reads when nothing is owed, a post when something is. Here
+        # because only this process holds the WhatsApp bridge.
         IntervalGate(
-            name="room-announcements",
-            run=_room_announcements,
+            name="room-notices",
+            run=_room_notices,
             fixed_interval=30,
             background=True,
         ),

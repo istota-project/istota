@@ -4213,6 +4213,7 @@ def delete_web_chat_room(
     conn.execute("DELETE FROM room_data_grants WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_policy WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_vetoes WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_notices WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_epochs WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM rooms WHERE token = ?", (token,))
     # Drop every participant's handle for the token, not just the requester's
@@ -7605,11 +7606,24 @@ CREATE TABLE IF NOT EXISTS room_vetoes (
 )
 """
 
+# Kept equal to schema.sql's copy by tests/test_room_veto.py.
+_ROOM_NOTICES_DDL = """
+CREATE TABLE IF NOT EXISTS room_notices (
+    id         INTEGER PRIMARY KEY,
+    room_token TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    body       TEXT NOT NULL,
+    reference  TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    posted_at  TEXT
+)
+"""
+
 
 def _migrate_room_veto(conn: sqlite3.Connection) -> None:
     """The participant veto and the announcement (multiplayer Stage 20).
 
-    Three `room_policy` columns and the `room_vetoes` table. Markered
+    Three `room_policy` columns and the `room_vetoes` and `room_notices`
+    tables. Markered
     (`room_veto_v1`), nothing backfilled: no room is off before somebody
     switches it off, and a room with a guest that was never announced to is
     owed its announcement.
@@ -7618,6 +7632,7 @@ def _migrate_room_veto(conn: sqlite3.Connection) -> None:
         "vetoed_at": "TEXT", "veto_on_by": "TEXT", "announced_at": "TEXT",
     })
     conn.execute(_ROOM_VETOES_DDL)
+    conn.execute(_ROOM_NOTICES_DDL)
     try:
         conn.execute(
             "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_veto_v1')"

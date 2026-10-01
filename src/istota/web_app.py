@@ -6859,16 +6859,24 @@ def _chat_relay_reply(username: str, token: str, reply_to_msg_id: int) -> bool:
 
 
 def _chat_room_veto(username: str, token: str, verb: str):
-    """A web member's `!<bot> off|on`, in its own transaction; None when not a veto here."""
+    """A web member's `!<bot> off|on`, in its own transaction; None when not a veto here.
+
+    The reply is queued for the room's Talk and WhatsApp sides rather than
+    sent from here: the WhatsApp bridge lives in the scheduler, so a send from
+    this process would settle its ledger row `failed`.
+    """
     from . import db, room_veto
     from .transport._types import ParticipantRef
 
     with db.get_db(_config.db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        return room_veto.apply(
+        outcome = room_veto.apply(
             conn, _config, room_token=token, verb=verb,
             author=ParticipantRef(surface="web", surface_ref=username, user_id=username),
         )
+        if outcome is not None:
+            room_veto.queue_notice(conn, token, outcome)
+        return outcome
 
 
 def _chat_room_off(token: str) -> bool:
@@ -8730,7 +8738,6 @@ async def chat_send_message(
     if veto_verb is not None:
         outcome = await asyncio.to_thread(_chat_room_veto, username, room.token, veto_verb)
         if outcome is not None:
-            await room_veto.push_outcome(_config, room.token, outcome)
             return {"task_id": None, "inline_result": outcome.text,
                     "command_data": {"kind": "room_veto", "state": outcome.state}}
     if await asyncio.to_thread(_chat_room_off, room.token):

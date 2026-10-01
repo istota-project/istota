@@ -596,8 +596,11 @@ def record_inbound(
     # several people read would put a correspondent's mail, and the answer
     # `_room_turn_belongs_here` then stores under it, in front of all of them.
     # It is the permanent kind of absence, so it is recorded on the task below.
+    # Nor in a room somebody switched off (D12), which can read as private
+    # once its vetoers have left.
     if (not room_surface and mirror_to_room and transcript_token
-            and db.room_is_shared(conn, transcript_token)):
+            and (db.room_is_shared(conn, transcript_token)
+                 or room_veto.is_vetoed(conn, transcript_token))):
         mirror_to_room = False
     mirror_only = (
         not room_surface

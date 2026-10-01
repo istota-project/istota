@@ -575,9 +575,11 @@ def _plan_room_pass(
             last_message_id=last_message_id,
             needs_participants=needs_participants,
             needs_cursor_init=needs_cursor_init,
+            # A room switched off caches nothing (multiplayer D12), so an
+            # empty cache there is the veto at work, not a room to backfill.
             needs_backfill=not db.has_cached_talk_messages(
                 conn, conversation_token,
-            ),
+            ) and not room_veto.is_vetoed_ref(conn, "talk", conversation_token),
         ))
     return plans
 
@@ -1565,6 +1567,10 @@ async def _classify_batch_ahead(
                 continue
             if _is_own_post(msg, config):
                 continue
+            if _veto_verb(msg, config) == room_veto.OFF:
+                # Nothing after a `!<bot> off` reaches a classifier (D12);
+                # the results loop applies the veto and drops what follows.
+                break
             content = clean_message_content(
                 msg, bot_username=config.talk.bot_username,
             ).strip()

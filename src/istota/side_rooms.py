@@ -759,8 +759,8 @@ def _post_destination(conn, parent_token: str, user_id: str) -> dict:
     from .room_veto import is_vetoed
 
     if is_vetoed(conn, parent_token):
-        # Switched off (D12): nothing the bot says reaches the room, an
-        # approved post included, until it is switched back on.
+        # Switched off (D12): an approved post is refused, and the request
+        # closes rather than waiting for the room to come back on.
         raise RequestError("room_off")
     talk = db.get_room_binding(conn, parent_token, "talk")
     whatsapp = db.get_room_binding(conn, parent_token, "whatsapp")

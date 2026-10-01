@@ -296,6 +296,7 @@ class TestTheMigration:
         db.init_db(old)
         raw = sqlite3.connect(old)
         raw.execute("DROP TABLE room_vetoes")
+        raw.execute("DROP TABLE room_notices")
         for column in ("vetoed_at", "veto_on_by", "announced_at"):
             raw.execute(f"ALTER TABLE room_policy DROP COLUMN {column}")
         raw.execute("DELETE FROM _migration_state WHERE name = 'room_veto_v1'")
@@ -305,7 +306,7 @@ class TestTheMigration:
         raw.commit()
         raw.close()
         with db.get_db(config.db_path) as fresh, db.get_db(old) as upgraded:
-            for table in ("room_policy", "room_vetoes"):
+            for table in ("room_policy", "room_vetoes", "room_notices"):
                 a = {r[1]: tuple(r)[2:6] for r in fresh.execute(f"PRAGMA table_info({table})")}
                 b = {r[1]: tuple(r)[2:6] for r in upgraded.execute(f"PRAGMA table_info({table})")}
                 assert a and a == b, table
@@ -360,7 +361,7 @@ def _talk_msg(id, actor_id, text, actor_type="users"):
             "messageType": "comment", "messageParameters": {}}
 
 
-async def _poll(config, *msgs, token="group1"):
+async def _poll(config, *msgs, token="group1", history=()):
     from istota.transport.talk import inbound as talk_inbound
     from istota.transport.talk.inbound import poll_talk_conversations
 
@@ -375,7 +376,7 @@ async def _poll(config, *msgs, token="group1"):
         client.poll_messages = AsyncMock(return_value=list(msgs))
         client.get_participants = AsyncMock(return_value=_ROSTER)
         client.send_message = AsyncMock(return_value={"id": 999})
-        client.fetch_chat_history = AsyncMock(return_value=[])
+        client.fetch_chat_history = AsyncMock(return_value=list(history))
         created = await poll_talk_conversations(config)
     return created, client
 
@@ -408,6 +409,9 @@ class TestOnTalk:
             config,
             _talk_msg(102, "alice", "@istota what is on today?"),
             _talk_msg(103, "max", "nice weather", actor_type="guests"),
+            # An empty cache in a vetoed room is the veto, not a room to
+            # backfill from Talk's own history.
+            history=[_talk_msg(102, "alice", "@istota what is on today?")],
         )
         assert created == []
         client.send_message.assert_not_awaited()
@@ -419,6 +423,28 @@ class TestOnTalk:
             decisions = _count(conn, "SELECT COUNT(*) FROM speech_gate_decisions")
         assert cached == []
         assert user_rows == decisions == 0
+
+    @pytest.mark.asyncio
+    async def test_nothing_after_the_veto_in_the_same_batch_is_classified(
+        self, tmp_path,
+    ):
+        config = _talk_config(tmp_path)
+        config.speech_gate.mode = "classifier"
+        _talk_group(config)
+        # Recorded, not raised: `classify_ahead` turns any exception into a
+        # failed decision, which would hide the call.
+        asked = []
+        with patch("istota.executor.build_speech_gate_completer",
+                   side_effect=lambda *a, **k: asked.append(k) or (lambda _p: "{}")):
+            created, _ = await _poll(
+                config,
+                _talk_msg(101, "max", "!zorg off", actor_type="guests"),
+                _talk_msg(102, "alice", "anyone around?"),
+            )
+        assert created == []
+        assert asked == []
+        with db.get_db(config.db_path) as conn:
+            assert _count(conn, "SELECT COUNT(*) FROM speech_gate_decisions") == 0
 
     @pytest.mark.asyncio
     async def test_back_on_the_room_is_recorded_again(self, tmp_path):
@@ -600,7 +626,7 @@ def _email_config(tmp_path, *, trusted=("*@ext.example",)):
 
 
 def _mail(config, *, sender, to=(BOT_ADDR,), cc=(), message_id, references=None,
-          body="hello"):
+          body="hello", authentication_results=None):
     from istota.skills.email import Email, EmailEnvelope
     from istota.transport.email.inbound import poll_emails
 
@@ -611,7 +637,7 @@ def _mail(config, *, sender, to=(BOT_ADDR,), cc=(), message_id, references=None,
     email = Email(id=uid, subject="Dinner", sender=sender,
                   date="Mon, 01 Jan 2026 12:00:00 +0000", body=body, attachments=[],
                   message_id=message_id, references=references, to=tuple(to),
-                  cc=tuple(cc), authentication_results=None)
+                  cc=tuple(cc), authentication_results=authentication_results)
     with (
         patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
         patch("istota.transport.email.inbound.read_email", return_value=email),
@@ -663,6 +689,37 @@ class TestOnEmail:
         with db.get_db(config.db_path) as conn:
             assert room_veto.is_vetoed(conn, _thread_room())
 
+    def _guest_off(self, config):
+        _start_thread(config)
+        _mail(config, sender=ALICE_ADDR, cc=(HOST_ADDR, BOB_ADDR),
+              message_id="<a2@ext.example>", references=ROOT, body="!zorg off")
+
+    def _vetoer_agreed(self, config):
+        with db.get_db(config.db_path) as conn:
+            return conn.execute(
+                "SELECT agreed_at FROM room_vetoes WHERE person = ?",
+                (f"email:{ALICE_ADDR}",),
+            ).fetchone()["agreed_at"] is not None
+
+    def test_a_forged_agreement_is_not_heard(self, tmp_path):
+        """A guest's `on` by mail is their agreement only when the receiving
+        MTA authenticated the sender: a member could otherwise forge it."""
+        config = _email_config(tmp_path)
+        self._guest_off(config)
+        _mail(config, sender=ALICE_ADDR, cc=(HOST_ADDR, BOB_ADDR),
+              message_id="<a3@ext.example>", references=ROOT, body="!zorg on")
+        assert not self._vetoer_agreed(config)
+
+    def test_an_authenticated_agreement_is(self, tmp_path):
+        config = _email_config(tmp_path)
+        self._guest_off(config)
+        _mail(config, sender=ALICE_ADDR, cc=(HOST_ADDR, BOB_ADDR),
+              message_id="<a3@ext.example>", references=ROOT, body="!zorg on",
+              authentication_results="mx.test; spf=pass; dmarc=pass header.from=ext.example")
+        assert self._vetoer_agreed(config)
+        with db.get_db(config.db_path) as conn:
+            assert room_veto.is_vetoed(conn, _thread_room())
+
 
 # ---------------------------------------------------------------------------
 # The announcement (D8)
@@ -681,8 +738,8 @@ class TestTheAnnouncement:
             _group(conn)
         with patch("istota.transport.talk.TalkTransport.deliver",
                    new=AsyncMock(return_value=77)) as deliver:
-            assert asyncio.run(room_veto.drain_announcements(config)) == 1
-            assert asyncio.run(room_veto.drain_announcements(config)) == 0
+            assert asyncio.run(room_veto.drain_room_notices(config)) == 1
+            assert asyncio.run(room_veto.drain_room_notices(config)) == 0
         assert deliver.await_count == 1
         assert deliver.await_args.args[0] == "grp"
         with db.get_db(config.db_path) as conn:
@@ -700,7 +757,7 @@ class TestTheAnnouncement:
             room_veto.apply(conn, config, room_token="grp", author=_max(), verb="off")
         with patch("istota.transport.talk.TalkTransport.deliver",
                    new=AsyncMock(return_value=77)) as deliver:
-            assert asyncio.run(room_veto.drain_announcements(config)) == 0
+            assert asyncio.run(room_veto.drain_room_notices(config)) == 0
         deliver.assert_not_awaited()
 
     def test_the_first_mail_on_a_thread_carries_it_once(self, tmp_path):
@@ -847,3 +904,19 @@ class TestOnWeb:
         with db.get_db(config.db_path) as conn:
             assert _count(conn, "SELECT COUNT(*) FROM messages WHERE role='user'") == 0
             assert _count(conn, "SELECT COUNT(*) FROM tasks") == 0
+
+    async def test_the_reply_reaches_talk_from_the_scheduler_not_the_request(self, web):
+        """The web process holds no WhatsApp bridge, so it owes the room's
+        other sides the reply and the scheduler's drain posts it, once."""
+        client, cookies, room, config = web
+        with db.get_db(config.db_path) as conn:
+            db.add_room_binding(conn, room["token"], "talk", "tk-family")
+        deliver = AsyncMock(return_value=88)
+        with patch("istota.transport.talk.TalkTransport.deliver", new=deliver):
+            await self._send(client, cookies, room, "!zorg off")
+            deliver.assert_not_awaited()
+            assert await room_veto.drain_room_notices(config) == 1
+            assert await room_veto.drain_room_notices(config) == 0
+        assert deliver.await_count == 1
+        assert deliver.await_args.args[0] == "tk-family"
+        assert "!zorg on" in deliver.await_args.args[1]

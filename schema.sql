@@ -1511,6 +1511,20 @@ CREATE TABLE IF NOT EXISTS room_vetoes (
     PRIMARY KEY (room_token, person)
 );
 
+-- Veto replies owed to a room's Talk conversation and WhatsApp group, written
+-- by a process that cannot post there itself (the web app holds no WhatsApp
+-- bridge) and posted by the scheduler's `room-notices` gate. `posted_at` is
+-- stamped before the post: at most once. Kept equal to
+-- `db._ROOM_NOTICES_DDL` by tests/test_room_veto.py.
+CREATE TABLE IF NOT EXISTS room_notices (
+    id         INTEGER PRIMARY KEY,
+    room_token TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    body       TEXT NOT NULL,
+    reference  TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    posted_at  TEXT
+);
+
 -- Audience epochs (multiplayer Stage 14, D3). A row with `epoch > 0` records
 -- that the room's audience grew without the history being acknowledged: who
 -- joined (`person`, spelled as `db.room_is_shared` counts humans: `u:<user>`

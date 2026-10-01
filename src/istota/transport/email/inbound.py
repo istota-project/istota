@@ -1949,8 +1949,11 @@ def poll_emails(config: Config) -> list[int]:
                     #     attachment fetched, no participant, no transcript row
                     #     and no task. Only the ledger row that stops the mail
                     #     being read again is written, with nothing of it. A
-                    #     From proves nothing, so a mail-borne `on` is a
-                    #     vetoer's agreement only (`authenticated=False`).
+                    #     From proves nothing: an `off` is heard anyway, since
+                    #     a forged one only silences the bot, but an `on` is a
+                    #     vetoer's agreement only, and only from a sender the
+                    #     receiving MTA authenticated (DMARC pass); a member
+                    #     switches the room back on from the web view.
                     if thread_room is not None:
                         first_line = next(
                             (line for line in (email.body or "").splitlines()
@@ -1959,6 +1962,12 @@ def poll_emails(config: Config) -> list[int]:
                         verb = room_veto.parse_command(first_line, config.bot_name)
                         room_off = room_veto.is_vetoed(conn, thread_room.token)
                         heard = None
+                        if verb == room_veto.ON and _authentication_verdict(
+                            email.authentication_results_headers,
+                            config.email.authserv_id,
+                            _address_domain(envelope.sender),
+                        ).verdict != "pass":
+                            verb = None
                         if verb is not None and email_threads.is_present(
                             conn, thread_room.token, envelope.sender,
                         ):
