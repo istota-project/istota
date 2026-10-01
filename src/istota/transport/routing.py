@@ -78,7 +78,9 @@ class Destination:
     mirror: bool = False
 
 
-def parse_output_target(spec: str | None) -> list[Destination]:
+def parse_output_target(
+    spec: str | None, *, task_id: int | None = None,
+) -> list[Destination]:
     """Parse an ``output_target`` string into destinations.
 
     Normalizes the legacy ``both`` / ``all`` aliases, splits on commas, and
@@ -92,6 +94,12 @@ def parse_output_target(spec: str | None) -> list[Destination]:
     ``_expand_room_destinations`` replaces at resolve time with the room's live
     bindings. Bare ``room`` means the task's own channel; the token form names
     the room explicitly, which is what a stored origin descriptor carries.
+
+    A ``group`` leaf, bare or ``group:<id>``, is dropped with a WARNING (groups
+    spec D8): a group is never a delivery target, and refusing it here rather
+    than in the registry means every validator that reads an empty parse as
+    "names nowhere" refuses it too. ``task_id`` only names the task in that
+    warning.
     """
     if spec is None:
         return []
@@ -113,6 +121,13 @@ def parse_output_target(spec: str | None) -> list[Destination]:
         # whole spec (handled above) and as a list leaf (e.g. a typo'd
         # "talk,none"); drop the leaf rather than emit an unknown-surface warning.
         if surface == "none":
+            continue
+        if surface == "group":
+            logger.warning(
+                "output target leaf %r dropped%s: a group is never a "
+                "delivery target",
+                token, f" for task {task_id}" if task_id is not None else "",
+            )
             continue
         channel = channel_raw.strip() if sep else None
         if channel == "":
@@ -1270,7 +1285,7 @@ def resolve_delivery_plan(
     to ``None``. Never raises into the caller.
     """
     spec = task.output_target
-    plan = parse_output_target(spec)
+    plan = parse_output_target(spec, task_id=task.id)
     if not plan and (spec is None or not spec.strip()):
         plan = _infer_default_plan(task)
 
