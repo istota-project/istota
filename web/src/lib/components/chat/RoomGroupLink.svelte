@@ -41,12 +41,14 @@
   // the settings PATCH.
   async function choose(value: string) {
     if (!link || saving || value === (link.group_id ?? '')) return;
+    const forRoom = roomId;
     saving = true;
     error = '';
     try {
-      link = await putRoomGroup(roomId, value || null);
+      const saved = await putRoomGroup(forRoom, value || null);
+      if (forRoom === roomId) link = saved;
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Couldn’t save that.';
+      if (forRoom === roomId) error = e instanceof Error ? e.message : 'Couldn’t save that.';
     } finally {
       saving = false;
     }

@@ -4692,6 +4692,25 @@ def room_is_shared(conn: sqlite3.Connection, room_token: str) -> bool:
     return members > 1
 
 
+def room_was_ever_shared(conn: sqlite3.Connection, room_token: str) -> bool:
+    """More than one human has ever been in this room, present or not.
+
+    `room_is_shared` answers who reads the room now; this answers who could
+    have written its notes. Participant rows are a history (`left_at`, never a
+    delete), so a member or guest who left still counts, counted the way
+    `room_is_shared` counts.
+    """
+    humans = conn.execute(
+        "SELECT COUNT(*) FROM ("
+        "SELECT CASE WHEN user_id IS NOT NULL THEN 'u:' || user_id "
+        "  ELSE surface || ':' || surface_ref END "
+        "FROM room_participants WHERE room_token = ? AND kind != 'agent' "
+        "UNION SELECT 'u:' || user_id FROM room_members WHERE room_token = ?)",
+        (room_token, room_token),
+    ).fetchone()[0]
+    return humans > 1
+
+
 # ---------------------------------------------------------------------------
 # Audience epochs (multiplayer Stage 14, D3)
 # ---------------------------------------------------------------------------

@@ -1635,6 +1635,8 @@ def _room_group(conn, room, user_id: str, value: str) -> str:
     from . import room_policy
 
     value = value.strip()
+    if room.side_of:
+        return "A side room has no group link; link the room it belongs to instead."
     if not value:
         if not room.group_id:
             return (

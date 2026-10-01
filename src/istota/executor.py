@@ -5602,8 +5602,15 @@ def _recall_memories(
     prompt: str,
     skip_memory: bool = False,
     exclude_task_ids: set[int] | None = None,
+    shared_channel: bool = False,
 ) -> str | None:
     """BM25 search using the task's *effective* prompt. Independent of triage.
+
+    ``shared_channel`` is `_channel_memory_is_shared`'s answer (D24). There the
+    re-indexed `CHANNEL.md` (`channel_memory_durable`) is not recalled at all,
+    since the whole file is already in the prompt, fenced; and the dated
+    channel notes, distilled from several people's turns, are fenced as the
+    file is.
 
     `prompt` is passed explicitly rather than read off `task` because the query
     is the enriched string — typed request plus audio transcript plus OCR
@@ -5630,7 +5637,9 @@ def _recall_memories(
         include_ids.append(f"channel:{task.conversation_token}")
         # Channel namespace also has dated channel_memory and durable
         # channel_memory_durable (from CHANNEL.md). Include both.
-        source_types += ["channel_memory", "channel_memory_durable"]
+        source_types += ["channel_memory"]
+        if not shared_channel:
+            source_types.append("channel_memory_durable")
 
     try:
         if conn is not None:
@@ -5663,6 +5672,8 @@ def _recall_memories(
     parts = []
     for r in results:
         snippet = r.content[:300].strip()
+        if shared_channel and r.source_type.startswith("channel_memory"):
+            snippet = frame_untrusted(snippet, CHANNEL_MEMORY_LABEL)
         parts.append(f"- [{r.source_type}] {snippet}")
     return "\n".join(parts)
 
@@ -7400,10 +7411,11 @@ CHANNEL_MEMORY_LABEL = "room notes"
 
 
 def _channel_memory_is_shared(config: Config, task: db.Task, conn) -> bool:
-    """Whether this task's `CHANNEL.md` has several authors (multiplayer D24).
+    """Whether this task's `CHANNEL.md` may have several authors (multiplayer D24).
 
-    The room card's own predicate: a guest's turn, a surface roster saying
-    "group", or a registered room more than one human reads. Opens its own
+    A guest's turn, a surface roster saying "group", or a registered room more
+    than one human has ever been in. Ever, not now as the room card asks:
+    notes a member wrote stay theirs after they leave. Opens its own
     connection when handed none, never on a database path that does not
     exist. An error reads as shared, since fencing a private room's notes
     costs a marker and leaving a shared room's unfenced is the hole.
@@ -7412,11 +7424,11 @@ def _channel_memory_is_shared(config: Config, task: db.Task, conn) -> bool:
         return True
     if not task.conversation_token:
         return False
-    from .side_rooms import canonical_token, is_shared_room
+    from .side_rooms import canonical_token
 
     def _read(c) -> bool:
         token = canonical_token(c, task.conversation_token)
-        return token is not None and is_shared_room(c, token)
+        return token is not None and db.room_was_ever_shared(c, token)
 
     try:
         if conn is not None:
@@ -8024,10 +8036,16 @@ def execute_task(
 
     # Auto-recall memories via BM25 search. Exclude task IDs already included
     # as conversation history so the same chunk doesn't appear twice.
+    # Whether this room's notes may have several authors (D24): one answer for
+    # the `## Channel memory` block and the channel half of recall.
+    _channel_shared = bool(task.conversation_token) and _channel_memory_is_shared(
+        config, task, conn,
+    )
     recalled_memories = _recall_memories(
         config, conn, task, retrieval_query,
         skip_memory=_skip_memory,
         exclude_task_ids=context_task_ids or None,
+        shared_channel=_channel_shared,
     )
 
     # Recall learned playbooks (Part B). Independent of _recall_memories;
@@ -8133,9 +8151,7 @@ def execute_task(
         confirmation_context=_confirmation_context,
         knowledge_facts=knowledge_facts_text,
         group_memory=group_memory,
-        channel_memory_shared=(
-            bool(channel_memory) and _channel_memory_is_shared(config, task, conn)
-        ),
+        channel_memory_shared=_channel_shared,
         conn=conn,
         effective_prompt=effective_prompt,
         attachment_status=image_attachment_status(image_prep),

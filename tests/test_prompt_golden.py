@@ -1766,6 +1766,24 @@ class TestSharedRoomNotesAreFenced:
         _system, user = split_halves(assemble(case, tmp_path, monkeypatch))
         assert self._fenced(user)
 
+    @pytest.mark.parametrize("name,shared", [
+        ("shared_room_notes", True), ("memory_present", False),
+    ])
+    def test_recall_is_told_the_same_answer(self, tmp_path, monkeypatch, name, shared):
+        # Recall serves the channel namespace too (`_recall_memories`), so it
+        # is handed the predicate the block uses, through `execute_task`.
+        from istota import executor
+
+        seen = {}
+
+        def fake_recall(*_args, **kwargs):
+            seen["shared_channel"] = kwargs.get("shared_channel")
+            return None
+
+        monkeypatch.setattr(executor, "_recall_memories", fake_recall)
+        assemble(CASES_BY_NAME[name], tmp_path, monkeypatch)
+        assert seen["shared_channel"] is shared
+
     def test_a_private_rooms_notes_are_not(self, tmp_path, monkeypatch):
         _system, user = split_halves(
             assemble(CASES_BY_NAME["memory_present"], tmp_path, monkeypatch)
