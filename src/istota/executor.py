@@ -6403,7 +6403,20 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # the value — which is the one outcome `run` exists to avoid. One line here
     # costs less than that.
     shared_credentials_line = ""
-    if shared_credentials:
+    if config.security.credential_broker.enabled:
+        shared_credentials_line = (
+            "\n- Credential broker: `istota-credential list` shows names and bound hosts. "
+            "`istota-credential placeholder NAME` prints `{{cred:NAME}}`. Put that literal "
+            "only in an allowed authentication header, never in a URL or body. For example: "
+            "`curl -H 'Authorization: Bearer {{cred:NAME}}' https://service.example/api`. "
+            "The proxy adds the value only for a bound host admitted by this task's grant; "
+            "a host outside the snapshot keeps ordinary TLS and receives inert text. "
+            "Grant refusals name the reason in X-Istota-Refused; ask the user to update "
+            "the credential settings instead of trying to obtain the value. Browser logins "
+            "use browse --fill-credential. Non-HTTP protocols and signing need a host-side "
+            "skill or an entry the user has marked revealable."
+        )
+    elif shared_credentials:
         shared_credentials_line = (
             "\n- Shared credentials: this user has stored credentials for you to "
             "use. `istota-credential list` names them; you are not told the "

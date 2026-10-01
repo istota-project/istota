@@ -109,19 +109,32 @@ def load_or_create_ca(state_dir: Path) -> Authority:
                 serialization.NoEncryption(),
             ) + cert.public_bytes(serialization.Encoding.PEM)
             write_bytes_atomic(path, record, mode=0o600, fsync=True)
-        key = serialization.load_pem_private_key(record, password=None)
-        cert = x509.load_pem_x509_certificate(record)
-        if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1):
-            raise ValueError("credential broker CA requires a P-256 key")
-        if key.public_key().public_numbers() != cert.public_key().public_numbers():
-            raise ValueError("credential broker CA key and certificate differ")
-        cert.verify_directly_issued_by(cert)
-        now = datetime.now(timezone.utc)
-        if not cert.not_valid_before_utc <= now < cert.not_valid_after_utc:
-            raise ValueError("credential broker CA has expired or is not yet valid; rotate it")
-        if not cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
-            raise ValueError("credential broker certificate is not a CA")
-        return Authority(state_dir, key, cert)
+        return _authority_from_record(state_dir, record)
+
+
+def read_ca(state_dir: Path) -> Authority:
+    """Read and validate existing state without creating or repairing anything."""
+    info = state_dir.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o700):
+        raise ValueError("credential broker CA directory requires private daemon ownership")
+    return _authority_from_record(state_dir, _private_record(state_dir / "ca-key.pem"))
+
+
+def _authority_from_record(state_dir: Path, record: bytes) -> Authority:
+    key = serialization.load_pem_private_key(record, password=None)
+    cert = x509.load_pem_x509_certificate(record)
+    if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1):
+        raise ValueError("credential broker CA requires a P-256 key")
+    if key.public_key().public_numbers() != cert.public_key().public_numbers():
+        raise ValueError("credential broker CA key and certificate differ")
+    cert.verify_directly_issued_by(cert)
+    now = datetime.now(timezone.utc)
+    if not cert.not_valid_before_utc <= now < cert.not_valid_after_utc:
+        raise ValueError("credential broker CA has expired or is not yet valid; rotate it")
+    if not cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
+        raise ValueError("credential broker certificate is not a CA")
+    return Authority(state_dir, key, cert)
 
 
 def mint_leaf(authority: Authority, host: str, *, validity_hours: int = 24,

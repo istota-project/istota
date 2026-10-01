@@ -654,6 +654,11 @@ def build_task_runtime(
 
         authority = load_or_create_ca(state_directory(config))
         sandbox_env = write_trust_bundle(authority, control_dir / "trust")
+        if _net_proxy_ctx is not None:
+            from .credential_broker.intercept import Broker
+            _net_proxy_ctx.broker = Broker(config, task.id, task.user_id, authority)
+        else:
+            logger.warning("Credential broker enabled without a network proxy: placeholders cannot authenticate")
         if not effective_sandboxing(config):
             logger.warning("Credential broker enabled without effective sandboxing: values are not contained")
 

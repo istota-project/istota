@@ -24,9 +24,10 @@ duplication ``AGENTS.md`` opens with, so the developer skill's git credential
 helper now shells out to the ``env`` verb here, which is that generated
 program's behaviour byte for byte.
 
-Six verbs::
+Seven verbs::
 
     istota-credential list                       # shared credential names
+    istota-credential placeholder <name>         # inert auth-header text
     istota-credential run VAR=name [...] -- cmd  # exec cmd with those set
     istota-credential run --stdin name -- cmd    # value on the child's stdin
     istota-credential get <name>                 # the value on stdout
@@ -141,6 +142,7 @@ EXIT_NOT_FOUND = 127
 USAGE = (
     "Usage:\n"
     "  istota-credential list\n"
+    "  istota-credential placeholder NAME\n"
     "  istota-credential run VAR=NAME [VAR2=NAME2 ...] [--stdin NAME] -- CMD [ARGS...]\n"
     "  istota-credential get NAME\n"
     "  istota-credential env VAR\n"
@@ -261,6 +263,22 @@ def _cmd_list() -> int:
         for name in names:
             print(name)
     return 0
+
+
+def _cmd_placeholder(args: list[str]) -> int:
+    """Print inert text; discover binding metadata without fetching a value."""
+    if len(args) != 1 or re.fullmatch(r"[A-Za-z0-9_-]+|forge\.(?:gitlab|github)", args[0]) is None:
+        print(USAGE, file=sys.stderr)
+        return EXIT_REFUSED
+    name = args[0]
+    reply = _request({"type": "vault_list"})
+    for item in reply.get("credentials", []):
+        if item.get("name") == name:
+            hosts = item.get("bound_hosts", [])
+            print("Bound hosts: " + (", ".join(hosts) or "unbound"), file=sys.stderr)
+            print("{{cred:" + name + "}}", end="")
+            return 0
+    raise ProxyError("credential name is unavailable")
 
 
 def _cmd_get(args: list[str]) -> int:
@@ -435,6 +453,7 @@ def main(argv: list[str] | None = None) -> int:
     verb, rest = args[0], args[1:]
     handlers = {
         "list": lambda: _cmd_list(),
+        "placeholder": lambda: _cmd_placeholder(rest),
         "run": lambda: _cmd_run(rest),
         "get": lambda: _cmd_get(rest),
         "env": lambda: _cmd_env(rest),

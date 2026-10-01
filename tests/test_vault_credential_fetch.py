@@ -830,6 +830,8 @@ def seeded_runtime(tmp_path, runtime_inputs, monkeypatch):
     from istota import db as framework_db
 
     framework_db.init_db(config.db_path)
+    with framework_db.get_db(config.db_path) as conn:
+        framework_db.create_task(conn, user_id="testuser", prompt="fixture", source_type="talk")
     for key, value in VAULT.items():
         secrets_store.upsert_secret(
             config.db_path, "testuser", secrets_vault.VAULT_ENTRY_SERVICE,
@@ -851,6 +853,8 @@ class TestThePlacement:
         monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
         db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            db.create_task(conn, user_id="testuser", prompt="fixture", source_type="talk")
         for name, value in VAULT.items():
             secrets_store.upsert_secret(
                 config.db_path, "testuser", secrets_vault.VAULT_ENTRY_SERVICE, name, value,
@@ -892,6 +896,8 @@ class TestThePlacement:
         from istota import db as framework_db
 
         framework_db.init_db(config.db_path)
+        with framework_db.get_db(config.db_path) as conn:
+            framework_db.create_task(conn, user_id="testuser", prompt="fixture", source_type="talk")
         runtime = task_env.build_task_runtime(config, **runtime_inputs)
         assert runtime.proxy_ctx.vault_credentials == {}
 
@@ -1132,3 +1138,35 @@ class TestThePromptStatesTheFetchBudget:
         system = self._system(tmp_path, 0)
         assert "istota-credential run TOKEN=" in system
         assert "budget of" not in system
+
+
+def test_placeholder_prints_only_inert_text_and_host_metadata(sock_path, tmp_path, monkeypatch, capsys):
+    from istota import db
+    from istota.credential_broker.bindings import parse_binding
+    config = Config(db_path=tmp_path / "data.db")
+    db.init_db(config.db_path)
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
+    secrets_store.upsert_secret(config.db_path, "alice", "vault_entries", "portal", "fixture-secret",
+                               binding=parse_binding("https://portal.example", {}, []))
+    monkeypatch.setenv("ISTOTA_SKILL_PROXY_SOCK", str(sock_path))
+    with proxy(sock_path, config=config, user_id="alice", vault_credentials={"portal": "fixture-secret"}):
+        assert credential_shim.main(["placeholder", "portal"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "{{cred:portal}}"
+    assert "portal.example" in captured.err
+    assert "fixture-secret" not in captured.out + captured.err
+
+
+def test_broker_prompt_teaches_placeholders_before_legacy_fetch(tmp_path):
+    from istota import db
+    config = Config(db_path=tmp_path / "data.db", skills_dir=tmp_path / "skills",
+                    bundled_skills_dir=tmp_path / "empty", temp_dir=tmp_path / "temp")
+    db.init_db(config.db_path)
+    config.security.credential_broker.enabled = True
+    task = db.Task(id=1, status="running", source_type="talk", user_id="alice",
+                   prompt="test", conversation_token="room-a")
+    system = executor.build_prompt(task, [], config, shared_credentials=True).system
+    assert "{{cred:NAME}}" in system
+    assert "istota-credential placeholder NAME" in system
+    assert "never in a URL or body" in system
+    assert "istota-credential run TOKEN=" not in system

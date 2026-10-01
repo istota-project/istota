@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Settings now lists credential bindings and lets you choose room access, HTTP methods and scheduled use. New credentials start ungranted; a one-time action grants the credentials already present. Grants are stored for the upcoming credential broker and do not yet restrict credential use.
+- The optional HTTP credential broker lets tasks authenticate with placeholders while the proxy supplies the values to approved hosts. Small echoed responses are scrubbed, and diagnostics report readiness and containment limits. The broker is disabled by default.
+
+- Settings now lists credential bindings and lets you choose room access, HTTP methods and scheduled use. New credentials start ungranted; a one-time action grants the credentials already present. When the optional HTTP credential broker is enabled, those grants restrict placeholder authentication. Existing credential fetch commands remain available during the rollout.
 
 - The web UI supports email and password login or one-time email sign-in links, alongside Nextcloud login or on its own. Admins can invite users and manage login access; operators can print recovery links when mail is unavailable. Changing a password signs out every existing session.
 

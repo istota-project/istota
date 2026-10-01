@@ -374,3 +374,20 @@ For the full skill development workflow including env var mapping, see [adding s
 **CalDAV** — currently global (one service account with shared calendar access via Nextcloud). If Istota ever supports users bringing their own CalDAV servers, this would need a per-user path.
 
 **Browser** — `BROWSER_API_URL` and `BROWSER_VNC_URL` are deployment-level config, not credentials. They point to the headless browser container.
+
+
+## HTTP credential broker
+
+The broker is off by default. Set `[security.credential_broker] enabled = true` with the network proxy enabled to use literal placeholders in authentication headers. `istota-credential list` shows names and bindings; `istota-credential placeholder NAME` prints the placeholder on stdout and its bound hosts on stderr without fetching a value.
+
+```sh
+curl -H 'Authorization: Bearer {{cred:portal_token}}' https://portal.example/api
+```
+
+Bind a vault entry using its HTTPS URL or `istota_hosts`, and grant access in Settings. Grants limit rooms, methods and scheduled use. Each task keeps its original grant snapshot across retries; revoking or changing a grant refuses its next use. Default methods exclude DELETE. The broker decodes Basic authentication before substituting a placeholder password, so clients can build the Basic header themselves.
+
+Only a host bound to a credential in the task snapshot is intercepted. Every other connection keeps its original TLS session and carries placeholders as literal text. On an intercepted connection, SNI and Host must match the CONNECT host. IP-literal destinations may omit SNI, as standard TLS clients do. A placeholder in a disallowed header or URL is refused. A placeholder in the first `scan_max_bytes` of a request body is refused before forwarding; later body bytes stream unchanged and are never substituted. The default cap is 1 MiB.
+
+Response headers and bodies no larger than that cap are scrubbed for the exact substituted bytes. A response field name containing a substituted value is refused, since a placeholder cannot be a valid field name. Larger bodies stream without body scrubbing; audit records state both scan limits. This is not protection against an upstream service deliberately encoding or transforming a credential in its response. Compressed request bodies, compressed responses to authenticated requests, trailers and upgrades are unsupported. Both TLS legs use HTTP/1.1, so pinned-certificate clients and clients that require HTTP/2 need a host-side skill or a revealable credential.
+
+`istota doctor --only security.credential_broker` reports the CA, task trust bundles, proxy and peer-check readiness, effective sandboxing, and counts of unbound or ungranted entries. The CA stays in daemon state; only public trust bundles enter tasks. The daemon verifies upstream TLS using its own trust store. Without effective sandboxing, credentials are not contained. Existing credential fetch commands remain available in this rollout stage; reveal enforcement and automatic forge-client placeholders follow separately.

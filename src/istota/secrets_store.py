@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+from contextlib import nullcontext
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -207,7 +208,7 @@ def set_secret(
 
 def get_secret(
     db_path: Path, user_id: str, service: str, key: str,
-    *, binding: bool = False,
+    *, binding: bool = False, connection=None,
 ) -> str | dict | None:
     """Decrypt and return a stored secret, or None if missing.
 
@@ -223,8 +224,8 @@ def get_secret(
     except SecretKeyMissingError:
         return None
 
-    with _connect(db_path) as conn:
-        if binding:
+    with (nullcontext(connection) if connection is not None else _connect(db_path)) as conn:
+        if binding and not conn.in_transaction:
             # Hold a consistent value/binding view through the access-time write.
             conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(

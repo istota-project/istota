@@ -97,7 +97,7 @@ class NetworkProxy:
             # Claude subprocess runs in sandbox with --unshare-net
             ...
 
-    No MITM, no credential injection.  Pure connectivity gate.
+    Raw TLS unless an optional broker covers the host in the task snapshot.
     TLS is end-to-end between the client and upstream.
     """
 
@@ -107,8 +107,10 @@ class NetworkProxy:
         allowed_hosts: set[str],  # {"api.anthropic.com:443", ...}
         *,
         trusted_roots: Iterable[int] = (),
+        broker=None,
     ):
         self.allowed_hosts = allowed_hosts
+        self.broker = broker
         self._peer_roots = peer_process.PeerRoots()
         for pid in trusted_roots:
             self.authorize_pid(pid)
@@ -229,6 +231,13 @@ class NetworkProxy:
             logger.debug("Network proxy blocked: %s", target)
             client.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
             return
+
+        if self.broker is not None:
+            from .credential_broker.bindings import https_host
+            from .credential_broker.intercept import intercept
+            if self.broker.covers(https_host(f"https://{host}:{port}")):
+                intercept(self.broker, client, host, port)
+                return
 
         try:
             upstream = socket.create_connection((host, port), timeout=10)
