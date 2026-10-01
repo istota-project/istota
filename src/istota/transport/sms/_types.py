@@ -43,6 +43,7 @@ class SmsEventResult:
     delivery: SmsDeliveryRecord | None = None
     response_text: str | None = None
     command_text: str | None = None
+    room_token: str | None = None
     response_logical_key: str | None = None
     preferred_from_number: str | None = None
     # A notification raised inside the caller's transaction and owed a push

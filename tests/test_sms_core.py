@@ -249,7 +249,7 @@ class TestInboundDomainHandling:
         with db.get_db(config.db_path) as conn:
             assert conn.execute("SELECT count(*) FROM sms_opt_outs").fetchone()[0] == 0
 
-    def test_bare_answer_and_command_use_sms_without_transcript_rows(self, tmp_path):
+    def test_bare_answer_and_command_record_turns_without_new_tasks(self, tmp_path):
         calls = []
 
         def send(req):
@@ -283,7 +283,8 @@ class TestInboundDomainHandling:
         assert "Available commands" in calls[1]
         with db.get_db(config.db_path) as conn:
             assert db.get_task(conn, held).status == "pending"
-            assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+            assert conn.execute("SELECT count(*) FROM messages WHERE body IN ('YES', '!help')").fetchone()[0] == 2
+            assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 1
 
     def test_inactive_provider_and_unknown_number_are_acknowledged_without_rows(
         self, tmp_path, caplog
@@ -1629,3 +1630,171 @@ class TestAnSmsStatusThatOvertakesTheIdWrite:
             assert row["status"] == "failed", f"attempt {attempt}"
             assert row["error_code"] == "30006", f"attempt {attempt}"
             assert _parked(config) == [], f"attempt {attempt}"
+
+
+class TestSmsRoomMint:
+    def test_first_text_maps_history_and_later_text_preserves_name(self, tmp_path):
+        config = _config(tmp_path)
+        old = sms_conversation_token('alice')
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            assert db.is_canonical_room_token(token)
+            assert db.get_room(conn, token).name == 'SMS'
+            assert db._canonical_room_token(conn, old, cross_surface=False) == token
+            assert db.is_room_member(conn, token, 'alice')
+            db.rename_room(conn, token, 'My texts')
+        with db.get_db(config.db_path) as conn:
+            second = handle_provider_event(conn, config, _inbound(provider_message_id='second', provider_event_id='event-second'))
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, second.task_id).conversation_token == token
+            assert db.get_room(conn, token).name == 'My texts'
+            for table, count in [('rooms', 1), ('messages', 2), ('room_token_migration', 1)]:
+                assert conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == count
+
+    def test_command_mints_and_dispatches_on_canonical_token(self, tmp_path, monkeypatch):
+        config = _config(tmp_path)
+        calls = []
+        async def dispatch(config, user, token, text, **kwargs):
+            calls.append(token)
+            from types import SimpleNamespace
+            return SimpleNamespace(text='')
+        monkeypatch.setattr('istota.commands.dispatch', dispatch)
+        providers = _providers(_adapter(lambda _req: SmsSendResult('opaque', 'accepted', 1)))
+        result = asyncio.run(_handle(config, providers, _inbound(text='!help')))
+        with db.get_db(config.db_path) as conn:
+            token = db.resolve_room_token(conn, 'sms', sms_conversation_token('alice'))
+            assert db.is_canonical_room_token(token)
+            assert calls == [token]
+            assert result.disposition == 'command'
+            assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 0
+            assert conn.execute('SELECT body FROM messages').fetchone()[0] == '!help'
+
+    @pytest.mark.parametrize('legacy', [False, True])
+    def test_confirmation_follows_only_own_alias(self, tmp_path, legacy):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            held = db.create_task(conn, prompt='delete it', user_id='alice', source_type='sms',
+                                  conversation_token=sms_conversation_token('alice') if legacy else token)
+            db.set_task_confirmation(conn, held, 'Delete?')
+        with db.get_db(config.db_path) as conn:
+            result = handle_provider_event(conn, config, _inbound(text='yes', provider_message_id='answer', provider_event_id='event-answer'))
+            assert result.disposition == 'confirmation_answer'
+            assert db.get_task(conn, held).status == 'pending'
+            assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 2
+
+    def test_racing_first_texts_share_one_room(self, tmp_path):
+        config = _config(tmp_path)
+        barrier = threading.Barrier(2)
+        def inbound(index):
+            with db.get_db(config.db_path) as conn:
+                barrier.wait(timeout=5)
+                return handle_provider_event(conn, config, _inbound(provider_message_id=f'race-{index}', provider_event_id=f'event-race-{index}'))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(inbound, range(2)))
+        with db.get_db(config.db_path) as conn:
+            assert len({db.get_task(conn, r.task_id).conversation_token for r in results}) == 1
+            for table, count in [('rooms', 1), ('messages', 2), ('room_token_migration', 1)]:
+                assert conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == count
+
+    def test_task_failure_rolls_back_claim_and_mint(self, tmp_path, monkeypatch):
+        config = _config(tmp_path)
+        def fail(*args, **kwargs):
+            raise RuntimeError('injected task failure')
+        monkeypatch.setattr(db, 'create_task', fail)
+        with pytest.raises(RuntimeError, match='injected'):
+            with db.get_db(config.db_path) as conn:
+                handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            for table in ('rooms', 'room_bindings', 'room_members', 'messages', 'room_token_migration', 'processed_sms'):
+                assert conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == 0
+
+    def test_sleep_enumeration_uses_room_once_and_keeps_old_history(self, tmp_path):
+        config = _config(tmp_path)
+        old = sms_conversation_token('alice')
+        with db.get_db(config.db_path) as conn:
+            historic = db.create_task(conn, prompt='old text', user_id='alice', source_type='sms', conversation_token=old)
+            conn.execute("UPDATE tasks SET status='completed', result='Done', completed_at=datetime('now') WHERE id=?", (historic,))
+            db.set_channel_sleep_cycle_last_run(conn, old, historic)
+        with db.get_db(config.db_path) as conn:
+            result = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, result.task_id).conversation_token
+            conn.execute("UPDATE tasks SET status='completed', result='Done', completed_at=datetime('now') WHERE id=?", (result.task_id,))
+            assert db.get_active_channel_tokens(conn, '2000-01-01') == [token]
+            assert [t.id for t in db.get_completed_channel_tasks_since(conn, token, '2000-01-01')] == [historic, result.task_id]
+            assert db.get_task(conn, historic).conversation_token == old
+
+    def test_recreated_binding_does_not_retarget_history_or_approval(self, tmp_path):
+        config = _config(tmp_path)
+        old = sms_conversation_token('alice')
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            original = db.get_task(conn, first.task_id).conversation_token
+            # Delete through the actual room seam, then leave an old-token
+            # parked task as an orphan a retry must never approve.
+            room = db.ensure_web_chat_handle(conn, 'alice', original, 'SMS')
+            assert db.delete_web_chat_room(conn, room.id, 'alice')
+            held = db.create_task(conn, prompt='old request', user_id='alice', source_type='sms', conversation_token=old)
+            db.set_task_confirmation(conn, held, 'Old question?')
+        with db.get_db(config.db_path) as conn:
+            result = handle_provider_event(conn, config, _inbound(text='yes', provider_message_id='new', provider_event_id='event-new'))
+            assert result.disposition == 'task'
+            current = db.get_task(conn, result.task_id).conversation_token
+            assert current != original
+            assert db.resolve_room_token(conn, 'sms', old) == current
+            assert db._canonical_room_token(conn, old, cross_surface=False) == old
+            assert db._room_ref_tokens(conn, current, include_surface_refs=False) == [current]
+            assert db.get_task(conn, held).status == 'pending_confirmation'
+            assert conn.execute('SELECT new_token FROM room_token_migration WHERE old_token=?', (old,)).fetchone()[0] == original
+
+    def test_new_text_cancels_legacy_and_current_questions_and_notifications(self, tmp_path):
+        from istota import notification_store
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            held_ids = []
+            for ref in (sms_conversation_token('alice'), token):
+                held = db.create_task(conn, prompt='delete it', user_id='alice', source_type='sms', conversation_token=ref)
+                db.set_task_confirmation(conn, held, 'Delete?')
+                confirmation_source.write(conn, 'alice', task_id=held, title='Delete?', room_token=token)
+                held_ids.append(held)
+        with db.get_db(config.db_path) as conn:
+            handle_provider_event(conn, config, _inbound(text='new request', provider_message_id='new', provider_event_id='event-new'))
+            assert all(db.get_task(conn, task).status == 'cancelled' for task in held_ids)
+            assert notification_store.list_open(config, conn, 'alice') == ([], 0)
+
+    @pytest.mark.parametrize('changes', [
+        {'from_number': '+15559876543'}, {'opt_out_action': 'stop'},
+        {'text': ''}, {'media_count': 1}, {'provider': 'telnyx'},
+    ])
+    def test_rejected_or_non_dispatch_text_does_not_mint(self, tmp_path, changes):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            handle_provider_event(conn, config, _inbound(**changes))
+        with db.get_db(config.db_path) as conn:
+            assert conn.execute('SELECT count(*) FROM rooms').fetchone()[0] == 0
+            assert conn.execute('SELECT count(*) FROM room_token_migration').fetchone()[0] == 0
+
+    def test_vetoed_room_does_not_accept_confirmation_or_command(self, tmp_path):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            db.set_task_confirmation(conn, first.task_id, 'Question?')
+            conn.execute("INSERT INTO room_policy (room_token, vetoed_at) VALUES (?, datetime('now'))", (token,))
+        for index, text in enumerate(('yes', '!help', 'new request')):
+            with db.get_db(config.db_path) as conn:
+                result = handle_provider_event(conn, config, _inbound(text=text, provider_message_id=f'veto-{index}', provider_event_id=f'event-veto-{index}'))
+                assert result.disposition == 'vetoed'
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, first.task_id).status == 'pending_confirmation'
+            assert conn.execute('SELECT count(*) FROM messages').fetchone()[0] == 1

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The first accepted SMS creates a room named SMS. Later texts keep the same room and its custom name, while older text history remains available.
+
 - Private SMS and WhatsApp turns now enter the room transcript. Room-wide delivery skips phone bindings, so a reply from another surface does not trigger an implicit phone send.
 
 - Server deployments now migrate existing room identities during a brief offline window, preserving room history, channel memories and old links. Standalone updates require stopping the local server first; Docker upgrades have an explicit offline migration step.

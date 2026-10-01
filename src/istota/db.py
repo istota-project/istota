@@ -1251,6 +1251,29 @@ def _resolve_schema_path() -> Path:
     return candidates[0]
 
 
+def _migrate_room_binding_uniqueness(conn: sqlite3.Connection) -> None:
+    """Refuse ambiguous legacy bindings before any upgrade mutates the DB."""
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='room_bindings'",
+    ).fetchone():
+        return
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        ambiguous = conn.execute(
+            "SELECT surface, surface_ref FROM room_bindings "
+            "GROUP BY surface, surface_ref HAVING count(*) > 1 LIMIT 1",
+        ).fetchone()
+        if ambiguous:
+            raise RuntimeError(
+                "ambiguous room bindings: resolve duplicate (surface, surface_ref) "
+                "rows in room_bindings before retrying the upgrade"
+            )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_room_bindings_unique_ref "
+            "ON room_bindings (surface, surface_ref)"
+        )
+
+
 def init_db(db_path: Path) -> None:
     """Initialize database with schema."""
     schema_path = _resolve_schema_path()
@@ -1276,6 +1299,7 @@ def init_db(db_path: Path) -> None:
         # a safe superset for every migration step.
         conn.row_factory = sqlite3.Row
         # Run migrations first so new columns exist before schema creates indexes on them
+        _migrate_room_binding_uniqueness(conn)
         _run_migrations(conn)
         conn.executescript(schema_path.read_text())
 
@@ -2104,11 +2128,13 @@ def cancel_pending_confirmations(
     """
     from .message_relays import close_task_questions
     from .whatsapp_requests import write_transaction
+    refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
+    marks = ", ".join("?" for _ in refs)
     with write_transaction(conn):
         held = conn.execute(
-            "SELECT id FROM tasks WHERE conversation_token=? AND user_id=? "
+            f"SELECT id FROM tasks WHERE conversation_token IN ({marks}) AND user_id=? "
             f"AND status='pending_confirmation' AND NOT {SIDE_ROUTED_PARK_SQL}",
-            (conversation_token, user_id)).fetchall()
+            (*refs, user_id)).fetchall()
         for row in held:
             close_task_questions(conn, row[0])
             conn.execute(
@@ -2131,17 +2157,19 @@ def get_pending_confirmation(
     ``user_id`` narrows it to that user's tasks, for a caller answering on
     their behalf from somewhere else (a side room answering its parent).
     """
+    refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
+    marks = ", ".join("?" for _ in refs)
     cursor = conn.execute(
         f"""
         SELECT {_TASK_COLUMNS}
         FROM tasks
-        WHERE conversation_token = ?
+        WHERE conversation_token IN ({marks})
         AND status = 'pending_confirmation'
         AND (? IS NULL OR user_id = ?)
         ORDER BY created_at DESC
         LIMIT 1
         """,
-        (conversation_token, user_id, user_id),
+        (*refs, user_id, user_id),
     )
     row = cursor.fetchone()
     if not row:
@@ -11041,17 +11069,19 @@ def get_completed_channel_tasks_since(
     later prompt in the room — so an exchange deliberately kept out of the room
     must not arrive there by the back door.
     """
+    refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
+    marks = ", ".join("?" for _ in refs)
     query = f"""
         SELECT {_TASK_COLUMNS}
         FROM tasks
-        WHERE conversation_token = ?
+        WHERE conversation_token IN ({marks})
         AND status = 'completed'
         AND result IS NOT NULL
         AND completed_at >= ?
         AND COALESCE(withheld_from_room, 0) = 0
         AND guest_participant_id IS NULL
     """
-    params: list = [conversation_token, since_datetime]
+    params: list = [*refs, since_datetime]
 
     floor = front_stage_cutoff(conn, conversation_token).task_id
     if after_task_id is not None:
@@ -11095,7 +11125,10 @@ def get_active_channel_tokens(
         """,
         (since_datetime,),
     )
-    return [row[0] for row in cursor.fetchall()]
+    return sorted({
+        _canonical_room_token(conn, row[0], cross_surface=False)
+        for row in cursor.fetchall()
+    })
 
 
 def get_completed_tasks_since(

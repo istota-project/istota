@@ -460,6 +460,10 @@ CASES: tuple[Case, ...] = (
     Case("source_talk", source_type="talk", conversation_token="room-token"),
     Case("source_email", source_type="email"),
     Case("source_sms", source_type="sms"),
+    Case(
+        "room_sms", source_type="sms", conversation_token="rm_sms_fixture",
+        room=("SMS", "sms"), memory=True, history=True, history_source_type="sms",
+    ),
     # The channel guideline is standing instruction, so it must land in the
     # system half — the half a compaction summary does not replace. Asserted
     # below as well as snapshotted, because a golden records where the line is

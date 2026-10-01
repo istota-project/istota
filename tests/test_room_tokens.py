@@ -141,3 +141,37 @@ def test_mixed_and_structured_holders_require_specific_handlers():
     assert REWRITE_COLUMNS["message_relays", "destination"] == "destination_json"
     assert REWRITE_COLUMNS["message_relays", "origin"] == "origin_json"
     assert REWRITE_COLUMNS["message_relays", "binding_fingerprint"] == "destination_fingerprint"
+
+
+@pytest.mark.parametrize('upgrade', [False, True])
+def test_binding_reference_is_unique(tmp_path, upgrade):
+    import sqlite3
+    path = tmp_path / 'bindings.db'
+    db.init_db(path)
+    if upgrade:
+        with db.get_db(path) as conn:
+            conn.execute('DROP INDEX IF EXISTS idx_room_bindings_unique_ref')
+        db.init_db(path)
+    with db.get_db(path) as conn:
+        first = db.register_room(conn, None, 'alice', origin='sms').token
+        second = db.register_room(conn, None, 'alice', origin='sms').token
+        conn.execute("INSERT INTO room_bindings (room_token, surface, surface_ref) VALUES (?, 'sms', 'same')", (first,))
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO room_bindings (room_token, surface, surface_ref) VALUES (?, 'sms', 'same')", (second,))
+
+
+def test_binding_upgrade_refuses_ambiguity_without_changes(tmp_path):
+    import sqlite3
+    path = tmp_path / 'ambiguous.db'
+    db.init_db(path)
+    with db.get_db(path) as conn:
+        conn.execute('DROP INDEX IF EXISTS idx_room_bindings_unique_ref')
+        for token in ('one', 'two'):
+            db.register_room(conn, token, 'alice', origin='talk')
+            conn.execute("INSERT INTO room_bindings (room_token, surface, surface_ref) VALUES (?, 'talk', 'same')", (token,))
+    with sqlite3.connect(path) as conn:
+        before = list(conn.iterdump())
+    with pytest.raises(RuntimeError, match='ambiguous room bindings.*resolve'):
+        db.init_db(path)
+    with sqlite3.connect(path) as conn:
+        assert list(conn.iterdump()) == before

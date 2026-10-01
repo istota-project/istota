@@ -1376,6 +1376,7 @@ CREATE TABLE IF NOT EXISTS room_bindings (
     PRIMARY KEY (room_token, surface)
 );
 CREATE INDEX IF NOT EXISTS idx_room_bindings_ref ON room_bindings (surface, surface_ref);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_room_bindings_unique_ref ON room_bindings (surface, surface_ref);
 
 -- Canonical message store. Folds the de-facto tasks-as-history store (user +
 -- assistant turns) and the bot-notification lane (role='system') into one

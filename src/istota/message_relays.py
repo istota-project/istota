@@ -577,13 +577,11 @@ def create_recipient_task(conn, config, relay, *, surface: str, actor_user_id: s
             reply_to_content=context,
         ))
     elif surface == "sms":
-        from .transport.sms import sms_conversation_token
+        from .transport.sms.webhook import record_sms_turn
 
-        task_id = ingest_message(conn, config, IncomingMessage(
-            user_id=actor_user_id, text=text, source_type="sms", surface="sms",
-            channel_token=sms_conversation_token(actor_user_id), output_target="sms",
-            mirror_to_room=False, queue="foreground", reply_to_content=context,
-        ))
+        task_id = record_sms_turn(
+            conn, config, actor_user_id, text, reply_to_content=context,
+        ).task_id
     else:
         raise ValueError("unsupported relay reply surface")
     if task_id is None:

@@ -834,3 +834,51 @@ class TestRoomIdentityUpgrade:
                              ["-c", _istota("init", "--relocate-rooms")], shared_dir=shared)
         assert second.returncode == 0, second.stdout + second.stderr
         assert state() == observed
+
+
+class TestRoomBindingUpgrade:
+    @pytest.mark.parametrize('ambiguous', [False, True])
+    def test_binding_reference_upgrade_guards_singleton(
+        self, volume_upgrade, istota_image, tmp_path, ambiguous,
+    ):
+        """The shipped init upgrades old bindings, or refuses before mutation."""
+        db_dir = tmp_path / 'db'
+        path = upgrade.build_anchor_db(REPO, volume_upgrade.anchor.commit, db_dir / 'istota.db')
+        with sqlite3.connect(path) as conn:
+            assert not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='idx_room_bindings_unique_ref'"
+            ).fetchone(), 'anchor already has the singleton constraint'
+            for token in ('binding-one', 'binding-two'):
+                conn.execute(
+                    "INSERT INTO rooms(token,user_id,origin,name) VALUES (?, 'upgradeuser', 'talk', 'Retained room')",
+                    (token,),
+                )
+                ref = 'same-ref' if ambiguous else token
+                conn.execute(
+                    "INSERT INTO room_bindings(room_token,surface,surface_ref) VALUES (?, 'talk', ?)",
+                    (token, ref),
+                )
+            conn.commit()
+        conn.close()
+        def state():
+            read = _docker_run(
+                istota_image, volume_upgrade.config_dir, db_dir,
+                ['-c', 'python /seed/binding_state.py'], mounts=[(SEED_DIR, '/seed')],
+            )
+            assert read.returncode == 0, read.stdout + read.stderr
+            return json.loads(read.stdout)
+
+        before = state()
+        result = _docker_run(
+            istota_image, volume_upgrade.config_dir, db_dir, ['-c', _istota('init')],
+        )
+        after = state()
+        if ambiguous:
+            assert result.returncode != 0, result.stdout + result.stderr
+            assert 'ambiguous room bindings' in result.stdout + result.stderr
+            assert after == before
+        else:
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert after['unique'], 'upgraded artifact has no unique binding reference index'
+            assert after['count'] == 2
+            assert after['refused'], 'upgraded artifact accepted a duplicate binding reference'

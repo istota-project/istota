@@ -508,6 +508,8 @@ def record_inbound(
     # never rooms. The caller has already registered the room; this turn then
     # takes the room-surface path.
     room_container: bool = False,
+    # Commands and consumed confirmation answers are turns without new tasks.
+    record_only: bool = False,
 ) -> InboundResult:
     """Resolve → echo-check → store user message → ask the gate → create task.
 
@@ -878,6 +880,9 @@ def record_inbound(
         task_user = policy.host
         guest_participant_id = participant_id
         task_prompt = guest_prompt(participants.guest_label(author), task_user, text)
+
+    if record_only:
+        return InboundResult(room_token, None, message_id, "recorded")
 
     # 5. Create the task and stamp the stored row with it.
     task_id = db.create_task(

@@ -195,6 +195,7 @@ def test_requests_rebind_same_destination_and_preserve_approval(database):
 
 def test_ambiguous_binding_refuses_without_writes(database):
     with db.get_db(database) as conn:
+        conn.execute("DROP INDEX idx_room_bindings_unique_ref")
         legacy(conn, "one")
         legacy(conn, "two")
         conn.execute("UPDATE room_bindings SET surface_ref='same'")
@@ -359,9 +360,11 @@ def test_migration_preserves_retention_orphans(database):
         assert [tuple(row) for row in conn.execute("PRAGMA foreign_key_check")] == before
 
 
-def test_existing_vector_index_survives_migration(database):
+def test_existing_vector_index_survives_migration(database, monkeypatch):
     import struct
     sqlite_vec = pytest.importorskip("sqlite_vec")
+    # Other tests may have probed a connection with extension loading disabled.
+    monkeypatch.setattr("istota.memory.search._vec_available", None)
     with db.get_db(database) as conn:
         old = legacy(conn)
         conn.enable_load_extension(True)

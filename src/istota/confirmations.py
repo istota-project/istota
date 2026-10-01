@@ -184,10 +184,12 @@ def cancel_for_conversation(
     """
     from .notification_resolvers import confirmation as confirmation_source
 
+    refs = db._room_ref_tokens(conn, conversation_token, include_surface_refs=False)
+    marks = ", ".join("?" for _ in refs)
     held = conn.execute(
-        "SELECT id FROM tasks WHERE conversation_token = ? AND user_id = ? "
+        f"SELECT id FROM tasks WHERE conversation_token IN ({marks}) AND user_id = ? "
         f"AND status = 'pending_confirmation' AND NOT {db.SIDE_ROUTED_PARK_SQL}",
-        (conversation_token, user_id),
+        (*refs, user_id),
     ).fetchall()
     cancelled = db.cancel_pending_confirmations(conn, conversation_token, user_id)
     for row in held:
