@@ -167,6 +167,8 @@ def _secret_cases():
         ("number value", json.dumps({"name": "numeric", "value": 918273645546372})),
         ("unknown key", json.dumps({**_body(name="other"), "extra": MARKER})),
         ("secret as key", json.dumps({**_body(name="other"), MARKER: "x"})),
+        ("lowercase secret as key", json.dumps({**_body(name="other"), "fixturemarkerlower": "x"})),
+        ("deeply nested", "[" * 60000),
         ("over cap", json.dumps(_body(name="big", value=over_cap))),
         ("not json", MARKER + "{"),
     ]
@@ -192,6 +194,7 @@ async def test_the_secret_never_appears_in_a_response_or_a_log(signed_client, ca
     for label, text in texts:
         assert MARKER not in text, label
         assert "918273645546372" not in text, label
+        assert "fixturemarkerlower" not in text, label
     assert MARKER not in caplog.text
     assert "918273645546372" not in caplog.text
 
@@ -218,6 +221,14 @@ async def test_writes_need_origin_login_and_a_bounded_body(signed_client, client
     big = json.dumps(_body(value="x" * (70 * 1024)))
     response = await signed_client.post(
         BASE, content=big, headers={**ORIGIN, "Content-Type": "application/json"})
+    assert response.status_code == 413
+
+    async def chunked():
+        for _ in range(70):
+            yield b"x" * 1024
+
+    response = await signed_client.post(
+        BASE, content=chunked(), headers={**ORIGIN, "Content-Type": "application/json"})
     assert response.status_code == 413
     signed_client.cookies.clear()
     assert (await signed_client.post(BASE, json=_body(), headers=ORIGIN)).status_code == 401

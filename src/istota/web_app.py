@@ -11412,7 +11412,6 @@ def _credential_settings(username: str, action="list", name="", payload=None):
 # echoes the offending input.
 _CREDENTIAL_BODY_LIMIT = 64 * 1024
 _CREDENTIAL_STORE_FAILED = "the credential could not be stored; see the daemon log"
-_CREDENTIAL_KEY_RE = re.compile(r"[a-z_]{1,32}")
 # Field -> (kind, nullable). Nullable on update means "keep what is stored".
 _CREDENTIAL_CREATE_FIELDS = {
     "name": ("text", False), "value": ("text", False), "username": ("text", False),
@@ -11424,35 +11423,27 @@ _CREDENTIAL_UPDATE_FIELDS = {
     "url": ("text", False), "extra_hosts": ("text", False), "headers": ("text", False),
     "revealable": ("bool", False),
 }
+_CREDENTIAL_KNOWN_KEYS = frozenset(_CREDENTIAL_CREATE_FIELDS) | frozenset(_CREDENTIAL_UPDATE_FIELDS)
 _CREDENTIAL_CREATE_REQUIRED = ("name", "value")
 _CREDENTIAL_UPDATE_REQUIRED = ("url", "extra_hosts", "headers", "revealable")
 
 
 async def _read_credential_body(request: Request) -> object:
-    """The request body as JSON, bounded at 64 KiB. Error details carry no input."""
-    from starlette.requests import ClientDisconnect
+    """The request body as JSON, bounded at 64 KiB. Error details carry no input.
 
+    The bound is `_read_bounded_body`'s, so a body with no declared length is
+    refused too.
+    """
+    from .avatars import AvatarError
     from .local_credentials import LocalCredentialError
 
-    declared = request.headers.get("content-length")
-    if declared is not None:
-        try:
-            length = int(declared)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="invalid Content-Length") from None
-        if length > _CREDENTIAL_BODY_LIMIT:
-            raise HTTPException(status_code=413, detail="the request body is too large")
-    buf = bytearray()
     try:
-        async for chunk in request.stream():
-            buf += chunk
-            if len(buf) > _CREDENTIAL_BODY_LIMIT:
-                raise HTTPException(status_code=413, detail="the request body is too large")
-    except ClientDisconnect:
-        raise HTTPException(status_code=400, detail="the request was interrupted") from None
+        raw = await _read_bounded_body(request, _CREDENTIAL_BODY_LIMIT)
+    except AvatarError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from None
     try:
-        return json.loads(bytes(buf))
-    except (ValueError, UnicodeDecodeError):
+        return json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
         raise LocalCredentialError("", "the request body is not JSON") from None
 
 
@@ -11464,9 +11455,9 @@ def _check_credential_body(body: object, fields: dict, required: tuple) -> dict:
         raise LocalCredentialError("", "the request body must be an object")
     for key in body:
         if key not in fields:
-            # A key is echoed only when it looks like a field name, so a value
-            # sent as a key cannot come back.
-            if isinstance(key, str) and _CREDENTIAL_KEY_RE.fullmatch(key):
+            # Only a known field name is echoed (one route's field sent to the
+            # other), so a value sent as a key cannot come back.
+            if key in _CREDENTIAL_KNOWN_KEYS:
                 raise LocalCredentialError(key, f"unknown field: {key}")
             raise LocalCredentialError("", "unknown field")
     for key in required:

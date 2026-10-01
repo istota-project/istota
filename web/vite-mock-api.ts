@@ -61,12 +61,16 @@ type MockCredential = {
   url?: string;
   username_set?: boolean;
 };
+// The server's `bindings.DEFAULT_HEADERS`, applied when no headers are named.
+const MOCK_DEFAULT_HEADERS = ['authorization', 'private-token', 'x-api-key', 'x-auth-token'];
+// "Allow all existing" is one-time on the server (a KV flag), not "some row is ungranted".
+let mockGrantedExisting = false;
 const mockCredentials: MockCredential[] = [
   {
     name: 'openrouter_key',
     source: 'local',
     hosts: ['openrouter.ai'],
-    headers: ['authorization'],
+    headers: MOCK_DEFAULT_HEADERS,
     revealable: false,
     grant: { scope_mode: 'all', rooms: [], allow_scheduled: false, allow_http: false },
     url: 'openrouter.ai',
@@ -76,7 +80,7 @@ const mockCredentials: MockCredential[] = [
     name: 'portal',
     source: 'vault',
     hosts: ['portal.example.com'],
-    headers: ['authorization'],
+    headers: MOCK_DEFAULT_HEADERS,
     revealable: false,
     grant: null,
   },
@@ -84,7 +88,7 @@ const mockCredentials: MockCredential[] = [
     name: 'forge.github',
     source: 'config',
     hosts: ['github.com', 'api.github.com'],
-    headers: ['authorization'],
+    headers: MOCK_DEFAULT_HEADERS,
     revealable: false,
     grant: null,
   },
@@ -109,7 +113,7 @@ function mockCredentialRoutes(url: string, method: string, body: any): unknown |
     return {
       credentials: mockCredentials,
       rooms: [{ token: 'mock-room', name: 'Personal' }],
-      grant_existing_available: mockCredentials.some((c) => c.grant === null),
+      grant_existing_available: !mockGrantedExisting,
       sandboxed: true,
       can_add: true,
       add_blocked_reason: '',
@@ -129,8 +133,15 @@ function mockCredentialRoutes(url: string, method: string, body: any): unknown |
     if (mockCredentials.some((c) => c.name === name)) {
       return { __status: 400, detail: `a credential named ${name} already exists`, field: 'name' };
     }
-    if (typeof b.value !== 'string' || !b.value.trim() || b.value !== b.value.trim()) {
+    if (typeof b.value !== 'string' || !b.value.trim()) {
       return { __status: 400, detail: 'value is required', field: 'value' };
+    }
+    if (b.value !== b.value.trim()) {
+      return {
+        __status: 400,
+        detail: 'value cannot start or end with whitespace',
+        field: 'value',
+      };
     }
     const hosts = mockCredentialHosts(b.url ?? '', b.extra_hosts ?? '');
     if (b.access && hosts.length === 0) {
@@ -152,7 +163,7 @@ function mockCredentialRoutes(url: string, method: string, body: any): unknown |
       name,
       source: 'local',
       hosts,
-      headers: ['authorization'],
+      headers: MOCK_DEFAULT_HEADERS,
       revealable: !!b.revealable,
       grant,
       url: b.url ?? '',
@@ -208,6 +219,7 @@ function mockCredentialRoutes(url: string, method: string, body: any): unknown |
         count += 1;
       }
     }
+    mockGrantedExisting = true;
     return { ok: true, count };
   }
   const value = url.match(/^\/istota\/api\/settings\/credentials\/([^/]+)\/value$/);
@@ -225,6 +237,7 @@ function mockCredentialRoutes(url: string, method: string, body: any): unknown |
     const row = mockCredentials.find((c) => c.name === decodeURIComponent(grant[1]));
     if (!row) return { __status: 404, detail: 'not found' };
     if (method === 'PUT') {
+      if (!row.hosts.length) return { __status: 400, detail: 'credential is not bound' };
       const b = (body ?? {}) as Partial<MockGrant>;
       row.grant = {
         scope_mode: b.scope_mode ?? 'all',
