@@ -101,6 +101,34 @@ class TestClassificationGate:
         for verb in ["memory append", "memory remove", "memory replace"]:
             assert verb not in section
 
+    def test_the_group_fact_branch_is_present(self):
+        """The fourth branch (groups spec, classification gate): a group fact
+        routes to the group store by name, through either of its two CLIs."""
+        gate = _section("### Classify before writing")
+        assert "**Group fact**" in gate
+        assert "memory append --group" in gate
+        assert "kv set --group" in gate
+
+    def test_the_group_branch_carries_the_restrictive_default(self):
+        """A group store is read by every current and future member, so the
+        branch has to say it is not the default, that doubt goes to USER.md,
+        and that nothing is promoted into a group on the model's own judgment.
+        Scoped to the gate, where the model reads while deciding."""
+        gate = _section("### Classify before writing")
+        branch = gate[gate.index("**Group fact**"):]
+        branch = branch[:branch.index("\n\n")]
+        assert "not the default" in branch
+        assert "future member" in branch
+        assert "it goes in USER.md" in branch
+        assert "on your own judgment" in branch
+
+    def test_the_group_section_states_the_charter_and_the_fence(self):
+        section = _section("### Group memory")
+        assert "present and future" in section
+        assert "When in doubt it goes in USER.md" in section
+        assert "untrusted" in section
+        assert "not a member of group" in section
+
     def test_routes_to_both_cli_targets(self):
         body = _body()
         assert "add-fact" in body

@@ -245,3 +245,33 @@ class TestDirectWrites:
             assert db.kv_get(conn, "alice", "ns", "k") is None
         assert json.loads(row["value"]) == ["c"]
         assert row["written_by"] == "alice"
+
+
+class TestTheSkillDoc:
+    """The kv skill.md says what --group does (multiplayer D22: "the skill doc
+    says so" about the fenced values). Scoped to the group section, since
+    `--shared` and the set ops are named elsewhere in the file too."""
+
+    @staticmethod
+    def _section() -> str:
+        from pathlib import Path
+
+        doc = (
+            Path(__file__).parent.parent / "src" / "istota" / "skills" / "kv" / "skill.md"
+        ).read_text(encoding="utf-8")
+        start = doc.index("## Group store")
+        rest = doc[start:]
+        end = rest.find("\n## ", 1)
+        return rest if end == -1 else rest[:end]
+
+    def test_it_documents_the_fenced_reads(self):
+        section = self._section()
+        assert "untrusted" in section
+        assert "written_by" in section
+        assert "set-members" in section
+
+    def test_it_documents_the_gate_and_the_set_ops(self):
+        section = self._section()
+        assert "not a member of group" in section
+        assert "set-add" in section
+        assert "--group` and `--shared` together is an error" in section
