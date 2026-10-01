@@ -279,7 +279,7 @@ def test_cli_mail_refuses_changed_recipient_snapshot(config, identity, monkeypat
 def test_sign_in_code_is_for_the_users_pending_request(config, identity, invoke):
     """Operator recovery when mail is down (ISSUE-574): it prints a code, never a link."""
     policy = web_auth.policy_from_config(config)
-    request_id = web_auth.start_sign_in(config.db_path, policy, identity.email, "s" * 32)
+    web_auth.start_sign_in(config.db_path, policy, identity.email, "s" * 32)
     code, out, err = invoke("sign-in-code", "alice")
     assert (code, err) == (0, "") and "state=updated" in out and "https://" not in out
     assert "requested_at=" in out and "pending=1" in out

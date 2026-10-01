@@ -218,7 +218,7 @@ def test_operator_code_replaces_the_emailed_one_for_the_newest_request(db_path, 
 
 
 def test_operator_code_works_when_mail_never_went_out(db_path, identity, policy):
-    request_id = auth.start_sign_in(db_path, policy, "alice@example.com", SECRET)
+    auth.start_sign_in(db_path, policy, "alice@example.com", SECRET)
     code = auth.mint_sign_in_code(db_path, "alice").code
     assert auth.redeem_sign_in_code(db_path, SECRET, code)[0] == "ok"
 
