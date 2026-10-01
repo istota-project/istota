@@ -158,7 +158,7 @@ class TestSharedTalkRoomVisibleToAllMembers:
             db.register_room(conn, "r77", "erin", origin="talk", name="#team")
             db.add_room_binding(conn, "r77", "talk", "r77")
             # dave later sends into the already-registered room.
-            room_token, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn,
                 web_config,
                 surface="talk",
@@ -167,7 +167,11 @@ class TestSharedTalkRoomVisibleToAllMembers:
                 text="hi",
                 source_type="talk",
                 channel_name="#team",
+                # Two members make the room shared (multiplayer Stage 7), so
+                # only a turn addressed to the bot gets a task in it.
+                addressed_to_bot=True,
             )
+            room_token, task_id = _inbound.room_token, _inbound.task_id
             assert room_token == "r77"
             assert task_id is not None
 

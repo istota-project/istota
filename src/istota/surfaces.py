@@ -11,7 +11,12 @@ literals:
    inbound message registers the room, binds the surface and adds membership
    (talk, web). ``guest`` — an inbound message can join an existing room's
    transcript but never mints one (email); ISSUE-136's "existence, never
-   creation" rule is this value. ``None`` — never a room turn at all.
+   creation" rule is this value. ``None`` — never a room turn at all. This is
+   the *surface's* answer. A room container on email or WhatsApp (a thread with
+   two or more humans besides the bot, a group) is a ``member`` for that room
+   alone (multiplayer D10, overriding ``room-surface-model.md`` for that case),
+   answered by `is_room_member_for` rather than by a change to the record, so
+   every other conversation on the surface keeps its answer.
 2. **Does this surface have a view of the room, so a turn written into the room
    is already in front of its users?** ``room_view``, mirroring
    ``TransportCapabilities.room_view``: ``canonical`` for a view rendered from
@@ -239,6 +244,31 @@ def is_room_member(surface: object) -> bool:
     so.
     """
     return _facts(surface).room_role == "member"
+
+
+#: Surfaces whose conversations are not rooms in general, but one container of
+#: which can be (multiplayer D10): a WhatsApp group, and an email thread with
+#: two or more humans besides the bot. Every other conversation on them — a
+#: 1:1 WhatsApp chat, a mail with one correspondent — keeps the surface's own
+#: answer above, so the per-surface record does not change.
+ROOM_CONTAINER_SURFACES = frozenset({"email", "whatsapp"})
+
+
+def is_room_member_for(surface: object, *, room_container: bool) -> bool:
+    """`is_room_member`, answered for one conversation rather than the surface.
+
+    D10's answer is per room: a container its transport registered as a room
+    (`transport/whatsapp/groups.py`, `transport/email/threads.py`) owns that
+    room as a member surface would, on a surface whose record says ``None``
+    (WhatsApp) or ``guest`` (email). ``room_container`` is that transport's
+    statement; it promotes only a surface listed above, so a flag from any
+    other surface cannot make one of its turns a room turn.
+    """
+    if is_room_member(surface):
+        return True
+    return bool(room_container) and isinstance(surface, str) and (
+        surface in ROOM_CONTAINER_SURFACES
+    )
 
 
 def is_room_view(surface: object) -> bool:

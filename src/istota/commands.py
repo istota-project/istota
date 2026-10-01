@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone, tzinfo
 
 from typing import TYPE_CHECKING
 
-from . import db
+from . import db, room_policy
 from .brain import (
     Brain,
     EFFORT_LEVELS,
@@ -1303,6 +1303,9 @@ async def cmd_brain(ctx: CommandContext):
 
     if not config.is_admin(ctx.user_id):
         return "Only an admin can change this room's brain. `!brain` shows what it runs."
+    refusal = room_policy.settings_refusal(conn, token, ctx.user_id)
+    if refusal:
+        return refusal
 
     # `default` is checked ahead of the allowlist deliberately. Clearing is a
     # narrowing, so it needs no entry — and emptying `[brain] room_selectable`
@@ -1438,6 +1441,11 @@ async def cmd_room(ctx: CommandContext):
         return _describe_room_default(room.model, room.effort) + "\n" + \
             _describe_room_brain(config, room, ctx.surface)
 
+    if sub in ("model", "effort"):
+        refusal = room_policy.settings_refusal(conn, token, ctx.user_id)
+        if refusal:
+            return refusal
+
     if sub == "model":
         alias = rest.lower()
         # Resolved through the *room's* brain. A room pinned to a brain in
@@ -1501,10 +1509,173 @@ async def cmd_room(ctx: CommandContext):
         db.set_room_effort(conn, token, level)
         return f"Room effort set to `{level}`."
 
+    if sub == "host":
+        return _room_host(conn, token, ctx.user_id)
+
+    if sub == "guests":
+        return _room_guests(conn, token, ctx.user_id, rest.lower())
+
+    if sub == "group":
+        return _room_group(conn, room, ctx.user_id, rest)
+
+    if sub in ("share", "unshare"):
+        return _room_share(config, conn, room, ctx.user_id, sub, rest.lower())
+
     return (
-        "Usage: `!room` (show), `!room model <alias>`, `!room effort <level>`. "
+        "Usage: `!room` (show), `!room model <alias>`, `!room effort <level>`, "
+        "`!room host`, `!room guests <off|held|direct>`, "
+        "`!room group [<id>|none]`, "
+        "`!room share [<scope>|all|none]`, `!room unshare <scope>`. "
         "Use `default` to clear."
     )
+
+
+def _room_share(config, conn, room, user_id: str, sub: str, arg: str) -> str:
+    """`!room share` / `!room unshare`: the caller's own grants in this room.
+
+    A grant means answers using that scope may land in front of everyone who
+    reads the room (speech gate draft B3). It is the caller's alone: the command
+    takes no user id, and a grant never reaches a guest's turn, which runs at
+    room-safe reach whatever the host granted (multiplayer D2).
+    """
+    from . import room_policy, room_scopes
+    from .skills._loader import load_skill_index
+
+    if room.side_of:
+        return "A side room is private to you; there is nothing to share here."
+    if not room_policy.host_present(conn, room.token, user_id):
+        return "Only a member of this room can share data in it."
+    index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+    scopes = room_scopes.scope_names(index)
+    granted = room_scopes.granted_scopes(conn, room.token, user_id)
+
+    if sub == "share" and not arg:
+        shown = [s for s in scopes if s in granted]
+        withheld = [s for s in scopes if s not in granted]
+        return (
+            f"Shared by you here: {', '.join(shown) or 'nothing'}.\n"
+            f"Withheld: {', '.join(withheld) or 'nothing'}.\n"
+            "`!room share <scope>` grants one, `!room unshare <scope>` takes it "
+            "back, `!room share all|none` does every one." + _guest_note(config, conn, room)
+        )
+    if sub == "unshare" and arg in ("", "all"):
+        if not arg:
+            return "Usage: `!room unshare <scope>`, or `!room unshare all`."
+        arg, sub = "none", "share"
+    if sub == "share" and arg == "none":
+        room_scopes.revoke_scopes(conn, room.token, user_id)
+        return "Nothing of yours is shared in this room now."
+    if sub == "share" and arg == "all":
+        room_scopes.grant_scopes(conn, room.token, user_id, scopes)
+        return "Everything of yours is shared in this room now." + _share_note(config, conn, room)
+    if arg not in scopes:
+        return (
+            f"`{arg}` is not a scope. Scopes: {', '.join(scopes)}."
+        )
+    if sub == "unshare":
+        room_scopes.revoke_scopes(conn, room.token, user_id, [arg])
+        return f"`{arg}` is withheld in this room again."
+    room_scopes.grant_scopes(conn, room.token, user_id, [arg])
+    return (
+        f"`{arg}` is shared in this room: everyone who reads it sees answers "
+        "that use it." + _share_note(config, conn, room)
+    )
+
+
+def _share_note(config, conn, room) -> str:
+    guest = _guest_note(config, conn, room)
+    if guest:
+        return guest
+    if db.room_is_shared(conn, room.token):
+        return ""
+    return " The room is private right now, so the grant applies once someone else joins."
+
+
+def _guest_note(config, conn, room) -> str:
+    """While a guest reads the room every grant is ignored (multiplayer D3).
+
+    Not said where the disclosure policy is ``off``: nothing is withheld from
+    a member's turn there, guest or no guest.
+    """
+    from . import room_scopes
+
+    state = room_scopes.grant_state(
+        conn, room.token, policy=config.rooms.shared_room_data_policy,
+    )
+    if state != room_scopes.GRANTS_GUESTS_PRESENT:
+        return ""
+    return (
+        "\nA guest reads this room, so grants are ignored here until no guest is "
+        "present: answers that need your data come to your side room instead."
+    )
+
+
+def _room_host(conn, token: str, user_id: str) -> str:
+    """`!room host`: claim a room that has lost its host (multiplayer D14)."""
+    from . import room_policy
+
+    outcome = room_policy.claim_host(conn, token, user_id)
+    if outcome == "claimed":
+        return "You are now this room's host. Guests' turns run on your behalf."
+    if outcome == "already_host":
+        return "You are this room's host."
+    if outcome == "held_by_another":
+        host = room_policy.get_policy(conn, token).host_user_id
+        return f"This room's host is {host}. A host is never replaced while present."
+    return "Only a member of this room can host it."
+
+
+def _room_group(conn, room, user_id: str, value: str) -> str:
+    """`!room group [<id>|none]`: the group this room is linked to (Stage 27).
+
+    Any member may read the link; setting it is the host's, to one of the
+    host's own groups (`room_policy.group_link_refusal`, which the web PATCH
+    asks too).
+    """
+    from . import room_policy
+
+    value = value.strip()
+    if room.side_of:
+        return "A side room has no group link; link the room it belongs to instead."
+    if not value:
+        if not room.group_id:
+            return (
+                "This room is not linked to a group. `!room group <id>` links it, "
+                "so members' turns here carry that group's memory."
+            )
+        return (
+            f"This room is linked to group `{room.group_id}`. Its memory loads here "
+            "only while everyone in the room is a member and no guest is present."
+        )
+    group_id = None if value.lower() == "none" else value
+    refusal = room_policy.group_link_refusal(conn, room.token, user_id, group_id)
+    if refusal:
+        return refusal
+    db.set_room_group(conn, room.token, group_id)
+    if group_id is None:
+        return "This room is no longer linked to a group."
+    return (
+        f"This room is linked to group `{group_id}`. Its memory loads here only "
+        "while everyone in the room is a member and no guest is present."
+    )
+
+
+def _room_guests(conn, token: str, user_id: str, value: str) -> str:
+    """`!room guests <off|held|direct>`: how guests are answered. Host only."""
+    from . import room_policy
+
+    policy = room_policy.ensure_policy(conn, token)
+    if policy is None:
+        return "This room has no guest policy."
+    if not value:
+        return f"Guest replies here: `{policy.guest_reply}`."
+    refusal = room_policy.guest_reply_refusal(conn, token, user_id)
+    if refusal:
+        return refusal
+    if value not in room_policy.GUEST_REPLY_VALUES:
+        return "Usage: `!room guests <off|held|direct>`."
+    room_policy.set_guest_reply(conn, token, value)
+    return f"Guest replies here are now `{value}`."
 
 
 @command("status", "Show your running/pending tasks and system status")
@@ -2411,7 +2582,8 @@ async def cmd_check(ctx: CommandContext):
 # =============================================================================
 
 _EXPORT_META_RE = re.compile(
-    r"^(?:<!--|#)\s*export:token=([^,]+),last_id=(\d+),updated=([^\s>]+)"
+    r"^(?:<!--|#)\s*export:token=([^,]+),last_id=(\d+)"
+    r"(?:,last_msg_id=(\d+))?,updated=([^\s>]+)"
 )
 
 
@@ -2420,19 +2592,51 @@ def _parse_export_metadata(first_line: str) -> dict | None:
     m = _EXPORT_META_RE.match(first_line.strip())
     if not m:
         return None
-    return {
+    meta = {
         "token": m.group(1),
         "last_id": int(m.group(2)),
-        "updated": m.group(3),
+        "updated": m.group(4),
     }
+    if m.group(3) is not None:
+        meta["last_msg_id"] = int(m.group(3))
+    return meta
 
 
-def _build_export_metadata(token: str, last_id: int, fmt: str) -> str:
-    """Build the metadata header line."""
+def _build_export_metadata(
+    token: str, last_id: int, fmt: str, last_msg_id: int | None = None,
+) -> str:
+    """Build the metadata header line.
+
+    ``last_id`` is the highest task id written, ``last_msg_id`` the highest
+    `messages.id`, present when the history came from the `messages` store.
+    """
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cursor = f"last_id={last_id}"
+    if last_msg_id is not None:
+        cursor += f",last_msg_id={last_msg_id}"
     if fmt == "markdown":
-        return f"<!-- export:token={token},last_id={last_id},updated={ts} -->"
-    return f"# export:token={token},last_id={last_id},updated={ts}"
+        return f"<!-- export:token={token},{cursor},updated={ts} -->"
+    return f"# export:token={token},{cursor},updated={ts}"
+
+
+def _max_message_id(messages) -> int | None:
+    ids = [m.message_id for m in messages if m.message_id is not None]
+    return max(ids) if ids else None
+
+
+def _turns_after_cursor(messages, meta: dict) -> list:
+    """The turns an incremental export has not written yet.
+
+    The message-id cursor covers answered and unanswered turns alike. A file
+    written before it existed, or history served from the `tasks` fallback,
+    has only the task-id cursor, under which every unanswered turn reads as id
+    0 and is skipped. A file carrying the old header gains the message cursor
+    on its next append, so that gap is one append wide.
+    """
+    last_msg_id = meta.get("last_msg_id")
+    if last_msg_id is not None and all(m.message_id is not None for m in messages):
+        return [m for m in messages if m.message_id > last_msg_id]
+    return [m for m in messages if m.id > meta["last_id"]]
 
 
 # Upper bound on turns pulled for an export. A conversation rarely approaches
@@ -2465,7 +2669,11 @@ def _format_history_markdown(
         ts = _format_db_timestamp(m.created_at, tz)
         if m.prompt and m.prompt.strip():
             lines.append("")
-            lines.append(f"**{m.user_id or 'User'}** — {ts}")
+            # External sender first, as `context._speaker_label` has it: a room
+            # guest's or a correspondent's turn carries no user of its own, and
+            # the row's user would otherwise name the account it reached.
+            speaker = getattr(m, "external_sender", None) or m.user_id or "User"
+            lines.append(f"**{speaker}** — {ts}")
             lines.append(m.prompt.strip())
         if m.result and m.result.strip():
             lines.append("")
@@ -2546,19 +2754,24 @@ async def cmd_export(ctx: CommandContext):
             pass
 
     if existing_meta and existing_meta["token"] == conversation_token:
-        # Incremental export — only turns newer than the last exported task id.
-        since_id = existing_meta["last_id"]
-        new_messages = [m for m in messages if m.id > since_id]
+        # Incremental export — only turns newer than the stored cursor.
+        new_messages = _turns_after_cursor(messages, existing_meta)
         if not new_messages:
             return "No new messages since last export."
 
-        last_id = new_messages[-1].id
+        last_id = max(existing_meta["last_id"], *(m.id for m in new_messages))
+        # A batch served from the `tasks` fallback carries no message ids, so
+        # the message cursor is dropped rather than kept stale: carried
+        # forward, the next `messages`-path append would rewrite this batch.
+        last_msg_id = _max_message_id(new_messages)
         new_content = render(new_messages, bot_name, tz=tz)
 
         existing_content = export_path.read_text()
         # Replace first line (metadata) with the updated one, then append.
         rest = existing_content.split("\n", 1)[1] if "\n" in existing_content else ""
-        new_meta = _build_export_metadata(conversation_token, last_id, fmt)
+        new_meta = _build_export_metadata(
+            conversation_token, last_id, fmt, last_msg_id,
+        )
         export_path.write_text(new_meta + "\n" + rest.rstrip("\n") + "\n" + new_content + "\n")
 
         rel_path = f"/{export_path.relative_to(mount)}"
@@ -2568,14 +2781,18 @@ async def cmd_export(ctx: CommandContext):
     if not messages:
         return "No messages to export."
 
-    last_id = messages[-1].id
-    title = await resolve_room_name(ctx, conversation_token)
+    # Not `messages[-1].id`: an unanswered turn carries id 0, and the
+    # incremental export keys on the highest task id already written.
+    last_id = max(m.id for m in messages)
+    title =await resolve_room_name(ctx, conversation_token)
 
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
     if tz:
         now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
 
-    meta_line = _build_export_metadata(conversation_token, last_id, fmt)
+    meta_line = _build_export_metadata(
+        conversation_token, last_id, fmt, _max_message_id(messages),
+    )
 
     if format_md:
         header_parts = [meta_line, "", f"# {title}", "", f"**Exported:** {now_str}", "", "---"]
@@ -2741,6 +2958,10 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
     the room's history fallback, its memory namespace, its sleep cycle. A bare
     ``!retry`` typed in the origin room can reach such a task, since
     ``_resolve_retry_target`` picks the newest failed task for the token.
+
+    ``guest_participant_id`` and ``audience`` go with it (multiplayer D2/D3):
+    the prompt is a guest's fenced words, and without the guest a retry would
+    run them as the host's own turn, at the host's grants.
     """
     return db.create_task(
         conn,
@@ -2751,6 +2972,8 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
         parent_task_id=original.id,
         is_group_chat=original.is_group_chat,
         withheld_from_room=original.withheld_from_room,
+        guest_participant_id=original.guest_participant_id,
+        audience=original.audience,
         output_target=original.output_target,
         talk_delivery_token=original.talk_delivery_token,
         model=original.model,
@@ -2794,8 +3017,13 @@ def _record_retry_user_turn(
                 conn, token, role="user", body=original.prompt,
                 origin_surface=surface, task_id=task_id,
                 # The retry re-asks the original question, so it is the original
-                # asker's turn — not the reader's, in a shared room.
-                author_user_id=original.user_id,
+                # asker's turn — not the reader's, in a shared room. A guest's
+                # turn is the guest's, never the host's the task runs as.
+                author_user_id=(
+                    None if original.guest_participant_id is not None
+                    else original.user_id
+                ),
+                author_participant_id=original.guest_participant_id,
             )
     except Exception:
         logger.debug("retry transcript user-row write failed", exc_info=True)

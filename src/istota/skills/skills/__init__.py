@@ -44,9 +44,13 @@ def _load_context():
     skill_index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
 
     # Instance + per-user disabled, plus the capability gate (browse→browser,
-    # devbox→devbox, …). Shared with the executor so `skills list` / `skills
-    # show` agree with the menu the model was shown.
-    disabled = effective_disabled_skills(config, user_id, skill_index)
+    # devbox→devbox, …) and what the calling task's room withholds. Shared with
+    # the executor so `skills list` / `skills show` agree with the menu the
+    # model was shown.
+    withheld = _room_withheld(config, user_id, skill_index)
+    disabled = effective_disabled_skills(
+        config, user_id, skill_index, withheld_scopes=withheld,
+    )
 
     is_admin = config.is_admin(user_id)
 
@@ -61,9 +65,56 @@ def _load_context():
         "user_id": user_id,
         "skill_index": skill_index,
         "disabled": disabled,
+        "withheld": withheld,
         "is_admin": is_admin,
         "enabled_features": enabled_features,
     }
+
+
+def _room_withheld(config, user_id: str, skill_index) -> frozenset[str]:
+    """What the calling task's room withholds from it (seam 6, multiplayer).
+
+    The executor's seams are what enforce a shared room's restriction; this is
+    the subprocess backstop, so a skill body or an overlay the room withholds
+    is not handed back by `skills show` either. Two readings, unioned: the set
+    the executor computed for the task (`ISTOTA_WITHHELD_SCOPES`, put in the
+    proxy's environment and never the model's), and a fresh derivation from
+    the task's own row, through the same `room_scopes.withheld_for_task` the
+    executor calls. The row rather than a room token, because only the row
+    says the turn is a guest's, and a guest's turn withholds everything
+    whatever the room's grants say. Fresh, so a grant revoked mid-task takes
+    effect here at once.
+
+    No task (an operator's shell, the heartbeat's id 0) reads the environment
+    alone. A database that cannot be read withholds every scope.
+    """
+    from pathlib import Path
+
+    from istota import db, room_scopes
+    from istota.skill_host_paths import WITHHELD_SCOPES_VAR
+
+    raw = os.environ.get(WITHHELD_SCOPES_VAR, "")
+    withheld = {part.strip() for part in raw.split(",") if part.strip()}
+    try:
+        task_id = int(os.environ.get("ISTOTA_TASK_ID", "") or 0)
+    except ValueError:
+        task_id = 0
+    if task_id <= 0:
+        return frozenset(withheld)
+    try:
+        if not Path(config.db_path).exists():
+            return frozenset(withheld)
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_id)
+            if task is not None and task.user_id == user_id:
+                withheld |= room_scopes.withheld_for_task(
+                    conn, task,
+                    policy=config.rooms.shared_room_data_policy,
+                    skill_index=skill_index,
+                )
+    except Exception:
+        withheld |= room_scopes.withheld_scopes(skill_index, frozenset())
+    return frozenset(withheld)
 
 
 def _guard_skill(name: str, ctx: dict) -> str | None:
@@ -157,7 +208,12 @@ def cmd_show(args) -> None:
 
     config = ctx["config"]
     skill_index = ctx["skill_index"]
-    overlay_dir, overlay_fd = _overlay_dir(config, ctx["user_id"])
+    # An overlay is the user's memory; a room that withholds memory gets the
+    # bare body, as the executor's eager path does.
+    if "memory" in ctx["withheld"]:
+        overlay_dir, overlay_fd = None, None
+    else:
+        overlay_dir, overlay_fd = _overlay_dir(config, ctx["user_id"])
     try:
         body = load_skills(
             config.skills_dir,
@@ -291,6 +347,9 @@ def _resolve_overlay_dir(ctx):
     go through the descriptor.
     """
     config = ctx["config"]
+    if "memory" in ctx["withheld"]:
+        # Overlays are memory; the room this task runs in withholds it.
+        _output_error("memory_withheld")
     if not config.has_workspace:
         return None, None
     d, fd = _overlay_dir(config, ctx["user_id"])

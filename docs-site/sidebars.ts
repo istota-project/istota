@@ -37,6 +37,10 @@ const sidebars: SidebarsConfig = {
       items: [
         'features/skills',
         'features/memory',
+        'features/groups',
+        'features/shared-rooms',
+        'features/side-rooms',
+        'features/room-veto',
         'features/briefings',
         'features/scheduling',
         'features/heartbeat',

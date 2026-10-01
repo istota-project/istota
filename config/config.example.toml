@@ -924,6 +924,30 @@ previous_tasks_count = 3
 # Talk API-based context shows all participants' messages, not just bot interactions
 talk_context_limit = 100
 
+[speech_gate]
+# Whether the bot replies to a turn nobody addressed to it, in a room with more
+# than one human. A direct conversation is never gated, and an explicit mention
+# always gets a reply. "mention" replies only when mentioned (Talk's rule);
+# "classifier" lets a cheap model decide and does not reply if it fails;
+# "off" replies to every turn. Every turn is recorded whichever mode is set.
+mode = "mention"
+# Classifier model. A role alias ("fast"), resolved per brain namespace.
+model = "fast"
+# Transcript turns the classifier sees, and the per-turn character cap
+window_messages = 8
+max_message_chars = 400
+timeout_seconds = 8.0
+# Days to keep the speech_gate_decisions audit rows (0 keeps them forever)
+decision_retention_days = 30
+
+[rooms]
+# What a task may read in a room more than one human reads. "restrict" gives it
+# only the scopes its sender granted in that room (skills marked safe, and the
+# room's own CHANNEL.md, are always available); the sender's files, memory and
+# private skills are withheld until they share them. "off" gives a shared-room
+# task everything a private one gets. Any other value restricts.
+shared_room_data_policy = "restrict"
+
 [money]
 # Whether the portfolio module may look up ticker metadata from a third-party
 # quote API when classifying a newly imported symbol. The request carries the

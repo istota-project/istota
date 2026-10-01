@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from .. import db
+    from ..speech_gate import GateDecision
 
 # referenceId prefix stamped on a web-origin user turn the web process posted
 # into Talk *as the user* (post-as-user mirroring). The Talk poller drops any
@@ -29,13 +30,34 @@ if TYPE_CHECKING:
 WEBMIRROR_REF_PREFIX = "istota:webmirror:"
 
 
+@dataclass(frozen=True)
+class ParticipantRef:
+    """Who wrote an inbound turn, as the surface identifies them.
+
+    Identity only; whether they are a principal, a guest or an agent is decided
+    in core (`transport.participants.classify`), because the answer depends on
+    room membership, which no surface knows. ``user_id`` is set only when the
+    surface resolved the sender to an istota user. ``is_bot`` is the surface's
+    own report of a bot actor (a Talk ``bots`` actor); the bot itself is
+    recognised in core whatever the surface says. ``display_name`` is raw
+    surface text and is sanitized before it reaches a label.
+    """
+
+    surface: str
+    surface_ref: str
+    user_id: str | None = None
+    display_name: str | None = None
+    is_bot: bool = False
+
+
 @dataclass
 class IncomingMessage:
     """A surface-normalized inbound message, ready to become a task.
 
-    A transport's ``poll()`` yields one of these per message that SHOULD create
-    a task. Messages the transport handles internally (commands, confirmation
-    replies, mentions it chose to ignore) are not emitted.
+    A transport's ``poll()`` yields one of these per conversational message.
+    Messages the transport handles internally (commands, confirmation replies)
+    are not emitted. Whether one gets a task is the speech gate's decision,
+    made in ``record_inbound`` after the turn is stored.
 
     The field-to-column mapping is the contract ``ingest_message`` relies on:
     ``channel_token`` → ``Task.conversation_token``, ``delivery_token`` →
@@ -55,6 +77,29 @@ class IncomingMessage:
     reply_to_content: str | None = None
     attachments: list[str] = field(default_factory=list)
     is_group_chat: bool = False
+    # Whether the surface detected an explicit address to the bot: a Talk
+    # @mention, the bot named in a web message, the bot in an email's To line.
+    # Unset means no. A direct conversation is answered by the gate's first
+    # rung whatever this says, so the default only matters in a group.
+    addressed_to_bot: bool = False
+    # The speech gate's classifier answer, obtained by `ingest.classify_ahead`
+    # before the caller opened its write transaction. None means not asked;
+    # read only when the gate reaches its classifier rung.
+    classified: "GateDecision | None" = None
+    # Who wrote the turn, when that is not simply ``user_id`` speaking for
+    # themselves: a guest or a bot in a Talk room. None means ``user_id`` is the
+    # author, which is every surface's answer for its own users. A ref with no
+    # ``user_id`` is recorded, and answered only as the room's host in emissary
+    # mode (multiplayer D2); ``user_id`` above is then empty.
+    author: ParticipantRef | None = None
+    # The text as typed is a `!command`. A surface dispatches its own users'
+    # commands before ingest; for a guest, whose commands are ignored, this is
+    # what keeps one from becoming a task instead.
+    is_command: bool = False
+    # The message's container is a room on a surface that owns none in
+    # general: an email thread room (multiplayer D6, D10). The transport has
+    # already registered it; see `record_inbound`'s parameter of the same name.
+    room_container: bool = False
     output_target: str | None = None  # "talk"|"email"|"ntfy"|comma list|None
     model: str | None = None          # !model override (canonical id)
     effort: str | None = None

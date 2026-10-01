@@ -143,10 +143,11 @@ def _email_turn(conn, config, token, prompt, sender):
     """
     from istota.transport.ingest import record_inbound
 
-    _room, tid = record_inbound(
+    _inbound = record_inbound(
         conn, config, surface="email", surface_ref=token,
         user_id="alice", text=prompt, sender_address=sender,
     )
+    _room, tid = _inbound.room_token, _inbound.task_id
     db.mark_email_processed(
         conn, f"uid-{tid}", sender, subject="Re: Scheduling",
         user_id="alice", task_id=tid, routing_method="thread_match",
@@ -158,10 +159,11 @@ def _web_turn(conn, config, token, text):
     """A room holding one ordinary web turn, through the same choke point."""
     from istota.transport.ingest import record_inbound
 
-    _room, tid = record_inbound(
+    _inbound = record_inbound(
         conn, config, surface="web", surface_ref=token,
         user_id="alice", text=text,
     )
+    _room, tid = _inbound.room_token, _inbound.task_id
     return tid
 
 

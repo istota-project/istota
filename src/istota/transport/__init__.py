@@ -15,11 +15,18 @@ from ._types import (
     WEBMIRROR_REF_PREFIX,
     DeliveryOptions,
     IncomingMessage,
+    ParticipantRef,
     Transport,
     TransportCapabilities,
 )
 from .email import EmailTransport
-from .ingest import display_attachment_names, ingest_message, record_inbound
+from .ingest import (
+    InboundResult,
+    classify_ahead,
+    display_attachment_names,
+    ingest_message,
+    record_inbound,
+)
 from .registry import TransportRegistry, make_registry
 from .routing import (
     Destination,
@@ -38,12 +45,15 @@ from .web import WebTransport
 __all__ = [
     "WEBMIRROR_REF_PREFIX",
     "IncomingMessage",
+    "ParticipantRef",
     "Transport",
     "TransportCapabilities",
     "DeliveryOptions",
     "TransportRegistry",
     "make_registry",
     "display_attachment_names",
+    "InboundResult",
+    "classify_ahead",
     "ingest_message",
     "record_inbound",
     "Destination",

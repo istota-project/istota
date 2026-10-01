@@ -530,6 +530,12 @@ def gather_day_data(
     since_str = since.replace(tzinfo=None).isoformat()
 
     tasks = db.get_completed_tasks_since(conn, user_id, since_str, after_task_id)
+    # A task in front of more than one human is extracted into nobody's
+    # personal memory (multiplayer: shared room -> CHANNEL.md only). Its turns
+    # name the other people in the room, and the principal repeating a
+    # co-participant's fact does not make it theirs to keep; the channel sleep
+    # cycle is that room's one writer.
+    tasks = [t for t in tasks if not t.is_group_chat]
 
     if not tasks:
         return ""

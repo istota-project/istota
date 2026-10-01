@@ -3781,11 +3781,16 @@ def _room_events_batch(
         rows = db.list_room_events_since(
             conn, username, since_id=since_id, limit=want + 1,
         )
+        undeletable = _undeletable_message_ids(
+            conn, username, [(r["msg_id"], r["room_token"]) for r in rows[:want]],
+        ) if len(rows) <= want else set()
     truncated = len(rows) > want
     events: list[dict] = []
     total = 0
     for r in rows[:want]:
         d = _cross_room_message_dict(r, username)
+        if r["msg_id"] in undeletable:
+            d["deletable"] = False
         total += len(json.dumps(d))
         if total > max_bytes:
             truncated = True
@@ -3874,6 +3879,7 @@ def _room_snapshot(username: str) -> dict[str, dict]:
                 "name": db.room_display_name(r, handle),
                 "origin": r.origin,
                 "talk_token": talk_refs.get(r.token),
+                "side_of": r.side_of,
                 "model": r.model,
                 "effort": r.effort,
                 # The room's standing brain pin, beside the model and effort it
@@ -5456,6 +5462,10 @@ def _chat_list_rooms(username: str) -> list[dict]:
             d["name"] = db.room_display_name(r, handle)
             d["origin"] = r.origin
             d["talk_token"] = talk_refs.get(r.token)
+            # The shared room a side room belongs to (multiplayer D4), so the
+            # client can link the two; None for every other room.
+            d["side_of"] = r.side_of
+            d.update(_room_sharing(conn, r, username))
             # Standing per-room model/effort default lives on the shared registry
             # room (canonical), not the per-user web handle.
             d["model"] = r.model
@@ -5536,9 +5546,9 @@ def _chat_answer_confirmation(
         # merely wasteful: the first attempt consumed the question, so a second
         # gate parked in between would be the single open one and get approved
         # on a "yes" the user typed at a different question entirely. The
-        # ordinary send path gets this from `_is_own_replay`, which cannot see
-        # this exchange — its lookup inner-joins `tasks` and these rows carry no
-        # task id.
+        # ordinary send path's `_is_own_replay` sees this row but only as a
+        # replayed turn with no task; it cannot return the ack, which is what a
+        # retried answer has to get back.
         prior = db.find_confirmation_exchange(conn, token, client_msg_id)
         if prior is not None:
             user_msg_id, system_msg_id, ack = prior
@@ -5651,9 +5661,13 @@ def _is_talk_backed(conn, reg, token: str) -> bool:
     return db.get_room_binding(conn, token, "talk") is not None
 
 
+class _RoomSettingsRefused(Exception):
+    """A shared room's setting changed by someone who is not its host (403)."""
+
+
 def _chat_update_room(
     username: str, room_id: int, name: str | None, archived: bool | None,
-    model=_UNSET, effort=_UNSET, brain=_UNSET, color=_UNSET,
+    model=_UNSET, effort=_UNSET, brain=_UNSET, color=_UNSET, guest_reply=_UNSET,
 ) -> dict | None:
     """Apply a room PATCH. `_UNSET` on a field means its key was absent.
 
@@ -5688,11 +5702,22 @@ def _chat_update_room(
     with no model pin survives, because the rule returns early with nothing to
     lose.
     """
-    from . import db
+    from . import db, room_policy
     with db.get_db(_config.db_path) as conn:
         room = db.get_web_chat_room(conn, room_id)
         if room is None or room.user_id != username:
             return None
+        # Name, model, effort and brain are the room's, not this handle's, so
+        # in a shared room they are the host's. Colour and hiding stay per
+        # member. Checked before any write, so a refused body changes nothing.
+        if name is not None or any(v is not _UNSET for v in (model, effort, brain)):
+            refusal = room_policy.settings_refusal(conn, room.token, username)
+            if refusal:
+                raise _RoomSettingsRefused(refusal)
+        if guest_reply is not _UNSET:
+            refusal = room_policy.guest_reply_refusal(conn, room.token, username)
+            if refusal:
+                raise _RoomSettingsRefused(refusal)
         # `_UNSET` → leave the column alone; `None` (an explicit null or "" in
         # the body) → clear it, which the store spells as the empty string.
         # This is the one field written straight to the handle: `model`,
@@ -5765,6 +5790,8 @@ def _chat_update_room(
                     cleared = [c for c in cleared if c != "effort"]
             if name is not None:
                 db.rename_room(conn, updated.token, updated.name)
+            if guest_reply is not _UNSET:
+                room_policy.set_guest_reply(conn, updated.token, guest_reply)
             if archived is not None:
                 reg = db.get_room(conn, updated.token)
                 if _is_talk_backed(conn, reg, updated.token):
@@ -5778,7 +5805,11 @@ def _chat_update_room(
                         db.remove_room_member(conn, updated.token, username)
                         db.dismiss_room(conn, updated.token, username)
                     else:
-                        db.add_room_member(conn, updated.token, username)
+                        # Un-hiding is the member's own act on a room they
+                        # already read: not a join (D3).
+                        db.add_room_member(
+                            conn, updated.token, username, acknowledged=True,
+                        )
                         db.undismiss_room(conn, updated.token, username)
                         # A promoted room archived *before* ISSUE-408 took the
                         # other arm and set the global flag, which nothing here
@@ -5794,6 +5825,15 @@ def _chat_update_room(
                         # to clear by unarchiving their own handle.
                         if reg is not None and reg.origin != "talk":
                             db.set_room_archived(conn, updated.token, False)
+                elif reg is not None and reg.user_id != username:
+                    # A co-member's archive is their own hide, never the global
+                    # flag that hides the room from its creator too. Membership
+                    # stays: hiding is not leaving, and they are still someone
+                    # an answer here can reach.
+                    if archived:
+                        db.dismiss_room(conn, updated.token, username)
+                    else:
+                        db.undismiss_room(conn, updated.token, username)
                 else:
                     db.set_room_archived(conn, updated.token, bool(archived))
         if updated is None:
@@ -5826,6 +5866,7 @@ def _chat_update_room(
             d["origin"] = reg.origin
         binding = db.get_room_binding(conn, updated.token, "talk")
         d["talk_token"] = binding.surface_ref if binding else None
+        d.update(_room_sharing(conn, reg, username))
     return d
 
 
@@ -5861,6 +5902,16 @@ def _chat_delete_room(username: str, room_id: int) -> str:
             db.dismiss_room(conn, room.token, username)
             db.update_web_chat_room(conn, room_id, archived=True)
             return "ok"
+        # Every member holds a handle of their own, so owning *this* handle does
+        # not make the room yours. A member who did not create it leaves it;
+        # only the creator destroys what everyone else reads.
+        if reg is not None and reg.user_id != username:
+            db.drop_web_room_member(conn, room.token, username)
+            return "ok"
+        # The creator's delete destroys what every member reads, so it waits on
+        # any member's work in the room, not only the creator's.
+        if db.count_active_room_tasks(conn, room.token) > 0:
+            return "busy"
         db.delete_web_chat_room(conn, room_id, username)
         token = room.token
     # Best-effort: drop the channel's CHANNEL.md directory. Outside the DB
@@ -5872,6 +5923,286 @@ def _chat_delete_room(username: str, room_id: int) -> str:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("chat room delete: CHANNEL.md cleanup failed: %s", exc)
     return "ok"
+
+
+def _chat_member_room(conn, username: str, room_id: int):
+    """``(handle, registry room)`` when ``username`` holds this handle *and* is a
+    member of its room, else None.
+
+    Both, because a handle survives a Talk-backed room's per-user hide; the
+    membership endpoints answer members only, and a 404 for everything else
+    says nothing about whether the room exists.
+    """
+    from . import db
+    handle = db.get_web_chat_room(conn, room_id)
+    if handle is None or handle.user_id != username:
+        return None
+    if not db.is_room_member(conn, handle.token, username):
+        return None
+    reg = db.get_room(conn, handle.token)
+    if reg is None:
+        return None
+    return handle, reg
+
+
+def _room_sharing(conn, reg, username: str) -> dict:
+    """``shared`` and ``policy`` for one room, as the settings modal reads them.
+
+    ``policy`` is None for a room one human reads and for a side room. For a
+    shared room it carries the host, the guest reply mode and
+    ``settings_refusal``, which is `room_policy.settings_refusal`'s own answer,
+    so the modal's read-only state and the PATCH's 403 are one rule. Asking it
+    records a host found gone, the sticky loss D14 describes; ``host`` None is
+    what the chat page shows as a hostless room.
+    """
+    from . import db, room_policy
+
+    off = _room_off(conn, reg)
+    if reg is None or not db.room_is_shared(conn, reg.token):
+        return {"shared": False, "policy": None, "off": off}
+    if reg.side_of:
+        return {"shared": True, "policy": None, "off": off}
+    refusal = room_policy.settings_refusal(conn, reg.token, username)
+    policy = room_policy.get_policy(conn, reg.token)
+    if policy is None:
+        return {"shared": True, "policy": None, "off": off}
+    return {
+        "shared": True,
+        "off": off,
+        "policy": {
+            "host": policy.host_user_id,
+            "is_host": policy.host_user_id == username,
+            "guest_reply": policy.guest_reply,
+            "settings_refusal": refusal,
+        },
+    }
+
+
+def _room_off(conn, reg) -> dict | None:
+    """``off`` on the listing: when the room was switched off (D8) and by whom.
+
+    Independent of ``shared``: a room stays off after its vetoers leave, which
+    is when it may have become private. A guest is named by the display name
+    they chose; the members of the room are the ones reading it.
+    """
+    from . import room_veto
+
+    state = room_veto.switched_off(conn, reg.token if reg is not None else None)
+    if state is None:
+        return None
+    return {
+        "at": _iso_utc(state["at"]),
+        "by": [
+            {
+                "name": (_display_name_for(v["user_id"]) if v["user_id"]
+                         else (v["display_name"] or "a guest")),
+                "guest": v["user_id"] is None,
+                "agreed": v["agreed"],
+            }
+            for v in state["vetoers"]
+        ],
+        "way_back": room_veto.way_back(_config),
+    }
+
+
+def _member_dict(reg, user_id: str) -> dict:
+    return {
+        "user_id": user_id,
+        "display_name": _display_name_for(user_id),
+        "is_owner": user_id == reg.user_id,
+    }
+
+
+def _chat_list_members(username: str, room_id: int) -> dict | None:
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        found = _chat_member_room(conn, username, room_id)
+        if found is None:
+            return None
+        handle, reg = found
+        members = [
+            _member_dict(reg, m) for m in db.list_room_members(conn, handle.token)
+        ]
+        can_manage = reg.user_id == username and not _is_talk_backed(
+            conn, reg, handle.token,
+        )
+        # What an add discloses, for the add dialog to state before the
+        # creator sends `acknowledge_history`.
+        message_count = db.count_room_messages(conn, handle.token)
+    members.sort(key=lambda m: (not m["is_owner"], m["user_id"]))
+    return {"members": members, "can_manage": can_manage, "message_count": message_count}
+
+
+def _chat_add_member(
+    username: str, room_id: int, target: str,
+) -> tuple[int, dict]:
+    """Add ``target`` to a web room. The body is already validated.
+
+    Only the room's creator adds (D3): adding discloses the whole transcript,
+    so it is not delegable. A Talk-bound room takes its membership from Talk,
+    whose poll would undo a write here within a cycle.
+    """
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        found = _chat_member_room(conn, username, room_id)
+        if found is None:
+            return 404, {"error": "room not found"}
+        handle, reg = found
+        if _is_talk_backed(conn, reg, handle.token):
+            return 409, {"error": "membership of a Talk room is managed in Talk"}
+        # A side room is one member's private channel (multiplayer D4); a
+        # second member would read answers given at that member's full reach.
+        if reg.side_of:
+            return 409, {"error": "a side room is private to its member"}
+        if reg.user_id != username:
+            return 403, {"error": "only the room's creator can add members"}
+        if target not in _config.users:
+            return 400, {"error": "unknown user"}
+        added = db.add_web_room_member(
+            conn, handle.token, target, display_name=_display_name_for(target),
+        )
+        return (201 if added else 200), {"member": _member_dict(reg, target)}
+
+
+def _chat_remove_member(username: str, room_id: int, target: str) -> tuple[int, dict]:
+    """Remove ``target`` from a web room: the creator removes anyone but
+    themselves, a member removes themselves."""
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        found = _chat_member_room(conn, username, room_id)
+        if found is None:
+            return 404, {"error": "room not found"}
+        handle, reg = found
+        if _is_talk_backed(conn, reg, handle.token):
+            return 409, {"error": "membership of a Talk room is managed in Talk"}
+        if target != username and reg.user_id != username:
+            return 403, {"error": "only the room's creator can remove others"}
+        if not db.is_room_member(conn, handle.token, target):
+            return 404, {"error": "not a member"}
+        # The creator is the only one who can manage the room, so they cannot
+        # leave it with others still in it; deleting the room is the way out.
+        # This also refuses removing the last member.
+        if target == reg.user_id:
+            return 409, {"error": "the room's creator cannot leave it; delete the room instead"}
+        # Same rule as leaving through the room delete: a task of theirs still
+        # running here would answer into a room they are no longer in.
+        if db.count_active_web_tasks(conn, handle.token, target) > 0:
+            return 409, {"error": "member has a task in progress"}
+        db.drop_web_room_member(conn, handle.token, target)
+    return 204, {}
+
+
+def _chat_users_directory() -> list[dict]:
+    """The deployment's own users, to invite from. A user id and a display name
+    and nothing else: no address, no profile field. Storage-agnostic on
+    purpose — Nextcloud's directory would make membership a Nextcloud feature."""
+    return [
+        {"user_id": user_id, "display_name": _display_name_for(user_id)}
+        for user_id in sorted(_config.users)
+    ]
+
+
+def _chat_claim_host(username: str, room_id: int) -> tuple[int, dict]:
+    """`!room host` from the web: a member claims a room that lost its host."""
+    from . import db, room_policy
+
+    with db.get_db(_config.db_path) as conn:
+        found = _chat_member_room(conn, username, room_id)
+        if found is None:
+            return 404, {"error": "room not found"}
+        _handle, reg = found
+        outcome = room_policy.claim_host(conn, reg.token, username)
+        if outcome == "not_a_member":
+            return 404, {"error": "room not found"}
+        payload = {"outcome": outcome, **_room_sharing(conn, reg, username)}
+    if outcome == "held_by_another":
+        payload["error"] = "this room has a host, and a present host is never replaced"
+        return 409, payload
+    return 200, payload
+
+
+def _chat_room_grants(
+    username: str, room_id: int, scopes: list[str] | None = None,
+) -> tuple[int, dict]:
+    """The caller's own grants in a room; with ``scopes``, replaced by them first.
+
+    A grant is consent to disclose one's own data to the room (speech-gate B3),
+    so it takes no user id: the writer is the caller, always. Every name is
+    checked before anything is written, so a refused body changes nothing.
+    """
+    from . import db, room_scopes
+    from .skills._loader import load_skill_index
+
+    index = load_skill_index(_config.skills_dir, bundled_dir=_config.bundled_skills_dir)
+    names = room_scopes.scope_names(index)
+    with db.get_db(_config.db_path) as conn:
+        found = _chat_member_room(conn, username, room_id)
+        if found is None:
+            return 404, {"error": "room not found"}
+        _handle, reg = found
+        if reg.side_of:
+            return 409, {"error": "a side room is private to its member"}
+        if scopes is not None:
+            unknown = sorted(set(scopes) - set(names))
+            if unknown:
+                return 400, {"error": f"unknown scope: {', '.join(unknown)}"}
+            room_scopes.revoke_scopes(conn, reg.token, username)
+            room_scopes.grant_scopes(
+                conn, reg.token, username, [n for n in names if n in scopes],
+            )
+        granted = room_scopes.granted_scopes(conn, reg.token, username)
+        state = room_scopes.grant_state(
+            conn, reg.token, policy=_config.rooms.shared_room_data_policy,
+        )
+    return 200, {
+        "scopes": [{"name": n, "granted": n in granted} for n in names],
+        "state": state,
+    }
+
+
+def _chat_room_group(
+    username: str, room_id: int, group_id=_UNSET,
+) -> tuple[int, dict]:
+    """The room's group link (multiplayer Stage 27); with ``group_id``, set first.
+
+    Every member reads the link. ``choices`` are the caller's own live groups,
+    and only for a caller who may set it, so a member who is not the host is
+    shown nothing of anyone's groups. The write asks
+    `room_policy.group_link_refusal`, the rule `!room group` asks, and a
+    refused body changes nothing.
+    """
+    from . import db, room_policy
+
+    with db.get_db(_config.db_path) as conn:
+        found = _chat_member_room(conn, username, room_id)
+        if found is None:
+            return 404, {"error": "room not found"}
+        _handle, reg = found
+        if reg.side_of:
+            return 409, {"error": "a side room is private to its member"}
+        if group_id is not _UNSET:
+            refusal = room_policy.group_link_refusal(conn, reg.token, username, group_id)
+            if refusal:
+                return 403, {"error": refusal}
+            db.set_room_group(conn, reg.token, group_id)
+            reg = db.get_room(conn, reg.token)
+        refusal = room_policy.group_link_refusal(conn, reg.token, username, None)
+        choices = []
+        if refusal is None:
+            for gid in db.list_user_groups(conn, username):
+                group = db.get_group(conn, gid)
+                choices.append({
+                    "group_id": gid,
+                    "display_name": (group or {}).get("display_name") or gid,
+                })
+        linked = db.get_group(conn, reg.group_id) if reg.group_id else None
+    return 200, {
+        "group_id": reg.group_id,
+        "group_name": (linked or {}).get("display_name") or reg.group_id,
+        "can_set": refusal is None,
+        "refusal": refusal,
+        "choices": choices,
+    }
 
 
 # A room's CHANNEL.md is prompt text, not a document store: it is read into
@@ -6160,6 +6491,7 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
     - `raced` — another promote bound the room while this one was creating its
       conversation. Its ref stands.
     - `not_found` — unknown / not owned / not web-origin / Talk unconfigured.
+    - `refused` — a shared room, and the caller is not its host.
     - `failed` — Nextcloud created no conversation.
     """
     from . import db
@@ -6173,6 +6505,15 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
         reg = db.get_room(conn, token)
         if reg is None or reg.origin != "web":
             return "not_found", None  # only web-origin rooms promote
+        # A side room's Talk view is its member's own conversation with the
+        # bot; a Talk conversation of its own could gain participants.
+        if reg.side_of:
+            return "not_found", None
+        # Binding a Talk conversation changes where every member's room
+        # lives, so in a shared room it is the host's call.
+        from .room_policy import settings_refusal
+        if settings_refusal(conn, token, username):
+            return "refused", None
         existing = db.get_room_binding(conn, token, "talk")
         name = db.room_display_name(reg, handle)
     if not _config.nextcloud.url:
@@ -7053,6 +7394,10 @@ def _chat_room_messages(
         note_star_ids = db.get_starred_message_ids(
             conn, username, [n.id for n in notes],
         )
+        undeletable = _undeletable_message_ids(
+            conn, username,
+            [(r["msg_id"], token) for r in msg_rows] + [(n.id, token) for n in notes],
+        )
 
         # 4. Paging metadata: the page's oldest spine (or aux-only) row gives the
         #    next cursor; `has_more` ORs a spine probe with a band-eligible
@@ -7164,6 +7509,8 @@ def _chat_room_messages(
     # also keeps the sort key in one uniform format.
     for m in messages:
         m["created_at"] = _iso_utc(m.get("created_at"))
+        if m.get("msg_id") in undeletable:
+            m["deletable"] = False
     # Order chronologically, but break created_at ties by (task_id, role) so a
     # turn's user→assistant pair stays adjacent even when several rapid in-flight
     # sends share a timestamp (the store and tasks contribute the two halves
@@ -7255,7 +7602,7 @@ def _is_own_replay(conn, token: str, client_msg_id: str, username: str) -> bool:
     from . import db
 
     prior = db.find_send_by_client_msg_id(conn, token, client_msg_id)
-    return prior is not None and prior[1] == username
+    return prior is not None and prior[2] == username
 
 
 def _chat_relay_reply(username: str, token: str, reply_to_msg_id: int) -> bool:
@@ -7272,6 +7619,34 @@ def _chat_relay_reply(username: str, token: str, reply_to_msg_id: int) -> bool:
         ) is not None
 
 
+def _chat_room_veto(username: str, token: str, verb: str):
+    """A web member's `!<bot> off|on`, in its own transaction; None when not a veto here.
+
+    The reply is queued for the room's Talk and WhatsApp sides rather than
+    sent from here: the WhatsApp bridge lives in the scheduler, so a send from
+    this process would settle its ledger row `failed`.
+    """
+    from . import db, room_veto
+    from .transport._types import ParticipantRef
+
+    with db.get_db(_config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        outcome = room_veto.apply(
+            conn, _config, room_token=token, verb=verb,
+            author=ParticipantRef(surface="web", surface_ref=username, user_id=username),
+        )
+        if outcome is not None:
+            room_veto.queue_notice(conn, token, outcome)
+        return outcome
+
+
+def _chat_room_off(token: str) -> bool:
+    from . import db, room_veto
+
+    with db.get_db(_config.db_path) as conn:
+        return room_veto.is_vetoed(conn, token)
+
+
 def _chat_create_web_task(
     username: str, token: str, text: str,
     attachments: list[str] | None = None,
@@ -7282,9 +7657,11 @@ def _chat_create_web_task(
     client_msg_id: str | None = None,
     reply_to_msg_id: int | None = None,
     relay_answer: str | None = None,
-) -> tuple[str, int]:
+) -> tuple[str, int | None]:
     """Rate-limited web-task creation. Returns ``("ok", task_id)``,
-    ``("rate_limited", window_seconds)`` or ``("reply_target_gone", 0)``.
+    ``("recorded", message_id)`` when the speech gate stored the turn without
+    answering it, ``("rate_limited", window_seconds)`` or
+    ``("reply_target_gone", 0)``.
 
     A cited parent is resolved here, inside the same transaction as the create:
     it must be a message in *this* room, and its body — never a client-supplied
@@ -7295,15 +7672,26 @@ def _chat_create_web_task(
     by `message_relays.accept_room_reply` in this same transaction.
     """
     from . import confirmations, db, message_relays
-    from .transport import record_inbound
+    from .transport import classify_ahead, record_inbound
+    from .transport.web import addressed_to_bot_in_text
     chat = _config.web.chat
+    addressed = addressed_to_bot_in_text(
+        text, (_config.bot_name, _config.talk.bot_username),
+    )
+    # Ahead of BEGIN IMMEDIATE, so a classifier call never holds the write
+    # lock. None unless the gate could reach its classifier rung.
+    classified = classify_ahead(
+        _config, surface="web", surface_ref=token, user_id=username,
+        text=text, is_group_chat=False, addressed_to_bot=addressed,
+        source_type="web",
+    )
     with db.get_db(_config.db_path) as conn:
         # Take the write lock up front so the count and the insert are one
         # critical section — a plain SELECT takes no lock under WAL, so two
         # concurrent sends could both read under-limit and both insert,
         # overshooting the cap (TOCTOU). BEGIN IMMEDIATE serializes them.
         conn.execute("BEGIN IMMEDIATE")
-        recent = db.count_recent_web_tasks(conn, username, chat.rate_limit_window_seconds)
+        recent = db.count_recent_web_sends(conn, username, chat.rate_limit_window_seconds)
         if recent >= chat.rate_limit_messages:
             return ("rate_limited", chat.rate_limit_window_seconds)
         # A retry of a send we already accepted replays that turn, and the
@@ -7390,7 +7778,7 @@ def _chat_create_web_task(
         # origin (streamed over SSE) plus a push mirror to a bound Talk room, if
         # any. For a web-only room it resolves to just the web stream (same as
         # the old "web").
-        _room_token, task_id = record_inbound(
+        result = record_inbound(
             conn, _config, surface="web", surface_ref=token, user_id=username,
             text=text, source_type="web", output_target="room", priority=5,
             attachments=attachments or None, model=model, effort=effort,
@@ -7399,8 +7787,15 @@ def _chat_create_web_task(
             client_msg_id=client_msg_id,
             reply_to_canonical_id=reply_to_msg_id,
             reply_to_content=reply_to_content,
+            addressed_to_bot=addressed,
+            classified=classified,
         )
-    return ("ok", task_id)
+    if result.gate_reason == "vetoed":
+        return ("room_off", 0)
+    # A replay of a turn that was recorded unanswered has no task either.
+    if result.task_id is None and result.message_id is not None:
+        return ("recorded", result.message_id)
+    return ("ok", result.task_id)
 
 
 # Fire-and-forget background tasks (web→Talk read pushes). Held in a set so
@@ -7720,8 +8115,10 @@ async def _post_as_user(
 
 
 async def _mirror_web_turn_as_user(
-    username: str, room_token: str, text: str, task_id: int,
+    username: str, room_token: str, text: str, task_id: int | None,
     reply_to_msg_id: int | None = None,
+    *,
+    message_id: int | None = None,
 ) -> None:
     """Post a just-ingested web user turn into the room's bound Talk
     conversation *as the user*, at send time — so the message appears in Talk
@@ -7742,6 +8139,10 @@ async def _mirror_web_turn_as_user(
     (`transport/talk/inbound.py`) reconciles those from the message itself, so
     a stamp missing here is usually repaired within a poll interval rather
     than standing.
+
+    A turn the speech gate recorded without answering has no task, so the
+    caller names its row by ``message_id`` instead. There is no scheduler
+    repost behind that path: if this post fails, the turn stays web-only.
 
     Two processes therefore write this one ledger entry, and what keeps them
     off each other is not symmetric: the `_lookup` early return above skips
@@ -7771,13 +8172,24 @@ async def _mirror_web_turn_as_user(
             # the first attempt created, and that attempt already mirrored it.
             # The stamp is the record of that, so it is also the guard: without
             # it a client-side timeout would put the message in Talk twice.
-            if db.user_turn_has_external_id(conn, task_id, "talk"):
-                return None, None, None
-            row = conn.execute(
-                "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
-                "AND role = 'user' LIMIT 1",
-                (room_token, task_id),
-            ).fetchone()
+            if message_id is not None:
+                row = conn.execute(
+                    "SELECT id FROM messages WHERE id = ? AND room_token = ? "
+                    "AND role = 'user'",
+                    (message_id, room_token),
+                ).fetchone()
+                if row is not None and db.get_message_external_id(
+                    conn, message_id, "talk",
+                ) is not None:
+                    return None, None, None
+            else:
+                if db.user_turn_has_external_id(conn, task_id, "talk"):
+                    return None, None, None
+                row = conn.execute(
+                    "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
+                    "AND role = 'user' LIMIT 1",
+                    (room_token, task_id),
+                ).fetchone()
             # The cited parent's own Talk id, when it has one. A parent that
             # never reached Talk (web-only, or predating the mirror) leaves
             # this None and the post degrades to a plain one.
@@ -7792,8 +8204,8 @@ async def _mirror_web_turn_as_user(
             return talk_ref, (int(row["id"]) if row else None), parent_talk_id
 
     try:
-        talk_ref, message_id, parent_talk_id = await asyncio.to_thread(_lookup)
-        if not talk_ref or message_id is None:
+        talk_ref, row_id, parent_talk_id = await asyncio.to_thread(_lookup)
+        if not talk_ref or row_id is None:
             return  # web-only room (or turn not stored) — nothing to mirror
 
         access = await asyncio.to_thread(
@@ -7811,7 +8223,7 @@ async def _mirror_web_turn_as_user(
 
         _note_token_healthy(username)
         posted_id = await _post_as_user(
-            access, talk_ref, text, message_id, username,
+            access, talk_ref, text, row_id, username,
             reply_to_talk_id=parent_talk_id,
         )
         if posted_id is None:
@@ -7820,7 +8232,7 @@ async def _mirror_web_turn_as_user(
         def _stamp():
             with db.get_db(_config.db_path) as conn:
                 db.set_message_external_id(
-                    conn, message_id, "talk", str(posted_id),
+                    conn, row_id, "talk", str(posted_id),
                 )
 
         await asyncio.to_thread(_stamp)
@@ -8188,6 +8600,14 @@ async def chat_update_room(
         color = str(data["color"] or "").strip().lower() or None
         if color is not None and not is_room_color(color):
             return JSONResponse({"error": "unknown color"}, status_code=400)
+    # How a guest's turn is answered (multiplayer D11). Host only, which
+    # `_chat_update_room` checks with the rule `!room guests` uses.
+    guest_reply = _UNSET
+    if "guest_reply" in data:
+        from .room_policy import GUEST_REPLY_VALUES
+        guest_reply = str(data["guest_reply"] or "").strip().lower()
+        if guest_reply not in GUEST_REPLY_VALUES:
+            return JSONResponse({"error": "invalid guest_reply"}, status_code=400)
     # Per-room brain pin. Same key-presence contract as `model` — absent leaves
     # it alone, "" / null clears it, a string sets it — and the same three
     # answers `!brain` gives, in the same order and for the same reasons.
@@ -8254,10 +8674,13 @@ async def chat_update_room(
                 )
             if not _room_model_allowed(model_brain, model):
                 return JSONResponse({"error": "unknown model"}, status_code=400)
-    updated = await asyncio.to_thread(
-        _chat_update_room, user["username"], room_id, name, archived, model, effort,
-        brain, color,
-    )
+    try:
+        updated = await asyncio.to_thread(
+            _chat_update_room, user["username"], room_id, name, archived, model,
+            effort, brain, color, guest_reply,
+        )
+    except _RoomSettingsRefused as refused:
+        return JSONResponse({"error": str(refused)}, status_code=403)
     if updated is None:
         return JSONResponse({"error": "room not found"}, status_code=404)
     # Propagate a rename to the bound Talk conversation, if any (best-effort).
@@ -8294,6 +8717,10 @@ async def chat_promote_room(
     does nothing.
     """
     status, room = await _chat_promote_to_talk(user["username"], room_id)
+    if status == "refused":
+        return JSONResponse(
+            {"error": "only this room's host can open it in Talk"}, status_code=403,
+        )
     if status == "not_found":
         return JSONResponse(
             {"error": "room not found or not eligible for promotion"},
@@ -8322,6 +8749,143 @@ async def chat_delete_room(
             {"error": "room has a task in progress"}, status_code=409,
         )
     return {"status": "ok"}
+
+
+@api_router.get("/chat/users")
+async def chat_users(user: dict = Depends(_require_api_auth)):
+    return {"users": _chat_users_directory()}
+
+
+@api_router.get("/chat/rooms/{room_id}/members")
+async def chat_room_members(
+    room_id: int,
+    user: dict = Depends(_require_api_auth),
+):
+    result = await asyncio.to_thread(_chat_list_members, user["username"], room_id)
+    if result is None:
+        return JSONResponse({"error": "room not found"}, status_code=404)
+    return result
+
+
+@api_router.post("/chat/rooms/{room_id}/members")
+async def chat_add_room_member(
+    room_id: int,
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    try:
+        data = await request.json()
+    except ValueError:
+        data = None
+    target = data.get("user_id") if isinstance(data, dict) else None
+    # A real ``true``, not a truthy value: the flag is the member's statement
+    # that they know the whole transcript is disclosed, and the endpoint, not
+    # the dialog that sets it, is the boundary.
+    if (
+        not isinstance(target, str)
+        or not target
+        or data.get("acknowledge_history") is not True
+    ):
+        return JSONResponse(
+            {"error": "user_id and acknowledge_history: true are required"},
+            status_code=400,
+        )
+    status, payload = await asyncio.to_thread(
+        _chat_add_member, user["username"], room_id, target,
+    )
+    return JSONResponse(payload, status_code=status)
+
+
+@api_router.delete("/chat/rooms/{room_id}/members/{member_id}")
+async def chat_remove_room_member(
+    room_id: int,
+    member_id: str,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    status, payload = await asyncio.to_thread(
+        _chat_remove_member, user["username"], room_id, member_id,
+    )
+    if status == 204:
+        return Response(status_code=204)
+    return JSONResponse(payload, status_code=status)
+
+
+@api_router.post("/chat/rooms/{room_id}/host")
+async def chat_claim_room_host(
+    room_id: int,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    status, payload = await asyncio.to_thread(
+        _chat_claim_host, user["username"], room_id,
+    )
+    return JSONResponse(payload, status_code=status)
+
+
+@api_router.get("/chat/rooms/{room_id}/grants")
+async def chat_room_grants(
+    room_id: int,
+    user: dict = Depends(_require_api_auth),
+):
+    status, payload = await asyncio.to_thread(
+        _chat_room_grants, user["username"], room_id,
+    )
+    return JSONResponse(payload, status_code=status)
+
+
+@api_router.put("/chat/rooms/{room_id}/grants")
+async def chat_put_room_grants(
+    room_id: int,
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    try:
+        data = await request.json()
+    except ValueError:
+        data = None
+    scopes = data.get("scopes") if isinstance(data, dict) else None
+    if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
+        return JSONResponse({"error": "scopes: a list of names is required"}, status_code=400)
+    status, payload = await asyncio.to_thread(
+        _chat_room_grants, user["username"], room_id, scopes,
+    )
+    return JSONResponse(payload, status_code=status)
+
+
+@api_router.get("/chat/rooms/{room_id}/group")
+async def chat_room_group(
+    room_id: int,
+    user: dict = Depends(_require_api_auth),
+):
+    status, payload = await asyncio.to_thread(
+        _chat_room_group, user["username"], room_id,
+    )
+    return JSONResponse(payload, status_code=status)
+
+
+@api_router.put("/chat/rooms/{room_id}/group")
+async def chat_put_room_group(
+    room_id: int,
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    try:
+        data = await request.json()
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or "group_id" not in data:
+        return JSONResponse({"error": "group_id is required (null unlinks)"}, status_code=400)
+    group_id = data["group_id"]
+    if group_id is not None and not isinstance(group_id, str):
+        return JSONResponse({"error": "group_id: a string or null"}, status_code=400)
+    status, payload = await asyncio.to_thread(
+        _chat_room_group, user["username"], room_id, group_id.strip() if group_id else None,
+    )
+    return JSONResponse(payload, status_code=status)
 
 
 @api_router.get("/chat/rooms/{room_id}/memory")
@@ -8466,14 +9030,70 @@ def _chat_set_message_star(username: str, message_id: int, starred: bool) -> boo
 _ACTIVE_TASK_STATUSES = ("pending", "locked", "running", "pending_confirmation")
 
 
+def _message_owners(conn, message_ids) -> dict[int, str | None]:
+    """The member each transcript row belongs to, None for a row that is nobody's.
+
+    The author where one is recorded; a participant's user id where the row
+    names a participant (a guest has none, and the task their turn ran as does
+    not make it the host's); else the owner of the task the row belongs to,
+    which is how the bot's answer is the asker's. A system notice with no task,
+    and an answer whose task has been pruned, are nobody's.
+
+    One query for many rows, because the transcript and the room stream mark
+    every row a viewer may not delete, and the delete endpoint asks the same
+    question of one row through this same function.
+    """
+    ids = [int(i) for i in message_ids]
+    if not ids:
+        return {}
+    placeholders = ", ".join("?" for _ in ids)
+    rows = conn.execute(
+        "SELECT m.id, CASE "
+        "  WHEN m.author_user_id IS NOT NULL AND m.author_user_id != '' "
+        "    THEN m.author_user_id "
+        "  WHEN m.author_participant_id IS NOT NULL THEN p.user_id "
+        "  ELSE t.user_id END AS owner "
+        "FROM messages m "
+        "LEFT JOIN room_participants p ON p.id = m.author_participant_id "
+        "LEFT JOIN tasks t ON t.id = m.task_id "
+        f"WHERE m.id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    return {int(r["id"]): r["owner"] for r in rows}
+
+
+def _undeletable_message_ids(conn, username: str, rows) -> set[int]:
+    """Of ``(msg_id, room_token)`` pairs, the rows ``username`` may not delete.
+
+    The delete endpoint's rule, asked ahead of time so the client can withhold
+    the control: in a room others read, a member deletes their own rows only.
+    A private room marks nothing.
+    """
+    from . import db
+
+    by_room: dict[str, list[int]] = {}
+    for msg_id, token in rows:
+        if isinstance(msg_id, int) and token:
+            by_room.setdefault(token, []).append(msg_id)
+    out: set[int] = set()
+    for token, ids in by_room.items():
+        if not db.room_is_shared(conn, token):
+            continue
+        for msg_id, owner in _message_owners(conn, ids).items():
+            if owner != username:
+                out.add(msg_id)
+    return out
+
+
 def _chat_delete_message(username: str, message_id: int) -> str | dict:
     """Hard-delete one transcript row for ``username``.
 
     Returns ``"not_found"`` (unknown id, or the caller isn't a member of its
     room — deliberately indistinguishable, same as the star endpoint, so the
-    route can't be used to probe foreign message ids), ``"busy"`` when the
-    turn's task is still in flight, or a dict describing what to propagate to
-    Talk.
+    route can't be used to probe foreign message ids), ``"forbidden"`` for
+    another member's row in a shared room (see `_message_owners`), ``"busy"``
+    when the turn's task is still in flight, or a dict describing what to
+    propagate to Talk.
 
     The busy guard mirrors the room delete's: a running turn's assistant row is
     still being written, and deleting it would have the scheduler recreate it
@@ -8491,6 +9111,13 @@ def _chat_delete_message(username: str, message_id: int) -> str | dict:
             "SELECT task_id FROM messages WHERE id = ?", (message_id,)
         ).fetchone()
         task_id = row["task_id"] if row else None
+        # In a room others read, a member removes their own turns and the
+        # answers to them, and nothing else: deleting another member's words
+        # rewrites the record they share, and the host is no moderator.
+        if row is not None and message_id in _undeletable_message_ids(
+            conn, username, [(message_id, token)],
+        ):
+            return "forbidden"
         if task_id is not None:
             task = db.get_task(conn, int(task_id))
             if task is not None and task.status in _ACTIVE_TASK_STATUSES:
@@ -8678,6 +9305,9 @@ def _chat_aggregate_messages(
             conn, username, view=view, limit=limit + 1,
             before_ts=before_ts, before_id=before_id,
         )
+        undeletable = _undeletable_message_ids(
+            conn, username, [(r["msg_id"], r["room_token"]) for r in rows[:limit]],
+        )
     has_more = len(rows) > limit
     rows = rows[:limit]
     # Rows arrive newest-first; the page's last row is its oldest → the cursor
@@ -8687,6 +9317,9 @@ def _chat_aggregate_messages(
         {"ts": rows[-1]["created_at"], "id": rows[-1]["msg_id"]} if rows else None
     )
     messages = [_cross_room_message_dict(r, username) for r in reversed(rows)]
+    for m in messages:
+        if m["msg_id"] in undeletable:
+            m["deletable"] = False
     return {
         "messages": messages,
         "has_more": has_more,
@@ -8775,6 +9408,11 @@ async def chat_delete_message(
     result = await asyncio.to_thread(_chat_delete_message, username, message_id)
     if result == "not_found":
         return JSONResponse({"error": "message not found"}, status_code=404)
+    if result == "forbidden":
+        return JSONResponse(
+            {"error": "only its author can delete a message in a shared room"},
+            status_code=403,
+        )
     if result == "busy":
         return JSONResponse(
             {"error": "message belongs to a task in progress"}, status_code=409,
@@ -8883,6 +9521,26 @@ async def chat_send_message(
     # An explicit `!model` prefix (any alias, incl. `default`) suppresses the
     # per-room model default so a per-message choice always wins.
     model_prefix_used = False
+
+    # `!<bot> off|on` (multiplayer D8) before anything else, and in a room
+    # switched off nothing else is taken (D12): no turn, no command, no
+    # confirmation answer. A member reading on web is a principal, so their
+    # `on` counts as one.
+    from . import room_veto
+
+    veto_verb = None if attachments else room_veto.parse_command(text, _config.bot_name)
+    if veto_verb is not None:
+        outcome = await asyncio.to_thread(_chat_room_veto, username, room.token, veto_verb)
+        if outcome is not None:
+            return {"task_id": None, "inline_result": outcome.text,
+                    "command_data": {"kind": "room_veto", "state": outcome.state}}
+    if await asyncio.to_thread(_chat_room_off, room.token):
+        return JSONResponse(
+            {"error": "This room is switched off and records nothing. A member "
+                      f"switches it back on with !{room_veto.command_word(_config)} on."},
+            status_code=409,
+        )
+
     if text.startswith("!"):
         from . import commands
         from .async_runtime import run_coro
@@ -8974,6 +9632,9 @@ async def chat_send_message(
             status_code=429,
             headers={"Retry-After": str(value)},
         )
+    if outcome == "room_off":
+        # Switched off between the check above and the write: the same refusal.
+        return JSONResponse({"error": "This room is switched off."}, status_code=409)
     if outcome == "reply_target_gone":
         # 404 for both "unknown id" and "a message in another room",
         # indistinguishable — the rule the star and delete endpoints already
@@ -8982,6 +9643,15 @@ async def chat_send_message(
             {"error": "the message you replied to is no longer available"},
             status_code=404,
         )
+    if outcome == "recorded":
+        # Stored in the room, and the bot is not answering it: no task, so no
+        # stream to open. The mirror is keyed on the row, and it is the only
+        # route into a bound Talk room: with no task there is no scheduler
+        # repost to fall back on.
+        await _mirror_web_turn_as_user(
+            username, room.token, text, None, reply_to_msg_id, message_id=value,
+        )
+        return {"task_id": None, "message_id": value, "status": "recorded"}
     task_id = value
     # Post-as-user mirror into a bound Talk room, at send time (bounded ~5s,
     # best-effort). When it succeeds the scheduler suppresses its completion-
@@ -9008,9 +9678,12 @@ def _chat_confirm_task(task_id: int, actor_user_id: str | None = None) -> None:
             # transcript-mirror restore all run unconditionally — so a stray
             # confirm (a duplicate click, a running re-run) has to stop here.
             return
-        if task.whatsapp_confirmation_request_id and actor_user_id != task.user_id:
+        # Only the task's owner answers it, admin or not: `!confirm` has no
+        # admin exemption and `confirmations.resolve` refuses another user's
+        # answer, so the route's admin pass must not be a way round both.
+        if actor_user_id != task.user_id:
             from fastapi import HTTPException
-            raise HTTPException(status_code=403, detail="not your relay question")
+            raise HTTPException(status_code=403, detail="not your task")
         # Shared with the Talk poller and `!confirm` so all three restore the
         # transcript mirror the gate withheld (ISSUE-241), and so all three
         # prune the parked attempt's terminal frames the same way (ISSUE-235).
@@ -9399,11 +10072,11 @@ async def chat_discard_draft(
     return {"status": "discarded", "draft_id": draft_id}
 
 
-def _chat_cancel_task(task_id: int) -> None:
+def _chat_cancel_task(task_id: int, actor_user_id: str | None = None) -> None:
     from . import confirmations, db
     with db.get_db(_config.db_path) as conn:
         row = conn.execute(
-            "SELECT worker_pid, status FROM tasks WHERE id = ?", (task_id,)
+            "SELECT worker_pid, status, user_id FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         status = row["status"] if row else None
         if status == "pending_confirmation":
@@ -9411,6 +10084,12 @@ def _chat_cancel_task(task_id: int) -> None:
             # than flagging a worker that will never see the flag. Through the
             # shared verb, so this path records the same `task_logs` row the
             # Talk poller and `!confirm` do.
+            #
+            # The owner's alone, as `!stop` has it: the admin exemption covers
+            # a runaway running task, never discarding somebody's held one.
+            if row["user_id"] != actor_user_id:
+                from fastapi import HTTPException
+                raise HTTPException(status_code=403, detail="not your task")
             task = db.get_task(conn, task_id)
             if task is not None:
                 confirmations.decline(conn, task, by="web")
@@ -9448,7 +10127,7 @@ async def chat_cancel_task(
     _csrf: None = Depends(_verify_origin),
 ):
     await _authorize_task_access(task_id, user)
-    await asyncio.to_thread(_chat_cancel_task, task_id)
+    await asyncio.to_thread(_chat_cancel_task, task_id, user["username"])
     return {"status": "cancelling"}
 
 
@@ -11883,7 +12562,8 @@ def _user_talk_rooms(user_id: str) -> list[dict]:
        ``talk:`` leaf carries, rather than the canonical room token.
 
     ``channel`` marks the first group, mirroring the flag `_user_web_rooms`
-    puts on the machine-owned web rooms.
+    puts on the machine-owned web rooms, and ``shared`` marks a conversation
+    another human reads, which the save refuses and the client disables.
 
     **The picker's view of `_talk_route_tokens`,** which is the authorization
     set — one rule rendered and enforced, so the dropdown cannot offer a
@@ -11903,26 +12583,36 @@ def _user_talk_rooms(user_id: str) -> list[dict]:
 
     out: list[dict] = []
     seen: set[str] = set()
-    for label, token in _user_talk_channels(user_id):
-        out.append({"token": token, "name": label, "channel": True})
-        seen.add(token)
-
+    channels = _user_talk_channels(user_id)
     if _config is None or not _config.db_path:
-        return out
+        return [{"token": t, "name": label, "channel": True, "shared": False}
+                for label, t in channels]
     try:
         with db.get_db(_config.db_path) as conn:
             refs = _talk_member_refs(conn, user_id)
+            # Marked as the web picker marks it, so the client disables what
+            # the save would refuse (`_refuse_shared_destination`).
+            shared = {
+                t for t in {*refs, *(t for _, t in channels)}
+                if (room := _talk_ref_room(conn, t)) and db.room_is_shared(conn, room)
+            }
     except Exception as e:
         logger.warning("talk room lookup failed for user %s: %s", user_id, e)
-        return out
+        return [{"token": t, "name": label, "channel": True, "shared": False}
+                for label, t in channels]
 
+    for label, token in channels:
+        out.append({"token": token, "name": label, "channel": True,
+                    "shared": token in shared})
+        seen.add(token)
     # `talk_refs_for_member` has no ORDER BY and the picker needs a stable one;
     # by name, since that is what the reader scans.
     for token, name in sorted(refs.items(), key=lambda kv: (kv[1], kv[0])):
         if token in seen:
             continue
         seen.add(token)
-        out.append({"token": token, "name": name, "channel": False})
+        out.append({"token": token, "name": name, "channel": False,
+                    "shared": token in shared})
     return out
 
 
@@ -11930,20 +12620,21 @@ def _user_web_rooms(user_id: str) -> list[dict]:
     """The web chat rooms a ``web:<token>`` route can name, oldest first.
 
     Each carries three flags: ``default`` (a bare ``web`` route lands here),
-    ``shared`` (somebody else is in it) and ``channel`` (it is the user's
-    machine-owned log or alerts room). The last two are the two classes
-    `db.default_web_room` refuses, and the picker offers them anyway — pinning
-    one is a deliberate choice, unlike the implicit default — but says which is
-    which, since delivering a personal alert into a room another person reads is
-    what ISSUE-473 is about.
+    ``shared`` (`db.room_is_shared`: another human reads it, a Talk guest
+    included) and ``channel`` (it is the user's machine-owned log or alerts
+    room). A shared room is listed so the picker can say why it cannot be
+    chosen: delivery refuses it for personal content and the save refuses it
+    too (`_refuse_shared_destination`), so the client offers it disabled. A
+    channel room is offered and marked, since pinning one is a deliberate
+    choice.
 
     Membership, not the handle, decides what is listed: a handle outlives
-    membership (a Talk-backed hide archives it rather than deleting it). It has
-    to stay a *subset* of what `_validate_descriptor_rooms` accepts, or the
-    dropdown offers a room the save then refuses — a subset, not an equality,
-    since the visibility filter below narrows this list and deliberately not
-    that check. Best-effort — delivery routing must still render when the DB is
-    unreachable.
+    membership (a Talk-backed hide archives it rather than deleting it). Apart
+    from the shared rooms the client disables, it has to stay a *subset* of
+    what `_validate_descriptor_rooms` accepts, or the dropdown offers a room the
+    save then refuses — a subset, not an equality, since the visibility filter
+    below narrows this list and deliberately not that check. Best-effort —
+    delivery routing must still render when the DB is unreachable.
 
     **And membership is not sufficient on its own** (ISSUE-478). A room the
     registry has archived and one the user has dismissed both keep their handle
@@ -11987,14 +12678,14 @@ def _user_web_rooms(user_id: str) -> list[dict]:
                 room = db.visible_room(conn, user_id, r.token)
                 if room is None:
                     continue
-                others = set(db.list_room_members(conn, r.token)) - {user_id}
                 out.append({
                     "token": r.token,
                     # `or r.token`: the helper answers "" when neither row has a
                     # name, and an option with an empty label is unpickable.
                     "name": db.room_display_name(room, r) or r.token,
                     "default": r.token == default_token,
-                    "shared": bool(others),
+                    # The predicate delivery refuses on, so a Talk guest counts.
+                    "shared": db.room_is_shared(conn, r.token),
                     "channel": r.token in channels,
                 })
             return out
@@ -12074,7 +12765,8 @@ def _ignored_default_room_pin(user_id: str, token: str) -> str:
     was written.
 
     - `db.configured_default_room`'s arms — the registry row exists, is not
-      archived, the user is still a member — are **terminal**. When one fails
+      archived, the user is still a member, nobody else reads it — are
+      **terminal**. When one fails
       every reader discards the value, the resolver falls back to the heuristic,
       and the room the user chose is quietly never used again. That is what this
       marks, and it is exactly `configured_default_room` answering `None` for a
@@ -12101,7 +12793,7 @@ def _ignored_default_room_pin(user_id: str, token: str) -> str:
     this user's own profile row — they wrote it, and it is returned to them in
     the same payload — so nothing is disclosed that the caller did not supply.
     That is also what lets the mark cover "no longer a member", which is one of
-    the three terminal arms and the one a membership gate would have hidden.
+    the four terminal arms and the one a membership gate would have hidden.
 
     Best-effort like the neighbour: an unreachable database marks nothing, since
     the mark is an assertion and a failed lookup has established none.
@@ -12132,8 +12824,10 @@ def _validate_descriptor_rooms(descriptor: str, user_id: str) -> None:
     A room token is not a secret — the room settings pane offers a copy button —
     and `WebTransport.deliver` checks only that the room exists, so without this
     a saved route is a standing write into any transcript whose token the caller
-    has seen, on every alert (ISSUE-473). Membership rather than ownership: a
-    shared room is a legitimate deliberate choice.
+    has seen, on every alert (ISSUE-473). Membership rather than ownership; but
+    a room another human reads is refused all the same
+    (`_refuse_shared_destination`), since delivery drops personal content there
+    and a pin onto one would save and then deliver nothing.
 
     **This is an authorization gate, and it is deliberately looser than the
     offered list** (ISSUE-478). `_user_web_rooms` also drops a room that is
@@ -12190,6 +12884,35 @@ def _validate_descriptor_rooms(descriptor: str, user_id: str) -> None:
         for token in web_tokens:
             if not db.is_room_member(conn, token, user_id):
                 raise ValueError(f"web room {token!r} is not one of your rooms")
+            _refuse_shared_destination(conn, token, f"web room {token!r}")
+
+
+def _refuse_shared_destination(conn, room_token: str | None, what: str) -> None:
+    """Raise ValueError when ``room_token`` names a room more than one human reads.
+
+    Delivery refuses such a room for personal content (speech-gate B4,
+    `routing.refuse_shared_rooms`), so a setting naming one would save and then
+    deliver nothing. Refused at save instead, where the user can see why. A
+    stored pin that later becomes shared is not re-judged, because every caller
+    skips a value identical to the stored one (the profile PUT and the briefing
+    upsert both); the picker marks it and delivery drops it.
+    """
+    from . import db
+
+    if room_token and db.room_is_shared(conn, room_token):
+        raise ValueError(
+            f"{what} is shared with other people, and personal deliveries never go there"
+        )
+
+
+def _talk_ref_room(conn, talk_ref: str) -> str | None:
+    """The room a Talk conversation ref is bound to, or None for one the
+    registry does not hold (a provisioned channel the bot made on Nextcloud)."""
+    from . import db
+
+    return db.resolve_room_token(conn, "talk", talk_ref) or (
+        talk_ref if db.get_room(conn, talk_ref) is not None else None
+    )
 
 
 def _validate_default_room(token: str, user_id: str) -> None:
@@ -12213,6 +12936,7 @@ def _validate_default_room(token: str, user_id: str) -> None:
     with db.get_db(_config.db_path) as conn:
         if not db.is_room_member(conn, token, user_id):
             raise ValueError(f"room {token!r} is not one of your rooms")
+        _refuse_shared_destination(conn, token, f"room {token!r}")
 
 
 def _validate_talk_route_token(token: str, user_id: str) -> None:
@@ -12228,6 +12952,12 @@ def _validate_talk_route_token(token: str, user_id: str) -> None:
     if token not in _talk_route_tokens(user_id):
         raise ValueError(
             f"Talk conversation {token!r} is not one of your conversations"
+        )
+    from . import db
+
+    with db.get_db(_config.db_path) as conn:
+        _refuse_shared_destination(
+            conn, _talk_ref_room(conn, token), f"Talk conversation {token!r}",
         )
 
 
@@ -12261,6 +12991,9 @@ def _validate_talk_channel(token: str, user_id: str) -> None:
             raise ValueError(
                 f"Talk conversation {token!r} is not one of your conversations"
             )
+        _refuse_shared_destination(
+            conn, _talk_ref_room(conn, token), f"Talk conversation {token!r}",
+        )
 
 
 _BUILTIN_DELIVERY_SURFACES = frozenset({
@@ -12639,7 +13372,7 @@ async def settings_briefings(user: dict = Depends(_require_api_auth)) -> dict:
 
 
 def _validate_briefing_payload(
-    payload: dict, *, name_required: bool, user_id: str,
+    payload: dict, *, name_required: bool, user_id: str, stored=None,
 ) -> dict:
     """Common shape check for POST/PUT briefing endpoints.
 
@@ -12675,9 +13408,14 @@ def _validate_briefing_payload(
     # Validate every leaf surface is known (rejects typos like "sms"); the
     # grammar stays permissive so legacy ``both`` / comma lists still parse,
     # while the UI offers only ``_registered_delivery_surfaces()``.
+    # ``stored`` is the briefing this upsert replaces, if any. A room value it
+    # already held is not re-judged, the rule `_coerce_profile_value` follows:
+    # a pin onto a room that became shared since must not stop the user
+    # disabling or rescheduling the briefing it sits on.
     try:
         _validate_descriptor_surfaces(output)
-        _validate_descriptor_rooms(output, user_id)
+        if stored is None or output != stored.output:
+            _validate_descriptor_rooms(output, user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -12693,7 +13431,8 @@ def _validate_briefing_payload(
     # descriptor's own `talk:<token>` leaf takes — otherwise a bare `talk`
     # output plus a token is the unguarded path around it.
     try:
-        _validate_talk_route_token(token, user_id)
+        if stored is None or token != stored.conversation_token:
+            _validate_talk_route_token(token, user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -12728,8 +13467,13 @@ async def settings_add_briefing(
     if _config is None:
         raise HTTPException(status_code=503, detail="config not loaded")
 
+    stored = None
+    if isinstance(payload, dict) and isinstance(payload.get("name"), str):
+        stored = await asyncio.to_thread(
+            _ub.get_briefing, _config.db_path, user["username"], payload["name"].strip(),
+        )
     cleaned = _validate_briefing_payload(
-        payload, name_required=True, user_id=user["username"],
+        payload, name_required=True, user_id=user["username"], stored=stored,
     )
     try:
         briefing, state = _ub.ensure_briefing(

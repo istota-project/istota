@@ -815,8 +815,12 @@ def reply_to_email(
     references: str | None = None,
     content_type: str = "plain",
     html_body: str | None = None,
+    cc: list[str] | None = None,
 ) -> str:
     """Send a reply email with proper threading headers.
+
+    ``cc`` makes it a reply-all: the addresses go on the Cc line, and SMTP
+    takes the envelope recipients from To and Cc.
 
     ``html_body`` behaves as in :func:`send_email` — non-empty makes the reply
     ``multipart/alternative`` with ``body`` as the plain-text fallback.
@@ -838,6 +842,8 @@ def reply_to_email(
     message_id = _generate_message_id(domain)
     msg = EmailMessage()
     msg["To"] = to_addr
+    if cc:
+        msg["Cc"] = ", ".join(cc)
     msg["Subject"] = reply_subject
     msg["From"] = from_address
     msg["Date"] = formatdate(localtime=True)

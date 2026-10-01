@@ -130,3 +130,57 @@ class TestTheAbsentExtraBindIsAnnounced:
 
         assert argv[:4] == ["bwrap", "--ro-bind", str(doc), str(doc)]
         assert "extra read-only bind" not in caplog.text
+
+
+class TestTheGroupBinds:
+    """`group_ids` is the task's resolved set; the planner does no lookup.
+
+    The argv golden `group_member` pins the rendered entry. These pin what the
+    golden cannot: the label, the read-write projection the native file tools
+    get, and the refusal of an id that would collapse to the shared root.
+    """
+
+    def _built(self, tmp_path, monkeypatch, group_ids):
+        import dataclasses
+
+        from tests.test_sandbox_argv_golden import CASES_BY_NAME
+        from tests.test_sandbox_plan_parity import build_plan
+
+        case = dataclasses.replace(
+            CASES_BY_NAME["claude_baseline"], group_ids=tuple(group_ids),
+        )
+        return build_plan(case, tmp_path / "world", monkeypatch)
+
+    def test_a_resolved_group_is_bound_read_write_after_the_channel(
+        self, tmp_path, monkeypatch,
+    ):
+        built = self._built(tmp_path, monkeypatch, ["family"])
+        reasons = [m.reason for m in built.plan.mounts]
+        group = [m for m in built.plan.mounts if m.reason == "nextcloud_group_dir"]
+        assert len(group) == 1
+        assert group[0].mode == "rw" and group[0].user_data
+        assert group[0].source == built.world["mount"] / "Groups" / "family"
+        assert reasons.index("nextcloud_group_dir") == (
+            reasons.index("nextcloud_channel_dir") + 1
+        )
+        _read, write, _denied = built.roots
+        assert built.world["mount"] / "Groups" / "family" in write
+        assert built.world["mount"] / "Groups" / "neighbours" not in write
+
+    def test_no_groups_binds_no_group(self, tmp_path, monkeypatch):
+        built = self._built(tmp_path, monkeypatch, [])
+        assert "nextcloud_group_dir" not in {m.reason for m in built.plan.mounts}
+
+    def test_an_absent_directory_is_not_bound(self, tmp_path, monkeypatch):
+        built = self._built(tmp_path, monkeypatch, ["absent"])
+        assert "nextcloud_group_dir" not in {m.reason for m in built.plan.mounts}
+
+    def test_a_collapsing_id_binds_nothing_and_says_so(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        with caplog.at_level(logging.WARNING, logger="istota.sandbox_plan"):
+            built = self._built(tmp_path, monkeypatch, ["..", "", "."])
+        group_sources = [m.source for m in built.plan.mounts
+                         if m.reason == "nextcloud_group_dir"]
+        assert group_sources == []
+        assert sum("group id" in r.getMessage() for r in caplog.records) == 3

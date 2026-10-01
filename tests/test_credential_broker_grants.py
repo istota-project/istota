@@ -223,6 +223,25 @@ def test_live_forge_check_rechecks_admin_and_enabled(database):
         assert grants.check_credential_grant(*args, config=config) == "credential_not_granted"
 
 
+@pytest.mark.parametrize("withheld,expected", [
+    (frozenset(), {"portal": 1}),
+    (frozenset({"calendar"}), {}),
+    (frozenset({"files", "memory"}), {}),
+])
+def test_a_shared_rooms_withheld_scopes_keep_vault_grants_out(database, withheld, expected):
+    """Multiplayer Stage 9: a restricted shared-room task gets none of the
+    sender's vault credentials, brokered placeholders included."""
+    with db.get_db(database) as conn:
+        grants.put_grant(conn, "alice", "portal")
+        identifier = task(conn)
+    with db.get_db(database) as conn:
+        assert grants.ensure_credential_grants(
+            conn, identifier, "alice", withheld_scopes=withheld,
+        ) == expected
+        if not expected:
+            assert check(conn, identifier) == "credential_not_granted"
+
+
 def test_a_task_with_no_row_is_granted_nothing(database):
     with db.get_db(database) as conn:
         grants.put_grant(conn, "alice", "portal")

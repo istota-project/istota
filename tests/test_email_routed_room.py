@@ -126,7 +126,7 @@ ROUTED_TARGET = f"room:{ROUTED_ROOM},email"
 
 def _ingest_email(conn, config, *, output_target=ROUTED_TARGET, suppress=False):
     """A first-contact email: a thread hash for a token, naming no room."""
-    return record_inbound(
+    result = record_inbound(
         conn, config,
         surface="email",
         surface_ref=THREAD_TOKEN,
@@ -137,6 +137,7 @@ def _ingest_email(conn, config, *, output_target=ROUTED_TARGET, suppress=False):
         output_target=output_target,
         suppress_transcript_mirror=suppress,
     )
+    return result.room_token, result.task_id
 
 
 # ---------------------------------------------------------------------------

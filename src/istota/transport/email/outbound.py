@@ -15,12 +15,13 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
-from ... import db
+from ... import db, room_veto
 from ...email_support import get_email_config
 from ...llm_json import find_fenced_block
 from ...notification_resolvers import outbound_draft as draft_source
 from ...notification_store import RaiseResult, deliver_pending
 from ...skills.email import reply_to_email, send_email
+from . import threads as email_threads
 
 # NOTE: the briefing skill's body helpers (``strip_markdown`` /
 # ``render_briefing_html`` / ``_strip_html``) are imported function-locally
@@ -130,9 +131,8 @@ def _load_deferred_email_output(
     `_consume_deferred_email_output` once the message has gone out or been
     recorded as a draft, never at load time.
     """
-    from ...executor import get_user_temp_dir
-    user_temp_dir = get_user_temp_dir(config, task.user_id)
-    path = user_temp_dir / f"task_{task.id}_email_output.json"
+    from ...executor import task_deferred_dir
+    path = task_deferred_dir(config, task) / f"task_{task.id}_email_output.json"
     if not path.exists():
         return None
 
@@ -172,8 +172,8 @@ def _consume_deferred_email_output(config: "Config", task: db.Task) -> None:
     body in ``outbound_drafts`` — never on the path where the approval check
     itself failed, because there the file is the only surviving copy.
     """
-    from ...executor import get_user_temp_dir
-    path = get_user_temp_dir(config, task.user_id) / f"task_{task.id}_email_output.json"
+    from ...executor import task_deferred_dir
+    path = task_deferred_dir(config, task) / f"task_{task.id}_email_output.json"
     try:
         path.unlink(missing_ok=True)
     except OSError as e:
@@ -195,8 +195,14 @@ def _hold_if_unapproved(
     html: bool,
     in_reply_to: str | None = None,
     references: str | None = None,
+    cc_addrs: list[str] | None = None,
+    room_token: str | None = None,
 ) -> tuple[bool, int | None]:
     """``(may_send, draft_id)`` for one outbound message on the delivery leg.
+
+    ``cc_addrs`` are checked with ``to_addr``, so a reply-all holds when any
+    recipient would; ``room_token`` names the room a held draft shows in when
+    it is not the task's own (an approved post into an email thread room).
 
     ``(True, None)`` sends. ``(False, id)`` was held as a draft. ``(False,
     None)`` means the check could not run and the send is refused.
@@ -256,8 +262,9 @@ def _hold_if_unapproved(
 
     try:
         with db.get_db(config.db_path) as conn:
+            cc = list(cc_addrs or [])
             reason = recipients_require_hold(
-                config, conn, task.user_id, [to_addr],
+                config, conn, task.user_id, [to_addr, *cc],
             )
             if reason is None:
                 return True, None
@@ -268,6 +275,8 @@ def _hold_if_unapproved(
                 if origin and origin.startswith("room:")
                 else None
             )
+            if room_token:
+                room = room_token
             try:
                 draft_id = drafts.hold(
                     conn,
@@ -275,7 +284,7 @@ def _hold_if_unapproved(
                     task_id=task.id,
                     room_token=room,
                     to_addrs=[to_addr],
-                    cc_addrs=[],
+                    cc_addrs=cc,
                     bcc_addrs=[],
                     subject=subject or "",
                     body=body or "",
@@ -300,7 +309,7 @@ def _hold_if_unapproved(
                     title=draft_source.title_for(to_addr),
                     body=draft_source.delivery_body_for(
                         subject, draft_id,
-                        draft_source.visible_recipients([to_addr]),
+                        draft_source.visible_recipients([to_addr, *cc]),
                     ),
                     room_token=room,
                 )
@@ -446,6 +455,124 @@ def _record_sent_email(
         logger.warning("Failed to record sent email for task %d: %s", task.id, e)
 
 
+def composed_email_body(config: "Config", task: db.Task, result: str) -> str:
+    """The body of the mail an email task composed, or ``result`` with none.
+
+    The deferred file first, then an envelope in the result, as
+    `deliver_email_result` reads them; the file is peeked, never consumed.
+    """
+    parsed = (
+        _load_deferred_email_output(config, task, consume=False)
+        or _parse_email_output(result)
+    )
+    if parsed and parsed.get("body"):
+        return parsed["body"]
+    return result
+
+
+async def _send_thread_reply(
+    config: "Config", task: db.Task, plan: "email_threads.ReplyAll", *,
+    subject: str, body: str, content_type: str = "plain",
+    html_body: str | None = None, room_token: str | None = None,
+    consume: bool = True, approved: bool = False, notice_room: str | None = None,
+) -> bool:
+    """Reply-all on an email thread room's thread, through the outbound gate.
+
+    True when the mail went out or was held as a draft; False when the gate
+    could not run or the send failed. ``consume`` drops the task's deferred
+    email output once accounted for; a room post carries its own body and
+    leaves the task's file alone. ``approved`` is a send the user already
+    approved, body and recipients both (D20), which the gate does not hold a
+    second time. ``notice_room`` is the thread room whose announcement the
+    body may carry; a sent body that does is the thread being told.
+    """
+    held_subject = subject
+    if held_subject and not held_subject.lower().startswith("re:"):
+        held_subject = f"Re: {held_subject}"
+    if approved:
+        may_send, draft_id = True, None
+    else:
+        may_send, draft_id = _hold_if_unapproved(
+            config, task,
+            to_addr=plan.to, cc_addrs=plan.cc, subject=held_subject, body=body,
+            html=content_type == "html", in_reply_to=plan.in_reply_to,
+            references=plan.references, room_token=room_token,
+        )
+    if not may_send:
+        if draft_id is None:
+            return False
+        if consume:
+            _consume_deferred_email_output(config, task)
+        return True
+    if consume:
+        _consume_deferred_email_output(config, task)
+    try:
+        sent_message_id = reply_to_email(
+            to_addr=plan.to, subject=subject, body=body,
+            config=get_email_config(config), from_addr=config.email.bot_email,
+            in_reply_to=plan.in_reply_to, references=plan.references,
+            content_type=content_type, html_body=html_body, cc=plan.cc,
+        )
+    except Exception as e:
+        logger.error("Failed to send the thread reply-all (task %s): %s", task.id, e)
+        return False
+    # Every recipient, so a Cc'd correspondent's reply reads as one the bot
+    # wrote to (`thread_reply_from_correspondent` parses this as an address list).
+    _record_sent_email(
+        config, task, sent_message_id, to_addr=", ".join([plan.to, *plan.cc]),
+        subject=subject, in_reply_to=plan.in_reply_to, references=plan.references,
+    )
+    if notice_room:
+        try:
+            with db.get_db(config.db_path) as conn:
+                room_veto.note_email_notice_sent(conn, config, notice_room, body)
+        except Exception as e:  # noqa: BLE001 — the mail has gone; a repeat notice is the cost
+            logger.warning("Could not record the thread's announcement: %s", e)
+    return True
+
+
+def recipients_of(plan: "email_threads.ReplyAll") -> dict:
+    """A reply-all's recipients, as an approval records and compares them."""
+    return {"to": email_threads.fold(plan.to),
+            "cc": [email_threads.fold(address) for address in plan.cc]}
+
+
+async def deliver_thread_post(
+    config: "Config", *, task_id: int, room_token: str, body: str,
+    approved_recipients: dict | None = None,
+) -> bool:
+    """An approved `room post` into an email thread room, as a reply-all.
+
+    The post's approval was for its text and its room; the recipients are the
+    thread's latest people at send time, and the outbound gate decides whether
+    they may receive it (D11: the gate holds untrusted reply-all regardless).
+    A held draft shows in the thread's room.
+
+    ``approved_recipients`` is the recipient list a guest proposal's preview
+    showed the host, whose approval of that exact mail is the outbound approval
+    too (D20). A send to exactly those people is not held again; a send to
+    anyone else, the thread having moved on meanwhile, is held as before.
+    """
+    with db.get_db(config.db_path) as conn:
+        task = db.get_task(conn, task_id)
+        plan = email_threads.reply_all(conn, config, room_token, task_id=task_id)
+    if task is None or plan is None:
+        logger.warning(
+            "room post into email thread %s: nothing to reply to; not sent", room_token,
+        )
+        return False
+    approved = (
+        approved_recipients is not None
+        and recipients_of(plan) == {
+            "to": approved_recipients.get("to"), "cc": approved_recipients.get("cc"),
+        }
+    )
+    return await _send_thread_reply(
+        config, task, plan, subject=plan.subject, body=body, room_token=room_token,
+        consume=False, approved=approved, notice_room=room_token,
+    )
+
+
 def _legacy_briefing_subject(task: db.Task) -> str:
     """Derive a briefing subject from the built prompt's opening line.
 
@@ -582,6 +709,25 @@ async def deliver_email_result(
 
     with db.get_db(config.db_path) as conn:
         processed_email = db.get_email_for_task(conn, task.id)
+        thread_room = email_threads.thread_room_for_task(conn, task)
+        thread_reply = (
+            email_threads.reply_all(conn, config, thread_room, task_id=task.id)
+            if thread_room else None
+        )
+        if thread_reply is not None and content_type == "plain":
+            # The bot's first mail on a thread with guests carries its
+            # announcement (multiplayer D8): on email there is no other way to
+            # tell the thread's people what it is and how to switch it off.
+            body_text = room_veto.with_email_notice(conn, config, thread_room, body_text)
+
+    if thread_reply is not None:
+        # An email thread room (multiplayer D6): a reply-all to the latest
+        # message's people, through the same gate, every recipient checked.
+        subject = parsed["subject"] or thread_reply.subject
+        return await _send_thread_reply(
+            config, task, thread_reply, subject=subject, body=body_text,
+            content_type=content_type, html_body=html_body, notice_room=thread_room,
+        )
 
     if processed_email:
         # Reply to existing email thread

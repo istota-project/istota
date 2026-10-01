@@ -113,7 +113,19 @@ def _in_scope(grant, task, scheduled):
                 and (grant["scope_mode"] == "all" or task["conversation_token"] in grant["rooms"]))
 
 
-def ensure_credential_grants(conn, task_id, user_id):
+def _withheld(binding, withheld_scopes):
+    # A shared room's withheld scopes keep the sender's credentials out of the
+    # task (multiplayer Stage 9): a vault entry whenever anything is withheld,
+    # as the skill proxy's vault map is emptied, and a deployment forge token
+    # when the developer skill that declares it is.
+    if not withheld_scopes:
+        return False
+    if binding["source"] == "config":
+        return "developer" in withheld_scopes
+    return True
+
+
+def ensure_credential_grants(conn, task_id, user_id, *, withheld_scopes=frozenset()):
     """Freeze the maximum set once, even when it is empty. Caller commits.
 
     A task id with no row (a direct caller that never inserted one) freezes
@@ -129,7 +141,8 @@ def ensure_credential_grants(conn, task_id, user_id):
             name = row["name"]
             grant = get_grant(conn, user_id, name)
             binding = get_entry_binding(conn, user_id, name)
-            if binding and binding["hosts"] and _in_scope(grant, task, scheduled):
+            if (binding and binding["hosts"] and _in_scope(grant, task, scheduled)
+                    and not _withheld(binding, withheld_scopes)):
                 conn.execute("INSERT OR IGNORE INTO credential_task_grants VALUES (?, ?, ?, ?)",
                              (task_id, user_id, name, grant["policy_revision"]))
         conn.execute("UPDATE tasks SET credential_grants_initialized=1 WHERE id=? AND user_id=?",

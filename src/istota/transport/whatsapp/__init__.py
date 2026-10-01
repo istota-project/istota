@@ -1,10 +1,11 @@
 """WhatsApp through Meta's hosted Cloud API.
 
-A direct external conversation, never a view of a room: nothing here creates or
-joins a room, writes a canonical `messages` row, or mirrors a turn into Talk or
-web chat. The room facts on `WhatsAppTransport.capabilities` and in
-`surfaces.SURFACES` are all `None`, which is what keeps the surface out of the
-room model with no special case anywhere in `ingest` or the planner.
+A direct chat is an external conversation, never a view of a room: nothing
+creates or joins a room for one, writes a canonical `messages` row, or mirrors
+a turn into Talk or web chat. The room facts on `WhatsAppTransport.capabilities`
+and in `surfaces.SURFACES` are all `None` for that reason. A Baileys *group* is
+the one exception (multiplayer D6): its JID is a room binding, registered and
+fed by `groups.py`, and its own turns are answered into it.
 """
 
 from __future__ import annotations
@@ -188,6 +189,21 @@ class WhatsAppTransport:
                 "written; the caller passed neither a user nor a task",
             )
             return None
+        from .outbound import group_room_for_task, is_group_task  # noqa: PLC0415
+
+        # A group's own turn answers into the group (multiplayer D6), and
+        # only when the planner's channel is that group's room: the token is
+        # re-derived from the task here rather than trusted off `target`.
+        group_room = group_room_for_task(self._config, task)
+        if group_room is not None and target != group_room:
+            group_room = None
+        if group_room is None and is_group_task(self._config, task):
+            log.warning(
+                "whatsapp.outbound.group_unavailable task=%s: the group this "
+                "answer belongs to is archived or unbound; nothing sent",
+                task.id,
+            )
+            return None
         logical_key = reference_id
         if not logical_key:
             logical_key = (
@@ -205,6 +221,7 @@ class WhatsAppTransport:
             self._config, logical_key=logical_key, user_id=user_id, text=text,
             task_id=task.id if task is not None else None,
             buttons=buttons, ignore_opt_out=ignore_opt_out,
+            group_room=group_room,
         )
 
     async def edit(self, target: str, message_id: int, text: str) -> None:
@@ -224,8 +241,16 @@ class WhatsAppTransport:
         user is enrolled at all — without the planner learning anything about
         who they are.
         """
-        from .outbound import current_destination
+        from .outbound import current_destination, group_room_for_task, is_group_task
 
+        # A WhatsApp group's room token: still a conversation token rather
+        # than the group's JID, and only for that group's own turns. A group
+        # that can no longer be reached has no channel, never the user's chat.
+        group_room = group_room_for_task(self._config, task)
+        if group_room is not None:
+            return group_room
+        if is_group_task(self._config, task):
+            return None
         if not task.user_id or not current_destination(self._config, task.user_id):
             return None
         return whatsapp_conversation_token(task.user_id)

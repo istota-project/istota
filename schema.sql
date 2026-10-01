@@ -75,6 +75,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- that *does* belong in the room until the user approves it.
     withheld_from_room INTEGER DEFAULT 0,
 
+    -- Multiplayer D2: the `room_participants.id` of the guest whose turn this
+    -- task answers. Set means emissary mode — the task runs as the room's host,
+    -- at room-safe reach, with no outbound action beyond the reply — and it is
+    -- extracted into nobody's memory.
+    guest_participant_id INTEGER,
+    -- Multiplayer D3: who read the room when the turn was written, `private`,
+    -- `principals` or `mixed`. NULL for a task that is not a room turn.
+    audience TEXT,
+
     -- Silent mode (for scheduled jobs with silent_unless_action)
     heartbeat_silent INTEGER DEFAULT 0,  -- Whether to suppress output on no-action
 
@@ -256,8 +265,9 @@ CREATE TABLE IF NOT EXISTS processed_emails (
     "references" TEXT,  -- RFC 5322 References header for thread chain
     user_id TEXT,
     task_id INTEGER,
-    routing_method TEXT,  -- plus_address, signup, sender_match, thread_match, discarded, quiet, read_error, throttled
+    routing_method TEXT,  -- plus_address, signup, sender_match, thread_match, thread_room, discarded, quiet, read_error, throttled
     processed_at TEXT DEFAULT (datetime('now')),
+    recipients TEXT,  -- the message's To + Cc, JSON; an email thread room replies to the latest
     UNIQUE (uidvalidity, email_id),
     FOREIGN KEY (task_id) REFERENCES tasks(id)
 );
@@ -557,6 +567,57 @@ CREATE TABLE IF NOT EXISTS shared_kv (
 );
 
 CREATE INDEX IF NOT EXISTS idx_shared_kv_ns ON shared_kv(namespace);
+
+-- Groups (groups-and-shared-scope Stage 1): a named set of istota users with a
+-- store of its own. `kind` is display-only; no code path may branch on it
+-- (tests/test_groups.py::test_kind_is_display_only). `group_id` names a
+-- directory under {mount}/Groups, so `db.create_group` refuses anything
+-- `db.is_valid_group_id` does not accept. An archived group is out of every
+-- membership answer and its rows stay readable to the operator CLI. Kept equal
+-- to `db._GROUPS_DDL` by tests/test_groups.py.
+CREATE TABLE IF NOT EXISTS groups (
+    group_id     TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL DEFAULT 'group',
+    display_name TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    created_by   TEXT NOT NULL,
+    archived_at  TEXT
+);
+
+-- Membership is a history, never a set: removal sets `ended_at`, no row is
+-- deleted, and a re-join inserts a new row, so `(group_id, user_id)` is not
+-- unique. `role` (owner | member) is recorded and read by nothing in v1
+-- (tests/test_groups.py::test_role_is_inert).
+CREATE TABLE IF NOT EXISTS group_members (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id   TEXT NOT NULL REFERENCES groups(group_id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    role       TEXT NOT NULL DEFAULT 'member',
+    added_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    added_by   TEXT NOT NULL,
+    ended_at   TEXT,
+    ended_by   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id, ended_at);
+
+CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id, ended_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_group_members_current ON group_members(group_id, user_id) WHERE ended_at IS NULL;
+
+-- `shared_kv` with an audience: the group's members. The table does no
+-- authorization; `written_by` is provenance and never an authorization input.
+CREATE TABLE IF NOT EXISTS group_kv (
+    group_id   TEXT NOT NULL REFERENCES groups(group_id) ON DELETE CASCADE,
+    namespace  TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    written_by TEXT,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (group_id, namespace, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_kv_ns ON group_kv(group_id, namespace);
 
 -- Cron bookkeeping for module-owned shared briefing blocks (generated once
 -- globally, written into shared_kv). Mirrors briefing_state.
@@ -1226,9 +1287,26 @@ CREATE TABLE IF NOT EXISTS rooms (
     -- cross-surface half of ISSUE-421: this row is shared by every surface
     -- bound to the room, written against the writing surface's lane and read
     -- against the inbound one. NULL = not recorded.
-    model_namespace TEXT
+    model_namespace TEXT,
+    -- A side room (multiplayer D4): one member's private companion of the
+    -- shared room `side_of`, for `side_for_user` alone. NULL on every other
+    -- room. db._migrate_side_rooms adds both columns to an existing table. No
+    -- foreign key: deleting the parent must not be refused or cascade into the
+    -- member's own transcript; a side room whose parent is gone posts nowhere.
+    side_of     TEXT,
+    side_for_user TEXT,
+    -- The group this room is linked to (multiplayer Stage 27), or NULL. A
+    -- linked room's tasks carry that group's material and no other, and only
+    -- while every reader is a current member (`room_scopes.task_group_ids`);
+    -- the link narrows the audience rule and never widens it. Set by the host,
+    -- to a group the host belongs to. No foreign key, for the reason `side_of`
+    -- has none: a group is archived rather than deleted, and a link to one that
+    -- is gone or archived loads nothing. db._migrate_room_group adds it.
+    group_id    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rooms_side
+ON rooms (side_of, side_for_user) WHERE side_of IS NOT NULL;
 
 -- Per-user room membership (ISSUE-134). A room is shared (one token, one
 -- transcript) but each participant has a membership row; web visibility is
@@ -1251,6 +1329,35 @@ CREATE TABLE IF NOT EXISTS room_dismissals (
     dismissed_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (room_token, user_id)
 );
+
+-- Everyone seen in a room, istota user or not (multiplayer D1). `room_members`
+-- keeps its meaning — istota users who see the room in their web sidebar —
+-- while this records every author and, where a surface reports one, every
+-- rostered participant. `kind` is classified deterministically at write time:
+-- 'principal' (an istota user who is a member), 'guest' (a human who is not)
+-- or 'agent' (a bot, the bot itself included). `surface_ref` is the surface's
+-- own identity: a Talk actor id (prefixed `<actorType>/` for anything but a
+-- user), a web user id, an email address.
+--
+-- History, not a set: leaving stamps `left_at`, and coming back is a new row.
+-- So "currently present" is `left_at IS NULL`, and that is the upsert key —
+-- the partial unique index below, not a table constraint. A UNIQUE over
+-- `joined_at` would identify nothing an upsert could name, and two joins in one
+-- second would collide. The FK cascade is decorative (foreign_keys unset);
+-- room deletion hand-deletes from here.
+CREATE TABLE IF NOT EXISTS room_participants (
+    id           INTEGER PRIMARY KEY,
+    room_token   TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    surface      TEXT NOT NULL,
+    surface_ref  TEXT NOT NULL,
+    user_id      TEXT,
+    kind         TEXT NOT NULL CHECK (kind IN ('principal', 'guest', 'agent')),
+    display_name TEXT,
+    joined_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    left_at      TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_room_participants_present
+    ON room_participants (room_token, surface, surface_ref) WHERE left_at IS NULL;
 
 -- One row per (room, surface) the room is exposed on.
 CREATE TABLE IF NOT EXISTS room_bindings (
@@ -1319,10 +1426,19 @@ CREATE TABLE IF NOT EXISTS messages (
     -- exact defect these columns exist to end. Break the tie toward the more
     -- cautious answer.
     author_user_id TEXT,   -- an istota user id, when the writer is one
-    -- An external sender, already sanitized through `db.external_email_sender`
-    -- on the way in — so it is an addr-spec or the fixed unattributed
-    -- sentinel, never a raw `From:` header. Readers render it as-is.
+    -- An external sender, already sanitized on the way in — an email addr-spec
+    -- (`db.external_email_sender`), the fixed unattributed sentinel, or a room
+    -- guest's flattened display name (`transport.participants.guest_label`),
+    -- never raw surface text. Readers render it as-is.
     author_label   TEXT,
+    -- The `room_participants` row that wrote this turn. Set on every user row
+    -- `record_inbound` stores on a room surface (not yet on the `!steer`,
+    -- `!retry` and confirmation-exchange rows); NULL for assistant and system
+    -- rows, for an email
+    -- turn mirrored into a room (email joins a room's transcript without
+    -- joining the room), and for rows older than the table the backfill could
+    -- not attribute. A guest turn has this and no `author_user_id`.
+    author_participant_id INTEGER,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 -- No index on either author column: they are projected, never filtered.
@@ -1390,6 +1506,137 @@ CREATE TABLE IF NOT EXISTS message_deletions (
     deleted_by  TEXT NOT NULL DEFAULT '',
     deleted_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- A member's standing consent for one room: when `user_id` is the sender in
+-- `room_token`, this class of their data may be read and its answer may land in
+-- a transcript the other members read. Absence is denial. `scope` is a skill
+-- name or one of the synthetic scopes (`files`, `memory`). A grant is the
+-- member's own and is never written on anyone else's behalf. Created empty and
+-- never backfilled: granting everything to existing rooms would restore the
+-- disclosure hole with no record that anyone chose it. The FK cascade is
+-- decorative (foreign_keys unset); room deletion hand-deletes from here.
+-- Kept equal to `db._ROOM_DATA_GRANTS_DDL` by tests/test_room_members_api.py.
+CREATE TABLE IF NOT EXISTS room_data_grants (
+    room_token TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (room_token, user_id, scope)
+);
+
+-- One row per room that has ever needed one: who hosts it and how it treats
+-- guests (multiplayer Stage 11, D2/D9/D11/D14). Made by
+-- `room_policy.ensure_policy` the first time a room is shared or a guest
+-- writes in it, never backfilled. `host_user_id` is the room's creator, or its
+-- first member when the creator has gone; NULL means the host left and the
+-- room is record-only until a principal claims it with `!room host`. It is
+-- nullable for that reason, where the umbrella spec's sketch said NOT NULL.
+-- `guest_reply` defaults per surface at creation (Talk and web `direct`,
+-- WhatsApp and email `held`); the column default is the conservative one.
+-- The veto (Stage 20, D8/D12): `vetoed_at` set means the room is switched off
+-- and records nothing. `vetoed_by` is its first vetoer, NULL when the bot was
+-- switched off by being removed from a WhatsApp group; `veto_on_by` is the
+-- member who asked to switch it back on before every vetoer agreed; everyone
+-- who switched it off is in `room_vetoes`. `announced_at` is when the bot
+-- announced itself to the room's guests. There is no switch to stop
+-- recording guests: D1 needs every turn, and a room that is off records
+-- nothing (D12). The FK
+-- cascade is decorative (foreign_keys unset); room deletion hand-deletes from
+-- here. Kept equal to `db._ROOM_POLICY_DDL` by tests/test_room_policy.py.
+CREATE TABLE IF NOT EXISTS room_policy (
+    room_token   TEXT PRIMARY KEY REFERENCES rooms(token) ON DELETE CASCADE,
+    host_user_id TEXT,
+    speech_mode  TEXT,
+    guest_reply  TEXT NOT NULL DEFAULT 'held'
+                 CHECK (guest_reply IN ('off', 'held', 'direct')),
+    vetoed_by    INTEGER REFERENCES room_participants(id),
+    max_bot_turns_without_human INTEGER NOT NULL DEFAULT 3,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    vetoed_at    TEXT,
+    veto_on_by   TEXT,
+    announced_at TEXT
+);
+
+-- Everyone who switched the bot off in a room (Stage 20, D12), one row per
+-- person spelled as `db.audience_persons` spells them (`u:<user>` or
+-- `<surface>:<ref>`), so a vetoer who left and came back is still the same
+-- vetoer. `agreed_at` is their own `!<bot> on`. Emptied when the room is
+-- switched back on. Kept equal to `db._ROOM_VETOES_DDL` by
+-- tests/test_room_veto.py.
+CREATE TABLE IF NOT EXISTS room_vetoes (
+    room_token     TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    person         TEXT NOT NULL,
+    participant_id INTEGER REFERENCES room_participants(id),
+    vetoed_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    agreed_at      TEXT,
+    PRIMARY KEY (room_token, person)
+);
+
+-- Veto replies owed to a room's Talk conversation and WhatsApp group, written
+-- by a process that cannot post there itself (the web app holds no WhatsApp
+-- bridge) and posted by the scheduler's `room-notices` gate. `posted_at` is
+-- stamped before the post: at most once. Kept equal to
+-- `db._ROOM_NOTICES_DDL` by tests/test_room_veto.py.
+CREATE TABLE IF NOT EXISTS room_notices (
+    id         INTEGER PRIMARY KEY,
+    room_token TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    body       TEXT NOT NULL,
+    reference  TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    posted_at  TEXT
+);
+
+-- Audience epochs (multiplayer Stage 14, D3). A row with `epoch > 0` records
+-- that the room's audience grew without the history being acknowledged: who
+-- joined (`person`, spelled as `db.room_is_shared` counts humans: `u:<user>`
+-- or `<surface>:<ref>`) and where the transcript stood at that moment, as the
+-- highest `messages.id`, `tasks.id` and cached Talk message id then. Ids rather
+-- than `started_at`, whose one-second resolution cannot order a join against a
+-- turn in the same second. Front-stage readers drop everything at or below the
+-- highest boundary of any epoch whose joiner is still in the audience
+-- (`db.front_stage_cutoff`); a side room reads its parent whole. A row with
+-- `epoch = 0` is not an epoch: it records that a surface's audience has been
+-- observed once (`reason = 'baseline:<surface>'`), since the first roster a
+-- room is seen with is who the transcript was written for, not a join.
+-- Never backfilled. The FK cascade is decorative; room deletion hand-deletes.
+-- Kept equal to `db._ROOM_EPOCHS_DDL` by tests/test_audience_epochs.py.
+CREATE TABLE IF NOT EXISTS room_epochs (
+    id                    INTEGER PRIMARY KEY,
+    room_token            TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    epoch                 INTEGER NOT NULL,
+    started_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    reason                TEXT NOT NULL,
+    person                TEXT,
+    after_message_id      INTEGER NOT NULL DEFAULT 0,
+    after_task_id         INTEGER NOT NULL DEFAULT 0,
+    after_talk_message_id INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_room_epochs_epoch
+    ON room_epochs (room_token, epoch) WHERE epoch > 0;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_room_epochs_baseline
+    ON room_epochs (room_token, reason) WHERE epoch = 0;
+
+-- The speech gate's audit trail: one row per decision about whether the bot
+-- replies to an inbound turn. An operator-facing tuning log, not a second
+-- transcript: `message_id` points at the turn rather than copying its body,
+-- and `reason` is the classifier's own bounded one-liner. Pruned by age on the
+-- scheduler's cleanup tick (`[speech_gate] decision_retention_days`).
+CREATE TABLE IF NOT EXISTS speech_gate_decisions (
+    id         INTEGER PRIMARY KEY,
+    room_token TEXT NOT NULL,
+    surface    TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    message_id INTEGER,
+    spoke      INTEGER NOT NULL,
+    -- 'agent_author'|'host_lost'|'guest_command'|'guest_reply_off'|'loop_cap'|'not_multi_human'|'addressed'|'mode_off'|'mode_mention'|'classifier'|'failed'
+    rung       TEXT NOT NULL,
+    reason     TEXT,
+    model      TEXT,
+    latency_ms INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_speech_gate_room ON speech_gate_decisions (room_token, id);
+CREATE INDEX IF NOT EXISTS idx_speech_gate_created ON speech_gate_decisions (created_at);
 
 -- One-time data-migration ledger (markered, so heavy backfills run once).
 CREATE TABLE IF NOT EXISTS _migration_state (
@@ -1659,7 +1906,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_skill_requests (
     requester_user_id TEXT NOT NULL,
     origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     request_key TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question')),
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post')),
     recipient_user_id TEXT NOT NULL,
     relay_id TEXT UNIQUE,
     text TEXT,
@@ -1681,6 +1928,11 @@ CREATE TABLE IF NOT EXISTS whatsapp_skill_requests (
     closed_at TEXT,
     content_cleared_at TEXT,
     error_code TEXT,
+    -- JSON: the private conversation a held request was asked from, and where
+    -- a side_whisper or room_post goes. A relay question keeps both on its
+    -- message_relays row instead.
+    origin TEXT,
+    destination TEXT,
     UNIQUE (requester_user_id, origin_task_id, request_key)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_request_held_task

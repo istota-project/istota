@@ -60,6 +60,9 @@ from ._types import (
     InboundWhatsAppEvent,
     WhatsAppDeliveryEvent,
     WhatsAppDeliveryStatus,
+    WhatsAppGroupContext,
+    WhatsAppGroupMember,
+    WhatsAppGroupRoster,
     WhatsAppInboundMedia,
     WhatsAppSendFailure,
     WhatsAppSendOutcome,
@@ -84,18 +87,26 @@ MSG_INBOUND = "inbound"
 MSG_RECEIPT = "receipt"
 MSG_SEND_RESULT = "send_result"
 MSG_FATAL = "fatal"
+#: A WhatsApp group's roster, read from `groupMetadata` (multiplayer D6).
+MSG_GROUP_ROSTER = "group_roster"
 
 MSG_SEND = "send"
 MSG_SHUTDOWN = "shutdown"
+#: Leave a WhatsApp group: D14, the host left it.
+MSG_LEAVE_GROUP = "leave_group"
+
+# The two group types are additive and the version does not move: a sidecar
+# that predates them sends a group message with no sender, which the daemon
+# still refuses, and logs a `leave_group` it does not know as unexpected.
 
 #: Sidecar to daemon.
 UP_MESSAGES: frozenset[str] = frozenset({
     MSG_HELLO, MSG_READY, MSG_QR, MSG_INBOUND, MSG_RECEIPT,
-    MSG_SEND_RESULT, MSG_FATAL,
+    MSG_SEND_RESULT, MSG_FATAL, MSG_GROUP_ROSTER,
 })
 
 #: Daemon to sidecar.
-DOWN_MESSAGES: frozenset[str] = frozenset({MSG_SEND, MSG_SHUTDOWN})
+DOWN_MESSAGES: frozenset[str] = frozenset({MSG_SEND, MSG_SHUTDOWN, MSG_LEAVE_GROUP})
 
 #: One line's ceiling, enforced by `encode` and by `decode` both. A cap only on
 #: the reader lets a writer build a line it can never deliver; a cap only on the
@@ -132,6 +143,12 @@ MAX_USERNAME_CHARS = 256
 #: length: a log line is where it goes, and a newline or an ANSI escape off
 #: the wire forges one there.
 MAX_MEDIA_MIME_CHARS = 128
+
+#: A JID or LID off the wire, before `identity` decides what it names.
+MAX_JID_CHARS = 128
+
+#: WhatsApp caps a group at 1,024 members; a roster past this is not one.
+MAX_GROUP_MEMBERS = 1024
 
 #: Every `media_error` the sidecar may name, and the local sentence each
 #: becomes. `_SEND_REASONS`' rule, for its reason: the sidecar's own words
@@ -480,14 +497,12 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
     the same reason: the subscriber number is inside the JID, and
     `identity.jid_number` is what takes it out.
 
-    A group message is typed `group` here, matching `webhook._inbound_event`,
-    so `_handle_inbound` refuses it **before** any identity lookup. The flag is
-    read off the line rather than off the JID's domain: the sidecar knows which
-    chat a message arrived in, and inferring it from a string is how a
-    `@g.us` spelling change becomes a third party's text in somebody's task
-    history. **The media goes with the text on that branch**, because nothing
-    will ever consume a file for a message refused above every identity
-    lookup; the staged file orphans and the sweep takes it.
+    A group message carries a `WhatsAppGroupContext` and `from_user` is its
+    sender, not the chat (multiplayer D6). The flag is read off the line
+    rather than off the JID's domain: the sidecar knows which chat a message
+    arrived in. One with no sender — an older sidecar — is typed `group` and
+    refused before any identity lookup, as every group message used to be.
+    Group media is not carried on either branch.
 
     An image's caption rides `text` rather than a field of its own, so that
     every gate in `_dispatch_inbound` can apply to it with no new code —
@@ -506,11 +521,31 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
         payload.get("callback_data"), "callback_data", MAX_MESSAGE_ID_CHARS,
     )
     inbound_media = _inbound_media(payload)
+    sender = _text(payload, "jid")
+    group = None
     if payload.get("group") is True:
-        message_type = "group"
-        text = None
+        # A group message names its sender beside the chat (multiplayer D6).
+        # One that names none came from a sidecar that predates groups, and
+        # no principal can be resolved for it, so it keeps the old refusal.
+        # Media and callbacks are dropped either way: group media stays
+        # refused, and a button belongs to a direct chat.
         callback_data = None
         inbound_media = None
+        sender_jid = _bounded_text(
+            payload.get("sender_jid"), "sender_jid", MAX_JID_CHARS,
+        ) or ""
+        sender_lid = _bounded_text(
+            payload.get("sender_lid"), "sender_lid", MAX_JID_CHARS,
+        ) or ""
+        if len(sender) > MAX_JID_CHARS or not (sender_jid or sender_lid):
+            message_type = "group"
+            text = None
+        else:
+            group = WhatsAppGroupContext(
+                group_jid=sender, sender_lid=sender_lid,
+                mentions_bot=payload.get("mentions_bot") is True,
+            )
+            sender = sender_jid
     return InboundWhatsAppEvent(
         message_id=_message_id(payload),
         waba_id=NO_CLOUD_ACCOUNT,
@@ -521,7 +556,7 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
             username=_bounded_text(
                 payload.get("username"), "username", MAX_USERNAME_CHARS,
             ),
-            jid=_text(payload, "jid"),
+            jid=sender,
         ),
         message_type=message_type,
         text=text,
@@ -529,6 +564,44 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
         reply_to_message_id=_optional_text(payload.get("reply_to_message_id")),
         sent_at=_event_time(payload),
         media=inbound_media,
+        group=group,
+    )
+
+
+def group_roster(payload: dict[str, Any]) -> WhatsAppGroupRoster:
+    """One `group_roster` line as the record `groups.apply_roster` reads.
+
+    Every member is refused rather than skipped when malformed: a roster is
+    the room's audience, and a half-read one would end the presence of the
+    people this side failed to parse.
+    """
+    group_jid = _text(payload, "group_jid")
+    if len(group_jid) > MAX_JID_CHARS:
+        raise BaileysProtocolError("group_jid exceeds the JID bound")
+    bot_present = payload.get("bot_present")
+    if not isinstance(bot_present, bool):
+        raise BaileysProtocolError("group_roster has no bot_present")
+    raw_members = payload.get("participants")
+    if not isinstance(raw_members, list) or len(raw_members) > MAX_GROUP_MEMBERS:
+        raise BaileysProtocolError("group_roster participants are unreadable")
+    members = []
+    for raw in raw_members:
+        if not isinstance(raw, dict):
+            raise BaileysProtocolError("a group_roster participant is not an object")
+        jid = _bounded_text(raw.get("jid"), "participant jid", MAX_JID_CHARS) or ""
+        lid = _bounded_text(raw.get("lid"), "participant lid", MAX_JID_CHARS) or ""
+        if not (jid or lid):
+            raise BaileysProtocolError("a group_roster participant names nobody")
+        members.append(WhatsAppGroupMember(
+            jid=jid, lid=lid,
+            display_name=_bounded_text(raw.get("name"), "name", MAX_USERNAME_CHARS),
+        ))
+    return WhatsAppGroupRoster(
+        group_jid=group_jid,
+        subject=_bounded_text(payload.get("subject"), "subject", MAX_USERNAME_CHARS),
+        members=tuple(members),
+        added_by=_bounded_text(payload.get("added_by"), "added_by", MAX_JID_CHARS) or "",
+        bot_present=bot_present,
     )
 
 
@@ -628,13 +701,17 @@ def result_request_id(payload: dict[str, Any]) -> str:
 __all__ = [
     "BaileysProtocolError",
     "DOWN_MESSAGES",
+    "MAX_GROUP_MEMBERS",
     "MAX_INBOUND_TEXT_CHARS",
+    "MAX_JID_CHARS",
     "MAX_LINE_BYTES",
     "MAX_MEDIA_MIME_CHARS",
     "MAX_MESSAGE_ID_CHARS",
     "MAX_USERNAME_CHARS",
     "MSG_FATAL",
+    "MSG_GROUP_ROSTER",
     "MSG_HELLO",
+    "MSG_LEAVE_GROUP",
     "MSG_INBOUND",
     "MSG_QR",
     "MSG_READY",
@@ -656,6 +733,7 @@ __all__ = [
     "decode",
     "delivery_event",
     "encode",
+    "group_roster",
     "hello_version",
     "inbound_event",
     "local_failure",

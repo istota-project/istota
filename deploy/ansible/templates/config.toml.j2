@@ -533,6 +533,17 @@ context_min_messages = {{ istota_conversation_context_min_messages }}
 previous_tasks_count = {{ istota_conversation_previous_tasks_count }}
 talk_context_limit = {{ istota_conversation_talk_context_limit }}
 
+[speech_gate]
+mode = "{{ istota_speech_gate_mode | istota_toml_escape }}"
+model = "{{ istota_speech_gate_model | istota_toml_escape }}"
+window_messages = {{ istota_speech_gate_window_messages }}
+max_message_chars = {{ istota_speech_gate_max_message_chars }}
+timeout_seconds = {{ istota_speech_gate_timeout_seconds }}
+decision_retention_days = {{ istota_speech_gate_decision_retention_days }}
+
+[rooms]
+shared_room_data_policy = "{{ istota_rooms_shared_room_data_policy | istota_toml_escape }}"
+
 [logging]
 level = "{{ istota_logging_level | istota_toml_escape }}"
 output = "{{ istota_logging_output | istota_toml_escape }}"

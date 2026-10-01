@@ -297,11 +297,25 @@ async def verify_private_audience(config, *, actor_user_id: str, origin: dict) -
 def close_task_questions(conn, task_id: int, *, reason: str = "cancelled") -> None:
     with write_transaction(conn):
         rows = conn.execute(
-            "SELECT relay_id FROM whatsapp_skill_requests WHERE origin_task_id=? AND state='held'",
+            "SELECT id, relay_id FROM whatsapp_skill_requests WHERE origin_task_id=? AND state='held'",
             (task_id,),
         ).fetchall()
+        state = "expired" if reason == "confirmation_expired" else "cancelled"
         for row in rows:
-            _close_relay(conn, row[0], state="expired" if reason == "confirmation_expired" else "cancelled", reason=reason)
+            if row["relay_id"]:
+                _close_relay(conn, row["relay_id"], state=state, reason=reason)
+                continue
+            # A held room post has no relay row; close the request and
+            # release its task the way `_close_relay` does.
+            conn.execute(
+                "UPDATE whatsapp_skill_requests SET state=?,error_code=?,closed_at=datetime('now'),"
+                "updated_at=datetime('now') WHERE id=? AND state='held'", (state, reason, row["id"]),
+            )
+            conn.execute(
+                """UPDATE tasks SET whatsapp_confirmation_request_id=NULL,
+                   status=CASE WHEN status='pending_confirmation' THEN 'cancelled' ELSE status END
+                   WHERE whatsapp_confirmation_request_id=?""", (row["id"],),
+            )
 
 
 # Replies never enter command or confirmation dispatch again, including when
@@ -532,20 +546,26 @@ def create_recipient_task(conn, config, relay, *, surface: str, actor_user_id: s
     from .transport.ingest import ingest_message, record_inbound
 
     context = None if outcome == "accepted" else _context(relay, outcome)
+    # A relay reply answers a question the bot posted, so it is addressed to the
+    # bot by construction. Set on the two room surfaces, the only ones whose
+    # turn the speech gate sees: without it the gate could record the answer
+    # with no task, and the web relay branch would report ("ok", None).
     if surface == "web":
-        _, task_id = record_inbound(
+        task_id = record_inbound(
             conn, config, surface="web", surface_ref=channel, user_id=actor_user_id, text=text,
             source_type="web", output_target="room", priority=5, attachments=attachments or None,
             attachment_names=attachment_names or None, client_msg_id=client_msg_id,
             reply_to_canonical_id=reply_to_id, reply_to_content=context,
             model=model, effort=effort, apply_room_default=not model_prefix_used,
-        )
+            addressed_to_bot=True,
+        ).task_id
     elif surface == "talk":
         task_id = ingest_message(conn, config, IncomingMessage(
             user_id=actor_user_id, text=text, source_type="talk", surface="talk",
             channel_token=channel, channel_name=channel_name, attachments=attachments or [],
             platform_message_id=platform_message_id, reply_to_message_id=reply_to_id,
             reply_to_content=context, model=model, effort=effort, model_prefix_used=model_prefix_used,
+            addressed_to_bot=True,
         ))
     elif surface == "whatsapp":
         from .transport.whatsapp import whatsapp_conversation_token

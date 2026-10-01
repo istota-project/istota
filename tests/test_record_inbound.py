@@ -31,10 +31,11 @@ def config(db_path):
 class TestRecordInboundTalk:
     def test_unknown_talk_room_auto_registers(self, config, db_path):
         with db.get_db(db_path) as conn:
-            token, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="talk", surface_ref="cpzpcfx2",
                 user_id="alice", text="hi", channel_name="#istota",
             )
+            token, task_id = _inbound.room_token, _inbound.task_id
         assert token == "cpzpcfx2"
         with db.get_db(db_path) as conn:
             room = db.get_room(conn, "cpzpcfx2")
@@ -69,9 +70,11 @@ class TestRecordInboundTalk:
             text="hi", platform_message_id=555,
         )
         with db.get_db(db_path) as conn:
-            _, first = record_inbound(conn, config, **msg_args)
+            _inbound = record_inbound(conn, config, **msg_args)
+            _, first = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
-            _, second = record_inbound(conn, config, **msg_args)
+            _inbound = record_inbound(conn, config, **msg_args)
+            _, second = _inbound.room_token, _inbound.task_id
         assert first == second  # create_task dedups
         with db.get_db(db_path) as conn:
             msgs = db.get_messages(conn, "room1")
@@ -87,10 +90,11 @@ class TestRecordInboundBinding:
             db.add_room_binding(conn, "web-alice-xyz", "web", "web-alice-xyz")
             db.add_room_binding(conn, "web-alice-xyz", "talk", "talktoken9")
         with db.get_db(db_path) as conn:
-            token, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="talk", surface_ref="talktoken9",
                 user_id="alice", text="from talk",
             )
+            token, task_id = _inbound.room_token, _inbound.task_id
         assert token == "web-alice-xyz"
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
@@ -102,10 +106,11 @@ class TestRecordInboundBinding:
 class TestRecordInboundEmail:
     def test_email_creates_no_room(self, config, db_path):
         with db.get_db(db_path) as conn:
-            token, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="email", surface_ref="thread-token",
                 user_id="bob", text="email body", source_type="email",
             )
+            token, task_id = _inbound.room_token, _inbound.task_id
         assert token == "thread-token"
         with db.get_db(db_path) as conn:
             assert db.get_room(conn, "thread-token") is None
@@ -125,11 +130,12 @@ class TestRecordInboundEcho:
             )
             db.set_message_external_id(conn, mid, "talk", "8888")
         with db.get_db(db_path) as conn:
-            token, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="talk", surface_ref="room1",
                 user_id="alice", text="bot reply", platform_message_id=8888,
                 external_id="8888",
             )
+            token, task_id = _inbound.room_token, _inbound.task_id
         assert token == "room1"
         assert task_id is None  # dropped, no task created
         with db.get_db(db_path) as conn:

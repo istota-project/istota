@@ -647,6 +647,17 @@ context_min_messages = ${ISTOTA_CONVERSATION_CONTEXT_MIN_MESSAGES:-10}
 previous_tasks_count = ${ISTOTA_CONVERSATION_PREVIOUS_TASKS_COUNT:-3}
 talk_context_limit = ${ISTOTA_CONVERSATION_TALK_CONTEXT_LIMIT:-100}
 
+[speech_gate]
+mode = "${ISTOTA_SPEECH_GATE_MODE:-mention}"
+model = "${ISTOTA_SPEECH_GATE_MODEL:-fast}"
+window_messages = ${ISTOTA_SPEECH_GATE_WINDOW_MESSAGES:-8}
+max_message_chars = ${ISTOTA_SPEECH_GATE_MAX_MESSAGE_CHARS:-400}
+timeout_seconds = ${ISTOTA_SPEECH_GATE_TIMEOUT_SECONDS:-8.0}
+decision_retention_days = ${ISTOTA_SPEECH_GATE_DECISION_RETENTION_DAYS:-30}
+
+[rooms]
+shared_room_data_policy = "${ISTOTA_ROOMS_SHARED_ROOM_DATA_POLICY:-restrict}"
+
 [logging]
 level = "${ISTOTA_LOGGING_LEVEL:-INFO}"
 output = "${ISTOTA_LOGGING_OUTPUT:-console}"

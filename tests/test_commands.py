@@ -2487,6 +2487,26 @@ class TestCmdExport:
         assert "---" not in content
 
     @pytest.mark.asyncio
+    async def test_an_unanswered_last_turn_does_not_reset_the_export_cursor(
+        self, make_config,
+    ):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="talk")
+            ids = _seed_conversation(conn, count=2)
+            db.backfill_room_messages_from_tasks(conn, "room1")
+            db.add_message(
+                conn, "room1", role="user", body="just between us",
+                origin_surface="talk", task_id=None, author_user_id="bob",
+            )
+            await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+
+        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
+        content = export_path.read_text()
+        assert f"last_id={ids[-1]}," in content.split("\n", 1)[0]
+        assert "just between us" in content
+
+    @pytest.mark.asyncio
     async def test_empty_channel(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
@@ -2545,6 +2565,53 @@ class TestCmdExport:
         # Metadata last_id is the newest exported task id
         meta = _parse_export_metadata(updated_content.split("\n")[0])
         assert meta["last_id"] == new_ids[-1]
+
+    @pytest.mark.asyncio
+    async def test_incremental_export_appends_an_unanswered_turn(self, make_config):
+        config = make_config()
+        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="talk")
+            _seed_conversation(conn, count=1)
+            db.backfill_room_messages_from_tasks(conn, "room1")
+            await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+        with db.get_db(config.db_path) as conn:
+            mid = db.add_message(
+                conn, "room1", role="user", body="just between us",
+                origin_surface="talk", task_id=None, author_user_id="bob",
+            )
+            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+            again = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+
+        assert "Appended 1 new messages" in result
+        content = export_path.read_text()
+        assert content.count("just between us") == 1
+        assert _parse_export_metadata(content.split("\n")[0])["last_msg_id"] == mid
+        assert "No new messages" in again
+
+    @pytest.mark.asyncio
+    async def test_an_append_from_the_task_fallback_is_not_rewritten_later(
+        self, make_config,
+    ):
+        config = make_config()
+        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="talk")
+            _seed_conversation(conn, count=1, start=1)
+            db.backfill_room_messages_from_tasks(conn, "room1")
+            await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+        # Unmirrored completed turns put the room on the `tasks` fallback.
+        with db.get_db(config.db_path) as conn:
+            _seed_conversation(conn, count=2, start=2)
+            await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+        # Mirroring them moves it back to the `messages` path.
+        with db.get_db(config.db_path) as conn:
+            db.backfill_room_messages_from_tasks(conn, "room1")
+            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+
+        assert "No new messages" in result
+        content = export_path.read_text()
+        assert [content.count(f"Reply {n}") for n in (1, 2, 3)] == [1, 1, 1]
 
     @pytest.mark.asyncio
     async def test_incremental_no_new_messages(self, make_config):

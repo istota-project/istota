@@ -182,7 +182,10 @@ SITES = (
         # `bool(room_token)` conjunct is not part of the question and does not
         # move; only the surface test converts.
         literal_text="surface in ROOM_SURFACES",
-        converted_text="is_room_member(surface)",
+        # Since multiplayer D10 the per-room form: with `room_container`
+        # False, which every surface but a WhatsApp group or an email thread
+        # room passes, it is `is_room_member(surface)` exactly.
+        converted_text="is_room_member_for(surface, room_container=room_container)",
         literal=lambda v: v in frozenset({"talk", "web"}),
         predicate=is_room_member,
     ),

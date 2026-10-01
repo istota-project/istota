@@ -6,7 +6,7 @@ Istota can receive requests and send final replies over WhatsApp, through one of
 
 **`whatsapp_cloud`** is Meta's hosted Cloud API, used directly rather than through Twilio, 360dialog or another Business Solution Provider. It is the sanctioned path. It needs a Meta business account and business verification, it is metered, and a free-form reply is only allowed inside 24 hours of the user's own message.
 
-A WhatsApp exchange is outside the room model on either adapter. It never creates or joins a Talk or web room, never copies a message into a room transcript, and never appears in a web composer. The task and its result stay available in the task history and the admin task views like any other task.
+A one-to-one WhatsApp chat is outside the room model on either adapter. It never creates or joins a Talk or web room, never copies a message into a room transcript, and never appears in a web composer. The task and its result stay available in the task history and the admin task views like any other task. A **group** the bot's number is in is different on the Baileys adapter: it becomes a room (see [Groups](#groups)).
 
 Both adapters handle private text messages, photographs, and the STOP, START and HELP keywords. Documents, audio, video, stickers, contacts, locations, reactions, edits, deletions, calls, Flows and payments are not handled: an unsupported message gets one fixed reply asking for text, and nothing is downloaded. Confirmation questions carry Yes and No buttons on Cloud and arrive as plain text on Baileys; either way a typed `YES` or `NO` answers them, and so does `!confirm <id> yes|no`.
 
@@ -281,6 +281,23 @@ JPEG, PNG, GIF, WebP and HEIC are read. An iPhone photograph works: HEIC is conv
 One image per message. Video, voice notes, documents and stickers are still refused — a photograph sent as a *document* rather than as a photo is refused with them, because Istota reads the message type before it reads the file.
 
 Nothing is downloaded for a sender Istota does not recognise, for a message it has already handled, or for somebody who has sent STOP. On Meta's Cloud adapter that means no request is made at all; on Baileys the sidecar has already fetched the file by then, and Istota deletes it without copying it anywhere.
+
+## Groups
+
+On the Baileys adapter, a WhatsApp group the bot's number belongs to becomes a [shared room](shared-rooms.md). It works like a Talk group: every message is recorded, the bot answers when addressed, and the group appears in its members' web sidebar, where they can read the whole conversation and use their [side rooms](side-rooms.md). The Cloud adapter still refuses group messages.
+
+- **Joining.** Add the bot's number to a group from a phone whose number is bound to an Istota user. That user becomes the room's host. A group with no Istota user in it is not registered, and its messages are ignored. The bot never creates a group and never adds anyone.
+- **Who is who.** A member's number bound to an Istota user is a member of the room; every other number in the group is a guest. Someone who joins later is a member once they write, if their number is bound to an Istota user.
+- **Addressing the bot.** Mention it, reply to one of its messages, or start with its name. By default nothing else is answered.
+- **Guests.** A guest's message is answered as the host's emissary, and by default (`held`) the reply waits in the host's side room for approval before it is posted to the group. Change it with `!room guests direct` or `off`.
+- **Commands.** A member's `!command` in a group is answered in their own WhatsApp chat with the bot, and acts on the group's room. Your side room's messages arrive in that chat too, headed "re: <group>".
+- **Photos** sent to a group are not handled, caption included.
+- **Leaving.** If the host leaves the group, the bot leaves too, and the room is archived. Removing the bot's number from the group [switches it off](room-veto.md) for that group, and it stays off after it is added again until a member sends `!<name> on`.
+- **Privacy.** The room's id is a hash of the group's id, not the id itself, since older group ids contain the creator's phone number.
+
+Scheduled jobs and other conversations cannot post into a group; only the group's own turns, and posts its members approve, are sent there. Group traffic adds somewhat to the account-ban risk described above, so keep the bot to groups that want it.
+
+No automated tier reaches a real WhatsApp account, so group support has been tested against recorded message shapes only.
 
 ## Operations
 

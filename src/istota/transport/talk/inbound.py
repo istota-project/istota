@@ -12,12 +12,14 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ... import confirmations, db
+from ... import confirmations, db, room_veto, speech_gate
 from ...async_runtime import get_talk_client
 from ...config import Config
 from ...talk import TalkClient, clean_message_content
-from .._types import WEBMIRROR_REF_PREFIX, IncomingMessage
-from ..ingest import ingest_message
+from .._types import WEBMIRROR_REF_PREFIX, IncomingMessage, ParticipantRef
+from ..ingest import classify_ahead, ingest_message
+from ..participants import classify as classify_participant
+from ..participants import guest_label
 from ._db_lock import DB_BUSY_TIMEOUT_MS, loop_db_lock, talk_db
 
 logger = logging.getLogger("istota.transport.talk.inbound")
@@ -335,21 +337,8 @@ def _report_poll_txn(hold: "_TxnHold", held_seconds: float) -> None:
 
 
 def _is_multi_user(participants: list[dict]) -> bool:
-    """Return True if 3+ participants (requires @mention)."""
+    """Return True if 3+ participants (an unmentioned turn is only recorded)."""
     return len(participants) >= 3
-
-
-def _participant_names(participants: list[dict], exclude: str | None = None) -> list[str]:
-    """Extract display names from participant list, excluding a specific actor."""
-    names = []
-    for p in participants:
-        actor_id = p.get("actorId", "")
-        if exclude and actor_id == exclude:
-            continue
-        name = p.get("displayName") or actor_id
-        if name:
-            names.append(name)
-    return names
 
 
 def _istota_members_for_conversation(
@@ -586,9 +575,11 @@ def _plan_room_pass(
             last_message_id=last_message_id,
             needs_participants=needs_participants,
             needs_cursor_init=needs_cursor_init,
+            # A room switched off caches nothing (multiplayer D12), so an
+            # empty cache there is the veto at work, not a room to backfill.
             needs_backfill=not db.has_cached_talk_messages(
                 conn, conversation_token,
-            ),
+            ) and not room_veto.is_vetoed_ref(conn, "talk", conversation_token),
         ))
     return plans
 
@@ -721,8 +712,15 @@ def _apply_room_pass(
                     origin="talk", name=plan.display_name,
                 )
                 db.add_room_binding(conn, plan.canonical, "talk", plan.token)
+                # Founders, not joiners: the room is registered the first
+                # time it is seen, so everyone on its roster now — guests
+                # included — is who it was already written for.
                 for uid in member_ids[1:]:
-                    db.add_room_member(conn, plan.canonical, uid)
+                    db.add_room_member(conn, plan.canonical, uid, acknowledged=True)
+                if plan.participants:
+                    _sync_talk_roster(
+                        conn, config, plan.token, plan.participants, baseline=True,
+                    )
 
         last_message_id = plan.last_message_id
         if plan.needs_cursor_init:
@@ -1116,12 +1114,11 @@ async def poll_one_conversation(
     **The room context is required and has no default anywhere on this path.**
     The results block reads ``conv_types.get(token, 1)``, and 1 is a DM:
     ``_get_participants`` returns ``[]`` for type 1, ``_is_multi_user`` is then
-    False, and the ``is_bot_mentioned`` gate is skipped. A
+    False, and every message is treated as addressed. A
     ``poll_one_conversation(config, token)`` with no listing would take that
-    default and ingest **every** message in every group room the bot sits in,
-    from any configured user, with no @mention required — and would also stop
-    stripping the mention, drop the ``[Room participants: …]`` prefix and pass
-    a null channel name. So the supervisor holds a token → context map built
+    default and answer **every** message in every group room the bot sits in,
+    from any configured user, with no @mention required — and would also record
+    the task as a direct conversation and pass a null channel name. So the supervisor holds a token → context map built
     from the same ``list_conversations`` payload it builds the watcher set
     from, which gives the invariant that makes this safe: a watcher exists only
     because that listing named its room, so a watcher always has context. A
@@ -1335,7 +1332,8 @@ async def poll_talk_conversations(config: Config) -> list[int]:
 
     This is the Talk transport's inbound body (``TalkTransport.poll`` delegates
     here). It owns every Talk-protocol-specific step — conversation listing +
-    cache, per-room long-poll, system/own/unknown-user/unmentioned filtering,
+    cache, per-room long-poll, system/own/unknown-user filtering, the @mention
+    test that keeps an unmentioned group turn to a recorded row,
     ``!model`` prefix parsing, ``!command`` dispatch, confirmation-reply
     handling, the per-channel active-task gate, attachment extraction, and
     cancelling superseded confirmations.
@@ -1413,6 +1411,229 @@ async def poll_talk_conversations(config: Config) -> list[int]:
     )
 
 
+def _is_own_post(msg: dict, config: Config) -> bool:
+    """The bot's own message, or one with no author at all.
+
+    Never recorded: every post of ours is already in the transcript as the
+    assistant row it was delivered from, so recording its echo would store the
+    answer a second time as a user turn.
+    """
+    actor_id = msg.get("actorId", "")
+    return not actor_id or actor_id == config.talk.bot_username
+
+
+def _veto_verb(msg: dict, config: Config) -> str | None:
+    """``off``/``on`` for a person's ``!<bot> off|on`` (multiplayer D8), else None.
+
+    Never for a system message, the bot's own post or a web-mirror echo: those
+    are nobody's veto, and the room's handling of them must not change.
+    """
+    if msg.get("messageType", "") == "system" or _is_own_post(msg, config):
+        return None
+    reference_id = msg.get("referenceId") or ""
+    if isinstance(reference_id, str) and reference_id.startswith(WEBMIRROR_REF_PREFIX):
+        return None
+    content = clean_message_content(msg, bot_username=config.talk.bot_username)
+    return room_veto.parse_command(content, config.bot_name)
+
+
+def _talk_ref(actor_type: str, actor_id: str) -> str:
+    """A Talk actor as a participant ref: the bare id for a Nextcloud user,
+    ``<actorType>/<id>`` for anything else, since ids are unique per type only.
+    A missing type reads as a user, as `_istota_members_for_conversation` has it.
+    """
+    actor_type = actor_type or "users"
+    return actor_id if actor_type == "users" else f"{actor_type}/{actor_id}"
+
+
+def _talk_author(
+    actor_type: str, actor_id: str, display_name: str | None, config: Config,
+) -> ParticipantRef:
+    """A Talk actor as a participant. Only a ``users`` actor in ``config.users``
+    resolves to an istota user; a guest, a federated or bridged sender, a
+    Nextcloud user istota does not serve, and a bot all carry no user id."""
+    actor_type = actor_type or "users"
+    user_id = actor_id if actor_type == "users" and actor_id in config.users else None
+    return ParticipantRef(
+        surface="talk", surface_ref=_talk_ref(actor_type, actor_id),
+        user_id=user_id, display_name=display_name or None,
+        is_bot=actor_type == "bots",
+    )
+
+
+def _message_author(msg: dict, config: Config) -> ParticipantRef:
+    """`_talk_author` for a chat message, whose type field is never defaulted:
+    a message with no ``actorType`` is not a configured user's."""
+    return _talk_author(
+        msg.get("actorType") or "unknown", msg.get("actorId", ""),
+        msg.get("actorDisplayName"), config,
+    )
+
+
+def _sync_talk_roster(
+    conn, config: Config, conversation_token: str, roster: list[dict],
+    *, baseline: bool = False,
+) -> None:
+    """Record a group room's live roster as its Talk participants.
+
+    Everyone on the roster is upserted as present, classified as any author
+    would be, and every Talk participant not on it is marked as having left —
+    which is what keeps `db.room_is_shared` about who is here now rather than
+    who ever spoke. Called only with a roster that was actually fetched: an
+    empty list means the fetch failed or the room is a DM, never that everyone
+    left. The bot itself is not recorded.
+
+    Anybody new on a roster starts an audience epoch (D3). Talk has no history
+    acknowledgment of its own — people are added in Talk's UI, not through
+    istota — so a Talk join always splits. `baseline` records the roster as
+    the room's founders instead, which is what registering a Talk room on
+    first sight passes. A room that already existed when epochs shipped has
+    its first roster taken as its baseline too (`audience_baseline_pending`):
+    nothing recorded anybody joining it before then.
+    """
+    room_token = db.resolve_room_token(conn, "talk", conversation_token) or conversation_token
+    if db.get_room(conn, room_token) is None:
+        return
+    baseline = baseline or db.audience_baseline_pending(conn, room_token, "talk")
+    present: list[str] = []
+    for entry in roster:
+        actor_id = entry.get("actorId") or ""
+        if not actor_id or actor_id == config.talk.bot_username:
+            continue
+        ref = _talk_author(
+            entry.get("actorType") or "users", actor_id, entry.get("displayName"),
+            config,
+        )
+        db.upsert_room_participant(
+            conn, room_token=room_token, surface="talk",
+            surface_ref=ref.surface_ref,
+            kind=classify_participant(conn, config, room_token, ref),
+            user_id=ref.user_id, display_name=ref.display_name,
+            acknowledged=baseline,
+        )
+        present.append(ref.surface_ref)
+    db.sync_room_roster(
+        conn, room_token=room_token, surface="talk", present=present,
+    )
+    if baseline:
+        db.mark_audience_baseline(conn, room_token, "talk")
+
+
+#: How many classifier calls one batch runs at once.
+_CLASSIFY_AHEAD_CONCURRENCY = 4
+#: Slack on the pass's deadline beyond the per-call timeouts; the CLI path's
+#: retry budget and process start can run a little past its own timeout.
+_CLASSIFY_AHEAD_GRACE_SECONDS = 5.0
+
+
+async def _classify_batch_ahead(
+    config: Config,
+    client: TalkClient,
+    results: list[tuple[str, list[dict]]],
+    conv_types: dict,
+) -> dict[tuple[str, int], "speech_gate.GateDecision"]:
+    """The speech gate's classifier answers for a batch, keyed ``(token, id)``.
+
+    Runs before ``_process_poll_results`` opens its transaction, so no model
+    call holds the write lock. Empty unless ``[speech_gate] mode`` is
+    ``classifier``. Only an unmentioned istota user's turn can reach the
+    classifier rung, so only those are submitted, and `classify_ahead` drops
+    the ones in a room holding one human; each sees the turns ahead of it in
+    the batch, guests' included, which are not stored yet. A turn this pass did not answer is
+    decided in the transaction without one, which fails closed.
+
+    The calls run concurrently, a few at a time, under one deadline for the
+    whole pass: each window depends on the text of earlier turns and not on
+    their decisions, and the batch — every room in it, mentioned turns
+    included — waits on this pass. A call still running at the deadline is
+    abandoned and its turn fails closed.
+
+    This pass reads the same filters the results loop applies but acts on
+    none of them; the loop still decides what happens to every message.
+    """
+    if speech_gate.normalize_mode(config.speech_gate.mode) != "classifier":
+        return {}
+    jobs: list[tuple[tuple[str, int], dict]] = []
+    for conversation_token, messages in results:
+        earlier: list[tuple[str, str]] = []
+        participants: list[dict] | None = None
+        for msg in messages:
+            if msg.get("messageType", "") == "system":
+                continue
+            reference_id = msg.get("referenceId") or ""
+            if isinstance(reference_id, str) and reference_id.startswith(
+                WEBMIRROR_REF_PREFIX
+            ):
+                continue
+            if _is_own_post(msg, config):
+                continue
+            if _veto_verb(msg, config) == room_veto.OFF:
+                # Nothing after a `!<bot> off` reaches a classifier (D12);
+                # the results loop applies the veto and drops what follows.
+                break
+            content = clean_message_content(
+                msg, bot_username=config.talk.bot_username,
+            ).strip()
+            if not content and not extract_attachments(msg):
+                continue
+            text = content or "Process the attached file(s)"
+            author = _message_author(msg, config)
+            if author.user_id is None:
+                # A guest's or a bot's turn is never classified (it cannot
+                # speak), but it is part of the conversation the window shows.
+                earlier.append((guest_label(author), text))
+                continue
+            actor_id = author.user_id
+            message_id = msg.get("id")
+            if message_id and not is_bot_mentioned(msg, config.talk.bot_username):
+                if participants is None:
+                    participants = await _get_participants(
+                        client, conversation_token,
+                        conv_types.get(conversation_token, 1),
+                    )
+                # Asked whatever the roster says: `classify_ahead` reads the
+                # same multi-human predicate the gate does and answers None for
+                # a room holding one human.
+                jobs.append(((conversation_token, message_id), dict(
+                    surface="talk", surface_ref=conversation_token,
+                    user_id=actor_id, text=text,
+                    is_group_chat=_is_multi_user(participants),
+                    addressed_to_bot=False, source_type="talk",
+                    earlier=tuple(earlier),
+                )))
+            earlier.append((actor_id, text))
+    if not jobs:
+        return {}
+
+    limit = asyncio.Semaphore(_CLASSIFY_AHEAD_CONCURRENCY)
+
+    async def _one(kwargs: dict):
+        async with limit:
+            return await asyncio.to_thread(classify_ahead, config, **kwargs)
+
+    tasks = {key: asyncio.ensure_future(_one(kwargs)) for key, kwargs in jobs}
+    rounds = -(-len(jobs) // _CLASSIFY_AHEAD_CONCURRENCY)
+    deadline = (
+        float(config.speech_gate.timeout_seconds) * rounds
+        + _CLASSIFY_AHEAD_GRACE_SECONDS
+    )
+    _done, pending = await asyncio.wait(tasks.values(), timeout=deadline)
+    for task in pending:
+        task.cancel()
+    if pending:
+        logger.warning(
+            "speech gate: %d of %d classifications missed the batch deadline",
+            len(pending), len(jobs),
+        )
+    decisions: dict[tuple[str, int], speech_gate.GateDecision] = {}
+    for key, task in tasks.items():
+        if task.done() and not task.cancelled() and task.exception() is None:
+            decision = task.result()
+            if decision is not None:
+                decisions[key] = decision
+    return decisions
+
+
 async def _process_poll_results(
     config: Config,
     client: TalkClient,
@@ -1433,6 +1654,9 @@ async def _process_poll_results(
     swallows fetch errors. A drain calling this owes the raise a ``finally``.
     """
     created: list[int] = []
+    # Before the transaction opens: a classifier call under it would hold the
+    # WAL write lock for the whole model call.
+    ahead = await _classify_batch_ahead(config, client, results, conv_types)
 
     async with contextlib.AsyncExitStack() as stack:
         # Same order as the room pass above, and the same reason. This is the
@@ -1445,23 +1669,36 @@ async def _process_poll_results(
         conn = stack.enter_context(
             db.get_db(config.db_path, busy_timeout_ms=DB_BUSY_TIMEOUT_MS),
         )
+        # One roster sync per room per batch; the roster is cached anyway.
+        synced_rosters: set[str] = set()
         for conversation_token, messages in results:
             if not messages:
                 continue
-
-            # Store all messages in cache (system, bot, user — context builder filters)
-            db.upsert_talk_messages(conn, conversation_token, messages)
 
             # Process messages in order (oldest first)
             for msg in messages:
                 message_id = msg.get("id")
                 actor_id = msg.get("actorId", "")  # Nextcloud username
-                actor_type = msg.get("actorType", "")
                 message_type = msg.get("messageType", "")
 
                 # Update poll state to this message
                 if message_id:
                     db.set_talk_poll_state(conn, conversation_token, message_id)
+
+                # `!<bot> off|on` (multiplayer D8), handled below once the
+                # author is known. A room switched off records nothing (D12):
+                # not the cache the context builder reads, not a turn, not a
+                # command, until the veto is lifted.
+                veto_verb = _veto_verb(msg, config)
+                if veto_verb is None and room_veto.is_vetoed_ref(
+                    conn, "talk", conversation_token,
+                ):
+                    continue
+                if veto_verb is None:
+                    # Every message is cached (system, bot, user — the
+                    # context builder filters), one at a time so a veto in
+                    # the middle of a batch stops what follows it.
+                    db.upsert_talk_messages(conn, conversation_token, [msg])
 
                 # Skip system messages
                 if message_type == "system":
@@ -1496,51 +1733,69 @@ async def _process_poll_results(
                     )
                     continue
 
-                # Skip bot's own messages
-                if actor_id == config.talk.bot_username:
+                # The bot's own post is already the assistant row it came from.
+                if _is_own_post(msg, config):
                     continue
 
-                # Only process messages from users (not guests, bots, etc.)
-                if actor_type != "users":
-                    continue
+                # Everyone else is recorded; `config.users` decides authority,
+                # not recording. A guest, a bot, or a Nextcloud user istota does
+                # not serve reaches the ingest as a participant with no user id,
+                # is stored, and acts on nothing.
+                author = _message_author(msg, config)
+                is_user = author.user_id is not None
 
-                # Check if sender is a configured user
-                if actor_id not in config.users:
-                    # Unknown user - skip silently
-                    continue
-
-                # Re-engagement un-hides: any message the user posts in a room
-                # they'd hidden clears their dismissal tombstone (and re-adds
-                # their membership), so it resurfaces in their web list — even
-                # in a multi-user room where the message is dropped just below
-                # for lacking an @mention (so record_inbound is never reached).
-                # Resolve to the canonical token so a promoted web room works.
-                reengaged_token = (
-                    db.resolve_room_token(conn, "talk", conversation_token)
-                    or conversation_token
-                )
-                if db.get_room(conn, reengaged_token) is not None:
-                    db.add_room_member(conn, reengaged_token, actor_id)
-                    db.undismiss_room(conn, reengaged_token, actor_id)
-
-                # In multi-user rooms, only respond when @mentioned
                 conv_type = conv_types.get(conversation_token, 1)
                 participants = await _await_in_txn(
                     hold, _get_participants(client, conversation_token, conv_type),
                 )
+                if participants and conversation_token not in synced_rosters:
+                    synced_rosters.add(conversation_token)
+                    _sync_talk_roster(conn, config, conversation_token, participants)
                 is_multi_user = _is_multi_user(participants)
-                if is_multi_user and not is_bot_mentioned(msg, config.talk.bot_username):
-                    logger.debug(
-                        "Skipping message from %s in multi-user room %s (no @mention)",
-                        actor_id, conversation_token,
-                    )
-                    continue
+                addressed = is_bot_mentioned(msg, config.talk.bot_username)
+                # An unmentioned turn in a group room is recorded and nothing
+                # else: `record_inbound` stores it and the speech gate decides
+                # whether it gets a task. Everything between here and the ingest
+                # that can act on the room — `!model` usage, `!command`, a relay
+                # or confirmation answer, the channel-gate notice, cancelling a
+                # parked confirmation — stays behind the mention, as it was when
+                # these turns were dropped here, and behind an istota user.
+                engaged = is_user and (addressed or not is_multi_user)
 
-                # Extract message content and attachments
-                # In multi-user rooms, strip bot mention from prompt and resolve other mentions
+                # An istota user speaking re-joins and un-hides the room, here
+                # rather than only in `record_inbound`, because a `!command`, a
+                # confirmation answer and a `!model` usage reply are consumed
+                # below without reaching it.
+                if is_user:
+                    room_token = (
+                        db.resolve_room_token(conn, "talk", conversation_token)
+                        or conversation_token
+                    )
+                    if db.get_room(conn, room_token) is not None:
+                        db.note_member_turn(conn, room_token, actor_id)
+
+                # The veto is the one command a guest is heard on (D2, D8),
+                # so it is answered ahead of every engagement gate.
+                if veto_verb is not None:
+                    outcome = room_veto.apply(
+                        conn, config,
+                        room_token=db.resolve_room_token(conn, "talk", conversation_token)
+                        or conversation_token,
+                        author=author, verb=veto_verb,
+                    )
+                    if outcome is not None:
+                        try:
+                            await _await_in_txn(
+                                hold, client.send_message(conversation_token, outcome.text),
+                            )
+                        except Exception as e:
+                            logger.debug("Failed to post the veto reply: %s", e)
+                        continue
+                    # Not a veto here (a private room): an ordinary message.
+                    db.upsert_talk_messages(conn, conversation_token, [msg])
+
                 content = clean_message_content(
-                    msg,
-                    bot_username=config.talk.bot_username if is_multi_user else None,
+                    msg, bot_username=config.talk.bot_username,
                 )
                 attachments = extract_attachments(msg)
 
@@ -1579,7 +1834,7 @@ async def _process_poll_results(
                 # pinned to native. `is_model_prefix` is the same test
                 # `parse_model_prefix` makes first, so nothing that used to
                 # match stops matching.
-                if is_model_prefix(content):
+                if engaged and is_model_prefix(content):
                     prefix = resolve_model_prefix(
                         content,
                         make_brain(brain_for_room(
@@ -1613,7 +1868,7 @@ async def _process_poll_results(
                     content = prefix.content
 
                 # !command dispatch — intercept before task creation
-                if content.strip().startswith("!"):
+                if engaged and content.strip().startswith("!"):
                     result = await _await_in_txn(
                         hold,
                         dispatch_command(
@@ -1640,7 +1895,7 @@ async def _process_poll_results(
                 # confirmation intercept: a quoted "yes" to one must never
                 # approve a parked task. The task is created here, in this
                 # transaction, rather than by the ingest below.
-                if reply_to_talk_id is not None:
+                if engaged and reply_to_talk_id is not None:
                     from ... import message_relays
 
                     room_token = (
@@ -1670,19 +1925,20 @@ async def _process_poll_results(
                         continue
 
                 # Check if this is a confirmation reply before creating a new task
-                handled = await _await_in_txn(
+                if engaged and await _await_in_txn(
                     hold,
                     handle_confirmation_reply(
                         conn, config, actor_id, content, conversation_token,
                         reply_to_talk_id=reply_to_talk_id,
                     ),
-                )
-                if handled:
+                ):
                     continue
 
                 # Per-channel gate: notify user if there's already an active fg task
                 # but still queue the message (fall through to task creation)
-                if db.has_active_foreground_task_for_channel(conn, conversation_token):
+                if engaged and db.has_active_foreground_task_for_channel(
+                    conn, conversation_token,
+                ):
                     logger.debug(
                         "Channel gate: active fg task in %s, queuing message from %s",
                         conversation_token, actor_id,
@@ -1702,19 +1958,14 @@ async def _process_poll_results(
                 if not content.strip() and not attachments:
                     continue
 
-                # Build prompt
+                # The author's own text, which is also what the transcript
+                # stores. Who else is in the room reaches the task through the
+                # room card, built from `room_participants` (multiplayer D7).
                 prompt = content.strip() if content.strip() else "Process the attached file(s)"
-
-                # For group chats, prepend participant context so the bot
-                # knows who else is in the room
-                if is_multi_user and participants:
-                    other_names = _participant_names(participants, exclude=config.talk.bot_username)
-                    if other_names:
-                        prompt = f"[Room participants: {', '.join(other_names)}]\n{prompt}"
 
                 # Cancel any pending confirmations in this conversation —
                 # the user has moved on by sending a new message
-                cancelled = confirmations.cancel_for_conversation(
+                cancelled = engaged and confirmations.cancel_for_conversation(
                     conn, conversation_token, actor_id, by="talk",
                 )
                 if cancelled:
@@ -1723,17 +1974,24 @@ async def _process_poll_results(
                         cancelled, conversation_token, actor_id,
                     )
 
-                # Normalize into an IncomingMessage and create the task in the
-                # SAME transaction as the poll-state advance above — see the
+                # Normalize into an IncomingMessage and record the turn (and,
+                # when the speech gate speaks, create its task) in the SAME
+                # transaction as the poll-state advance above — see the
                 # docstring's atomicity note.
                 task_id = ingest_message(conn, config, IncomingMessage(
-                    user_id=actor_id,
+                    user_id=actor_id if is_user else "",
+                    author=None if is_user else author,
+                    # A user's command was dispatched above; a guest's is
+                    # ignored, which the ingest needs to know (multiplayer D2).
+                    is_command=not is_user and content.strip().startswith("!"),
                     text=prompt,
                     source_type="talk",
                     surface="talk",
                     channel_token=conversation_token,
                     channel_name=conv_names.get(conversation_token),
                     is_group_chat=is_multi_user,
+                    addressed_to_bot=addressed,
+                    classified=ahead.get((conversation_token, message_id)),
                     attachments=attachments if attachments else [],
                     platform_message_id=message_id,
                     reply_to_message_id=reply_to_talk_id,

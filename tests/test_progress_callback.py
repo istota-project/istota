@@ -212,6 +212,60 @@ class TestTalkEventSubscriber:
         sub.on_event(_ev("cancelled", {}))
         assert "Cancelled" in _edits(fake_talk)[-1]
 
+    # A guest's turn (multiplayer Stage 17): held for the host, or cancelled
+    # with no host to hold it for, the room is owed nothing, so the ack goes.
+
+    @patch("istota.consumers.talk.run_coro", side_effect=asyncio.run)
+    def test_a_held_guest_turn_takes_its_ack_down(self, mock_run, tmp_path, fake_talk, room):
+        sub = TalkEventSubscriber(
+            _make_config(tmp_path),
+            _make_task(conversation_token=room.canonical, guest_participant_id=7),
+            ack_msg_id=100,
+        )
+        sub.on_event(_ev("confirmation", {"prompt": "proposal"}))
+        assert [(c.method, c.token) for c in fake_talk.calls] == [
+            ("delete_message", room.talk_ref),
+        ]
+        assert fake_talk.refusals == []
+        assert fake_talk.calls[0].args["message_id"] == 100
+
+    @patch("istota.consumers.talk.run_coro", side_effect=asyncio.run)
+    def test_a_cancelled_guest_turn_takes_its_ack_down(
+        self, mock_run, tmp_path, fake_talk, room,
+    ):
+        sub = TalkEventSubscriber(
+            _make_config(tmp_path),
+            _make_task(conversation_token=room.canonical, guest_participant_id=7),
+            ack_msg_id=100,
+        )
+        sub.on_event(_ev("cancelled", {}))
+        assert [c.method for c in fake_talk.calls] == ["delete_message"]
+        assert fake_talk.refusals == []
+
+    @patch("istota.consumers.talk.run_coro", side_effect=asyncio.run)
+    def test_a_members_held_turn_keeps_its_ack(self, mock_run, tmp_path, fake_talk, room):
+        sub = TalkEventSubscriber(
+            _make_config(tmp_path), _make_task(conversation_token=room.canonical),
+            ack_msg_id=100,
+        )
+        sub.on_event(_ev("confirmation", {"prompt": "go ahead?"}))
+        assert "Awaiting confirmation" in _edits(fake_talk)[-1]
+
+    @patch("istota.consumers.talk.run_coro", side_effect=asyncio.run)
+    def test_a_guest_turn_shows_the_room_nothing_the_model_wrote(
+        self, mock_run, tmp_path, fake_talk, room,
+    ):
+        sub = TalkEventSubscriber(
+            _make_config(tmp_path),
+            _make_task(conversation_token=room.canonical, guest_participant_id=7),
+            ack_msg_id=100,
+        )
+        sub.on_event(_ev("progress_text", {"text": "Drafting a reply to Max"}))
+        sub.on_event(_ev("tool_start", {"description": "Checking Alice's calendar"}, seq=2))
+        sub.on_event(_ev("tool_end", {"success": True, "duration_ms": 5}, seq=3))
+        assert fake_talk.calls == []
+        assert sub.descriptions == ["Checking Alice's calendar"]
+
     @patch("istota.consumers.talk.run_coro", side_effect=Exception("network"))
     def test_edit_exception_swallowed(self, mock_run, tmp_path, room):
         sub = TalkEventSubscriber(

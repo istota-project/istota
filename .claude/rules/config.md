@@ -138,6 +138,16 @@ context_recency_hours: float = 0    context_min_messages: int = 10
 previous_tasks_count: int = 3       talk_context_limit: int = 100
 ```
 
+### `SpeechGateConfig` (`[speech_gate]`) and `RoomsConfig` (`[rooms]`)
+```
+mode: str = "mention"            model: str = "fast"
+window_messages: int = 8         max_message_chars: int = 400
+timeout_seconds: float = 8.0     decision_retention_days: int = 30
+
+shared_room_data_policy: str = "restrict"
+```
+Plain dataclasses, no hooks. An unrecognised `mode` is not refused at load: the gate fails closed on it (rung `failed`), and a DM or an addressed turn is answered before the mode is read. `shared_room_data_policy` disables the disclosure gate only on exactly `"off"`; a guest's turn is withheld every scope regardless, since that rule is authority rather than disclosure. Both are wired through `render-config.sh` and `docker-compose.yml` together (`ISTOTA_SPEECH_GATE_*`, `ISTOTA_ROOMS_SHARED_ROOM_DATA_POLICY`, documented in `docker/.env.example`) and the Ansible template (`istota_speech_gate_*`, `istota_rooms_shared_room_data_policy`). Behaviour in `.claude/rules/transport.md` ("Multiplayer rooms").
+
 ### `SchedulerConfig`
 See `.claude/rules/scheduler.md` for full table of fields and defaults.
 

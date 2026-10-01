@@ -116,6 +116,10 @@ def describe(conn, task: db.Task) -> str:
     prompt-assembly detail and not something to rest the invariant on.
     """
     if task.whatsapp_confirmation_request_id:
+        row = conn.execute("SELECT kind FROM whatsapp_skill_requests WHERE id=?",
+                           (task.whatsapp_confirmation_request_id,)).fetchone()
+        if row is not None and row["kind"] == "room_post":
+            return "a room post awaiting approval"
         return "a private relay question"
     if task.source_type == "email":
         record = db.get_email_for_task(conn, task.id)
@@ -182,7 +186,7 @@ def cancel_for_conversation(
 
     held = conn.execute(
         "SELECT id FROM tasks WHERE conversation_token = ? AND user_id = ? "
-        "AND status = 'pending_confirmation'",
+        f"AND status = 'pending_confirmation' AND NOT {db.SIDE_ROUTED_PARK_SQL}",
         (conversation_token, user_id),
     ).fetchall()
     cancelled = db.cancel_pending_confirmations(conn, conversation_token, user_id)
@@ -228,11 +232,25 @@ def approve(
     from .whatsapp_requests import approve_request, text_hash, write_transaction
     with write_transaction(conn):
         current = db.get_task(conn, task.id)
+        proposal = None
         if current and current.whatsapp_confirmation_request_id:
-            approve_request(conn, task=current,
-                            request_id=current.whatsapp_confirmation_request_id,
+            request_id = current.whatsapp_confirmation_request_id
+            approve_request(conn, task=current, request_id=request_id,
                             preview_digest=text_hash(current.confirmation_prompt or ""))
-        db.confirm_task(conn, task.id)
+            if current.guest_participant_id is not None:
+                # Only the proposal the scheduler made of the guest's answer;
+                # a room post the task asked for itself re-runs as any does.
+                proposal = conn.execute(
+                    "SELECT text FROM whatsapp_skill_requests WHERE id = ? "
+                    "AND request_key = ?", (request_id, f"guest-reply-{current.id}"),
+                ).fetchone()
+        if proposal is not None:
+            # A guest's proposed answer (multiplayer D4 item 2): approving it
+            # releases the post, and there is nothing left to run. A re-run
+            # would only compose another answer to propose.
+            db.update_task_status(conn, task.id, "completed", result=proposal["text"])
+        else:
+            db.confirm_task(conn, task.id)
     db.log_task(conn, task.id, "info", "User confirmed task")
 
     # Drop the parked attempt's two terminal frames, and nothing else
@@ -354,13 +372,35 @@ def resolve(
 
     The ownership check lives here rather than at the call sites. Path C
     already filters by user, so it only ever mattered for A and B — and both
-    are reachable with an id the answerer does not own.
+    are reachable with an id the answerer does not own. A shared room is the
+    case it exists for: `db.get_pending_confirmation` looks a question up by
+    conversation alone, so in a room two members read, B finds one member's
+    held task for the other, and this check is all that stops them answering it.
     """
     task = None
     if talk_response_id:
         task = db.get_pending_confirmation_by_response_id(conn, talk_response_id)
     if task is None and conversation_token:
+        from .side_rooms import canonical_token, is_shared_room
+
+        room_token = canonical_token(conn, conversation_token)
+        # A shared room's questions are asked in its members' side rooms
+        # (multiplayer D4), so a bare "yes" typed in the room is conversation,
+        # never an approval: it would otherwise land on a question the room
+        # never saw. `!confirm <id>` and a reply to the prompt still work.
+        if room_token and is_shared_room(conn, room_token):
+            return Resolution(task=task if task is not None and task.user_id == user_id else None)
         task = db.get_pending_confirmation(conn, conversation_token)
+        # A side room also answers what its parent asked this member.
+        side = db.side_room_parent(conn, room_token) if room_token else None
+        if task is None and side is not None and side.side_for_user == user_id:
+            # A parked task carries whichever token its surface named the
+            # parent by: the canonical one, or a binding's ref.
+            refs = [side.side_of] + [b.surface_ref for b in db.list_room_bindings(conn, side.side_of)]
+            for ref in dict.fromkeys(refs):
+                task = db.get_pending_confirmation(conn, ref, user_id=user_id)
+                if task is not None:
+                    break
     if task is None:
         open_for_user = pending_for_user(conn, user_id)
         if len(open_for_user) > 1:

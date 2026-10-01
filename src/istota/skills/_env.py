@@ -227,6 +227,8 @@ def dispatch_setup_env_hooks(
     selected_skills: list[str],
     skill_index: dict[str, SkillMeta],
     ctx: EnvContext,
+    *,
+    withheld: "frozenset[str] | set[str]" = frozenset(),
 ) -> dict[str, str]:
     """Call setup_env() hooks on skill Python modules that export them.
 
@@ -253,6 +255,13 @@ def dispatch_setup_env_hooks(
     it is deliberately kept out of the environment handed to host-side skill
     CLIs, which is a security property rather than tidiness. See the
     application site in ``execute_task``.
+
+    ``withheld`` names skills a shared room withholds (``room_scopes``). Their
+    hooks still run, because some have side effects the rest of the task relies
+    on (the developer hook scrubs credentials out of the repos before anything
+    can bind them), but what they return is dropped: ``HEALTH_DB_PATH`` and its
+    siblings come from here, over the whole index, so no authorization gate
+    downstream would otherwise remove them.
     """
     import importlib
 
@@ -272,7 +281,7 @@ def dispatch_setup_env_hooks(
         if setup_fn is not None:
             try:
                 result = setup_fn(ctx)
-                if isinstance(result, dict):
+                if isinstance(result, dict) and skill_name not in withheld:
                     env.update(result)
             except Exception as e:
                 logger.warning(

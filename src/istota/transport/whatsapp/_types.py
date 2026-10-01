@@ -177,6 +177,47 @@ class InboundWhatsAppEvent:
     #: one record up. A caption rides `text` rather than a field of its own,
     #: so every text gate applies to it with no new code.
     media: WhatsAppInboundMedia | None = None
+    #: The group this message was posted in, or `None` for a direct chat.
+    #: When set, `from_user` is the *sender* inside the group, not the chat.
+    group: "WhatsAppGroupContext | None" = None
+
+
+@dataclass(frozen=True)
+class WhatsAppGroupContext:
+    """Where in a WhatsApp group a message was posted, and how it addressed us.
+
+    Baileys only; Cloud group support is out of scope (multiplayer D6). A
+    sender whose number WhatsApp withholds arrives with `sender_lid` alone and
+    is a guest (D1): only a phone JID can resolve to an istota user.
+    `mentions_bot` is the sidecar's answer, since only it knows the paired
+    account's own JIDs.
+    """
+    group_jid: str
+    sender_lid: str = ""
+    mentions_bot: bool = False
+
+
+@dataclass(frozen=True)
+class WhatsAppGroupMember:
+    """One person on a group's roster: phone JID, LID, or both."""
+    jid: str
+    lid: str = ""
+    display_name: str | None = None
+
+
+@dataclass(frozen=True)
+class WhatsAppGroupRoster:
+    """A group's roster as the sidecar last read it from `groupMetadata`.
+
+    `bot_present` False means the bot was removed from the group and
+    `members` is empty. `added_by` is the phone JID of whoever added the bot,
+    when this roster was read because of that add; it is what names the host.
+    """
+    group_jid: str
+    subject: str | None
+    members: tuple[WhatsAppGroupMember, ...]
+    added_by: str = ""
+    bot_present: bool = True
 
 
 @dataclass(frozen=True)
@@ -228,7 +269,9 @@ class WhatsAppParkedStatus:
     pricing_type: str | None
 
 
-WhatsAppEvent: TypeAlias = InboundWhatsAppEvent | WhatsAppDeliveryEvent
+WhatsAppEvent: TypeAlias = (
+    InboundWhatsAppEvent | WhatsAppDeliveryEvent | WhatsAppGroupRoster
+)
 
 
 @dataclass(frozen=True)

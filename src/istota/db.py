@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from . import sqlite_util
 from .user_scope import is_scopable_user_id
@@ -126,6 +126,13 @@ class Task:
     #: history fallback, the channel memory namespace, the channel sleep cycle,
     #: and the two failure paths that would otherwise have no channel at all.
     withheld_from_room: bool = False
+    #: The guest whose turn this task answers, as a `room_participants.id`
+    #: (multiplayer D2). Set means emissary mode: the task runs as the room's
+    #: host, at room-safe reach, with no outbound action beyond the reply.
+    guest_participant_id: int | None = None
+    #: Who reads the room this turn was written in: `private`, `principals`
+    #: or `mixed` (multiplayer D3), computed at ingest. None off a room.
+    audience: str | None = None
     heartbeat_silent: bool = False
     skip_log_channel: bool = False
     scheduled_job_id: int | None = None
@@ -433,6 +440,11 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # schema.sql. Constant defaults, so every existing row reads 0.
         "attempt_tool_calls": "INTEGER NOT NULL DEFAULT 0",
         "attempt_first_tool_relay": "INTEGER NOT NULL DEFAULT 0",
+        # Multiplayer Stage 11; see schema.sql. No backfill: no guest turn
+        # created a task before this, and the audience of a past turn is not
+        # recoverable.
+        "guest_participant_id": "INTEGER",
+        "audience": "TEXT",
     })
 
     # Sent emails: carry the originating task's resolved Talk room so
@@ -493,6 +505,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
 
     # Processed emails migrations
     _add_columns(conn, "processed_emails", {"routing_method": "TEXT"})
+    # The message's To and Cc, so an email thread room's reply-all goes to the
+    # latest message's people (multiplayer D6).
+    _add_columns(conn, "processed_emails", {"recipients": "TEXT"})
 
     # WhatsApp bindings: the adapter split (whatsapp-baileys-adapter spec).
     # `jid` is the Baileys-native identity and `provider` says which adapter
@@ -925,6 +940,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         _add_columns(conn, "messages", {
             "author_user_id": "TEXT",
             "author_label": "TEXT",
+            # The `room_participants` row that wrote the turn (multiplayer D1);
+            # backfilled by `_migrate_room_participants`.
+            "author_participant_id": "INTEGER",
         })
         # The citation, so the transcript can render a reply as a reply after
         # retention has deleted the task row that also carries it.
@@ -1120,6 +1138,15 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # long as that failure persists. Attributing a row that a later re-run then
     # deletes costs nothing.
     _migrate_messages_author(conn)
+    # After the author backfill, which is what it reads.
+    _migrate_room_participants(conn)
+    _migrate_room_data_grants(conn)
+    _migrate_side_rooms(conn)
+    _migrate_room_policy(conn)
+    _migrate_room_veto(conn)
+    _migrate_room_epochs(conn)
+    _migrate_groups(conn)
+    _migrate_room_group(conn)
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
@@ -1191,6 +1218,9 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     # Rebuilds `message_relays` in place; recreates its indexes itself, so the
     # open-pair constraint is never absent between this and `schema.sql`.
     _migrate_message_relays_surfaces(conn)
+    # The request table the relays point at, for the same reason and in the
+    # same way: a CHECK cannot be altered, so it is rebuilt.
+    _migrate_skill_request_room_kinds(conn)
     # And then the inbox's one-shot seed, which needs that table to exist. It
     # takes a transaction of its own, so it commits whatever the migrations
     # above left open first (ISSUE-261); nothing after it depends on the
@@ -1307,6 +1337,17 @@ def get_db_if_present(
         yield opened
 
 
+def find_task_by_talk_message_id(
+    conn: sqlite3.Connection, talk_message_id: int, conversation_token: str | None,
+) -> int | None:
+    """The task already created for this Talk message in this conversation, or None."""
+    row = conn.execute(
+        "SELECT id FROM tasks WHERE talk_message_id = ? AND conversation_token = ?",
+        (talk_message_id, conversation_token),
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
 def create_task(
     conn: sqlite3.Connection,
     prompt: str = "",
@@ -1327,6 +1368,10 @@ def create_task(
     # names (ISSUE-255). Written by the one caller that knows — `record_inbound`,
     # from the same answer that turned off the transcript mirror.
     withheld_from_room: bool = False,
+    # Multiplayer D2/D3: the guest this task answers (emissary mode), and who
+    # reads the room. Written only by `record_inbound`.
+    guest_participant_id: int | None = None,
+    audience: str | None = None,
     heartbeat_silent: bool = False,
     skip_log_channel: bool = False,
     scheduled_job_id: int | None = None,
@@ -1362,17 +1407,16 @@ def create_task(
         )
     # Guard against duplicate Talk messages (race between overlapping poll cycles)
     if talk_message_id is not None:
-        existing = conn.execute(
-            "SELECT id FROM tasks WHERE talk_message_id = ? AND conversation_token = ?",
-            (talk_message_id, conversation_token),
-        ).fetchone()
-        if existing:
+        existing = find_task_by_talk_message_id(
+            conn, talk_message_id, conversation_token,
+        )
+        if existing is not None:
             logger.warning(
                 "Duplicate talk_message_id %d in conversation %s — "
                 "task %d already exists, skipping",
-                talk_message_id, conversation_token, existing[0],
+                talk_message_id, conversation_token, existing,
             )
-            return existing[0]
+            return existing
 
     cursor = conn.execute(
         """
@@ -1380,11 +1424,11 @@ def create_task(
             prompt, command, user_id, source_type, conversation_token,
             parent_task_id, is_group_chat, attachments, priority, scheduled_for,
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
-            reply_to_message_id, withheld_from_room,
+            reply_to_message_id, withheld_from_room, guest_participant_id, audience,
             heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
             queue, model, effort, brain, model_namespace,
             talk_delivery_token, skill, skill_args
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -1404,6 +1448,8 @@ def create_task(
             reply_to_content,
             reply_to_message_id,
             1 if withheld_from_room else 0,
+            guest_participant_id,
+            audience,
             1 if heartbeat_silent else 0,
             1 if skip_log_channel else 0,
             scheduled_job_id,
@@ -1436,7 +1482,7 @@ _TASK_COLUMNS = (
     "priority, attempt_count, max_attempts, created_at, scheduled_for, "
     "output_target, talk_message_id, talk_response_id, reply_to_talk_id, "
     "reply_to_content, reply_to_message_id, withheld_from_room, "
-    "heartbeat_silent, skip_log_channel, scheduled_job_id, "
+    "guest_participant_id, audience, heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
     "brain, model_namespace, talk_delivery_token, skill, skill_args, whatsapp_confirmation_request_id"
 )
@@ -1479,6 +1525,8 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         reply_to_content=row["reply_to_content"],
         reply_to_message_id=row["reply_to_message_id"],
         withheld_from_room=bool(row["withheld_from_room"]),
+        guest_participant_id=row["guest_participant_id"],
+        audience=row["audience"],
         heartbeat_silent=bool(row["heartbeat_silent"]),
         skip_log_channel=bool(row["skip_log_channel"]),
         scheduled_job_id=row["scheduled_job_id"],
@@ -1548,9 +1596,23 @@ _CLAIM_CHANNEL_GATE_SQL = """
                     AND t2.status IN ('locked', 'running', 'pending_confirmation')
                     AND t2.cancel_requested = 0
                     AND t2.id != tasks.id
+                    AND NOT (t2.status = 'pending_confirmation' AND """ + (
+    "EXISTS (SELECT 1 FROM messages sm WHERE sm.delivery_reference "
+    "LIKE 'side-confirmation:' || t2.id || ':%')") + """)
                 )
             )
             """
+
+# A shared-room task parked on a question it asked in its principal's side
+# room (multiplayer D4). Such a park neither holds the room's channel gate
+# (above) nor is cancelled by the principal's next message in the room
+# (`cancel_pending_confirmations`): the room never saw the question, so its
+# conversation is not an answer to it and must not be held behind it. The
+# side-room row `side_rooms.write_confirmation` writes is the record.
+SIDE_ROUTED_PARK_SQL = (
+    "EXISTS (SELECT 1 FROM messages sm WHERE sm.delivery_reference "
+    "LIKE 'side-confirmation:' || tasks.id || ':%')"
+)
 
 
 def _stuck_running_params(heartbeat_stuck_minutes: int, stuck_running_minutes: int) -> tuple:
@@ -2042,32 +2104,31 @@ def cancel_pending_confirmations(
     from .message_relays import close_task_questions
     from .whatsapp_requests import write_transaction
     with write_transaction(conn):
-        held = conn.execute("SELECT id FROM tasks WHERE conversation_token=? AND user_id=? AND status='pending_confirmation'",
-                            (conversation_token, user_id)).fetchall()
+        held = conn.execute(
+            "SELECT id FROM tasks WHERE conversation_token=? AND user_id=? "
+            f"AND status='pending_confirmation' AND NOT {SIDE_ROUTED_PARK_SQL}",
+            (conversation_token, user_id)).fetchall()
         for row in held:
             close_task_questions(conn, row[0])
-        conn.execute(
-            """
-            UPDATE tasks
-            SET status = 'cancelled',
-                updated_at = datetime('now')
-            WHERE conversation_token = ?
-              AND user_id = ?
-              AND status = 'pending_confirmation'
-            """,
-            (conversation_token, user_id),
-        )
+            conn.execute(
+                "UPDATE tasks SET status = 'cancelled', updated_at = datetime('now') "
+                "WHERE id = ? AND status = 'pending_confirmation'", (row[0],),
+            )
         return len(held)
 
 
 def get_pending_confirmation(
     conn: sqlite3.Connection,
     conversation_token: str,
+    *,
+    user_id: str | None = None,
 ) -> Task | None:
     """
     Get a task that is pending confirmation for a conversation.
 
     Returns the most recent task awaiting confirmation, or None if none found.
+    ``user_id`` narrows it to that user's tasks, for a caller answering on
+    their behalf from somewhere else (a side room answering its parent).
     """
     cursor = conn.execute(
         f"""
@@ -2075,10 +2136,11 @@ def get_pending_confirmation(
         FROM tasks
         WHERE conversation_token = ?
         AND status = 'pending_confirmation'
+        AND (? IS NULL OR user_id = ?)
         ORDER BY created_at DESC
         LIMIT 1
         """,
-        (conversation_token,),
+        (conversation_token, user_id, user_id),
     )
     row = cursor.fetchone()
     if not row:
@@ -2372,9 +2434,12 @@ def set_briefing_last_run(conn: sqlite3.Connection, user_id: str, briefing_name:
 
 @dataclass
 class ConversationMessage:
+    # The turn's task id, or 0 for an unanswered turn, which has no task.
     id: int
     prompt: str
-    result: str
+    # None means nobody answered this turn: a message the room recorded
+    # without creating a task for it.
+    result: str | None
     created_at: str
     actions_taken: str | None = None
     source_type: str = "talk"
@@ -2385,6 +2450,10 @@ class ConversationMessage:
     # that labels the turn with it asserts the principal said something an
     # external contact said. None means "attribute to `user_id` as usual".
     external_sender: str | None = None
+    # The turn's own `messages.id`, set on the `messages` path only. The one
+    # cursor that orders answered and unanswered turns alike, since `id` is 0
+    # for every unanswered turn.
+    message_id: int | None = None
 
 
 @dataclass
@@ -2648,6 +2717,7 @@ def get_conversation_history(
     limit: int = 10,
     exclude_source_types: list[str] | None = None,
     user_email_addresses: Mapping[str, Sequence[str]] | None = None,
+    after: "AudienceCutoff | None" = None,
 ) -> list[ConversationMessage]:
     """
     Get completed conversation history for a conversation token.
@@ -2671,15 +2741,18 @@ def get_conversation_history(
             than taking one list, because a shared room's turns are not all the
             requesting user's. Omitting it fails safe — every email turn is then
             attributed to its envelope sender.
+        after: A front-stage reader's `front_stage_cutoff`: turns from before
+            an epoch the current audience did not share are left out. Omitted
+            by a reader that is not front stage (`!export`).
     """
     if _messages_caught_up(conn, conversation_token):
         return _conversation_history_from_messages(
             conn, conversation_token, exclude_task_id, limit, exclude_source_types,
-            user_email_addresses,
+            user_email_addresses, after=after,
         )
     return _conversation_history_from_tasks(
         conn, conversation_token, exclude_task_id, limit, exclude_source_types,
-        user_email_addresses,
+        user_email_addresses, after=after,
     )
 
 
@@ -2690,6 +2763,8 @@ def _conversation_history_from_tasks(
     limit: int,
     exclude_source_types: list[str] | None,
     user_email_addresses: Mapping[str, Sequence[str]] | None = None,
+    *,
+    after: "AudienceCutoff | None" = None,
 ) -> list[ConversationMessage]:
     """Legacy path: reconstruct history from completed `tasks` rows."""
     # `withheld_from_room` excludes an exchange that keeps this token for context
@@ -2719,6 +2794,10 @@ def _conversation_history_from_tasks(
         placeholders = ", ".join("?" for _ in exclude_source_types)
         query += f" AND source_type NOT IN ({placeholders})"
         params.extend(exclude_source_types)
+
+    if after is not None and after.task_id:
+        query += " AND id > ?"
+        params.append(after.task_id)
 
     # Get most recent N, then reverse for oldest-first order
     # Use id as tiebreaker for same-second timestamps
@@ -2751,59 +2830,88 @@ def _conversation_history_from_messages(
     limit: int,
     exclude_source_types: list[str] | None,
     user_email_addresses: Mapping[str, Sequence[str]] | None = None,
+    *,
+    after: "AudienceCutoff | None" = None,
 ) -> list[ConversationMessage]:
     """Unified path: re-pair `messages` user/assistant rows (keyed on task_id)
     back into the (prompt, result) ConversationMessage shape callers expect.
 
     The user row and assistant row of one turn share a `task_id`; the join to
-    `tasks` recovers per-task metadata (source_type, user_id, actions_taken) the
+    `tasks` recovers per-task metadata (source_type, actions_taken) the
     role/body-only message rows don't carry, and applies the same
-    completed/result-present + exclusion filters as the legacy path. An in-flight
-    turn (user row, no assistant row yet) is excluded by the inner join, exactly
-    as the `result IS NOT NULL` filter excludes it today. `id` stays the task id
-    so reply-parent / memory-dedup callers keyed on it are unaffected.
+    completed/result-present + exclusion filters as the legacy path. `id` stays
+    the task id so reply-parent / memory-dedup callers keyed on it are
+    unaffected.
+
+    A user row with no `task_id` is a turn the room recorded and nobody
+    answered, returned with `result=None` and `id=0`. Both joins are therefore
+    outer, with `t.status = 'completed'` in the join condition rather than the
+    WHERE clause, where it would turn the outer join back into an inner one and
+    drop exactly those rows. A user row that *has* a task still needs a
+    completed task and a paired assistant row, so an in-flight or failed turn is
+    excluded as before. The speaker is read off the message row first: an
+    unanswered row has no task to name one, and in a shared room the two differ.
     """
     query = f"""
-        SELECT t.id AS id, mu.body AS prompt, ma.body AS result,
-               t.created_at AS created_at, t.actions_taken AS actions_taken,
-               t.source_type AS source_type, t.user_id AS user_id,
+        SELECT mu.id AS message_id, mu.task_id AS task_id, mu.body AS prompt,
+               ma.body AS result,
+               COALESCE(t.created_at, mu.created_at) AS created_at,
+               t.actions_taken AS actions_taken,
+               COALESCE(t.source_type, mu.origin_surface) AS source_type,
+               COALESCE(mu.author_user_id, t.user_id) AS user_id,
+               mu.author_label AS author_label,
                {EMAIL_SENDER_SUBQUERY.format(alias="t")}
         FROM messages mu
-        JOIN messages ma
+        LEFT JOIN tasks t
+          ON t.id = mu.task_id AND t.status = 'completed'
+        LEFT JOIN messages ma
           ON ma.room_token = mu.room_token AND ma.task_id = mu.task_id
              AND ma.role = 'assistant'
-        JOIN tasks t ON t.id = mu.task_id
         WHERE mu.room_token = ? AND mu.role = 'user'
-          AND t.status = 'completed'
+          AND (mu.task_id IS NULL OR (t.id IS NOT NULL AND ma.id IS NOT NULL))
     """
     params: list = [conversation_token]
 
     if exclude_task_id is not None:
-        query += " AND t.id != ?"
+        query += " AND (mu.task_id IS NULL OR mu.task_id != ?)"
         params.append(exclude_task_id)
 
     if exclude_source_types:
         placeholders = ", ".join("?" for _ in exclude_source_types)
-        query += f" AND t.source_type NOT IN ({placeholders})"
+        query += f" AND (mu.task_id IS NULL OR t.source_type NOT IN ({placeholders}))"
         params.extend(exclude_source_types)
 
-    query += " ORDER BY t.created_at DESC, t.id DESC LIMIT ?"
+    # A turn is on the side of the join its user row is on: an answer that
+    # landed after the join still answered something the joiner never saw.
+    if after is not None and after.message_id:
+        query += " AND mu.id > ?"
+        params.append(after.message_id)
+
+    query += " ORDER BY COALESCE(t.created_at, mu.created_at) DESC, mu.id DESC LIMIT ?"
     params.append(limit)
 
     rows = conn.execute(query, params).fetchall()
-    return [
-        ConversationMessage(
-            id=row["id"],
+    history: list[ConversationMessage] = []
+    for row in reversed(rows):
+        answered = row["task_id"] is not None
+        history.append(ConversationMessage(
+            id=row["task_id"] if answered else 0,
             prompt=row["prompt"],
-            result=row["result"],
+            result=row["result"] if answered else None,
             created_at=row["created_at"],
-            actions_taken=row["actions_taken"] if "actions_taken" in row.keys() else None,
-            source_type=row["source_type"] if "source_type" in row.keys() else "talk",
-            user_id=row["user_id"] if "user_id" in row.keys() else None,
-            external_sender=_external_sender_for_row(row, user_email_addresses),
-        )
-        for row in reversed(rows)
-    ]
+            actions_taken=row["actions_taken"],
+            source_type=row["source_type"] or "talk",
+            user_id=row["user_id"],
+            # An answered email turn's sender comes off `processed_emails` as
+            # before; an unanswered row has no task, so its stored label (already
+            # sanitized at ingest) is the only record of who wrote it.
+            external_sender=(
+                _external_sender_for_row(row, user_email_addresses)
+                if answered else row["author_label"]
+            ),
+            message_id=row["message_id"],
+        ))
+    return history
 
 
 def _messages_caught_up(conn: sqlite3.Connection, conversation_token: str) -> bool:
@@ -3057,6 +3165,7 @@ def get_previous_tasks(
     limit: int = 3,
     exclude_source_types: list[str] | None = None,
     user_email_addresses: Mapping[str, Sequence[str]] | None = None,
+    after: "AudienceCutoff | None" = None,
 ) -> list[ConversationMessage]:
     """
     Get the most recent completed tasks in a conversation.
@@ -3099,6 +3208,10 @@ def get_previous_tasks(
     if exclude_task_id is not None:
         query += " AND id != ?"
         params.append(exclude_task_id)
+
+    if after is not None and after.task_id:
+        query += " AND id > ?"
+        params.append(after.task_id)
 
     query += " ORDER BY created_at DESC, id DESC LIMIT ?"
     params.append(limit)
@@ -3704,7 +3817,8 @@ def default_web_room(
 
 def configured_default_room(conn: sqlite3.Connection, user_id: str) -> str | None:
     """The canonical token of ``user_id``'s configured default room, or None
-    when unset, deleted, archived, or no longer theirs (ISSUE-477).
+    when unset, deleted, archived, no longer theirs, or read by somebody else
+    (ISSUE-477, multiplayer Stage 15).
 
     Surface-agnostic, and the raw read of the column. `configured_delivery_room`
     is the surface-aware wrapper and the one the two resolvers call; this half
@@ -3713,17 +3827,23 @@ def configured_default_room(conn: sqlite3.Connection, user_id: str) -> str | Non
     that view is the right answer rather than falling back.
 
     Two arms: `_live_room` — the core shared with `visible_room` — and any
-    membership. Three of `_usable_as_delivery_default`'s five are dropped, for
-    two different reasons. **Unwise, so deliberately not applied:** a room
-    somebody else reads, and a machine-owned channel room. Those keep a *guess*
-    out of somewhere embarrassing, the picker offers both classes marked, and the
-    whole point of this setting is that the answer is no longer a guess. **A view
-    concern, so checked one level down:** a room the user hid — see `_live_room`
-    for why the dismissal arm sits where it does (ISSUE-479).
+    membership. Two of `_usable_as_delivery_default`'s arms are dropped, for
+    two different reasons. **Unwise, so deliberately not applied:** a
+    machine-owned channel room. That keeps a *guess* out of somewhere
+    embarrassing, the picker offers the class marked, and the whole point of
+    this setting is that the answer is no longer a guess. **A view concern, so
+    checked one level down:** a room the user hid — see `_live_room` for why the
+    dismissal arm sits where it does (ISSUE-479).
 
-    What is left is the room being unusable: gone, archived, or not the user's.
+    What is left is the room being unusable: gone, archived, not the user's, or
+    **read by somebody else** (`room_is_shared`). That last arm was once in the
+    first group, and it moved because a shared room is not a destination for
+    personal content at all (multiplayer Stage 15, SG 10): a pin is a choice
+    about where the user's own deliveries go, and it cannot make that choice for
+    the room's other readers. It is also the arm a pin can trip after it was
+    set, by a second member joining.
 
-    **These three arms are terminal, and that is what separates them from the
+    **These four arms are terminal, and that is what separates them from the
     ones above.** When one fails the pin is dead: the caller falls back to the
     heuristic and the room the user chose is quietly never used again. The
     dismissal and archived-handle arms in `configured_delivery_room`'s web arm
@@ -3753,6 +3873,8 @@ def configured_default_room(conn: sqlite3.Connection, user_id: str) -> str | Non
     if _live_room(conn, token) is None:
         return None
     if not is_room_member(conn, token, user_id):
+        return None
+    if room_is_shared(conn, token):
         return None
     return token
 
@@ -3794,7 +3916,7 @@ def configured_delivery_room(
     paragraphs up, and a web-only room refusing a bare `talk` is this setting
     behaving as specified. Nothing repairs those: the writer is web-only and
     mints no `talk` binding, which only the promote button writes (ISSUE-401).
-    Terminal *and* a fault is `configured_default_room`'s three arms beneath,
+    Terminal *and* a fault is `configured_default_room`'s four arms beneath,
     and that is the set the settings page marks — see
     `web_app._ignored_default_room_pin`. Do not read a `None` from here as
     benign on its own; which arm answered decides.
@@ -3921,16 +4043,23 @@ def _usable_as_delivery_default(
 
     - **A room somebody else reads.** A shared Talk room is one other people are
       in, and a personal alert delivered there is delivered in front of them.
-      Tested as "no member but this user" rather than as a count: a handle can
-      outlive membership, so counting would admit a room whose one member is
-      somebody else.
+      Two tests: `room_is_shared`, which also counts a guest in the surface's
+      roster, and "no member but this user", since a handle can outlive
+      membership and a room whose one member is somebody else is not shared.
     - **A channel room.** `log_channel` and `alerts_channel` are machine-owned;
       the entrypoint even posts into `alerts` at boot, so activity alone would
       hand a user's default to whichever the daemon last wrote to.
+    - **A side room** (multiplayer D4). It is private, but it is the companion
+      of one shared room and is created by the system on that room's need, so
+      a default landing there would file unrelated alerts under that room.
     """
     if token in channels:
         return False
     if visible_room(conn, user_id, token) is None:
+        return False
+    if is_side_room(conn, token):
+        return False
+    if room_is_shared(conn, token):
         return False
     return not (set(list_room_members(conn, token)) - {user_id})
 
@@ -3974,15 +4103,24 @@ def _default_room_candidates(
 # dropping it is a migration and out of scope.
 
 
-def count_recent_web_tasks(
+def count_recent_web_sends(
     conn: sqlite3.Connection, user_id: str, window_seconds: int,
 ) -> int:
-    """Count this user's web-chat tasks created within the last
-    ``window_seconds`` — backs the per-user rate limit (no extra state)."""
+    """Count this user's web-chat sends within the last ``window_seconds`` —
+    backs the per-user rate limit (no extra state).
+
+    A send is a task, or a turn the speech gate recorded without answering,
+    which has no task and is counted off its `speech_gate_decisions` row. That
+    row is the exact set: a `task_id IS NULL` user row is also what a
+    confirmation answer and a `!steer` note write, and neither is a send here.
+    """
+    window = f"-{int(window_seconds)} seconds"
     row = conn.execute(
-        "SELECT COUNT(*) FROM tasks WHERE user_id = ? AND source_type = 'web' "
-        "AND created_at > datetime('now', ?)",
-        (user_id, f"-{int(window_seconds)} seconds"),
+        "SELECT (SELECT COUNT(*) FROM tasks WHERE user_id = ? "
+        "AND source_type = 'web' AND created_at > datetime('now', ?)) "
+        "+ (SELECT COUNT(*) FROM speech_gate_decisions WHERE user_id = ? "
+        "AND surface = 'web' AND spoke = 0 AND created_at > datetime('now', ?))",
+        (user_id, window, user_id, window),
     ).fetchone()
     return int(row[0]) if row else 0
 
@@ -3993,7 +4131,7 @@ def count_recent_email_tasks(
     """Count this user's email-origin tasks created within the last
     ``window_seconds`` — backs the per-user inbound volume budget (ISSUE-250).
 
-    The email twin of ``count_recent_web_tasks``, and deliberately the same
+    The email twin of ``count_recent_web_sends``, and deliberately the same
     shape: counting `tasks` rather than keeping a separate counter means the
     budget survives a daemon restart and cannot drift from what was actually
     created. A held (`pending_confirmation`) task counts — it cost a prompt and
@@ -4081,8 +4219,9 @@ def count_active_room_tasks(conn: sqlite3.Connection, token: str) -> int:
     that is room-global rather than per-user. A room's `CHANNEL.md` is one file
     shared by every member, so any member's worker may be writing it — filtering
     by the caller the way the delete guard does would refuse nothing in exactly
-    the shared-room case that needs the guard most. Delete is per-user because
-    it drops only the caller's own handle; this is not.
+    the shared-room case that needs the guard most. A member leaving waits on
+    their own tasks only; the creator's delete, which destroys the room for
+    everyone, waits on this.
     """
     row = conn.execute(
         "SELECT COUNT(*) FROM tasks WHERE conversation_token = ? "
@@ -4108,20 +4247,19 @@ def delete_web_chat_room(
     if room is None or room.user_id != user_id:
         return False
     token = room.token
+    # Every member's tasks, not only the caller's: a web room can hold more
+    # than one member, and a co-member's row would otherwise outlive its room.
     conn.execute(
         "DELETE FROM task_events WHERE task_id IN "
-        "(SELECT id FROM tasks WHERE conversation_token = ? AND user_id = ?)",
-        (token, user_id),
+        "(SELECT id FROM tasks WHERE conversation_token = ?)",
+        (token,),
     )
     conn.execute(
         "DELETE FROM credential_task_grants WHERE task_id IN "
-        "(SELECT id FROM tasks WHERE conversation_token = ? AND user_id = ?)",
-        (token, user_id),
+        "(SELECT id FROM tasks WHERE conversation_token = ?)",
+        (token,),
     )
-    conn.execute(
-        "DELETE FROM tasks WHERE conversation_token = ? AND user_id = ?",
-        (token, user_id),
-    )
+    conn.execute("DELETE FROM tasks WHERE conversation_token = ?", (token,))
     conn.execute("DELETE FROM web_chat_messages WHERE token = ?", (token,))
     conn.execute(
         "DELETE FROM channel_sleep_cycle_state WHERE conversation_token = ?",
@@ -4141,6 +4279,12 @@ def delete_web_chat_room(
     conn.execute("DELETE FROM room_read_state WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_members WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_dismissals WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_participants WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_data_grants WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_policy WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_vetoes WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_notices WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_epochs WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM rooms WHERE token = ?", (token,))
     # Drop every participant's handle for the token, not just the requester's
     # (room_id): a promoted web room can accrue handles for other members, and
@@ -4182,6 +4326,12 @@ class Room:
     # queries that compute it (`list_member_rooms`) — a room fetched by token
     # carries None rather than a stale stamp.
     last_activity: str | None = None
+    #: A side room's parent (multiplayer D4), and the one member it is for.
+    #: None on every other room.
+    side_of: str | None = None
+    side_for_user: str | None = None
+    #: The group the room is linked to (multiplayer Stage 27), or None.
+    group_id: str | None = None
 
 
 @dataclass
@@ -4216,6 +4366,10 @@ class Message:
     #: Canonical id of the message this one replies to, or None. May dangle —
     #: the parent can be hard-deleted, and the citation outlives it.
     reply_to_message_id: int | None = None
+    #: Who wrote the row: an istota user id, or a sanitized external label. At
+    #: most one is set by convention; a reader that finds both prefers the label.
+    author_user_id: str | None = None
+    author_label: str | None = None
 
 
 def _row_to_room(row: sqlite3.Row) -> Room:
@@ -4235,6 +4389,9 @@ def _row_to_room(row: sqlite3.Row) -> Room:
             row["model_namespace"] if "model_namespace" in keys else None
         ),
         last_activity=row["last_activity"] if "last_activity" in keys else None,
+        side_of=row["side_of"] if "side_of" in keys else None,
+        side_for_user=row["side_for_user"] if "side_for_user" in keys else None,
+        group_id=row["group_id"] if "group_id" in keys else None,
     )
 
 
@@ -4259,6 +4416,8 @@ def _row_to_message(row: sqlite3.Row) -> Message:
         reply_to_message_id=(
             row["reply_to_message_id"] if "reply_to_message_id" in keys else None
         ),
+        author_user_id=row["author_user_id"] if "author_user_id" in keys else None,
+        author_label=row["author_label"] if "author_label" in keys else None,
         id=row["id"],
         room_token=row["room_token"],
         role=row["role"],
@@ -4297,19 +4456,44 @@ def register_room(
     return room
 
 
-def add_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
-    """Idempotently record that `user_id` is a participant in `room_token`."""
+def add_room_member(
+    conn: sqlite3.Connection, room_token: str, user_id: str,
+    *, acknowledged: bool = False,
+) -> None:
+    """Idempotently record that `user_id` is a participant in `room_token`.
+
+    A member reads the room, so a new one grows its audience and starts an
+    epoch unless `acknowledged` — see `note_audience_join`.
+    """
+    joining = not is_room_member(conn, room_token, user_id)
+    audience = audience_persons(conn, room_token) if joining else set()
     conn.execute(
         "INSERT OR IGNORE INTO room_members (room_token, user_id) VALUES (?, ?)",
         (room_token, user_id),
     )
+    if joining:
+        note_audience_join(
+            conn, room_token, f"u:{user_id}", audience,
+            reason="member_add", acknowledged=acknowledged,
+        )
 
 
 def remove_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
     """Drop `user_id`'s membership — the per-user "hide this room" switch. The
-    shared room, its transcript, and other members are untouched."""
+    shared room, its transcript, and other members are untouched.
+
+    Their web presence in `room_participants` ends with it: web has no roster
+    to sync, so membership is the only thing saying they are still there, and a
+    row left present would keep `room_is_shared` true for a room they left.
+    """
     conn.execute(
         "DELETE FROM room_members WHERE room_token = ? AND user_id = ?",
+        (room_token, user_id),
+    )
+    conn.execute(
+        "UPDATE room_participants SET left_at = datetime('now') "
+        "WHERE room_token = ? AND surface = 'web' AND user_id = ? "
+        "AND left_at IS NULL",
         (room_token, user_id),
     )
 
@@ -4408,6 +4592,387 @@ def list_room_members(conn: sqlite3.Connection, room_token: str) -> list[str]:
     return [r["user_id"] for r in rows]
 
 
+def count_room_messages(conn: sqlite3.Connection, room_token: str) -> int:
+    """How many transcript rows the room holds: what adding a member discloses."""
+    return int(conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE room_token = ?", (room_token,),
+    ).fetchone()[0])
+
+
+def note_member_turn(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
+    """An istota user spoke in this room: make them a member and clear their hide.
+
+    Every sender is a member, so a shared room surfaces in each participant's
+    web list (ISSUE-134), and re-engagement un-hides — the sender's own
+    tombstone only, never a co-member's. One helper because two paths reach it:
+    `record_inbound` for every stored turn, and the Talk poller for a turn it
+    consumes before ingest (a `!command`, a confirmation answer).
+    """
+    add_room_member(conn, room_token, user_id)
+    undismiss_room(conn, room_token, user_id)
+
+
+def add_web_room_member(
+    conn: sqlite3.Connection, room_token: str, user_id: str,
+    *, display_name: str | None = None,
+) -> bool:
+    """Make an istota user a member of a web room by the creator's act; True if new.
+
+    Three writes, because each answers a different reader: the membership row
+    puts the room in their sidebar, clearing their hide tombstone keeps a stale
+    one from hiding it again, and a present `principal` web participant row
+    counts them in the room's audience before they have said anything.
+    """
+    added = not is_room_member(conn, room_token, user_id)
+    # The add endpoint refuses without `acknowledge_history`, so the creator
+    # has said the new member may read what came before: no epoch (D3).
+    add_room_member(conn, room_token, user_id, acknowledged=True)
+    undismiss_room(conn, room_token, user_id)
+    upsert_room_participant(
+        conn, room_token=room_token, surface="web", surface_ref=user_id,
+        kind="principal", user_id=user_id, display_name=display_name,
+        acknowledged=True,
+    )
+    return added
+
+
+def drop_web_room_member(
+    conn: sqlite3.Connection, room_token: str, user_id: str,
+) -> None:
+    """Take a user out of a web room for good: membership, presence and handle.
+
+    `remove_room_member` alone is the per-user *hide*, and a hide is undone by
+    the user's own next turn or un-archive — both reached through their
+    `web_chat_rooms` handle. So the handle goes too: with it, a removed member
+    could post once and be re-added by `record_inbound`. Their messages stay.
+    """
+    remove_room_member(conn, room_token, user_id)
+    conn.execute(
+        "DELETE FROM web_chat_rooms WHERE user_id = ? AND token = ?",
+        (user_id, room_token),
+    )
+
+
+PARTICIPANT_KINDS = ("principal", "guest", "agent")
+
+
+def upsert_room_participant(
+    conn: sqlite3.Connection,
+    *,
+    room_token: str,
+    surface: str,
+    surface_ref: str,
+    kind: str,
+    user_id: str | None = None,
+    display_name: str | None = None,
+    acknowledged: bool = False,
+) -> int:
+    """Record a participant as present in a room; the row's id.
+
+    A human who was not already in the room's audience grows it, which starts
+    an epoch unless `acknowledged` — see `note_audience_join`.
+
+    Keyed on the *present* row — `(room_token, surface, surface_ref)` with
+    `left_at IS NULL`, the partial unique index — so a participant still here is
+    one row however often they speak, and one who left and came back is a new
+    row. `kind` is overwritten with the caller's current classification (a guest
+    who became a member is a principal from their next turn); `user_id` and
+    `display_name` are overwritten only by a value, so a later ref that could
+    not be mapped does not erase an earlier mapping.
+    """
+    if kind not in PARTICIPANT_KINDS:
+        raise ValueError(f"unknown participant kind: {kind!r}")
+    joining = kind != "agent" and conn.execute(
+        "SELECT 1 FROM room_participants WHERE room_token = ? AND surface = ? "
+        "AND surface_ref = ? AND left_at IS NULL",
+        (room_token, surface, surface_ref),
+    ).fetchone() is None
+    audience = audience_persons(conn, room_token) if joining else set()
+    row = conn.execute(
+        "INSERT INTO room_participants "
+        "(room_token, surface, surface_ref, user_id, kind, display_name) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (room_token, surface, surface_ref) WHERE left_at IS NULL "
+        "DO UPDATE SET kind = excluded.kind, "
+        "  user_id = COALESCE(excluded.user_id, room_participants.user_id), "
+        "  display_name = COALESCE(excluded.display_name, room_participants.display_name) "
+        "RETURNING id",
+        (room_token, surface, surface_ref, user_id or None, kind, display_name or None),
+    ).fetchone()
+    if joining:
+        note_audience_join(
+            conn, room_token,
+            f"u:{user_id}" if user_id else f"{surface}:{surface_ref}", audience,
+            reason=f"{surface}_join", acknowledged=acknowledged,
+        )
+    return int(row[0])
+
+
+def sync_room_roster(
+    conn: sqlite3.Connection,
+    *,
+    room_token: str,
+    surface: str,
+    present: Sequence[str],
+) -> int:
+    """Stamp `left_at` on every present participant of `surface` not in `present`.
+
+    `present` is the surface's own roster, as refs. Only that surface's rows are
+    touched: a surface reports who is on it, never who is on another. The
+    caller upserts the present ones itself. Returns how many rows left. A caller
+    whose roster fetch failed must not call this — an empty list here means
+    everyone left.
+
+    Agents are exempt: a Talk bot posts without ever being on the roster, so
+    ending its row here would mint a new one on each of its turns.
+    """
+    placeholders = ", ".join("?" for _ in present)
+    exclusion = f"AND surface_ref NOT IN ({placeholders})" if present else ""
+    cur = conn.execute(
+        "UPDATE room_participants SET left_at = datetime('now') "
+        "WHERE room_token = ? AND surface = ? AND left_at IS NULL "
+        f"AND kind != 'agent' {exclusion}",
+        (room_token, surface, *present),
+    )
+    return cur.rowcount or 0
+
+
+def room_is_shared(conn: sqlite3.Connection, room_token: str) -> bool:
+    """More than one human is in this room: present participants, or members.
+
+    Humans are counted, not rows — one istota user present on both Talk and web
+    is one person — and agents are not humans. The member half covers the
+    istota users who read the room in the web view without being in the
+    surface's roster: they are part of whoever reads an answer posted there.
+    """
+    humans = conn.execute(
+        "SELECT COUNT(DISTINCT CASE WHEN user_id IS NOT NULL THEN 'u:' || user_id "
+        "  ELSE surface || ':' || surface_ref END) "
+        "FROM room_participants "
+        "WHERE room_token = ? AND left_at IS NULL AND kind != 'agent'",
+        (room_token,),
+    ).fetchone()[0]
+    if humans > 1:
+        return True
+    members = conn.execute(
+        "SELECT COUNT(*) FROM room_members WHERE room_token = ?", (room_token,),
+    ).fetchone()[0]
+    return members > 1
+
+
+def room_was_ever_shared(conn: sqlite3.Connection, room_token: str) -> bool:
+    """More than one human has ever been in this room, present or not.
+
+    `room_is_shared` answers who reads the room now; this answers who could
+    have written its notes. Participant rows are a history (`left_at`, never a
+    delete), so a member or guest who left still counts, counted the way
+    `room_is_shared` counts.
+    """
+    humans = conn.execute(
+        "SELECT COUNT(*) FROM ("
+        "SELECT CASE WHEN user_id IS NOT NULL THEN 'u:' || user_id "
+        "  ELSE surface || ':' || surface_ref END "
+        "FROM room_participants WHERE room_token = ? AND kind != 'agent' "
+        "UNION SELECT 'u:' || user_id FROM room_members WHERE room_token = ?)",
+        (room_token, room_token),
+    ).fetchone()[0]
+    return humans > 1
+
+
+# ---------------------------------------------------------------------------
+# Audience epochs (multiplayer Stage 14, D3)
+# ---------------------------------------------------------------------------
+
+_AUDIENCE_PERSONS_SQL = (
+    "SELECT CASE WHEN user_id IS NOT NULL THEN 'u:' || user_id "
+    "  ELSE surface || ':' || surface_ref END "
+    "FROM room_participants "
+    "WHERE room_token = ? AND left_at IS NULL AND kind != 'agent' "
+    "UNION SELECT 'u:' || user_id FROM room_members WHERE room_token = ?"
+)
+
+
+def audience_persons(conn: sqlite3.Connection, room_token: str) -> set[str]:
+    """Who reads a room now: present human participants and members.
+
+    Spelled as `room_is_shared` counts them — `u:<user>` for an istota user on
+    any surface, `<surface>:<ref>` for anyone else — so one person on Talk and
+    web is one reader.
+    """
+    return {
+        r[0] for r in conn.execute(_AUDIENCE_PERSONS_SQL, (room_token, room_token))
+    }
+
+
+def _canonical_room_token(conn: sqlite3.Connection, token: str) -> str:
+    if get_room(conn, token) is not None:
+        return token
+    return find_room_token_by_ref(conn, token) or token
+
+
+def room_ref_tokens(conn: sqlite3.Connection, room_token: str) -> list[str]:
+    """`_room_ref_tokens`, for callers outside this module."""
+    return _room_ref_tokens(conn, room_token)
+
+
+def _room_ref_tokens(conn: sqlite3.Connection, room_token: str) -> list[str]:
+    """The canonical token plus every surface ref bound to it: the values a
+    `tasks.conversation_token` or a Talk cache row for this room can carry."""
+    refs = [room_token]
+    for row in conn.execute(
+        "SELECT surface_ref FROM room_bindings WHERE room_token = ?", (room_token,),
+    ):
+        if row[0] not in refs:
+            refs.append(row[0])
+    return refs
+
+
+def note_audience_join(
+    conn: sqlite3.Connection,
+    room_token: str,
+    person: str,
+    audience_before: set[str],
+    *,
+    reason: str,
+    acknowledged: bool = False,
+) -> int | None:
+    """Start an epoch if `person` joining grew the room's audience; its number.
+
+    Splits only when somebody else was already reading the room (a room's
+    first reader has nothing to be kept from), the person was not among them
+    (the same user on a second surface is not a join), and nobody acknowledged
+    the history for them. Web's add endpoint does; Talk, email and WhatsApp
+    have no such act, so their joins always split. Surface-neutral: every
+    surface's joins arrive through `upsert_room_participant` and
+    `add_room_member`, which call this.
+
+    The boundaries are the highest ids in the whole store, not the room's: a
+    later row only ever gets a higher id, so nothing written before the join
+    can read as after it.
+    """
+    if acknowledged or not audience_before or person in audience_before:
+        return None
+    refs = _room_ref_tokens(conn, room_token)
+    placeholders = ", ".join("?" for _ in refs)
+    row = conn.execute(
+        "INSERT INTO room_epochs (room_token, epoch, reason, person, "
+        "  after_message_id, after_task_id, after_talk_message_id) "
+        "SELECT ?, COALESCE(MAX(epoch), 0) + 1, ?, ?, "
+        "  (SELECT COALESCE(MAX(id), 0) FROM messages), "
+        "  (SELECT COALESCE(MAX(id), 0) FROM tasks), "
+        "  (SELECT COALESCE(MAX(message_id), 0) FROM talk_messages "
+        f"   WHERE conversation_token IN ({placeholders})) "
+        "FROM room_epochs WHERE room_token = ? "
+        "RETURNING epoch",
+        (room_token, reason, person, *refs, room_token),
+    ).fetchone()
+    return int(row[0])
+
+
+def audience_baseline_pending(
+    conn: sqlite3.Connection, room_token: str, surface: str,
+) -> bool:
+    """Whether this room's next `surface` roster is its baseline, not joins.
+
+    True only for a room the `room_epochs_v1` migration found already bound to
+    `surface` and whose roster has not been observed since. A room made after
+    that records its baseline where its roster is first known (Talk
+    registration, promotion to Talk), so a roster first seen later — once
+    somebody could already have been added — is compared against the room's
+    audience like any other.
+    """
+    rows = {
+        r[0] for r in conn.execute(
+            "SELECT reason FROM room_epochs WHERE room_token = ? AND epoch = 0",
+            (room_token,),
+        )
+    }
+    return f"pending:{surface}" in rows and f"baseline:{surface}" not in rows
+
+
+def mark_audience_baseline(
+    conn: sqlite3.Connection, room_token: str, surface: str,
+) -> None:
+    """Record that `surface`'s roster has now been observed for this room.
+
+    The first roster a room is seen with is who its transcript was written
+    for — a new room's founders, or on the day this shipped every existing
+    room's people — not somebody joining. That observation writes this row
+    instead of epochs, and only a later roster can grow the audience.
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO room_epochs (room_token, epoch, reason) "
+        "VALUES (?, 0, ?)", (room_token, f"baseline:{surface}"),
+    )
+
+
+@dataclass(frozen=True)
+class AudienceCutoff:
+    """Where a room's front stage starts, in each id space a reader keys on.
+
+    A row whose id is at or below its boundary is from before an epoch that
+    somebody reading the room now was not present for. Zero everywhere means
+    no limit, which is every room that has never split.
+    """
+    message_id: int = 0
+    task_id: int = 0
+    talk_message_id: int = 0
+
+    def __bool__(self) -> bool:
+        return bool(self.message_id or self.task_id or self.talk_message_id)
+
+
+def front_stage_cutoff(conn: sqlite3.Connection, token: str | None) -> AudienceCutoff:
+    """The cutoff for front-stage readers of the room `token` names.
+
+    The latest epoch started by anybody still in the audience: the current
+    audience was present, throughout, for every epoch from there on. An earlier
+    stint of somebody who left and came back is dropped with the rest, the
+    conservative side of "epochs they were present for", and a joiner who has
+    left no longer narrows anything. `token` may be the canonical token or any
+    surface ref for the room; an unknown token has no epochs.
+    """
+    if not token:
+        return AudienceCutoff()
+    room_token = _canonical_room_token(conn, token)
+    row = conn.execute(
+        "SELECT MAX(after_message_id), MAX(after_task_id), "
+        "  MAX(after_talk_message_id) "
+        "FROM room_epochs WHERE room_token = ? AND epoch > 0 "
+        f"AND person IN ({_AUDIENCE_PERSONS_SQL})",
+        (room_token, room_token, room_token),
+    ).fetchone()
+    return AudienceCutoff(
+        message_id=row[0] or 0, task_id=row[1] or 0, talk_message_id=row[2] or 0,
+    )
+
+
+def pre_cutoff_room_task_ids(
+    conn: sqlite3.Connection, token: str, cutoff: AudienceCutoff,
+    candidates: Iterable[int],
+) -> set[int]:
+    """Which of `candidates` are this room's tasks from before `cutoff`.
+
+    A task id below the cutoff with no row left (retention) counts as one:
+    nothing says which room it was in, and the rule is to hide rather than
+    guess.
+    """
+    ids = {int(c) for c in candidates if int(c) <= cutoff.task_id}
+    if not ids:
+        return set()
+    refs = _room_ref_tokens(conn, _canonical_room_token(conn, token))
+    id_marks = ", ".join("?" for _ in ids)
+    ref_marks = ", ".join("?" for _ in refs)
+    elsewhere = {
+        r[0] for r in conn.execute(
+            f"SELECT id FROM tasks WHERE id IN ({id_marks}) "
+            f"AND conversation_token NOT IN ({ref_marks})",
+            (*ids, *refs),
+        )
+    }
+    return ids - elsewhere
+
+
 def list_member_rooms(
     conn: sqlite3.Connection, user_id: str, include_archived: bool = False,
     include_dismissed: bool = False,
@@ -4463,6 +5028,91 @@ def list_member_rooms(
 def get_room(conn: sqlite3.Connection, token: str) -> Room | None:
     row = conn.execute("SELECT * FROM rooms WHERE token = ?", (token,)).fetchone()
     return _row_to_room(row) if row else None
+
+
+def is_side_room(conn: sqlite3.Connection, token: str) -> bool:
+    row = conn.execute(
+        "SELECT side_of FROM rooms WHERE token = ?", (token,),
+    ).fetchone()
+    return bool(row and row["side_of"])
+
+
+def get_side_room(
+    conn: sqlite3.Connection, parent_token: str, user_id: str,
+) -> Room | None:
+    """``user_id``'s side room of ``parent_token``, or None when none exists."""
+    row = conn.execute(
+        "SELECT * FROM rooms WHERE side_of = ? AND side_for_user = ?",
+        (parent_token, user_id),
+    ).fetchone()
+    return _row_to_room(row) if row else None
+
+
+def ensure_side_room(
+    conn: sqlite3.Connection, parent_token: str, user_id: str,
+) -> Room:
+    """``user_id``'s side room of ``parent_token``, created on first need (D4).
+
+    **This is the one place the system makes a room, and why it may.** Rooms
+    are user-created: nothing mints a room to deliver into, and an email thread
+    routes into a room a person made. A side room is not a new conversation
+    and not a new audience. It is the private companion of a room the user is
+    *already a member of*, with that user as its only member for good, and it
+    exists only because that room produced something for them alone (a
+    whisper, a confirmation). It never becomes anyone's delivery default
+    (`_usable_as_delivery_default`), never gains a second member, and nothing
+    that is not about its parent is ever routed into it. Refused, with
+    ``ValueError``, for a parent that does not exist, a user who is not a
+    member of it, and a parent that is itself a side room.
+
+    Idempotent, including under a race: the partial unique index on
+    ``(side_of, side_for_user)`` keeps one row, `INSERT OR IGNORE` loses
+    quietly, and only the writer whose row landed makes the membership, the
+    web binding and the web handle.
+    """
+    parent = get_room(conn, parent_token)
+    if parent is None:
+        raise ValueError("parent_unavailable")
+    if parent.side_of:
+        raise ValueError("side_room_of_side_room")
+    if not is_room_member(conn, parent_token, user_id):
+        raise ValueError("not_a_member")
+    existing = get_side_room(conn, parent_token, user_id)
+    if existing is not None:
+        # Fail closed if anything has put a second reader in it.
+        if list_room_members(conn, existing.token) != [user_id]:
+            raise ValueError("side_room_not_private")
+        return existing
+    token = _new_web_chat_token(user_id)
+    name = f"re: {room_display_name(parent, None) or 'room'}"[:80]
+    conn.execute(
+        "INSERT OR IGNORE INTO rooms (token, user_id, name, origin, side_of, side_for_user) "
+        "VALUES (?, ?, ?, 'web', ?, ?)",
+        (token, user_id, name, parent_token, user_id),
+    )
+    room = get_side_room(conn, parent_token, user_id)
+    assert room is not None
+    if room.token == token:
+        add_room_member(conn, token, user_id)
+        add_room_binding(conn, token, "web", token)
+        ensure_web_chat_handle(conn, user_id, token, name)
+    return room
+
+
+def side_room_parent(conn: sqlite3.Connection, token: str) -> Room | None:
+    """The side room ``token`` names, when it is one whose member still reads
+    its parent; None for any other room, and for a side room whose member has
+    left the parent or whose parent is gone."""
+    room = get_room(conn, token)
+    if room is None or not room.side_of or not room.side_for_user:
+        return None
+    if list_room_members(conn, token) != [room.side_for_user]:
+        return None
+    if get_room(conn, room.side_of) is None:
+        return None
+    if not is_room_member(conn, room.side_of, room.side_for_user):
+        return None
+    return room
 
 
 def list_rooms(
@@ -4628,6 +5278,19 @@ def set_room_brain(conn: sqlite3.Connection, token: str, brain: str | None) -> N
     )
 
 
+def set_room_group(conn: sqlite3.Connection, token: str, group_id: str | None) -> None:
+    """Link the room to a group, or None to unlink it (multiplayer Stage 27).
+
+    Stored as given: who may write it is `room_policy.group_link_refusal`'s
+    question, and whether it loads anything is asked per turn by
+    `room_scopes.task_group_ids`, so a link outlives a membership change
+    without being trusted across it.
+    """
+    conn.execute(
+        "UPDATE rooms SET group_id = ? WHERE token = ?", (group_id, token)
+    )
+
+
 def add_room_binding(
     conn: sqlite3.Connection, room_token: str, surface: str, surface_ref: str,
 ) -> None:
@@ -4776,6 +5439,7 @@ def add_message(
     author_user_id: str | None = None,
     author_label: str | None = None,
     delivery_reference: str | None = None,
+    author_participant_id: int | None = None,
 ) -> int:
     """Append a message to a room's canonical transcript. Returns the new id.
 
@@ -4797,8 +5461,8 @@ def add_message(
         "INSERT INTO messages "
         "(room_token, role, body, title, task_id, origin_surface, external_ids, "
         " attachments, attachment_paths, client_msg_id, reply_to_message_id, "
-        " author_user_id, author_label, delivery_reference) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        " author_user_id, author_label, delivery_reference, author_participant_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         (
             room_token,
             role,
@@ -4817,6 +5481,7 @@ def add_message(
             author_user_id or None,
             author_label or None,
             delivery_reference or None,
+            author_participant_id,
         ),
     ).fetchone()
     return int(row["id"])
@@ -4824,8 +5489,14 @@ def add_message(
 
 def find_send_by_client_msg_id(
     conn: sqlite3.Connection, room_token: str, client_msg_id: str
-) -> tuple[int, str] | None:
-    """``(task_id, sender)`` for a stored send under this key in this room, or None.
+) -> tuple[int, int | None, str | None] | None:
+    """``(message_id, task_id, sender)`` for a stored send under this key in
+    this room, or None.
+
+    ``task_id`` is None for a turn the room recorded without answering, and for
+    one whose task retention has since deleted; the sender then comes off the
+    row's own ``author_user_id``. Both are still stored turns under this key,
+    and the room-scoped unique index would refuse a second one.
 
     What makes a retry of an accepted-but-unreported send idempotent: the
     client cannot tell a request that never arrived from one whose answer was
@@ -4842,13 +5513,17 @@ def find_send_by_client_msg_id(
     if not client_msg_id:
         return None
     row = conn.execute(
-        "SELECT m.task_id, t.user_id FROM messages m "
-        "JOIN tasks t ON t.id = m.task_id "
+        "SELECT m.id, t.id AS task_id, "
+        "COALESCE(t.user_id, m.author_user_id) AS sender FROM messages m "
+        "LEFT JOIN tasks t ON t.id = m.task_id "
         "WHERE m.room_token = ? AND m.client_msg_id = ? "
         "LIMIT 1",
         (room_token, client_msg_id),
     ).fetchone()
-    return (int(row["task_id"]), row["user_id"]) if row else None
+    if row is None:
+        return None
+    task_id = int(row["task_id"]) if row["task_id"] is not None else None
+    return int(row["id"]), task_id, row["sender"]
 
 
 def find_confirmation_exchange(
@@ -4859,12 +5534,10 @@ def find_confirmation_exchange(
 
     The sibling of :func:`find_send_by_client_msg_id` for the one exchange that
     is *not* a task. `confirmations.record_exchange` writes a `task_id IS NULL`
-    pair, and that inner join drops a NULL — so the send-durability lookup
-    cannot see this row while the `(room_token, client_msg_id)` unique index
-    can. Without a lookup that spans both, a retried "yes" re-resolves from
-    scratch: with a second gate parked in the meantime it approves a question
-    the user never answered, and with none it takes an `IntegrityError` on the
-    index. Both were found in review; the first is an authorization defect.
+    pair, and the answer path needs the ack beside it, which the send lookup
+    does not return. Without it a retried "yes" re-resolves from scratch: with
+    a second gate parked in the meantime it approves a question the user never
+    answered. That was found in review and is an authorization defect.
 
     The ack is the `system` row written immediately after the answer in the
     same transaction, so it is the next system row in the room by id.
@@ -4892,18 +5565,31 @@ def find_confirmation_exchange(
 
 def get_messages(
     conn: sqlite3.Connection, room_token: str, limit: int | None = None,
+    *, roles: tuple[str, ...] | None = None, after_id: int = 0,
 ) -> list[Message]:
     """A room's messages, oldest-first (by id). With `limit`, returns the most
-    recent `limit` messages, still oldest-first."""
+    recent `limit` messages, still oldest-first. With `roles`, only rows of
+    those roles are returned and counted against `limit`. With `after_id`, only
+    rows with a higher id (a front-stage reader's `front_stage_cutoff`)."""
+    where = "room_token = ?"
+    params: list = [room_token]
+    if after_id:
+        where += " AND id > ?"
+        params.append(after_id)
+    if roles is not None:
+        if not roles:
+            return []
+        where += f" AND role IN ({','.join('?' * len(roles))})"
+        params.extend(roles)
     if limit is None:
         rows = conn.execute(
-            "SELECT * FROM messages WHERE room_token = ? ORDER BY id ASC",
-            (room_token,),
+            f"SELECT * FROM messages WHERE {where} ORDER BY id ASC",
+            params,
         ).fetchall()
         return [_row_to_message(r) for r in rows]
     rows = conn.execute(
-        "SELECT * FROM messages WHERE room_token = ? ORDER BY id DESC LIMIT ?",
-        (room_token, limit),
+        f"SELECT * FROM messages WHERE {where} ORDER BY id DESC LIMIT ?",
+        (*params, limit),
     ).fetchall()
     return [_row_to_message(r) for r in reversed(rows)]
 
@@ -5281,8 +5967,8 @@ def message_has_external_id(
     ``exclude_origin`` skips rows whose `origin_surface` matches: a row that
     originated on the inbound surface itself isn't a mirror echo — it's the
     same message re-polled (inbound Talk ids are stamped at ingest now), and
-    that case must fall through to `create_task`'s duplicate dedup so the
-    caller gets the existing task id instead of an echo drop."""
+    that case must fall through to `record_inbound`'s replay probe so the
+    caller gets the existing turn instead of an echo drop."""
     rows = conn.execute(
         "SELECT origin_surface, external_ids FROM messages "
         "WHERE room_token = ? AND external_ids IS NOT NULL",
@@ -5980,6 +6666,7 @@ def _migrate_processed_emails_uidvalidity(conn: sqlite3.Connection) -> None:
                 task_id INTEGER,
                 routing_method TEXT,
                 processed_at TEXT DEFAULT (datetime('now')),
+                recipients TEXT,
                 UNIQUE (uidvalidity, email_id),
                 FOREIGN KEY (task_id) REFERENCES tasks(id)
             )
@@ -5991,10 +6678,10 @@ def _migrate_processed_emails_uidvalidity(conn: sqlite3.Connection) -> None:
             INSERT INTO processed_emails
             (id, uidvalidity, email_id, sender_email, subject, thread_id,
              message_id, "references", user_id, task_id, routing_method,
-             processed_at)
+             processed_at, recipients)
             SELECT id, 0, email_id, sender_email, subject, thread_id,
                    message_id, "references", user_id, task_id, routing_method,
-                   processed_at
+                   processed_at, recipients
             FROM _processed_emails_old
         """)
         conn.execute("DROP TABLE _processed_emails_old")
@@ -6319,6 +7006,111 @@ def _migrate_message_relays_surfaces(conn: sqlite3.Connection) -> None:
             conn.execute(f"PRAGMA foreign_keys={'ON' if foreign_keys else 'OFF'}")
     except sqlite3.Error as e:
         logger.warning("message_relays rebuild failed, will retry: %s", e)
+
+
+# The rebuilt `whatsapp_skill_requests`. A copy of schema.sql's, because this
+# runs before schema.sql; `tests/test_side_rooms.py` holds the two equal.
+_SKILL_REQUESTS_DDL = """CREATE TABLE whatsapp_skill_requests_rebuild (
+    id TEXT PRIMARY KEY,
+    requester_user_id TEXT NOT NULL,
+    origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+    request_key TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post')),
+    recipient_user_id TEXT NOT NULL,
+    relay_id TEXT UNIQUE,
+    text TEXT,
+    content_hash TEXT NOT NULL,
+    service_body TEXT,
+    service_hash TEXT NOT NULL,
+    template_body TEXT,
+    template_hash TEXT,
+    preview TEXT,
+    preview_digest TEXT,
+    provider TEXT NOT NULL,
+    binding_fingerprint TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('held','queued','sending','sent','uncertain','failed','cancelled','expired')),
+    approved_at TEXT,
+    approved_digest TEXT,
+    queue_deadline TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_at TEXT,
+    content_cleared_at TEXT,
+    error_code TEXT,
+    origin TEXT,
+    destination TEXT,
+    UNIQUE (requester_user_id, origin_task_id, request_key)
+)"""
+
+_SKILL_REQUESTS_INDEXES = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_request_held_task "
+    "ON whatsapp_skill_requests(origin_task_id) WHERE state = 'held'",
+    "CREATE INDEX IF NOT EXISTS idx_whatsapp_request_queue "
+    "ON whatsapp_skill_requests(state, queue_deadline)",
+)
+
+
+def _migrate_skill_request_room_kinds(conn: sqlite3.Connection) -> None:
+    """Widen `whatsapp_skill_requests` to the side-room kinds (multiplayer D16).
+
+    `side_whisper` and `room_post` ride the relay request table rather than a
+    second hold table, so its `kind` CHECK is rebuilt by the procedure
+    `_migrate_message_relays_surfaces` documents: foreign keys off,
+    `legacy_alter_table` on for the rename (the `whatsapp_request_task_deleted`
+    trigger and `message_relays`' foreign key both name this table), create,
+    copy, drop, rename, indexes back, and a `foreign_key_check` of this table
+    before commit. A failure rolls back and the next boot retries.
+
+    The two new columns are added first, so a refused rebuild still leaves
+    every column the code reads; only a row of a new kind is refused, by the
+    CHECK still standing. Idempotent on the table's own SQL.
+    """
+    _add_columns(conn, "whatsapp_skill_requests", {"origin": "TEXT", "destination": "TEXT"})
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='whatsapp_skill_requests'"
+        ).fetchone()
+        if row is None or "room_post" in (row[0] or ""):
+            return
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(whatsapp_skill_requests)")]
+        conn.commit()
+        foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("PRAGMA legacy_alter_table=ON")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute("DROP TABLE IF EXISTS whatsapp_skill_requests_rebuild")
+                conn.execute(_SKILL_REQUESTS_DDL)
+                listed = ",".join(cols)
+                conn.execute(
+                    f"INSERT INTO whatsapp_skill_requests_rebuild ({listed}) "
+                    f"SELECT {listed} FROM whatsapp_skill_requests"
+                )
+                conn.execute("DROP TABLE whatsapp_skill_requests")
+                conn.execute(
+                    "ALTER TABLE whatsapp_skill_requests_rebuild "
+                    "RENAME TO whatsapp_skill_requests"
+                )
+                for statement in _SKILL_REQUESTS_INDEXES:
+                    conn.execute(statement)
+                violations = conn.execute(
+                    "PRAGMA foreign_key_check(whatsapp_skill_requests)"
+                ).fetchall()
+                if violations:
+                    raise sqlite3.IntegrityError(
+                        f"{len(violations)} foreign key violation(s) in "
+                        "whatsapp_skill_requests"
+                    )
+            except BaseException:
+                conn.rollback()
+                raise
+            conn.commit()
+        finally:
+            conn.execute("PRAGMA legacy_alter_table=OFF")
+            conn.execute(f"PRAGMA foreign_keys={'ON' if foreign_keys else 'OFF'}")
+    except sqlite3.Error as e:
+        logger.warning("whatsapp_skill_requests rebuild failed, will retry: %s", e)
 
 
 def _migrate_room_members(conn: sqlite3.Connection) -> None:
@@ -6721,6 +7513,368 @@ def _migrate_messages_author(conn: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO _migration_state (name) "
         "VALUES ('messages_author_v1')"
     )
+
+
+# Kept equal to schema.sql's copy by the fresh-versus-upgraded parity test in
+# tests/test_room_participants.py.
+_ROOM_PARTICIPANTS_DDL = """
+CREATE TABLE IF NOT EXISTS room_participants (
+    id           INTEGER PRIMARY KEY,
+    room_token   TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    surface      TEXT NOT NULL,
+    surface_ref  TEXT NOT NULL,
+    user_id      TEXT,
+    kind         TEXT NOT NULL CHECK (kind IN ('principal', 'guest', 'agent')),
+    display_name TEXT,
+    joined_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    left_at      TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_room_participants_present
+    ON room_participants (room_token, surface, surface_ref) WHERE left_at IS NULL;
+"""
+
+
+def _migrate_room_participants(conn: sqlite3.Connection) -> None:
+    """Create `room_participants` and backfill it from the turns already stored.
+
+    Every distinct istota author of a Talk or web `role='user'` row in a
+    registered room becomes a present participant — `principal` when they are a
+    member now, `guest` otherwise — joined at their first turn, and each of
+    those rows is linked through `messages.author_participant_id`. For both
+    surfaces the author's user id *is* the surface ref: a Talk actor reaches
+    `author_user_id` only as a configured user, whose actor id is the key.
+
+    Email rows are not backfilled, deliberately: email joins a room's transcript
+    without joining the room, and its sender is not in the room's audience.
+    Nobody who never wrote is backfilled either; the Talk roster sync adds them
+    on the room's next group turn.
+
+    Markered (`room_participants_v1`), and idempotent regardless: the insert
+    ignores a present row and the link touches only unlinked rows. Runs after
+    `_migrate_messages_author`, whose columns it reads. The DDL runs on every
+    boot, before the marker check, so a fresh install has the table before
+    `schema.sql` does.
+    """
+    # `execute` per statement rather than `executescript`, which would commit
+    # whatever transaction the migrations above left open.
+    for statement in _ROOM_PARTICIPANTS_DDL.split(";"):
+        if statement.strip():
+            conn.execute(statement)
+    try:
+        already = conn.execute(
+            "SELECT 1 FROM _migration_state WHERE name = 'room_participants_v1'"
+        ).fetchone()
+        # The author backfill re-arms on failure; linking before it has finished
+        # would mark this done over rows it has yet to attribute.
+        authored = conn.execute(
+            "SELECT 1 FROM _migration_state WHERE name = 'messages_author_v1'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+    if already or not authored:
+        return
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO room_participants "
+            "(room_token, surface, surface_ref, user_id, kind, joined_at) "
+            "SELECT m.room_token, m.origin_surface, m.author_user_id, "
+            "  m.author_user_id, "
+            "  CASE WHEN EXISTS (SELECT 1 FROM room_members rm "
+            "    WHERE rm.room_token = m.room_token AND rm.user_id = m.author_user_id) "
+            "  THEN 'principal' ELSE 'guest' END, "
+            "  MIN(m.created_at) "
+            "FROM messages m "
+            "WHERE m.role = 'user' AND m.origin_surface IN ('talk', 'web') "
+            "AND m.author_user_id IS NOT NULL AND m.author_label IS NULL "
+            "AND m.room_token IN (SELECT token FROM rooms) "
+            "GROUP BY m.room_token, m.origin_surface, m.author_user_id"
+        )
+        conn.execute(
+            "UPDATE messages SET author_participant_id = ("
+            "  SELECT p.id FROM room_participants p "
+            "  WHERE p.room_token = messages.room_token "
+            "  AND p.surface = messages.origin_surface "
+            "  AND p.surface_ref = messages.author_user_id AND p.left_at IS NULL"
+            ") "
+            "WHERE role = 'user' AND author_participant_id IS NULL "
+            "AND origin_surface IN ('talk', 'web') "
+            "AND author_user_id IS NOT NULL AND author_label IS NULL"
+        )
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            return  # fresh install, nothing to fold yet
+        logger.warning("room participants backfill failed: %s", e)
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO _migration_state (name) "
+        "VALUES ('room_participants_v1')"
+    )
+
+
+# Kept equal to schema.sql's copy by tests/test_room_members_api.py.
+_ROOM_DATA_GRANTS_DDL = """
+CREATE TABLE IF NOT EXISTS room_data_grants (
+    room_token TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (room_token, user_id, scope)
+)
+"""
+
+
+def _migrate_room_data_grants(conn: sqlite3.Connection) -> None:
+    """Create `room_data_grants`, empty, and record that it was created empty.
+
+    **No backfill, and the marker is what says so.** Granting every scope to
+    every existing shared room would reopen the disclosure hole the table exists
+    to close, under a name that looks like consent nobody gave. The marker
+    (`room_grants_v1`) records that this database got the table with nothing in
+    it, so a later migration cannot mistake an empty table on an upgraded
+    install for one that predates the decision.
+    """
+    conn.execute(_ROOM_DATA_GRANTS_DDL)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_grants_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+
+
+def _migrate_side_rooms(conn: sqlite3.Connection) -> None:
+    """Add `rooms.side_of` / `rooms.side_for_user` and their unique index.
+
+    Markered (`side_rooms_v1`) so a later migration can tell a database that
+    got the columns empty from one that predates them. Nothing is backfilled:
+    no side room existed before this, and minting one here would be exactly
+    the room nobody asked for that the rooms rule forbids.
+    """
+    _add_columns(conn, "rooms", {"side_of": "TEXT", "side_for_user": "TEXT"})
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_rooms_side "
+            "ON rooms (side_of, side_for_user) WHERE side_of IS NOT NULL"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('side_rooms_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # rooms or the marker table not created yet
+
+
+def _migrate_room_group(conn: sqlite3.Connection) -> None:
+    """Add `rooms.group_id` (multiplayer Stage 27).
+
+    Markered (`room_group_v1`) like `_migrate_side_rooms`. Nothing is
+    backfilled: no room was linked to a group before this, and a link is the
+    host's choice, never an inference from who happens to be in the room.
+    """
+    _add_columns(conn, "rooms", {"group_id": "TEXT"})
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_group_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # marker table not created yet
+
+
+# Kept equal to schema.sql's copy by tests/test_room_policy.py.
+_ROOM_POLICY_DDL = """
+CREATE TABLE IF NOT EXISTS room_policy (
+    room_token   TEXT PRIMARY KEY REFERENCES rooms(token) ON DELETE CASCADE,
+    host_user_id TEXT,
+    speech_mode  TEXT,
+    guest_reply  TEXT NOT NULL DEFAULT 'held'
+                 CHECK (guest_reply IN ('off', 'held', 'direct')),
+    vetoed_by    INTEGER REFERENCES room_participants(id),
+    max_bot_turns_without_human INTEGER NOT NULL DEFAULT 3,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    vetoed_at    TEXT,
+    veto_on_by   TEXT,
+    announced_at TEXT
+)
+"""
+
+
+def _migrate_room_policy(conn: sqlite3.Connection) -> None:
+    """Create `room_policy`, empty (multiplayer Stage 11).
+
+    Markered (`room_policy_v1`) and never backfilled: `room_policy.ensure_policy`
+    makes a room's row the first time the room needs one, from the room as it
+    is then, which is the same answer a backfill would give and costs nothing
+    for the rooms that are never shared.
+    """
+    conn.execute(_ROOM_POLICY_DDL)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_policy_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+
+
+# Kept equal to schema.sql's copy by tests/test_room_veto.py.
+_ROOM_VETOES_DDL = """
+CREATE TABLE IF NOT EXISTS room_vetoes (
+    room_token     TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    person         TEXT NOT NULL,
+    participant_id INTEGER REFERENCES room_participants(id),
+    vetoed_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    agreed_at      TEXT,
+    PRIMARY KEY (room_token, person)
+)
+"""
+
+# Kept equal to schema.sql's copy by tests/test_room_veto.py.
+_ROOM_NOTICES_DDL = """
+CREATE TABLE IF NOT EXISTS room_notices (
+    id         INTEGER PRIMARY KEY,
+    room_token TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    body       TEXT NOT NULL,
+    reference  TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    posted_at  TEXT
+)
+"""
+
+
+def _migrate_room_veto(conn: sqlite3.Connection) -> None:
+    """The participant veto and the announcement (multiplayer Stage 20).
+
+    Three `room_policy` columns and the `room_vetoes` and `room_notices`
+    tables. Markered
+    (`room_veto_v1`), nothing backfilled: no room is off before somebody
+    switches it off, and a room with a guest that was never announced to is
+    owed its announcement.
+    """
+    _add_columns(conn, "room_policy", {
+        "vetoed_at": "TEXT", "veto_on_by": "TEXT", "announced_at": "TEXT",
+    })
+    conn.execute(_ROOM_VETOES_DDL)
+    conn.execute(_ROOM_NOTICES_DDL)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_veto_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+
+
+# Kept equal to schema.sql's copy by tests/test_audience_epochs.py.
+_ROOM_EPOCHS_DDL = """
+CREATE TABLE IF NOT EXISTS room_epochs (
+    id                    INTEGER PRIMARY KEY,
+    room_token            TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    epoch                 INTEGER NOT NULL,
+    started_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    reason                TEXT NOT NULL,
+    person                TEXT,
+    after_message_id      INTEGER NOT NULL DEFAULT 0,
+    after_task_id         INTEGER NOT NULL DEFAULT 0,
+    after_talk_message_id INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+_ROOM_EPOCHS_INDEXES = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_room_epochs_epoch\n"
+    "    ON room_epochs (room_token, epoch) WHERE epoch > 0",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_room_epochs_baseline\n"
+    "    ON room_epochs (room_token, reason) WHERE epoch = 0",
+)
+
+
+def _migrate_room_epochs(conn: sqlite3.Connection) -> None:
+    """Create `room_epochs`, empty (multiplayer Stage 14).
+
+    Markered (`room_epochs_v1`). No epoch is backfilled: nothing recorded
+    when anybody joined a room before this, so every existing room starts in
+    epoch 0. Each existing Talk-bound room gets a `pending:talk` row instead,
+    so its next roster observation is taken as its baseline rather than as
+    everybody on it joining at once — which would hide every group room's
+    history on the day this ships. Only when the table is new here: on a fresh
+    install `schema.sql` creates it and the marker can only land on a later
+    boot, by which time any room is one made under epochs, whose baseline was
+    recorded where its roster was first known.
+    """
+    existed = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'room_epochs'"
+    ).fetchone() is not None
+    conn.execute(_ROOM_EPOCHS_DDL)
+    for statement in _ROOM_EPOCHS_INDEXES:
+        conn.execute(statement)
+    try:
+        if existed:
+            conn.execute(
+                "INSERT OR IGNORE INTO _migration_state (name) "
+                "VALUES ('room_epochs_v1')"
+            )
+            return
+        conn.execute(
+            "INSERT OR IGNORE INTO room_epochs (room_token, epoch, reason) "
+            "SELECT DISTINCT room_token, 0, 'pending:talk' FROM room_bindings "
+            "WHERE surface = 'talk'"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_epochs_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # rooms or the marker table not created yet (fresh install)
+
+
+# Kept equal to schema.sql's copy by tests/test_groups.py.
+_GROUPS_DDL = (
+    """CREATE TABLE IF NOT EXISTS groups (
+    group_id     TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL DEFAULT 'group',
+    display_name TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    created_by   TEXT NOT NULL,
+    archived_at  TEXT
+)""",
+    """CREATE TABLE IF NOT EXISTS group_members (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id   TEXT NOT NULL REFERENCES groups(group_id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    role       TEXT NOT NULL DEFAULT 'member',
+    added_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    added_by   TEXT NOT NULL,
+    ended_at   TEXT,
+    ended_by   TEXT
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id, ended_at)",
+    "CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id, ended_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_group_members_current "
+    "ON group_members(group_id, user_id) WHERE ended_at IS NULL",
+    """CREATE TABLE IF NOT EXISTS group_kv (
+    group_id   TEXT NOT NULL REFERENCES groups(group_id) ON DELETE CASCADE,
+    namespace  TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    written_by TEXT,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (group_id, namespace, key)
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_group_kv_ns ON group_kv(group_id, namespace)",
+)
+
+
+def _migrate_groups(conn: sqlite3.Connection) -> None:
+    """Create `groups`, `group_members` and `group_kv`, empty (groups Stage 1).
+
+    Markered (`groups_v1`), nothing backfilled: no group exists before an
+    operator creates one. `schema.sql` would create the three on its own; the
+    migration is here so an upgraded database is built from one copy of the
+    DDL that a test holds equal to the fresh one.
+    """
+    for statement in _GROUPS_DDL:
+        conn.execute(statement)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('groups_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
 
 
 def _migrate_notifications(conn: sqlite3.Connection) -> None:
@@ -7355,15 +8509,20 @@ def mark_email_processed(
     task_id: int | None = None,
     routing_method: str | None = None,
     uidvalidity: int = 0,
+    recipients: str | None = None,
 ) -> int:
-    """Record a processed email, keyed by (uidvalidity, email_id)."""
+    """Record a processed email, keyed by (uidvalidity, email_id).
+
+    ``recipients`` is the message's To and Cc as a JSON list; ``thread_id`` is
+    the room token for a message on an email thread room.
+    """
     cursor = conn.execute(
         """
-        INSERT INTO processed_emails (uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO processed_emails (uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method, recipients)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
-        (uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method),
+        (uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method, recipients),
     )
     return cursor.fetchone()[0]
 
@@ -8620,6 +9779,267 @@ def shared_kv_namespaces(conn: sqlite3.Connection) -> list[str]:
 
 
 # ============================================================================
+# Groups (groups-and-shared-scope)
+# ============================================================================
+#
+# A group is a named set of istota users with a store of its own. Pure DB
+# operations: `is_group_member` is the one authorization gate and, like
+# `is_room_member`, does no policy of its own; every caller pairs it with the
+# trusted identity (the task's `user_id`, the proxy's `ISTOTA_USER_ID`), never
+# with anything the model wrote. Membership is a history: nothing here deletes
+# a `group_members` row. An archived group is out of every membership answer
+# (`is_group_member`, `list_user_groups`, `get_group` by default) while its
+# rows, members and `group_kv` stay readable to the operator.
+
+GROUP_ROLES = ("owner", "member")
+
+_GROUP_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{1,63}")
+
+
+def is_valid_group_id(group_id: object) -> bool:
+    """Whether ``group_id`` may name a group.
+
+    Two checks. ``is_scopable_user_id`` is the ISSUE-402 lexical rule, reused
+    because a group id names a directory under ``{mount}/Groups`` exactly as a
+    user id names one under ``Users/``. The charset is narrower than any user
+    id's, because a group id is chosen by a person and appears in CLI arguments
+    and in a deferred op's ``scope`` string. ``none`` is reserved: it is how
+    `!room group none` says "unlink".
+    """
+    if not is_scopable_user_id(group_id):
+        return False
+    return group_id != "none" and _GROUP_ID_RE.fullmatch(group_id) is not None
+
+
+def _group_dict(row: sqlite3.Row) -> dict:
+    return {
+        "group_id": row["group_id"],
+        "kind": row["kind"],
+        "display_name": row["display_name"],
+        "created_at": row["created_at"],
+        "created_by": row["created_by"],
+        "archived_at": row["archived_at"],
+    }
+
+
+def create_group(
+    conn: sqlite3.Connection, group_id: str, *,
+    kind: str, display_name: str, created_by: str,
+) -> None:
+    """Create a group. Raises ``ValueError`` on an unusable id or one already
+    taken, archived groups included: an id names a directory and a history,
+    and reusing it would hand a new audience an old store."""
+    if not is_valid_group_id(group_id):
+        raise ValueError(f"invalid group id: {group_id!r}")
+    try:
+        conn.execute(
+            "INSERT INTO groups (group_id, kind, display_name, created_by) "
+            "VALUES (?, ?, ?, ?)",
+            (group_id, kind or "group", display_name or "", created_by),
+        )
+    except sqlite3.IntegrityError:
+        raise ValueError(f"group already exists: {group_id!r}") from None
+
+
+def archive_group(
+    conn: sqlite3.Connection, group_id: str, *, at: str | None = None,
+) -> bool:
+    """Retire a group. True if a live group was archived."""
+    cursor = conn.execute(
+        "UPDATE groups SET archived_at = COALESCE(?, datetime('now')) "
+        "WHERE group_id = ? AND archived_at IS NULL",
+        (at, group_id),
+    )
+    return cursor.rowcount > 0
+
+
+def get_group(
+    conn: sqlite3.Connection, group_id: str, *, include_archived: bool = False,
+) -> dict | None:
+    """The group, or None when absent (or archived, unless asked for)."""
+    row = conn.execute(
+        "SELECT * FROM groups WHERE group_id = ?", (group_id,),
+    ).fetchone()
+    if row is None or (row["archived_at"] is not None and not include_archived):
+        return None
+    return _group_dict(row)
+
+
+def list_groups(
+    conn: sqlite3.Connection, *, include_archived: bool = False,
+) -> list[dict]:
+    sql = "SELECT * FROM groups"
+    if not include_archived:
+        sql += " WHERE archived_at IS NULL"
+    return [_group_dict(r) for r in conn.execute(sql + " ORDER BY group_id")]
+
+
+def add_group_member(
+    conn: sqlite3.Connection, group_id: str, user_id: str, *,
+    role: str = "member", added_by: str,
+) -> None:
+    """Record ``user_id`` as a current member of a live group.
+
+    A no-op when a current membership exists (its role is left alone); a fresh
+    row otherwise, so a re-join is a second row and the history reads. Raises
+    ``ValueError`` for an unknown or archived group, an unknown role, or a user
+    id that could not name a directory of its own.
+    """
+    if role not in GROUP_ROLES:
+        raise ValueError(f"invalid group role: {role!r}")
+    if not is_scopable_user_id(user_id):
+        raise ValueError(f"invalid user id: {user_id!r}")
+    if get_group(conn, group_id) is None:
+        raise ValueError(f"no such group: {group_id!r}")
+    # `idx_group_members_current` allows one open row per (group, user), so
+    # the no-op is the constraint's rather than a check-then-insert's.
+    conn.execute(
+        "INSERT OR IGNORE INTO group_members (group_id, user_id, role, added_by) "
+        "VALUES (?, ?, ?, ?)",
+        (group_id, user_id, role, added_by),
+    )
+
+
+def end_group_membership(
+    conn: sqlite3.Connection, group_id: str, user_id: str, *,
+    ended_by: str, at: str | None = None,
+) -> bool:
+    """End ``user_id``'s current membership. Deletes nothing. True if a
+    current membership was ended."""
+    cursor = conn.execute(
+        "UPDATE group_members SET ended_at = COALESCE(?, datetime('now')), "
+        "ended_by = ? WHERE group_id = ? AND user_id = ? AND ended_at IS NULL",
+        (at, ended_by, group_id, user_id),
+    )
+    return cursor.rowcount > 0
+
+
+def is_group_member(conn: sqlite3.Connection, group_id: str, user_id: str) -> bool:
+    """The gate: a current membership of a live group. False for an unknown,
+    archived or ended one and for an empty or non-string argument. A database
+    error raises; a caller treats that as a refusal."""
+    if not isinstance(group_id, str) or not isinstance(user_id, str):
+        return False
+    if not group_id or not user_id:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM group_members m JOIN groups g ON g.group_id = m.group_id "
+        "WHERE m.group_id = ? AND m.user_id = ? AND m.ended_at IS NULL "
+        "AND g.archived_at IS NULL LIMIT 1",
+        (group_id, user_id),
+    ).fetchone()
+    return row is not None
+
+
+def list_group_members(conn: sqlite3.Connection, group_id: str) -> list[str]:
+    """Current members, sorted. Answers for an archived group too: it is the
+    operator's listing, and the gates above are what exclude archived groups."""
+    rows = conn.execute(
+        "SELECT DISTINCT user_id FROM group_members "
+        "WHERE group_id = ? AND ended_at IS NULL ORDER BY user_id",
+        (group_id,),
+    ).fetchall()
+    return [r["user_id"] for r in rows]
+
+
+def list_user_groups(conn: sqlite3.Connection, user_id: str) -> list[str]:
+    """The live groups ``user_id`` currently belongs to, sorted."""
+    rows = conn.execute(
+        "SELECT DISTINCT m.group_id FROM group_members m "
+        "JOIN groups g ON g.group_id = m.group_id "
+        "WHERE m.user_id = ? AND m.ended_at IS NULL AND g.archived_at IS NULL "
+        "ORDER BY m.group_id",
+        (user_id,),
+    ).fetchall()
+    return [r["group_id"] for r in rows]
+
+
+def group_membership_history(conn: sqlite3.Connection, group_id: str) -> list[dict]:
+    """Every membership row the group has had, oldest first."""
+    rows = conn.execute(
+        "SELECT user_id, role, added_at, added_by, ended_at, ended_by "
+        "FROM group_members WHERE group_id = ? ORDER BY id",
+        (group_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def group_kv_get(
+    conn: sqlite3.Connection, group_id: str, namespace: str, key: str,
+) -> dict | None:
+    """A value from a group's store: value, updated_at, written_by, or None."""
+    row = conn.execute(
+        "SELECT value, updated_at, written_by FROM group_kv "
+        "WHERE group_id = ? AND namespace = ? AND key = ?",
+        (group_id, namespace, key),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "value": row["value"],
+        "updated_at": row["updated_at"],
+        "written_by": row["written_by"],
+    }
+
+
+def group_kv_set(
+    conn: sqlite3.Connection, group_id: str, namespace: str, key: str,
+    value: str, written_by: str,
+) -> None:
+    """Upsert a value in a group's store. ``written_by`` is provenance only."""
+    conn.execute(
+        """
+        INSERT INTO group_kv (group_id, namespace, key, value, written_by, updated_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(group_id, namespace, key) DO UPDATE SET
+            value = excluded.value,
+            written_by = excluded.written_by,
+            updated_at = excluded.updated_at
+        """,
+        (group_id, namespace, key, value, written_by),
+    )
+
+
+def group_kv_delete(
+    conn: sqlite3.Connection, group_id: str, namespace: str, key: str,
+) -> bool:
+    """Delete a key from a group's store. True if it existed."""
+    cursor = conn.execute(
+        "DELETE FROM group_kv WHERE group_id = ? AND namespace = ? AND key = ?",
+        (group_id, namespace, key),
+    )
+    return cursor.rowcount > 0
+
+
+def group_kv_list(
+    conn: sqlite3.Connection, group_id: str, namespace: str,
+) -> list[dict]:
+    """Every entry in one of a group's namespaces, ordered by key."""
+    rows = conn.execute(
+        "SELECT key, value, updated_at, written_by FROM group_kv "
+        "WHERE group_id = ? AND namespace = ? ORDER BY key",
+        (group_id, namespace),
+    ).fetchall()
+    return [
+        {
+            "key": r["key"],
+            "value": r["value"],
+            "updated_at": r["updated_at"],
+            "written_by": r["written_by"],
+        }
+        for r in rows
+    ]
+
+
+def group_kv_namespaces(conn: sqlite3.Connection, group_id: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT DISTINCT namespace FROM group_kv WHERE group_id = ? ORDER BY namespace",
+        (group_id,),
+    ).fetchall()
+    return [r["namespace"] for r in rows]
+
+
+# ============================================================================
 # Shared briefing-block cron state
 # ============================================================================
 
@@ -9527,6 +10947,13 @@ def get_completed_channel_tasks_since(
 
     Returns list of Task objects ordered by id ascending.
 
+    Limited to the epochs the room's current audience shared
+    (`front_stage_cutoff`): `CHANNEL.md` is front-stage memory, read by every
+    later task in the room, so a turn from before somebody joined must not
+    reach them through it.
+
+    Excludes a guest's turn (multiplayer D2): a guest's words are extracted into
+    nobody's memory, and `CHANNEL.md` is read by every later task in the room.
     Excludes ``withheld_from_room`` (ISSUE-255): the channel sleep cycle distils
     what it collects into ``CHANNEL.md``, which is durable and reaches every
     later prompt in the room — so an exchange deliberately kept out of the room
@@ -9540,12 +10967,16 @@ def get_completed_channel_tasks_since(
         AND result IS NOT NULL
         AND completed_at >= ?
         AND COALESCE(withheld_from_room, 0) = 0
+        AND guest_participant_id IS NULL
     """
     params: list = [conversation_token, since_datetime]
 
+    floor = front_stage_cutoff(conn, conversation_token).task_id
     if after_task_id is not None:
+        floor = max(floor, after_task_id)
+    if after_task_id is not None or floor:
         query += " AND id > ?"
-        params.append(after_task_id)
+        params.append(floor)
 
     query += " ORDER BY id ASC"
 
@@ -9577,6 +11008,7 @@ def get_active_channel_tokens(
         AND conversation_token != ''
         AND completed_at >= ?
         AND COALESCE(withheld_from_room, 0) = 0
+        AND guest_participant_id IS NULL
         ORDER BY conversation_token
         """,
         (since_datetime,),
@@ -9593,6 +11025,9 @@ def get_completed_tasks_since(
     """
     Fetch completed tasks for a user since a given datetime.
 
+    A guest's turn run as this user (multiplayer D2) is not theirs to learn
+    from: it is extracted into nobody's memory, so it is excluded here.
+
     Args:
         since_datetime: ISO format datetime string (UTC)
         after_task_id: Only return tasks with id > this value (to avoid reprocessing)
@@ -9606,6 +11041,7 @@ def get_completed_tasks_since(
         AND status = 'completed'
         AND result IS NOT NULL
         AND completed_at >= ?
+        AND guest_participant_id IS NULL
     """
     params: list = [user_id, since_datetime]
 

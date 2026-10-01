@@ -92,7 +92,7 @@ def _warn_once(key: str, message: str) -> None:
     _warned_keys.add(key)
     logger.warning("%s", message)
 
-from . import avatars, confirmations, db
+from . import avatars, confirmations, db, speech_gate
 from .brain import (
     make_brain,
     resolve_brain_kind,
@@ -892,6 +892,26 @@ async def edit_talk_message(
         return True
     except Exception as e:
         logger.debug("Edit message %d failed: %s", message_id, e)
+        return False
+
+
+async def delete_talk_message(
+    config: Config, task: db.Task, message_id: int,
+    *, target_token: str | None = None,
+) -> bool:
+    """Delete a message the bot posted. True on success, False on failure.
+
+    The same ``target_token`` rule as ``edit_talk_message``; thin shim over
+    ``TalkTransport.delete``."""
+    token = target_token or task.conversation_token
+    if not config.nextcloud.url or not token:
+        return False
+    from .transport.talk import TalkTransport
+    try:
+        await TalkTransport(config).delete(token, message_id)
+        return True
+    except Exception as e:
+        logger.debug("Delete message %d failed: %s", message_id, e)
         return False
 
 
@@ -2323,8 +2343,18 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
     going to lose anyway — but the breadcrumb is worth the same as any other,
     so it is written before the re-raise.
     """
-    from .executor import get_user_temp_dir
-    user_temp_dir = get_user_temp_dir(config, task.user_id)
+    from .executor import task_deferred_dir
+    # The directory the run wrote to: the per-user one, or the task's own
+    # when its room restricted it or a guest wrote the turn.
+    user_temp_dir = task_deferred_dir(config, task)
+    if task.guest_participant_id is not None:
+        # Emissary mode (multiplayer D2): a guest's turn takes no action beyond
+        # its reply, so nothing it wrote down is replayed. The files are ops
+        # the host never asked for — a subtask would run at the host's full
+        # reach — and are dropped rather than left for the temp sweep.
+        _purge_deferred_files_for_retry(task, user_temp_dir)
+        logger.info("Task %d: emissary task, deferred ops dropped", task.id)
+        return
     # One end of the order is load-bearing: `_warn_unconsumed_deferred_files`
     # runs last so it reports only what the handlers genuinely left behind.
     # The retired-file sweep leads because it depends on nothing, which is a
@@ -2729,17 +2759,15 @@ def process_one_task(
     # a charged attempt and would have its held writes discarded. The narrower
     # stale-email_output cleanup just below is what that path needs instead.
     if task.attempt_count > 0 and task.confirmation_prompt is None:
-        from .executor import get_user_temp_dir
-        _purge_deferred_files_for_retry(
-            task, get_user_temp_dir(config, task.user_id),
-        )
+        from .executor import task_deferred_dir
+        _purge_deferred_files_for_retry(task, task_deferred_dir(config, task))
 
     # Clean up stale deferred email output from a previous execution (e.g.
     # confirmation flow: first run writes a draft via `email output`, re-run
     # sends via `email send` — the stale file would cause a double-send).
     if task.confirmation_prompt is not None:
-        from .executor import get_user_temp_dir
-        _stale = get_user_temp_dir(config, task.user_id) / f"task_{task.id}_email_output.json"
+        from .executor import task_deferred_dir
+        _stale = task_deferred_dir(config, task) / f"task_{task.id}_email_output.json"
         if _stale.exists():
             logger.debug("Removing stale email output file from prior execution of task %d", task.id)
             _stale.unlink(missing_ok=True)
@@ -3028,6 +3056,7 @@ def process_one_task(
     if success:
         result = check_chat_file_links(config, task.user_id, result, task_id=task_id)
 
+    from . import side_rooms as side_rooms_mod
     from .whatsapp_requests import held_question, present_question
     with db.get_db(config.db_path) as conn:
         relay_question = held_question(conn, task_id)
@@ -3064,11 +3093,24 @@ def process_one_task(
     _own_origin_web = plan_web and task.source_type == "web"
     _own_origin_sms = plan_sms and task.source_type == "sms"
     _own_origin_whatsapp = plan_whatsapp and task.source_type == "whatsapp"
+    # An email thread room's own task (multiplayer D6): its only leg is the
+    # reply-all, which must never carry the question, and the room is shared,
+    # so the question parks and goes to the principal's side room and its
+    # private-mail view (D4 item 3).
+    _own_email_thread_room = False
+    if task.source_type == "email" and not dry_run:
+        from .transport.email.threads import thread_room_for_task
+        with db.get_db(config.db_path) as conn:
+            _thread_token = thread_room_for_task(conn, task)
+            _own_email_thread_room = bool(
+                _thread_token and db.room_is_shared(conn, _thread_token)
+            )
     _confirmable_surface = (
         (plan_talk and talk_token and not plan_ntfy)
         or _own_origin_web
         or _own_origin_sms
         or _own_origin_whatsapp
+        or _own_email_thread_room
     )
     # A no-final-answer result embeds mid-turn text the model wrote to itself,
     # not to the user, so its "should I proceed?" is not a question awaiting an
@@ -3081,6 +3123,60 @@ def process_one_task(
         and CONFIRMATION_PATTERN.search(result)
     )
 
+    # The room was switched off while this task ran (multiplayer D12): its
+    # answer is not recorded there and does not reach it. Progress it posted
+    # while running is not taken back.
+    if not dry_run:
+        from .room_veto import task_room_vetoed
+        with db.get_db(config.db_path) as conn:
+            vetoed = task_room_vetoed(conn, task)
+            if vetoed:
+                db.cancel_task(conn, task_id)
+                db.log_task(conn, task_id, "info",
+                            "Answer dropped: the room was switched off")
+        if vetoed:
+            logger.info("Task %d: its room was switched off; answer dropped", task_id)
+            if event_writer is not None:
+                event_writer.emit("cancelled")
+                event_writer.emit("done", {"stop_reason": "cancelled", "duration_seconds": 0})
+                event_writer.finish()
+            return (task_id, False)
+
+    # A guest's turn under `guest_reply = held` (multiplayer D4 item 2): the
+    # answer is proposed in the host's side room as a held `room post`, and
+    # parks the task on that exact text, instead of reaching the room. From
+    # here on it is a side-routed confirmation like any other; approving it
+    # releases the post and completes the task rather than re-running it
+    # (`confirmations.approve`). A host who changed or left since the turn
+    # gets nothing, and neither does the room.
+    guest_route = None
+    if success and task.guest_participant_id is not None and not dry_run:
+        with db.get_db(config.db_path) as conn:
+            guest_mode = side_rooms_mod.guest_reply_mode(conn, task)
+            if guest_mode == "held":
+                proposed = result
+                if task.source_type == "email":
+                    # On an email thread the answer is the mail the model
+                    # composed, not its narration about composing it.
+                    from .transport.email.outbound import composed_email_body
+                    proposed = composed_email_body(config, task, result)
+                guest_route = side_rooms_mod.propose_guest_reply(conn, config, task, proposed)
+        if guest_mode != "direct" and guest_route is None:
+            logger.info("Task %d: guest reply has no host to propose it to; cancelled",
+                        task_id)
+            with db.get_db(config.db_path) as conn:
+                db.cancel_task(conn, task_id)
+                db.log_task(conn, task_id, "info",
+                            "Guest reply cancelled: no host to propose it to")
+            if event_writer is not None:
+                event_writer.emit("cancelled")
+                event_writer.emit("done", {"stop_reason": "cancelled", "duration_seconds": 0})
+                event_writer.finish()
+            return (task_id, False)
+        if guest_route is not None:
+            result = guest_route.preview
+            is_confirmation_request = True
+
     # The durable `messages.id` of this task's stored assistant turn, when it
     # was persisted below. Threaded into the terminal `done` event so a
     # freshly-settled web turn learns its star key without a history refetch
@@ -3092,6 +3188,11 @@ def process_one_task(
     # the branch that writes it withholds delivery when the Talk post is
     # carrying the question instead, and that post can fail.
     held_notification: RaiseResult | None = None
+
+    # Where a shared-room task's confirmation went instead of the room, when
+    # it parked on one (multiplayer D4). Its Talk view is posted at the tail.
+    from . import side_rooms
+    side_confirmation: "side_rooms.ConfirmationRoute | None" = None
 
     # A once-job whose table row was deleted inside the transaction below, and
     # whose CRON.md entry therefore still has to go: `(user_id, job_name)`.
@@ -3145,7 +3246,17 @@ def process_one_task(
                 # suppressed on the mirror leg — delivered nowhere, then killed
                 # by `expire_stale_confirmations` two hours later, which is the
                 # exact failure the paragraph above records fixing.
-                if plan_talk and talk_token and not (
+                #
+                # A task in a shared room asks its principal privately
+                # (multiplayer D4): the question goes to their side room and
+                # its Talk view, never into the room everyone reads.
+                side_confirmation = (
+                    guest_route.route if guest_route is not None
+                    else side_rooms.confirmation_route(conn, task)
+                )
+                if side_confirmation is not None:
+                    side_rooms.write_confirmation(conn, side_confirmation, task, result)
+                elif plan_talk and talk_token and not (
                     _talk_is_mirror
                     and is_room_view(origin_surface_for_source_type(
                         task.source_type or ""
@@ -3168,7 +3279,9 @@ def process_one_task(
                     post_sms_message = (
                         f"{result}\n\nTask #{task_id}. Reply YES or NO."
                     )
-                if _own_origin_whatsapp:
+                # A WhatsApp group's question went to the principal's side
+                # room above; asking it in the group is what that prevents.
+                if _own_origin_whatsapp and side_confirmation is None:
                     # The buttons carry the answer; the sentence carries the
                     # task id, which is what makes `!confirm <id>` and a later
                     # typed YES work on a client that renders no buttons.
@@ -3218,6 +3331,8 @@ def process_one_task(
                     post_talk_message is None
                     and post_sms_message is None
                     and post_whatsapp_message is None
+                    and not (side_confirmation is not None
+                             and side_confirmation.externally_viewed)
                 ):
                     notification_results.append(held_notification)
                     held_notification = None
@@ -3285,8 +3400,12 @@ def process_one_task(
                         _speaker = speaker_labels(conn, config, [task]).get(
                             task_id, "User",
                         )
-                        _index_conv(conn, task.user_id, task_id, task.prompt, result,
-                                    speaker=_speaker)
+                        # A guest's turn is the host's by authority only,
+                        # never by memory (multiplayer D2): nothing a guest
+                        # wrote is recalled back into the host's own tasks.
+                        if task.guest_participant_id is None:
+                            _index_conv(conn, task.user_id, task_id, task.prompt, result,
+                                        speaker=_speaker)
                         # Also index under channel namespace if in a channel.
                         # Skipped for an exchange deliberately kept out of that
                         # room (ISSUE-255): `_recall_memories` serves this
@@ -3295,7 +3414,8 @@ def process_one_task(
                         # even where the transcript is clean. The per-user index
                         # above is untouched — the exchange is the user's own and
                         # belongs in their own recall.
-                        if task.conversation_token and not task.withheld_from_room:
+                        if (task.conversation_token and not task.withheld_from_room
+                                and task.guest_participant_id is None):
                             channel_uid = f"channel:{task.conversation_token}"
                             _index_conv(conn, channel_uid, task_id, task.prompt, result,
                                         speaker=_speaker)
@@ -3541,10 +3661,8 @@ def process_one_task(
                 )
                 # The next attempt re-runs from the top, so this attempt's
                 # deferred-op files must not replay alongside it (ISSUE-074).
-                from .executor import get_user_temp_dir
-                _purge_deferred_files_for_retry(
-                    task, get_user_temp_dir(config, task.user_id),
-                )
+                from .executor import task_deferred_dir
+                _purge_deferred_files_for_retry(task, task_deferred_dir(config, task))
             elif decision.will_retry:
                 delay = decision.delay_minutes
                 db.set_task_pending_retry(conn, task_id, result, delay)
@@ -3555,10 +3673,8 @@ def process_one_task(
                 # the failed attempt's ops alongside the successful one's. The
                 # claim-time backstop above would catch this too; purging at the
                 # requeue keeps the disk clean for a task that never comes back.
-                from .executor import get_user_temp_dir
-                _purge_deferred_files_for_retry(
-                    task, get_user_temp_dir(config, task.user_id),
-                )
+                from .executor import task_deferred_dir
+                _purge_deferred_files_for_retry(task, task_deferred_dir(config, task))
                 # The event log is intentionally NOT wiped here: keeping it lets
                 # a watching web client survive the retry (its resume cursor
                 # stays valid) and see a "retrying" notice. The next attempt's
@@ -3917,6 +4033,76 @@ def process_one_task(
         # bypasses the delivery plan entirely, and that answer is just as lost.
         # Being inside this block is the same test, stated once.
         talk_undelivered = response_msg_id is None
+    # A shared-room confirmation's Talk view: the principal's own conversation
+    # with the bot, headed with the room's name. Its id is the task's
+    # `talk_response_id`, so a reply to it answers by Path A. A push that
+    # posted nothing owes the withheld notification, as a failed Talk post does.
+    side_undelivered = False
+    if side_confirmation is not None and side_confirmation.externally_viewed:
+        side_msg_id = None
+        side_whatsapp_sent = False
+        side_email_sent = False
+        if side_confirmation.talk_bound:
+            side_msg_id = run_coro(side_rooms.push_to_talk_view(
+                config, user_id=task.user_id,
+                parent_token=side_confirmation.parent_token, body=result,
+                reference_id=f"istota:task:{task.id}:confirmation",
+            ))
+        if side_confirmation.whatsapp_bound:
+            # A WhatsApp group's view is the principal's own chat with the bot.
+            side_whatsapp_sent = bool(run_coro(side_rooms.push_to_whatsapp_view(
+                config, user_id=task.user_id,
+                parent_token=side_confirmation.parent_token,
+                body=side_rooms.whatsapp_confirmation_body(result, task.id),
+                # Per question, so a task that parks twice asks twice: the
+                # ledger key is permanent, and a reused one reads as sent.
+                reference_id=(
+                    f"istota:task:{task.id}:confirmation:"
+                    f"{side_rooms.text_hash(result)[:16]}"
+                ),
+            )))
+        if side_confirmation.email_bound:
+            # An email thread's view is a private mail to the principal's own
+            # address, never a reply on the thread.
+            side_email_sent = bool(run_coro(side_rooms.push_to_email_view(
+                config, user_id=task.user_id,
+                parent_token=side_confirmation.parent_token,
+                body=side_rooms.email_confirmation_body(result, task.id),
+                reference_id=f"istota:task:{task.id}:confirmation",
+            )))
+        side_undelivered = (
+            side_msg_id is None and not side_whatsapp_sent and not side_email_sent
+        )
+        if side_msg_id:
+            try:
+                with db.get_db(config.db_path) as conn:
+                    db.update_talk_response_id(conn, task_id, side_msg_id)
+            except Exception as e:
+                logger.debug("Failed to store talk_response_id for task %d: %s", task_id, e)
+    # A side-room answer (multiplayer D4 item 1) is stored in the side room
+    # like any side-room task's. Its question was asked in a room the principal
+    # may read on Talk, so the answer goes to their Talk view there as well.
+    if success and not is_confirmation_request and not dry_run:
+        try:
+            with db.get_db(config.db_path) as conn:
+                side_answer_parent = side_rooms.side_answer_parent(conn, task)
+        except Exception as e:
+            logger.warning("Side-answer check failed for task %d: %s", task_id, e)
+            side_answer_parent = None
+        if side_answer_parent:
+            run_coro(side_rooms.push_to_talk_view(
+                config, user_id=task.user_id, parent_token=side_answer_parent,
+                body=result, reference_id=f"istota:task:{task.id}:side-answer",
+            ))
+            run_coro(side_rooms.push_to_whatsapp_view(
+                config, user_id=task.user_id, parent_token=side_answer_parent,
+                body=result, reference_id=f"istota:task:{task.id}:side-answer",
+            ))
+            run_coro(side_rooms.push_to_email_view(
+                config, user_id=task.user_id, parent_token=side_answer_parent,
+                body=result, reference_id=f"istota:task:{task.id}:side-answer",
+            ))
+
     # Store bot's response message ID for reply tracking
     if response_msg_id and not is_failure_notify:
         try:
@@ -4177,6 +4363,7 @@ def process_one_task(
     # message failed, and carries neither the question nor its `!confirm` verbs.
     if held_notification is not None and (
         talk_undelivered or sms_undelivered or whatsapp_undelivered
+        or side_undelivered
     ):
         deliver_pending(config, [held_notification])
 
@@ -7041,6 +7228,14 @@ def run_cleanup_checks(config: Config) -> None:
         if pruned > 0:
             logger.info(f"Pruned {pruned} message-deletion ledger row(s)")
 
+        # 4b'. Age out the speech gate's audit rows. Small, one row per
+        # decision in a multi-human room, and nothing else deletes them.
+        gate_rows = speech_gate.prune_decisions(
+            conn, config.speech_gate.decision_retention_days,
+        )
+        if gate_rows > 0:
+            logger.info(f"Pruned {gate_rows} speech-gate decision row(s)")
+
     # 4c. Prune token/cost rows, in a transaction of its own. The block above is
     # one long write transaction and this retention window is 180 days against
     # the task table's 7, so the delete it issues on the day it finally bites is
@@ -7124,7 +7319,12 @@ def run_cleanup_checks(config: Config) -> None:
     # 4d. And about the ancient pending tasks that were just auto-failed.
     for user_id, message, token in ancient_notices:
         try:
-            send_notification(config, user_id, message, conversation_token=token)
+            # The notice is about the user's own turn in that room, so it may
+            # go back there even when the room is shared.
+            send_notification(
+                config, user_id, message,
+                conversation_token=token, task_room=token,
+            )
         except Exception as e:
             logger.error(f"Failed to notify user about failed task: {e}")
 
@@ -8427,6 +8627,11 @@ def build_interval_gates(
 
         run_coro(drain_requests(config))
 
+    def _room_notices(now: float) -> None:
+        from .room_veto import drain_room_notices
+
+        run_coro(drain_room_notices(config))
+
     def _whatsapp_pairing(now: float) -> None:
         # Inline on the dispatch thread, deliberately: the poll's own cheap
         # read is what makes an every-tick gate affordable, and
@@ -8682,6 +8887,16 @@ def build_interval_gates(
             name="whatsapp-requests",
             run=_whatsapp_requests,
             fixed_interval=0,
+            background=True,
+        ),
+        # The bot announcing itself to a room's guests, and veto replies the
+        # web app owed a room's Talk and WhatsApp sides (multiplayer D8): two
+        # indexed reads when nothing is owed, a post when something is. Here
+        # because only this process holds the WhatsApp bridge.
+        IntervalGate(
+            name="room-notices",
+            run=_room_notices,
+            fixed_interval=30,
             background=True,
         ),
         IntervalGate(

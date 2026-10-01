@@ -49,6 +49,7 @@ class TalkEventSubscriber:
         # Live text message (progress_show_text only).
         self._text_msg_id: int | None = None
         self._accumulated_texts: list[str] = []
+        self._guest_turn = getattr(task, "guest_participant_id", None) is not None
 
     @property
     def descriptions(self) -> list[str]:
@@ -60,18 +61,22 @@ class TalkEventSubscriber:
         if kind == "tool_start":
             desc = event.payload.get("description", "")
             self._descriptions.append(desc)
-            if self._ack_msg_id is not None and desc:
+            if self._ack_msg_id is not None and desc and not self._guest_turn:
                 elapsed = int(time.monotonic() - self._start_time)
                 self._edit_ack(f"`{desc} ({elapsed}s)`")
 
         elif kind == "tool_end":
             # NativeBrain only — annotate the ack with outcome + duration.
-            if self._ack_msg_id is not None and self._descriptions:
+            if self._ack_msg_id is not None and self._descriptions and not self._guest_turn:
                 mark = "✓" if event.payload.get("success") else "✗"
                 ms = event.payload.get("duration_ms", 0)
                 self._edit_ack(f"`{self._descriptions[-1]} {mark} ({ms}ms)`")
 
         elif kind == "progress_text":
+            # A guest's turn may end held for the host (D4 item 2): nothing the
+            # model writes, tool descriptions included, reaches the room first.
+            if self._guest_turn:
+                return
             text = event.payload.get("text", "").strip()
             if not text:
                 return
@@ -86,14 +91,22 @@ class TalkEventSubscriber:
         elif kind == "result":
             self._edit_summary("✅ Done")
 
+        # A guest's held or cancelled turn owes the room nothing (its answer, if
+        # any, went to the host's side room), so its ack is taken down.
         elif kind == "confirmation":
-            self._edit_summary("⏸️ Awaiting confirmation")
+            if self._guest_turn:
+                self._delete_ack()
+            else:
+                self._edit_summary("⏸️ Awaiting confirmation")
 
         elif kind == "error":
             self._edit_summary("❌ Failed")
 
         elif kind == "cancelled":
-            self._edit_summary("🛑 Cancelled")
+            if self._guest_turn:
+                self._delete_ack()
+            else:
+                self._edit_summary("🛑 Cancelled")
 
     def on_finish(self) -> None:
         # Result delivery is handled by the scheduler's post_result_to_talk;
@@ -123,6 +136,18 @@ class TalkEventSubscriber:
             ))
         except Exception:
             logger.debug("Talk ack edit failed", exc_info=True)
+
+    def _delete_ack(self) -> None:
+        if self._ack_msg_id is None:
+            return
+        from ..scheduler import delete_talk_message
+        try:
+            run_coro(delete_talk_message(
+                self._config, self._task, self._ack_msg_id,
+                target_token=self._target_token,
+            ))
+        except Exception:
+            logger.debug("Talk ack delete failed", exc_info=True)
 
     def _post_or_edit_text(self, body: str) -> None:
         from ..scheduler import edit_talk_message, post_result_to_talk

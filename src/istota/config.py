@@ -289,6 +289,36 @@ class ConversationConfig:
 
 
 @dataclass
+class SpeechGateConfig:
+    """Whether the bot replies to an unaddressed turn in a multi-human room.
+
+    Read by ``speech_gate``. ``mode`` is ``"mention"`` (reply only when
+    addressed, which is Talk's rule), ``"classifier"`` (a cheap model decides)
+    or ``"off"`` (always reply). An unrecognised mode fails closed at the gate.
+    """
+
+    mode: str = "mention"
+    model: str = "fast"  # role alias, resolved per brain namespace; not a pin
+    window_messages: int = 8  # transcript turns the classifier sees
+    max_message_chars: int = 400  # per-turn cap inside the window
+    timeout_seconds: float = 8.0
+    decision_retention_days: int = 30  # speech_gate_decisions rows; 0 keeps them forever
+
+
+@dataclass
+class RoomsConfig:
+    """What a task in a room more than one human reads may reach.
+
+    Read by ``room_scopes.task_withheld_scopes``. ``"restrict"`` withholds every
+    scope the sender has not granted in that room; ``"off"`` gives a shared-room
+    task everything a private one gets. Any other value restricts, since a typo
+    must not reopen the disclosure the default closes.
+    """
+
+    shared_room_data_policy: str = "restrict"
+
+
+@dataclass
 class SchedulerConfig:
     # 5, not 2, because 5 is what every deployment actually runs: the Ansible
     # template, the Docker render, `config.example.toml` and `istota setup` all
@@ -2064,6 +2094,8 @@ class Config:
     sms: SmsConfig = field(default_factory=SmsConfig)
     whatsapp: WhatsAppConfig = field(default_factory=WhatsAppConfig)
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
+    speech_gate: SpeechGateConfig = field(default_factory=SpeechGateConfig)
+    rooms: RoomsConfig = field(default_factory=RoomsConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     devbox: DevboxConfig = field(default_factory=DevboxConfig)

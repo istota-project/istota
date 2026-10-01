@@ -176,6 +176,8 @@ class TestTheSidecarSpeaksTheSameProtocol:
             ("MSG_FATAL", "MSG_FATAL"),
             ("MSG_SEND", "MSG_SEND"),
             ("MSG_SHUTDOWN", "MSG_SHUTDOWN"),
+            ("MSG_GROUP_ROSTER", "MSG_GROUP_ROSTER"),
+            ("MSG_LEAVE_GROUP", "MSG_LEAVE_GROUP"),
         ],
     )
     def test_each_message_type_is_spelled_the_same(self, js_name, py_name):
@@ -401,6 +403,9 @@ class TestTheSidecarsPayloadsAreReadable:
         "callback_data": None,
         "reply_to_message_id": None,
         "group": False,
+        "sender_jid": "",
+        "sender_lid": "",
+        "mentions_bot": False,
         "timestamp": 1757000000,
         "media_name": None,
         "media_mime": None,
@@ -430,6 +435,41 @@ class TestTheSidecarsPayloadsAreReadable:
         ))
 
         assert proto.inbound_event(payload).message_type == "group"
+
+    def test_a_group_payload_names_its_sender_and_its_mention(self):
+        """Multiplayer D6: the sidecar's group keys, through the decoder.
+        A renamed `sender_jid` would leave every group turn with no sender,
+        which the decoder reads as an older sidecar and refuses."""
+        keys = _js_send_keys("MSG_INBOUND")
+        assert {"sender_jid", "sender_lid", "mentions_bot"} <= keys
+        payload = self._filled(keys, dict(
+            self._INBOUND_TEXT, jid="120363000000000001@g.us", group=True,
+            sender_jid="15551234567@s.whatsapp.net", mentions_bot=True,
+        ))
+
+        event = proto.inbound_event(payload)
+
+        assert event.message_type == "text"
+        assert event.group is not None
+        assert event.group.group_jid == "120363000000000001@g.us"
+        assert event.group.mentions_bot is True
+        assert event.from_user.jid == "15551234567@s.whatsapp.net"
+
+    def test_a_group_roster_payload_normalizes(self):
+        keys = _js_send_keys("MSG_GROUP_ROSTER")
+        payload = self._filled(keys, {
+            "group_jid": "120363000000000001@g.us",
+            "subject": "Family",
+            "participants": [{"jid": "15551234567@s.whatsapp.net", "lid": ""}],
+            "added_by": "15551234567@s.whatsapp.net",
+            "bot_present": True,
+        })
+
+        roster = proto.group_roster(payload)
+
+        assert roster.subject == "Family"
+        assert roster.members[0].jid == "15551234567@s.whatsapp.net"
+        assert roster.added_by == "15551234567@s.whatsapp.net"
 
     def test_an_inbound_payload_carrying_an_image_normalizes(self):
         """The caption rides `text`, so every gate in `_dispatch_inbound`
@@ -3525,3 +3565,79 @@ class TestTheReadmeSaysWhatIsNotCovered:
 
         assert "istota whatsapp pair" in text
         assert "real WhatsApp account" in text
+
+
+class TestTheGroupFunctions:
+    """Multiplayer D6, driven through `node`: who posted a group message,
+    whether it mentions the bot, and what a roster carries.
+
+    Each decides which principal a group turn acts as or whether the bot
+    speaks, so they are executed rather than read off the source.
+    """
+
+    _call = staticmethod(TestTheSidecarsPureFunctions._call)
+
+    def test_a_phone_addressed_sender_crosses_as_its_jid(self):
+        key = json.dumps({"remoteJid": "120363000000000001@g.us",
+                          "participant": "15551234567@s.whatsapp.net"})
+        assert self._call(f"m.groupSender({key})") == {
+            "jid": "15551234567@s.whatsapp.net", "lid": "",
+        }
+
+    def test_a_lid_sender_takes_its_number_from_the_key(self):
+        key = json.dumps({"participant": "277009032835160@lid",
+                          "participantAlt": "15551234567@s.whatsapp.net"})
+        assert self._call(f"m.groupSender({key})") == {
+            "jid": "15551234567@s.whatsapp.net", "lid": "277009032835160@lid",
+        }
+
+    def test_a_lid_sender_takes_its_number_from_the_roster(self):
+        key = json.dumps({"participant": "277009032835160:3@lid"})
+        roster = 'new Map([["277009032835160@lid", "15551234567@s.whatsapp.net"]])'
+        assert self._call(f"m.groupSender({key}, {roster})") == {
+            "jid": "15551234567@s.whatsapp.net", "lid": "277009032835160:3@lid",
+        }
+
+    def test_a_withheld_number_crosses_as_the_lid_alone(self):
+        """D1: a guest. Never a guessed phone JID."""
+        key = json.dumps({"participant": "277009032835160@lid"})
+        assert self._call(f"m.groupSender({key}, new Map())") == {
+            "jid": "", "lid": "277009032835160@lid",
+        }
+
+    def test_a_mention_of_the_paired_account_is_seen_through_its_device_suffix(self):
+        message = json.dumps({"message": {"extendedTextMessage": {
+            "text": "@bot hi",
+            "contextInfo": {"mentionedJid": ["15550000000@s.whatsapp.net"]},
+        }}})
+        bot = '["15550000000:12@s.whatsapp.net", "99900000000:12@lid"]'
+        assert self._call(f"m.mentionsBot({message}, {bot})") is True
+
+    def test_a_mention_of_somebody_else_is_not_a_mention_of_the_bot(self):
+        message = json.dumps({"message": {"extendedTextMessage": {
+            "text": "@alice hi",
+            "contextInfo": {"mentionedJid": ["15551234567@s.whatsapp.net"]},
+        }}})
+        bot = '["15550000000:12@s.whatsapp.net"]'
+        assert self._call(f"m.mentionsBot({message}, {bot})") is False
+
+    def test_a_roster_leaves_the_bot_out_and_keeps_both_spellings(self):
+        participants = json.dumps([
+            {"id": "277009032835160@lid", "phoneNumber": "15551234567@s.whatsapp.net"},
+            {"id": "15550000000@s.whatsapp.net"},
+            {"id": "388000000000000@lid"},
+            {"id": "not-a-jid"},
+        ])
+        bot = '["15550000000:12@s.whatsapp.net"]'
+        assert self._call(f"m.rosterParticipants({participants}, {bot})") == [
+            {"jid": "15551234567@s.whatsapp.net", "lid": "277009032835160@lid"},
+            {"jid": "", "lid": "388000000000000@lid"},
+        ]
+
+    def test_the_session_listens_for_group_membership_and_can_leave(self):
+        """Source assertions, which catch a deletion and not a subtle change:
+        nothing in any tier reaches a real group."""
+        source = PROGRAM.read_text()
+        assert "sock.ev.on('group-participants.update'" in source
+        assert "this.sock.groupLeave(jid)" in source
+        assert "if (type === MSG_LEAVE_GROUP)" in source

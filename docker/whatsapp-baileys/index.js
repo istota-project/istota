@@ -69,8 +69,10 @@ const MSG_INBOUND = 'inbound';
 const MSG_RECEIPT = 'receipt';
 const MSG_SEND_RESULT = 'send_result';
 const MSG_FATAL = 'fatal';
+const MSG_GROUP_ROSTER = 'group_roster';
 const MSG_SEND = 'send';
 const MSG_SHUTDOWN = 'shutdown';
+const MSG_LEAVE_GROUP = 'leave_group';
 
 // Every `reason` the daemon's fixed table knows. Anything else there renders
 // as the generic sentence, which is a worse diagnostic rather than a leak —
@@ -405,8 +407,7 @@ function isGroupJid(jid) {
 // arrive through `messages.upsert` like any other message and on an active
 // account they never stop, so forwarding them costs a queue slot, a thread
 // and a write transaction each, every one of which then fails to resolve a
-// sender. A group still crosses — the daemon refuses it before any identity
-// lookup, and that refusal has to stay a path something drives.
+// sender. A group crosses: it is a room on the daemon's side (multiplayer D6).
 function isForwardableJid(jid) {
   return typeof jid === 'string' &&
     (jid.endsWith(USER_JID_DOMAIN) || jid.endsWith(GROUP_JID_DOMAIN));
@@ -461,6 +462,85 @@ function chatAddress(key) {
   // return to the bug this was written for.
   const pn = key.remoteJidAlt || key.senderPn;
   return typeof pn === 'string' && pn.endsWith(USER_JID_DOMAIN) ? pn : '';
+}
+
+/*
+ * A JID with its device suffix dropped: `123:4@s.whatsapp.net` is the same
+ * account as `123@s.whatsapp.net`, and the paired session's own id carries
+ * one. `''` for anything that is not a string with a domain.
+ */
+function bareJid(jid) {
+  if (typeof jid !== 'string') return '';
+  const at = jid.lastIndexOf('@');
+  if (at <= 0) return '';
+  return `${jid.slice(0, at).split(':')[0]}@${jid.slice(at + 1)}`.toLowerCase();
+}
+
+/*
+ * Who posted a group message: `{jid, lid}`, either of which may be `''`.
+ *
+ * `key.participant` is the sender inside the group, and on a LID-addressed
+ * group it is a LID. Its phone JID is `participantAlt` (Baileys 7) or
+ * `participantPn` (6.7.x), the same server-stamped field `chatAddress` reads
+ * for a direct chat, and failing those the group's own roster (`lidToPn`,
+ * from the last `groupMetadata` read). A sender WhatsApp shows only by LID
+ * crosses with `lid` alone and is a guest on the daemon's side (D1).
+ */
+function groupSender(key, lidToPn) {
+  const participant = key && key.participant;
+  if (typeof participant !== 'string') return { jid: '', lid: '' };
+  if (participant.endsWith(USER_JID_DOMAIN)) return { jid: participant, lid: '' };
+  if (!participant.endsWith(LID_JID_DOMAIN)) return { jid: '', lid: '' };
+  let pn = key.participantAlt || key.participantPn;
+  if (!(typeof pn === 'string' && pn.endsWith(USER_JID_DOMAIN)) && lidToPn) {
+    pn = lidToPn.get(bareJid(participant));
+  }
+  return {
+    jid: typeof pn === 'string' && pn.endsWith(USER_JID_DOMAIN) ? pn : '',
+    lid: participant,
+  };
+}
+
+/*
+ * Whether a message @-mentions the paired account (D5). Only this side knows
+ * the account's own JIDs, phone and LID, so the answer crosses as a bit and
+ * the mention list never does.
+ */
+function mentionsBot(message, botIds) {
+  const content = message && message.message;
+  const context = content && content.extendedTextMessage &&
+    content.extendedTextMessage.contextInfo;
+  const mentioned = context && context.mentionedJid;
+  if (!Array.isArray(mentioned) || !Array.isArray(botIds)) return false;
+  const mine = new Set(botIds.map(bareJid).filter(Boolean));
+  return mentioned.some((jid) => mine.has(bareJid(jid)));
+}
+
+// WhatsApp caps a group at 1,024 members; the daemon refuses a longer roster.
+const MAX_GROUP_MEMBERS = 1024;
+
+/*
+ * A `groupMetadata` participant list as the roster frame carries it, the bot
+ * left out: `[{jid, lid}]`, each naming the phone JID WhatsApp shows and the
+ * LID, either possibly `''`. Baileys 7 reports a LID-addressed participant's
+ * number as `phoneNumber`; an entry naming neither is dropped.
+ */
+function rosterParticipants(participants, botIds) {
+  if (!Array.isArray(participants)) return [];
+  const mine = new Set((botIds || []).map(bareJid).filter(Boolean));
+  const out = [];
+  for (const entry of participants) {
+    if (!entry || typeof entry !== 'object') continue;
+    const ids = [entry.id, entry.phoneNumber, entry.jid, entry.lid]
+      .filter((value) => typeof value === 'string');
+    const jid = ids.find((value) => value.endsWith(USER_JID_DOMAIN)) || '';
+    const lid = ids.find((value) => value.endsWith(LID_JID_DOMAIN)) || '';
+    if (!jid && !lid) continue;
+    if ((jid && mine.has(bareJid(jid))) || (lid && mine.has(bareJid(lid)))) continue;
+    out.push({ jid, lid });
+    if (out.length >= MAX_GROUP_MEMBERS) break;
+  }
+  return out;
 }
 
 /*
@@ -1588,6 +1668,10 @@ class Session {
     this.inbound = Promise.resolve();
     this.inboundDepth = 0;
     this.inboundDropped = 0;
+    // Group JID → its LID-to-phone map from the last `groupMetadata` read.
+    // Presence is also "this process has sent the group's roster", which is
+    // what makes the first message of an unseen group fetch it first.
+    this.groupRosters = new Map();
   }
 
   // Whether this process is holding a verdict the daemon must be told on
@@ -1748,6 +1832,22 @@ class Session {
     });
     sock.ev.on('messages.update', (updates) => {
       if (mine()) this.onReceipts(updates);
+    });
+    // Group membership (multiplayer D6), on the serialized inbound chain so
+    // a roster lands in order with the messages around it.
+    sock.ev.on('group-participants.update', (event) => {
+      if (mine()) this.chainInbound(() => this.onGroupParticipants(event));
+    });
+    sock.ev.on('groups.upsert', (groups) => {
+      if (!mine() || !Array.isArray(groups)) return;
+      for (const meta of groups) {
+        if (meta && isGroupJid(meta.id)) {
+          // A group created with the bot in it arrives here and not as an
+          // `add`, so its creator is who added the bot.
+          const addedBy = meta.author || meta.owner || '';
+          this.chainInbound(() => this.sendGroupRoster(meta.id, { metadata: meta, addedBy }));
+        }
+      }
     });
   }
 
@@ -2235,6 +2335,106 @@ class Session {
       .then(() => { this.inboundDepth -= 1; });
   }
 
+  // Append work to the serialized inbound chain, under the same bound and
+  // the same never-break-the-chain rule `onMessages` keeps.
+  chainInbound(work) {
+    if (this.inboundDepth >= MAX_INBOUND_QUEUE) {
+      this.inboundDropped += 1;
+      log('warn', 'inbound batch dropped', {
+        why: 'queue_full', dropped: this.inboundDropped,
+      });
+      return;
+    }
+    this.inboundDepth += 1;
+    this.inbound = this.inbound
+      .then(work)
+      .catch((err) => {
+        log('error', 'an inbound batch escaped', { kind: err && err.name });
+      })
+      .then(() => { this.inboundDepth -= 1; });
+  }
+
+  // The paired account's own JIDs, phone and LID, as Baileys reports them.
+  botIds() {
+    const user = this.sock && this.sock.user;
+    if (!user) return [];
+    return [user.id, user.lid].filter((value) => typeof value === 'string');
+  }
+
+  /*
+   * Read a group's roster and send it to the daemon (D6).
+   *
+   * `metadata` is used as given when the event carried it; otherwise it is
+   * fetched. `addedBy` names whoever added the bot, which is what makes them
+   * the room's host. A fetch that fails sends nothing: a roster that is not
+   * the group's would end the presence of everyone left out of it.
+   */
+  async sendGroupRoster(jid, { metadata = null, addedBy = '', botRemoved = false } = {}) {
+    if (!isGroupJid(jid)) return;
+    let participants = [];
+    let subject = null;
+    let adder = '';
+    if (botRemoved) {
+      this.groupRosters.delete(jid);
+    } else {
+      let meta = metadata;
+      if (!meta || !Array.isArray(meta.participants)) {
+        if (!this.sock) return;
+        try {
+          meta = await this.sock.groupMetadata(jid);
+        } catch (err) {
+          log('warn', 'a group roster could not be read', { kind: err && err.name });
+          return;
+        }
+      }
+      participants = rosterParticipants(meta && meta.participants, this.botIds());
+      const lidToPn = new Map();
+      for (const entry of participants) {
+        if (entry.lid && entry.jid) lidToPn.set(bareJid(entry.lid), entry.jid);
+      }
+      this.groupRosters.set(jid, lidToPn);
+      adder = typeof addedBy === 'string' ? addedBy : '';
+      if (adder.endsWith(LID_JID_DOMAIN)) adder = lidToPn.get(bareJid(adder)) || '';
+      if (!adder.endsWith(USER_JID_DOMAIN)) adder = '';
+      subject = meta && typeof meta.subject === 'string' ? meta.subject.slice(0, 256) : null;
+    }
+    this.link.send(MSG_GROUP_ROSTER, {
+      group_jid: jid,
+      subject,
+      participants,
+      added_by: adder,
+      bot_present: !botRemoved,
+    });
+  }
+
+  async onGroupParticipants(event) {
+    if (!event || !isGroupJid(event.id)) return;
+    const ids = (Array.isArray(event.participants) ? event.participants : [])
+      .map((entry) => (typeof entry === 'string'
+        ? entry : entry && (entry.id || entry.phoneNumber)))
+      .filter((value) => typeof value === 'string');
+    const mine = new Set(this.botIds().map(bareJid).filter(Boolean));
+    const botInvolved = ids.some((value) => mine.has(bareJid(value)));
+    if (event.action === 'remove' && botInvolved) {
+      await this.sendGroupRoster(event.id, { botRemoved: true });
+      return;
+    }
+    await this.sendGroupRoster(event.id, {
+      addedBy: event.action === 'add' && botInvolved ? event.author : '',
+    });
+  }
+
+  // D14: the daemon asks the bot to leave a group whose host left it.
+  async leaveGroup(jid) {
+    if (!isGroupJid(jid) || !this.sock) return;
+    try {
+      await this.sock.groupLeave(jid);
+      log('info', 'left a group');
+    } catch (err) {
+      log('warn', 'leaving a group failed', { kind: err && err.name });
+    }
+  }
+
   async handleMessages(event) {
     // Both filters below drop a message and return nothing, so a surface that
     // is receiving and discarding everything is indistinguishable from one
@@ -2272,20 +2472,26 @@ class Session {
         continue;
       }
       const group = isGroupJid(jid);
-      const text = group ? null : messageText(message);
-      // A group message is refused above every identity lookup on the
-      // daemon's side, so fetching its media would be bytes on disk for a
-      // message nothing will ever consume.
+      // Group media stays refused (D6), and an image's caption goes with it:
+      // the model would be answering about a picture nobody can see.
       const part = group ? null : mediaPart(message);
-      if (!group && !part && text === null) {
+      const text = group && mediaPart(message) ? null : messageText(message);
+      if (!part && text === null) {
         log('info', 'inbound has no text this side can read', {
           shape: messageShape(message),
         });
       }
       const media = part ? await this.downloadMedia(message) : NO_MEDIA;
+      // A group's roster goes ahead of its first message: that message needs
+      // the room the roster registers.
+      if (group && !this.groupRosters.has(jid)) await this.sendGroupRoster(jid);
+      const sender = group
+        ? groupSender(message.key, this.groupRosters.get(jid))
+        : { jid: '', lid: '' };
       // The `group` flag is read off the chat rather than inferred from the
-      // JID's spelling on the daemon's side, which is why it is sent: the
-      // daemon refuses a group message before any identity lookup.
+      // JID's spelling on the daemon's side, which is why it is sent. A group
+      // message names its sender beside the chat, and whether it mentions
+      // the paired account.
       //
       // An image is typed `image` whether or not the fetch worked: a failed
       // one carries `media_error` and the daemon answers "that image could
@@ -2294,12 +2500,15 @@ class Session {
       const delivered = this.link.send(MSG_INBOUND, {
         message_id: message.key.id,
         jid,
-        username: group ? null : message.pushName || null,
+        username: message.pushName || null,
         message_type: part ? 'image' : (text === null ? 'unsupported' : 'text'),
         text,
         callback_data: null,
-        reply_to_message_id: group ? null : quotedId(message),
+        reply_to_message_id: quotedId(message),
         group,
+        sender_jid: sender.jid,
+        sender_lid: sender.lid,
+        mentions_bot: group ? mentionsBot(message, this.botIds()) : false,
         timestamp: Number(message.messageTimestamp) || Math.floor(Date.now() / 1000),
         media_name: media.media_name,
         media_mime: media.media_mime,
@@ -2670,6 +2879,12 @@ function main() {
       });
       return;
     }
+    if (type === MSG_LEAVE_GROUP) {
+      session.leaveGroup(payload && payload.group_jid).catch((err) => {
+        log('error', 'a group leave escaped', { kind: err && err.name });
+      });
+      return;
+    }
     if (type === MSG_SHUTDOWN) {
       log('info', 'the daemon asked the sidecar to stop');
       session.stop().finally(() => process.exit(0));
@@ -2721,14 +2936,21 @@ module.exports = {
   MSG_RECEIPT,
   MSG_SEND_RESULT,
   MSG_FATAL,
+  MSG_GROUP_ROSTER,
   MSG_SEND,
   MSG_SHUTDOWN,
+  MSG_LEAVE_GROUP,
+  MAX_GROUP_MEMBERS,
   SEND_REASONS,
   MAX_MEDIA_BYTES,
   MEDIA_ERRORS,
   MEDIA_EXTENSIONS,
+  bareJid,
   chatAddress,
   collectMediaChunk,
+  groupSender,
+  mentionsBot,
+  rosterParticipants,
   deriveMediaDir,
   encode,
   hasReadableContent,

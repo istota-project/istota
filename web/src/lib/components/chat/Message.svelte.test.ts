@@ -760,3 +760,39 @@ describe('brain fallback notice reaches the DOM (ISSUE-278)', () => {
     expect(container.querySelector('.progress .dot')).toBeNull();
   });
 });
+
+// Multiplayer Stage 17: in a shared room a member deletes their own rows only.
+describe('delete follows the server owner rule', () => {
+  const handlers = { onConfirm: noop, onReject: noop, onDelete: noop };
+  const deleteButton = (container: HTMLElement) =>
+    container.querySelector('[aria-label="Delete message"]');
+
+  it('hides delete on a row the server marked as somebody else’s', () => {
+    const { container } = render(Message, {
+      message: finished({ msgId: 9, deletable: false }),
+      ...handlers,
+    });
+    expect(deleteButton(container)).toBeNull();
+  });
+
+  it('offers it where the server said nothing', () => {
+    const { container } = render(Message, { message: finished({ msgId: 9 }), ...handlers });
+    expect(deleteButton(container)).not.toBeNull();
+  });
+});
+
+describe('a side-room row shown in its parent', () => {
+  it('says only the reader sees it and links to the side room', async () => {
+    const onOpenRoom = vi.fn();
+    const { container, getByText } = render(Message, {
+      message: finished({ ephemeral: { roomToken: 'side-1', roomName: 're: family' } }),
+      onConfirm: noop,
+      onReject: noop,
+      onOpenRoom,
+    });
+    expect(getByText(/Only you can see this/)).toBeTruthy();
+    const open = container.querySelector('.ephemeral-open') as HTMLButtonElement;
+    await fireEvent.click(open);
+    expect(onOpenRoom).toHaveBeenCalledWith('side-1');
+  });
+});

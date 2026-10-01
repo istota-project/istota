@@ -2,6 +2,7 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { page } from '$app/state';
+  import { describeRoomOff } from '$lib/roomOff';
   import { Plus, MessageSquare, Cloud, ChevronDown, Circle, Star, CheckCheck } from 'lucide-svelte';
   import {
     AppShell,
@@ -12,6 +13,8 @@
     Chip,
     ConfirmDialog,
     CountPill,
+    NoticeBanner,
+    Button,
   } from '$lib/components/ui';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import { roomColorVar } from '$lib/roomColors';
@@ -160,6 +163,40 @@
   let composerH = $state(0);
 
   const activeRoom = $derived($rooms.find((r) => r.id === $activeRoomId) ?? null);
+
+  // A room whose host left answers nobody until a member claims it (D14).
+  const hostLost = $derived(!!activeRoom?.policy && activeRoom.policy.host === null);
+  // A room anyone in it switched off records and answers nothing (D8).
+  const roomOff = $derived(activeRoom?.off ?? null);
+  let claiming = $state(false);
+  async function claimHost() {
+    if (!activeRoom || claiming) return;
+    claiming = true;
+    try {
+      await session.claimHost(activeRoom.id);
+    } finally {
+      claiming = false;
+    }
+  }
+
+  // A side room sits under its parent (D4); one whose parent is not in the
+  // list stays where activity puts it.
+  const sidebarRooms = $derived.by(() => {
+    const tokens = new Set($rooms.map((r) => r.token));
+    const sides = new Map<string, ChatRoom[]>();
+    for (const r of $rooms) {
+      if (r.side_of && tokens.has(r.side_of)) {
+        sides.set(r.side_of, [...(sides.get(r.side_of) ?? []), r]);
+      }
+    }
+    const out: { room: ChatRoom; nested: boolean }[] = [];
+    for (const r of $rooms) {
+      if (r.side_of && tokens.has(r.side_of)) continue;
+      out.push({ room: r, nested: false });
+      for (const side of sides.get(r.token) ?? []) out.push({ room: side, nested: true });
+    }
+    return out;
+  });
   // Where the composer holds unsent text (ISSUE-205). Scoped to the room's
   // token *and* the logged-in user: the room id is a recycled SQLite rowid, so
   // a deleted room's draft would land in whichever room takes its id next, and
@@ -848,8 +885,33 @@
 
   async function saveRoomSettings(patch: RoomPatch) {
     if (!settingsRoom) return;
-    await session.updateRoomSettings(settingsRoom.id, patch);
+    // A refusal (a setting only the host may change) keeps the modal open
+    // with the server's reason, rather than closing as though it had saved.
+    try {
+      await session.updateRoomSettings(settingsRoom.id, patch);
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : 'Couldn’t save the room settings.', {
+        key: 'chat:room-settings',
+      });
+      return;
+    }
     settingsRoom = null;
+  }
+
+  // Left from the members pane. The server already removed the member and
+  // their handle, so the room delete answers "gone" and drops it locally.
+  async function leftRoom() {
+    const id = settingsRoom?.id;
+    settingsRoom = null;
+    if (id != null) await session.deleteRoom(id);
+  }
+
+  // Membership changed in the settings modal: whether the room is shared, and
+  // with it the policy the modal shows, comes from the listing.
+  async function membersChanged() {
+    const id = settingsRoom?.id;
+    await session.refreshRooms();
+    if (id != null) settingsRoom = $rooms.find((r) => r.id === id) ?? null;
   }
 
   // Both the hard delete and the Talk-room hide arrive here.
@@ -1007,7 +1069,7 @@
         {/if}
       </div>
 
-      {#each $rooms as room (room.id)}
+      {#each sidebarRooms as { room, nested } (room.id)}
         {@const isTalk = room.origin === 'talk' || !!room.talk_token}
         {@const unreadCount = room.unread_count ?? 0}
         {@const unread = unreadCount > 0 && room.id !== $activeRoomId}
@@ -1019,6 +1081,7 @@
 			     briefings archive row (ISSUE-433). -->
         <div
           class="list-row room-row"
+          class:nested
           class:active={room.id === $activeRoomId}
           class:tinted={!!tint}
           style:--room-tint={tint}
@@ -1081,6 +1144,28 @@
   {/snippet}
 
   <div class="chat-pane" style:--composer-h="{composerH}px">
+    {#if hostLost && !inViewMode}
+      <div class="room-notice">
+        <NoticeBanner title="This room has no host" variant="warn" collapsed={false}>
+          <p>
+            Its host left, so nobody is answered here and its settings cannot change until a member
+            claims it. Whoever claims it is who guests' turns run on behalf of.
+          </p>
+          <Button size="sm" loading={claiming} loadingLabel="Claiming…" onclick={claimHost}>
+            Claim this room
+          </Button>
+        </NoticeBanner>
+      </div>
+    {/if}
+    {#if roomOff && !inViewMode}
+      <div class="room-notice">
+        <NoticeBanner title="This room is switched off" variant="warn" collapsed={false}>
+          <p>
+            {describeRoomOff(roomOff)} Nothing said here is recorded or answered. {roomOff.way_back}
+          </p>
+        </NoticeBanner>
+      </div>
+    {/if}
     <div class="messages-wrap">
       <div
         class="messages"
@@ -1166,6 +1251,7 @@
                 onJumpToMessage={inViewMode ? undefined : jumpToCitedMessage}
                 onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
                 onJump={(token, taskId) => session.jumpToTask(token, taskId)}
+                onOpenRoom={(token) => session.selectRoomByToken(token)}
                 onImageOpen={(imgs, idx) => {
                   lightboxImages = imgs;
                   lightboxIndex = idx;
@@ -1276,6 +1362,9 @@
       onDelete={deleteRoom}
       onPromote={promoteRoom}
       onClose={() => (settingsRoom = null)}
+      userId={userId ?? undefined}
+      onMembersChanged={membersChanged}
+      onLeft={leftRoom}
     />
   {/if}
 
@@ -1657,6 +1746,16 @@
 	   pill, which are the two things in this row that mean something has changed.
 	   `color-mix` over transparent is the idiom this file already uses for a
 	   subtle wash (see @keyframes jump-pulse below). */
+  /* A side room under its parent. */
+  .room-row.nested {
+    padding-left: var(--space-4);
+  }
+  .room-notice {
+    padding: var(--space-2) var(--space-3) 0;
+  }
+  .room-notice p {
+    margin: 0 0 var(--space-2);
+  }
   .room-row.tinted {
     background: color-mix(in srgb, var(--room-tint) 14%, transparent);
   }

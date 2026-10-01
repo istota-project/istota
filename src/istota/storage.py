@@ -28,6 +28,7 @@ logger = logging.getLogger("istota.storage")
 
 BOT_USER_BASE = "/Users"
 CHANNEL_BASE = "/Channels"
+GROUP_BASE = "/Groups"
 
 #: The directories provisioned inside a user's bot directory, in one place.
 #:
@@ -2561,6 +2562,158 @@ def init_channel_memory(config: "Config", conversation_token: str) -> bool:
             get_channel_memory_path(conversation_token),
             CHANNEL_MEMORY_TEMPLATE,
         )
+
+
+# =============================================================================
+# Group memory functions
+# =============================================================================
+
+#: Past this, a group file still loads, with a warning: several members write
+#: it and no curator trims it (groups spec, open question 2). The hard bound is
+#: ``USER_CONFIG_READ_CAP_BYTES``, the same read cap as USER.md.
+GROUP_MEMORY_SOFT_LIMIT_BYTES = 32 * 1024
+
+GROUP_MEMORY_TEMPLATE = """\
+<!-- Group memory for "{name}". Everything in this file may be said in
+     front of every current and future member of this group, in any room where
+     the group's material loads. Nothing else goes in it. When in doubt it goes
+     in USER.md. Written only when a member explicitly asks; no automatic
+     extraction writes here. -->
+
+# {name}
+
+## Members
+
+## Conventions
+
+## Reference
+"""
+
+
+def get_group_base_path(group_id: str) -> str:
+    """``/Groups/{group_id}``. Raises ``ValueError`` on an unusable id."""
+    from .db import is_valid_group_id  # noqa: PLC0415 - keep storage light
+
+    if not is_valid_group_id(group_id):
+        raise ValueError(f"Invalid group id: {group_id!r}")
+    return f"{GROUP_BASE}/{group_id}"
+
+
+def get_group_memory_path(group_id: str) -> str:
+    return f"{get_group_base_path(group_id)}/GROUP.md"
+
+
+def _contained_group_dir(config: "Config", group_id: str) -> Path | None:
+    """``{mount}/Groups/{group_id}`` resolved, or None if it leads anywhere else.
+
+    ``_contained_channel_dir``'s rule, under ``{mount}/Groups``: equality with
+    the resolved root plus the id, so a link at ``Groups/<id>`` cannot put
+    another group's file in this group's prompt or take this group's write.
+    None for an unusable id or no workspace.
+    """
+    from .skills._loader import contained_group_dir  # noqa: PLC0415 - import cycle
+
+    if not config.has_workspace:
+        return None
+    return contained_group_dir(_get_mount_path(config, GROUP_BASE), group_id)
+
+
+def _group_heading(display_name: str, group_id: str) -> str:
+    """One line, and nothing that closes the seed's HTML comment."""
+    name = " ".join(str(display_name or "").split())
+    while "--" in name:
+        name = name.replace("--", "-")
+    return name or group_id
+
+
+def ensure_group_directories(
+    config: "Config", group_id: str, *, display_name: str = "",
+) -> bool:
+    """Create ``Groups/{group_id}/memories/`` and seed ``GROUP.md`` once.
+
+    The seed carries the charter (groups spec D3) and is created with
+    ``create_file_if_absent``, so an existing file — or anything planted at the
+    name — is never overwritten. Mount only: the bind and the read both need
+    the mount, so a deployment without one has no group directory. Never
+    raises; False when nothing usable could be made.
+    """
+    group_dir = _contained_group_dir(config, group_id)
+    if group_dir is None:
+        if config.has_workspace:
+            logger.warning(
+                "group_dir_refused group=%r reason=group_dir_outside_group_root",
+                group_id,
+            )
+        return False
+    try:
+        (group_dir / "memories").mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning("group_dir_create_failed group=%s errno=%s", group_id, e.errno)
+        return False
+    if _contained_group_dir(config, group_id) != group_dir:
+        return False
+    create_file_if_absent(
+        group_dir / "GROUP.md",
+        GROUP_MEMORY_TEMPLATE.format(name=_group_heading(display_name, group_id)),
+    )
+    return True
+
+
+def read_group_memory(config: "Config", group_id: str) -> str | None:
+    """The group's ``GROUP.md``, or None where there is nothing to load.
+
+    Hardened on ``read_channel_memory``'s terms and for its reason: the file
+    goes into every member's prompt and its directory is bound read-write into
+    every member's sandbox (ISSUE-339). Containment by equality under
+    ``{mount}/Groups``, then ``read_regular_file`` refuses a symlink, a FIFO
+    and anything past the read cap. Never raises.
+    """
+    group_dir = _contained_group_dir(config, group_id)
+    if group_dir is None:
+        if config.has_workspace:
+            logger.warning(
+                "group_memory_read_refused group=%r reason=group_dir_outside_group_root",
+                group_id,
+            )
+        return None
+    content, reason = read_regular_file(
+        group_dir / "GROUP.md", max_bytes=USER_CONFIG_READ_CAP_BYTES,
+    )
+    if reason is not None:
+        logger.warning(
+            "group_memory_read_refused group=%s reason=%s", group_id, reason,
+        )
+        return None
+    if not content or not content.strip():
+        return None
+    size = len(content.encode("utf-8"))
+    if size > GROUP_MEMORY_SOFT_LIMIT_BYTES:
+        logger.warning(
+            "group_memory_large group=%s bytes=%d soft_limit=%d",
+            group_id, size, GROUP_MEMORY_SOFT_LIMIT_BYTES,
+        )
+    return content
+
+
+def write_group_memory(config: "Config", group_id: str, content: str) -> bool:
+    """Replace ``GROUP.md`` atomically (tmp + ``os.replace``). Never raises.
+
+    ``write_channel_memory``'s staging rule: a per-call staging name, so two
+    members' concurrent writes cannot interleave into one staging file.
+    """
+    group_dir = _contained_group_dir(config, group_id)
+    if group_dir is None:
+        logger.warning(
+            "group_memory_write_refused group=%r reason=group_dir_outside_group_root",
+            group_id,
+        )
+        return False
+    try:
+        write_text_atomic(group_dir / "GROUP.md", content, mode=0o644)
+        return True
+    except (OSError, ValueError) as e:
+        logger.warning("group memory write failed for %s: %s", group_id, e)
+        return False
 
 
 # =============================================================================

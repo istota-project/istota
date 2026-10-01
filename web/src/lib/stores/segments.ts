@@ -240,6 +240,14 @@ export interface ChatMessage {
   // The subject line of an external turn's mail. What a collapsed turn shows in
   // place of the body, since the body itself is what is being withheld.
   subject?: string;
+  // False on a row the viewer may not delete: another member's in a shared
+  // room. The server's own rule; absent means the delete would be accepted.
+  deletable?: boolean;
+  // A row from the viewer's side room shown inline in its parent room, which
+  // only they see because only they are in the side room (multiplayer D4).
+  // Client-only: not part of the parent's transcript and gone on reload, so it
+  // carries no durable id and offers nothing that acts on one.
+  ephemeral?: { roomToken: string; roomName: string };
 
   // ---- Send lifecycle (ISSUE-200) -------------------------------------------
   // User rows this client originated, only. Absent means settled — which every

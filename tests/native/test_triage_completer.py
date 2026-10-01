@@ -11,8 +11,12 @@ through their own provider, and never falls back to the wrong CLI.
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from istota import db
 from istota.config import BrainConfig, Config, NativeBrainConfig
-from istota.executor import _build_triage_completer
+from istota.executor import _build_triage_completer, build_oneshot_completer
+from istota.llm.types import AssistantMessage, TextContent, Usage
+
+from ._mock_provider import MockProvider
 
 
 def _cfg(tmp_path, kind="claude_code", overrides=None):
@@ -95,3 +99,51 @@ def test_an_unallowlisted_pin_falls_through_to_the_source_type_layer(tmp_path):
     cfg.brain.room_selectable = []
     with patch("istota.executor._build_native_completer", return_value=sentinel):
         assert _build_triage_completer(_task(brain="claude_code"), cfg) is sentinel
+
+
+class TestTheTaskFreeFactory:
+    """``build_oneshot_completer`` takes the fields, never a ``db.Task``.
+
+    The speech gate runs before any task exists, so what it builds from has to
+    be ``(config, user_id, source_type)`` alone.
+    """
+
+    def test_it_routes_by_source_type_and_pin_with_no_task(self, tmp_path):
+        sentinel = lambda _p: "{}"  # noqa: E731
+        cfg = _cfg(tmp_path, "claude_code", overrides={"talk": "native"})
+        cfg.brain.room_selectable = ["claude_code"]
+        kw = dict(user_id="alice", timeout=5.0, origin="speech_gate")
+        with patch("istota.executor._build_native_completer", return_value=sentinel):
+            assert build_oneshot_completer(cfg, source_type="talk", **kw) is sentinel
+            assert build_oneshot_completer(cfg, source_type="web", **kw) is None
+            assert build_oneshot_completer(
+                cfg, source_type="talk", brain_kind="claude_code", **kw,
+            ) is None
+
+    def test_a_native_call_writes_a_task_less_row_under_the_callers_origin(
+        self, tmp_path,
+    ):
+        cfg = _cfg(tmp_path, "native")
+        db.init_db(cfg.db_path)
+        provider = MockProvider([
+            AssistantMessage(
+                content=[TextContent(text='{"speak": false}')],
+                usage=Usage(input_tokens=50, output_tokens=7),
+                model="claude-sonnet-4-6",
+            )
+        ])
+        with patch("istota.llm.make_provider", return_value=provider), \
+                patch("istota.executor._native_with_user_key",
+                      side_effect=lambda nc, *a, **k: nc):
+            completer = build_oneshot_completer(
+                cfg, user_id="bob", source_type="web",
+                timeout=5.0, origin="speech_gate",
+            )
+            assert completer("is this for the bot?") == '{"speak": false}'
+
+        with db.get_db(cfg.db_path) as conn:
+            rows = conn.execute(
+                "SELECT origin, user_id, source_type, task_id, output_tokens "
+                "FROM task_usage"
+            ).fetchall()
+        assert [tuple(r) for r in rows] == [("speech_gate", "bob", "web", None, 7)]

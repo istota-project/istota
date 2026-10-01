@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from .._types import DeliveryOptions, IncomingMessage, TransportCapabilities
@@ -33,7 +35,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("istota.transport.web")
 
-__all__ = ["WebTransport", "default_web_room_token"]
+__all__ = ["WebTransport", "addressed_to_bot_in_text", "default_web_room_token"]
+
+
+def addressed_to_bot_in_text(text: str, bot_names: Iterable[str]) -> bool:
+    """Whether a web message explicitly addresses the bot.
+
+    Web has no structured mention, so this is the text test: ``@<name>``
+    anywhere, or ``<name>`` as the first word, case-insensitive, for each of
+    ``bot_names`` (the bot's display name and its Talk account name). "Ask zorg
+    about it" is a message *about* the bot and does not count. Blank names are
+    skipped, since an empty pattern would match every message.
+    """
+    for name in bot_names:
+        name = (name or "").strip()
+        if not name:
+            continue
+        escaped = re.escape(name)
+        pattern = rf"(?<![\w@])@{escaped}(?![\w-])|^\s*{escaped}(?![\w])"
+        if re.search(pattern, text or "", re.IGNORECASE):
+            return True
+    return False
 
 
 def default_web_room_token(config: "Config", user_id: str) -> str | None:

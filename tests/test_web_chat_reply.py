@@ -367,7 +367,7 @@ class TestTalkInbound:
                     {"talk": str(parent_talk_id)} if parent_talk_id else None
                 ),
             )
-            _room, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, self._config(), surface="talk", surface_ref=token,
                 user_id="alice", text="yes, that one", source_type="talk",
                 platform_message_id=555,
@@ -375,6 +375,7 @@ class TestTalkInbound:
                 reply_to_content="the earlier answer",
                 external_id="555",
             )
+            _room, task_id = _inbound.room_token, _inbound.task_id
             task = db.get_task(conn, task_id)
             row = conn.execute(
                 "SELECT reply_to_message_id FROM messages "

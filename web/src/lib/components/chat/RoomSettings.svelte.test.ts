@@ -1,5 +1,23 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/svelte';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
+
+// The members and grants panes fetch on mount. Answered with an empty room so
+// they settle quietly; their own behaviour is in their own test files.
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api, {
+  getRoomMembers: vi.fn(async () => ({ members: [], can_manage: false, message_count: 0 })),
+  getChatUsers: vi.fn(async () => ({ users: [] })),
+  getRoomGrants: vi.fn(async () => ({ scopes: [], state: 'private' })),
+  getRoomGroup: vi.fn(async () => ({
+    group_id: null,
+    group_name: null,
+    can_set: false,
+    refusal: null,
+    choices: [],
+  })),
+});
 
 // The component asks the autocomplete providers for the model and brain
 // dropdowns on mount, and the real ones reach the API. Both are `vi.fn`s the
@@ -571,5 +589,63 @@ describe('RoomSettings — colour', () => {
     await rerender({ room: room({ id: 2, color: 'green' }) });
     expect(swatch('Green').checked).toBe(true);
     expect(swatch('Teal').checked).toBe(false);
+  });
+});
+
+// Multiplayer Stage 17. In a shared room the room-wide settings are the host's,
+// so another member sees them and cannot change them; colour stays theirs.
+describe('RoomSettings — a shared room another member hosts', () => {
+  afterEach(cleanup);
+
+  const hosted = (refusal: string | null, isHost = false) =>
+    room({
+      shared: true,
+      policy: {
+        host: 'alice',
+        is_host: isHost,
+        guest_reply: 'direct',
+        settings_refusal: refusal,
+      },
+    });
+  const REFUSAL = "Only this room's host (alice) can change its settings.";
+
+  it("shows the server's reason and makes the room-wide controls read-only", async () => {
+    await mountSettled(hosted(REFUSAL));
+    expect(screen.getByText(REFUSAL)).toBeTruthy();
+    const name = screen.getByPlaceholderText('Room name') as HTMLInputElement;
+    expect(name.readOnly).toBe(true);
+    const model = screen.getByRole('button', { name: 'Room model default' }) as HTMLButtonElement;
+    expect(model.disabled).toBe(true);
+    const guests = screen.getByRole('button', {
+      name: 'How guests are answered',
+    }) as HTMLButtonElement;
+    expect(guests.disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: PROMOTE_LABEL })).toBeNull();
+  });
+
+  it("still saves the member's own colour, and nothing room-wide", async () => {
+    const onSave = vi.fn();
+    await mountSettled(hosted(REFUSAL), onSave);
+    const name = screen.getByPlaceholderText('Room name') as HTMLInputElement;
+    await fireEvent.input(name, { target: { value: 'renamed' } });
+    const tint = screen.getAllByRole('radio').find((r) => (r as HTMLInputElement).value !== '');
+    await fireEvent.click(tint!);
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const patch = onSave.mock.calls[0][0] as RoomPatch;
+    expect(Object.keys(patch)).toEqual(['color']);
+  });
+
+  it('lets the host change how guests are answered', async () => {
+    const onSave = vi.fn();
+    await mountSettled(hosted(null, true), onSave);
+    await pick('How guests are answered', 'Propose the answer to the host first');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(onSave).toHaveBeenCalledWith({ guest_reply: 'held' });
+  });
+
+  it('shows a private room no guest policy', async () => {
+    await mountSettled(room());
+    expect(screen.queryByRole('button', { name: 'How guests are answered' })).toBeNull();
   });
 });

@@ -618,7 +618,8 @@ class TestTheInboundReceiver:
         """
         seen = {}
 
-        def spy(conn, config, events, *, provider=db.WHATSAPP_LEGACY_PROVIDER):
+        def spy(conn, config, events, *, provider=db.WHATSAPP_LEGACY_PROVIDER,
+                classified=None):
             seen["provider"] = provider
             seen["events"] = events
             return []
@@ -1871,3 +1872,38 @@ class TestTheSessionReset:
         finally:
             monkeypatch.undo()
             await instance.stop()
+
+
+class TestGroupFrames:
+    """Multiplayer D6 and D14 over the real socket: a roster frame reaches the
+    common path in order, and a host leaving is answered with a leave frame."""
+
+    GROUP = "120363000000000001@g.us"
+    GUEST = "15559990000@s.whatsapp.net"
+
+    def _roster(self, members, *, added_by=""):
+        return dict(
+            group_jid=self.GROUP, subject="Family", added_by=added_by,
+            bot_present=True,
+            participants=[{"jid": jid, "lid": ""} for jid in members],
+        )
+
+    async def test_a_roster_frame_registers_the_group(self, bridge, sidecar, config):
+        bind_user(config)
+        await sidecar.say(proto.MSG_GROUP_ROSTER, **self._roster([USER_JID, self.GUEST]))
+
+        def room():
+            with db.get_db(config.db_path) as conn:
+                return db.resolve_room_token(conn, "whatsapp", self.GROUP)
+
+        assert await wait_for(room)
+
+    async def test_the_host_leaving_writes_a_leave_frame(self, bridge, sidecar, config):
+        bind_user(config)
+        await sidecar.say(proto.MSG_GROUP_ROSTER, **self._roster(
+            [USER_JID, self.GUEST], added_by=USER_JID,
+        ))
+        await sidecar.say(proto.MSG_GROUP_ROSTER, **self._roster([self.GUEST]))
+
+        message = await sidecar.expect(proto.MSG_LEAVE_GROUP)
+        assert message["group_jid"] == self.GROUP

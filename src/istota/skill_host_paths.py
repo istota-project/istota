@@ -105,8 +105,13 @@ def workspace_roots(
     conversation_token: str | None = None,
     writable: bool = False,
     talk: bool = False,
+    own_workspace: bool = True,
 ) -> list[Path]:
     """The roots one caller may operate inside, derived from explicit values.
+
+    ``own_workspace=False`` drops ``{mount}/Users/{user_id}`` and keeps the
+    rest: a shared room that withholds ``files`` binds no workspace, and a
+    host-side CLI must not reach what the sandbox does not.
 
     The single derivation. Every consumer of this module gets its root list
     from here — the skill CLIs through `env_host_roots`, the daemon-side
@@ -161,7 +166,7 @@ def workspace_roots(
     except (OSError, TypeError, ValueError):
         return roots
 
-    own = scoped_user_dir(mount_path / "Users", user_id)
+    own = scoped_user_dir(mount_path / "Users", user_id) if own_workspace else None
     if own is not None:
         roots.append(own)
 
@@ -201,8 +206,76 @@ def user_workspace_root() -> Path | None:
     own = workspace_roots(
         mount=workspace or legacy_workspace or None,
         user_id=os.environ.get("ISTOTA_USER_ID", "").strip(),
+        own_workspace=not _files_withheld(),
     )
     return own[0] if own else None
+
+
+#: Set by `task_env` in the proxy's base env for a shared-room task, naming
+#: what the room withholds. Never in the model's env; the proxy is its only
+#: route to a skill CLI.
+WITHHELD_SCOPES_VAR = "ISTOTA_WITHHELD_SCOPES"
+
+#: Set by `task_env` in the proxy's base env, naming the task's resolved group
+#: set (`room_scopes.task_group_ids`), comma-separated. `kv --group` refuses a
+#: group not named here (multiplayer D21); absent means none. Never in the
+#: model's env, for the reason above.
+TASK_GROUPS_VAR = "ISTOTA_TASK_GROUPS"
+
+
+def _withheld_from_env() -> set[str]:
+    raw = os.environ.get(WITHHELD_SCOPES_VAR, "")
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _files_withheld() -> bool:
+    return "files" in _withheld_from_env()
+
+
+def memory_dir_parts(bot_dir_name: str) -> list[tuple[str, ...]]:
+    """Where the ``memory`` scope lives inside a user's workspace, relative to it.
+
+    ``memories/`` (dated memories), and under the bot directory ``config/``
+    (``USER.md`` and the per-skill overlays) and ``playbooks/``. The one list
+    the sandbox's masks, the host-path refusal below and the nextcloud skill's
+    WebDAV refusal all read. The bot entries are dropped for a bot directory
+    name that is not a single path component.
+    """
+    parts: list[tuple[str, ...]] = [("memories",)]
+    bot = (bot_dir_name or "").strip()
+    if bot and "/" not in bot and bot not in (".", ".."):
+        parts += [(bot, "config"), (bot, "playbooks")]
+    return parts
+
+
+def withheld_from_env() -> frozenset[str]:
+    """The scopes the proxy says the calling task's room withholds."""
+    return frozenset(_withheld_from_env())
+
+
+def memory_refusal(resolved: Path) -> str | None:
+    """A refusal when ``resolved`` is the user's memory and the room withholds it.
+
+    ``files`` and ``memory`` are separate scopes. With ``files`` granted the
+    workspace is a root, and the memory inside it — ``memories/``, and under
+    the bot directory ``config/`` and ``playbooks/`` — is the same set the
+    sandbox masks (`sandbox_plan.memory_masks`). None when nothing is refused.
+    """
+    if "memory" not in _withheld_from_env():
+        return None
+    own = user_workspace_root()
+    if own is None:
+        return None
+    denied = [
+        own.joinpath(*parts)
+        for parts in memory_dir_parts(os.environ.get("ISTOTA_BOT_DIR_NAME", ""))
+    ]
+    if path_under_roots(resolved, denied):
+        return (
+            f"Refusing {resolved}: this room withholds your memory, and the "
+            "path is in it."
+        )
+    return None
 
 
 def env_host_roots(
@@ -232,7 +305,10 @@ def env_host_roots(
             os.environ.get("ISTOTA_CONVERSATION_TOKEN", "").strip() if channel else ""
         ),
         writable=writable,
-        talk=talk,
+        # A task its room restricts has no `{mount}/Talk` in its sandbox; its
+        # own attachments were staged where the sandbox binds them.
+        talk=talk and not _withheld_from_env(),
+        own_workspace=not _files_withheld(),
     )
 
 
@@ -258,10 +334,15 @@ def resolve_host_path(
     `writable=False` means an existing source to read; `writable=True` means a
     destination that need not exist yet.
     """
-    return resolve_in_roots(
+    resolved, error = resolve_in_roots(
         path, env_host_roots(writable=writable),
         writable=writable, operation=operation,
     )
+    if resolved is not None:
+        refusal = memory_refusal(resolved)
+        if refusal is not None:
+            return None, refusal
+    return resolved, error
 
 
 def resolve_in_roots(

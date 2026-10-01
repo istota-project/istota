@@ -2,6 +2,7 @@
 name: sensitive_actions
 description: Actions requiring user confirmation; defines the public/private boundary and the meaning of trust
 always_include: true
+shared_room: safe
 ---
 
 ## The public/private boundary

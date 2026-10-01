@@ -141,10 +141,11 @@ class TestRoomBrainReachesTheTask:
             db.add_room_binding(conn, "room1", "web", "room1")
             db.set_room_brain(conn, "room1", "native")
         with db.get_db(db_path) as conn:
-            _tok, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="web", surface_ref="room1",
                 user_id="alice", text="hi", source_type="web",
             )
+            _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
 
@@ -160,10 +161,11 @@ class TestRoomBrainReachesTheTask:
             db.register_room(conn, "room1", "alice", origin="web")
             db.add_room_binding(conn, "room1", "web", "room1")
         with db.get_db(db_path) as conn:
-            _tok, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="web", surface_ref="room1",
                 user_id="alice", text="hi", source_type="web",
             )
+            _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
         assert task.brain is None

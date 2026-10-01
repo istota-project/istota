@@ -74,6 +74,7 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     # `fixed_interval=0` like `backup-stale-alert` and for the same
     # clock-bypass reason. See `tests/test_whatsapp_pairing_poll.py`.
     ("whatsapp-requests", None),
+    ("room-notices", None),
     ("whatsapp-pairing", None),
     ("skill-overlay-reindex", "skill_overlay_reindex_interval"),
     ("vault-sync", "vault_sync_interval"),
@@ -100,6 +101,7 @@ KNOWN_FIELD_MISMATCHES = {
 # they are not free to change.
 EXPECTED_BACKGROUND = {
     "whatsapp-requests",
+    "room-notices",
     "sleep-cycles",
     "travel-timezone",
     "email-poll",

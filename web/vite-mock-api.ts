@@ -1200,6 +1200,101 @@ function mockAggregateRows(): any[] {
     .map((r) => ({ ...r.msg, _createdAtMs: r.createdAt }));
 }
 
+// Multiplayer rooms (shared rooms, grants, host, group link, veto). Room 3
+// (`invoices`) is a web room carol shares with dave; room 2 (the Talk room) also
+// has a guest, who has switched the bot off there. Every other room is carol's
+// alone. The shapes follow `web_app._room_sharing` and the room endpoints.
+const MOCK_DIRECTORY = [
+  { user_id: 'carol', display_name: 'Carol' },
+  { user_id: 'dave', display_name: 'Dave' },
+  { user_id: 'erin', display_name: 'Erin' },
+];
+const MOCK_ROOM_SCOPES = ['files', 'memory', 'calendar', 'email', 'money', 'health'];
+const MOCK_GROUPS = [{ group_id: 'family', display_name: 'Family' }];
+const mockRoomMembers = new Map<number, string[]>([
+  [2, ['carol', 'dave']],
+  [3, ['carol', 'dave']],
+]);
+const mockRoomHosts = new Map<number, string | null>([
+  [2, 'dave'],
+  [3, 'carol'],
+]);
+const mockRoomGuestReply = new Map<number, 'off' | 'held' | 'direct'>();
+const mockRoomGrants = new Map<number, Set<string>>();
+const mockRoomGroups = new Map<number, string | null>();
+const mockRoomsWithGuests = new Set<number>([2]);
+const mockRoomsOff = new Set<number>([2]);
+
+function mockRoomMembersOf(id: number): string[] {
+  return mockRoomMembers.get(id) ?? ['carol'];
+}
+
+function mockRoomShared(id: number): boolean {
+  return mockRoomMembersOf(id).length > 1 || mockRoomsWithGuests.has(id);
+}
+
+function mockSettingsRefusal(id: number): string | null {
+  if (!mockRoomShared(id)) return null;
+  const host = mockRoomHosts.get(id) ?? null;
+  if (host === 'carol') return null;
+  if (host === null) {
+    return (
+      'This room has no host, so nobody can change its settings. A member ' +
+      'claims it with `!room host`.'
+    );
+  }
+  return `Only this room's host (${host}) can change its settings.`;
+}
+
+function mockRoomSharing(room: MockChatRoom) {
+  const off = mockRoomsOff.has(room.id)
+    ? {
+        at: new Date(Date.now() - 3_600_000).toISOString(),
+        by: [{ name: 'Sam', guest: true, agreed: false }],
+        way_back:
+          'To switch it back on, a member of the room sends `!istota on`, and ' +
+          'everyone who switched it off agrees by sending `!istota on` too.',
+      }
+    : null;
+  if (!mockRoomShared(room.id)) return { shared: false, policy: null, off };
+  const host = mockRoomHosts.get(room.id) ?? null;
+  return {
+    shared: true,
+    off,
+    policy: {
+      host,
+      is_host: host === 'carol',
+      guest_reply: mockRoomGuestReply.get(room.id) ?? 'direct',
+      settings_refusal: mockSettingsRefusal(room.id),
+    },
+  };
+}
+
+function mockGrantState(id: number): string {
+  if (!mockRoomShared(id)) return 'private';
+  return mockRoomsWithGuests.has(id) ? 'guests_present' : 'active';
+}
+
+function mockRoomGrantsView(id: number) {
+  const granted = mockRoomGrants.get(id) ?? new Set<string>();
+  return {
+    scopes: MOCK_ROOM_SCOPES.map((name) => ({ name, granted: granted.has(name) })),
+    state: mockGrantState(id),
+  };
+}
+
+function mockRoomGroupView(id: number) {
+  const groupId = mockRoomGroups.get(id) ?? null;
+  const refusal = mockSettingsRefusal(id);
+  return {
+    group_id: groupId,
+    group_name: MOCK_GROUPS.find((g) => g.group_id === groupId)?.display_name ?? null,
+    can_set: refusal === null,
+    refusal,
+    choices: refusal === null ? MOCK_GROUPS : [],
+  };
+}
+
 function mockUnreadCount(token: string): number {
   const now = Date.now();
   let n = 0;
@@ -1295,7 +1390,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
     return {
       rooms: mockChatRooms
         .filter((r) => !r.archived)
-        .map((r) => ({ ...r, unread_count: mockUnreadCount(r.token) })),
+        .map((r) => ({ ...r, ...mockRoomSharing(r), unread_count: mockUnreadCount(r.token) })),
     };
   }
   if (path === '/istota/api/chat/rooms/read-all' && method === 'POST') {
@@ -1440,6 +1535,79 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
     mockChatRooms.push(room);
     return room;
   }
+  if (path === '/istota/api/chat/users' && method === 'GET') {
+    return { users: MOCK_DIRECTORY };
+  }
+  {
+    const m = path.match(
+      /^\/istota\/api\/chat\/rooms\/(\d+)\/(members|grants|host|group)(?:\/([^/]+))?$/,
+    );
+    const room = m ? mockChatRooms.find((r) => r.id === Number(m[1])) : undefined;
+    if (m && !room) return { __status: 404, error: 'room not found' };
+    if (m && room) {
+      const id = room.id;
+      const members = mockRoomMembersOf(id);
+      const talkBacked = room.origin === 'talk';
+      if (m[2] === 'members' && method === 'GET' && !m[3]) {
+        return {
+          members: members.map((u) => ({
+            user_id: u,
+            display_name: MOCK_DIRECTORY.find((d) => d.user_id === u)?.display_name ?? u,
+            is_owner: u === 'carol' && !talkBacked,
+          })),
+          can_manage: !talkBacked,
+          message_count: 42,
+        };
+      }
+      if (m[2] === 'members' && method === 'POST' && !m[3]) {
+        if (talkBacked) return { __status: 409, error: 'Membership of this room is set in Talk.' };
+        const userId = String(body?.user_id ?? '');
+        if (!MOCK_DIRECTORY.some((d) => d.user_id === userId))
+          return { __status: 400, error: 'unknown user' };
+        if (body?.acknowledge_history !== true)
+          return { __status: 400, error: 'acknowledge_history must be true' };
+        if (!members.includes(userId)) mockRoomMembers.set(id, [...members, userId]);
+        if (!mockRoomHosts.has(id)) mockRoomHosts.set(id, 'carol');
+        const d = MOCK_DIRECTORY.find((x) => x.user_id === userId)!;
+        return { member: { ...d, is_owner: false } };
+      }
+      if (m[2] === 'members' && method === 'DELETE' && m[3]) {
+        if (talkBacked) return { __status: 409, error: 'Membership of this room is set in Talk.' };
+        const userId = decodeURIComponent(m[3]);
+        if (userId === 'carol') return { __status: 409, error: 'Delete the room instead.' };
+        mockRoomMembers.set(
+          id,
+          members.filter((u) => u !== userId),
+        );
+        return { ok: true };
+      }
+      if (m[2] === 'grants' && method === 'GET') return mockRoomGrantsView(id);
+      if (m[2] === 'grants' && method === 'PUT') {
+        const scopes: unknown[] = Array.isArray(body?.scopes) ? body.scopes : [];
+        const unknown = scopes.find((x) => !MOCK_ROOM_SCOPES.includes(String(x)));
+        if (unknown !== undefined) return { __status: 400, error: `${unknown} is not a scope` };
+        mockRoomGrants.set(id, new Set(scopes.map(String)));
+        return mockRoomGrantsView(id);
+      }
+      if (m[2] === 'host' && method === 'POST') {
+        const host = mockRoomHosts.get(id) ?? null;
+        if (host !== null && host !== 'carol')
+          return { __status: 409, error: 'This room already has a host.' };
+        mockRoomHosts.set(id, 'carol');
+        return { outcome: 'claimed', ...mockRoomSharing(room) };
+      }
+      if (m[2] === 'group' && method === 'GET') return mockRoomGroupView(id);
+      if (m[2] === 'group' && method === 'PUT') {
+        const view = mockRoomGroupView(id);
+        if (!view.can_set) return { __status: 403, error: view.refusal };
+        const groupId = body?.group_id ?? null;
+        if (groupId !== null && !MOCK_GROUPS.some((g) => g.group_id === groupId))
+          return { __status: 403, error: `You are not a member of group '${groupId}'.` };
+        mockRoomGroups.set(id, groupId);
+        return mockRoomGroupView(id);
+      }
+    }
+  }
   // Room memory (`CHANNEL.md`) — GET returns the file plus an opaque revision
   // the PUT must hand back; a mismatch is the 409 the editor recovers from.
   const roomMemory = path.match(/^\/istota\/api\/chat\/rooms\/(\d+)\/memory$/);
@@ -1484,6 +1652,14 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
   if (roomPatch && method === 'PATCH') {
     const room = mockChatRooms.find((r) => r.id === Number(roomPatch[1]));
     if (!room) return { error: 'room not found' };
+    const refusal = mockSettingsRefusal(room.id);
+    if (refusal && ['name', 'model', 'effort', 'guest_reply'].some((k) => k in (body ?? {})))
+      return { __status: 403, error: refusal };
+    if (body?.guest_reply != null) {
+      if (!['off', 'held', 'direct'].includes(body.guest_reply))
+        return { __status: 400, error: 'unknown guest_reply' };
+      mockRoomGuestReply.set(room.id, body.guest_reply);
+    }
     if (body?.name != null) room.name = String(body.name).slice(0, 80);
     if (body?.archived != null) room.archived = !!body.archived;
     if ('model' in (body ?? {}))
@@ -1500,7 +1676,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
       if (c && !(ROOM_COLORS as readonly string[]).includes(c)) return { error: 'unknown color' };
       room.color = c || null;
     }
-    return room;
+    return { ...room, ...mockRoomSharing(room) };
   }
   if (roomPatch && method === 'DELETE') {
     const idx = mockChatRooms.findIndex((r) => r.id === Number(roomPatch[1]));

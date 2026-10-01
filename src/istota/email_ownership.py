@@ -55,6 +55,32 @@ def signup_recipient_tails(config: Config, email) -> list[str]:
     return tails
 
 
+def bot_addressed_in_to(config: Config, email) -> bool:
+    """Whether the bot's address, or a plus address of it, is in the To line.
+
+    Email's explicit address for the speech gate: in To the bot is being asked,
+    in Cc it is only listening. A display-name form is parsed, and local part
+    and domain compare case-insensitively.
+    """
+    return any(
+        is_bot_address(config, address)
+        for _, address in getaddresses(list(getattr(email, "to", ()) or ()))
+    )
+
+
+def is_bot_address(config: Config, address: str) -> bool:
+    """Whether an addr-spec is the bot's address or a plus address of it."""
+    bot = config.email.bot_email
+    if not bot or "@" not in bot or "@" not in (address or ""):
+        return False
+    bot_local, bot_domain = bot.rsplit("@", 1)
+    local, domain = address.rsplit("@", 1)
+    if domain.lower() != bot_domain.lower():
+        return False
+    local, bot_local = local.lower(), bot_local.lower()
+    return local == bot_local or local.startswith(bot_local + "+")
+
+
 def extract_user_from_recipient(config: Config, email) -> str | None:
     """Extract user_id from a plus-addressed recipient.
 

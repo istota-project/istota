@@ -429,6 +429,20 @@ class Case:
     #: and pushes nothing to Talk, so a promoted room's target carries both
     #: legs and the golden is where that is visible.
     room_talk_ref: str | None = None
+    #: Makes that room shared (multiplayer D7): `OTHER_USER` joins it as a web
+    #: member, the task carries `is_group_chat` as ingest would set it, and
+    #: the room card replaces nothing in any other golden, since a private
+    #: room has no card. Grants every scope but `files` and `memory`, so the
+    #: card lists two withheld scopes and the menu keeps its shape.
+    shared: bool = False
+    #: One Talk guest present in that room, and the task is that guest's turn:
+    #: it runs as the host with every scope withheld (D2). The guest's display
+    #: name is here to show it is **not** rendered in the system half.
+    guest_turn: bool = False
+    #: Puts the user in one group whose `GROUP.md` holds a line, and seeds a
+    #: second group the user is *not* in with a sentinel that must never
+    #: render (groups spec D6, multiplayer D21).
+    group: bool = False
 
 
 CASES: tuple[Case, ...] = (
@@ -522,6 +536,44 @@ CASES: tuple[Case, ...] = (
     # that it exists, and the quoting the injection form needs. Names and
     # values are in neither golden, because they are in neither prompt.
     Case("shared_credentials", shared_credentials=True),
+    # The room card (multiplayer Stage 12), against `room_web`, which differs
+    # from it in nothing but the second member: the diff is the card and what
+    # the two withheld scopes (`files`, `memory`) take away.
+    Case(
+        "shared_room",
+        source_type="web",
+        conversation_token="web-room",
+        room=("#weekly", "web"),
+        shared=True,
+    ),
+    # A guest's turn in a Talk room the user hosts: the header's first line,
+    # the card saying who wrote it and who the bot acts for, and every scope
+    # withheld whatever the host granted.
+    Case(
+        "guest_turn",
+        source_type="talk",
+        conversation_token="room-token",
+        room=("family", "talk"),
+        shared=True,
+        guest_turn=True,
+    ),
+    # Group memory (groups spec Stage 3), against `base_nextcloud`, which it
+    # differs from in nothing else: the diff is the `## Group memory` block,
+    # in the user half, with the seeded charter. The second group's sentinel
+    # is absent because the user is not in it.
+    Case("group_memory", group=True),
+    # A shared room's CHANNEL.md (multiplayer D24), against `shared_room`,
+    # which it differs from in the seeded memory: several people write a
+    # shared room's notes, so they arrive fenced as untrusted content.
+    # `memory_present` is the private-room control and stays unfenced.
+    Case(
+        "shared_room_notes",
+        source_type="web",
+        conversation_token="web-room",
+        room=("#weekly", "web"),
+        shared=True,
+        memory=True,
+    ),
 )
 
 CASES_BY_NAME = {c.name: c for c in CASES}
@@ -609,6 +661,7 @@ def _build_task(case: Case) -> db.Task:
         prompt="Summarize what changed in my notes this week.",
         conversation_token=case.conversation_token,
         brain=case.brain,
+        is_group_chat=case.shared,
     )
     if case.confirmed:
         fields["confirmed_at"] = "2026-01-01T00:00:00Z"
@@ -767,7 +820,55 @@ def _seed_room(config: Config, case: Case) -> None:
             db.add_room_binding(
                 conn, case.conversation_token, "talk", case.room_talk_ref,
             )
+        if case.shared:
+            from istota import room_policy, room_scopes
+            from istota.skills._loader import load_skill_index
+
+            db.add_web_room_member(conn, case.conversation_token, OTHER_USER)
+            room_policy.ensure_policy(conn, case.conversation_token)
+            index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+            room_scopes.grant_scopes(
+                conn, case.conversation_token, USER,
+                [s for s in room_scopes.scope_names(index) if s not in ("files", "memory")],
+            )
+        if case.guest_turn:
+            db.upsert_room_participant(
+                conn, room_token=case.conversation_token, surface="talk",
+                surface_ref="guests/max", kind="guest",
+                display_name="Max GUEST_DISPLAY_NAME",
+            )
         conn.commit()
+
+
+#: In a group the case's user is not in; must appear in no prompt.
+NOT_MY_GROUP_SENTINEL = "NOT_MY_GROUP_SENTINEL"
+
+
+def _seed_groups(config: Config, case: Case) -> None:
+    if not case.group:
+        return
+    from istota import storage
+
+    with db.get_db(config.db_path) as conn:
+        db.create_group(conn, "family", kind="family",
+                        display_name="Example Family", created_by="operator")
+        db.add_group_member(conn, "family", USER, added_by="operator")
+        db.add_group_member(conn, "family", OTHER_USER, added_by="operator")
+        db.create_group(conn, "neighbours", kind="group",
+                        display_name="Neighbours", created_by="operator")
+        db.add_group_member(conn, "neighbours", OTHER_USER, added_by="operator")
+        conn.commit()
+    storage.ensure_group_directories(config, "family", display_name="Example Family")
+    path = config.workspace_path / "Groups" / "family" / "GROUP.md"
+    path.write_text(
+        path.read_text().replace(
+            "## Reference\n", "## Reference\n\n- The plumber is Ana.\n",
+        )
+    )
+    storage.ensure_group_directories(config, "neighbours", display_name="Neighbours")
+    (config.workspace_path / "Groups" / "neighbours" / "GROUP.md").write_text(
+        f"{NOT_MY_GROUP_SENTINEL}\n"
+    )
 
 
 def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
@@ -795,7 +896,18 @@ def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
     _seed_history(config, case)
     _seed_shared_credentials(config, case, monkeypatch)
     _seed_room(config, case)
+    _seed_groups(config, case)
     task = _build_task(case)
+    if case.guest_turn:
+        from istota.transport.ingest import guest_prompt
+
+        with db.get_db(config.db_path) as conn:
+            task.guest_participant_id = conn.execute(
+                "SELECT id FROM room_participants WHERE kind = 'guest'"
+            ).fetchone()[0]
+        # What `record_inbound` makes a guest's turn into: the name the guest
+        # chose is in the user half, fenced, and nowhere in the system half.
+        task.prompt = guest_prompt("Max GUEST_DISPLAY_NAME", USER, task.prompt)
 
     success, result, _actions, _trace = execute_task(task, config, [], dry_run=True)
     assert success, result
@@ -1583,3 +1695,98 @@ class TestThePushSurfacesAreInteractive:
         system, _user = split_halves(assemble(case, tmp_path, monkeypatch))
 
         assert "SKILLS_CHANGELOG_SENTINEL" in system
+
+
+class TestGroupMemoryThroughAssembly:
+    """The `## Group memory` block, through `execute_task`, where it must not
+    appear as well as where it must. `tests/test_group_recall.py` holds the
+    policy as a function; these hold the wiring."""
+
+    def test_it_is_retrieved_memory_in_the_user_half(self, tmp_path, monkeypatch):
+        system, user = split_halves(
+            assemble(CASES_BY_NAME["group_memory"], tmp_path, monkeypatch)
+        )
+        assert "## Group memory" in user
+        assert "### Example Family" in user
+        assert "The plumber is Ana." in user
+        assert "## Group memory" not in system
+        assert "The plumber is Ana." not in system
+        assert NOT_MY_GROUP_SENTINEL not in system + user
+
+    def test_a_guest_turn_carries_none(self, tmp_path, monkeypatch):
+        case = Case(
+            "group_guest_turn", source_type="talk", conversation_token="room-token",
+            room=("family", "talk"), shared=True, guest_turn=True, group=True,
+        )
+        rendered = assemble(case, tmp_path, monkeypatch)
+        assert "## Group memory" not in rendered
+        assert "The plumber is Ana." not in rendered
+
+    def test_a_shared_room_of_members_carries_it(self, tmp_path, monkeypatch):
+        # `shared` adds OTHER_USER, who is in `family` too; and the room
+        # withholds `memory`, which governs USER.md, not group material.
+        case = Case(
+            "group_shared_room", source_type="web", conversation_token="web-room",
+            room=("#home", "web"), shared=True, group=True,
+        )
+        _system, user = split_halves(assemble(case, tmp_path, monkeypatch))
+        assert "The plumber is Ana." in user
+
+    def test_an_exclude_memory_skill_carries_none(self, tmp_path, monkeypatch):
+        case = Case("group_briefing", source_type="briefing", group=True)
+        rendered = assemble(case, tmp_path, monkeypatch)
+        assert "## Group memory" not in rendered
+
+
+class TestSharedRoomNotesAreFenced:
+    """Multiplayer D24: a shared room's `CHANNEL.md` has several authors and
+    reaches every member's prompt, so it is fenced as untrusted content. A
+    private room's has one author and is left as it was."""
+
+    NOTE = "CHANNEL MEMORY: this room is for release notes."
+
+    def _fenced(self, user):
+        lowered = user.lower()
+        start = lowered.index("[untrusted room notes")
+        end = lowered.index("[end untrusted room notes]")
+        return start < user.index(self.NOTE) < end
+
+    def test_a_shared_rooms_notes_are_fenced(self, tmp_path, monkeypatch):
+        _system, user = split_halves(
+            assemble(CASES_BY_NAME["shared_room_notes"], tmp_path, monkeypatch)
+        )
+        assert "## Channel memory" in user
+        assert self._fenced(user)
+
+    def test_a_guest_turns_notes_are_fenced(self, tmp_path, monkeypatch):
+        case = Case(
+            "notes_guest_turn", source_type="talk", conversation_token="room-token",
+            room=("family", "talk"), shared=True, guest_turn=True, memory=True,
+        )
+        _system, user = split_halves(assemble(case, tmp_path, monkeypatch))
+        assert self._fenced(user)
+
+    @pytest.mark.parametrize("name,shared", [
+        ("shared_room_notes", True), ("memory_present", False),
+    ])
+    def test_recall_is_told_the_same_answer(self, tmp_path, monkeypatch, name, shared):
+        # Recall serves the channel namespace too (`_recall_memories`), so it
+        # is handed the predicate the block uses, through `execute_task`.
+        from istota import executor
+
+        seen = {}
+
+        def fake_recall(*_args, **kwargs):
+            seen["shared_channel"] = kwargs.get("shared_channel")
+            return None
+
+        monkeypatch.setattr(executor, "_recall_memories", fake_recall)
+        assemble(CASES_BY_NAME[name], tmp_path, monkeypatch)
+        assert seen["shared_channel"] is shared
+
+    def test_a_private_rooms_notes_are_not(self, tmp_path, monkeypatch):
+        _system, user = split_halves(
+            assemble(CASES_BY_NAME["memory_present"], tmp_path, monkeypatch)
+        )
+        assert self.NOTE in user
+        assert "untrusted room notes" not in user.lower()

@@ -13,6 +13,12 @@ Each room is a persistent conversation backed by its own per-surface channel tok
 
 Deleting a room is a hard, token-scoped cascade across `task_events`, `tasks`, `web_chat_messages`, and `channel_sleep_cycle_state`, plus a best-effort removal of the `Channels/<token>/` workspace folder. (Channel `memory_chunks` are a documented residual.)
 
+## Sharing a room
+
+The room's creator can add other Istota users under **Members** in the room settings. The add dialog says how many messages the new member will see, since they get the whole transcript. Only the creator adds or removes members; any other member can leave. A room bound to Talk takes its members from Talk instead.
+
+A room with more than one person is a [shared room](shared-rooms.md): the bot answers when addressed (`@name`, or its name as the first word) and records the rest, each member's private data stays out until they share it under **What you share here** (or with `!room share`), and settings that change the room for everyone are the host's. Each member's [side room](side-rooms.md) appears under the shared room in the sidebar. A room someone has switched off says so in a banner above the conversation, naming who switched it off.
+
 ## Sending a message
 
 **Enter** sends and **Shift+Enter** writes a newline; **Cmd/Ctrl+Enter** still sends, and so does the send button. On a phone or tablet the return key keeps inserting a newline — there is no cheap Shift there and the send button is already under your thumb. The key does nothing while a voice message is recording, while an attachment is still uploading, or while this room's send queue is full (see below), and never sends the Enter that commits an input-method candidate.

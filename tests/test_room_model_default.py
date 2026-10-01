@@ -96,10 +96,11 @@ class TestRecordInboundRoomDefault:
             db.add_room_binding(conn, "room1", "web", "room1")
             db.set_room_model_effort(conn, "room1", "claude-opus-4-8", "high")
         with db.get_db(db_path) as conn:
-            _tok, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="web", surface_ref="room1",
                 user_id="alice", text="hi", source_type="web",
             )
+            _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
         assert task.model == "claude-opus-4-8"
@@ -113,10 +114,11 @@ class TestRecordInboundRoomDefault:
             db.add_room_binding(conn, "tk123", "talk", "tk123")
             db.set_room_model_effort(conn, "tk123", "claude-opus-4-8", "high")
         with db.get_db(db_path) as conn:
-            _tok, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="talk", surface_ref="tk123",
                 user_id="alice", text="hi", channel_name="#room",
             )
+            _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
         assert task.model == "claude-opus-4-8"
@@ -128,11 +130,12 @@ class TestRecordInboundRoomDefault:
             db.add_room_binding(conn, "room1", "web", "room1")
             db.set_room_model_effort(conn, "room1", "claude-opus-4-8", "high")
         with db.get_db(db_path) as conn:
-            _tok, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="web", surface_ref="room1",
                 user_id="alice", text="hi", source_type="web",
                 model="claude-sonnet-4-6", effort=None,
             )
+            _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
         # Inline model present → room default (incl. its effort) does not bleed in.
@@ -147,11 +150,12 @@ class TestRecordInboundRoomDefault:
             db.add_room_binding(conn, "room1", "web", "room1")
             db.set_room_model_effort(conn, "room1", "claude-opus-4-8", "high")
         with db.get_db(db_path) as conn:
-            _tok, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="web", surface_ref="room1",
                 user_id="alice", text="hi", source_type="web",
                 model=None, effort=None, apply_room_default=False,
             )
+            _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
         assert (task.model or "") == ""
@@ -188,10 +192,11 @@ class TestRecordInboundRoomDefault:
             db.register_room(conn, "room1", "alice", origin="web")
             db.add_room_binding(conn, "room1", "web", "room1")
         with db.get_db(db_path) as conn:
-            _tok, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="web", surface_ref="room1",
                 user_id="alice", text="hi", source_type="web",
             )
+            _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
         assert (task.model or "") == ""
@@ -212,10 +217,11 @@ class TestRecordInboundRoomBrain:
             db.add_room_binding(conn, "room1", "web", "room1")
             db.set_room_brain(conn, "room1", "native")
         with db.get_db(db_path) as conn:
-            _tok, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="web", surface_ref="room1",
                 user_id="alice", text="hi", source_type="web",
             )
+            _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             assert db.get_task(conn, task_id).brain == "native"
 
@@ -225,10 +231,11 @@ class TestRecordInboundRoomBrain:
             db.add_room_binding(conn, "tk123", "talk", "tk123")
             db.set_room_brain(conn, "tk123", "native")
         with db.get_db(db_path) as conn:
-            _tok, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="talk", surface_ref="tk123",
                 user_id="alice", text="hi", channel_name="#room",
             )
+            _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             assert db.get_task(conn, task_id).brain == "native"
 
@@ -237,10 +244,11 @@ class TestRecordInboundRoomBrain:
             db.register_room(conn, "room1", "alice", origin="web")
             db.add_room_binding(conn, "room1", "web", "room1")
         with db.get_db(db_path) as conn:
-            _tok, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="web", surface_ref="room1",
                 user_id="alice", text="hi", source_type="web",
             )
+            _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             assert db.get_task(conn, task_id).brain is None
 
@@ -252,11 +260,12 @@ class TestRecordInboundRoomBrain:
             db.add_room_binding(conn, "room1", "web", "room1")
             db.set_room_brain(conn, "room1", "native")
         with db.get_db(db_path) as conn:
-            _tok, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="web", surface_ref="room1",
                 user_id="alice", text="hi", source_type="web",
                 brain="claude_code",
             )
+            _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             assert db.get_task(conn, task_id).brain == "claude_code"
 
@@ -279,11 +288,12 @@ class TestRecordInboundRoomBrain:
             db.set_room_brain(conn, "room1", "native")
             db.set_room_model_effort(conn, "room1", "claude-opus-4-8", "high")
         with db.get_db(db_path) as conn:
-            _tok, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="web", surface_ref="room1",
                 user_id="alice", text="hi", source_type="web",
                 model=None, effort=None, apply_room_default=False,
             )
+            _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
         assert task.brain == "native"
@@ -323,10 +333,11 @@ class TestRecordInboundRoomBrain:
             db.add_room_binding(conn, "room1", "web", "room1")
             db.set_room_brain(conn, "room1", "native")
         with db.get_db(db_path) as conn:
-            _tok, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="web", surface_ref="room1",
                 user_id="alice", text="hi", source_type="web", brain="",
             )
+            _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             assert db.get_task(conn, task_id).brain is None
 
@@ -343,10 +354,11 @@ class TestRecordInboundRoomBrain:
             db.set_room_brain(conn, "room1", "native")
             db.set_room_model_effort(conn, "room1", "claude-opus-4-8", "high")
         with db.get_db(db_path) as conn:
-            _tok, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="email", surface_ref="room1",
                 user_id="alice", text="hi", source_type="email",
             )
+            _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
         assert task.brain is None
@@ -361,17 +373,19 @@ class TestRecordInboundRoomBrain:
             db.add_room_binding(conn, "room1", "web", "room1")
             db.set_room_brain(conn, "room1", "native")
         with db.get_db(db_path) as conn:
-            _tok, first = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="web", surface_ref="room1",
                 user_id="alice", text="one", source_type="web",
             )
+            _tok, first = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             db.set_room_brain(conn, "room1", "claude_code")
         with db.get_db(db_path) as conn:
-            _tok, second = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="web", surface_ref="room1",
                 user_id="alice", text="two", source_type="web",
             )
+            _tok, second = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             assert db.get_task(conn, first).brain == "native"
             assert db.get_task(conn, second).brain == "claude_code"

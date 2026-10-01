@@ -16,7 +16,6 @@ turn is recorded there. That makes the user-row gate identical to the assistant-
 row gate `_store_room_turn` has always used.
 """
 
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -486,7 +485,7 @@ class TestAssistantBodyIsTheDeliveredReply:
         assert email_transcript_body("plain reply") == "plain reply"
 
     def test_the_deferred_file_no_longer_overrides_a_prose_result(
-        self, config, tmp_path,
+        self, config, tmp_path, make_task,
     ):
         """The deferred file holds the bytes mailed to a third party;
         `task.result` holds the bot's answer to its user. Substituting the first
@@ -499,7 +498,9 @@ class TestAssistantBodyIsTheDeliveredReply:
             email_transcript_body,
         )
 
-        task = SimpleNamespace(id=7, user_id="testuser", source_type="email")
+        # The real dataclass, so the double cannot fall behind `db.Task` again:
+        # a namespace missing a field the reader later grew is how this failed.
+        task = make_task(id=7, user_id="testuser", source_type="email")
         temp_dir = get_user_temp_dir(config, "testuser")
         temp_dir.mkdir(parents=True, exist_ok=True)
         path = temp_dir / "task_7_email_output.json"

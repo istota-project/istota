@@ -261,6 +261,110 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  // Multiplayer D4: a row for the reader's side room shows inline in the
+  // parent they are looking at, as a bubble only they see, and stays in the
+  // side room as the durable copy.
+  it('shows a side-room answer inline in its parent, marked as private', async () => {
+    vi.useFakeTimers();
+    const side = { ...room(2, 0, 're: Room 1'), side_of: 't1' };
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1), side] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init(); // room 1, the parent, is active
+    queueEvents([row(10, 't2', { text: 'your calendar is clear' })], 10);
+    await vi.advanceTimersByTimeAsync(2000);
+    const shown = get(s.messages).find((m) => m.text === 'your calendar is clear');
+    expect(shown?.ephemeral).toEqual({ roomToken: 't2', roomName: 're: Room 1' });
+    // No durable id in the parent: nothing that acts on one is offered there.
+    expect(shown?.msgId).toBeUndefined();
+    // The side room still counts it, since that is where it lives.
+    expect(get(s.rooms).find((r) => r.id === 2)!.unread_count).toBe(1);
+    s.teardown();
+  });
+
+  it('shows nothing inline from a side room of a room not on screen', async () => {
+    vi.useFakeTimers();
+    const side = { ...room(3, 0, 're: Room 2'), side_of: 't2' };
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2), side] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init(); // room 1 is active, not room 2
+    queueEvents([row(10, 't3', { text: 'private to room 2' })], 10);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(get(s.messages)).toHaveLength(0);
+    s.teardown();
+  });
+
+  it('claiming a hostless room takes the new policy into the room record', async () => {
+    const policy = { host: null, is_host: false, guest_reply: 'direct', settings_refusal: 'x' };
+    api.getChatRooms.mockResolvedValue({ rooms: [{ ...room(1), shared: true, policy }] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    api.claimRoomHost.mockResolvedValue({
+      outcome: 'claimed',
+      shared: true,
+      policy: { host: 'bob', is_host: true, guest_reply: 'direct', settings_refusal: null },
+    });
+    const s = await freshSession();
+    await s.init();
+    await s.claimHost(1);
+    expect(api.claimRoomHost).toHaveBeenCalledWith(1);
+    expect(get(s.rooms)[0].policy?.host).toBe('bob');
+    s.teardown();
+  });
+
+  it('a room list refresh carries a changed policy, so a lost host shows', async () => {
+    api.getChatRooms.mockResolvedValueOnce({
+      rooms: [{ ...room(1), shared: false, policy: null }],
+    });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    api.getChatRooms.mockResolvedValue({
+      rooms: [
+        {
+          ...room(1),
+          shared: true,
+          policy: { host: null, is_host: false, guest_reply: 'direct', settings_refusal: 'x' },
+        },
+      ],
+    });
+    await s.refreshRooms();
+    expect(get(s.rooms)[0].shared).toBe(true);
+    expect(get(s.rooms)[0].policy?.host).toBeNull();
+    s.teardown();
+  });
+
+  it('a room list refresh carries a room being switched off, and back on', async () => {
+    api.getChatRooms.mockResolvedValueOnce({ rooms: [{ ...room(1), off: null }] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    const off = {
+      at: '2026-09-30T10:00:00Z',
+      by: [{ name: 'Max', guest: true, agreed: false }],
+      way_back: 'To switch it back on, …',
+    };
+    api.getChatRooms.mockResolvedValueOnce({ rooms: [{ ...room(1), off }] });
+    await s.refreshRooms();
+    expect(get(s.rooms)[0].off?.by[0].name).toBe('Max');
+    api.getChatRooms.mockResolvedValueOnce({ rooms: [{ ...room(1), off: null }] });
+    await s.refreshRooms();
+    expect(get(s.rooms)[0].off).toBeNull();
+    s.teardown();
+  });
+
+  it('carries the server’s not-deletable mark onto the row', async () => {
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    queueEvents([row(10, 't1', { text: 'from bob', deletable: false })], 10);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(get(s.messages).find((m) => m.text === 'from bob')?.deletable).toBe(false);
+    s.teardown();
+  });
+
   it('does not ring a room for the user’s own mirrored turn', async () => {
     vi.useFakeTimers();
     api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2, 0)] });

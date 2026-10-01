@@ -88,7 +88,7 @@ import logging
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
-from istota.skill_host_paths import env_host_roots, resolve_in_roots
+from istota.skill_host_paths import env_host_roots, memory_refusal, resolve_in_roots
 
 log = logging.getLogger(__name__)
 
@@ -581,6 +581,9 @@ def _resolve_one(
     )
     if error is not None:
         return None, error
+    refusal = memory_refusal(resolved)
+    if refusal is not None:
+        return None, refusal
     return str(resolved), None
 
 

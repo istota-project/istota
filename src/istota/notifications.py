@@ -173,7 +173,8 @@ def effective_log_destinations(config: "Config", user_id: str):
                 continue
             seen.add(key)
             resolved.append(Destination(dest.surface, channel))
-        return resolved
+        from .transport.routing import refuse_shared_rooms
+        return refuse_shared_rooms(config, user_id, resolved, purpose="log")
     except Exception:
         logger.warning(
             "effective_log_destinations failed for user %s", user_id, exc_info=True,
@@ -312,7 +313,8 @@ def send_confirmation_prompt(
     """
     dests = resolve_destinations(config, user_id, "alert")
     return _dispatch(config, user_id, message, dests,
-                     conversation_token=conversation_token)
+                     conversation_token=conversation_token,
+                     purpose="confirmation")
 
 
 def _send_email(
@@ -670,6 +672,8 @@ def _dispatch(
     priority: int | None = None,
     tags: str | None = None,
     reference_id: str | None = None,
+    purpose: str = "notification",
+    task_room: str | None = None,
 ) -> tuple[bool, int | None]:
     """Deliver ``message`` to every resolved destination.
 
@@ -678,9 +682,31 @@ def _dispatch(
     Talk id is how a *reply* to it is matched). One loop, shared by
     :func:`send_notification` and :func:`send_confirmation_prompt`, so the two
     cannot disagree about what a destination list means.
-    """
-    from .async_runtime import run_coro
 
+    Every purpose here is the user's own, so no leg may post into a room more
+    than one human reads (`routing.refuse_shared_rooms`). A bare ``talk`` leg
+    is resolved to its room first so the refusal sees where it lands; a bare
+    ``web`` leg needs no check, because its resolver never picks a shared room.
+    ``task_room`` is the one exemption: a notice about a turn asked in that
+    room goes back to it, as a conversational reply would.
+    """
+    from dataclasses import replace
+
+    from .async_runtime import run_coro
+    from .transport.routing import refuse_shared_rooms
+
+    dests = refuse_shared_rooms(
+        config, user_id,
+        [
+            replace(d, channel=(
+                conversation_token or resolve_conversation_token(config, user_id)
+            ))
+            if d.surface == "talk" and not d.channel else d
+            for d in dests
+        ],
+        purpose=purpose,
+        conversation_token=task_room,
+    )
     sent = False
     talk_message_id: int | None = None
     # Rooms a `web` destination will write into anyway — a route naming both
@@ -775,6 +801,7 @@ def send_notification(
     priority: int | None = None,
     tags: str | None = None,
     reference_id: str | None = None,
+    task_room: str | None = None,
 ) -> bool:
     """Send a notification via an explicit surface or the user's routing table.
 
@@ -791,6 +818,9 @@ def send_notification(
         conversation_token: Talk room override for any *bare* talk destination
             (``talk`` with no explicit ``:token``); an explicit ``talk:<token>``
             in the descriptor (or a routed channel) keeps its own channel.
+        task_room: the room a task this notice is about was asked in. A room
+            more than one human reads is refused for every notification except
+            this one (`routing.refuse_shared_rooms`).
     """
     from .transport import parse_output_target
 
@@ -805,6 +835,8 @@ def send_notification(
         config, user_id, message, dests,
         conversation_token=conversation_token,
         title=title, priority=priority, tags=tags, reference_id=reference_id,
+        purpose=purpose or "notification",
+        task_room=task_room,
     )
 
     if not sent:

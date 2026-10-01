@@ -602,7 +602,7 @@ class TestThePathPrepend:
         prepend = str(runtime_inputs["user_temp_dir"] / ".developer")
         monkeypatch.setattr(
             "istota.skills._env.dispatch_setup_env_hooks",
-            lambda selected, index, ctx: {
+            lambda selected, index, ctx, **_: {
                 executor.HOOK_PATH_PREPEND_KEY: prepend,
                 "PLAIN_HOOK_VAR": "value",
             },

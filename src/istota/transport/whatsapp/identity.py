@@ -162,6 +162,76 @@ def normalize_jid(value: object) -> str:
     return f"{user}@{JID_USER_DOMAIN}"
 
 
+#: A WhatsApp group's server. A group JID is never an identity: it is a room
+#: binding's `surface_ref` (multiplayer D6), and the sender inside it is what
+#: resolves to a user.
+GROUP_JID_DOMAIN = "g.us"
+
+
+def normalize_group_jid(value: object) -> str:
+    """A group JID in the one spelling a room binding holds, or `""`.
+
+    Lowercased and bounded; the user part is digits, with the hyphen the
+    older `<creator>-<timestamp>` form carries. Anything else is not a group
+    this surface binds.
+    """
+    text = value if isinstance(value, str) else ""
+    text = text.strip().lower()
+    if not text or len(text) > _MAX_JID_CHARS:
+        return ""
+    user, sep, server = text.partition("@")
+    if not sep or server != GROUP_JID_DOMAIN or not user:
+        return ""
+    if not user.isascii() or not all(c.isdigit() or c == "-" for c in user):
+        return ""
+    return f"{user}@{GROUP_JID_DOMAIN}"
+
+
+def normalize_lid(value: object) -> str:
+    """A LID in one spelling, device suffix removed, or `""`.
+
+    Never an identity here — `normalize_jid` refuses the namespace — but the
+    stable ref a group participant whose number WhatsApp withholds is
+    recorded under, so it is a guest (D1) rather than unrecorded.
+    """
+    text = value if isinstance(value, str) else ""
+    text = text.strip().lower()
+    if not text or len(text) > _MAX_JID_CHARS:
+        return ""
+    user, sep, server = text.partition("@")
+    user = user.partition(":")[0]
+    if not sep or server != "lid" or not user or not user.isascii() or not user.isdigit():
+        return ""
+    return f"{user}@lid"
+
+
+def group_member_user(conn, jid: object) -> str | None:
+    """The istota user a group participant's phone JID belongs to, or None.
+
+    The Baileys arm of `resolve_inbound_identity`, read-only: the JID a user
+    is bound by, else the operator's bootstrap number for a row that has not
+    latched a JID yet. A group message or roster never latches, enrolls or
+    raises an alert — those belong to the direct chat, where the person
+    writes to the bot — and a number whose row already holds a *different*
+    JID is the recycled-line case and resolves to nobody. So does a row
+    whose identity another adapter established: the direct chat re-
+    establishes that principal from the number only with the cross-adapter
+    alert, so the group waits for that first direct message. Nobody resolved
+    means a guest (D1), which is also what a LID with no number is.
+    """
+    normalized = normalize_jid(jid)
+    if not normalized:
+        return None
+    bound = db.get_whatsapp_binding_by_jid(conn, normalized)
+    if bound is not None:
+        return bound.user_id
+    number = jid_number(normalized)
+    candidate = db.get_whatsapp_binding_by_phone(conn, number) if number else None
+    if candidate is None or candidate.jid or candidate.bsuid:
+        return None
+    return candidate.user_id
+
+
 def jid_number(jid: str) -> str:
     """The E.164 number a normalized JID names, or `""`.
 

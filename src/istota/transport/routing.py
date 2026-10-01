@@ -78,7 +78,9 @@ class Destination:
     mirror: bool = False
 
 
-def parse_output_target(spec: str | None) -> list[Destination]:
+def parse_output_target(
+    spec: str | None, *, task_id: int | None = None,
+) -> list[Destination]:
     """Parse an ``output_target`` string into destinations.
 
     Normalizes the legacy ``both`` / ``all`` aliases, splits on commas, and
@@ -92,6 +94,12 @@ def parse_output_target(spec: str | None) -> list[Destination]:
     ``_expand_room_destinations`` replaces at resolve time with the room's live
     bindings. Bare ``room`` means the task's own channel; the token form names
     the room explicitly, which is what a stored origin descriptor carries.
+
+    A ``group`` leaf, bare or ``group:<id>``, is dropped with a WARNING (groups
+    spec D8): a group is never a delivery target, and refusing it here rather
+    than in the registry means every validator that reads an empty parse as
+    "names nowhere" refuses it too. ``task_id`` only names the task in that
+    warning.
     """
     if spec is None:
         return []
@@ -113,6 +121,13 @@ def parse_output_target(spec: str | None) -> list[Destination]:
         # whole spec (handled above) and as a list leaf (e.g. a typo'd
         # "talk,none"); drop the leaf rather than emit an unknown-surface warning.
         if surface == "none":
+            continue
+        if surface == "group":
+            logger.warning(
+                "output target leaf %r dropped%s: a group is never a "
+                "delivery target",
+                token, f" for task {task_id}" if task_id is not None else "",
+            )
             continue
         channel = channel_raw.strip() if sep else None
         if channel == "":
@@ -808,12 +823,17 @@ def routed_notification_room(
 
     Existence, never creation: `None` when the route names no registered room,
     and then the mail stays task-only exactly as it did.
+
+    A room more than one human reads is skipped, as `refuse_shared_rooms`
+    refuses it for the notification itself: the mail is the user's, and naming
+    the room here records it there before any delivery rule runs.
     """
     try:
+        from .. import db
         from ..notifications import resolve_destinations
         for dest in resolve_destinations(config, user_id, "notification"):
             room = _room_for_destination(conn, config, user_id, dest)
-            if room:
+            if room and not db.room_is_shared(conn, room):
                 return room
     except Exception as e:  # pragma: no cover - never abort ingest
         logger.warning("notification room resolution failed for %s: %s", user_id, e)
@@ -1080,6 +1100,19 @@ def _resolve_one(
             return None
         channel = transport.resolve_target(task)
         if dest.channel and dest.channel != channel:
+            from .whatsapp.identity import normalize_group_jid
+
+            if normalize_group_jid(dest.channel):
+                # A room's WhatsApp group binding, reached by fan-out from a
+                # task that is not that group's own turn — a web turn in the
+                # group's room, a scheduled job naming it. A group is answered
+                # only from its own turns (multiplayer D6); falling through to
+                # the user's own chat would send it somewhere nobody asked.
+                logger.info(
+                    "Not delivering task %s into a WhatsApp group it was not "
+                    "asked in", getattr(task, "id", "?"),
+                )
+                return None
             # `whatsapp:<phone-or-id>` is refused rather than obeyed. The route
             # grammar must not become a way to send to an arbitrary contact, so
             # the binding wins always — said out loud rather than rewritten in
@@ -1162,6 +1195,82 @@ def _reply_origin_destination(
     return Destination("talk", channel, "push")
 
 
+def refuse_shared_rooms(
+    config: "Config", user_id: str, dests: list[Destination], *,
+    purpose: str, conversation_token: str | None = None,
+) -> list[Destination]:
+    """``dests`` without any leg that posts into a room more than one human
+    reads (multiplayer Stage 15, SG 10).
+
+    A shared room is not a destination for a user's personal content, however
+    it came to be named: an ``output_target``, a routing descriptor, or an
+    ``alerts_channel`` / ``log_channel`` that gained a second reader after it
+    was set. Each refusal is one WARNING naming the room and the purpose, and
+    the rest of the list survives. Nothing is redirected: the caller's own
+    fallback, if it has one, decides what happens to an emptied list.
+
+    ``conversation_token`` is the room the caller's task ran in. A leg into
+    that room is a conversational reply and is kept, because the disclosure
+    gate (`room_scopes.task_withheld_scopes`) keys on exactly that room, so the
+    answer was produced at the reach the room allows. Any other shared room
+    would receive output produced at the reach of somewhere else.
+
+    Fails toward refusal: a registry that cannot be read refuses every room
+    leg, since a room that cannot be checked cannot be shown private. A
+    database with no registry at all is not that case: it holds no room.
+    """
+    from pathlib import Path
+
+    from .. import db
+
+    legs = [
+        d for d in dests
+        if d.kind != "stream" and d.channel and d.channel != "stream"
+        and is_room_member(d.surface)
+    ]
+    if not legs or not config.db_path or not Path(config.db_path).exists():
+        return list(dests)
+    refused: dict[tuple[str, str | None], str] = {}
+    try:
+        with db.get_db(config.db_path) as conn:
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rooms'"
+            ).fetchone() is None:
+                # A database with no room registry holds no room to refuse.
+                return list(dests)
+            own = None
+            if conversation_token:
+                own = (
+                    conversation_token
+                    if db.get_room(conn, conversation_token) is not None
+                    else db.find_room_token_by_ref(conn, conversation_token)
+                )
+            for d in legs:
+                room = _canonical_room_token(
+                    conn, d.surface, d.channel, cross_surface=False,
+                )
+                if room and room != own and db.room_is_shared(conn, room):
+                    refused[(d.surface, d.channel)] = room
+    except Exception as e:
+        logger.warning(
+            "could not read the room registry for %s delivery (user %s); "
+            "refusing every room leg: %s", purpose, user_id, e,
+        )
+        refused = {(d.surface, d.channel): d.channel for d in legs}
+    kept = []
+    for d in dests:
+        room = refused.get((d.surface, d.channel))
+        if room is None:
+            kept.append(d)
+            continue
+        logger.warning(
+            "Refusing %s delivery for user %s into shared room %s (%s:%s): "
+            "more than one human reads it",
+            purpose, user_id, room, d.surface, d.channel,
+        )
+    return kept
+
+
 def resolve_delivery_plan(
     config: "Config", task: "db.Task", registry: "TransportRegistry | None",
 ) -> list[Destination]:
@@ -1176,7 +1285,7 @@ def resolve_delivery_plan(
     to ``None``. Never raises into the caller.
     """
     spec = task.output_target
-    plan = parse_output_target(spec)
+    plan = parse_output_target(spec, task_id=task.id)
     if not plan and (spec is None or not spec.strip()):
         plan = _infer_default_plan(task)
 
@@ -1208,9 +1317,29 @@ def resolve_delivery_plan(
         seen.add(key)
         resolved.append(r)
 
+    # A side room's output never reaches its parent (multiplayer D4); posting
+    # there is the held `room post` verb. Before the shared-room refusal, which
+    # would otherwise drop the parent first and leave the pin nothing to
+    # substitute the side room for.
+    from ..side_rooms import pin_plan
+    resolved = pin_plan(config, task, resolved)
+
+    # Only the room the task ran in may receive it if that room is shared. A
+    # briefing has no such room: its blocks are assembled daemon-side from the
+    # user's own sources, which no room gate reaches.
+    resolved = refuse_shared_rooms(
+        config, task.user_id, resolved,
+        purpose=task.source_type or "task",
+        conversation_token=(
+            None if task.source_type == "briefing" else task.conversation_token
+        ),
+    )
+
+    # Last, so an interactive reply is never eaten. It names the task's own
+    # origin, which neither rule above refuses: not a side room's parent, and
+    # the room the task ran in.
     if not resolved and task.source_type in _INTERACTIVE_SOURCE_TYPES:
         fb = _reply_origin_destination(config, task)
         if fb is not None:
             resolved.append(fb)
-
     return resolved

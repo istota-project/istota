@@ -75,6 +75,8 @@ function roomedLeaf(descriptor: string): { surface: string; room: string } | nul
 export interface RouteOption {
   value: string;
   label: string;
+  /** Shown but not choosable: a room the save would refuse. */
+  disabled?: boolean;
 }
 
 /** A room a `web:<token>` route may name, as the server reports it. */
@@ -83,7 +85,7 @@ export interface WebRoom {
   name: string;
   /** A bare `web` route lands here. */
   default: boolean;
-  /** Somebody else is in it. */
+  /** Another human reads it, a Talk guest included. The save refuses it. */
   shared: boolean;
   /** The user's machine-owned log or alerts room. */
   channel: boolean;
@@ -99,6 +101,8 @@ export interface TalkRoom {
   name: string;
   /** One of the two the bot provisioned for this user. */
   channel: boolean;
+  /** Another human reads it. The save refuses it. Absent on an older server. */
+  shared?: boolean;
 }
 
 /**
@@ -148,11 +152,14 @@ export function routeOptions(
  * on. When the server names none the user has no room that qualifies and
  * delivery will make one, so the option says only "Default room".
  *
- * A shared or machine-owned room is offered and marked. The server refuses both
- * as the *implicit* default — an alert delivered into a room another person
- * reads is delivered in front of them — but pinning one is a deliberate choice,
- * and the mark is what makes it an informed one. A `current` that is not among
- * them is kept for the same reason `routeOptions` keeps a withdrawn surface.
+ * A machine-owned room is offered and marked: the server refuses it as the
+ * *implicit* default, but pinning one is a deliberate choice. A shared room is
+ * listed, marked and disabled: delivery drops personal content in a room
+ * another person reads, so the save refuses it too (multiplayer Stage 17), and
+ * the option says why it cannot be picked rather than vanishing. A `current`
+ * that is not among them is kept for the same reason `routeOptions` keeps a
+ * withdrawn surface, and so is a `current` on a room that became shared after
+ * it was pinned: still selected, still marked, so the user sees the pin is dead.
  *
  * `unavailable` is the server's list of this profile's own pins that will
  * swallow a delivery, and a `current` on it is marked (ISSUE-478). It is a
@@ -218,8 +225,9 @@ export function webRoomOptions(
  *
  * A conversation the bot provisioned is marked, on the same reasoning as the
  * web picker's machine-owned rooms: pinning one is allowed and worth knowing
- * about. There is no `shared` mark — a Talk conversation is shared by
- * definition, and marking every entry says nothing.
+ * about. A conversation another human reads is marked and disabled, as the web
+ * picker's shared room is. That is not every Talk conversation: the bot is not
+ * a human, so a conversation between the user and the bot is not shared.
  *
  * A `current` the list does not carry is kept, as `routeOptions` keeps a
  * withdrawn surface: an operator-set token for a conversation the room registry
@@ -243,7 +251,7 @@ export function talkRoomOptions(
  * conversations can share a tail — a Nextcloud id is eight characters, so the
  * six-character hint leaves a genuine collision available — and a label that is
  * still ambiguous falls back to the token, which is unique by definition. */
-function roomOptions<T extends { token: string; name: string }>(
+function roomOptions<T extends { token: string; name: string; shared?: boolean }>(
   rooms: T[],
   current: string,
   emptyLabel: string,
@@ -257,10 +265,16 @@ function roomOptions<T extends { token: string; name: string }>(
 
   const out: RouteOption[] = [{ value: '', label: emptyLabel }];
   for (const r of rooms) {
-    if ((plain.get(label(r)) ?? 0) < 2) out.push({ value: r.token, label: label(r) });
+    let text: string;
+    if ((plain.get(label(r)) ?? 0) < 2) text = label(r);
     else if ((hinted.get(label(r, tokenHint(r.token))) ?? 0) < 2)
-      out.push({ value: r.token, label: label(r, tokenHint(r.token)) });
-    else out.push({ value: r.token, label: label(r, r.token) });
+      text = label(r, tokenHint(r.token));
+    else text = label(r, r.token);
+    // The pinned value stays choosable, so the select can still show it.
+    const refused = isShared(r) && r.token !== current;
+    out.push(
+      refused ? { value: r.token, label: text, disabled: true } : { value: r.token, label: text },
+    );
   }
   if (current && !rooms.some((r) => r.token === current))
     out.push({ value: current, label: unknownLabel(current) });
@@ -331,18 +345,25 @@ function defaultRoomLabel(rooms: WebRoom[]): string {
   return `Default room (${name})`;
 }
 
-/** What the room is, beyond its name. At most one — a channel room is the bot's
- * whether or not anyone else is in it. */
+/** What the room is, beyond its name. At most one, and `shared` wins: it is the
+ * reason the option is disabled, which matters more than whose channel it is. */
 function webRoomMarks(room: WebRoom): string[] {
+  if (room.shared) return [SHARED_MARK];
   if (room.channel) return ["bot's own channel"];
-  if (room.shared) return ['shared'];
   return [];
 }
 
-/** The same, for a Talk conversation. Only the one mark: every Talk
- * conversation is shared, so a `shared` mark on all of them says nothing. */
+/** The same, for a Talk conversation. */
 function talkRoomMarks(room: TalkRoom): string[] {
+  if (room.shared) return [SHARED_MARK];
   return room.channel ? ["bot's own channel"] : [];
+}
+
+/** With the option disabled, the mark is the reason it cannot be picked. */
+const SHARED_MARK = 'shared';
+
+function isShared(room: { shared?: boolean }): boolean {
+  return room.shared === true;
 }
 
 /** The tail of a room token. The tail rather than the head because a web room's

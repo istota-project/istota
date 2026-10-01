@@ -2791,6 +2791,40 @@ export interface ChatRoom {
    * row's stamp can be written straight onto the room. Absent on older
    * backends → the room keeps whatever position the server gave it. */
   last_activity?: string;
+  /** For a side room (multiplayer D4), the token of the shared room it is the
+   * caller's private companion of. null for every other room. */
+  side_of?: string | null;
+  /** More than one human reads this room, a Talk guest included. */
+  shared?: boolean;
+  /** The policy of a shared room; null for a room one human reads and for a
+   * side room. */
+  policy?: RoomPolicyView | null;
+  /** Set while the room is switched off (multiplayer D8): nothing in it is
+   * recorded or answered. null while it is on. */
+  off?: RoomOffView | null;
+}
+
+export interface RoomOffView {
+  at: string;
+  /** Everyone who switched it off, in order; empty when the bot was removed
+   * from a WhatsApp group, which does not say by whom. `agreed` is a vetoer
+   * who has since asked for it back on. */
+  by: { name: string; guest: boolean; agreed: boolean }[];
+  /** The server's own sentence saying how to switch it back on. */
+  way_back: string;
+}
+
+/** How guests' turns are answered (multiplayer D11). */
+export type GuestReply = 'off' | 'held' | 'direct';
+
+export interface RoomPolicyView {
+  /** The host's user id, or null once the room has lost its host. */
+  host: string | null;
+  is_host: boolean;
+  guest_reply: GuestReply;
+  /** Why the caller may not change the room-wide settings, or null when they
+   * may. The server's own refusal text, so it is shown verbatim. */
+  settings_refusal: string | null;
 }
 
 export interface ChatConfig {
@@ -2894,6 +2928,10 @@ export interface ChatHistoryMessage {
   // The email's subject line, lifted out of the wrapper the display body
   // strips. What a collapsed external turn shows in place of the body.
   subject?: string;
+  // False on a row in a shared room that is not the viewer's to delete — the
+  // delete endpoint's own owner rule, asked ahead of time. Absent means the
+  // endpoint would accept it.
+  deletable?: boolean;
 }
 
 /** Cross-room aggregate views (sidebar All / Unread / Starred). */
@@ -2953,6 +2991,10 @@ export interface SendResult {
   command_data?: Record<string, unknown> | null;
   stream_url?: string;
   error?: string;
+  // The speech gate stored the turn and nobody is answering it: no task, no
+  // stream. `message_id` is the stored row's canonical id.
+  recorded?: boolean;
+  message_id?: number;
 }
 
 export interface TaskEventDTO {
@@ -3125,6 +3167,8 @@ export interface RoomPatch {
   brain?: string | null;
   /** A `ROOM_COLORS` name, or null to clear. Absent leaves it untouched. */
   color?: string | null;
+  /** Host only, like the other room-wide settings. */
+  guest_reply?: GuestReply;
 }
 
 /** The PATCH response is the room, plus one field that is not room state:
@@ -3195,6 +3239,108 @@ export async function deleteChatRoom(id: number): Promise<{ status: string }> {
   if (resp.status === 404) return { status: 'gone' };
   if (!resp.ok) throw new Error(`API error: ${resp.status}`);
   return resp.json();
+}
+
+/** `!room host` from the web: claim a room that has lost its host. A present
+ * host is never replaced, which the server answers with 409. */
+export function claimRoomHost(
+  id: number,
+): Promise<{ outcome: string; shared: boolean; policy: RoomPolicyView | null }> {
+  return apiFetch(`/chat/rooms/${id}/host`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+export interface RoomMember {
+  user_id: string;
+  display_name: string;
+  is_owner: boolean;
+}
+
+export interface RoomMembers {
+  members: RoomMember[];
+  /** Only the creator manages membership, and never of a Talk-backed room. */
+  can_manage: boolean;
+  /** Transcript rows an add discloses to the new member. */
+  message_count: number;
+}
+
+export function getRoomMembers(id: number): Promise<RoomMembers> {
+  return apiFetch<RoomMembers>(`/chat/rooms/${id}/members`);
+}
+
+/** `acknowledge_history` is the creator's statement that the whole transcript
+ * is disclosed; the endpoint refuses an add without it. */
+export function addRoomMember(id: number, userId: string): Promise<{ member: RoomMember }> {
+  return apiFetch(`/chat/rooms/${id}/members`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_id: userId, acknowledge_history: true }),
+  });
+}
+
+export async function removeRoomMember(id: number, userId: string): Promise<void> {
+  const resp = await fetch(`${base}/api/chat/rooms/${id}/members/${encodeURIComponent(userId)}`, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+  });
+  if (!resp.ok) throw new Error(await errorMessage(resp));
+}
+
+export interface DirectoryUser {
+  user_id: string;
+  display_name: string;
+}
+
+export function getChatUsers(): Promise<{ users: DirectoryUser[] }> {
+  return apiFetch('/chat/users');
+}
+
+/** Whether a member's grants decide anything right now: `active`, or one of the
+ * three reasons they do not. */
+export type GrantState = 'active' | 'private' | 'guests_present' | 'policy_off';
+
+export interface RoomGrants {
+  scopes: { name: string; granted: boolean }[];
+  state: GrantState;
+}
+
+/** The caller's own grants. The API takes no user id: a grant is its writer's. */
+export function getRoomGrants(id: number): Promise<RoomGrants> {
+  return apiFetch<RoomGrants>(`/chat/rooms/${id}/grants`);
+}
+
+/** Replace the caller's grants in this room with exactly `scopes`. */
+export function putRoomGrants(id: number, scopes: string[]): Promise<RoomGrants> {
+  return apiFetch<RoomGrants>(`/chat/rooms/${id}/grants`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scopes }),
+  });
+}
+
+/** The group a room is linked to (multiplayer Stage 27). `choices` are the
+ * caller's own groups, and empty unless the caller may set the link. */
+export interface RoomGroupLink {
+  group_id: string | null;
+  group_name: string | null;
+  can_set: boolean;
+  refusal: string | null;
+  choices: { group_id: string; display_name: string }[];
+}
+
+export function getRoomGroup(id: number): Promise<RoomGroupLink> {
+  return apiFetch<RoomGroupLink>(`/chat/rooms/${id}/group`);
+}
+
+/** Link the room to one of the caller's groups, or `null` to unlink it. */
+export function putRoomGroup(id: number, groupId: string | null): Promise<RoomGroupLink> {
+  return apiFetch<RoomGroupLink>(`/chat/rooms/${id}/group`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupId }),
+  });
 }
 
 /** A room's `CHANNEL.md` — the standing instructions every task in the room
@@ -3466,7 +3612,14 @@ export async function sendChatMessage(
     // `data` spread first: the endpoint's own payload carries a `status`
     // ("pending"), which would otherwise shadow the numeric HTTP status this
     // type promises — and that status is now rendered to the user on failure.
-    return { ...data, ok: true, status: resp.status };
+    // The one payload status the caller needs is "recorded", so it gets a
+    // field of its own before the shadowing.
+    return {
+      ...data,
+      ...(data.status === 'recorded' ? { recorded: true } : {}),
+      ok: true,
+      status: resp.status,
+    };
   } catch {
     // A rejection here is the network, never the server: connection refused,
     // DNS, a dropped socket, a stalled body, or our own abort. There is no

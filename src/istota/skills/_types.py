@@ -87,6 +87,11 @@ class SkillMeta:
     exclude_memory: bool = False
     exclude_persona: bool = False
     cli: bool = False  # skill has a CLI (istota-skill <name>)
+    # Whether a task in a room more than one human reads may use this skill
+    # without the sender's grant (`room_scopes`). "safe" only for a skill shown
+    # to read nothing user-specific; anything else, including a value the loader
+    # does not recognise, is "private", so a skill added later fails closed.
+    shared_room: str = "private"
     # Experimental skill — operator must opt in via the matching
     # ``skill_<name>`` entry in ``[experimental] features``. Filtered out of
     # ``select_skills`` otherwise.

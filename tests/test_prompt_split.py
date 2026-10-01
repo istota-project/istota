@@ -301,16 +301,17 @@ class TestNoSystemLinePointsAtTheUserHalf:
         assert "\nCurrent UTC: " not in halves.user
         assert "The `Current UTC` line above is your reference" in halves.system
 
-    def test_the_group_conversation_line_no_longer_points_below(self, tmp_path):
-        """Its referent is conversation context, which is in the other half.
+    def test_the_room_card_is_in_the_system_half_and_points_nowhere(self, tmp_path):
+        """The card that replaced the group-conversation line (multiplayer D7).
 
-        Classification cannot answer this one, so the wording does.
+        That line named conversation context, which is in the other half; the
+        card names only what it states itself, and the sweep below would catch
+        a positional word. Here the placement is asserted.
         """
         group = _assemble(tmp_path, task=_task(is_group_chat=True))
-        line = "This is a group conversation. You were @mentioned by 'alice'."
-        assert line in group.system
-        assert "Other participants' messages are visible in conversation context." in group.system
-        assert "visible in conversation context below" not in group.system
+        assert "\nShared room: everything you post here is read by everyone" in group.system
+        assert "Shared room:" not in group.user
+        assert "@mentioned" not in group.system
 
     def test_no_dangling_pointer_survives_in_the_system_half(self, halves):
         """A sweep, so the next referent added is caught before a golden is.

@@ -1,4 +1,4 @@
-"""Memory skill CLI — runtime writes to USER.md / CHANNEL.md.
+"""Memory skill CLI — runtime writes to USER.md / CHANNEL.md / GROUP.md.
 
 Single write path through the curation ops engine (`apply_ops`). Used by the
 always-included memory skill so durable memory writes don't bypass heading
@@ -22,11 +22,18 @@ Each write subcommand can target the channel memory file by passing
 when set, to refuse cross-channel writes from a runtime task that's
 been scoped to a different conversation.
 
-Both documents live under a directory `build_bwrap_cmd` binds **read-write**
+`--group ID` targets `{mount}/Groups/{ID}/GROUP.md` instead. There is no
+environment variable naming the group, so the gate asks the database: the
+caller is a current member and the group is in the task's resolved set
+(`skills/_group_access`, the rule `kv --group` uses too, multiplayer D21).
+Group writes are audited into the group's own store, since the file has
+several authors.
+
+All three documents live under a directory `build_bwrap_cmd` binds **read-write**
 into a sandbox, while this CLI runs host-side and unsandboxed with the daemon's
 filesystem view. So neither the path nor the file at the end of it is trusted
 (ISSUE-339): the directory is resolved and checked against the user's own root
-(or `{mount}/Channels`) before use, and the read refuses a symlink, a FIFO or an
+(or `{mount}/Channels`, `{mount}/Groups`) before use, and the read refuses a symlink, a FIFO or an
 oversized file rather than following it. `_user_md_path` and `_read_text` carry
 the reasoning.
 
@@ -44,6 +51,8 @@ Env vars used:
   ISTOTA_BOT_DIR_NAME       Bot directory name (e.g. "istota").
   ISTOTA_TASK_ID            Optional, used in audit log entries.
   ISTOTA_CONVERSATION_TOKEN Optional, used to validate --channel.
+  ISTOTA_DB_PATH            The audit store, and the --group membership check.
+  ISTOTA_TASK_GROUPS        The task's resolved group set, for --group.
 """
 
 from __future__ import annotations
@@ -58,9 +67,16 @@ from typing import NamedTuple
 
 from istota.atomic_write import write_text_atomic
 from istota.skills._cli import emit, error_envelope, parse_and_resolve, status_exit_code
+from istota.skills._group_access import (
+    GROUP_MEMORY_LABEL,
+    group_access_denied,
+    group_refusal,
+)
+from istota.untrusted import frame_untrusted
 from istota.user_scope import is_scopable_user_id
 from istota.memory.curation.audit import (
     write_audit_log,
+    write_group_audit_log,
     write_last_seen,
 )
 from istota.memory.curation.file_lock import (
@@ -75,6 +91,7 @@ from istota.memory.curation.parser import (
 )
 from istota.skills._loader import (
     OVERLAY_NOT_UTF8,
+    contained_group_dir,
     contained_overlay_dir,
     read_overlay_bytes,
 )
@@ -83,6 +100,7 @@ from istota.skills._loader import (
 #: with different audit rules is one answer too many for one.
 _USER = "user"
 _CHANNEL = "channel"
+_GROUP = "group"
 
 #: Ceiling on what this CLI will read back before editing, matching the
 #: daemon's own `storage.USER_CONFIG_READ_CAP_BYTES`.
@@ -243,14 +261,43 @@ def _channel_md_path(token: str) -> Path:
     return resolved / "CHANNEL.md"
 
 
+def _group_md_path(group_id: str) -> Path:
+    """GROUP.md under `{mount}/Groups/{group_id}`, for a caller allowed there.
+
+    The gate first, so a refused caller learns nothing from a containment
+    error about a group they cannot reach. Then `_channel_md_path`'s rule: the
+    directory is bound read-write into every member's sandbox, so it must
+    resolve to exactly `realpath({mount}/Groups)/{group_id}` — "under the root"
+    would let a link at `Groups/<id>` land the write on another group's file.
+    The rule is `_loader.contained_group_dir`, which the daemon's own read and
+    write of the file use.
+    """
+    if group_access_denied(group_id):
+        _err(group_refusal(group_id))
+        sys.exit(1)
+    groups = _mount_path() / "Groups"
+    resolved = contained_group_dir(groups, group_id)
+    if resolved is None:
+        _err("group_dir_outside_group_root", path=_mount_relative(groups / group_id))
+        sys.exit(1)
+    return resolved / "GROUP.md"
+
+
 class Target(NamedTuple):
     path: Path
     kind: str
+    group_id: str | None = None
 
 
 def _resolve_target(args, *, verb: str) -> Target:
-    """Resolve the write/read destination from `--channel`."""
+    """Resolve the write/read destination from `--channel` or `--group`."""
     token = getattr(args, "channel", None)
+    group_id = getattr(args, "group", None)
+    if token and group_id is not None:
+        _err("--group and --channel are mutually exclusive")
+        sys.exit(1)
+    if group_id is not None:
+        return Target(_group_md_path(group_id), _GROUP, group_id)
     if token:
         return Target(_channel_md_path(token), _CHANNEL)
     return Target(_user_md_path(), _USER)
@@ -352,15 +399,26 @@ def _mount_relative(path: Path) -> str:
 
 def _audit_for(args, op: dict, outcome_or_reason: str, *,
                target: Target, applied: bool) -> None:
-    """Write a JSONL audit entry for a runtime CLI write.
+    """Write an audit entry for a runtime CLI write.
 
-    USER.md only. Channel-memory writes are not audited — CHANNEL.md has no
-    nightly curator and the audit module only knows about USER.md paths.
+    USER.md writes go to the user's trail. GROUP.md writes go to the group's
+    own, recording who wrote and from which task, since the file has several
+    authors. Channel-memory writes are not audited — CHANNEL.md has no nightly
+    curator and no audit trail.
     """
     if target.kind == _CHANNEL:
         return
     config = _config_for_audit()
     user_id = _user_id()
+    entries = [{"op": op, "outcome": outcome_or_reason}] if applied else []
+    rejects = [] if applied else [{"op": op, "reason": outcome_or_reason}]
+    if target.kind == _GROUP:
+        write_group_audit_log(
+            config, target.group_id, user_id,
+            task_id=os.environ.get("ISTOTA_TASK_ID") or None,
+            applied=entries, rejected=rejects,
+        )
+        return
     size = None
     extra = None
     # `target.path` **is** the USER.md path, already resolved once by
@@ -383,8 +441,6 @@ def _audit_for(args, op: dict, outcome_or_reason: str, *,
         extra = {"user_md_read_refused": reason}
     elif raw:
         size = len(raw)
-    entries = [{"op": op, "outcome": outcome_or_reason}] if applied else []
-    rejects = [] if applied else [{"op": op, "reason": outcome_or_reason}]
     write_audit_log(
         config, user_id,
         applied=entries,
@@ -412,15 +468,26 @@ def _update_last_seen(path: Path, text: str, target: Target) -> None:
     )
 
 
-def _lock_dir() -> Path | None:
+def _lock_dir(target: Target) -> Path | None:
     """Shared anchor dir for the runtime CLI.
 
-    Use the per-user deferred dir (`ISTOTA_DEFERRED_DIR`) so the anchor is the
+    GROUP.md takes the default anchor in the system temp dir: its writers are
+    several users, each with their own deferred dir, so a per-user anchor
+    would let two members' read-modify-writes interleave and drop one. Today
+    every writer is this CLI, spawned host-side by the skill proxy inside the
+    scheduler (the membership check needs the database, which no sandbox has),
+    and no curator writes the file. The anchor is per systemd unit, not per
+    host (`PrivateTmp=true`), so a GROUP.md writer in another process, such as
+    a web editor, needs a shared local anchor instead.
+
+    Otherwise use the per-user deferred dir (`ISTOTA_DEFERRED_DIR`) so the anchor is the
     same inode whether this CLI runs host-side under the skill proxy or inside
     the bwrap sandbox (the deferred dir is bind-mounted in), matching the
     nightly curator's anchor. Falls back to the system-temp default for ad-hoc
     CLI runs with no task env (no concurrent curator to coordinate with then).
     """
+    if target.kind == _GROUP:
+        return None
     deferred = os.environ.get("ISTOTA_DEFERRED_DIR", "")
     return deferred_lock_dir(Path(deferred)) if deferred else None
 
@@ -429,7 +496,7 @@ def _do_op(args, op_dict: dict, *, verb: str) -> int:
     target = _resolve_target(args, verb=verb)
     path = target.path
     try:
-        with memory_md_lock(path, timeout_seconds=5.0, lock_dir=_lock_dir()):
+        with memory_md_lock(path, timeout_seconds=5.0, lock_dir=_lock_dir(target)):
             current = _read_text(path)
             doc = parse_sectioned_doc(current)
             new_doc, applied, rejected = apply_ops(doc, [op_dict])
@@ -580,6 +647,36 @@ def cmd_remove_subheading(args) -> int:
     )
 
 
+def _channel_notes_shared() -> bool:
+    """The prompt's D24 rule for the calling task's room, read host-side.
+
+    Anything unanswerable (no database, no task row, a read error) reads as
+    shared: a fence on a private room's notes costs a marker.
+    """
+    from istota import db
+    from istota.room_scopes import channel_notes_shared
+
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+    if not db_path or not Path(db_path).is_file():
+        return True
+    try:
+        with db.get_db(Path(db_path)) as conn:
+            task = None
+            task_id = os.environ.get("ISTOTA_TASK_ID", "")
+            if task_id.isdigit():
+                task = db.get_task(conn, int(task_id))
+            if task is None:
+                return True
+            return channel_notes_shared(
+                conn, task.conversation_token,
+                guest_turn=task.guest_participant_id is not None,
+                is_group_chat=bool(task.is_group_chat),
+            )
+    except Exception as exc:  # noqa: BLE001 — fail toward the fence
+        logger.warning("memory: could not tell whether the room is shared: %s", exc)
+        return True
+
+
 def cmd_show(args) -> int:
     _refuse_retired_skill_flag(args)
     target = _resolve_target(args, verb="show")
@@ -597,9 +694,15 @@ def cmd_show(args) -> int:
         # output round-trippable.
         from istota.memory.curation.types import SectionedDoc
         sub = SectionedDoc(preamble=[], sections=[section])
-        body = serialize_sectioned_doc(sub)
-        print(body, end="" if body.endswith("\n") else "\n")
-        return 0
+        text = serialize_sectioned_doc(sub)
+    if target.kind == _GROUP:
+        # Several members write GROUP.md, so it reaches the model fenced, as
+        # the prompt block and `kv --group` do (multiplayer D22).
+        text = frame_untrusted(text, GROUP_MEMORY_LABEL)
+    elif target.kind == _CHANNEL and _channel_notes_shared():
+        from istota.room_scopes import CHANNEL_NOTES_LABEL
+
+        text = frame_untrusted(text, CHANNEL_NOTES_LABEL)
     print(text, end="" if text.endswith("\n") else "\n")
     return 0
 
@@ -619,14 +722,18 @@ def cmd_headings(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m istota.skills.memory",
-        description="Runtime memory writes (USER.md / CHANNEL.md)",
+        description="Runtime memory writes (USER.md / CHANNEL.md / GROUP.md)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    def _add_channel_flag(p: argparse.ArgumentParser) -> None:
+    def _add_target_flags(p: argparse.ArgumentParser) -> None:
         p.add_argument(
             "--channel",
             help="Target /Channels/<token>/CHANNEL.md instead of USER.md.",
+        )
+        p.add_argument(
+            "--group",
+            help="Target /Groups/<id>/GROUP.md instead of USER.md.",
         )
 
     def _add_retired_skill_flag(p: argparse.ArgumentParser) -> None:
@@ -655,32 +762,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--subheading",
         help="Append under this `### subheading` of the heading instead of the top region.",
     )
-    _add_channel_flag(p_app)
+    _add_target_flags(p_app)
     _add_retired_skill_flag(p_app)
 
     p_add = sub.add_parser("add-heading", help="Add a new heading with one or more bullets.")
     p_add.add_argument("--heading", required=True)
     p_add.add_argument("--line", action="append", required=True,
                        help="Bullet line; pass multiple times for multiple bullets.")
-    _add_channel_flag(p_add)
+    _add_target_flags(p_add)
     _add_retired_skill_flag(p_add)
 
     p_rm = sub.add_parser("remove", help="Remove a bullet under a heading (unique substring).")
     p_rm.add_argument("--heading")
     p_rm.add_argument("--match", required=True)
-    _add_channel_flag(p_rm)
+    _add_target_flags(p_rm)
     _add_retired_skill_flag(p_rm)
 
     p_rep = sub.add_parser("replace", help="Rewrite the single matching bullet in place.")
     p_rep.add_argument("--heading")
     p_rep.add_argument("--match", required=True)
     p_rep.add_argument("--line", required=True)
-    _add_channel_flag(p_rep)
+    _add_target_flags(p_rep)
     _add_retired_skill_flag(p_rep)
 
     p_rmh = sub.add_parser("remove-heading", help="Drop a whole `## ` section.")
     p_rmh.add_argument("--heading", required=True)
-    _add_channel_flag(p_rmh)
+    _add_target_flags(p_rmh)
     _add_retired_skill_flag(p_rmh)
 
     p_rms = sub.add_parser(
@@ -689,16 +796,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_rms.add_argument("--heading")
     p_rms.add_argument("--subheading")
-    _add_channel_flag(p_rms)
+    _add_target_flags(p_rms)
     _add_retired_skill_flag(p_rms)
 
     p_show = sub.add_parser("show", help="Print USER.md or a CHANNEL.md, optionally filtered to one heading.")
     p_show.add_argument("--heading")
-    _add_channel_flag(p_show)
+    _add_target_flags(p_show)
     _add_retired_skill_flag(p_show)
 
     p_h = sub.add_parser("headings", help="List the `## ` heading names.")
-    _add_channel_flag(p_h)
+    _add_target_flags(p_h)
     _add_retired_skill_flag(p_h)
 
     return parser
