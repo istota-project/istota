@@ -1,16 +1,6 @@
 <script lang="ts">
-  import {
-    Copy,
-    Star,
-    Trash2,
-    Reply,
-    Mail,
-    Info,
-    Pencil,
-    X,
-    Smartphone,
-    MessageCircle,
-  } from 'lucide-svelte';
+  import { Copy, Star, Trash2, Reply, Mail, Info, Pencil, X } from 'lucide-svelte';
+  import PhoneSurfaceIcon from './PhoneSurfaceIcon.svelte';
   import { chatFileUrl, type ExternalTurnDisplay } from '$lib/api';
   import { copyText } from '$lib/clipboard';
   import { renderMarkdown } from '$lib/markdown';
@@ -58,6 +48,7 @@
     active = false,
     touch = false,
     answerByText = null,
+    phoneGroup = false,
     mentions = [],
   }: {
     message: ChatMessage;
@@ -160,6 +151,8 @@
     // there was asked by text and is answered by text, so the card shows that
     // instead of buttons. The server refuses the answer from web either way.
     answerByText?: string | null;
+    // The room is a WhatsApp group, so the via mark draws the group glyph.
+    phoneGroup?: boolean;
     // Who may be `@`-mentioned where this row is shown: the room's members by
     // user id and the bot's name, the viewer's own entry marked `self`. Empty
     // (the default) styles nothing, which is what the aggregate views get,
@@ -852,9 +845,10 @@
           {#if viaLabel}
             <div class="via-mark">
               <span class="via-icon" aria-hidden="true">
-                {#if message.via === 'sms'}<Smartphone size={13} />{:else}<MessageCircle
-                    size={13}
-                  />{/if}
+                <PhoneSurfaceIcon
+                  surface={message.via === 'sms' ? 'sms' : 'whatsapp'}
+                  group={phoneGroup}
+                />
               </span>
               <span>{viaLabel}</span>
             </div>

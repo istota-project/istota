@@ -80,6 +80,9 @@
 	   in-app cross-references. Distinct from --status-info-fg: this marks
 	   something you can act on, not a severity. */
   --accent-blue: #7aa3d8;
+  /* The WhatsApp surface glyph in the room list, the chat header and a texted
+	   turn's provenance line (ISSUE-584). A brand cue, not a severity. */
+  --accent-whatsapp: #5fd07a;
   /* Links inside rendered body content — chat markdown, the briefings reader,
 	   feed entries. Amber, following the bot's accent. Kept as its own token
 	   rather than using --accent-amber directly so a link can be retuned without
@@ -448,6 +451,7 @@
   /* Darker amber so the bot's accent stays legible on a light surface. */
   --accent-amber: #b9740a;
   --accent-blue: #2563b0;
+  --accent-whatsapp: #1c8043;
   --link: var(--accent-amber);
 
   /* Status severities — darkened foregrounds that hold contrast on white, and
