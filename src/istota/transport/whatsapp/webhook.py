@@ -31,6 +31,7 @@ carrying group context.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -1357,6 +1358,16 @@ async def deliver_event_responses(
             )
         except Exception:
             logger.warning("whatsapp.outbound.response_failed", exc_info=True)
+        if result.command_text:
+            # The command is already a turn in the room it came from; its reply
+            # joins it there only when that is the private chat's room, after
+            # the send and whatever the send returned.
+            from ...notifications import mirror_phone_command_reply
+
+            await asyncio.to_thread(
+                mirror_phone_command_reply, config, "whatsapp", owner,
+                result.conversation_token, text, result.response_logical_key,
+            )
 
 
 __all__ = [

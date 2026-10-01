@@ -652,3 +652,52 @@ class TestAPrivateRoomBesideAGroup:
         assert 'target = "whatsapp"' in private_line
         assert "group" not in private_line
         assert "a WhatsApp group" in group_line
+
+    def test_a_group_commands_reply_is_written_in_neither_room(
+        self, group, sent, monkeypatch,
+    ):
+        # The reply goes to the sender's own chat, but the command was the
+        # group's turn: no row in the group, which everyone reads, and none
+        # in the private room, which never held the command.
+        from types import SimpleNamespace
+
+        from istota.transport.whatsapp.webhook import deliver_event_responses
+
+        async def dispatch(config, user, token, text, **kwargs):
+            return SimpleNamespace(text="The host is alice.")
+
+        monkeypatch.setattr("istota.commands.dispatch", dispatch)
+        (private,) = _apply(group, _direct("check the backup"))
+        private_room = _task(group, private.task_id).conversation_token
+        (command,) = _apply(group, _message("!room host", message_id="M9"))
+        assert command.conversation_token == _room(group)
+
+        asyncio.run(deliver_event_responses(group, [command]))
+
+        assert [request.to for request in sent] == [ALICE_JID]
+        assert [request.text for request in sent] == ["The host is alice."]
+        assert _rows(
+            group, "SELECT room_token FROM messages WHERE role = 'system' "
+            "AND room_token IN (?, ?)", (_room(group), private_room),
+        ) == []
+
+    def test_a_private_commands_reply_is_written_in_the_private_room(
+        self, group, sent, monkeypatch,
+    ):
+        from types import SimpleNamespace
+
+        from istota.transport.whatsapp.webhook import deliver_event_responses
+
+        async def dispatch(config, user, token, text, **kwargs):
+            return SimpleNamespace(text="Nothing is running.")
+
+        monkeypatch.setattr("istota.commands.dispatch", dispatch)
+        (private,) = _apply(group, _direct("check the backup"))
+        private_room = _task(group, private.task_id).conversation_token
+        (command,) = _apply(group, _direct("!status", message_id="D9"))
+
+        asyncio.run(deliver_event_responses(group, [command]))
+
+        assert _rows(
+            group, "SELECT room_token, body FROM messages WHERE role = 'system'",
+        ) == [{"room_token": private_room, "body": "Nothing is running."}]

@@ -584,6 +584,7 @@ def mirror_talk_to_room(
 def mirror_phone_to_room(
     config: "Config", surface: str, user_id: str, message: str,
     *, title: str | None = None, reference_id: str | None = None,
+    reference_kind: str = "notification", in_room: str | None = None,
 ) -> None:
     """Record a notification pushed to SMS or WhatsApp in the user's phone room.
 
@@ -598,18 +599,31 @@ def mirror_phone_to_room(
     budget) leaves the notice readable in web rather than nowhere. A stable
     ``reference_id`` keys the row, so a repeat raise the ledger refuses as a
     duplicate does not write it twice.
+
+    Also the writer for a phone `!command`'s reply (``reference_kind=
+    "command-reply"``, keyed on the reply's ledger key). The webhook stored the
+    command as a turn in the room it came from, so ``in_room`` names that room
+    and the reply is written only when it is the user's own private phone room:
+    a WhatsApp group member's command is answered in their private chat, and
+    its reply must land in neither the group nor a room that never held it.
     """
     from . import db
-    from .transport.routing import private_phone_room
+    from .transport.routing import is_private_phone_room, private_phone_room
 
     if not config.db_path or not message:
         return
     delivery_reference = (
-        f"{surface}-notification:{user_id}:{reference_id}" if reference_id else None
+        f"{surface}-{reference_kind}:{user_id}:{reference_id}" if reference_id else None
     )
     try:
         with db.get_db(config.db_path, busy_timeout_ms=_MIRROR_LOCK_WAIT_MS) as conn:
-            room_token = private_phone_room(conn, surface, user_id)
+            if in_room is not None:
+                room_token = (
+                    in_room if is_private_phone_room(conn, surface, user_id, in_room)
+                    else None
+                )
+            else:
+                room_token = private_phone_room(conn, surface, user_id)
             if room_token is None:
                 return
             db.add_message(
@@ -623,6 +637,26 @@ def mirror_phone_to_room(
             "%s→room transcript mirror failed for user %s", surface, user_id,
             exc_info=True,
         )
+
+
+def mirror_phone_command_reply(
+    config: "Config", surface: str, user_id: str, room_token: str | None,
+    reply: str, logical_key: str,
+) -> None:
+    """Record a phone `!command`'s texted reply beside the command's own turn.
+
+    Call after the send, off any open transaction. ``room_token`` is the room
+    the webhook recorded the command in; a command recorded in no room has no
+    turn for a reply to sit under, so it writes nothing. ``logical_key`` is the
+    reply's ledger key, which keys the row, so a redelivered or retried
+    command adds no second one.
+    """
+    if not room_token:
+        return
+    mirror_phone_to_room(
+        config, surface, user_id, reply,
+        reference_id=logical_key, reference_kind="command-reply", in_room=room_token,
+    )
 
 
 def is_channel_configured(

@@ -44,6 +44,7 @@ from istota.transport.whatsapp.webhook import (
     STOP_REPLY,
     UNSUPPORTED_REPLY,
     WhatsAppWebhookError,
+    deliver_event_responses,
     handle_whatsapp_batch,
     normalize_payload,
     parse_webhook,
@@ -2373,9 +2374,8 @@ class TestWhatsAppRoomMint:
                 ("user", "check the backup"), ("user", "yes"), ("system", result.response_text),
             ]
 
-    def test_confirm_command_records_its_ack_and_no_second_answer(self, tmp_path):
+    def test_confirm_command_records_its_ack_and_no_second_answer(self, tmp_path, monkeypatch):
         import asyncio
-        from istota import commands
         config = _config(tmp_path)
         _bind(config, bsuid=USER_BSUID)
         first = _handle(config, _text_payload())[0]
@@ -2385,14 +2385,80 @@ class TestWhatsAppRoomMint:
         command = f"!confirm {first.task_id}"
         result = _handle(config, _text_payload(message_id="cmd", text=command))[0]
         assert result.disposition == "command"
-        reply = asyncio.run(commands.dispatch(
-            config, "alice", result.conversation_token, result.command_text, surface="whatsapp",
-        ))
-        assert reply.text.startswith(f"Confirmed #{first.task_id}")
+        sent = self._capture_sends(monkeypatch)
+        asyncio.run(deliver_event_responses(config, [result]))
+        (reply,) = sent
+        assert reply.startswith(f"Confirmed #{first.task_id}")
         with db.get_db(config.db_path) as conn:
             assert db.get_task(conn, first.task_id).status == "pending"
             assert self._rendered(conn, token) == [
-                ("user", "check the backup"), ("user", command), ("system", reply.text),
+                ("user", "check the backup"), ("user", command), ("system", reply),
+            ]
+
+    @staticmethod
+    def _capture_sends(monkeypatch):
+        sent = []
+
+        async def deliver(config, *, logical_key, user_id, text, **kwargs):
+            sent.append(text)
+
+        monkeypatch.setattr("istota.transport.whatsapp.outbound.deliver_whatsapp", deliver)
+        return sent
+
+    @staticmethod
+    def _stub_dispatch(monkeypatch, reply):
+        from types import SimpleNamespace
+
+        async def dispatch(config, user, token, text, **kwargs):
+            return SimpleNamespace(text=reply)
+
+        monkeypatch.setattr("istota.commands.dispatch", dispatch)
+
+    def test_a_command_reply_joins_the_transcript_after_the_send(self, tmp_path, monkeypatch):
+        import asyncio
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        first = _handle(config, _text_payload())[0]
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+        self._stub_dispatch(monkeypatch, "Nothing is running.")
+        seen = []
+
+        async def deliver(config, *, logical_key, user_id, text, **kwargs):
+            with db.get_db(config.db_path) as conn:
+                seen.append(conn.execute(
+                    "SELECT count(*) FROM messages WHERE role='system'").fetchone()[0])
+
+        monkeypatch.setattr("istota.transport.whatsapp.outbound.deliver_whatsapp", deliver)
+        result = _handle(config, _text_payload(message_id="cmd", text="!status"))[0]
+        asyncio.run(deliver_event_responses(config, [result]))
+        assert seen == [0]
+        with db.get_db(config.db_path) as conn:
+            assert self._rendered(conn, token) == [
+                ("user", "check the backup"), ("user", "!status"),
+                ("system", "Nothing is running."),
+            ]
+
+    def test_a_redelivered_command_writes_no_second_reply(self, tmp_path, monkeypatch):
+        import asyncio
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        first = _handle(config, _text_payload())[0]
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+        self._stub_dispatch(monkeypatch, "Nothing is running.")
+        sent = self._capture_sends(monkeypatch)
+        result = _handle(config, _text_payload(message_id="cmd", text="!status"))[0]
+        asyncio.run(deliver_event_responses(config, [result]))
+        again = _handle(config, _text_payload(message_id="cmd", text="!status"))[0]
+        assert again.disposition == "duplicate"
+        asyncio.run(deliver_event_responses(config, [again]))
+        # A retried response run for the same committed result.
+        asyncio.run(deliver_event_responses(config, [result]))
+        assert len(sent) == 2
+        with db.get_db(config.db_path) as conn:
+            assert [r for r in self._rendered(conn, token) if r[0] == "system"] == [
+                ("system", "Nothing is running."),
             ]
 
     def test_confirm_command_from_a_group_records_nothing_in_the_group(self, tmp_path):

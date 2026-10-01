@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 
@@ -280,8 +281,19 @@ async def deliver_event_response(
         response = command.text or ""
     if not response or not result.response_logical_key or not result.user_id:
         return
-    await deliver_sms(
-        config, providers, logical_key=result.response_logical_key,
-        user_id=result.user_id, text=response,
-        preferred_from_number=result.preferred_from_number,
-    )
+    try:
+        await deliver_sms(
+            config, providers, logical_key=result.response_logical_key,
+            user_id=result.user_id, text=response,
+            preferred_from_number=result.preferred_from_number,
+        )
+    finally:
+        if result.command_text:
+            # The command is already a turn in the room; its reply joins it,
+            # after the send and whatever the send returned.
+            from ...notifications import mirror_phone_command_reply
+
+            await asyncio.to_thread(
+                mirror_phone_command_reply, config, "sms", result.user_id,
+                result.room_token, response, result.response_logical_key,
+            )

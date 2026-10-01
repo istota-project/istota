@@ -929,25 +929,17 @@ def _record_confirm_exchange(ctx: CommandContext, reply: str) -> "CommandResult"
         or ctx.conversation_token
     )
     if ctx.surface in _PHONE_SURFACES:
-        # The webhook already stored the typed `!confirm` as a user turn, but
-        # only in the user's own phone room. A WhatsApp group's command answers
-        # in the private chat precisely so the group never reads it, so a
-        # command from any other room records nothing, as before.
-        from .transport.routing import is_private_phone_room
-
-        if not is_private_phone_room(ctx.conn, ctx.surface, ctx.user_id, room_token):
-            ctx.conn.commit()
-            return CommandResult(handled=True, text=reply)
-        user_msg_id = None
-        system_msg_id = confirmations.record_ack(
-            ctx.conn, room_token, ack=reply, origin_surface=ctx.surface,
-        )
-    else:
-        user_msg_id, system_msg_id = confirmations.record_exchange(
-            ctx.conn, room_token,
-            answer_text=f"!{ctx.invoked_as} {ctx.args}".strip(),
-            ack=reply, origin_surface=ctx.surface, answered_by=ctx.user_id,
-        )
+        # The webhook already stored the typed `!confirm` as a user turn, and
+        # writes this reply beside it after the send, as it does every phone
+        # command's reply (`notifications.mirror_phone_command_reply`). Writing
+        # it here too would put the ack in the transcript twice.
+        ctx.conn.commit()
+        return CommandResult(handled=True, text=reply)
+    user_msg_id, system_msg_id = confirmations.record_exchange(
+        ctx.conn, room_token,
+        answer_text=f"!{ctx.invoked_as} {ctx.args}".strip(),
+        ack=reply, origin_surface=ctx.surface, answered_by=ctx.user_id,
+    )
     ctx.conn.commit()
     return CommandResult(
         handled=True,

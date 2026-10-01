@@ -1883,8 +1883,71 @@ class TestSmsRoomMint:
         asyncio.run(_handle(config, providers, _inbound(text=command, provider_message_id='steer', provider_event_id='event-steer')))
         with db.get_db(config.db_path) as conn:
             assert db.count_pending_steers(conn, first.task_id) == 1
+            rendered = self._rendered(conn, token)
+            # The note is not stored a second time; the steer's reply is.
+            assert rendered[:2] == [('user', 'check the backup'), ('user', command)]
+            assert [role for role, _ in rendered[2:]] == ['system']
+
+    @staticmethod
+    def _stub_dispatch(monkeypatch, reply):
+        async def dispatch(config, user, token, text, **kwargs):
+            from types import SimpleNamespace
+            return SimpleNamespace(text=reply)
+        monkeypatch.setattr('istota.commands.dispatch', dispatch)
+
+    def test_a_command_reply_joins_the_transcript_after_the_send(self, tmp_path, monkeypatch):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+            token = db.get_task(conn, first.task_id).conversation_token
+        self._stub_dispatch(monkeypatch, 'Nothing is running.')
+        sent = []
+        def send(request):
+            # The row is written after the send, never ahead of it.
+            with db.get_db(config.db_path) as conn:
+                sent.append(conn.execute(
+                    "SELECT count(*) FROM messages WHERE role='system'").fetchone()[0])
+            return SmsSendResult('opaque', 'accepted', 1)
+        providers = _providers(_adapter(send))
+        asyncio.run(_handle(config, providers, _inbound(
+            text='!status', provider_message_id='cmd', provider_event_id='event-cmd')))
+        assert sent == [0]
+        with db.get_db(config.db_path) as conn:
             assert self._rendered(conn, token) == [
-                ('user', 'check the backup'), ('user', command),
+                ('user', 'check the backup'), ('user', '!status'),
+                ('system', 'Nothing is running.'),
+            ]
+
+    def test_a_redelivered_command_writes_no_second_reply(self, tmp_path, monkeypatch):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+            token = db.get_task(conn, first.task_id).conversation_token
+        self._stub_dispatch(monkeypatch, 'Nothing is running.')
+        providers = _providers(_adapter(lambda _req: SmsSendResult('opaque', 'accepted', 1)))
+        command = _inbound(text='!status', provider_message_id='cmd', provider_event_id='event-cmd')
+        result = asyncio.run(_handle(config, providers, command))
+        again = asyncio.run(_handle(config, providers, command))
+        assert again.disposition == 'duplicate'
+        # A retried response run for the same committed result.
+        asyncio.run(deliver_event_response(config, providers, result))
+        with db.get_db(config.db_path) as conn:
+            assert [r for r in self._rendered(conn, token) if r[0] == 'system'] == [
+                ('system', 'Nothing is running.'),
+            ]
+
+    def test_a_command_with_no_reply_writes_nothing(self, tmp_path, monkeypatch):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+            token = db.get_task(conn, first.task_id).conversation_token
+        self._stub_dispatch(monkeypatch, '')
+        providers = _providers(_adapter(lambda _req: SmsSendResult('opaque', 'accepted', 1)))
+        asyncio.run(_handle(config, providers, _inbound(
+            text='!status', provider_message_id='cmd', provider_event_id='event-cmd')))
+        with db.get_db(config.db_path) as conn:
+            assert self._rendered(conn, token) == [
+                ('user', 'check the backup'), ('user', '!status'),
             ]
 
     def test_racing_first_texts_share_one_room(self, tmp_path):
