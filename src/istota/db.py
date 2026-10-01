@@ -4109,9 +4109,9 @@ def _usable_as_delivery_default(
 ) -> bool:
     """Whether ``token`` may be ``user_id``'s default delivery room.
 
-    Five exclusions, each about the room being written to unprompted. Three of
+    Six exclusions, each about the room being written to unprompted. Three of
     them are `visible_room`'s — the room exists, is not archived, and the user
-    has not hidden it — and are shared with the picker. The two here are the
+    has not hidden it — and are shared with the picker. The others are the
     ones that separate an *implicit* default from a room a user may pin:
 
     - **A room somebody else reads.** A shared Talk room is one other people are
@@ -4125,12 +4125,20 @@ def _usable_as_delivery_default(
     - **A side room** (multiplayer D4). It is private, but it is the companion
       of one shared room and is created by the system on that room's need, so
       a default landing there would file unrelated alerts under that room.
+    - **A phone room** (room-surface-model Stage 24). A private SMS or
+      WhatsApp room is a read-only transcript of a phone thread, and a bare
+      web delivery or a relay question landing there would sit in a room the
+      user reads only from web and answers only by text. Any phone binding
+      excludes, not only a private one: a WhatsApp group is shared and the
+      arm below refuses it anyway.
     """
     if token in channels:
         return False
     if visible_room(conn, user_id, token) is None:
         return False
     if is_side_room(conn, token):
+        return False
+    if room_has_phone_binding(conn, token):
         return False
     if room_is_shared(conn, token):
         return False
@@ -5530,6 +5538,43 @@ def talk_refs_for_member(
         (user_id,),
     ).fetchall()
     return {row["room_token"]: row["surface_ref"] for row in rows}
+
+
+#: Surfaces whose binding makes a room the transcript of a phone thread
+#: (room-surface-model Phase 6). A private one is read-only in web; whether a
+#: binding is private is `transport.routing.phone_transcript_surface`'s test.
+PHONE_ROOM_SURFACES = ("sms", "whatsapp")
+
+
+def phone_bindings_for_member(
+    conn: sqlite3.Connection, user_id: str,
+) -> dict[str, RoomBinding]:
+    """Canonical room token -> its SMS or WhatsApp binding, for one user's rooms.
+
+    `talk_refs_for_member`'s shape and reason: one query for the polled room
+    listing rather than a lookup per room. A WhatsApp group room is in it too,
+    since its binding is a phone surface's; the listing badges both and asks
+    the private-thread question only of these.
+    """
+    rows = conn.execute(
+        "SELECT b.* FROM room_bindings b "
+        "JOIN room_members m ON m.room_token = b.room_token "
+        "WHERE b.surface IN (?, ?) AND m.user_id = ? ORDER BY b.surface",
+        (*PHONE_ROOM_SURFACES, user_id),
+    ).fetchall()
+    out: dict[str, RoomBinding] = {}
+    for row in rows:
+        out.setdefault(row["room_token"], _row_to_room_binding(row))
+    return out
+
+
+def room_has_phone_binding(conn: sqlite3.Connection, room_token: str) -> bool:
+    """Whether the room is bound to SMS or WhatsApp at all."""
+    return conn.execute(
+        "SELECT 1 FROM room_bindings WHERE room_token = ? AND surface IN (?, ?) "
+        "LIMIT 1",
+        (room_token, *PHONE_ROOM_SURFACES),
+    ).fetchone() is not None
 
 
 def resolve_room_token(

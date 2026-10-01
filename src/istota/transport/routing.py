@@ -1017,6 +1017,47 @@ def is_private_phone_room(conn, surface: str, user_id: str, room_token) -> bool:
     return bool(room_token) and room_token == private_phone_room(conn, surface, user_id)
 
 
+def private_phone_ref(surface: str, user_id: str) -> str | None:
+    """The ``surface_ref`` of ``user_id``'s own SMS or WhatsApp thread, else None."""
+    from .sms import sms_conversation_token
+    from .whatsapp import whatsapp_conversation_token
+
+    if not user_id:
+        return None
+    if surface == "sms":
+        return sms_conversation_token(user_id)
+    if surface == "whatsapp":
+        return whatsapp_conversation_token(user_id)
+    return None
+
+
+def phone_transcript_surface(conn, room_token) -> str | None:
+    """``'sms'`` or ``'whatsapp'`` when the room is a private phone thread's
+    transcript, else None.
+
+    The read-only test (decided 2026-10-01): web reads such a room and may not
+    write into it, so the send route refuses and the client renders no
+    composer. Asked of the room, not of a reader, so it answers the same for
+    every member: the binding's ref has to be the room creator's own private
+    thread token, the rule `whatsapp.outbound.is_group_task` uses. A WhatsApp
+    group room is bound by its group JID and keeps its composer. Unlike
+    `private_phone_room` this does not drop a room another member was added to;
+    adding a reader does not make a phone thread writable from web.
+    """
+    from .. import db
+
+    if not room_token:
+        return None
+    room = db.get_room(conn, room_token)
+    if room is None:
+        return None
+    for binding in db.list_room_bindings(conn, room.token):
+        ref = private_phone_ref(binding.surface, room.user_id)
+        if ref is not None and binding.surface_ref == ref:
+            return binding.surface
+    return None
+
+
 def transcript_room_for_task(conn, config: "Config", task: "db.Task") -> str | None:
     """The transcript room for a task that already exists.
 

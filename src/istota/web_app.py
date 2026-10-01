@@ -3868,6 +3868,7 @@ def _room_snapshot(username: str) -> dict[str, dict]:
         # `talk_token` would render a promoted room as web-only until the next
         # poll settles it (ISSUE-342).
         talk_refs = db.talk_refs_for_member(conn, username)
+        phone_bindings = db.phone_bindings_for_member(conn, username)
         out: dict[str, dict] = {}
         for r in db.list_member_rooms(conn, username, include_archived=False):
             handle = handles.get(r.token)
@@ -3879,6 +3880,7 @@ def _room_snapshot(username: str) -> dict[str, dict]:
                 "name": db.room_display_name(r, handle),
                 "origin": r.origin,
                 "talk_token": talk_refs.get(r.token),
+                **_room_phone_fields(r, phone_bindings.get(r.token)),
                 "side_of": r.side_of,
                 "model": r.model,
                 "effort": r.effort,
@@ -5321,6 +5323,22 @@ def _render_pairing_qr() -> tuple[bytes, int] | None:
 # the task_events table the existing /chat/tasks/{id}/stream SSE endpoint tails.
 
 
+def _room_phone_fields(reg, binding) -> dict:
+    """``phone_surface`` and ``read_only`` for one listed room.
+
+    ``phone_surface`` badges any room bound to SMS or WhatsApp, a WhatsApp
+    group included. ``read_only`` is the narrower private-thread test, the
+    same one the send route refuses on (`routing.phone_transcript_surface`),
+    answered here from the binding already in hand rather than per room.
+    """
+    from .transport.routing import private_phone_ref
+
+    if binding is None:
+        return {"phone_surface": None, "read_only": False}
+    private = binding.surface_ref == private_phone_ref(binding.surface, reg.user_id)
+    return {"phone_surface": binding.surface, "read_only": private}
+
+
 def _room_to_dict(room) -> dict:
     return {
         "id": room.id,
@@ -5446,6 +5464,7 @@ def _chat_list_rooms(username: str) -> list[dict]:
         # room reads as istota-only and the UI re-offers "Also open in Talk"
         # (ISSUE-342).
         talk_refs = db.talk_refs_for_member(conn, username)
+        phone_bindings = db.phone_bindings_for_member(conn, username)
         out: list[dict] = []
         for r in registry:
             handle = db.ensure_web_chat_handle(
@@ -5462,6 +5481,7 @@ def _chat_list_rooms(username: str) -> list[dict]:
             d["name"] = db.room_display_name(r, handle)
             d["origin"] = r.origin
             d["talk_token"] = talk_refs.get(r.token)
+            d.update(_room_phone_fields(r, phone_bindings.get(r.token)))
             # The shared room a side room belongs to (multiplayer D4), so the
             # client can link the two; None for every other room.
             d["side_of"] = r.side_of
@@ -5515,6 +5535,47 @@ def _chat_owned_room(username: str, room_id: int):
     if room is None or room.user_id != username:
         return None
     return room
+
+
+def _phone_transcript_surface(room_token: str) -> str | None:
+    """`routing.phone_transcript_surface` over its own connection.
+
+    The server half of the read-only phone room (decided 2026-10-01): the
+    client renders no composer there, and a client that sends anyway is
+    refused here, since a hidden composer is not a gate.
+    """
+    from . import db
+    from .transport.routing import phone_transcript_surface
+
+    with db.get_db(_config.db_path) as conn:
+        return phone_transcript_surface(conn, room_token)
+
+
+def _task_phone_transcript_surface(task_id: int) -> str | None:
+    """The phone surface when the task's room is a read-only phone transcript."""
+    from . import db
+    from .transport.routing import phone_transcript_surface
+
+    with db.get_db(_config.db_path) as conn:
+        task = db.get_task(conn, task_id)
+        if task is None or not task.conversation_token:
+            return None
+        return phone_transcript_surface(conn, task.conversation_token)
+
+
+_PHONE_LABELS = {"sms": "SMS", "whatsapp": "WhatsApp"}
+
+
+def _read_only_refusal(surface: str) -> JSONResponse:
+    label = _PHONE_LABELS.get(surface, surface)
+    return JSONResponse(
+        {
+            "error": f"This room is the transcript of your {label} conversation "
+                     f"and is read-only here. Reply by {label} instead.",
+            "read_only": True,
+        },
+        status_code=409,
+    )
 
 
 def _chat_answer_confirmation(
@@ -7219,6 +7280,11 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
     # external, in the web process, on every page load.
     if author_label and origin_surface and not is_room_member(origin_surface):
         out["origin"] = origin_surface
+    # A turn texted in rather than typed here. Its own words, so not the
+    # external-message treatment above, which collapses a stranger's body:
+    # the client marks it with the surface's icon and nothing else.
+    if origin_surface in _PHONE_LABELS:
+        out["via"] = origin_surface
     return out
 
 
@@ -9455,6 +9521,11 @@ async def chat_send_message(
         # Archived rooms are hidden in the UI; reject sends so they don't keep
         # spawning tasks and churning their channel memory behind your back.
         return JSONResponse({"error": "room is archived"}, status_code=409)
+    # Ahead of everything else, `!commands` and confirmation answers included:
+    # a phone room is answered by text, and web only reads it.
+    phone = await asyncio.to_thread(_phone_transcript_surface, room.token)
+    if phone is not None:
+        return _read_only_refusal(phone)
 
     data = await request.json()
     raw_text = data.get("text") if isinstance(data.get("text"), str) else ""
@@ -10093,6 +10164,18 @@ def _chat_cancel_task(task_id: int, actor_user_id: str | None = None) -> None:
                 from fastapi import HTTPException
                 raise HTTPException(status_code=403, detail="not your task")
             task = db.get_task(conn, task_id)
+            # Declining is answering, and a phone task is answered by text
+            # (the read-only phone room, decided 2026-10-01). Stopping a
+            # running one below is not an answer and stays open.
+            if task is not None and task.conversation_token:
+                from .transport.routing import phone_transcript_surface
+
+                if phone_transcript_surface(conn, task.conversation_token):
+                    from fastapi import HTTPException
+                    raise HTTPException(
+                        status_code=409,
+                        detail="answer this question by text; the room is read-only here",
+                    )
             if task is not None:
                 confirmations.decline(conn, task, by="web")
             return
@@ -10118,6 +10201,11 @@ async def chat_confirm_task(
     _csrf: None = Depends(_verify_origin),
 ):
     await _authorize_task_access(task_id, user)
+    # A phone task's question was asked by text and is answered by text: the
+    # read-only room shows the card without buttons, and this is the gate.
+    phone = await asyncio.to_thread(_task_phone_transcript_surface, task_id)
+    if phone is not None:
+        return _read_only_refusal(phone)
     await asyncio.to_thread(_chat_confirm_task, task_id, user["username"])
     return {"status": "ok"}
 
