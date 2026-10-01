@@ -70,6 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Email sign-in now sends a 6-digit code instead of a link, and the code works only in the browser or app that asked for it. On iOS the link opened in Safari, so the istota app never got the session; you now type the code into the app, and Mail can fill it in for you. Each code allows five tries, and wrong codes are capped at 20 per address per day. The admin "Send sign-in link" action is gone, and `istota auth login-link` is replaced by `istota auth sign-in-code <user>`, which prints a fresh code for the user's pending sign-in when mail is down. Password setup and reset links are unchanged. **Upgrade note:** `[web] auth_login_link_ttl_minutes` is now `auth_sign_in_code_ttl_minutes` (default 10); the old key is still read and logs a warning, but the Ansible variable `istota_web_auth_login_link_ttl_minutes` is ignored, so rename it to `istota_web_auth_sign_in_code_ttl_minutes` if you set it. (ISSUE-574)
 - A room colour now only tints the room's row in the web chat sidebar. The dot it also added beside the room name is gone.
 - In a group Talk room your `USER.md`, recalled memories, remembered facts and playbooks are no longer put into the prompt, since everyone in the room reads the answer. Everything else your turns could use there is unchanged.
 

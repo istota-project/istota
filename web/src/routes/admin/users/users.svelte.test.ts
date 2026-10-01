@@ -57,7 +57,7 @@ it('shows the three states and only permits attaching email to a Nextcloud-only 
   expect(within(row).getByText('Nextcloud only')).toBeTruthy();
   expect(within(row).queryByRole('button', { name: 'Disable' })).toBeNull();
   expect(within(row).queryByRole('button', { name: 'Sign out everywhere' })).toBeNull();
-  expect(screen.getByText('Sign-in link')).toBeTruthy();
+  expect(screen.getByText('Email code')).toBeTruthy();
   expect(screen.getByText('Password set')).toBeTruthy();
   await fireEvent.click(within(row).getByRole('button', { name: 'Actions for Legacy' }));
   expect(await screen.findAllByRole('menuitem')).toHaveLength(1);
@@ -83,10 +83,12 @@ it('shows the three states and only permits attaching email to a Nextcloud-only 
 it('names disable and removal effects and sends links through the API', async () => {
   render(Page);
   await screen.findByRole('row', { name: /Bob/ });
-  api.adminUserAction.mockRejectedValueOnce(new Error('The sign-in link could not be sent.'));
+  api.adminUserAction.mockRejectedValueOnce(new Error('The reset link could not be sent.'));
   await fireEvent.click(screen.getByRole('button', { name: 'Actions for Bob' }));
-  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Send sign-in link' }));
-  await waitFor(() => expect(api.adminUserAction).toHaveBeenCalledWith('bob', 'login-link'));
+  // Sign-in is by a code the user requests themselves, so no admin action sends one.
+  expect(screen.queryByRole('menuitem', { name: 'Send sign-in link' })).toBeNull();
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Send password reset' }));
+  await waitFor(() => expect(api.adminUserAction).toHaveBeenCalledWith('bob', 'reset'));
   expect(await screen.findByRole('alert')).toHaveTextContent('could not be sent');
 });
 

@@ -9,18 +9,26 @@ from istota.config import Config
 
 
 @pytest.mark.parametrize("builder,ttl,unit", [("build_enrol_email", 168, "hours"),
-                                               ("build_reset_email", 1, "hour"),
-                                               ("build_login_link_email", 15, "minutes")])
+                                               ("build_reset_email", 1, "hour")])
 def test_bodies_carry_same_link_and_escape_html(builder, ttl, unit):
     from istota import web_auth_mail
-    link = "https://bot.example.com/istota/auth/login-link?token=example&other=value"
+    link = "https://bot.example.com/istota/auth/set-password?token=example&other=value"
     subject, plain, rich = getattr(web_auth_mail, builder)("Example bot", "<Alice>", link, ttl)
     assert "Example bot" in subject
     assert link in plain and html.escape(link, quote=True) in rich
     assert "<Alice>" in plain and "&lt;Alice&gt;" in rich
     assert f"{ttl} {unit}" in plain
-    if builder == "build_login_link_email":
-        assert "anyone" in plain.lower() and "ignore" in plain.lower()
+
+
+def test_sign_in_code_mail_carries_a_code_and_no_link():
+    from istota import web_auth_mail
+    subject, plain, rich = web_auth_mail.build_sign_in_code_email("Example <bot>", "<Alice>", "042917", 10)
+    # In the subject and alone on a line: what one-time-code autofill reads from Mail.
+    assert subject == "042917 is your Example <bot> sign-in code"
+    assert "\n042917\n" in plain and "042917" in rich
+    assert "http" not in plain and "href" not in rich
+    assert "10 minutes" in plain and "ignore" in plain.lower()
+    assert "<Alice>" in plain and "&lt;Alice&gt;" in rich and "Example &lt;bot&gt;" in rich
 
 
 def test_disabled_mail_returns_false_and_logs(caplog):

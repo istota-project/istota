@@ -65,7 +65,7 @@ NON_SECRET_KEYS = frozenset({
     "web.auth",
     "web.auth_enrol_ttl_hours",
     "web.auth_reset_ttl_hours",
-    "web.auth_login_link_ttl_minutes",
+    "web.auth_sign_in_code_ttl_minutes",
     "web.auth_min_password_length",
     "web.auth_throttle_window_seconds",
     "web.auth_throttle_max_email",

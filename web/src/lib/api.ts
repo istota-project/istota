@@ -544,8 +544,7 @@ export function createAdminUser(user: { user_id: string; email: string; display_
   });
 }
 
-export type AdminUserAction =
-  'invite' | 'reset' | 'login-link' | 'disable' | 'enable' | 'logout-all' | 'remove';
+export type AdminUserAction = 'invite' | 'reset' | 'disable' | 'enable' | 'logout-all' | 'remove';
 
 export function adminUserAction(userId: string, action: AdminUserAction) {
   const path = `/admin/users/${encodeURIComponent(userId)}`;

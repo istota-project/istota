@@ -18,7 +18,9 @@ from tests.test_entrypoint_config_stage import boot
 from tests.test_ansible_config_template import render as render_ansible
 
 REPO = Path(__file__).resolve().parent.parent
-TOKEN_PATHS = ("/istota/auth/set-password", "/istota/auth/login-link")
+# Email sign-in is a typed code (ISSUE-574), so set-password is the one route
+# left that carries a credential in its query string.
+TOKEN_PATHS = ("/istota/auth/set-password",)
 NGINX = ("docker/nginx/default.conf.template", "deploy/ansible/templates/istota.conf.j2")
 LAUNCHERS = ("docker/docker-compose.yml", "deploy/ansible/templates/istota-web.service.j2")
 

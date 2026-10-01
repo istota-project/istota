@@ -1404,14 +1404,12 @@ def _auth_issue_link(config, identity, purpose, print_link):
     options = {
         "enrol": (config.web.auth_enrol_ttl_hours, 3600, web_auth_mail.build_enrol_email),
         "reset": (config.web.auth_reset_ttl_hours, 3600, web_auth_mail.build_reset_email),
-        "login": (config.web.auth_login_link_ttl_minutes, 60, web_auth_mail.build_login_link_email),
     }
     ttl, multiplier, builder = options[purpose]
     token = web_auth.issue_token(
         config.db_path, identity.user_id, purpose, ttl * multiplier, expected_identity=identity,
     )
-    route = "login-link" if purpose == "login" else "set-password"
-    link = f"{origin}/istota/auth/{route}?token={token}"
+    link = f"{origin}/istota/auth/set-password?token={token}"
     if print_link:
         print(link)
         return
@@ -1493,9 +1491,19 @@ def cmd_auth(args):
             if action == "set-password":
                 password = _auth_read_password(args, _auth_policy(config), email=identity.email, user_id=user_id)
                 web_auth.set_password(db_path, user_id, password)
-            elif action in ("invite", "reset", "login-link"):
-                purpose = {"invite": "enrol", "reset": "reset", "login-link": "login"}[action]
+            elif action in ("invite", "reset"):
+                purpose = {"invite": "enrol", "reset": "reset"}[action]
                 _auth_issue_link(config, identity, purpose, args.print_link)
+            elif action == "sign-in-code":
+                # Recovery when mail is down. The code works only in the browser
+                # that opened the request, and anyone can open one for an address,
+                # so the operator confirms the request time with the user first.
+                minted = web_auth.mint_sign_in_code(db_path, user_id)
+                print(f"code={minted.code} requested_at={minted.requested_at} UTC "
+                      f"expires_at={minted.expires_at} UTC pending={minted.pending}")
+                if minted.pending > 1:
+                    print(f"warning: {minted.pending} pending sign-ins for this address; the code is for the newest. "
+                          "Confirm the request time with the user before reading it out.", file=sys.stderr)
             elif action in ("disable", "enable"):
                 web_auth.set_disabled(db_path, user_id, action == "disable")
             elif action == "logout-all":
@@ -4943,12 +4951,17 @@ def main():
     auth_password = auth_subparsers.add_parser("set-password", help="Set a password directly", allow_abbrev=False)
     auth_password.add_argument("user_id")
     auth_password.add_argument("--password-stdin", action="store_true")
-    for verb in ("invite", "reset", "login-link"):
+    for verb in ("invite", "reset"):
         auth_link = auth_subparsers.add_parser(verb, help="Send a fresh link (or print it)", allow_abbrev=False)
         auth_link.add_argument("user_id")
         auth_link_mode = auth_link.add_mutually_exclusive_group()
         auth_link_mode.add_argument("--send", action="store_true", help="Send by email (default)")
         auth_link_mode.add_argument("--print-link", action="store_true")
+    auth_code = auth_subparsers.add_parser(
+        "sign-in-code", allow_abbrev=False,
+        help="Print a fresh code for the user's pending email sign-in (it works only in their browser)",
+    )
+    auth_code.add_argument("user_id")
     for verb in ("disable", "enable", "logout-all", "remove"):
         auth_mutation = auth_subparsers.add_parser(verb, allow_abbrev=False)
         auth_mutation.add_argument("user_id")
