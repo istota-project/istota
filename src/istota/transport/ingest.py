@@ -556,9 +556,13 @@ def record_inbound(
         if db.get_room(conn, room_token) is None:
             if not user_author:
                 return InboundResult(room_token, None, None, "dropped")
-            room_token = db.register_room(
-                conn, None, user_id, origin=surface, name=channel_name,
-            ).token
+            minted = db.register_bound_room(
+                conn, user_id, origin=surface, name=channel_name,
+                surface=surface, surface_ref=surface_ref,
+            )
+            if minted is None:
+                return InboundResult(room_token, None, None, "dropped")
+            room_token = minted.token
     else:
         room_token = room_token or surface_ref
     if not user_author and not room_surface:

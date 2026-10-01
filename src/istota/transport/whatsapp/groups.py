@@ -187,8 +187,13 @@ def _register(
             jid_fingerprint(group_jid),
         )
         return WhatsAppEventResult("group_no_principal")
-    token = db.register_room(conn, None, host, origin=SURFACE, name=roster.subject).token
-    db.add_room_binding(conn, token, SURFACE, group_jid)
+    room = db.register_bound_room(
+        conn, host, origin=SURFACE, name=roster.subject,
+        surface=SURFACE, surface_ref=group_jid,
+    )
+    if room is None:
+        return WhatsAppEventResult("group_bind_refused")
+    token = room.token
     # Founders, not joiners: the group existed before the bot saw it, and
     # everyone in it now is who its history was written for.
     for user_id in users:

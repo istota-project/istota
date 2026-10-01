@@ -189,3 +189,55 @@ describe('the shared room glyph in the header', () => {
     expect(headerGlyph()).toBeNull();
   });
 });
+
+describe('the phone room glyphs (ISSUE-584)', () => {
+  const whatsapp = (name: string) =>
+    glyph(name)?.querySelector<HTMLElement>('[data-whatsapp]')?.dataset.whatsapp;
+
+  it('tells an SMS room, a WhatsApp chat and a WhatsApp group apart', async () => {
+    setRooms([
+      { name: 'SMS', origin: 'sms', phone_surface: 'sms', read_only: true },
+      { name: 'WhatsApp', origin: 'whatsapp', phone_surface: 'whatsapp', read_only: true },
+      {
+        name: 'Family',
+        phone_surface: 'whatsapp',
+        read_only: true,
+        phone_group: true,
+        shared: true,
+      },
+    ]);
+    renderPage();
+    await waitFor(() => expect(glyph('Family')).toBeTruthy());
+    expect(glyph('SMS')!.getAttribute('title')).toBe('SMS conversation');
+    expect(glyph('SMS')!.querySelector('[data-whatsapp]')).toBeNull();
+    expect(whatsapp('WhatsApp')).toBe('private');
+    expect(glyph('WhatsApp')!.getAttribute('title')).toBe('WhatsApp conversation');
+    // A group is shared, and its surface glyph still outranks the people one.
+    expect(glyph('Family')!.classList.contains('shared')).toBe(false);
+    expect(whatsapp('Family')).toBe('group');
+    expect(glyph('Family')!.getAttribute('title')).toBe('WhatsApp group, shared room');
+  });
+
+  it('keeps the people glyph on a shared room bound to nothing', async () => {
+    setRooms([{ name: 'Team', shared: true, phone_surface: null }]);
+    renderPage();
+    await waitFor(() => expect(glyph('Team')).toBeTruthy());
+    expect(glyph('Team')!.classList.contains('shared')).toBe(true);
+  });
+
+  it('puts the same glyph in the header', async () => {
+    setRooms([
+      {
+        name: 'Family',
+        phone_surface: 'whatsapp',
+        read_only: true,
+        phone_group: true,
+        shared: true,
+      },
+    ]);
+    renderPage();
+    const mark = () => document.querySelector<HTMLElement>('.header .header-phone [data-whatsapp]');
+    await waitFor(() => expect(mark()).toBeTruthy());
+    expect(mark()!.dataset.whatsapp).toBe('group');
+  });
+});

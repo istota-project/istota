@@ -174,6 +174,20 @@ class TestTheRosterRegistersTheRoom:
         assert result.disposition == "group_no_principal"
         assert _rows(config, "SELECT * FROM rooms") == []
 
+    def test_a_held_group_ref_refuses_rather_than_leaving_an_unbound_room(self, config):
+        """ISSUE-581: a binding whose room row is gone still holds the JID, so
+        the mint's bind is refused; nothing may be left minted behind it."""
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO room_bindings (room_token, surface, surface_ref) "
+                "VALUES ('rm_gone', 'whatsapp', ?)", (GROUP,),
+            )
+        (result,) = _apply(config, _roster([ALICE_JID, BOB_JID]))
+
+        assert result.disposition == "group_bind_refused"
+        assert _rows(config, "SELECT * FROM rooms") == []
+        assert _rows(config, "SELECT * FROM room_members") == []
+
     def test_a_cloud_provider_does_not_apply_a_roster(self, config):
         """Cloud API group support is out of scope (D6)."""
         with db.get_db(config.db_path) as conn:

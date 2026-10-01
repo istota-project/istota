@@ -12,9 +12,8 @@
     Star,
     CheckCheck,
     Users,
-    Smartphone,
-    MessageCircle,
   } from 'lucide-svelte';
+  import PhoneSurfaceIcon from '$lib/components/chat/PhoneSurfaceIcon.svelte';
   import {
     AppShell,
     ShellHeader,
@@ -193,6 +192,21 @@
   // about what the glyph means.
   const sharedRoomTitle = (room: { origin?: string | null; talk_token?: string | null }) =>
     isTalkRoom(room) ? 'Shared room, also on Nextcloud Talk' : 'Shared room';
+  // A group room is read-only too (ISSUE-585), so the server says which it is.
+  const isWhatsAppGroup = (room: { phone_surface?: string | null; phone_group?: boolean }) =>
+    room.phone_surface === 'whatsapp' && !!room.phone_group;
+  const phoneRoomTitle = (room: {
+    phone_surface?: string | null;
+    phone_group?: boolean;
+    shared?: boolean;
+  }) =>
+    room.phone_surface === 'sms'
+      ? 'SMS conversation'
+      : isWhatsAppGroup(room)
+        ? room.shared
+          ? 'WhatsApp group, shared room'
+          : 'WhatsApp group'
+        : 'WhatsApp conversation';
 
   // Who may be `@`-mentioned in the open room (ISSUE-578): its members by user
   // id, the viewer's own entry marked, and the bot's name. Only in a shared
@@ -1035,6 +1049,20 @@
       titleActionLabel="open rooms"
     >
       {#snippet afterTitle()}
+        {#if !inViewMode && activeRoom?.phone_surface}
+          <span
+            class="header-phone"
+            role="img"
+            title={phoneRoomTitle(activeRoom)}
+            aria-label={phoneRoomTitle(activeRoom)}
+          >
+            <PhoneSurfaceIcon
+              surface={activeRoom.phone_surface}
+              group={isWhatsAppGroup(activeRoom)}
+              size={14}
+            />
+          </span>
+        {/if}
         {#if !inViewMode && activeRoom?.shared}
           <!-- The sidebar marks this too, but it is closed most of the time on
                a phone, and who reads a message is what a sender needs before
@@ -1180,7 +1208,7 @@
           style:--room-tint={tint}
         >
           <button class="room-btn" onclick={() => selectRoom(room.id)} type="button">
-            {#if room.shared}
+            {#if room.shared && room.phone_surface !== 'whatsapp'}
               <!-- More than one human reads this room, so it outranks the
 							     origin glyph: who will see a message matters more than which
 							     surface mirrors it. The Talk fact moves into the title. -->
@@ -1194,16 +1222,16 @@
               </span>
             {:else if room.phone_surface}
               <!-- A room bound to a phone thread: an SMS conversation, or a
-							     WhatsApp chat or group. Outranked by the shared glyph above,
-							     which a WhatsApp group also carries. -->
+							     WhatsApp chat or group. A WhatsApp group keeps its surface
+							     glyph over the shared one, in outline where the private chat's
+							     is filled, and says it is shared in the title (ISSUE-584). -->
               <span
                 class="room-origin phone"
-                title={room.phone_surface === 'sms' ? 'SMS conversation' : 'WhatsApp conversation'}
-                aria-label={room.phone_surface === 'sms' ? 'SMS' : 'WhatsApp'}
+                role="img"
+                title={phoneRoomTitle(room)}
+                aria-label={phoneRoomTitle(room)}
               >
-                {#if room.phone_surface === 'sms'}<Smartphone size={13} />{:else}<MessageCircle
-                    size={13}
-                  />{/if}
+                <PhoneSurfaceIcon surface={room.phone_surface} group={isWhatsAppGroup(room)} />
               </span>
             {:else if isTalk}
               <!-- Leading origin glyph: a tinted cloud marks a room mirrored
@@ -1375,6 +1403,7 @@
                 active={message.cid === activeCid}
                 touch={pointerIsTouch}
                 answerByText={inViewMode || readOnlyGroup ? null : readOnlyPhone}
+                phoneGroup={!inViewMode && !!activeRoom && isWhatsAppGroup(activeRoom)}
                 mentions={mentionTargets}
               />
             {/each}
@@ -1883,6 +1912,11 @@
   }
   .room-origin.shared {
     color: var(--accent-blue);
+  }
+  .header-phone {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--text-dim);
   }
   .header-shared {
     display: inline-flex;

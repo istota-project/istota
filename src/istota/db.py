@@ -4573,6 +4573,31 @@ def register_room(
     return room
 
 
+def register_bound_room(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    origin: str,
+    name: str | None,
+    surface: str,
+    surface_ref: str,
+) -> Room | None:
+    """Mint a room and bind it to ``surface_ref``, or mint nothing.
+
+    None when the bind is refused (another room already holds the ref), with the
+    just-minted room removed again, so a caller can never be left holding a room
+    no surface reaches (ISSUE-581). Callers still resolve first; this is the
+    check behind that, not a replacement for it.
+    """
+    room = register_room(conn, None, user_id, origin=origin, name=name)
+    if add_room_binding(conn, room.token, surface, surface_ref):
+        return room
+    # Nothing but register_room has written under this token yet.
+    conn.execute("DELETE FROM room_members WHERE room_token = ?", (room.token,))
+    conn.execute("DELETE FROM rooms WHERE token = ?", (room.token,))
+    return None
+
+
 def add_room_member(
     conn: sqlite3.Connection, room_token: str, user_id: str,
     *, acknowledged: bool = False,
@@ -5467,13 +5492,40 @@ def set_room_group(conn: sqlite3.Connection, token: str, group_id: str | None) -
 
 def add_room_binding(
     conn: sqlite3.Connection, room_token: str, surface: str, surface_ref: str,
-) -> None:
-    """Idempotently bind a room to a surface (PK (room_token, surface))."""
-    conn.execute(
+) -> bool:
+    """Idempotently bind a room to a surface. Returns whether the room now
+    holds exactly this binding.
+
+    True when the row landed or was already there. False when the insert was
+    ignored for any other reason: the ref belongs to another room (the UNIQUE
+    `(surface, surface_ref)` index) or this room is bound to a different ref on
+    that surface (the PK). Neither raises, because the Talk poller binds inside
+    a whole-batch transaction and one exception would roll back the batch; a
+    caller that minted the room checks the result instead (ISSUE-581).
+    """
+    cur = conn.execute(
         "INSERT OR IGNORE INTO room_bindings (room_token, surface, surface_ref) "
         "VALUES (?, ?, ?)",
         (room_token, surface, surface_ref),
     )
+    if cur.rowcount > 0:
+        return True
+    row = conn.execute(
+        "SELECT room_token FROM room_bindings WHERE surface = ? AND surface_ref = ?",
+        (surface, surface_ref),
+    ).fetchone()
+    if row is not None and row["room_token"] == room_token:
+        return True
+    # Quiet when the room is bound to another ref on this surface: a room the
+    # token migration rewrote keeps its legacy web ref, and the room list and
+    # every web send self-bind it. The ref is surface-native (a group JID, a
+    # Message-ID) and stays out of the log.
+    if row is not None:
+        logger.warning(
+            "room_binding.refused room=%s surface=%s: ref held by another room %s",
+            room_token, surface, row["room_token"],
+        )
+    return False
 
 
 def replace_room_binding(
@@ -5487,7 +5539,8 @@ def replace_room_binding(
     """Point a room's binding at a different ref. Compare-and-set; returns
     whether the write landed.
 
-    `add_room_binding` is `INSERT OR IGNORE` and stays that way: it is called on
+    `add_room_binding` is `INSERT OR IGNORE` and stays that way (it reports a
+    refused bind but never overwrites one): it is called on
     every inbound poll by three writers, and an `ON CONFLICT DO UPDATE` there
     would let a stale or misrouted inbound rewrite a good binding. Replacement
     is a separate verb with one caller — the promote path, which has established

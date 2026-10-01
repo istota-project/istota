@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A skill can now read a whole vault entry, its password, username, URL and custom fields, in one fetch, instead of spending one fetch from `vault_fetch_limit_per_task` per field. For that read the limit counts credentials rather than fields. Grants and the reveal policy apply to every field of the entry, and the entry is refused if any one field would be.
+
 - Your SMS conversation and your one-to-one WhatsApp chat now each have a room. The first text you send creates a room named SMS or WhatsApp, and your texts, the answers, confirmation exchanges, the replies to `!commands` you text, and scheduled jobs and alerts sent to your phone (including ones whose send was blocked) are all recorded in it. A WhatsApp group keeps its own room, and its people's messages now show in its web view, as Talk group messages already did.
 
   **Upgrade note:** the first start after the upgrade adds a unique index on `room_bindings (surface, surface_ref)`, and refuses to start with `ambiguous room bindings` if two rooms already share one binding. Resolve the duplicate rows by hand and start again; nothing is chosen for you. A new scheduler gate, `phone-room-backfill`, runs every minute and records its progress in the reserved `_room_backfill` key-value namespace.
@@ -84,6 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- WhatsApp rooms in web chat now carry a green WhatsApp bubble, filled for your private WhatsApp chat and outlined for a WhatsApp group, so the two read apart from the room list alone. A group shows that bubble instead of the generic people icon, the chat header shows the same glyph for SMS and WhatsApp rooms, and the "Sent on WhatsApp" line under a message uses it too.
 - New rooms use independent room IDs in their links and memory folders. Talk delivery uses the bound conversation address, including for rooms first opened in Talk.
 
 - Email sign-in now sends a 6-digit code instead of a link, and the code works only in the browser or app that asked for it. On iOS the link opened in Safari, so the istota app never got the session; you now type the code into the app, and Mail can fill it in for you. Each code allows five tries, and wrong codes are capped at 20 per address per day. The admin "Send sign-in link" action is gone, and `istota auth login-link` is replaced by `istota auth sign-in-code <user>`, which prints a fresh code for the user's pending sign-in when mail is down. Password setup and reset links are unchanged. **Upgrade note:** `[web] auth_login_link_ttl_minutes` is now `auth_sign_in_code_ttl_minutes` (default 10); the old key is still read and logs a warning, but the Ansible variable `istota_web_auth_login_link_ttl_minutes` is ignored, so rename it to `istota_web_auth_sign_in_code_ttl_minutes` if you set it. (ISSUE-574)

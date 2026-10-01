@@ -41,6 +41,20 @@ describe('the texted-turn mark', () => {
   it('names WhatsApp for a WhatsApp turn', () => {
     const { container } = render(Message, { ...base, message: userMsg({ via: 'whatsapp' }) });
     expect(container.querySelector('.via-mark')?.textContent).toContain('Sent on WhatsApp');
+    const mark = container.querySelector<HTMLElement>('.via-mark [data-whatsapp]');
+    expect(mark?.dataset.whatsapp).toBe('private');
+    expect(mark?.querySelector('svg')?.getAttribute('fill')).toBe('currentColor');
+  });
+
+  it('draws the group glyph for a WhatsApp turn in a group room', () => {
+    const { container } = render(Message, {
+      ...base,
+      message: userMsg({ via: 'whatsapp' }),
+      phoneGroup: true,
+    });
+    const mark = container.querySelector<HTMLElement>('.via-mark [data-whatsapp]');
+    expect(mark?.dataset.whatsapp).toBe('group');
+    expect(mark?.querySelector('svg')?.getAttribute('fill')).toBe('none');
   });
 
   it('marks nothing on a typed turn', () => {
