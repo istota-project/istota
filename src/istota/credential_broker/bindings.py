@@ -9,15 +9,15 @@ DEFAULT_HEADERS = ["authorization", "private-token", "x-api-key", "x-auth-token"
 _HEADER = re.compile(r"[!#$%&'*+.^_`|~0-9a-z-]+")
 
 
-def https_host(url):
-    """Canonical exact HTTPS authority, or a refusal for an unsafe URL."""
+def credential_host(url, *, allow_http=False):
+    """Exact authority; HTTP retains its scheme so it cannot share HTTPS grants."""
     if (not isinstance(url, str) or not url or not url.isascii()
             or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url)
             or "\\" in url):
         raise ValueError("invalid credential host")
     parsed = urlsplit(url)
     host = parsed.hostname
-    if (parsed.scheme != "https" or not host or parsed.username is not None
+    if (parsed.scheme not in (("https", "http") if allow_http else ("https",)) or not host or parsed.username is not None
             or parsed.password is not None or parsed.netloc.endswith(":")):
         raise ValueError("credential hosts require HTTPS without user information")
     if ":" in host:
@@ -29,7 +29,13 @@ def https_host(url):
     port = parsed.port
     if port == 0:
         raise ValueError("invalid credential port")
-    return host if port in (None, 443) else f"{host}:{port}"
+    default_port = 80 if parsed.scheme == "http" else 443
+    authority = host if port in (None, default_port) else f"{host}:{port}"
+    return "http://" + authority if parsed.scheme == "http" else authority
+
+
+def https_host(url):
+    return credential_host(url)
 
 
 def parse_binding(url, attributes, tags, *, source="vault"):
@@ -41,7 +47,7 @@ def parse_binding(url, attributes, tags, *, source="vault"):
             # gets this shorthand; actual request URLs still require HTTPS.
             if source == "vault" and isinstance(url, str) and not any(c in url for c in "/?#@"):
                 url = "https://" + url
-            hosts.add(https_host(url))
+            hosts.add(credential_host(url, allow_http=source == "vault"))
         for value in (attributes.get("istota_hosts") or "").split(","):
             value = value.strip()
             if not value:
@@ -63,6 +69,14 @@ def parse_binding(url, attributes, tags, *, source="vault"):
 
 def put_binding(conn, user_id, name, binding):
     """Caller owns the transaction, including the credential value write."""
+    from .. import db
+    owner = binding.get("credential", name)
+    previous = credential_name(conn, user_id, name)
+    if previous != owner:
+        # Never carry a field-only grant into another entry's shared policy.
+        from .grants import delete_grant
+        delete_grant(conn, user_id, name)
+    db.kv_set(conn, user_id, "_credential_fields", name, owner)
     conn.execute("""
         INSERT INTO credential_bindings (user_id, name, hosts, headers, revealable, source)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -107,3 +121,31 @@ def sync_forge_bindings(conn, user_id, developer, *, available_names=None):
     for name, binding in bindings.items():
         put_binding(conn, user_id, name, binding)
     return bindings
+
+
+def credential_name(conn, user_id, name):
+    row = conn.execute("SELECT value FROM istota_kv WHERE user_id=? "
+                       "AND namespace='_credential_fields' AND key=?", (user_id, name)).fetchone()
+    return row[0] if row else name
+
+
+def credential_groups(conn, user_id):
+    """Entry membership comes from the vault parser, never name suffixes."""
+    groups = {}
+    for row in conn.execute("SELECT key FROM secrets WHERE user_id=? AND service='vault_entries'",
+                            (user_id,)):
+        name = row[0]
+        groups.setdefault(credential_name(conn, user_id, name), []).append(name)
+    return groups
+
+
+def get_entry_binding(conn, user_id, name):
+    binding = get_binding(conn, user_id, name)
+    if binding is not None:
+        return binding
+    # Entries without passwords still have username, URL or custom fields.
+    for member in credential_groups(conn, user_id).get(name, []):
+        binding = get_binding(conn, user_id, member)
+        if binding is not None:
+            return binding
+    return None

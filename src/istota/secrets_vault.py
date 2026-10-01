@@ -1510,7 +1510,7 @@ def _take_entry(walk: _Walk, entry, group_path: tuple[str, ...]) -> None:
                 )
             continue
         walk.candidates.setdefault(name, []).append(value)
-        walk.bindings[name] = binding
+        walk.bindings[name] = {**binding, "credential": slug_name(path)}
         if value:
             produced += 1
 

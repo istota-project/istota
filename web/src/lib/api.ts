@@ -4260,6 +4260,7 @@ export interface CredentialGrant {
   methods: string[];
   rooms: string[];
   allow_scheduled: boolean;
+  allow_http?: boolean;
   policy_revision?: number;
 }
 export interface CredentialGrantsSettings {
