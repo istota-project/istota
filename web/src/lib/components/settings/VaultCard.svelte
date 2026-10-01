@@ -80,7 +80,8 @@
   let nameConflictLine = $derived.by(() => {
     const n = nameConflicts;
     const which = n === 1 ? '1 entry in the file was' : `${n} entries in the file were`;
-    return `${which} skipped because a credential with the same name was added in Istota. Rename one of them; the entry is synced the next time the file changes.`;
+    const [it, ones] = n === 1 ? ['it', 'the one'] : ['them', 'the ones'];
+    return `${which} skipped because a credential with the same name was added in Istota. Rename ${it} in KeePassXC, or delete ${ones} added in Istota; skipped entries are synced the next time the file changes.`;
   });
 
   /**

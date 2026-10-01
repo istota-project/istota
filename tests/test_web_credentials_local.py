@@ -130,6 +130,21 @@ async def test_create_without_access_has_no_grant(signed_client, config):  # noq
     assert row["hosts"] == []
     assert row["url"] == ""
     assert row["username_set"] is False
+    assert row["extra_hosts"] == ""
+
+
+async def test_listing_separates_extra_hosts_from_the_normalised_site(signed_client, config):  # noqa: F811
+    # The site's bound host drops the default port, so a client comparing
+    # strings would read it as an extra host and keep it bound after the site
+    # changed.
+    response = await signed_client.post(
+        BASE, json=_body(url="api.example.com:443", extra_hosts="mirror.example.com"),
+        headers=ORIGIN)
+    assert response.status_code == 200, response.text
+    row = (await signed_client.get(BASE)).json()["credentials"][0]
+    assert row["hosts"] == ["api.example.com", "mirror.example.com"]
+    assert row["url"] == "api.example.com:443"
+    assert row["extra_hosts"] == "mirror.example.com"
 
 
 @pytest.mark.parametrize("body, field", [

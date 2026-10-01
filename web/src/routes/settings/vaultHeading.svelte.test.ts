@@ -339,10 +339,10 @@ describe('name conflicts', () => {
     await findHeading();
     const line = words(screen.getByTestId('vault-conflicts'));
     expect(line).toContain(
-      '2 entries in the file were skipped because a credential with the same name was added in Istota. Rename one of them',
+      '2 entries in the file were skipped because a credential with the same name was added in Istota. Rename them in KeePassXC, or delete the ones added in Istota',
     );
     // An unchanged file is not re-read, so only a change to it brings the entry in.
-    expect(line).toContain('the next time the file changes');
+    expect(line).toContain('skipped entries are synced the next time the file changes');
   });
 
   it('uses the singular for one', async () => {

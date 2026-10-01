@@ -4407,6 +4407,9 @@ export interface CredentialSummary {
   grant: CredentialGrant | null;
   /** Local credentials only: the stored site, which is not secret. */
   url?: string;
+  /** Local credentials only: the bound hosts other than the site's, comma-separated,
+   *  as the server's parser splits them. */
+  extra_hosts?: string;
   /** Local credentials only. The username itself is never sent. */
   username_set?: boolean;
 }
@@ -4471,12 +4474,22 @@ export class CredentialWriteError extends Error {
 /** Outside `apiFetch` because a refusal's `field` has to reach the form, and
  *  `apiFetch` keeps only the message. */
 async function credentialWrite(path: string, method: string, body: unknown) {
-  const resp = await fetch(`${base}/api/settings/credentials${path}`, {
-    method,
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}/api/settings/credentials${path}`, {
+      method,
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    noteTransport(false, 'unreachable');
+    throw new CredentialWriteError(
+      'Istota could not be reached. Check the list before trying again.',
+      null,
+    );
+  }
+  noteTransport(true);
   if (resp.status === 401) throw new AuthError();
   let payload: unknown = null;
   try {

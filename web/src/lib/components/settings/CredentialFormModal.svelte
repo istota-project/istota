@@ -44,25 +44,10 @@
   const start = untrack(() => (mode === 'edit' ? credential : null));
   const editing = start !== null;
   const initialUrl = start?.url ?? '';
-
-  /** The site's host as typed, for telling it apart from the extra hosts. */
-  function bareHost(url: string): string {
-    return url
-      .trim()
-      .toLowerCase()
-      .replace(/^https?:\/\//, '')
-      .split(/[/?#]/)[0];
-  }
-
-  // The list payload merges the site's host into `hosts`, so the extra hosts
-  // are what is left. An `http://` host can only have come from the site.
-  // A host whose spelling differs from the typed site stays in the list, which
-  // is redundant rather than wrong: the server de-duplicates.
-  const initialExtraHosts = editing
-    ? (start?.hosts ?? [])
-        .filter((host) => !host.startsWith('http://') && host !== bareHost(initialUrl))
-        .join(', ')
-    : '';
+  // From the server, which splits the bound hosts with the parser that bound
+  // them; a string comparison here would read `host:443` as an extra host and
+  // keep it bound after the site changed.
+  const initialExtraHosts = start?.extra_hosts ?? '';
 
   let open = $state(true);
   let busy = $state(false);
@@ -102,6 +87,12 @@
   onDestroy(clearSecret);
 
   function cancel() {
+    // Escape and the overlay bypass the disabled fieldset; while a save runs,
+    // its result decides whether the dialog closes.
+    if (busy) {
+      open = true;
+      return;
+    }
     clearSecret();
     open = false;
     onClose();

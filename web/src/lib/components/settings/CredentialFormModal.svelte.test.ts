@@ -25,6 +25,7 @@ const LOCAL: CredentialSummary = {
   revealable: false,
   grant: null,
   url: 'openrouter.ai',
+  extra_hosts: 'api2.openrouter.ai',
   username_set: true,
 };
 
@@ -186,6 +187,54 @@ describe('editing', () => {
       headers: 'authorization, x-api-key',
       revealable: false,
     });
+  });
+
+  it('takes the extra hosts from the server, not from the bound hosts', async () => {
+    // The site's bound host is `openrouter.ai` while the typed site is
+    // `openrouter.ai:443`; reading extra hosts off `hosts` would keep the old
+    // site bound after the site changed.
+    vi.mocked(updateLocalCredential).mockResolvedValue({
+      ok: true,
+      name: 'openrouter_key',
+      username_name: null,
+      url_name: 'openrouter_key_url',
+      grant: null,
+    });
+    const { onSaved } = mount({
+      mode: 'edit',
+      credential: { ...LOCAL, hosts: ['openrouter.ai'], url: 'openrouter.ai:443', extra_hosts: '' },
+    });
+    await type(/^Site/, 'api.example.com');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(updateLocalCredential).toHaveBeenCalledWith(
+      'openrouter_key',
+      expect.objectContaining({ url: 'api.example.com', extra_hosts: '' }),
+    );
+  });
+
+  it('stays open when dismissed while a save is running', async () => {
+    let finish: () => void = () => {};
+    vi.mocked(updateLocalCredential).mockReturnValue(
+      new Promise((resolve) => {
+        finish = () =>
+          resolve({
+            ok: true,
+            name: 'openrouter_key',
+            username_name: null,
+            url_name: null,
+            grant: null,
+          });
+      }),
+    );
+    const { onClose, onSaved } = mount({ mode: 'edit', credential: LOCAL });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    finish();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it('removes the username when asked', async () => {

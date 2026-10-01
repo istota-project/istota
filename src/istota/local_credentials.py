@@ -189,18 +189,26 @@ def is_local(conn, user_id: str, name: str) -> bool:
 
 
 def stored_fields(conn, user_id: str, name: str) -> dict:
-    """What the edit form may know about a local credential: its URL, and whether a username is set.
+    """What the edit form may know about a local credential: its URL, its extra
+    hosts, and whether a username is set.
 
     The URL is a binding input and not secret; the username and the value are
-    never read back.
+    never read back. The extra hosts are the bound hosts minus the site's own,
+    worked out here with the same parser that bound them: the client cannot
+    tell `api.example.com:443` from `api.example.com`, and a site host
+    misread as an extra host would stay bound after the site changed.
     """
     username_name, url_name = derived_names(name)
     url = ""
     if url_name and _owned_field(conn, user_id, name, url_name):
         stored = secrets_store.get_secret(None, user_id, _SERVICE, url_name, connection=conn)
         url = stored if isinstance(stored, str) else ""
+    binding = _bindings.get_binding(conn, user_id, name) or {"hosts": []}
+    site_hosts = set(_bindings.parse_binding(url, {}, [], source=SOURCE)["hosts"]) if url else set()
+    extra_hosts = [host for host in binding["hosts"] if host not in site_hosts]
     return {
         "url": url,
+        "extra_hosts": ", ".join(extra_hosts),
         "username_set": bool(username_name) and _owned_field(conn, user_id, name, username_name),
     }
 

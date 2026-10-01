@@ -59,6 +59,7 @@ type MockCredential = {
   revealable: boolean;
   grant: MockGrant | null;
   url?: string;
+  extra_hosts?: string;
   username_set?: boolean;
 };
 // The server's `bindings.DEFAULT_HEADERS`, applied when no headers are named.
@@ -74,6 +75,7 @@ const mockCredentials: MockCredential[] = [
     revealable: false,
     grant: { scope_mode: 'all', rooms: [], allow_scheduled: false, allow_http: false },
     url: 'openrouter.ai',
+    extra_hosts: '',
     username_set: false,
   },
   {
@@ -167,6 +169,7 @@ function mockCredentialRoutes(url: string, method: string, body: any): unknown |
       revealable: !!b.revealable,
       grant,
       url: b.url ?? '',
+      extra_hosts: b.extra_hosts ?? '',
       username_set: !!b.username,
     });
     mockCredentials.sort((a, c) => a.name.localeCompare(c.name));
@@ -200,6 +203,7 @@ function mockCredentialRoutes(url: string, method: string, body: any): unknown |
     }
     row.hosts = hosts;
     row.url = b.url ?? '';
+    row.extra_hosts = b.extra_hosts ?? '';
     row.revealable = !!b.revealable;
     if (b.username === '') row.username_set = false;
     else if (typeof b.username === 'string') row.username_set = true;

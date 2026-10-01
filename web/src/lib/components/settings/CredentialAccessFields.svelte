@@ -66,7 +66,7 @@
     HTTP sends credentials without encryption. Turn it on only for a service you trust on a trusted
     network.
   </p>
-  {#if error}<p class="form-error" data-testid="access-error">{error}</p>{/if}
+  {#if error}<p class="form-error" role="alert" data-testid="access-error">{error}</p>{/if}
 </div>
 
 <style>
