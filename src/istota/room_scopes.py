@@ -221,6 +221,19 @@ def withheld_for_task(
     )
 
 
+def canonical_token(conn, token: str | None) -> str | None:
+    """The registry token a conversation token names, or None for no room.
+
+    The one copy: `side_rooms` re-exports it, and the memory skill CLI reaches
+    it here without importing `side_rooms`.
+    """
+    if not token:
+        return None
+    if db.get_room(conn, token) is not None:
+        return token
+    return db.find_room_token_by_ref(conn, token)
+
+
 #: The fence label a shared room's `CHANNEL.md` carries, in the prompt block,
 #: in recall and in `memory show --channel` (multiplayer D24).
 CHANNEL_NOTES_LABEL = "room notes"
@@ -242,11 +255,7 @@ def channel_notes_shared(
     """
     if guest_turn or is_group_chat:
         return True
-    if not conversation_token:
-        return False
-    token: str | None = conversation_token
-    if db.get_room(conn, token) is None:
-        token = db.find_room_token_by_ref(conn, token)
+    token = canonical_token(conn, conversation_token)
     return token is not None and db.room_was_ever_shared(conn, token)
 
 

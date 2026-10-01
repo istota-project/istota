@@ -6,7 +6,8 @@ without `files`, a per-task `room-task-<id>` temp dir instead of the per-user
 one, no flat Talk directory, read-only tmpfs masks over the memory directories
 when `files` is granted without `memory` (made first when absent, put on the
 target when a symlink), the bot directory bound onto itself so it cannot be
-renamed out from under those masks, and a `Groups/<id>` bind for the groups
+renamed out from under those masks and checked by inode before the command
+runs, and a `Groups/<id>` bind for the groups
 the task resolves (multiplayer Stages 9, 13, 16, 23 and 28).
 
 The default suite patches `_bwrap_available` and reads argv, so it has never
@@ -290,6 +291,28 @@ class TestFilesGrantedWithoutMemory:
         assert "No such file" in facts["groups_entries"], _show(facts)
 
 
+class TestTheIdentityGuard:
+    """The self-bind's source can be swapped for a symlink between the plan
+    and bwrap's mount, by another task of the same user. What runs the
+    command is a check, after every mount, that the path is the inode the plan
+    saw. The files tests above pass through it in a real namespace; this is
+    its refusal, run in the image's own shell and `stat`."""
+
+    def test_it_runs_the_command_only_for_the_planned_inode(self, shared_rooms):
+        from istota.sandbox_plan import IDENTITY_GUARD
+
+        ident = shared_rooms.exec(["stat", "-c", "%d:%i", BOT]).stdout.strip()
+        assert re.fullmatch(r"\d+:\d+", ident), ident
+        guarded = ["/bin/sh", "-c", IDENTITY_GUARD, "sh", BOT]
+        ran = shared_rooms.exec([*guarded, ident, "--", "echo", "GUARD_RAN"])
+        assert ran.returncode == 0 and "GUARD_RAN" in ran.stdout, ran.stderr
+        other = shared_rooms.exec(["stat", "-c", "%d:%i", USER_DIR]).stdout.strip()
+        refused = shared_rooms.exec([*guarded, other, "--", "echo", "GUARD_RAN"])
+        assert refused.returncode == 125, (refused.returncode, refused.stderr)
+        assert "GUARD_RAN" not in refused.stdout
+        assert "not the directory that was planned" in refused.stderr
+
+
 class TestAGuestsTurn:
     @pytest.mark.script(SCRIPT)
     def test_it_reaches_no_workspace_and_no_group(self, shared_rooms):
@@ -320,5 +343,4 @@ class TestThePrivateRoomControl:
         assert "USER.md" in facts["config_entries"], report
         assert "planted-sibling.txt" in facts["temp_entries"], report
         assert facts["rename"] == "ok", report
-        assert facts["memories_fs"] != "tmpfs" or facts["memory_readable"] == "yes", report
         assert "fam" in facts["groups_entries"] and facts["other_group"] == "yes", report

@@ -454,6 +454,37 @@ class TestFilesWithoutMemory:
         # itself, so its parent needs no bind of its own.
         assert _user_dir(config) not in [argv[i + 1] for i in self_binds]
 
+    def test_the_command_runs_only_if_the_bound_directory_is_the_planned_one(
+        self, config,
+    ):
+        """The self-bind's source is a name in a directory another task of the
+        same user can write, so a symlink swapped in between the plan and
+        bwrap's mount would bind whatever it points at (`..` is every user's
+        workspace). The command is wrapped in a check, run inside the
+        namespace after every mount, that the path is the inode the plan saw."""
+        import os
+
+        self._memory_dirs(config)
+        bot = (config.workspace_path / "Users" / "alice" / config.bot_dir_name).resolve()
+        st = os.stat(bot, follow_symlinks=False)
+        seen = _run(config, _room(config, shared=True, grants=("files",)))
+        argv = seen["argv"]
+        tail = argv[argv.index("--") + 1:]
+        guard = next(i for i, tok in enumerate(tail) if "stat -c %d:%i" in tok)
+        assert tail[guard - 2:guard] == ["/bin/sh", "-c"]
+        assert tail[guard + 2:guard + 5] == [str(bot), f"{st.st_dev}:{st.st_ino}", "--"]
+        assert tail[guard + 5] == "claude"
+
+    def test_a_symlinked_bot_directory_is_not_self_bound(self, config, tmp_path):
+        """A link there is not a directory the plan can pin by identity, and
+        binding it by name is the swap the guard exists for."""
+        base = (config.workspace_path / "Users" / "alice").resolve()
+        (base / "real-bot" / "config").mkdir(parents=True)
+        (base / config.bot_dir_name).symlink_to(base / "real-bot")
+        seen = _run(config, _room(config, shared=True, grants=("files",)))
+        argv = seen["argv"]
+        assert str(base / config.bot_dir_name) not in _binds(argv)
+
     def test_control_both_granted_binds_no_bot_directory(self, config):
         self._memory_dirs(config)
         bot = str((config.workspace_path / "Users" / "alice" / config.bot_dir_name).resolve())

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -59,6 +60,15 @@ EXTRA_RO_BIND = "extra_ro_bind"
 #: A memory mask's parent bound onto itself, so it is a mountpoint and
 #: rename(2) refuses it (see `build_mount_plan`).
 MEMORY_PARENT_BIND = "memory_parent_self_bind"
+
+#: The in-namespace check `render_bwrap_argv` puts in front of a command whose
+#: plan pinned a path's identity. Exit 125 names the refusal on stderr.
+IDENTITY_GUARD = (
+    'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do '
+    '[ "$(stat -c %d:%i -- "$1" 2>/dev/null)" = "$2" ] || '
+    '{ echo "istota sandbox: $1 is not the directory that was planned; refusing '
+    'to run" >&2; exit 125; }; shift 2; done; shift; exec "$@"'
+)
 
 #: The `/etc` entries every profile binds read-only. Module scope because
 #: `config_sandbox_bound_roots` has to name the same set from outside
@@ -161,6 +171,10 @@ class MountPlan:
     #: Masks refused because they would have shadowed a path the task needs.
     #: Logged at build time; carried here so a caller can report on them.
     refused_masks: tuple[Path, ...] = ()
+    #: ``(in-namespace path, "dev:ino")`` pairs the command checks after every
+    #: mount and before it runs: a bind whose source a task can swap between
+    #: plan and mount is refused at the door rather than trusted.
+    identity_checks: tuple[tuple[Path, str], ...] = ()
     #: The validated REPL workspace, if one was supplied. Also the chdir target
     #: when set, and the extra entry ``mask_protected_paths`` was given.
     workspace_resolved: Path | None = None
@@ -981,6 +995,35 @@ def build_mount_plan(
             else:
                 _ro(rpath, "user_resource", user_data=True)
 
+    # --- Memory inside a bound workspace (`files` without `memory`) ---
+    # The memory directories are masked (below, with the database masks), so
+    # the two scopes are granted independently. rename(2) refuses only a
+    # dentry that is itself a mountpoint, so each mask's parent below the
+    # workspace (the bot directory) is bound onto itself: otherwise it could be
+    # renamed away and `config/USER.md` recreated outside the mask. That bind's
+    # source is a name another task of this user can replace with a symlink
+    # between here and bwrap's mount, so its identity is pinned now and checked
+    # inside the namespace before the command runs (`identity_checks`). A
+    # parent that is not a plain directory is not self-bound at all.
+    withheld_memory: list[Path] = []
+    identity_checks: list[tuple[Path, str]] = []
+    if user_dir is not None and "files" not in withheld_scopes and "memory" in withheld_scopes:
+        withheld_memory = memory_masks(config, user_dir)
+        for parent in dict.fromkeys(m.parent for m in withheld_memory):
+            if parent == user_dir or not is_within(parent, user_dir):
+                continue
+            try:
+                st = os.stat(parent, follow_symlinks=False)
+            except OSError:
+                continue
+            if not stat.S_ISDIR(st.st_mode):
+                logger.warning(
+                    "sandbox_plan: %s is not a plain directory; not self-bound", parent,
+                )
+                continue
+            _rw(parent, MEMORY_PARENT_BIND)
+            identity_checks.append((parent, f"{st.st_dev}:{st.st_ino}"))
+
     # --- Extra RO binds (e.g. service sockets for same-host APIs, and the
     # document a task-less OCR call reads) ---
     #
@@ -1022,19 +1065,6 @@ def build_mount_plan(
     # path *absent*: the CLI then exits at `--append-system-prompt-file` and a
     # `Read` of a prepared attachment gets ENOENT. Fail-closed either way,
     # which is why the message names both rather than picking one.
-    # `files` without `memory`: the workspace is bound, and the memory inside
-    # it is masked, so the two scopes are granted independently. rename(2)
-    # refuses only a dentry that is itself a mountpoint, so each mask's parent
-    # below the workspace (the bot directory) is self-bound: otherwise it could
-    # be renamed away and `config/USER.md` recreated outside the mask. Ahead of
-    # the extra binds, which stay last.
-    withheld_memory: list[Path] = []
-    if user_dir is not None and "files" not in withheld_scopes and "memory" in withheld_scopes:
-        withheld_memory = memory_masks(config, user_dir)
-        for parent in dict.fromkeys(m.parent for m in withheld_memory):
-            if parent != user_dir and is_within(parent, user_dir):
-                _rw(parent, MEMORY_PARENT_BIND, user_data=True)
-
     for path in (extra_ro_binds or []):
         _ro(path, EXTRA_RO_BIND)
 
@@ -1057,6 +1087,7 @@ def build_mount_plan(
         masks=tuple(masks),
         refused_masks=tuple(refused),
         workspace_resolved=workspace_resolved,
+        identity_checks=tuple(identity_checks),
     )
 
 
@@ -1165,6 +1196,15 @@ def render_bwrap_argv(
     # --- Lifecycle ---
     args.extend(["--die-with-parent", "--chdir", str(plan.chdir)])
     args.append("--")
+
+    if plan.identity_checks:
+        # Inside the namespace, after every mount: each pinned path must still
+        # be the inode the plan stat'ed, or nothing runs. `exec` keeps the pid
+        # and every inherited descriptor (the tool server's socketpair).
+        pinned: list[str] = []
+        for path, identity in plan.identity_checks:
+            pinned += [str(path), identity]
+        cmd = ["/bin/sh", "-c", IDENTITY_GUARD, "sh", *pinned, "--", *cmd]
 
     if net_proxy_sock:
         # Wrap the command in a shell that starts the TCP-to-Unix bridge as a

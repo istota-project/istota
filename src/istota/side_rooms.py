@@ -51,6 +51,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import db
+from .room_scopes import canonical_token  # noqa: F401 — re-exported; one copy
 from .untrusted import frame_untrusted
 from .whatsapp_requests import (
     CLAIM_RECOVERY_SECONDS,
@@ -72,15 +73,6 @@ UNTRUSTED_LABEL = "PARENT ROOM TRANSCRIPT"
 PARENT_CONTEXT_MESSAGES = 40
 PARENT_CONTEXT_CHARS = 12000
 _LABEL_MAX = 80
-
-
-def canonical_token(conn, token: str | None) -> str | None:
-    """The registry token a conversation token names, or None for no room."""
-    if not token:
-        return None
-    if db.get_room(conn, token) is not None:
-        return token
-    return db.find_room_token_by_ref(conn, token)
 
 
 def is_shared_room(conn, room_token: str, *, is_group_chat: bool = False) -> bool:

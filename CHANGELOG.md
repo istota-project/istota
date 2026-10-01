@@ -216,7 +216,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The Nextcloud skill no longer lets a task post into, rename, describe, invite into, leave or delete a Talk conversation that someone other than the task's user reads, except a post into the room the task was asked in. Before, a private task could post into a group room directly and skip the held `room post`. `talk invite` and `talk create --invite` from a task invite only the caller.
 
-- With your memory withheld in a shared room, the Nextcloud skill's WebDAV verbs refuse your `USER.md`, dated memories and playbooks, file listings and searches leave their names out, and the sandbox masks them even when your files are shared. A task cannot rename the bot directory to get around the masks.
+- With your memory withheld in a shared room, the Nextcloud skill's WebDAV verbs refuse your `USER.md`, dated memories and playbooks, `files list` and `files search` leave their names out, and the sandbox masks them even when your files are shared. A task cannot rename the bot directory to get around the masks.
 
 - A guest's turn runs in a temp directory of its own rather than the host's, so it cannot leave a deferred operation for the host's next task to replay at the host's authority, and it has no native web fetch or search.
 
