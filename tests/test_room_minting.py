@@ -136,3 +136,93 @@ def test_native_talk_binding_wins_over_legacy_identity_collision(config, collisi
         plan = inbound._plan_room_pass(conn, config,
                                       [{"token": "talkref1", "type": 1, "name": "alice"}], {}, {})[0]
         assert plan.canonical == room.token
+
+
+@pytest.mark.parametrize("command_name", ["memory", "export"])
+async def test_talk_commands_read_canonical_room_data(config, tmp_path, command_name):
+    from istota.commands import CommandContext, cmd_export, cmd_memory
+
+    config.workspace_path = tmp_path
+    with db.get_db(config.db_path) as conn:
+        turn = record_inbound(conn, config, surface="talk", surface_ref="talkref1",
+                              user_id="alice", text="Room question")
+        db.update_task_status(conn, turn.task_id, "completed", result="Room answer")
+        memory = tmp_path / "Channels" / turn.room_token / "CHANNEL.md"
+        memory.parent.mkdir(parents=True)
+        memory.write_text("Room notes")
+        ctx = CommandContext(config=config, conn=conn, user_id="alice",
+                             conversation_token="talkref1", surface="talk",
+                             args="channel" if command_name == "memory" else "")
+        if command_name == "memory":
+            assert "Room notes" in await cmd_memory(ctx)
+        else:
+            assert "Exported 1 messages" in await cmd_export(ctx)
+            export = tmp_path / "Users/alice/istota/exports/conversations" / f"{turn.room_token}.md"
+            assert "Room question" in export.read_text()
+        assert ctx.conversation_token == "talkref1"
+
+
+@pytest.mark.parametrize("notice", ["expired", "ancient"])
+def test_cleanup_notices_resolve_minted_talk_room(config, tmp_path, notice):
+    from unittest.mock import patch
+    from istota.scheduler import run_cleanup_checks
+
+    config.nextcloud.url = "https://nc.example.com"
+    config.temp_dir = tmp_path
+    config.email.enabled = False
+    config.talk.enabled = False
+    with db.get_db(config.db_path) as conn:
+        room = db.register_room(conn, None, "alice", origin="talk")
+        db.add_room_binding(conn, room.token, "talk", "talkref1")
+        task_id = db.create_task(conn, prompt="A request", user_id="alice",
+                                 source_type="talk", conversation_token=room.token)
+        if notice == "expired":
+            db.set_task_confirmation(conn, task_id, "Proceed?")
+        conn.execute("UPDATE tasks SET created_at = datetime('now', '-30 days'), "
+                     "updated_at = datetime('now', '-30 days') WHERE id = ?", (task_id,))
+    with patch("istota.scheduler.send_notification", return_value=True) as send:
+        run_cleanup_checks(config)
+    assert send.call_count == 1
+    assert send.call_args.kwargs["conversation_token"] == "talkref1"
+    if notice == "expired":
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute("SELECT room_token FROM notifications WHERE source = 'task_alert'").fetchone()
+            assert row["room_token"] == room.token
+
+
+@pytest.mark.parametrize("builder", [plain_talk_room, promoted_room])
+def test_talk_context_reads_native_cache_with_minted_identity(config, builder):
+    from istota.executor import _build_talk_api_context
+
+    with db.get_db(config.db_path) as conn:
+        room = builder(conn, "alice")
+        db.upsert_talk_messages(conn, room.talk_ref, [{
+            "id": 10, "actorId": "alice", "actorDisplayName": "Alice",
+            "actorType": "users", "message": "Cached room history",
+            "messageType": "comment", "timestamp": 10,
+        }])
+        task = db.Task(id=1, user_id="alice", prompt="Next question",
+                       source_type="talk", conversation_token=room.canonical, status="running")
+        context, _ = _build_talk_api_context(task, config, conn)
+        assert context is not None and "Cached room history" in context
+
+
+@pytest.mark.parametrize("source", ["memory", "talk"])
+async def test_search_scopes_native_and_canonical_hits_to_minted_room(config, source):
+    from unittest.mock import AsyncMock, patch
+    from istota.commands import CommandContext, cmd_search
+
+    with db.get_db(config.db_path) as conn:
+        room = db.register_room(conn, None, "alice", origin="talk")
+        db.add_room_binding(conn, room.token, "talk", "talkref1")
+        ctx = CommandContext(config=config, conn=conn, user_id="alice",
+                             conversation_token="talkref1", surface="talk", args="history")
+        hit = {"summary": "Room history found", "conversation_token":
+               room.token if source == "memory" else "talkref1", "talk_message_id": 10}
+        with patch("istota.commands._search_memory", return_value=[hit] if source == "memory" else []) as mem, \
+             patch("istota.commands._search_talk_api", new=AsyncMock(return_value=[hit] if source == "talk" else [])):
+            result = await cmd_search(ctx)
+        assert "Room history found" in result
+        assert mem.call_args.kwargs["conversation_token"] == room.token
+        assert ctx.result_data["results"][0]["room_token"] == room.token
+        assert "/call/talkref1#message_10" in ctx.result_data["results"][0]["talk_link"]

@@ -1938,7 +1938,7 @@ async def _process_poll_results(
                 # Per-channel gate: notify user if there's already an active fg task
                 # but still queue the message (fall through to task creation)
                 if engaged and db.has_active_foreground_task_for_channel(
-                    conn, conversation_token,
+                    conn, room_token,
                 ):
                     logger.debug(
                         "Channel gate: active fg task in %s, queuing message from %s",

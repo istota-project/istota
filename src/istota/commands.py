@@ -2191,7 +2191,7 @@ def _usage_age(seconds: float) -> str:
 @command("memory", "Show memory: `!memory user`, `!memory channel`, `!memory facts`")
 async def cmd_memory(ctx: CommandContext):
     config, conn = ctx.config, ctx.conn
-    user_id, conversation_token, args = ctx.user_id, ctx.conversation_token, ctx.args
+    user_id, args = ctx.user_id, ctx.args
     mount = config.workspace_path
     target = args.strip().lower()
 
@@ -2209,8 +2209,9 @@ async def cmd_memory(ctx: CommandContext):
         if mount is None:
             return "Nextcloud mount not configured -- cannot read memory files."
         from .storage import validate_conversation_token
-        validate_conversation_token(conversation_token)
-        mem_path = mount / "Channels" / conversation_token / "CHANNEL.md"
+        room_token = _room_token(ctx)
+        validate_conversation_token(room_token)
+        mem_path = mount / "Channels" / room_token / "CHANNEL.md"
         if mem_path.exists():
             content = mem_path.read_text()
             if content.strip():
@@ -2705,7 +2706,7 @@ def _format_history_text(
 @command("export", "Export conversation history to a file: `!export [markdown|text]`")
 async def cmd_export(ctx: CommandContext):
     config, conn = ctx.config, ctx.conn
-    user_id, conversation_token, args = ctx.user_id, ctx.conversation_token, ctx.args
+    user_id, conversation_token, args = ctx.user_id, _room_token(ctx), ctx.args
     mount = config.workspace_path
     if mount is None:
         return "Nextcloud mount not configured — cannot write export file."
@@ -3405,8 +3406,14 @@ async def _resolve_room_names(
     return names
 
 
-def _build_message_link(config: Config, token: str, message_id: int) -> str:
-    """Build a Nextcloud Talk deep link to a specific message."""
+def _build_message_link(config: Config, token: str, message_id: int, conn=None) -> str | None:
+    """Build a Nextcloud Talk deep link using the bound native address."""
+    with db.get_db_if_present(config.db_path, conn) as c:
+        binding = db.get_room_binding(c, token, "talk") if c is not None else None
+    if binding:
+        token = binding.surface_ref
+    elif db.is_canonical_room_token(token):
+        return None
     base_url = config.nextcloud.url.rstrip("/")
     return f"{base_url}/call/{token}#message_{message_id}"
 
@@ -3445,7 +3452,7 @@ def _format_search_results(results: list[dict], query: str) -> str:
 
 
 def _build_search_data(
-    config: Config, query: str, results: list[dict], text: str,
+    config: Config, query: str, results: list[dict], text: str, conn=None,
 ) -> dict:
     """Build the structured `search_results` payload for rich stream surfaces.
 
@@ -3460,7 +3467,7 @@ def _build_search_data(
         talk_message_id = r.get("talk_message_id")
         talk_link = r.get("talk_link")
         if not talk_link and room_token and talk_message_id:
-            talk_link = _build_message_link(config, room_token, talk_message_id)
+            talk_link = _build_message_link(config, room_token, talk_message_id, conn)
         room_name = r.get("room_name") or None
         out.append({
             "source_type": r.get("source_type"),
@@ -3478,7 +3485,7 @@ def _build_search_data(
 @command("search", "Search conversation history: `!search <query>`, `!search --all <query>`, `!search --since DATE <query>`, `!search --memories <query>`")
 async def cmd_search(ctx: CommandContext):
     config, conn = ctx.config, ctx.conn
-    user_id, conversation_token, args = ctx.user_id, ctx.conversation_token, ctx.args
+    user_id, conversation_token, args = ctx.user_id, _room_token(ctx), ctx.args
     parsed = _parse_search_args(args)
     if not parsed.query:
         return (
@@ -3495,6 +3502,15 @@ async def cmd_search(ctx: CommandContext):
         talk_results: list[dict] = []
     else:
         talk_results = await _search_talk_api(config, parsed.query)
+
+    # Talk search returns native addresses; memory stores canonical identities.
+    for result in talk_results:
+        token = result.get("conversation_token")
+        if token:
+            result["conversation_token"] = db.resolve_room_token(conn, "talk", token) or token
+    scope = parsed.scope
+    if scope and scope != "all":
+        scope = db.resolve_room_token(conn, ctx.surface, scope) or db._canonical_room_token(conn, scope)
 
     def _assemble(mem_results: list[dict]) -> list[dict]:
         """Merge memory + Talk hits, apply the --since / room-scope filters, cap.
@@ -3519,15 +3535,15 @@ async def cmd_search(ctx: CommandContext):
         # memory rows (personal + current-channel memory) are never discarded in
         # the current-room view, and are excluded from a specific-room search
         # (they belong to the current room / the user, not the named room).
-        if parsed.scope is None:
+        if scope is None:
             merged = [
                 r for r in merged
                 if r.get("is_memory") or r.get("conversation_token") == conversation_token
             ]
-        elif parsed.scope != "all":
+        elif scope != "all":
             merged = [
                 r for r in merged
-                if not r.get("is_memory") and r.get("conversation_token") == parsed.scope
+                if not r.get("is_memory") and r.get("conversation_token") == scope
             ]
         return merged[:8]
 
@@ -3554,7 +3570,7 @@ async def cmd_search(ctx: CommandContext):
         # The plain-text message is the durable record; the empty structured
         # card lets a rich stream client render "no results" in place.
         text = f"No results for \"{parsed.query}\"."
-        ctx.result_data = _build_search_data(config, parsed.query, [], text)
+        ctx.result_data = _build_search_data(config, parsed.query, [], text, conn)
         return text
 
     # Resolve room display names for all unique tokens
@@ -3569,10 +3585,10 @@ async def cmd_search(ctx: CommandContext):
         # Deep links are a Talk concept — only build them on the Talk surface.
         msg_id = r.get("talk_message_id")
         if ctx.surface == "talk" and token and msg_id:
-            r["talk_link"] = _build_message_link(config, token, msg_id)
+            r["talk_link"] = _build_message_link(config, token, msg_id, conn)
 
     text = _format_search_results(all_results, parsed.query)
-    ctx.result_data = _build_search_data(config, parsed.query, all_results, text)
+    ctx.result_data = _build_search_data(config, parsed.query, all_results, text, conn)
     return text
 
 

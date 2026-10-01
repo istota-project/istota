@@ -1838,11 +1838,13 @@ class TestChannelGate:
         """When an active fg task exists, send 'still working' AND create a task."""
         config = make_config()
 
-        # Pre-create an active foreground task for room1
+        # The active task is keyed by the minted room, not its Talk address.
         with db.get_db(config.db_path) as conn:
+            room = db.register_room(conn, None, "alice", origin="talk")
+            db.add_room_binding(conn, room.token, "talk", "room1")
             db.create_task(
                 conn, prompt="previous request", user_id="alice",
-                source_type="talk", conversation_token="room1", queue="foreground",
+                source_type="talk", conversation_token=room.token, queue="foreground",
             )
 
         msg = _msg(id=200, actor_id="alice", message="Another request")

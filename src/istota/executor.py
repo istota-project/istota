@@ -5298,7 +5298,10 @@ def _build_talk_api_context(
     raw_messages = []
     with db.get_db_if_present(config.db_path, conn) as c:
         if c is not None:
-            raw_messages = db.get_cached_talk_messages(c, task.conversation_token, limit=limit)
+            binding = db.get_room_binding(c, task.conversation_token, "talk")
+            talk_ref = binding.surface_ref if binding else task.conversation_token
+            if not db.is_canonical_room_token(talk_ref):
+                raw_messages = db.get_cached_talk_messages(c, talk_ref, limit=limit)
 
     talk_floor = _front_stage_cutoff(task, conn, config).talk_message_id
     if talk_floor:

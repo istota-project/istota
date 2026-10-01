@@ -7004,7 +7004,7 @@ def _effective_processed_email_retention(sched: SchedulerConfig) -> int:
     return configured
 
 
-def _confirmation_notice_token(task_info: dict) -> str | None:
+def _confirmation_notice_token(task_info: dict, conn=None) -> str | None:
     """The Talk room an expiry notice may fall back to, or None.
 
     The old code passed ``conversation_token`` verbatim, which for an email gate
@@ -7019,6 +7019,10 @@ def _confirmation_notice_token(task_info: dict) -> str | None:
     token = task_info.get("conversation_token")
     if not token:
         return None
+    if conn is not None:
+        binding = db.get_room_binding(conn, token, "talk")
+        if binding:
+            return binding.surface_ref
     if db.is_canonical_room_token(token) or token.startswith(("web-", "repl-")):
         return None
     if is_synthetic_email_thread_token(token):
@@ -7156,12 +7160,14 @@ def run_cleanup_checks(config: Config) -> None:
                 actionable=False,
                 params={"task_id": task_info["id"],
                         "source_type": task_info.get("source_type")},
-                room_token=_confirmation_notice_token(task_info),
+                room_token=(task_info["conversation_token"]
+                            if db.is_canonical_room_token(task_info.get("conversation_token"))
+                            else _confirmation_notice_token(task_info)),
             )
             expiry_notices.append((
                 task_info["user_id"],
                 notice,
-                _confirmation_notice_token(task_info),
+                _confirmation_notice_token(task_info, conn),
                 expired_row.notification_id if expired_row is not None else None,
             ))
 
@@ -7214,7 +7220,7 @@ def run_cleanup_checks(config: Config) -> None:
                     "A task you submitted was cancelled because it was pending too long "
                     "without being processed. Please try again or contact support if this "
                     "keeps happening.",
-                    task_info["conversation_token"],
+                    _confirmation_notice_token(task_info, conn),
                 ))
 
         # 4. Clean up old completed tasks
