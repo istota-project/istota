@@ -562,6 +562,18 @@ CASES: tuple[Case, ...] = (
     # in the user half, with the seeded charter. The second group's sentinel
     # is absent because the user is not in it.
     Case("group_memory", group=True),
+    # A shared room's CHANNEL.md (multiplayer D24), against `shared_room`,
+    # which it differs from in the seeded memory: several people write a
+    # shared room's notes, so they arrive fenced as untrusted content.
+    # `memory_present` is the private-room control and stays unfenced.
+    Case(
+        "shared_room_notes",
+        source_type="web",
+        conversation_token="web-room",
+        room=("#weekly", "web"),
+        shared=True,
+        memory=True,
+    ),
 )
 
 CASES_BY_NAME = {c.name: c for c in CASES}
@@ -1724,3 +1736,39 @@ class TestGroupMemoryThroughAssembly:
         case = Case("group_briefing", source_type="briefing", group=True)
         rendered = assemble(case, tmp_path, monkeypatch)
         assert "## Group memory" not in rendered
+
+
+class TestSharedRoomNotesAreFenced:
+    """Multiplayer D24: a shared room's `CHANNEL.md` has several authors and
+    reaches every member's prompt, so it is fenced as untrusted content. A
+    private room's has one author and is left as it was."""
+
+    NOTE = "CHANNEL MEMORY: this room is for release notes."
+
+    def _fenced(self, user):
+        lowered = user.lower()
+        start = lowered.index("[untrusted room notes")
+        end = lowered.index("[end untrusted room notes]")
+        return start < user.index(self.NOTE) < end
+
+    def test_a_shared_rooms_notes_are_fenced(self, tmp_path, monkeypatch):
+        _system, user = split_halves(
+            assemble(CASES_BY_NAME["shared_room_notes"], tmp_path, monkeypatch)
+        )
+        assert "## Channel memory" in user
+        assert self._fenced(user)
+
+    def test_a_guest_turns_notes_are_fenced(self, tmp_path, monkeypatch):
+        case = Case(
+            "notes_guest_turn", source_type="talk", conversation_token="room-token",
+            room=("family", "talk"), shared=True, guest_turn=True, memory=True,
+        )
+        _system, user = split_halves(assemble(case, tmp_path, monkeypatch))
+        assert self._fenced(user)
+
+    def test_a_private_rooms_notes_are_not(self, tmp_path, monkeypatch):
+        _system, user = split_halves(
+            assemble(CASES_BY_NAME["memory_present"], tmp_path, monkeypatch)
+        )
+        assert self.NOTE in user
+        assert "untrusted room notes" not in user.lower()
