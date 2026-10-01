@@ -168,6 +168,32 @@ class TestTheBackfill:
             assert ("assistant", "Late answer.") in rows
             assert _marker(conn, room) is not None
 
+    def test_a_task_finishing_mid_pass_is_not_lost(self, tmp_path, monkeypatch):
+        """Review finding: a task completing between the backfill read and
+        the unfinished check was read by neither, and the marker then closed
+        the room on it. The check now runs first; this completes the task at
+        the alias lookup, which sat between the two in the old order."""
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            late = _old_turn(conn, SMS, "still running", None, status="running")
+            room = _mint(conn, config)
+        real = db.room_ref_tokens
+
+        def finish_then_lookup(conn, token, **kw):
+            with db.get_db(config.db_path) as other:
+                other.execute(
+                    "UPDATE tasks SET status = 'completed', result = 'Late answer.' "
+                    "WHERE id = ?", (late,),
+                )
+            return real(conn, token, **kw)
+
+        monkeypatch.setattr(db, "room_ref_tokens", finish_then_lookup)
+        scheduler.backfill_phone_rooms(config)
+        monkeypatch.setattr(db, "room_ref_tokens", real)
+        scheduler.backfill_phone_rooms(config)
+        with db.get_db(config.db_path) as conn:
+            assert ("assistant", "Late answer.") in _rows(conn, room)
+
     def test_a_recreated_room_does_not_inherit_a_deleted_rooms_alias(self, tmp_path):
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:

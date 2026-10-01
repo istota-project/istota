@@ -758,21 +758,15 @@ def _backfill_phone_room(conn, room_token: str, user_id: str, surface: str) -> i
     """
     if private_phone_room(conn, surface, user_id) != room_token:
         return 0
-    before = db.room_max_message_id(conn, room_token)
-    caught_up = db.get_room_read_state(conn, room_token, "web", user_id) >= before > 0
-    inserted = db.backfill_room_messages_from_tasks(
-        conn, room_token, alias_owner=user_id,
-    )
-    if inserted and caught_up:
-        # The history was read on the phone; a reader who had seen everything
-        # in web is not shown it again as unread.
-        db.set_room_read_state(
-            conn, room_token, "web", db.room_max_message_id(conn, room_token), user_id,
-        )
+    # Asked before the backfill reads, not after: a task completing between
+    # the two would be missed by the read and not seen as unfinished, and the
+    # marker would close the room on it for good. Asked first, anything not
+    # unfinished now is already completed and visible to the read below.
     aliases = [
         ref for ref in db.room_ref_tokens(conn, room_token, include_surface_refs=False)
         if ref != room_token
     ]
+    unfinished = None
     if aliases:
         marks = ", ".join("?" for _ in aliases)
         states = ", ".join("?" for _ in _UNFINISHED_TASK_STATUSES)
@@ -781,8 +775,21 @@ def _backfill_phone_room(conn, room_token: str, user_id: str, surface: str) -> i
             f"AND user_id = ? AND status IN ({states}) LIMIT 1",
             (*aliases, user_id, *_UNFINISHED_TASK_STATUSES),
         ).fetchone()
-        if unfinished:
-            return inserted
+    before = db.room_max_message_id(conn, room_token)
+    caught_up = db.get_room_read_state(conn, room_token, "web", user_id) >= before > 0
+    inserted = db.backfill_room_messages_from_tasks(
+        conn, room_token, alias_owner=user_id,
+    )
+    if inserted and caught_up:
+        # The history was read on the phone; a reader who had seen everything
+        # in web is not shown it again as unread. One who had not keeps the
+        # backfilled rows as unread too: an id cursor cannot say "old rows
+        # read, newer rows not".
+        db.set_room_read_state(
+            conn, room_token, "web", db.room_max_message_id(conn, room_token), user_id,
+        )
+    if unfinished:
+        return inserted
     db.kv_set(
         conn, user_id, PHONE_ROOM_BACKFILL_NAMESPACE, room_token,
         json.dumps({"rows": inserted}),
