@@ -122,9 +122,10 @@ class TestThePlanRefusesASharedRoom:
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
             shared = _shared_talk_room(conn)
+            talk_ref = db.get_room_binding(conn, shared, "talk").surface_ref
             task = _task(conn, source_type="talk", conversation_token=shared)
         plan = resolve_delivery_plan(config, task, make_registry(config))
-        assert ("talk", shared) in _legs(plan)
+        assert ("talk", talk_ref) in _legs(plan)
 
     def test_a_cron_job_in_the_shared_room_is_gated_on_it_and_delivered(self, tmp_path):
         """The other answer to the reach half: a job whose conversation is the
@@ -146,13 +147,14 @@ class TestThePlanRefusesASharedRoom:
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
             shared = _shared_talk_room(conn)
-            private = plain_talk_room(conn, "alice", name="me").canonical
+            private_room = plain_talk_room(conn, "alice", name="me")
+            private = private_room.canonical
             db.add_room_member(conn, private, "alice")
             task = _task(conn, source_type="talk", conversation_token=private,
                          output_target=f"talk:{shared}")
         plan = resolve_delivery_plan(config, task, make_registry(config))
         # Refused, and the reply goes back where the turn was asked.
-        assert _legs(plan) == [("talk", private)]
+        assert _legs(plan) == [("talk", private_room.talk_ref)]
 
     def test_a_side_room_task_still_lands_in_its_side_room(self, tmp_path):
         """Stage 10's pin runs first and keeps its substitution."""

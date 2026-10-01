@@ -117,7 +117,7 @@ def _run_fresh_migrations(config_path: Path | None, run: Runner) -> None:
     cmd = ["istota"]
     if config_path is not None:
         cmd += ["-c", str(config_path)]
-    cmd += ["init"]
+    cmd += ["init", "--relocate-rooms"]
     result = run(cmd)
     if result.returncode != 0:
         raise UpdateError(
@@ -252,6 +252,12 @@ def run_update(
     if migrate is None:
         migrate = lambda _db: _run_fresh_migrations(config_path, run)  # noqa: E731
     daemon_running = daemon_running or _daemon_running
+
+    if daemon_running():
+        raise UpdateError(
+            "Stop istota serve/the scheduler and any separate web or webhook "
+            "processes before updating: room migration needs an offline workspace."
+        )
 
     record = load_install_record(record_path)
     method = record.get("method", "checkout")

@@ -7,7 +7,6 @@ import re
 import secrets
 import subprocess
 import time
-from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import pytest
@@ -27,22 +26,24 @@ def _form_fields(page: str, action: str) -> dict[str, str]:
     }
 
 
-def _delivered_link(service, since: int, recipient: str) -> str:
+def _delivered_code(service, since: int, recipient: str) -> str:
     deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
         with service.session(mail.EXTERNAL_ADDRESS) as inbox:
             for message in inbox.fetch_new_since(since):
-                if recipient not in message.recipients or not message.subject.endswith(": Sign in"):
+                if recipient not in message.recipients or not message.subject.endswith(" sign-in code"):
                     continue
-                links = re.findall(r'https?://[^\s<>]+/istota/auth/login-link\?token=[^\s<>]+', message.body_text)
-                assert len(links) == 1, "Delivered sign-in mail must contain one plain-text link"
-                return links[0]
+                codes = re.findall(r"^(\d{6})$", message.body_text, re.M)
+                assert len(codes) == 1, "Delivered sign-in mail must carry one code on its own line"
+                assert "http" not in message.body_text, "A sign-in mail must not carry a link (ISSUE-574)"
+                assert message.subject.startswith(codes[0])
+                return codes[0]
         time.sleep(0.5)
     pytest.fail("No sign-in email delivered to the recipient over Maddy IMAP")
 
 
 @pytest.mark.profile("full")
-def test_delivered_sign_in_link_and_password_login(stack):
+def test_delivered_sign_in_code_and_password_login(stack):
     # Distinct recipient plus an IMAP watermark exclude background mail and
     # messages left by another scenario on the session-scoped full stack.
     user_id = "email-login-" + secrets.token_hex(4)
@@ -65,43 +66,52 @@ def test_delivered_sign_in_link_and_password_login(stack):
             password_form = _form_fields(page.text, "/istota/login/email")
             assert "csrf_token" in password_form
             assert 'type="password"' in page.text
-            request_form = _form_fields(page.text, "/istota/auth/login-link/request")
-            requested = browser.post("/istota/auth/login-link/request", data={**request_form, "email": address})
+            request_form = _form_fields(page.text, "/istota/auth/sign-in-code/request")
+            requested = browser.post("/istota/auth/sign-in-code/request", data={**request_form, "email": address})
             assert requested.status_code == 200
+            assert 'autocomplete="one-time-code"' in requested.text
             assert browser.get("/istota/api/me").status_code == 401
+            code = _delivered_code(service, since, address)
 
-            delivered = urlsplit(_delivered_link(service, since, address))
-            assert delivered.scheme == "http"
-            assert delivered.hostname in {"localhost", "127.0.0.1"}
-            assert delivered.port == port, "The emailed link must target the published nginx port"
-            # Compose advertises localhost. Use published_port's IPv4 answer
-            # without changing the delivered path or token.
-            link = urlunsplit((delivered.scheme, f"127.0.0.1:{port}", delivered.path, delivered.query, ""))
-            with httpx.Client(base_url=origin, timeout=30, trust_env=False) as scanner:
-                scanned = scanner.get(link)
-                assert scanned.status_code == 200
-                _form_fields(scanned.text, "/istota/auth/login-link")
-                assert scanner.get("/istota/api/me").status_code == 401
+            # The code is bound to the browser that asked: another client that
+            # started its own request cannot spend it.
+            with httpx.Client(base_url=origin, timeout=30, trust_env=False) as other:
+                other_page = other.get("/istota/login")
+                other_form = _form_fields(other_page.text, "/istota/auth/sign-in-code/request")
+                other_request = other.post("/istota/auth/sign-in-code/request",
+                                           data={**other_form, "email": "someone-else@ext.test"})
+                stolen = other.post("/istota/auth/sign-in-code", data={
+                    **_form_fields(other_request.text, "/istota/auth/sign-in-code"), "code": code,
+                })
+                assert stolen.status_code == 400
+                assert other.get("/istota/api/me").status_code == 401
 
-            confirmation = browser.get(link)
-            assert confirmation.status_code == 200
-            fields = _form_fields(confirmation.text, "/istota/auth/login-link")
-            assert browser.get("/istota/api/me").status_code == 401
-            signed_in = browser.post("/istota/auth/login-link", data=fields)
+            fields = _form_fields(requested.text, "/istota/auth/sign-in-code")
+            signed_in = browser.post("/istota/auth/sign-in-code", data={**fields, "code": code})
             assert signed_in.status_code == 302
             me = browser.get("/istota/api/me")
             assert me.status_code == 200
             assert me.json()["username"] == user_id
             assert me.json()["auth"] == {"method": "email", "email": address, "can_change_password": False}
+            replayed = browser.post("/istota/auth/sign-in-code", data={**fields, "code": code})
+            assert replayed.status_code in (400, 403)
 
-            # Replay with the original CSRF-bearing scanner session, so a
-            # rejection cannot be explained by a missing confirmation form.
-            with httpx.Client(base_url=origin, timeout=30, trust_env=False) as replay:
-                replay.cookies.update(scanner.cookies)
-                rejected = replay.post("/istota/auth/login-link", data=_form_fields(scanned.text, "/istota/auth/login-link"))
-                assert rejected.status_code == 400
-                assert "This link is invalid" in rejected.text
-                assert replay.get("/istota/api/me").status_code == 401
+        # Operator recovery: the CLI prints a code for the user's own pending
+        # request, which still works only in the browser that made it.
+        with httpx.Client(base_url=origin, timeout=30, trust_env=False) as browser:
+            page = browser.get("/istota/login")
+            requested = browser.post("/istota/auth/sign-in-code/request", data={
+                **_form_fields(page.text, "/istota/auth/sign-in-code/request"), "email": address,
+            })
+            assert requested.status_code == 200
+            printed = stack.exec(command + ["sign-in-code", user_id])
+            assert printed.returncode == 0, printed.stderr
+            code = re.search(r"code=(\d{6})", printed.stdout)[1]
+            signed_in = browser.post("/istota/auth/sign-in-code", data={
+                **_form_fields(requested.text, "/istota/auth/sign-in-code"), "code": code,
+            })
+            assert signed_in.status_code == 302
+            assert browser.get("/istota/api/me").status_code == 200
 
             password = secrets.token_urlsafe(24)
             changed = subprocess.run(

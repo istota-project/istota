@@ -254,30 +254,13 @@ if [ -n "$BAILEYS_CHANGED" ]; then
 fi
 {% endif %}
 
-# Run DB migrations
-log "Running database migrations"
-"${HOME_DIR}/.venv/bin/python" -c "from pathlib import Path; import sys; sys.path.insert(0, 'src'); from ${PACKAGE}.db import init_db; init_db(Path('${DB_PATH}'))"
-sqlite3 "$DB_PATH" "ALTER TABLE processed_emails ADD COLUMN \"references\" TEXT;" 2>/dev/null || true
-sqlite3 "$DB_PATH" "ALTER TABLE tasks ADD COLUMN output_target TEXT;" 2>/dev/null || true
-sqlite3 "$DB_PATH" "ALTER TABLE scheduled_jobs ADD COLUMN output_target TEXT;" 2>/dev/null || true
+# This process already owns the update flock. The shared wrapper stops all
+# writers, initializes the schema, migrates rooms, sweeps, and restores state.
+log "Migrating room identities and reconciling workspace"
+bash "$REPO_DIR/scripts/relocate-rooms.sh" "$NAMESPACE" "$USER" \
+    "${HOME_DIR}/.venv/bin/istota" "${REPO_DIR}/config/config.toml" \
+    "{{ istota_update_lock_wait | default(900) }}" "${HOME_DIR}/data/istota.db" --lock-held
 
-# Fix DB ownership
-chown "${USER}:${GROUP}" "$DB_PATH"
-
-# Restart services. All long-running Python services hold the old code in
-# memory until restarted — restarting only the scheduler left the web UI and
-# webhook receiver serving stale code after every auto-update. Gated on the
-# same flags as the Ansible restart handlers.
-log "Restarting ${NAMESPACE}-scheduler"
-systemctl restart "${NAMESPACE}-scheduler"
-{% if istota_web_enabled | default(false) %}
-log "Restarting ${NAMESPACE}-web"
-systemctl restart "${NAMESPACE}-web"
-{% endif %}
-{% if istota_webhooks_enabled | default(false) %}
-log "Restarting ${NAMESPACE}-webhooks"
-systemctl restart "${NAMESPACE}-webhooks"
-{% endif %}
 {% if istota_whatsapp_baileys_unit_wanted | default(false) %}
 # Restarted only when something under the sidecar's own directory moved, and
 # otherwise started. Unlike every unit above it, this one holds a WhatsApp Web

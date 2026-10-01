@@ -648,3 +648,24 @@ describe('RoomSettings — a shared room another member hosts', () => {
     expect(screen.queryByRole('button', { name: 'How guests are answered' })).toBeNull();
   });
 });
+
+describe('a phone room (room-surface-model Stage 24)', () => {
+  it('shows the binding read-only and offers no Talk promote', () => {
+    mount(room({ origin: 'sms', phone_surface: 'sms', read_only: true, name: 'SMS' }));
+    expect(screen.getByText('Connected to')).toBeTruthy();
+    expect(screen.getByText(/transcript of an? SMS conversation/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: PROMOTE_LABEL })).toBeNull();
+    expect(screen.queryByText('Nextcloud Talk')).toBeNull();
+  });
+
+  it('names a WhatsApp group as a group', () => {
+    mount(room({ origin: 'whatsapp', phone_surface: 'whatsapp', read_only: false }));
+    expect(screen.getByText(/this room is a WhatsApp group/)).toBeTruthy();
+  });
+
+  it('leaves an ordinary web room on the Talk line', () => {
+    mount(room());
+    expect(screen.queryByText('Connected to')).toBeNull();
+    expect(screen.getByRole('button', { name: PROMOTE_LABEL })).toBeTruthy();
+  });
+});

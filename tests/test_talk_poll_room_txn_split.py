@@ -243,12 +243,14 @@ class TestTheWorkStillLands:
         )
 
         with db.get_db(config.db_path) as conn:
-            room = db.get_room(conn, "fresh")
+            token = db.resolve_room_token(conn, "talk", "fresh")
+            assert db.is_canonical_room_token(token)
+            room = db.get_room(conn, token)
             assert room is not None, "the room was not registered"
             assert room.origin == "talk"
             assert room.name == "team"
-            assert db.get_room_binding(conn, "fresh", "talk") is not None
-            assert db.is_room_member(conn, "fresh", "alice")
+            assert db.get_room_binding(conn, token, "talk") is not None
+            assert db.is_room_member(conn, token, "alice")
             # latest_id - 1, so the next poll still returns the newest message.
             assert db.get_talk_poll_state(conn, "fresh") == 499
             assert db.has_cached_talk_messages(conn, "fresh")

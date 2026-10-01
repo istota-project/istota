@@ -234,16 +234,44 @@ def private_origin(conn, config, *, actor_user_id: str, surface: str,
             raise RequestError("unsupported_origin")
         return {"surface": surface, "channel": talk.surface_ref if surface == "talk" else room.token,
                 "room_token": room.token, "talk_ref": talk.surface_ref if talk else None}
-    if surface == "whatsapp" and conversation_token == whatsapp_conversation_token(actor_user_id):
-        binding = db.get_whatsapp_binding(conn, actor_user_id)
-        if config.whatsapp.enabled and binding and binding.provider == config.whatsapp.provider:
-            return {"surface": surface, "channel": conversation_token,
-                    "binding": binding_fingerprint(config.whatsapp.provider, binding)}
-    if surface == "sms" and conversation_token == sms_conversation_token(actor_user_id):
-        number = config.sms_phone_number_for(actor_user_id)
-        if config.sms.enabled and number:
-            return {"surface": surface, "channel": conversation_token,
-                    "binding": text_hash(number)}
+    if surface in ("sms", "whatsapp"):
+        from . import room_policy
+
+        surface_ref = (sms_conversation_token(actor_user_id) if surface == "sms"
+                       else whatsapp_conversation_token(actor_user_id))
+        bound = db.resolve_room_token(conn, surface, surface_ref)
+        canonical = bool(bound) and conversation_token == bound
+        if not canonical and conversation_token != surface_ref:
+            raise RequestError("unsupported_origin")
+        if bound:
+            room = db.get_room(conn, bound)
+            readers = room_policy.room_readers(conn, bound)
+            if (room is None or room.archived or readers.guests or readers.others
+                    or set(readers.members) != {actor_user_id}):
+                raise RequestError("unsupported_origin")
+            if not canonical and surface_ref not in db._room_ref_tokens(
+                conn, bound, include_surface_refs=False,
+            ):
+                raise RequestError("unsupported_origin")
+        elif conn.execute(
+            "SELECT 1 FROM room_token_migration WHERE old_token=?", (surface_ref,),
+        ).fetchone():
+            # A deleted room's old descriptor cannot become a new phone origin.
+            raise RequestError("unsupported_origin")
+        if surface == "sms":
+            number = config.sms_phone_number_for(actor_user_id)
+            if not config.sms.enabled or not number:
+                raise RequestError("unsupported_origin")
+            fingerprint = text_hash(number)
+        else:
+            binding = db.get_whatsapp_binding(conn, actor_user_id)
+            if not (config.whatsapp.enabled and binding and binding.provider == config.whatsapp.provider):
+                raise RequestError("unsupported_origin")
+            fingerprint = binding_fingerprint(config.whatsapp.provider, binding)
+        origin = {"surface": surface, "channel": surface_ref, "binding": fingerprint}
+        if canonical:
+            origin["room_token"] = bound
+        return origin
     raise RequestError("unsupported_origin")
 
 
@@ -568,22 +596,18 @@ def create_recipient_task(conn, config, relay, *, surface: str, actor_user_id: s
             addressed_to_bot=True,
         ))
     elif surface == "whatsapp":
-        from .transport.whatsapp import whatsapp_conversation_token
+        from .transport.whatsapp.webhook import record_whatsapp_turn
 
-        task_id = ingest_message(conn, config, IncomingMessage(
-            user_id=actor_user_id, text=text, source_type="whatsapp", surface="whatsapp",
-            channel_token=whatsapp_conversation_token(actor_user_id), output_target="whatsapp",
-            attachments=attachments or [], mirror_to_room=False, queue="foreground",
+        task_id = record_whatsapp_turn(
+            conn, config, actor_user_id, text, attachments=attachments or [],
             reply_to_content=context,
-        ))
+        ).task_id
     elif surface == "sms":
-        from .transport.sms import sms_conversation_token
+        from .transport.sms.webhook import record_sms_turn
 
-        task_id = ingest_message(conn, config, IncomingMessage(
-            user_id=actor_user_id, text=text, source_type="sms", surface="sms",
-            channel_token=sms_conversation_token(actor_user_id), output_target="sms",
-            mirror_to_room=False, queue="foreground", reply_to_content=context,
-        ))
+        task_id = record_sms_turn(
+            conn, config, actor_user_id, text, reply_to_content=context,
+        ).task_id
     else:
         raise ValueError("unsupported relay reply surface")
     if task_id is None:

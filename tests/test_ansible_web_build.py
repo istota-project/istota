@@ -229,6 +229,10 @@ class Rig:
         if self.node_present:
             self._stub(self.node_bin)
         self._stub(self.home / ".venv" / "bin" / "python")
+        self._stub(self.home / ".venv" / "bin" / "istota")
+        runner = self.bin / "systemd-run"
+        runner.write_text('#!/bin/sh\nwhile [ "${1#--}" != "$1" ]; do shift; done\nexec "$@"\n')
+        runner.chmod(0o755)
         # `flock` is a util-linux binary and macOS has none, so without a
         # stand-in the real script exits 0 at the lock and every assertion
         # below passes vacuously. A **working** one rather than `exit 0`: the
@@ -243,17 +247,23 @@ class Rig:
         lock = self.bin / "flock"
         lock.write_text(
             "#!/usr/bin/env python3\n"
-            "import fcntl, sys\n"
+            "import fcntl, os, sys\n"
             "args = sys.argv[1:]\n"
-            "nb = '-n' in args\n"
-            "fds = [a for a in args if a.isdigit()]\n"
-            "if not fds:\n"
-            "    sys.exit(0)\n"
+            "nb = False\n"
+            "while args and args[0].startswith('-'):\n"
+            "    option = args.pop(0)\n"
+            "    if option == '-n': nb = True\n"
+            "    if option == '-w': nb = args.pop(0) == '0'\n"
+            "target = args.pop(0)\n"
+            "fd = int(target) if target.isdigit() else os.open(target, os.O_CREAT | os.O_WRONLY, 0o600)\n"
             "flags = fcntl.LOCK_EX | (fcntl.LOCK_NB if nb else 0)\n"
             "try:\n"
-            "    fcntl.flock(int(fds[0]), flags)\n"
+            "    fcntl.flock(fd, flags)\n"
             "except OSError:\n"
             "    sys.exit(1)\n"
+            "if args:\n"
+            "    os.set_inheritable(fd, True)\n"
+            "    os.execvp(args[0], args)\n"
         )
         lock.chmod(0o755)
 
@@ -261,7 +271,10 @@ class Rig:
         path.write_text(
             "#!/bin/sh\n"
             f'printf "%s %s\\n" "$(basename "$0")" "$*" >> "{self.stub_log}"\n'
-            "exit 0\n"
+            + ('[ "$1" != "show" ] || echo loaded\n' if path.name == "systemctl" else "")
+            + ('[ "$1 $3" != "is-active istota-web" ] || exit 3\n'
+               if path.name == "systemctl" and not self.web_enabled else "")
+            + "exit 0\n"
         )
         path.chmod(0o755)
 
@@ -305,6 +318,10 @@ class Rig:
         # silently disarms `test_a_half_applied_deploy_is_retried`, which
         # makes its point by replacing that stub with a failing one.
         rendered = rendered.replace("/root/.local/bin", str(self.bin))
+        maintenance = self.root / "relocate-rooms.sh"
+        maintenance.write_text((REPO / "scripts/relocate-rooms.sh").read_text().replace(
+            '/tmp/${namespace}-update.lock', str(self.root / "lock")))
+        rendered = rendered.replace('$REPO_DIR/scripts/relocate-rooms.sh', str(maintenance))
         return rendered
 
     def run(self) -> subprocess.CompletedProcess:

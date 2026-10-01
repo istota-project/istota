@@ -463,12 +463,15 @@ class TestTalkSideOfTheExchange:
 
     @patch("istota.scheduler.post_result_to_email", return_value=True)
     @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
+    @pytest.mark.parametrize("builder", [plain_talk_room, promoted_room])
     def test_talk_is_told_who_the_answer_is_answering(
-        self, mock_run_coro, mock_post_email, db_path, config, fake_talk,
+        self, mock_run_coro, mock_post_email, db_path, config, fake_talk, builder,
     ):
         with db.get_db(db_path) as conn:
-            _routed_room(conn)
-            _room, task_id = _ingest_email(conn, config)
+            room = builder(conn, "testuser")
+            _room, task_id = _ingest_email(
+                conn, config, output_target=f"room:{room.canonical},email",
+            )
             self._processed_email(conn, task_id)
 
         with patch(
@@ -477,7 +480,10 @@ class TestTalkSideOfTheExchange:
         ):
             process_one_task(config)
 
-        posted = _talk_bodies(fake_talk)
+        posted = [
+            c.args["message"]
+            for c in fake_talk.calls_to(room.talk_ref, method="send_message")
+        ]
         assert fake_talk.refusals == []
         assert any(
             "contact@example.com" in p and "Hey" in p for p in posted
@@ -485,6 +491,7 @@ class TestTalkSideOfTheExchange:
         assert "Told them no." in posted
         # The header, never the body: the prompt is the wrapped, untrusted mail.
         assert not any("<email_content>" in p for p in posted), posted
+        assert not any("What is on the list?" in p for p in posted), posted
 
     def test_the_users_own_mail_gets_no_external_header(self, db_path, config):
         """`resolve_author` draws this line already — a user mailing their own

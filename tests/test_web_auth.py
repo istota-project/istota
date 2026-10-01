@@ -181,12 +181,12 @@ def test_authentication_rechecks_state_after_verification(db_path, policy, ident
 
 
 def test_tokens_peek_replacement_and_delete(db_path, identity):
-    tokens = {purpose: auth.issue_token(db_path, "alice", purpose, 3600) for purpose in ("enrol", "reset", "login")}
+    tokens = {purpose: auth.issue_token(db_path, "alice", purpose, 3600) for purpose in ("enrol", "reset")}
     assert auth.peek_token(db_path, tokens["reset"]).purpose == "reset"
-    assert auth.peek_token(db_path, tokens["reset"], "login") is None
+    assert auth.peek_token(db_path, tokens["reset"], "enrol") is None
     replacement = auth.issue_token(db_path, "alice", "reset", 3600)
     assert auth.peek_token(db_path, tokens["reset"]) is None
-    assert auth.peek_token(db_path, tokens["login"]) is not None
+    assert auth.peek_token(db_path, tokens["enrol"]) is not None
     with db.get_db(db_path) as conn:
         stored = conn.execute("SELECT token_hash FROM web_auth_tokens").fetchall()
     assert all(row[0] not in tokens.values() and row[0] != replacement for row in stored)
@@ -195,7 +195,7 @@ def test_tokens_peek_replacement_and_delete(db_path, identity):
     assert all(auth.peek_token(db_path, token) is None for token in [*tokens.values(), replacement])
 
 
-@pytest.mark.parametrize("purpose", ["enrol", "reset", "login"])
+@pytest.mark.parametrize("purpose", ["enrol", "reset"])
 @pytest.mark.parametrize("invalid", ["expired", "disabled", "email", "orphan", "recreated"])
 def test_invalid_tokens_do_not_authenticate_or_change_password(db_path, identity, policy, purpose, invalid):
     token = auth.issue_token(db_path, "alice", purpose, 3600)
@@ -211,17 +211,14 @@ def test_invalid_tokens_do_not_authenticate_or_change_password(db_path, identity
     else:
         auth.delete_identity(db_path, "alice")
         auth.upsert_identity(db_path, "alice", identity.email)
-    if purpose == "login":
-        result = auth.consume_login_token(db_path, token)
-    else:
-        result = auth.consume_and_set_password(db_path, token, purpose, PASSWORD, policy)
+    result = auth.consume_and_set_password(db_path, token, purpose, PASSWORD, policy)
     assert result is None
     assert auth.get_identity(db_path, "alice").password_hash == ""
 
 
 def test_atomic_password_token_and_rollback(db_path, identity, policy):
     token = auth.issue_token(db_path, "alice", "enrol", 3600)
-    other = auth.issue_token(db_path, "alice", "login", 3600)
+    other = auth.issue_token(db_path, "alice", "reset", 3600)
     assert auth.peek_token(db_path, token) is not None
     with db.get_db(db_path) as conn:
         conn.execute("CREATE TRIGGER reject_password BEFORE UPDATE OF password_hash ON web_auth_identities BEGIN SELECT RAISE(ABORT, 'test failure'); END")
@@ -239,18 +236,6 @@ def test_atomic_password_token_and_rollback(db_path, identity, policy):
     assert auth.verify_password(PASSWORD, auth.get_identity(db_path, "alice").password_hash)[0]
 
 
-def test_login_token_is_atomic_single_use_without_epoch_change(db_path, identity):
-    token = auth.issue_token(db_path, "alice", "login", 3600)
-    reset = auth.issue_token(db_path, "alice", "reset", 3600)
-    assert auth.peek_token(db_path, token) is not None
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(lambda _: auth.consume_login_token(db_path, token), range(4)))
-    assert results.count(("alice", identity.email, identity.credential_epoch)) == 1
-    assert results.count(None) == 3
-    assert auth.peek_token(db_path, reset) is not None
-    assert auth.get_identity(db_path, "alice").last_login_at
-
-
 def test_password_token_concurrent_single_use(db_path, identity, policy):
     token = auth.issue_token(db_path, "alice", "reset", 3600)
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -259,20 +244,20 @@ def test_password_token_concurrent_single_use(db_path, identity, policy):
 
 
 def test_shared_mail_budget_preserves_last_link_when_refused(db_path, identity, policy):
-    assert auth.issue_mail_link_if_allowed(db_path, policy, "unknown@example.com", "login") is None
+    assert auth.issue_mail_link_if_allowed(db_path, policy, "unknown@example.com", "reset") is None
     assert auth.issue_mail_link_if_allowed(db_path, policy, identity.email, "reset")
     assert auth.issue_mail_link_if_allowed(db_path, policy, identity.email, "reset")
-    token, found = auth.issue_mail_link_if_allowed(db_path, policy, " ALICE@example.com ", "login")
+    token, found = auth.issue_mail_link_if_allowed(db_path, policy, " ALICE@example.com ", "reset")
     assert found == identity
-    assert auth.issue_mail_link_if_allowed(db_path, policy, identity.email, "login") is None
-    assert auth.peek_token(db_path, token, "login") is not None
+    assert auth.issue_mail_link_if_allowed(db_path, policy, identity.email, "reset") is None
+    assert auth.peek_token(db_path, token, "reset") is not None
     assert auth.attempts_in_window(db_path, "mail_link", identity.email, 3600) == 3
     assert auth.attempts_in_window(db_path, "mail_link", "unknown@example.com", 3600) == 0
 
 
 def test_shared_mail_budget_concurrency(db_path, identity, policy):
     with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(lambda n: auth.issue_mail_link_if_allowed(db_path, policy, identity.email, "login" if n % 2 else "reset"), range(12)))
+        results = list(pool.map(lambda n: auth.issue_mail_link_if_allowed(db_path, policy, identity.email, "reset"), range(12)))
     assert sum(result is not None for result in results) == 3
 
 
@@ -292,7 +277,7 @@ def test_authentication_rehashes_without_changing_epoch(db_path, identity, polic
 @pytest.mark.parametrize("token", ["", "unknown", "x" * 257, "\ud800"])
 def test_malformed_token_is_absent(db_path, token):
     assert auth.peek_token(db_path, token) is None
-    assert auth.consume_login_token(db_path, token) is None
+    assert auth.redeem_sign_in_code(db_path, token, "123456") == ("dead", None)
 
 
 def test_password_token_rechecks_epoch_after_hashing(db_path, identity, policy):
@@ -310,36 +295,31 @@ def test_password_token_rechecks_epoch_after_hashing(db_path, identity, policy):
     assert auth.peek_token(db_path, token) is not None
 
 
-def test_login_token_rolls_back_if_login_stamp_fails(db_path, identity):
-    token = auth.issue_token(db_path, "alice", "login", 3600)
-    with db.get_db(db_path) as conn:
-        conn.execute("CREATE TRIGGER reject_login BEFORE UPDATE OF last_login_at ON web_auth_identities BEGIN SELECT RAISE(ABORT, 'test failure'); END")
-    with pytest.raises(sqlite3.Error):
-        auth.consume_login_token(db_path, token)
-    assert auth.peek_token(db_path, token) is not None
-
-
 def test_mail_budget_ignores_disabled_orphan_and_expired_reservations(db_path, identity, policy):
     auth.set_disabled(db_path, "alice", True)
-    assert auth.issue_mail_link_if_allowed(db_path, policy, identity.email, "login") is None
+    assert auth.issue_mail_link_if_allowed(db_path, policy, identity.email, "reset") is None
     auth.set_disabled(db_path, "alice", False)
     for _ in range(3):
-        assert auth.issue_mail_link_if_allowed(db_path, policy, identity.email, "login")
+        assert auth.issue_mail_link_if_allowed(db_path, policy, identity.email, "reset")
     with db.get_db(db_path) as conn:
         conn.execute("UPDATE web_auth_attempts SET at=datetime('now', '-3601 seconds')")
     assert auth.issue_mail_link_if_allowed(db_path, policy, identity.email, "reset")
     user_profiles.delete_profile(db_path, "alice")
-    assert auth.issue_mail_link_if_allowed(db_path, policy, identity.email, "login") is None
+    assert auth.issue_mail_link_if_allowed(db_path, policy, identity.email, "reset") is None
 
 
 def test_schema_upgrade_is_additive_and_idempotent(db_path, identity):
     with db.get_db(db_path) as conn:
         conn.execute("DROP TABLE web_auth_attempts")
         conn.execute("DROP TABLE web_auth_tokens")
+        conn.execute("DROP TABLE web_auth_sign_ins")
     db.init_db(db_path)
     db.init_db(db_path)
     assert auth.get_identity(db_path, "alice") == identity
-    assert auth.peek_token(db_path, auth.issue_token(db_path, "alice", "login", 900))
+    assert auth.peek_token(db_path, auth.issue_token(db_path, "alice", "reset", 900))
+    policy = auth.Policy(12, 900, 10, 30, 604800, 3600, 600, 3)
+    request_id = auth.start_sign_in(db_path, policy, identity.email, "s" * 32)
+    assert auth.issue_sign_in_code_if_allowed(db_path, policy, request_id)
 
 
 def test_authentication_error_logs_no_exception_payload(db_path, policy, caplog):
@@ -377,11 +357,11 @@ def test_password_change_rechecks_after_hash(db_path, identity, policy, monkeypa
 
 
 def test_identity_deletion_rolls_back_retained_epoch_and_tokens(db_path, identity):
-    token = auth.issue_token(db_path, "alice", "login", 900)
+    token = auth.issue_token(db_path, "alice", "reset", 900)
     with db.get_db(db_path) as conn:
         conn.execute("CREATE TRIGGER reject_identity_delete BEFORE DELETE ON web_auth_identities BEGIN SELECT RAISE(ABORT, 'test failure'); END")
     with pytest.raises(sqlite3.IntegrityError):
         auth.delete_identity(db_path, "alice")
     assert auth.get_identity(db_path, "alice") == identity
     assert auth.get_retired_epoch(db_path, "alice") == 0
-    assert auth.peek_token(db_path, token, "login") is not None
+    assert auth.peek_token(db_path, token, "reset") is not None

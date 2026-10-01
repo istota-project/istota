@@ -174,7 +174,13 @@ class TestTheSmsReply:
         assert state['inbound_answer_id'] == 'sms:twilio:bob-1'
         assert state['recipient_task_id'] == result.task_id
         (task,) = rows(config, "SELECT * FROM tasks WHERE user_id='bob'")
-        assert task['source_type'] == 'sms' and task['conversation_token'] == sms_conversation_token('bob')
+        assert task['source_type'] == 'sms'
+        with db.get_db(config.db_path) as conn:
+            token = db.resolve_room_token(conn, 'sms', sms_conversation_token('bob'))
+            assert task['conversation_token'] == token
+            assert db.get_room(conn, token).name == 'SMS'
+            assert db._canonical_room_token(conn, sms_conversation_token('bob'), cross_surface=False) == token
+            assert conn.execute('SELECT count(*) FROM messages WHERE room_token=?', (token,)).fetchone()[0] == 1
         from istota.executor import build_prompt
         with db.get_db(config.db_path) as conn:
             composed = build_prompt(db.get_task(conn, result.task_id), [], config, conn=conn)

@@ -23,7 +23,12 @@ from .db import get_db
 logger = logging.getLogger(__name__)
 _N, _R, _P = 32768, 8, 1
 _MAX_PASSWORD_BYTES = 1024
-_PURPOSES = {"enrol", "reset", "login"}
+_PURPOSES = {"enrol", "reset"}
+# A six-digit code is bound to one client's secret and dies after this many
+# wrong guesses (ISSUE-574). Anyone can open a request for any address, so the
+# per-address daily cap is what bounds a guesser: 20 a day, about 2e-5.
+SIGN_IN_CODE_ATTEMPTS = 5
+SIGN_IN_CODE_DAILY_FAILURES = 20
 
 
 @dataclass(frozen=True)
@@ -53,7 +58,7 @@ class Policy:
     throttle_max_ip: int
     enrol_ttl_seconds: int
     reset_ttl_seconds: int
-    login_link_ttl_seconds: int
+    sign_in_code_ttl_seconds: int
     mail_link_max_email: int
 
 
@@ -66,7 +71,7 @@ def policy_from_config(config) -> Policy:
         throttle_max_ip=web.auth_throttle_max_ip,
         enrol_ttl_seconds=web.auth_enrol_ttl_hours * 3600,
         reset_ttl_seconds=web.auth_reset_ttl_hours * 3600,
-        login_link_ttl_seconds=web.auth_login_link_ttl_minutes * 60,
+        sign_in_code_ttl_seconds=web.auth_sign_in_code_ttl_minutes * 60,
         mail_link_max_email=web.auth_mail_link_max_email,
     )
 
@@ -383,20 +388,6 @@ def consume_and_set_password(db_path: Path, token: str, purpose: str, password: 
         return row["user_id"], row["email"], epoch
 
 
-def consume_login_token(db_path: Path, token: str) -> tuple[str, str, int] | None:
-    with get_db(db_path) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        row = _live_token(conn, token, "login")
-        if row is None:
-            return None
-        used = conn.execute("UPDATE web_auth_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL", (_timestamp(), row["id"]))
-        if used.rowcount != 1:
-            return None
-        _invalidate_tokens(conn, row["user_id"], "login")
-        conn.execute("UPDATE web_auth_identities SET last_login_at = ? WHERE user_id = ?", (_timestamp(), row["user_id"]))
-        return row["user_id"], row["email"], row["credential_epoch"]
-
-
 def _attempts(conn: sqlite3.Connection, kind: str, key: str, window_seconds: int) -> int:
     return conn.execute("SELECT count(*) FROM web_auth_attempts WHERE kind = ? AND key = ? AND at > ?",
                         (kind, key, _timestamp(-window_seconds))).fetchone()[0]
@@ -432,22 +423,175 @@ def check_and_record(db_path: Path, policy: Policy, *, email: str, ip: str | Non
         return True
 
 
+def _mailable_identity(conn: sqlite3.Connection, policy: Policy, email: str) -> Identity | None:
+    """The identity a self-service mail may go to, spending one unit of its hourly budget.
+
+    One budget across reset links and sign-in codes, so neither can flood an
+    inbox the other is limited for.
+    """
+    identity = _identity(conn.execute("SELECT * FROM web_auth_identities WHERE email = ?", (email,)).fetchone())
+    if identity is None or identity.disabled or not _has_profile(conn, identity.user_id):
+        return None
+    if _attempts(conn, "mail_link", email, 3600) >= policy.mail_link_max_email:
+        return None
+    conn.execute("DELETE FROM web_auth_attempts WHERE kind = 'mail_link' AND at <= ?", (_timestamp(-3600),))
+    conn.execute("INSERT INTO web_auth_attempts (kind, key, at) VALUES ('mail_link', ?, ?)", (email, _timestamp()))
+    return identity
+
+
 def issue_mail_link_if_allowed(db_path: Path, policy: Policy, email: str, purpose: str) -> tuple[str, Identity] | None:
-    if purpose not in {"login", "reset"}:
-        raise ValueError("Mail link purpose must be login or reset")
+    if purpose != "reset":
+        raise ValueError("Mail link purpose must be reset")
     email = normalize_email(email)
     with get_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        identity = _identity(conn.execute("SELECT * FROM web_auth_identities WHERE email = ?", (email,)).fetchone())
-        if identity is None or identity.disabled or not _has_profile(conn, identity.user_id):
+        identity = _mailable_identity(conn, policy, email)
+        if identity is None:
             return None
-        if _attempts(conn, "mail_link", email, 3600) >= policy.mail_link_max_email:
+        return _issue_token(conn, identity, purpose, policy.reset_ttl_seconds), identity
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _code_digest(request_id: str, code: str) -> str:
+    # Salted by the request so equal codes on two requests differ. Six digits
+    # are trivially reversible offline; the database is the boundary.
+    return _digest(f"{request_id}:{code}")
+
+
+def start_sign_in(db_path: Path, policy: Policy, email: str, secret: str) -> str:
+    """Open a pending email sign-in for whichever client holds ``secret``.
+
+    Created for every address, known or not, so the row says nothing about who
+    can sign in. A client asking again reuses its secret; its older requests
+    stay live until a newer one is actually sent a code.
+    """
+    if not isinstance(secret, str) or len(secret) < 16 or not secret.isascii():
+        raise ValueError("Sign-in secret is too short")
+    if policy.sign_in_code_ttl_seconds <= 0:
+        raise ValueError("Sign-in code lifetime must be positive")
+    request_id = secrets.token_urlsafe(18)
+    with get_db(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM web_auth_sign_ins WHERE expires_at <= ?", (_timestamp(),))
+        conn.execute("""INSERT INTO web_auth_sign_ins (request_id, secret_hash, email, expires_at)
+            VALUES (?, ?, ?, ?)""", (request_id, _digest(secret), normalize_email(email),
+                                     _timestamp(policy.sign_in_code_ttl_seconds)))
+    return request_id
+
+
+_LIVE_SIGN_IN = "used_at IS NULL AND expires_at > ? AND attempts < ?"
+
+
+def _live_sign_in(conn: sqlite3.Connection, request_id: object) -> sqlite3.Row | None:
+    if not isinstance(request_id, str) or not request_id or len(request_id) > 64 or not request_id.isascii():
+        return None
+    return conn.execute(f"SELECT * FROM web_auth_sign_ins WHERE request_id = ? AND {_LIVE_SIGN_IN}",
+                        (request_id, _timestamp(), SIGN_IN_CODE_ATTEMPTS)).fetchone()
+
+
+def _set_code(conn: sqlite3.Connection, row: sqlite3.Row, identity: Identity) -> str:
+    code = f"{secrets.randbelow(10**6):06d}"
+    conn.execute("""UPDATE web_auth_sign_ins SET code_hash = ?, user_id = ?, credential_epoch = ?, attempts = 0
+        WHERE id = ?""", (_code_digest(row["request_id"], code), identity.user_id, identity.credential_epoch, row["id"]))
+    return code
+
+
+def issue_sign_in_code_if_allowed(db_path: Path, policy: Policy, request_id: str) -> tuple[str, Identity] | None:
+    """Mint the code to email for a pending request, once, within the mail budget.
+
+    ``None`` for an unknown, disabled or over-budget address: that request then
+    has no code. Only a mint retires the same client's older requests, so asking
+    again past the budget leaves the code already sent working.
+    """
+    with get_db(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = _live_sign_in(conn, request_id)
+        if row is None or row["code_hash"] is not None:
             return None
-        ttl = policy.login_link_ttl_seconds if purpose == "login" else policy.reset_ttl_seconds
-        token = _issue_token(conn, identity, purpose, ttl)
-        conn.execute("DELETE FROM web_auth_attempts WHERE kind = 'mail_link' AND at <= ?", (_timestamp(-3600),))
-        conn.execute("INSERT INTO web_auth_attempts (kind, key, at) VALUES ('mail_link', ?, ?)", (email, _timestamp()))
-        return token, identity
+        identity = _mailable_identity(conn, policy, row["email"])
+        if identity is None:
+            return None
+        conn.execute("UPDATE web_auth_sign_ins SET used_at = ? WHERE secret_hash = ? AND id != ? AND used_at IS NULL",
+                     (_timestamp(), row["secret_hash"], row["id"]))
+        return _set_code(conn, row, identity), identity
+
+
+@dataclass(frozen=True)
+class MintedCode:
+    code: str
+    requested_at: str
+    expires_at: str
+    pending: int
+
+
+def mint_sign_in_code(db_path: Path, user_id: str) -> MintedCode:
+    """Operator recovery: a fresh code for the newest pending sign-in for the user's address.
+
+    Replaces any emailed code on that request and clears the address's failure
+    budget. Anyone can open a request for an address, so the operator checks
+    ``requested_at`` and ``pending`` with the user before reading the code out.
+    """
+    with get_db(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        identity = _require_identity(conn, user_id)
+        if identity.disabled or not _has_profile(conn, user_id):
+            raise ValueError("Identity is disabled or has no profile")
+        rows = conn.execute(f"SELECT * FROM web_auth_sign_ins WHERE email = ? AND {_LIVE_SIGN_IN} ORDER BY id DESC",
+                            (identity.email, _timestamp(), SIGN_IN_CODE_ATTEMPTS)).fetchall()
+        if not rows:
+            raise ValueError("No pending sign-in for this user; ask them to request a code on the sign-in page first")
+        conn.execute("DELETE FROM web_auth_attempts WHERE kind = 'sign_in_code' AND key = ?", (identity.email,))
+        return MintedCode(_set_code(conn, rows[0], identity), rows[0]["created_at"], rows[0]["expires_at"], len(rows))
+
+
+def redeem_sign_in_code(db_path: Path, secret: str, code: str) -> tuple[str, tuple[str, str, int] | None]:
+    """``("ok", (user_id, email, epoch))``, ``("bad", None)`` or ``("dead", None)``.
+
+    Checks the newest of this client's live requests that has a code. A wrong
+    secret is ``dead`` and costs no attempt, so a stranger cannot burn somebody
+    else's request. Wrong codes are also counted per address over a day: a
+    stranger can open requests for any address from their own browser, and
+    without that count the mail budget alone would bound their guesses.
+    """
+    if (not isinstance(secret, str) or not secret.isascii() or len(secret) > 256
+            or not isinstance(code, str) or len(code) > 64):
+        return "dead", None
+    typed = re.sub(r"[\s-]", "", code)
+    with get_db(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(f"SELECT * FROM web_auth_sign_ins WHERE secret_hash = ? AND {_LIVE_SIGN_IN} ORDER BY id DESC",
+                            (_digest(secret), _timestamp(), SIGN_IN_CODE_ATTEMPTS)).fetchall()
+        if not rows:
+            return "dead", None
+        row = next((r for r in rows if r["code_hash"] is not None), rows[0])
+        now = _timestamp()
+        if _attempts(conn, "sign_in_code", row["email"], 86400) >= SIGN_IN_CODE_DAILY_FAILURES:
+            conn.execute("UPDATE web_auth_sign_ins SET used_at = ? WHERE id = ?", (now, row["id"]))
+            return "dead", None
+        matched = (row["code_hash"] is not None and typed.isascii() and typed.isdigit()
+                   and hmac.compare_digest(row["code_hash"], _code_digest(row["request_id"], typed)))
+        if not matched:
+            attempts = row["attempts"] + 1
+            spent = attempts >= SIGN_IN_CODE_ATTEMPTS
+            conn.execute("UPDATE web_auth_sign_ins SET attempts = ?, used_at = ? WHERE id = ?",
+                         (attempts, now if spent else None, row["id"]))
+            conn.execute("DELETE FROM web_auth_attempts WHERE kind = 'sign_in_code' AND at <= ?", (_timestamp(-86400),))
+            conn.execute("INSERT INTO web_auth_attempts (kind, key, at) VALUES ('sign_in_code', ?, ?)",
+                         (row["email"], now))
+            return ("dead" if spent else "bad"), None
+        conn.execute("UPDATE web_auth_sign_ins SET used_at = ? WHERE id = ?", (now, row["id"]))
+        identity = _get_identity(conn, row["user_id"])
+        if (identity is None or identity.disabled or identity.email != row["email"]
+                or identity.credential_epoch != row["credential_epoch"]
+                or not _has_profile(conn, identity.user_id)):
+            return "dead", None
+        conn.execute("UPDATE web_auth_sign_ins SET used_at = ? WHERE (user_id = ? OR secret_hash = ?) AND used_at IS NULL",
+                     (now, identity.user_id, row["secret_hash"]))
+        conn.execute("UPDATE web_auth_identities SET last_login_at = ? WHERE user_id = ?", (now, identity.user_id))
+        return "ok", (identity.user_id, identity.email, identity.credential_epoch)
 
 
 def authenticate(db_path: Path, policy: Policy, email: str, password: str, *, ip: str | None) -> tuple[str, Identity | None]:

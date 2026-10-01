@@ -66,7 +66,7 @@ def _user_id() -> str:
     return user_id
 
 
-def _room_row(room, talk_ref, *, current_token):
+def _room_row(room, talk_ref, *, current_token, phone_surface=None):
     from istota.transport.routing import room_target_descriptor
 
     return {
@@ -77,7 +77,11 @@ def _room_row(room, talk_ref, *, current_token):
         # "is this on Talk" off `origin` alone is the ISSUE-342 defect.
         "origin": room.origin,
         "talk_token": talk_ref,
-        "target": room_target_descriptor(room.token, room.origin, talk_ref),
+        # The caller's own SMS or WhatsApp room is scheduled into by its phone
+        # surface, the target the prompt header names for it.
+        "target": room_target_descriptor(
+            room.token, room.origin, talk_ref, phone_surface,
+        ),
         "archived": bool(room.archived),
         "last_activity": room.last_activity,
         # Which of these the task is running in. "Post to this room" is the
@@ -99,6 +103,9 @@ def cmd_list(args):
         # scoped by membership, so it takes one parameter however many rooms
         # the user is in.
         talk_refs = db.talk_refs_for_member(conn, user_id)
+        from istota.transport.routing import private_phone_rooms
+
+        phone_rooms = private_phone_rooms(conn, user_id)
         # The task's own token may name a room by a surface ref rather than by
         # the canonical token (a promoted room reached from Talk), so resolve
         # it the way the room model does instead of comparing raw.
@@ -111,7 +118,10 @@ def cmd_list(args):
         "notice": UNTRUSTED_NOTICE,
         "count": len(rooms),
         "rooms": [
-            _room_row(r, talk_refs.get(r.token), current_token=current)
+            _room_row(
+                r, talk_refs.get(r.token), current_token=current,
+                phone_surface=phone_rooms.get(r.token),
+            )
             for r in rooms
         ],
     }

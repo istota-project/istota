@@ -179,7 +179,7 @@ class TestWebChatRoomsDB:
         room = db.ensure_default_web_chat_room(conn, "alice")
         assert room.name == "general"
         assert room.user_id == "alice"
-        assert room.token.startswith("web-alice-")
+        assert db.is_canonical_room_token(room.token)
         assert not room.archived
 
     def test_ensure_default_idempotent(self, conn):

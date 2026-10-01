@@ -2082,14 +2082,14 @@ class TestTheSurface:
         assert capabilities.surface_class == "push"
         assert capabilities.user_routable is True
         assert capabilities.room_view is None
-        assert capabilities.inbound_room_role is None
+        assert capabilities.inbound_room_role == "member"
         assert capabilities.user_turn_mirror is None
 
-    def test_the_room_facts_are_all_absent(self):
-        assert surfaces.room_role("whatsapp") is None
+    def test_private_chats_own_rooms_without_a_room_view(self):
+        assert surfaces.room_role("whatsapp") == "member"
         assert surfaces.room_view("whatsapp") is None
         assert surfaces.user_turn_mirror("whatsapp") is None
-        assert surfaces.is_room_member("whatsapp") is False
+        assert surfaces.is_room_member("whatsapp") is True
         assert surfaces.is_room_view("whatsapp") is False
         assert surfaces.origin_surface_for_source_type("whatsapp") == "whatsapp"
 
@@ -2455,8 +2455,126 @@ class TestSchedulerDelivery:
                 output_target="whatsapp",
             )
 
-    def test_a_completed_task_delivers_once_through_the_ledger(
+    @staticmethod
+    def _phone_room(config, *, extra_member=None):
+        with db.get_db(config.db_path) as conn:
+            token = db.register_room(conn, None, "alice", origin="whatsapp").token
+            db.add_room_binding(
+                conn, token, "whatsapp", whatsapp_conversation_token("alice"),
+            )
+            if extra_member:
+                db.add_room_member(conn, token, extra_member)
+        return token
+
+    @staticmethod
+    def _turns(config, task_id):
+        with db.get_db(config.db_path) as conn:
+            return [tuple(r) for r in conn.execute(
+                "SELECT room_token, role, body FROM messages WHERE task_id = ? "
+                "AND role != 'user' ORDER BY id", (task_id,),
+            )]
+
+    @pytest.mark.parametrize("room_exists", [False, True])
+    def test_an_explicit_push_lands_in_the_private_room_only_when_it_exists(
+        self, tmp_path, monkeypatch, room_exists,
+    ):
+        from istota.scheduler import process_one_task
+
+        config = _config(tmp_path)
+        _bind(config)
+        client = _FakeClient()
+        task_id = self._task(config, monkeypatch, client, "Nightly summary.")
+        token = self._phone_room(config) if room_exists else None
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "UPDATE tasks SET source_type = 'scheduled', conversation_token = NULL "
+                "WHERE id = ?", (task_id,),
+            )
+
+        assert process_one_task(config) == (task_id, True)
+
+        assert [r.text for r in client.requests] == ["Nightly summary."]
+        assert self._turns(config, task_id) == (
+            [(token, "assistant", "Nightly summary.")] if room_exists else []
+        )
+        with db.get_db(config.db_path) as conn:
+            assert conn.execute("SELECT count(*) FROM rooms").fetchone()[0] == int(room_exists)
+
+    def test_an_explicit_push_never_lands_in_a_room_another_human_reads(
         self, tmp_path, monkeypatch,
+    ):
+        from istota.scheduler import process_one_task
+
+        config = _config(tmp_path)
+        _bind(config)
+        client = _FakeClient()
+        task_id = self._task(config, monkeypatch, client, "Nightly summary.")
+        self._phone_room(config, extra_member="bob")
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "UPDATE tasks SET source_type = 'scheduled', conversation_token = NULL "
+                "WHERE id = ?", (task_id,),
+            )
+
+        assert process_one_task(config) == (task_id, True)
+        # The planner already refuses the leg into a shared room; the transcript
+        # write must not reach it on its own either.
+        assert self._turns(config, task_id) == []
+
+    def test_an_unreachable_group_turn_never_lands_in_the_private_room(
+        self, tmp_path, monkeypatch,
+    ):
+        # An archived group's planned channel is None; that must not read as
+        # the member's own chat, or a group answer lands in a private transcript.
+        from istota.scheduler import process_one_task
+
+        config = _config(tmp_path)
+        _bind(config)
+        client = _FakeClient()
+        task_id = self._task(config, monkeypatch, client, "Group answer.")
+        private = self._phone_room(config)
+        with db.get_db(config.db_path) as conn:
+            group = db.register_room(conn, None, "alice", origin="whatsapp").token
+            db.add_room_binding(conn, group, "whatsapp", "120363000000000001@g.us")
+            db.set_room_archived(conn, group, True)
+            conn.execute(
+                "UPDATE tasks SET conversation_token = ? WHERE id = ?", (group, task_id),
+            )
+
+        assert process_one_task(config) == (task_id, True)
+
+        assert client.requests == []
+        with db.get_db(config.db_path) as conn:
+            assert conn.execute(
+                "SELECT count(*) FROM messages WHERE room_token = ?", (private,),
+            ).fetchone()[0] == 0
+
+    @pytest.mark.parametrize("source_type", ["whatsapp", "scheduled"])
+    def test_a_window_closed_send_still_writes_its_one_row(
+        self, tmp_path, monkeypatch, source_type,
+    ):
+        from istota.scheduler import process_one_task
+
+        config = _config(tmp_path)
+        _bind(config, window=timedelta(hours=30))
+        client = _FakeClient()
+        task_id = self._task(config, monkeypatch, client, "Nightly summary.")
+        token = self._phone_room(config)
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "UPDATE tasks SET source_type = ?, conversation_token = ? WHERE id = ?",
+                (source_type, token if source_type == "whatsapp" else None, task_id),
+            )
+
+        assert process_one_task(config) == (task_id, True)
+
+        assert client.requests == []
+        assert [row["status"] for row in _rows(config)] == ["window_closed"]
+        assert self._turns(config, task_id) == [(token, "assistant", "Nightly summary.")]
+
+    @pytest.mark.parametrize("room_exists", [False, True])
+    def test_a_completed_task_delivers_once_through_the_ledger(
+        self, tmp_path, monkeypatch, room_exists,
     ):
         from istota.scheduler import process_one_task
 
@@ -2465,17 +2583,25 @@ class TestSchedulerDelivery:
         client = _FakeClient()
         task_id = self._task(config, monkeypatch, client, "Finished the check.")
 
+        with db.get_db(config.db_path) as conn:
+            if room_exists:
+                token = db.register_room(conn, None, "alice", origin="whatsapp").token
+                db.add_room_binding(conn, token, "whatsapp", whatsapp_conversation_token("alice"))
+                conn.execute("UPDATE tasks SET conversation_token = ? WHERE id = ?", (token, task_id))
+
         assert process_one_task(config) == (task_id, True)
 
         assert [r.text for r in client.requests] == ["Finished the check."]
         with db.get_db(config.db_path) as conn:
             assert db.get_task(conn, task_id).status == "completed"
-            # No room, no membership, no canonical transcript row: WhatsApp is
-            # its own external conversation and is never a view of a room.
-            for table in ("rooms", "room_bindings", "room_members", "messages"):
-                assert conn.execute(
-                    f"SELECT count(*) FROM {table}"
-                ).fetchone()[0] == 0
+            turns = conn.execute(
+                "SELECT room_token, body FROM messages WHERE role = 'assistant' AND task_id = ?",
+                (task_id,),
+            ).fetchall()
+            assert [tuple(row) for row in turns] == ([(token, "Finished the check.")] if room_exists else [])
+            # Delivering an old task without a room must not mint one.
+            for table in ("rooms", "room_bindings"):
+                assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == int(room_exists)
         assert [row["logical_key"] for row in _rows(config)] == [
             f"task-result:{task_id}"
         ]
@@ -2647,3 +2773,34 @@ class TestTheNotificationLeg:
         assert sent is True
         assert len(client.requests) == 1
         assert _rows(config, "alert:1")[0]["status"] == "accepted"
+
+    @pytest.mark.parametrize("window", [timedelta(), timedelta(hours=30)])
+    async def test_a_notification_lands_once_in_the_private_room_whatever_the_send(
+        self, tmp_path, monkeypatch, window,
+    ):
+        # A closed window blocks the send and still leaves the readable copy.
+        config = _config(tmp_path)
+        _bind(config, window=window)
+        client = _FakeClient()
+        monkeypatch.setattr(
+            "istota.transport.whatsapp.client.make_client", lambda _config: client,
+        )
+        with db.get_db(config.db_path) as conn:
+            token = db.register_room(conn, None, "alice", origin="whatsapp").token
+            db.add_room_binding(
+                conn, token, "whatsapp", whatsapp_conversation_token("alice"),
+            )
+
+        for _ in range(2):
+            await asyncio.to_thread(
+                notifications.send_notification,
+                config, "alice", "Alert\n\nthe alert body",
+                surface="whatsapp", title="Alert", reference_id="alert:2",
+            )
+
+        assert len(client.requests) == (1 if window == timedelta() else 0)
+        with db.get_db(config.db_path) as conn:
+            rows = [tuple(r) for r in conn.execute(
+                "SELECT room_token, role, title, body, origin_surface FROM messages"
+            )]
+        assert rows == [(token, "system", "Alert", "the alert body", "whatsapp")]

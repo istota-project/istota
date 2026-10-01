@@ -13,6 +13,7 @@ dependencies = [
     "requests>=2.32.0",
     "croniter>=2.0.0",
     "tomli>=2.0.0",
+    "tomli-w>=1.0.0",
     "cryptography>=42.0",
     # Image pre-shrink for vision attachments runs on every task with an image
     # attachment, so Pillow + HEIC support live in core, not an extra.
@@ -99,7 +100,6 @@ web = [
 ]
 money = [
     "click>=8.0",
-    "tomli-w>=1.0.0",
     "beancount>=3.0.0",
     "beanquery>=0.1.0",
     "weasyprint>=62.0",

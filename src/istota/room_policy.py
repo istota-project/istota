@@ -98,6 +98,7 @@ def _row_to_policy(row) -> RoomPolicy:
 
 
 def get_policy(conn: sqlite3.Connection, room_token: str) -> RoomPolicy | None:
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     row = conn.execute(
         "SELECT * FROM room_policy WHERE room_token = ?", (room_token,),
     ).fetchone()
@@ -112,6 +113,7 @@ def host_present(conn: sqlite3.Connection, room_token: str, user_id: str) -> boo
     writes a dismissal tombstone, but it is a view preference; reading it as
     leaving would take a room's host away because they tidied their sidebar.
     """
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     if not (db.is_room_member(conn, room_token, user_id)
             or db.is_room_dismissed(conn, room_token, user_id)):
         return False
@@ -141,6 +143,7 @@ def ensure_policy(conn: sqlite3.Connection, room_token: str) -> RoomPolicy | Non
     The host is fixed here, once: the creator if they are still in the room,
     else the first member who is.
     """
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     policy = get_policy(conn, room_token)
     if policy is not None:
         return policy
@@ -168,6 +171,7 @@ def current_host(conn: sqlite3.Connection, policy: RoomPolicy | None) -> str | N
 
 def lose_host(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
     """Record that ``user_id`` no longer hosts the room (D14). Sticky."""
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     conn.execute(
         "UPDATE room_policy SET host_user_id = NULL "
         "WHERE room_token = ? AND host_user_id = ?",
@@ -181,6 +185,7 @@ def claim_host(conn: sqlite3.Connection, room_token: str, user_id: str) -> str:
     Returns ``claimed``, ``already_host``, ``held_by_another`` (a present host
     is never displaced) or ``not_a_member``.
     """
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     if not host_present(conn, room_token, user_id):
         return "not_a_member"
     policy = ensure_policy(conn, room_token)
@@ -208,6 +213,7 @@ def settings_refusal(conn: sqlite3.Connection, room_token: str, user_id: str) ->
     Per-member choices (a colour, hiding the room) and the room's notes are not
     settings: every member has those.
     """
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     room = db.get_room(conn, room_token)
     if room is None or room.side_of or not db.room_is_shared(conn, room_token):
         return None
@@ -229,6 +235,7 @@ def guest_reply_refusal(conn: sqlite3.Connection, room_token: str, user_id: str)
     turn runs as, so the choice is theirs. `!room guests` and the web PATCH
     both ask this.
     """
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     policy = ensure_policy(conn, room_token)
     if policy is None:
         return "This room has no guest policy."
@@ -250,6 +257,7 @@ def group_link_refusal(
     every refusal of the group reads the same, as `kv --group`'s does, so the
     command is not a way to learn which groups exist.
     """
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     room = db.get_room(conn, room_token)
     if room is None:
         return "This room isn't registered yet."
@@ -269,6 +277,7 @@ def group_link_refusal(
 
 
 def set_guest_reply(conn: sqlite3.Connection, room_token: str, value: str) -> RoomPolicy:
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     if value not in GUEST_REPLY_VALUES:
         raise ValueError(f"guest_reply must be one of {GUEST_REPLY_VALUES}")
     policy = ensure_policy(conn, room_token)
@@ -286,6 +295,7 @@ def audience_class(
     """Who reads a turn in this room now. A present guest makes it ``mixed``
     whatever else holds; ``is_group_chat`` is the surface's own roster, which
     can say "group" before anyone is recorded."""
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     guest = conn.execute(
         "SELECT 1 FROM room_participants WHERE room_token = ? AND kind = 'guest' "
         "AND left_at IS NULL LIMIT 1",
@@ -319,6 +329,7 @@ class RoomReaders:
 
 def room_readers(conn: sqlite3.Connection, room_token: str) -> RoomReaders:
     """Read-only: unlike `current_host`, a host found gone is reported, not cleared."""
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     members = set(db.list_room_members(conn, room_token))
     rows = conn.execute(
         "SELECT kind, user_id, surface, surface_ref FROM room_participants "
@@ -352,6 +363,7 @@ def bot_turns_since_principal(conn: sqlite3.Connection, room_token: str) -> int:
     A member is any row with an istota author; a guest's or an agent's turn
     carries none, so neither resets the count.
     """
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     row = conn.execute(
         "SELECT COUNT(*) FROM messages WHERE room_token = ? AND role = 'assistant' "
         "AND id > COALESCE((SELECT MAX(id) FROM messages WHERE room_token = ? "

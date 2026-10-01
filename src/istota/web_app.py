@@ -826,7 +826,8 @@ button.btn { cursor: pointer; }
 }
 .email-panel { display: none; grid-column: 1 / -1; padding-top: 1.25rem; }
 #email-password:checked ~ .password-panel,
-#email-link:checked ~ .link-panel { display: block; }
+#email-code:checked ~ .code-panel { display: block; }
+.code-input { font-size: 1.4rem; letter-spacing: 0.3em; text-align: center; font-variant-numeric: tabular-nums; }
 .form-field { display: grid; gap: 0.4rem; }
 .password-label { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
 .recovery { color: var(--text-muted); font-size: 0.75rem; text-decoration: none; }
@@ -1049,7 +1050,7 @@ def _render_form_page(bot_name: str, headline: str, body: str, mark: str) -> str
 
 def _render_login_page(
     bot_name: str, mark: str, *, methods: list[str],
-    login_csrf: str = "", link_csrf: str = "", error: str | None = None,
+    login_csrf: str = "", code_csrf: str = "", error: str | None = None,
     email_prefill: str = "",
 ) -> str:
     body = f'<p class="form-error">{escape(error)}</p>' if error else ""
@@ -1063,8 +1064,8 @@ def _render_login_page(
             '<fieldset class="email-login"><legend class="visually-hidden">Sign in with email</legend>'
             '<input class="visually-hidden" type="radio" name="email-method" id="email-password" checked>'
             '<label class="email-choice" for="email-password">Password</label>'
-            '<input class="visually-hidden" type="radio" name="email-method" id="email-link">'
-            '<label class="email-choice" for="email-link">Email link</label>'
+            '<input class="visually-hidden" type="radio" name="email-method" id="email-code">'
+            '<label class="email-choice" for="email-code">Email code</label>'
             '<div class="email-panel password-panel">'
             '<form method="post" action="/istota/login/email">'
             f'<input type="hidden" name="csrf_token" value="{escape(login_csrf)}">'
@@ -1076,22 +1077,22 @@ def _render_login_page(
             '<input id="login-password" type="password" name="password" '
             'autocomplete="current-password" required></div>'
             '<button class="btn btn-primary" type="submit">Log in</button></form></div>'
-            '<div class="email-panel link-panel">'
-            '<form method="post" action="/istota/auth/login-link/request">'
-            f'<input type="hidden" name="csrf_token" value="{escape(link_csrf)}">'
-            '<div class="form-field"><label for="link-email">Email</label>'
-            f'<input id="link-email" type="email" name="email" value="{escape(email_prefill)}" '
-            'autocomplete="email" aria-describedby="link-help" required></div>'
-            '<p class="form-help" id="link-help">We’ll email you a one-time sign-in link. No password needed.</p>'
-            f'<button class="btn btn-primary" type="submit">{_MAIL_ICON}Send sign-in link</button>'
+            '<div class="email-panel code-panel">'
+            '<form method="post" action="/istota/auth/sign-in-code/request">'
+            f'<input type="hidden" name="csrf_token" value="{escape(code_csrf)}">'
+            '<div class="form-field"><label for="code-email">Email</label>'
+            f'<input id="code-email" type="email" name="email" value="{escape(email_prefill)}" '
+            'autocomplete="email" aria-describedby="code-help" required></div>'
+            '<p class="form-help" id="code-help">We’ll email you a 6-digit sign-in code. No password needed.</p>'
+            f'<button class="btn btn-primary" type="submit">{_MAIL_ICON}Email me a code</button>'
             '</form></div></fieldset>'
             '<script>'
             'const passwordEmail = document.getElementById("login-email");'
-            'const linkEmail = document.getElementById("link-email");'
-            'document.getElementById("email-link").addEventListener("change", () => {'
-            'linkEmail.value = passwordEmail.value;});'
+            'const codeEmail = document.getElementById("code-email");'
+            'document.getElementById("email-code").addEventListener("change", () => {'
+            'codeEmail.value = passwordEmail.value;});'
             'document.getElementById("email-password").addEventListener("change", () => {'
-            'passwordEmail.value = linkEmail.value;});'
+            'passwordEmail.value = codeEmail.value;});'
             '</script>'
         )
     return _render_form_page(bot_name, "Sign in to continue", body, mark)
@@ -1126,7 +1127,7 @@ async def login(request: Request):
     return HTMLResponse(_render_login_page(
         _config.bot_name, mark, methods=_config.web.auth,
         login_csrf=_csrf_token(request, "login"),
-        link_csrf=_csrf_token(request, "login-link-request"),
+        code_csrf=_csrf_token(request, "sign-in-code-request"),
     ), headers=_AUTH_PAGE_HEADERS)
 
 
@@ -1194,7 +1195,7 @@ async def _invalid_auth_link() -> HTMLResponse:
     return await _auth_error("This link is invalid", "It may have expired or already been used. Request a new link.", 400)
 
 
-async def _peek_auth_link(token: object, *, login: bool = False):
+async def _peek_auth_link(token: object):
     if not isinstance(token, str):
         return None
     try:
@@ -1202,23 +1203,21 @@ async def _peek_auth_link(token: object, *, login: bool = False):
     except Exception:
         logger.warning("Auth link lookup failed")
         return None
-    purposes = {"login"} if login else {"enrol", "reset"}
-    return record if record and record.purpose in purposes else None
+    return record if record and record.purpose in {"enrol", "reset"} else None
 
 
-async def _finish_link_sign_in(request: Request, result) -> Response:
-    if result is None:
-        return await _invalid_auth_link()
+async def _start_email_session(request: Request, result) -> Response | None:
+    """Mint the session for a verified email credential, or ``None`` if it went stale."""
     user_id, email, epoch = result
     try:
         profile = await asyncio.to_thread(user_profiles.get_profile, _config.db_path, user_id)
         identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user_id)
     except Exception:
-        logger.warning("Auth link session lookup failed")
-        return await _invalid_auth_link()
+        logger.warning("Email sign-in session lookup failed")
+        return None
     if (profile is None or identity is None or identity.disabled
             or identity.email != email or identity.credential_epoch != epoch):
-        return await _invalid_auth_link()
+        return None
     request.session.clear()
     request.session["user"] = {"username": user_id, "display_name": profile.display_name}
     request.session["auth"] = {"method": "email", "epoch": epoch}
@@ -1277,48 +1276,137 @@ async def set_password_submit(request: Request):
     except Exception:
         logger.warning("Auth link password update failed")
         return await _invalid_auth_link()
-    return await _finish_link_sign_in(request, result)
+    response = await _start_email_session(request, result) if result is not None else None
+    return response or await _invalid_auth_link()
 
 
-@auth_router.get("/auth/login-link")
-async def login_link_page(request: Request):
-    if not _config.web.has_method("email"):
-        raise HTTPException(status_code=404)
-    token = request.query_params.get("token", "")
-    if await _peek_auth_link(token, login=True) is None:
-        return await _invalid_auth_link()
-    body = (
-        '<form method="post" action="/istota/auth/login-link">'
-        f'<input type="hidden" name="token" value="{escape(token)}">'
-        f'<input type="hidden" name="csrf_token" value="{escape(_csrf_token(request, "login-link"))}">'
-        '<button class="btn" type="submit">Sign in</button></form>'
+# Email sign-in by code (ISSUE-574). The browser that asks holds a secret in its
+# signed session, and the emailed code redeems only together with it. A link
+# opened in whatever app reads the mail, iOS's browser rather than the istota
+# app's web view for one, could never complete a sign-in begun somewhere else.
+_SIGN_IN_SESSION_KEY = "sign_in"
+
+
+def _pending_sign_in(request: Request) -> dict | None:
+    value = request.session.get(_SIGN_IN_SESSION_KEY)
+    if isinstance(value, dict) and isinstance(value.get("secret"), str):
+        return value
+    return None
+
+
+async def _sign_in_code_form(request: Request, error: str = "", status_code: int = 200) -> HTMLResponse:
+    body = f'<p class="form-error">{escape(error)}</p>' if error else ""
+    body += (
+        '<p class="tagline">If this address can sign in, a 6-digit code is on its way. '
+        'Enter it here, in this window.</p>'
+        '<form method="post" action="/istota/auth/sign-in-code">'
+        f'<input type="hidden" name="csrf_token" value="{escape(_csrf_token(request, "sign-in-code"))}">'
+        '<div class="form-field"><label for="sign-in-code">Code</label>'
+        '<input id="sign-in-code" class="code-input" type="text" name="code" inputmode="numeric" '
+        'autocomplete="one-time-code" maxlength="9" required autofocus></div>'
+        '<button class="btn btn-primary" type="submit">Sign in</button></form>'
+        '<a class="recovery" href="/istota/login">Use a different address or send a new code</a>'
     )
-    return await _auth_form("Confirm sign-in", body)
+    return await _auth_form("Check your email", body, status_code)
 
 
-@auth_router.post("/auth/login-link")
-async def login_link_submit(request: Request):
+def _send_sign_in_code(config, request_id: str):
+    # BackgroundTask runs this after the response, so the identity lookup and
+    # the mail cannot be timed from the page.
+    try:
+        issued = web_auth.issue_sign_in_code_if_allowed(
+            config.db_path, web_auth.policy_from_config(config), request_id,
+        )
+        if issued is None:
+            return
+        code, identity = issued
+        profile = user_profiles.get_profile(config.db_path, identity.user_id)
+        if profile is None:
+            return
+        message = web_auth_mail.build_sign_in_code_email(
+            config.bot_name, profile.display_name, code, config.web.auth_sign_in_code_ttl_minutes,
+        )
+        web_auth_mail.send_auth_email(config, identity.email, *message)
+    except Exception:
+        # Backend/SMTP exception text may contain the address or the code.
+        logger.warning("Requested sign-in code could not be sent")
+
+
+@auth_router.post("/auth/sign-in-code/request")
+async def sign_in_code_request(request: Request):
     if not _config.web.has_method("email"):
         raise HTTPException(status_code=404)
     form = await request.form()
-    token = form.get("token", "")
-    if await _peek_auth_link(token, login=True) is None:
-        return await _invalid_auth_link()
-    if not _check_csrf(request, "login-link", form.get("csrf_token")):
+    if not _check_csrf(request, "sign-in-code-request", form.get("csrf_token")):
         return await _auth_error("This form expired", "Reload and try again.", 403)
+    email = form.get("email", "")
+    if not isinstance(email, str) or not email.strip() or len(email) > 320:
+        return await _auth_error("Sign-in failed", "Enter a valid email address.", 400)
+    email = web_auth.normalize_email(email)
+    policy = web_auth.policy_from_config(_config)
+    # Address-blind: the same gate as a password attempt, before any database work.
+    if not _admit_password_request(email, _client_ip(request), policy):
+        return await _auth_error("Too many attempts", "Wait a few minutes and try again.", 429)
+    # One secret per browser, so a repeat request past the mail budget leaves
+    # the code already sent working rather than stranding the user.
+    previous = _pending_sign_in(request)
+    secret = previous["secret"] if previous else secrets.token_urlsafe(32)
     try:
-        result = await asyncio.to_thread(web_auth.consume_login_token, _config.db_path, token)
+        request_id = await asyncio.to_thread(web_auth.start_sign_in, _config.db_path, policy, email, secret)
     except Exception:
-        logger.warning("Auth sign-in link consumption failed")
-        return await _invalid_auth_link()
-    return await _finish_link_sign_in(request, result)
+        logger.warning("Sign-in request could not be recorded")
+        return await _auth_error("Sign-in is unavailable", "Try again in a moment.", 503)
+    request.session[_SIGN_IN_SESSION_KEY] = {"secret": secret}
+    response = await _sign_in_code_form(request)
+    response.background = BackgroundTask(_send_sign_in_code, _config, request_id)
+    return response
+
+
+@auth_router.get("/auth/sign-in-code")
+async def sign_in_code_page(request: Request):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    if _pending_sign_in(request) is None:
+        return RedirectResponse("/istota/login", status_code=302, headers=_AUTH_PAGE_HEADERS)
+    return await _sign_in_code_form(request)
+
+
+@auth_router.post("/auth/sign-in-code")
+async def sign_in_code_submit(request: Request):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    form = await request.form()
+    if not _check_csrf(request, "sign-in-code", form.get("csrf_token")):
+        return await _auth_error("This form expired", "Reload and try again.", 403)
+    pending = _pending_sign_in(request)
+    code = form.get("code", "")
+    status, result = "dead", None
+    if pending is not None and isinstance(code, str):
+        try:
+            status, result = await asyncio.to_thread(
+                web_auth.redeem_sign_in_code, _config.db_path, pending["secret"], code,
+            )
+        except Exception:
+            logger.warning("Sign-in code redemption failed")
+            return await _auth_error("Sign-in is unavailable", "Try again in a moment.", 503)
+    if status == "ok":
+        response = await _start_email_session(request, result)
+        if response is not None:
+            return response
+    elif status == "bad":
+        return await _sign_in_code_form(request, "That code was not accepted. Check it and try again.", 400)
+    request.session.pop(_SIGN_IN_SESSION_KEY, None)
+    return await _auth_error(
+        "This code has expired",
+        "It may have been used, replaced by a newer one, or mistyped too many times. Request a new code.", 400,
+    )
 
 
 _mail_link_pending: set[tuple[str, str]] = set()
 _mail_link_lock = threading.Lock()
 
 
-def _send_requested_auth_link(config, email: str, purpose: str, pending_key: tuple[str, str]):
+def _send_requested_auth_link(config, email: str, pending_key: tuple[str, str]):
     # BackgroundTask runs this synchronous function through anyio's threadpool.
     # Its finally also runs if the HTTP request is cancelled during delivery.
     try:
@@ -1326,7 +1414,7 @@ def _send_requested_auth_link(config, email: str, purpose: str, pending_key: tup
 
         host, scheme = external_origin(config)
         issued = web_auth.issue_mail_link_if_allowed(
-            config.db_path, web_auth.policy_from_config(config), email, purpose,
+            config.db_path, web_auth.policy_from_config(config), email, "reset",
         )
         if issued is None:
             return
@@ -1334,16 +1422,10 @@ def _send_requested_auth_link(config, email: str, purpose: str, pending_key: tup
         profile = user_profiles.get_profile(config.db_path, identity.user_id)
         if profile is None:
             return
-        path = "login-link" if purpose == "login" else "set-password"
-        link = f"{scheme}://{host}/istota/auth/{path}?token={token}"
-        if purpose == "login":
-            message = web_auth_mail.build_login_link_email(
-                config.bot_name, profile.display_name, link, config.web.auth_login_link_ttl_minutes,
-            )
-        else:
-            message = web_auth_mail.build_reset_email(
-                config.bot_name, profile.display_name, link, config.web.auth_reset_ttl_hours,
-            )
+        link = f"{scheme}://{host}/istota/auth/set-password?token={token}"
+        message = web_auth_mail.build_reset_email(
+            config.bot_name, profile.display_name, link, config.web.auth_reset_ttl_hours,
+        )
         web_auth_mail.send_auth_email(config, identity.email, *message)
     except Exception:
         # Backend/SMTP exception text may contain the address or the token.
@@ -1351,31 +1433,6 @@ def _send_requested_auth_link(config, email: str, purpose: str, pending_key: tup
     finally:
         with _mail_link_lock:
             _mail_link_pending.discard(pending_key)
-
-
-async def _request_auth_link(request: Request, purpose: str):
-    if not _config.web.has_method("email"):
-        raise HTTPException(status_code=404)
-    form = await request.form()
-    csrf_purpose = "reset" if purpose == "reset" else "login-link-request"
-    if not _check_csrf(request, csrf_purpose, form.get("csrf_token")):
-        return await _auth_error("This form expired", "Reload and try again.", 403)
-    response = await _auth_form(
-        "Check your email",
-        '<p class="tagline">If this address can sign in, an email with a link will arrive shortly.</p>'
-        '<a class="btn" href="/istota/login">Back to sign in</a>',
-    )
-    email = form.get("email", "")
-    if isinstance(email, str) and len(email) <= 320:
-        email = web_auth.normalize_email(email)
-        key = (str(_config.db_path), email)
-        # Reserve after the final await, so cancellation during rendering cannot
-        # leave a marker for a background task that was never handed off.
-        with _mail_link_lock:
-            if key not in _mail_link_pending:
-                _mail_link_pending.add(key)
-                response.background = BackgroundTask(_send_requested_auth_link, _config, email, purpose, key)
-    return response
 
 
 @auth_router.get("/auth/reset")
@@ -1394,12 +1451,27 @@ async def reset_page(request: Request):
 
 @auth_router.post("/auth/reset")
 async def reset_submit(request: Request):
-    return await _request_auth_link(request, "reset")
-
-
-@auth_router.post("/auth/login-link/request")
-async def login_link_request(request: Request):
-    return await _request_auth_link(request, "login")
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    form = await request.form()
+    if not _check_csrf(request, "reset", form.get("csrf_token")):
+        return await _auth_error("This form expired", "Reload and try again.", 403)
+    response = await _auth_form(
+        "Check your email",
+        '<p class="tagline">If this address can sign in, an email with a link will arrive shortly.</p>'
+        '<a class="btn" href="/istota/login">Back to sign in</a>',
+    )
+    email = form.get("email", "")
+    if isinstance(email, str) and len(email) <= 320:
+        email = web_auth.normalize_email(email)
+        key = (str(_config.db_path), email)
+        # Reserve after the final await, so cancellation during rendering cannot
+        # leave a marker for a background task that was never handed off.
+        with _mail_link_lock:
+            if key not in _mail_link_pending:
+                _mail_link_pending.add(key)
+                response.background = BackgroundTask(_send_requested_auth_link, _config, email, key)
+    return response
 
 
 # Where a completed OAuth round trip may land, keyed rather than stored as a
@@ -2016,14 +2088,11 @@ async def _admin_send_auth_link(config, user_id: str, purpose: str):
         if identity.disabled or profile is None:
             raise ValueError("An enabled identity and a live profile are required to send a link")
         policy = web_auth.policy_from_config(config)
-        ttl = {"enrol": policy.enrol_ttl_seconds, "reset": policy.reset_ttl_seconds,
-               "login": policy.login_link_ttl_seconds}[purpose]
+        ttl = {"enrol": policy.enrol_ttl_seconds, "reset": policy.reset_ttl_seconds}[purpose]
         token = web_auth.issue_token(config.db_path, user_id, purpose, ttl, expected_identity=identity)
-        route = "login-link" if purpose == "login" else "set-password"
-        link = f"{scheme}://{host}/istota/auth/{route}?token={token}"
-        builder = {"enrol": web_auth_mail.build_enrol_email, "reset": web_auth_mail.build_reset_email,
-                   "login": web_auth_mail.build_login_link_email}[purpose]
-        message = builder(config.bot_name, profile.display_name, link, ttl // (60 if purpose == "login" else 3600))
+        link = f"{scheme}://{host}/istota/auth/set-password?token={token}"
+        builder = {"enrol": web_auth_mail.build_enrol_email, "reset": web_auth_mail.build_reset_email}[purpose]
+        message = builder(config.bot_name, profile.display_name, link, ttl // 3600)
         try:
             return web_auth_mail.send_auth_email(config, identity.email, *message)
         except Exception:
@@ -2032,7 +2101,7 @@ async def _admin_send_auth_link(config, user_id: str, purpose: str):
     sent = await _admin_auth_write(send)
     if not sent:
         logger.warning("Admin auth mail could not be sent user=%s purpose=%s", user_id, purpose)
-        raise HTTPException(status_code=502, detail="The invitation or sign-in link could not be sent. The identity is saved; try sending again.")
+        raise HTTPException(status_code=502, detail="The invitation or reset link could not be sent. The identity is saved; try sending again.")
     return {"sent": True}
 
 
@@ -2066,11 +2135,6 @@ async def admin_user_invite(user_id: str, _: dict = Depends(_require_admin), _cs
 @api_router.post("/admin/users/{user_id}/reset")
 async def admin_user_reset(user_id: str, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
     return await _admin_send_auth_link(_config, user_id, "reset")
-
-
-@api_router.post("/admin/users/{user_id}/login-link")
-async def admin_user_login_link(user_id: str, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
-    return await _admin_send_auth_link(_config, user_id, "login")
 
 
 @api_router.post("/admin/users/{user_id}/disable")
@@ -3868,6 +3932,7 @@ def _room_snapshot(username: str) -> dict[str, dict]:
         # `talk_token` would render a promoted room as web-only until the next
         # poll settles it (ISSUE-342).
         talk_refs = db.talk_refs_for_member(conn, username)
+        phone_bindings = db.phone_bindings_for_member(conn, username)
         out: dict[str, dict] = {}
         for r in db.list_member_rooms(conn, username, include_archived=False):
             handle = handles.get(r.token)
@@ -3879,6 +3944,7 @@ def _room_snapshot(username: str) -> dict[str, dict]:
                 "name": db.room_display_name(r, handle),
                 "origin": r.origin,
                 "talk_token": talk_refs.get(r.token),
+                **_room_phone_fields(r, phone_bindings.get(r.token)),
                 "side_of": r.side_of,
                 "model": r.model,
                 "effort": r.effort,
@@ -5321,6 +5387,22 @@ def _render_pairing_qr() -> tuple[bytes, int] | None:
 # the task_events table the existing /chat/tasks/{id}/stream SSE endpoint tails.
 
 
+def _room_phone_fields(reg, binding) -> dict:
+    """``phone_surface`` and ``read_only`` for one listed room.
+
+    ``phone_surface`` badges any room bound to SMS or WhatsApp, a WhatsApp
+    group included. ``read_only`` is the narrower private-thread test, the
+    same one the send route refuses on (`routing.phone_transcript_surface`),
+    answered here from the binding already in hand rather than per room.
+    """
+    from .transport.routing import private_phone_ref
+
+    if binding is None:
+        return {"phone_surface": None, "read_only": False}
+    private = binding.surface_ref == private_phone_ref(binding.surface, reg.user_id)
+    return {"phone_surface": binding.surface, "read_only": private}
+
+
 def _room_to_dict(room) -> dict:
     return {
         "id": room.id,
@@ -5446,6 +5528,7 @@ def _chat_list_rooms(username: str) -> list[dict]:
         # room reads as istota-only and the UI re-offers "Also open in Talk"
         # (ISSUE-342).
         talk_refs = db.talk_refs_for_member(conn, username)
+        phone_bindings = db.phone_bindings_for_member(conn, username)
         out: list[dict] = []
         for r in registry:
             handle = db.ensure_web_chat_handle(
@@ -5462,6 +5545,7 @@ def _chat_list_rooms(username: str) -> list[dict]:
             d["name"] = db.room_display_name(r, handle)
             d["origin"] = r.origin
             d["talk_token"] = talk_refs.get(r.token)
+            d.update(_room_phone_fields(r, phone_bindings.get(r.token)))
             # The shared room a side room belongs to (multiplayer D4), so the
             # client can link the two; None for every other room.
             d["side_of"] = r.side_of
@@ -5515,6 +5599,47 @@ def _chat_owned_room(username: str, room_id: int):
     if room is None or room.user_id != username:
         return None
     return room
+
+
+def _phone_transcript_surface(room_token: str) -> str | None:
+    """`routing.phone_transcript_surface` over its own connection.
+
+    The server half of the read-only phone room (decided 2026-10-01): the
+    client renders no composer there, and a client that sends anyway is
+    refused here, since a hidden composer is not a gate.
+    """
+    from . import db
+    from .transport.routing import phone_transcript_surface
+
+    with db.get_db(_config.db_path) as conn:
+        return phone_transcript_surface(conn, room_token)
+
+
+def _task_phone_transcript_surface(task_id: int) -> str | None:
+    """The phone surface when the task's room is a read-only phone transcript."""
+    from . import db
+    from .transport.routing import phone_transcript_surface
+
+    with db.get_db(_config.db_path) as conn:
+        task = db.get_task(conn, task_id)
+        if task is None or not task.conversation_token:
+            return None
+        return phone_transcript_surface(conn, task.conversation_token)
+
+
+_PHONE_LABELS = {"sms": "SMS", "whatsapp": "WhatsApp"}
+
+
+def _read_only_refusal(surface: str) -> JSONResponse:
+    label = _PHONE_LABELS.get(surface, surface)
+    return JSONResponse(
+        {
+            "error": f"This room is the transcript of your {label} conversation "
+                     f"and is read-only here. Reply by {label} instead.",
+            "read_only": True,
+        },
+        status_code=409,
+    )
 
 
 def _chat_answer_confirmation(
@@ -6054,6 +6179,19 @@ def _chat_add_member(
         # second member would read answers given at that member's full reach.
         if reg.side_of:
             return 409, {"error": "a side room is private to its member"}
+        # A private phone thread has one reader. A second member makes it
+        # shared, and a shared phone room is answered, recorded into and
+        # backfilled by nothing (`routing.private_phone_room` refuses it).
+        # A WhatsApp group room is not a private thread and takes members.
+        from .transport.routing import phone_transcript_surface
+        phone = phone_transcript_surface(conn, handle.token)
+        if phone is not None:
+            label = _PHONE_LABELS.get(phone, phone)
+            return 409, {
+                "error": f"This room is the transcript of a {label} "
+                         "conversation and has one reader; members cannot be added.",
+                "read_only": True,
+            }
         if reg.user_id != username:
             return 403, {"error": "only the room's creator can add members"}
         if target not in _config.users:
@@ -7101,9 +7239,9 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
 
     **Where it came from.** `origin` needs two things to be true, and the second
     is the one that is easy to miss. The surface must be one the room does not
-    itself live on — `surfaces.is_room_member` is talk and web, and
-    `TRANSCRIPT_SURFACE_FILTER` renders a user row only for those two plus
-    `email`, so this resolves to `email` today. And the row must carry an
+    itself live on — `surfaces.is_room_member` is talk, web, sms and
+    whatsapp, and `TRANSCRIPT_SURFACE_FILTER` renders a user row only for
+    those plus `email`, so this resolves to `email` today. And the row must carry an
     `author_label`, which `transport.ingest.resolve_author` sets **iff the
     envelope sender was not one of the user's own addresses**. Surface alone is
     not enough: a user mailing their own plus-address writes an email-origin row
@@ -7180,6 +7318,11 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
     # external, in the web process, on every page load.
     if author_label and origin_surface and not is_room_member(origin_surface):
         out["origin"] = origin_surface
+    # A turn texted in rather than typed here. Its own words, so not the
+    # external-message treatment above, which collapses a stranger's body:
+    # the client marks it with the surface's icon and nothing else.
+    if origin_surface in _PHONE_LABELS:
+        out["via"] = origin_surface
     return out
 
 
@@ -8117,15 +8260,17 @@ async def _mirror_web_turn_as_user(
     it does not close it.
     """
     from . import db, web_tokens
+    from .transport.routing import plan_user_turn_mirrors
 
     if not _config or not web_tokens.feature_enabled(_config):
         return
 
     def _lookup() -> tuple[str | None, int | None, int | None]:
         with db.get_db(_config.db_path) as conn:
-            bindings = db.list_room_bindings(conn, room_token)
+            mirrors = plan_user_turn_mirrors(conn, _config, room_token, "web")
             talk_ref = next(
-                (b.surface_ref for b in bindings if b.surface == "talk"), None,
+                (m.surface_ref for m in mirrors
+                 if m.surface == "talk" and m.mode == "as_user"), None,
             )
             if talk_ref is None:
                 return None, None, None
@@ -9383,6 +9528,11 @@ async def chat_send_message(
         # Archived rooms are hidden in the UI; reject sends so they don't keep
         # spawning tasks and churning their channel memory behind your back.
         return JSONResponse({"error": "room is archived"}, status_code=409)
+    # Ahead of everything else, `!commands` and confirmation answers included:
+    # a phone room is answered by text, and web only reads it.
+    phone = await asyncio.to_thread(_phone_transcript_surface, room.token)
+    if phone is not None:
+        return _read_only_refusal(phone)
 
     data = await request.json()
     raw_text = data.get("text") if isinstance(data.get("text"), str) else ""
@@ -10002,7 +10152,9 @@ async def chat_discard_draft(
     return {"status": "discarded", "draft_id": draft_id}
 
 
-def _chat_cancel_task(task_id: int, actor_user_id: str | None = None) -> None:
+def _chat_cancel_task(task_id: int, actor_user_id: str | None = None) -> str | None:
+    """Cancel or decline. Returns the phone surface when the decline is
+    refused because the question belongs to a read-only phone room."""
     from . import confirmations, db
     with db.get_db(_config.db_path) as conn:
         row = conn.execute(
@@ -10021,9 +10173,18 @@ def _chat_cancel_task(task_id: int, actor_user_id: str | None = None) -> None:
                 from fastapi import HTTPException
                 raise HTTPException(status_code=403, detail="not your task")
             task = db.get_task(conn, task_id)
+            # Declining is answering, and a phone task is answered by text
+            # (the read-only phone room, decided 2026-10-01). Stopping a
+            # running one below is not an answer and stays open.
+            if task is not None and task.conversation_token:
+                from .transport.routing import phone_transcript_surface
+
+                surface = phone_transcript_surface(conn, task.conversation_token)
+                if surface:
+                    return surface
             if task is not None:
                 confirmations.decline(conn, task, by="web")
-            return
+            return None
         conn.execute(
             "UPDATE tasks SET cancel_requested = 1 WHERE id = ?", (task_id,)
         )
@@ -10046,6 +10207,11 @@ async def chat_confirm_task(
     _csrf: None = Depends(_verify_origin),
 ):
     await _authorize_task_access(task_id, user)
+    # A phone task's question was asked by text and is answered by text: the
+    # read-only room shows the card without buttons, and this is the gate.
+    phone = await asyncio.to_thread(_task_phone_transcript_surface, task_id)
+    if phone is not None:
+        return _read_only_refusal(phone)
     await asyncio.to_thread(_chat_confirm_task, task_id, user["username"])
     return {"status": "ok"}
 
@@ -10057,7 +10223,9 @@ async def chat_cancel_task(
     _csrf: None = Depends(_verify_origin),
 ):
     await _authorize_task_access(task_id, user)
-    await asyncio.to_thread(_chat_cancel_task, task_id, user["username"])
+    phone = await asyncio.to_thread(_chat_cancel_task, task_id, user["username"])
+    if phone is not None:
+        return _read_only_refusal(phone)
     return {"status": "cancelling"}
 
 

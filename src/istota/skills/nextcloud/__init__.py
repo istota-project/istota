@@ -711,7 +711,9 @@ def _registry_room_named(name: str) -> dict | None:
         return None
     try:
         from istota import db
-        from istota.transport.routing import room_target_descriptor
+        from istota.transport.routing import (
+            private_phone_rooms, room_target_descriptor,
+        )
 
         with db.get_db(db_path) as conn:
             rooms = db.list_member_rooms(conn, user_id, include_dismissed=True)
@@ -722,13 +724,16 @@ def _registry_room_named(name: str) -> dict | None:
             if match is None:
                 return None
             talk_ref = db.talk_refs_for_member(conn, user_id).get(match.token)
+            phone_surface = private_phone_rooms(conn, user_id).get(match.token)
     except Exception:
         return None
     return {
         "token": match.token,
         "origin": match.origin,
         "talk_token": talk_ref,
-        "target": room_target_descriptor(match.token, match.origin, talk_ref),
+        "target": room_target_descriptor(
+            match.token, match.origin, talk_ref, phone_surface,
+        ),
     }
 
 

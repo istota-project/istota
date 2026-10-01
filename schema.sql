@@ -1308,6 +1308,14 @@ CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rooms_side
 ON rooms (side_of, side_for_user) WHERE side_of IS NOT NULL;
 
+-- Permanent forwarding from pre-migration tokens, including descriptors in
+-- mail already sent. No room FK: the mapping must survive room deletion.
+CREATE TABLE IF NOT EXISTS room_token_migration (
+    old_token   TEXT PRIMARY KEY,
+    new_token   TEXT NOT NULL,
+    migrated_at TEXT NOT NULL
+);
+
 -- Per-user room membership (ISSUE-134). A room is shared (one token, one
 -- transcript) but each participant has a membership row; web visibility is
 -- resolved through this, not the single-owner `rooms.user_id`.
@@ -1368,6 +1376,7 @@ CREATE TABLE IF NOT EXISTS room_bindings (
     PRIMARY KEY (room_token, surface)
 );
 CREATE INDEX IF NOT EXISTS idx_room_bindings_ref ON room_bindings (surface, surface_ref);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_room_bindings_unique_ref ON room_bindings (surface, surface_ref);
 
 -- Canonical message store. Folds the de-facto tasks-as-history store (user +
 -- assistant turns) and the bot-notification lane (role='system') into one
@@ -2047,6 +2056,25 @@ CREATE TABLE IF NOT EXISTS web_auth_tokens (
     created_by TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_web_auth_tokens_user ON web_auth_tokens(user_id, purpose);
+
+-- Pending email sign-ins (ISSUE-574). A row is opened for any address typed on
+-- the sign-in page; `code_hash`, `user_id` and `credential_epoch` are set only
+-- when a code is minted for a live identity. Redeeming needs the code and the
+-- secret held by the client that opened the row; both are stored as digests.
+CREATE TABLE IF NOT EXISTS web_auth_sign_ins (
+    id INTEGER PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE,
+    secret_hash TEXT NOT NULL,
+    email TEXT NOT NULL,
+    code_hash TEXT,
+    user_id TEXT,
+    credential_epoch INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_web_auth_sign_ins_email ON web_auth_sign_ins(email, used_at);
 
 CREATE TABLE IF NOT EXISTS web_auth_attempts (
     id INTEGER PRIMARY KEY,

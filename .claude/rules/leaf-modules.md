@@ -20,7 +20,7 @@ It does not own judgement: anything that validates, migrates a legacy key, reads
 
 What role each surface plays in the room model, in one table, replacing hardcoded surface-name lists scattered across five files. Three different questions shared those literals, and the table answers two:
 
-- `room_role`: whether a surface creates and owns rooms. `member` for talk and web; `guest` for email, which joins an existing room's transcript and never mints one (ISSUE-136's "existence, never creation" rule).
+- `room_role`: whether a surface creates and owns rooms. `member` for talk, web, sms and whatsapp (the two phone surfaces each own one private room per user that they are not a view of); `guest` for email, which joins an existing room's transcript and never mints one (ISSUE-136's "existence, never creation" rule).
 - `room_view`: whether the surface has a view of the room, so a turn written into the room is already in front of its users. `canonical` where the view renders from our `messages` store, `external` where the store is somebody else's.
 
 The third question, whether a surface may deposit a `role='user'` row in a room, deliberately stays a literal in `db.py`: it admits email, and converting it to the ownership predicate would have stopped an email `!confirm` recording what its docstring calls a durable authorization record.
@@ -117,7 +117,7 @@ stdlib-only leaf: `subprocess` and `logging`.
 
 ## sqlite_util.py
 
-One SQLite open, with each caller's pragma set as parameters, replacing many helpers that each issued a subset of the same four pragmas. Three entry points for three caller shapes: `open_db` (a context manager), `connect` (bare, for `money/cli._get_db_conn` and `money/routes._portfolio_conn`, which hand a live connection on), and `connect_read_only` (`doctor`).
+One SQLite open, with each caller's pragma set as parameters, replacing many helpers that each issued a subset of the same four pragmas. Three entry points for three caller shapes: `open_db` (a context manager), `connect` (bare, for `money/cli._get_db_conn` and `money/routes._portfolio_conn`, which hand a live connection on, and `room_relocate`'s migration, which passes `create=False` so a wrong path raises rather than becoming an empty database), and `connect_read_only` (`doctor`, `storage.channel_memory_tokens`, `room_mount_reconcile` and `room_relocate`'s `--dry-run` / `--list`).
 
 - **There is no `journal_mode` parameter, and adding one would be a defect.** WAL is persistent in the file header, so each store's `init_db` issues it once. Re-issuing it per open takes a write lock that races sibling readers, the recorded cause of a dispatch-loop stall (argued in `money/config_store.init`). `tests/test_sqlite_util.py` asserts the parameter's absence. Three `init_db` bodies keep their own `sqlite3.connect` for this reason: they are the only place `journal_mode=WAL` is issued.
 - **`timeout` already is a busy timeout.** `sqlite3.connect(timeout=T)` sets `busy_timeout` to `T * 1000`, so `busy_timeout_ms` is an override, `None` is not "no busy timeout", and asserting `busy_timeout == 30000` on a `timeout=30.0` connection proves nothing about the pragma. That is why the pin is a matrix over every caller: `foreign_keys`, `synchronous`, `row_factory` and `busy_timeout` split the callers differently, and no single default can move all four.

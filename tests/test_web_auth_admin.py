@@ -50,7 +50,7 @@ async def client(configured):
 
 
 ROUTES = [("GET", ""), ("POST", ""), ("DELETE", "/bob")] + [
-    ("POST", f"/bob/{action}") for action in ("invite", "login-link", "reset", "disable", "logout-all")]
+    ("POST", f"/bob/{action}") for action in ("invite", "reset", "disable", "logout-all")]
 
 
 @pytest.mark.parametrize("method,path", ROUTES)
@@ -144,7 +144,7 @@ async def test_revokes_nextcloud_and_preserves_profile(client, configured, actio
     assert user_profiles.get_profile(path, "bob") is not None
 
 
-@pytest.mark.parametrize("action", ["disable", "logout-all", "invite", "reset", "login-link", "remove"])
+@pytest.mark.parametrize("action", ["disable", "logout-all", "invite", "reset", "remove"])
 async def test_nextcloud_only_controls_refuse(client, configured, action):
     web_auth.delete_identity(configured._config.db_path, "bob")
     response = await client.request("DELETE" if action == "remove" else "POST", "/istota/api/admin/users/bob" + ("" if action == "remove" else f"/{action}"), json={"disabled": True})
@@ -172,7 +172,7 @@ def test_last_admin_guard_is_atomic(configured):
     assert len(web_auth.list_identities(path)) == 1
 
 
-@pytest.mark.parametrize("action,purpose", [("invite", "enrol"), ("reset", "reset"), ("login-link", "login")])
+@pytest.mark.parametrize("action,purpose", [("invite", "enrol"), ("reset", "reset")])
 async def test_admin_links_and_visible_sanitized_mail_errors(client, configured, monkeypatch, action, purpose):
     mail = []
     monkeypatch.setattr(configured.web_auth_mail, "send_auth_email", lambda *args: mail.append(args) or True)
@@ -198,7 +198,7 @@ async def test_mail_never_sends_new_address_token_to_previous_address(client, co
     sent = []
     monkeypatch.setattr(web_auth, "issue_token", changed)
     monkeypatch.setattr(configured.web_auth_mail, "send_auth_email", lambda *args: sent.append(args) or True)
-    response = await client.post("/istota/api/admin/users/bob/login-link")
+    response = await client.post("/istota/api/admin/users/bob/reset")
     assert response.status_code == 400
     assert not sent
 

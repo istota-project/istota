@@ -7,6 +7,7 @@
     busy = false,
     botName = 'Istota',
     botAvatar = null,
+    answerByText = null,
   }: {
     onConfirm: () => void;
     onReject: () => void;
@@ -19,6 +20,9 @@
     // renders the chip and issues no request; the default is what keeps a
     // caller that knows nothing about avatars rendering what it did before.
     botAvatar?: string | null;
+    // The surface label in a read-only phone room, where the question was
+    // texted and is answered by text: a sentence in place of the buttons.
+    answerByText?: string | null;
   } = $props();
 </script>
 
@@ -32,10 +36,14 @@
     </span>
     <span class="confirm-label">This action needs your confirmation.</span>
   </span>
-  <div class="confirm-actions">
-    <Button variant="primary" size="sm" disabled={busy} onclick={onConfirm}>Confirm</Button>
-    <Button variant="subtle" size="sm" disabled={busy} onclick={onReject}>Cancel</Button>
-  </div>
+  {#if answerByText}
+    <span class="confirm-elsewhere">Reply by {answerByText} to answer.</span>
+  {:else}
+    <div class="confirm-actions">
+      <Button variant="primary" size="sm" disabled={busy} onclick={onConfirm}>Confirm</Button>
+      <Button variant="subtle" size="sm" disabled={busy} onclick={onReject}>Cancel</Button>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -68,6 +76,10 @@
   .confirm-label {
     font-size: var(--text-sm);
     color: var(--text-secondary);
+  }
+  .confirm-elsewhere {
+    font-size: var(--text-sm);
+    color: var(--text-muted);
   }
   .confirm-actions {
     display: flex;

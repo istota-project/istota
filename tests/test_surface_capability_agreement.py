@@ -124,9 +124,17 @@ class TestTheDefaults:
         assert caps.inbound_room_role is None
         assert caps.user_turn_mirror is None
 
-    @pytest.mark.parametrize("name", ["ntfy", "istota_file", "repl", "sms"])
+    @pytest.mark.parametrize("name", ["ntfy", "istota_file", "repl"])
     def test_the_non_room_surfaces_declare_nothing(self, transports, name):
         caps = transports[name].capabilities
         assert (caps.room_view, caps.inbound_room_role, caps.user_turn_mirror) == (
             None, None, None,
         )
+
+
+@pytest.mark.parametrize("name", ["sms", "whatsapp"])
+def test_phone_transports_declare_membership_without_a_room_view(transports, name):
+    caps = transports[name].capabilities
+    assert (caps.inbound_room_role, caps.room_view, caps.user_turn_mirror) == (
+        "member", None, None,
+    )

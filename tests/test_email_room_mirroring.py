@@ -144,7 +144,10 @@ class TestEmailUserTurnMirroring:
             conn, config, surface="talk", surface_ref="newtalkroom",
             user_id="testuser", text="hi", channel_name="#general",
         )
-        room = db.get_room(conn, "newtalkroom")
+        # Talk inbound mints its own room token and binds the Talk ref.
+        token = db.resolve_room_token(conn, "talk", "newtalkroom")
+        assert token is not None and token != "newtalkroom"
+        room = db.get_room(conn, token)
         assert room is not None and room.origin == "talk"
 
 

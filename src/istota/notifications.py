@@ -581,6 +581,84 @@ def mirror_talk_to_room(
         )
 
 
+def mirror_phone_to_room(
+    config: "Config", surface: str, user_id: str, message: str,
+    *, title: str | None = None, reference_id: str | None = None,
+    reference_kind: str = "notification", in_room: str | None = None,
+) -> None:
+    """Record a notification pushed to SMS or WhatsApp in the user's phone room.
+
+    The phone counterpart of `mirror_talk_to_room`, and the same rules: the gate
+    is room existence (`routing.private_phone_room`, which also refuses a room
+    another human reads), a push never mints a room, the row is
+    ``role='system'``, and it runs after the send on a connection of its own
+    with the short lock wait, so no network call sits under a write lock and a
+    caller holding a transaction costs a dropped row rather than a stall.
+
+    Written whatever the send returned: a blocked send (window closed, opt-out,
+    budget) leaves the notice readable in web rather than nowhere. A stable
+    ``reference_id`` keys the row, so a repeat raise the ledger refuses as a
+    duplicate does not write it twice.
+
+    Also the writer for a phone `!command`'s reply (``reference_kind=
+    "command-reply"``, keyed on the reply's ledger key). The webhook stored the
+    command as a turn in the room it came from, so ``in_room`` names that room
+    and the reply is written only when it is the user's own private phone room:
+    a WhatsApp group member's command is answered in their private chat, and
+    its reply must land in neither the group nor a room that never held it.
+    """
+    from . import db
+    from .transport.routing import is_private_phone_room, private_phone_room
+
+    if not config.db_path or not message:
+        return
+    delivery_reference = (
+        f"{surface}-{reference_kind}:{user_id}:{reference_id}" if reference_id else None
+    )
+    try:
+        with db.get_db(config.db_path, busy_timeout_ms=_MIRROR_LOCK_WAIT_MS) as conn:
+            if in_room is not None:
+                room_token = (
+                    in_room if is_private_phone_room(conn, surface, user_id, in_room)
+                    else None
+                )
+            else:
+                room_token = private_phone_room(conn, surface, user_id)
+            if room_token is None:
+                return
+            db.add_message(
+                conn, room_token, role="system", body=message,
+                origin_surface=surface, title=title,
+                delivery_reference=delivery_reference,
+            )
+            conn.commit()
+    except Exception:
+        logger.warning(
+            "%s→room transcript mirror failed for user %s", surface, user_id,
+            exc_info=True,
+        )
+
+
+def mirror_phone_command_reply(
+    config: "Config", surface: str, user_id: str, room_token: str | None,
+    reply: str, logical_key: str,
+) -> None:
+    """Record a phone `!command`'s texted reply beside the command's own turn.
+
+    Call after the send, off any open transaction. ``room_token`` is the room
+    the webhook recorded the command in; a command recorded in no room has no
+    turn for a reply to sit under, so it writes nothing. ``logical_key`` is the
+    reply's ledger key, which keys the row, so a redelivered or retried
+    command adds no second one.
+    """
+    if not room_token:
+        return
+    mirror_phone_to_room(
+        config, surface, user_id, reply,
+        reference_id=logical_key, reference_kind="command-reply", in_room=room_token,
+    )
+
+
 def is_channel_configured(
     config: "Config",
     user_id: str,
@@ -760,8 +838,14 @@ def _dispatch(
             if _send_web(config, user_id, body, dest.channel, title=title):
                 sent = True
         elif dest.surface == "sms":
-            if _send_sms(config, user_id, message or title or "", reference_id):
-                sent = True
+            try:
+                if _send_sms(config, user_id, message or title or "", reference_id):
+                    sent = True
+            finally:
+                mirror_phone_to_room(
+                    config, "sms", user_id, body or title or "",
+                    title=title, reference_id=reference_id,
+                )
         elif dest.surface == "whatsapp":
             # The one arm with its own guard, and the reason is the surface
             # rather than the route: `deliver_whatsapp` settles a claimed
@@ -781,6 +865,10 @@ def _dispatch(
                     "WhatsApp notification leg failed (user: %s)", user_id,
                     exc_info=True,
                 )
+            mirror_phone_to_room(
+                config, "whatsapp", user_id, body or title or "",
+                title=title, reference_id=reference_id,
+            )
         else:
             logger.warning(
                 "Unsupported notification surface %r (user: %s)",

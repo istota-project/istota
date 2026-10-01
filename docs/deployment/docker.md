@@ -55,6 +55,20 @@ Editing the rendered file directly does not survive a restart — that is the po
 
 ## Upgrading an existing deployment
 
+### Room identities: offline maintenance required
+
+When upgrading a volume with legacy room identities, build the new image, then stop all three application services before running the migration. Keep Nextcloud and its database running for the server-side channel directory moves. From `docker/`, with the existing config and workspace volumes retained:
+
+```bash
+docker compose build istota
+docker compose stop istota web webhooks
+docker compose run --rm --no-deps --entrypoint /app/.venv/bin/istota istota -c /data/config/config.toml init --relocate-rooms
+docker compose up -d istota web webhooks
+```
+
+Inspect the migration result before the final command. Exit 1 is a refusal, and exit 2 means partial work needs attention; follow the [refusal and retry procedure](ansible.md#room-identity-migration). The command is safe to rerun while the application services remain stopped. Existing room history, native surface bindings and old links survive the identity change. Ordinary container boot initializes the schema but does not run this offline migration: the scheduler entrypoint cannot stop sibling web and webhook containers, and its config-ready flag is published before schema initialization.
+
+
 One thing this stack does is first-install only: `provision-nc.sh` is a Nextcloud post-installation hook, so it runs against a fresh instance and never again. A release whose fix is a new `occ` call therefore lands on new installs and needs a hand patch on old ones. The CHANGELOG says so where it applies.
 
 Config keys are no longer in that category. The entrypoint used to write `/data/config/config.toml` only when the file was absent, and it lives on the `istota_data` volume that `rebuild.sh` keeps — so a release adding or renaming a key landed on new installs only, and an operator editing `docker/.env` got no error, no warning and no change (ISSUE-368). The config is rendered on every boot now, so **restarting `istota` is the patch** for the three that used to be listed here: the DAV prefix and share flag below, the `[models.roles]` → `[models.aliases]` rename, and the `tmux_claude` brain's explicit `fallback`. Each is kept below for the half a restart cannot do, and for anyone reading an older CHANGELOG entry that still names it.
@@ -294,8 +308,8 @@ The web service also runs uvicorn without `--timeout-graceful-shutdown`, so a `d
 
 ## Signing in without Nextcloud
 
-Set `ISTOTA_WEB_AUTH=email` in `docker/.env`, set `ISTOTA_WEB_SITE_HOSTNAME` to the public hostname, and configure SMTP for email sign-in links and password resets. Recreate both `istota` and `web` after changing the environment. The default remains `nextcloud`, even without a Nextcloud URL. The renderer emits web settings without OAuth provisioning; the entrypoint preserves the signing secret in the persistent config volume on every render. See [email login setup](../features/web-interface.md#email-login) for the CLI bootstrap and recovery commands. These settings change authentication only; they do not remove the stack's Nextcloud, storage or Talk services.
+Set `ISTOTA_WEB_AUTH=email` in `docker/.env`, set `ISTOTA_WEB_SITE_HOSTNAME` to the public hostname, and configure SMTP for email sign-in codes and password resets. Recreate both `istota` and `web` after changing the environment. The default remains `nextcloud`, even without a Nextcloud URL. The renderer emits web settings without OAuth provisioning; the entrypoint preserves the signing secret in the persistent config volume on every render. See [email login setup](../features/web-interface.md#email-login) for the CLI bootstrap and recovery commands. These settings change authentication only; they do not remove the stack's Nextcloud, storage or Talk services.
 
-To migrate an existing installation, set `ISTOTA_WEB_AUTH=nextcloud,email`, attach an email identity to each existing user, and inspect `istota auth list`. Once every user has an enabled identity and a working password or sign-in-link path, change the value to `email`. Existing Nextcloud sessions then stop working. Dropping Nextcloud for storage, Talk and CalDAV is a separate change.
+To migrate an existing installation, set `ISTOTA_WEB_AUTH=nextcloud,email`, attach an email identity to each existing user, and inspect `istota auth list`. Once every user has an enabled identity and a working password or email-code path, change the value to `email`. Existing Nextcloud sessions then stop working. Dropping Nextcloud for storage, Talk and CalDAV is a separate change.
 
-`none` is refused by the Docker web launcher. A loopback backend behind a public proxy is still public. Custom outer proxies must exclude `/istota/auth/set-password` and `/istota/auth/login-link`, or omit query strings from access logs; the shipped nginx and uvicorn suppression cannot control an outer proxy.
+`none` is refused by the Docker web launcher. A loopback backend behind a public proxy is still public. Custom outer proxies must exclude `/istota/auth/set-password`, or omit query strings from access logs; the shipped nginx and uvicorn suppression cannot control an outer proxy.

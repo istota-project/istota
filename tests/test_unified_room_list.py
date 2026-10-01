@@ -94,13 +94,13 @@ class TestTalkRenameFlowBack:
             record_inbound(conn, cfg, surface="talk", surface_ref="cpz",
                            user_id="alice", text="hi", channel_name="Old")
         with db.get_db(db_path) as conn:
-            assert db.get_room(conn, "cpz").name == "Old"
+            assert db.get_room(conn, db.resolve_room_token(conn, "talk", "cpz")).name == "Old"
         # A later inbound carrying a new Talk displayName renames the registry.
         with db.get_db(db_path) as conn:
             record_inbound(conn, cfg, surface="talk", surface_ref="cpz",
                            user_id="alice", text="hi again", channel_name="Renamed")
         with db.get_db(db_path) as conn:
-            assert db.get_room(conn, "cpz").name == "Renamed"
+            assert db.get_room(conn, db.resolve_room_token(conn, "talk", "cpz")).name == "Renamed"
 
 
 class TestRoomListActivityOrder:
@@ -250,7 +250,7 @@ class TestDefaultRoomAsksTheRegistry:
         with db.get_db(db_path) as conn:
             room = db.ensure_default_web_chat_room(conn, "alice")
         assert room.name == "general"
-        assert room.token.startswith("web-alice-")
+        assert db.is_canonical_room_token(room.token)
 
     def test_a_dismissed_room_does_not_count_as_having_one(self, db_path):
         # A hidden room is not a room the user can post into, so it must not
@@ -259,7 +259,7 @@ class TestDefaultRoomAsksTheRegistry:
             db.register_room(conn, "rm1a2b3c", "alice", origin="talk", name="general")
             db.dismiss_room(conn, "rm1a2b3c", "alice")
             room = db.ensure_default_web_chat_room(conn, "alice")
-        assert room.token.startswith("web-alice-")
+        assert db.is_canonical_room_token(room.token)
 
     def test_a_shared_room_is_never_the_default_delivery_target(self, db_path):
         # `default_web_room_token` resolves a bare `web` route — an alert, the
@@ -268,7 +268,7 @@ class TestDefaultRoomAsksTheRegistry:
             db.register_room(conn, "shared", "alice", origin="talk", name="general")
             db.add_room_member(conn, "shared", "bob")
             room = db.ensure_default_web_chat_room(conn, "alice")
-        assert room.token.startswith("web-alice-")
+        assert db.is_canonical_room_token(room.token)
 
     def test_a_channel_room_is_never_the_default_delivery_target(self, db_path):
         # `logs` and `alerts` are machine-owned, and the boot sequence posts
@@ -283,7 +283,7 @@ class TestDefaultRoomAsksTheRegistry:
             db.register_room(conn, "lg4d5e6f", "alice", origin="talk", name="logs")
             db.register_room(conn, "al7g8h9i", "alice", origin="talk", name="alerts")
             room = db.ensure_default_web_chat_room(conn, "alice")
-        assert room.token.startswith("web-alice-")
+        assert db.is_canonical_room_token(room.token)
 
     def test_the_talkable_room_wins_over_the_channel_rooms(self, db_path):
         from istota import user_profiles

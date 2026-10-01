@@ -1190,7 +1190,8 @@ class TestPollEmailsThreadMatching:
         assert task.output_target is None  # mismatched origin dropped → default
         assert task.conversation_token != "rm_web123"
 
-    def test_legacy_null_origin_with_web_token_not_used_as_talk_channel(self, make_config):
+    @pytest.mark.parametrize("token", ["web-carol-deadbeef", "rm_example"])
+    def test_legacy_null_origin_with_web_token_not_used_as_talk_channel(self, make_config, token):
         # A legacy (pre-migration) sent_emails row with NULL origin_target whose
         # conversation_token is a web room token must NOT be used as a Talk
         # delivery channel (that would post to a nonexistent Talk room).
@@ -1208,7 +1209,7 @@ class TestPollEmailsThreadMatching:
                 message_id="<legacy_web@bot.com>",
                 to_addr="ext@x.com",
                 subject="Q",
-                conversation_token="web-carol-deadbeef",
+                conversation_token=token,
                 origin_target=None,  # legacy row
             )
         envelope = _envelope(id="30", sender="ext@x.com", subject="Re: Q")
@@ -1231,7 +1232,7 @@ class TestPollEmailsThreadMatching:
         assert task.output_target == "talk,email"
         # The web token must not leak in as the Talk channel; the ladder falls
         # through to the resolved alerts room instead.
-        assert task.talk_delivery_token != "web-carol-deadbeef"
+        assert task.talk_delivery_token != token
         assert task.talk_delivery_token == "alerts_room"
 
     def test_known_sender_resolves_talk_delivery_token_from_alerts(self, make_config):

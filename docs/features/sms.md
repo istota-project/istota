@@ -2,7 +2,9 @@
 
 Istota can receive requests and send final replies through Twilio or Telnyx. SMS is one provider-neutral surface: user phone assignments, task history, routing, opt-out state, and delivery records do not change when the provider changes.
 
-An SMS exchange is separate from the room model. It does not create or join a Talk or web room, and it does not copy messages into a room transcript. The task and its result remain available in the task history.
+Your SMS conversation has a room. The first text you send creates a room named SMS, which you can rename; later texts keep using it. The conversation is recorded there: your texts, the answers, confirmation exchanges, the replies to `!commands` you text, and scheduled jobs and alerts sent to you by SMS, including ones whose send was blocked. Within a minute of the room being created, Istota copies your earlier texts and their answers into it, and the assistant recalls memories from those earlier texts there.
+
+In web chat the room is marked with a phone icon and is read-only: there is no composer, and a question waiting for your confirmation says to reply by SMS. Your own texts show as yours, with a "Sent by SMS" line. Nothing written into the room is ever texted to you unless it was sent to SMS on purpose, so reading the room in web chat costs nothing. A reminder or scheduled job you ask for by text is sent to your phone and also recorded in the room. The room is never chosen automatically as your default web room. Deleting the room also deletes the SMS task history from before it existed, and is refused while a task from that history is still running or waiting for an answer; your next text then creates a new, empty room. The room has one reader: web chat refuses to add anyone else to it.
 
 ## Identity and consent
 

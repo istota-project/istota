@@ -327,7 +327,7 @@ When adding new fields to the config system:
 
 ## Signing in without Nextcloud
 
-Set `istota_web_auth: ["email"]`, configure `istota_hostname`, vault a persistent `istota_web_secret_key`, and configure SMTP for password resets and email sign-in links. The role defaults to `["nextcloud", "email"]`. Keep both methods while attaching identities to existing users, then select `["email"]` when every user can sign in that way. See [email login setup](../features/web-interface.md#email-login) for bootstrap and recovery commands.
+Set `istota_web_auth: ["email"]`, configure `istota_hostname`, vault a persistent `istota_web_secret_key`, and configure SMTP for password resets and email sign-in codes. The role defaults to `["nextcloud", "email"]`. Keep both methods while attaching identities to existing users, then select `["email"]` when every user can sign in that way. See [email login setup](../features/web-interface.md#email-login) for bootstrap and recovery commands.
 
 The direct uvicorn unit refuses `["none"]` even though it binds loopback: nginx publishes that backend. No-auth is supported only by `istota serve` on loopback, without a public proxy. The role excludes both email token paths from nginx access logs and disables uvicorn access logs. Apply the same exclusion to any outer proxy.
 
@@ -339,12 +339,12 @@ The role writes these email-login settings under `[web]`:
 | --- | --- | --- |
 | `istota_web_auth_enrol_ttl_hours` | `168` | Password-setup link lifetime in hours |
 | `istota_web_auth_reset_ttl_hours` | `1` | Password-reset link lifetime in hours |
-| `istota_web_auth_login_link_ttl_minutes` | `15` | Email sign-in link lifetime in minutes |
+| `istota_web_auth_sign_in_code_ttl_minutes` | `10` | Email sign-in code lifetime in minutes |
 | `istota_web_auth_min_password_length` | `12` | Minimum password length |
 | `istota_web_auth_throttle_window_seconds` | `900` | Verification budget window in seconds |
 | `istota_web_auth_throttle_max_email` | `10` | Verification attempts per email in the window |
 | `istota_web_auth_throttle_max_ip` | `30` | Verification attempts per trusted client IP in the window |
-| `istota_web_auth_mail_link_max_email` | `3` | Mail-link requests per email per hour, across link purposes |
+| `istota_web_auth_mail_link_max_email` | `3` | Mails per address per hour, reset links and sign-in codes together |
 | `istota_web_trusted_proxy_hops` | `0` | Trusted hops in the forwarded client-address chain |
 
 ## Credential controls
@@ -359,3 +359,11 @@ These variables preserve the application's defaults and let inventory override t
 | `istota_security_credential_broker_enforce_reveal` | `false` | Refuse public reads of non-revealable credentials |
 | `istota_security_credential_broker_scan_max_bytes` | `1048576` | Positive byte limit for request scans and response scrubbing |
 | `istota_security_credential_broker_leaf_validity_hours` | `24` | Positive lifetime of per-host TLS certificates in hours |
+
+## Room identity migration
+
+The play and the unattended updater share an offline wrapper under the update lock, so neither can restart services during the other's migration. They stop every installed scheduler, web and webhook unit before running `istota init --relocate-rooms`. This initializes the schema, migrates legacy room tokens to minted `rm_` identities, then reconciles channel directories and the destinations in `CRON.md` and `BRIEFINGS.md`. Before that command, the stopped-writer window repairs ownership of the framework database and its SQLite sidecars. The command runs as the service user. The maintenance window restores units that were running, including after a refusal or failure; absent and previously stopped units are not started by this window. A failed stop aborts migration.
+
+Exit 0 means success or an already migrated database. Exit 1 refuses the migration before any room changes; only the exact `refusal: live_tasks` is tolerated by deployment, reported, and retried at the next deploy. Finish or cancel pending confirmations before retrying `refusal: pending_confirmation`. Unknown columns, ambiguous bindings and unreadable state require operator attention. Exit 2 means some work may have completed: inspect the named failures, resolve file conflicts or restore workspace access, and rerun in another offline window. Do not delete the mapping table or manually replace surface tokens.
+
+For an inspection, set `ISTOTA_CONFIG_PATH` to the installed config and run `python -m istota.room_relocate --list` or `--dry-run` with the installation's Python. Add `--reconcile-mount --dry-run` to inspect the remaining workspace work. File rewrites keep dated originals under `Backups/`; conflicting files are preserved. The old and new channel directory names remain readable until a production reconciliation reports zero outstanding and the compatibility reader is removed in a separate change. The mapping table and forwarding of old bookmarks and sent-mail descriptors are permanent.

@@ -544,8 +544,7 @@ export function createAdminUser(user: { user_id: string; email: string; display_
   });
 }
 
-export type AdminUserAction =
-  'invite' | 'reset' | 'login-link' | 'disable' | 'enable' | 'logout-all' | 'remove';
+export type AdminUserAction = 'invite' | 'reset' | 'disable' | 'enable' | 'logout-all' | 'remove';
 
 export function adminUserAction(userId: string, action: AdminUserAction) {
   const path = `/admin/users/${encodeURIComponent(userId)}`;
@@ -2765,7 +2764,7 @@ export interface ChatRoom {
   updated_at: string;
   /** Surface the room was created on. Talk-origin rooms surface here
    * automatically once the bot is messaged in them. */
-  origin?: 'web' | 'talk';
+  origin?: 'web' | 'talk' | 'sms' | 'whatsapp';
   /** The bound Talk conversation, or null when the room is web-only. Sent on
    * every room the listing returns, not only on a fresh promote response — the
    * room-list refresh writes this key unconditionally, so a listing that
@@ -2797,6 +2796,13 @@ export interface ChatRoom {
   /** For a side room (multiplayer D4), the token of the shared room it is the
    * caller's private companion of. null for every other room. */
   side_of?: string | null;
+  /** The phone surface this room is bound to, a WhatsApp group included; null
+   * for every other room. What the sidebar badge and the settings line read. */
+  phone_surface?: 'sms' | 'whatsapp' | null;
+  /** The room is the transcript of its creator's private phone thread: web
+   * reads it and the server refuses a send into it, so no composer. True for
+   * every member, since adding a reader does not make the thread writable. */
+  read_only?: boolean;
   /** More than one human reads this room, a Talk guest included. */
   shared?: boolean;
   /** The policy of a shared room; null for a room one human reads and for a
@@ -2931,6 +2937,9 @@ export interface ChatHistoryMessage {
   // The email's subject line, lifted out of the wrapper the display body
   // strips. What a collapsed external turn shows in place of the body.
   subject?: string;
+  // The phone surface a user turn was texted in from. The turn is the
+  // writer's own, so this is a provenance mark and not the external treatment.
+  via?: string;
   // False on a row in a shared room that is not the viewer's to delete — the
   // delete endpoint's own owner rule, asked ahead of time. Absent means the
   // endpoint would accept it.

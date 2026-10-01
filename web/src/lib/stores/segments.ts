@@ -240,6 +240,9 @@ export interface ChatMessage {
   // The subject line of an external turn's mail. What a collapsed turn shows in
   // place of the body, since the body itself is what is being withheld.
   subject?: string;
+  // User rows only: `'sms'` or `'whatsapp'` for a turn texted in rather than
+  // typed here. Marked with the surface's icon and nothing else.
+  via?: string;
   // False on a row the viewer may not delete: another member's in a shared
   // room. The server's own rule; absent means the delete would be accepted.
   deletable?: boolean;

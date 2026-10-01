@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import secrets
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -1250,6 +1251,29 @@ def _resolve_schema_path() -> Path:
     return candidates[0]
 
 
+def _migrate_room_binding_uniqueness(conn: sqlite3.Connection) -> None:
+    """Refuse ambiguous legacy bindings before any upgrade mutates the DB."""
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='room_bindings'",
+    ).fetchone():
+        return
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        ambiguous = conn.execute(
+            "SELECT surface, surface_ref FROM room_bindings "
+            "GROUP BY surface, surface_ref HAVING count(*) > 1 LIMIT 1",
+        ).fetchone()
+        if ambiguous:
+            raise RuntimeError(
+                "ambiguous room bindings: resolve duplicate (surface, surface_ref) "
+                "rows in room_bindings before retrying the upgrade"
+            )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_room_bindings_unique_ref "
+            "ON room_bindings (surface, surface_ref)"
+        )
+
+
 def init_db(db_path: Path) -> None:
     """Initialize database with schema."""
     schema_path = _resolve_schema_path()
@@ -1275,6 +1299,7 @@ def init_db(db_path: Path) -> None:
         # a safe superset for every migration step.
         conn.row_factory = sqlite3.Row
         # Run migrations first so new columns exist before schema creates indexes on them
+        _migrate_room_binding_uniqueness(conn)
         _run_migrations(conn)
         conn.executescript(schema_path.read_text())
 
@@ -2103,11 +2128,13 @@ def cancel_pending_confirmations(
     """
     from .message_relays import close_task_questions
     from .whatsapp_requests import write_transaction
+    refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
+    marks = ", ".join("?" for _ in refs)
     with write_transaction(conn):
         held = conn.execute(
-            "SELECT id FROM tasks WHERE conversation_token=? AND user_id=? "
+            f"SELECT id FROM tasks WHERE conversation_token IN ({marks}) AND user_id=? "
             f"AND status='pending_confirmation' AND NOT {SIDE_ROUTED_PARK_SQL}",
-            (conversation_token, user_id)).fetchall()
+            (*refs, user_id)).fetchall()
         for row in held:
             close_task_questions(conn, row[0])
             conn.execute(
@@ -2130,17 +2157,19 @@ def get_pending_confirmation(
     ``user_id`` narrows it to that user's tasks, for a caller answering on
     their behalf from somewhere else (a side room answering its parent).
     """
+    refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
+    marks = ", ".join("?" for _ in refs)
     cursor = conn.execute(
         f"""
         SELECT {_TASK_COLUMNS}
         FROM tasks
-        WHERE conversation_token = ?
+        WHERE conversation_token IN ({marks})
         AND status = 'pending_confirmation'
         AND (? IS NULL OR user_id = ?)
         ORDER BY created_at DESC
         LIMIT 1
         """,
-        (conversation_token, user_id, user_id),
+        (*refs, user_id, user_id),
     )
     row = cursor.fetchone()
     if not row:
@@ -2745,6 +2774,7 @@ def get_conversation_history(
             an epoch the current audience did not share are left out. Omitted
             by a reader that is not front stage (`!export`).
     """
+    conversation_token = _canonical_room_token(conn, conversation_token, cross_surface=False)
     if _messages_caught_up(conn, conversation_token):
         return _conversation_history_from_messages(
             conn, conversation_token, exclude_task_id, limit, exclude_source_types,
@@ -2775,16 +2805,18 @@ def _conversation_history_from_tasks(
     # task in the room, and it is not a rare path: it serves any room with no
     # completed talk/web task left in `tasks`, i.e. a mail-only room, or one
     # whose last chat turn aged past `task_retention_days`.
+    refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
+    ref_marks = ", ".join("?" for _ in refs)
     query = f"""
         SELECT id, prompt, result, created_at, actions_taken, source_type, user_id,
                {EMAIL_SENDER_SUBQUERY.format(alias="tasks")}
         FROM tasks
-        WHERE conversation_token = ?
+        WHERE conversation_token IN ({ref_marks})
         AND status = 'completed'
         AND result IS NOT NULL
         AND COALESCE(withheld_from_room, 0) = 0
     """
-    params: list = [conversation_token]
+    params: list = list(refs)
 
     if exclude_task_id is not None:
         query += " AND id != ?"
@@ -2954,13 +2986,15 @@ def _messages_caught_up(conn: sqlite3.Connection, conversation_token: str) -> bo
     forever (and re-expose the dormant-room history loss once those tasks are
     GC'd). `_CONVERSATIONAL_SOURCE_TYPES` keys the check on the turns the store
     actually mirrors as user+assistant pairs."""
+    refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
+    ref_marks = ", ".join("?" for _ in refs)
     placeholders = ", ".join("?" for _ in _CONVERSATIONAL_SOURCE_TYPES)
     types = tuple(_CONVERSATIONAL_SOURCE_TYPES)
     row = conn.execute(
         f"SELECT MAX(id) AS mx FROM tasks "
-        f"WHERE conversation_token = ? AND status = 'completed' "
+        f"WHERE conversation_token IN ({ref_marks}) AND status = 'completed' "
         f"AND result IS NOT NULL AND source_type IN ({placeholders})",
-        (conversation_token, *types),
+        (*refs, *types),
     ).fetchone()
     latest = row["mx"] if row else None
     if latest is None:
@@ -2969,14 +3003,14 @@ def _messages_caught_up(conn: sqlite3.Connection, conversation_token: str) -> bo
     # up -> fall back.
     gap = conn.execute(
         f"SELECT 1 FROM tasks t "
-        f"WHERE t.conversation_token = ? AND t.status = 'completed' "
+        f"WHERE t.conversation_token IN ({ref_marks}) AND t.status = 'completed' "
         f"  AND t.result IS NOT NULL AND t.source_type IN ({placeholders}) "
         f"  AND NOT EXISTS ("
         f"    SELECT 1 FROM messages m "
-        f"    WHERE m.room_token = t.conversation_token "
+        f"    WHERE m.room_token = ? "
         f"      AND m.task_id = t.id AND m.role = 'assistant'"
         f"  ) LIMIT 1",
-        (conversation_token, *types),
+        (*refs, *types, conversation_token),
     ).fetchone()
     return gap is None
 
@@ -3003,7 +3037,9 @@ def scheduled_assistant_body(heartbeat_silent: bool, result: str) -> str | None:
     return result
 
 
-def _backfill_turns_for(conn: sqlite3.Connection, where: str, params: tuple) -> int:
+def _backfill_turns_for(
+    conn: sqlite3.Connection, where: str, params: tuple, *, into: str | None = None,
+) -> int:
     """Shared transcript backfill: fold completed `tasks` rows matching `where`
     into the canonical `messages` store. One user row (body=prompt) + one
     assistant row (body=result) per conversational turn; a *scheduled* job
@@ -3011,7 +3047,8 @@ def _backfill_turns_for(conn: sqlite3.Connection, where: str, params: tuple) -> 
     `scheduled_assistant_body` (its synthetic cron prompt was never
     user-authored, so no user row, and a NO_ACTION tick is omitted entirely).
     Idempotent via the partial unique index (room_token, origin_surface, role,
-    task_id). Returns rows inserted."""
+    task_id). Rows land under each task's own `conversation_token` unless
+    `into` names the room they belong to. Returns rows inserted."""
     rows = conn.execute(
         f"SELECT id, conversation_token, prompt, result, source_type, "
         f"heartbeat_silent, created_at FROM tasks "
@@ -3020,7 +3057,7 @@ def _backfill_turns_for(conn: sqlite3.Connection, where: str, params: tuple) -> 
     ).fetchall()
     inserted = 0
     for r in rows:
-        token = r["conversation_token"]
+        token = into or r["conversation_token"]
         st = r["source_type"]
         created = r["created_at"]
         if st == "scheduled":
@@ -3042,11 +3079,44 @@ def _backfill_turns_for(conn: sqlite3.Connection, where: str, params: tuple) -> 
 
 def backfill_room_messages_from_tasks(
     conn: sqlite3.Connection, conversation_token: str,
+    *, alias_owner: str | None = None,
 ) -> int:
     """Populate the canonical `messages` store from completed `tasks` for one
-    room token. See `_backfill_turns_for` for the per-turn shape."""
+    room token. See `_backfill_turns_for` for the per-turn shape.
+
+    With ``alias_owner``, ``conversation_token`` is a room and the tasks read
+    are the ones on its permanent aliases rather than on the room token — a
+    phone conversation's history from before its room was minted — written
+    under the room token. The aliases are `_room_ref_tokens`' without surface
+    refs, so an alias tombstoned by a deleted room is not one, and a room
+    recreated on the same binding cannot reach its predecessor's history.
+    Only ``alias_owner``'s own turns are read, never a withheld or guest turn
+    (the two the history reader and the channel index already leave out), and
+    only conversational source types plus ``scheduled``: any other source
+    type would write its synthetic prompt as a user row, which is what
+    `_migrate_nonconversational_transcript_cleanup` had to sweep after the
+    unified-rooms fold. Tasks on the room token itself are the live writers'.
+    """
+    if alias_owner is None:
+        return _backfill_turns_for(
+            conn, "conversation_token = ?", (conversation_token,),
+        )
+    if get_room(conn, conversation_token) is None:
+        return 0
+    refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
+    aliases = [ref for ref in refs if ref != conversation_token]
+    if not aliases:
+        return 0
+    sources = TRANSCRIPT_SURFACES + ("scheduled",)
+    where = (
+        f"conversation_token IN ({', '.join('?' for _ in aliases)}) "
+        "AND user_id = ? "
+        "AND COALESCE(withheld_from_room, 0) = 0 "
+        "AND guest_participant_id IS NULL "
+        f"AND source_type IN ({', '.join('?' for _ in sources)})"
+    )
     return _backfill_turns_for(
-        conn, "conversation_token = ?", (conversation_token,),
+        conn, where, (*aliases, alias_owner, *sources), into=conversation_token,
     )
 
 
@@ -3592,12 +3662,6 @@ def _row_to_web_chat_room(row: sqlite3.Row) -> WebChatRoom:
     )
 
 
-def _new_web_chat_token(user_id: str) -> str:
-    """Per-room channel token. The ``web-`` prefix is informational, not a
-    security boundary — handlers always derive ``user_id`` from the session."""
-    return f"web-{user_id}-{uuid.uuid4().hex[:12]}"
-
-
 def list_web_chat_rooms(
     conn: sqlite3.Connection, user_id: str, include_archived: bool = False,
 ) -> list[WebChatRoom]:
@@ -3614,7 +3678,11 @@ def get_web_chat_room(conn: sqlite3.Connection, room_id: int) -> WebChatRoom | N
     row = conn.execute(
         "SELECT * FROM web_chat_rooms WHERE id = ?", (room_id,)
     ).fetchone()
-    return _row_to_web_chat_room(row) if row else None
+    if row is None:
+        return None
+    room = _row_to_web_chat_room(row)
+    room.token = _canonical_room_token(conn, room.token, cross_surface=False)
+    return room
 
 
 def get_web_chat_room_by_token(
@@ -3624,10 +3692,16 @@ def get_web_chat_room_by_token(
     handle — a shared Talk room has one handle per participant (ISSUE-134) — so
     this is only safe for reading token-invariant fields (e.g. the room name).
     Callers needing a specific user's handle must scope by `user_id`."""
+    canonical = _canonical_room_token(conn, token, cross_surface=False)
     row = conn.execute(
-        "SELECT * FROM web_chat_rooms WHERE token = ? LIMIT 1", (token,)
+        "SELECT * FROM web_chat_rooms WHERE token IN (?, ?) "
+        "ORDER BY token = ? DESC LIMIT 1", (canonical, token, canonical),
     ).fetchone()
-    return _row_to_web_chat_room(row) if row else None
+    if row is None:
+        return None
+    room = _row_to_web_chat_room(row)
+    room.token = canonical
+    return room
 
 
 def create_web_chat_room(
@@ -3639,14 +3713,13 @@ def create_web_chat_room(
     self-referential `web` binding, so newly-created web rooms appear in the
     cross-surface room list without waiting for the one-time migration.
     """
-    token = _new_web_chat_token(user_id)
     display = name.strip() or "general"
+    token = register_room(conn, None, user_id, origin="web", name=display).token
     row = conn.execute(
         "INSERT INTO web_chat_rooms (user_id, token, name) VALUES (?, ?, ?) "
         "RETURNING *",
         (user_id, token, display),
     ).fetchone()
-    register_room(conn, token, user_id, origin="web", name=display)
     add_room_binding(conn, token, "web", token)
     return _row_to_web_chat_room(row)
 
@@ -3687,7 +3760,7 @@ def update_web_chat_room(
         f"UPDATE web_chat_rooms SET {', '.join(sets)} WHERE id = ? RETURNING *",
         params,
     ).fetchone()
-    return _row_to_web_chat_room(row) if row else None
+    return get_web_chat_room(conn, row["id"]) if row else None
 
 
 def ensure_web_chat_handle(
@@ -4048,9 +4121,9 @@ def _usable_as_delivery_default(
 ) -> bool:
     """Whether ``token`` may be ``user_id``'s default delivery room.
 
-    Five exclusions, each about the room being written to unprompted. Three of
+    Six exclusions, each about the room being written to unprompted. Three of
     them are `visible_room`'s — the room exists, is not archived, and the user
-    has not hidden it — and are shared with the picker. The two here are the
+    has not hidden it — and are shared with the picker. The others are the
     ones that separate an *implicit* default from a room a user may pin:
 
     - **A room somebody else reads.** A shared Talk room is one other people are
@@ -4064,12 +4137,20 @@ def _usable_as_delivery_default(
     - **A side room** (multiplayer D4). It is private, but it is the companion
       of one shared room and is created by the system on that room's need, so
       a default landing there would file unrelated alerts under that room.
+    - **A phone room** (room-surface-model Stage 24). A private SMS or
+      WhatsApp room is a read-only transcript of a phone thread, and a bare
+      web delivery or a relay question landing there would sit in a room the
+      user reads only from web and answers only by text. Any phone binding
+      excludes, not only a private one: a WhatsApp group is shared and the
+      arm below refuses it anyway.
     """
     if token in channels:
         return False
     if visible_room(conn, user_id, token) is None:
         return False
     if is_side_room(conn, token):
+        return False
+    if room_has_phone_binding(conn, token):
         return False
     if room_is_shared(conn, token):
         return False
@@ -4215,11 +4296,18 @@ def count_active_web_tasks(
     Counts every source_type, not just ``web``: a foreign task routed into the
     room (e.g. an email reply with ``conversation_token`` set to the room token)
     will also write to it via WebTransport.deliver, so deletion must wait on it
-    too."""
+    too.
+
+    Counts the room's permanent aliases too (`_room_ref_tokens` without
+    surface refs): a phone room's pre-room tasks carry its hash token, and the
+    delete removes them, so an unfinished one there blocks it the same way."""
+    refs = _room_ref_tokens(conn, token, include_surface_refs=False)
+    marks = ", ".join("?" for _ in refs)
     row = conn.execute(
-        "SELECT COUNT(*) FROM tasks WHERE conversation_token = ? AND user_id = ? "
+        f"SELECT COUNT(*) FROM tasks WHERE conversation_token IN ({marks}) "
+        "AND user_id = ? "
         "AND status IN ('pending', 'locked', 'running', 'pending_confirmation')",
-        (token, user_id),
+        (*refs, user_id),
     ).fetchone()
     return int(row[0]) if row else 0
 
@@ -4233,12 +4321,14 @@ def count_active_room_tasks(conn: sqlite3.Connection, token: str) -> int:
     by the caller the way the delete guard does would refuse nothing in exactly
     the shared-room case that needs the guard most. A member leaving waits on
     their own tasks only; the creator's delete, which destroys the room for
-    everyone, waits on this.
+    everyone, waits on this. Aliases included, as in `count_active_web_tasks`.
     """
+    refs = _room_ref_tokens(conn, token, include_surface_refs=False)
+    marks = ", ".join("?" for _ in refs)
     row = conn.execute(
-        "SELECT COUNT(*) FROM tasks WHERE conversation_token = ? "
+        f"SELECT COUNT(*) FROM tasks WHERE conversation_token IN ({marks}) "
         "AND status IN ('pending', 'locked', 'running', 'pending_confirmation')",
-        (token,),
+        refs,
     ).fetchone()
     return int(row[0]) if row else 0
 
@@ -4259,49 +4349,51 @@ def delete_web_chat_room(
     if room is None or room.user_id != user_id:
         return False
     token = room.token
+    refs = _room_ref_tokens(conn, token, include_surface_refs=False)
+    ref_marks = ", ".join("?" for _ in refs)
     # Every member's tasks, not only the caller's: a web room can hold more
     # than one member, and a co-member's row would otherwise outlive its room.
     conn.execute(
         "DELETE FROM task_events WHERE task_id IN "
-        "(SELECT id FROM tasks WHERE conversation_token = ?)",
-        (token,),
+        f"(SELECT id FROM tasks WHERE conversation_token IN ({ref_marks}))",
+        refs,
     )
     conn.execute(
         "DELETE FROM credential_task_grants WHERE task_id IN "
-        "(SELECT id FROM tasks WHERE conversation_token = ?)",
-        (token,),
+        f"(SELECT id FROM tasks WHERE conversation_token IN ({ref_marks}))",
+        refs,
     )
-    conn.execute("DELETE FROM tasks WHERE conversation_token = ?", (token,))
-    conn.execute("DELETE FROM web_chat_messages WHERE token = ?", (token,))
+    conn.execute(f"DELETE FROM tasks WHERE conversation_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM web_chat_messages WHERE token IN ({ref_marks})", refs)
     conn.execute(
-        "DELETE FROM channel_sleep_cycle_state WHERE conversation_token = ?",
-        (token,),
+        f"DELETE FROM channel_sleep_cycle_state WHERE conversation_token IN ({ref_marks})",
+        refs,
     )
     # Unified-rooms tables — FK cascades are decorative (foreign_keys unset),
     # so hand-delete every row keyed on the token. Stars first: they key on
     # message ids that are about to disappear.
     conn.execute(
         "DELETE FROM message_stars WHERE message_id IN "
-        "(SELECT id FROM messages WHERE room_token = ?)",
-        (token,),
+        f"(SELECT id FROM messages WHERE room_token IN ({ref_marks}))",
+        refs,
     )
-    conn.execute("DELETE FROM messages WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM message_deletions WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_bindings WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_read_state WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_members WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_dismissals WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_participants WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_policy WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_vetoes WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_notices WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_epochs WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM rooms WHERE token = ?", (token,))
+    conn.execute(f"DELETE FROM messages WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM message_deletions WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_bindings WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_read_state WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_members WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_dismissals WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_participants WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_policy WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_vetoes WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_notices WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_epochs WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM rooms WHERE token IN ({ref_marks})", refs)
     # Drop every participant's handle for the token, not just the requester's
     # (room_id): a promoted web room can accrue handles for other members, and
     # leaving an orphan handle pointing at a now-deleted room would suppress
     # their default-room creation and yield an empty room list (ISSUE-134).
-    conn.execute("DELETE FROM web_chat_rooms WHERE token = ?", (token,))
+    conn.execute(f"DELETE FROM web_chat_rooms WHERE token IN ({ref_marks})", refs)
     return True
 
 
@@ -4441,21 +4533,35 @@ def _row_to_message(row: sqlite3.Row) -> Message:
     )
 
 
+def mint_room_token() -> str:
+    """Mint a path-safe, surface-independent room identity with 128 random bits."""
+    return "rm_" + secrets.token_urlsafe(16)
+
+
+def is_canonical_room_token(token: object) -> bool:
+    """Recognise the minted namespace, without checking format or existence."""
+    return isinstance(token, str) and token.startswith("rm_")
+
+
 def register_room(
     conn: sqlite3.Connection,
-    token: str,
+    token: str | None,
     user_id: str,
     *,
     origin: str,
     name: str | None = None,
 ) -> Room:
-    """Idempotently register a room. If a row already exists for `token` it is
+    """Mint a room when `token` is None; explicit tokens support legacy imports.
+
+    Idempotently register a room. If a row already exists for `token` it is
     returned unchanged (name/origin are not overwritten — first writer wins).
 
     The registering user is recorded as a member either way: `rooms.user_id` is
     only the creator/origin owner, but visibility is resolved through
     `room_members` (ISSUE-134), so a second participant registering against an
     existing room still becomes a member."""
+    if token is None:
+        token = mint_room_token()
     conn.execute(
         "INSERT OR IGNORE INTO rooms (token, user_id, name, origin) "
         "VALUES (?, ?, ?, ?)",
@@ -4476,6 +4582,7 @@ def add_room_member(
     A member reads the room, so a new one grows its audience and starts an
     epoch unless `acknowledged` — see `note_audience_join`.
     """
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     joining = not is_room_member(conn, room_token, user_id)
     audience = audience_persons(conn, room_token) if joining else set()
     conn.execute(
@@ -4497,6 +4604,7 @@ def remove_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) 
     to sync, so membership is the only thing saying they are still there, and a
     row left present would keep `room_is_shared` true for a room they left.
     """
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     conn.execute(
         "DELETE FROM room_members WHERE room_token = ? AND user_id = ?",
         (room_token, user_id),
@@ -4510,6 +4618,7 @@ def remove_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) 
 
 
 def is_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     row = conn.execute(
         "SELECT 1 FROM room_members WHERE room_token = ? AND user_id = ? LIMIT 1",
         (room_token, user_id),
@@ -4572,6 +4681,7 @@ def dismiss_room(conn: sqlite3.Connection, room_token: str, user_id: str) -> Non
     against the poll-time membership backfill — `list_member_rooms` excludes a
     dismissed room even while the user is still a member. Cleared by
     `undismiss_room` (the user's own next inbound)."""
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     conn.execute(
         "INSERT OR IGNORE INTO room_dismissals (room_token, user_id) VALUES (?, ?)",
         (room_token, user_id),
@@ -4581,6 +4691,7 @@ def dismiss_room(conn: sqlite3.Connection, room_token: str, user_id: str) -> Non
 def undismiss_room(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
     """Clear a hide tombstone — re-engagement un-hides (called from
     `record_inbound` on the sender's own message)."""
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     conn.execute(
         "DELETE FROM room_dismissals WHERE room_token = ? AND user_id = ?",
         (room_token, user_id),
@@ -4588,6 +4699,7 @@ def undismiss_room(conn: sqlite3.Connection, room_token: str, user_id: str) -> N
 
 
 def is_room_dismissed(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     row = conn.execute(
         "SELECT 1 FROM room_dismissals WHERE room_token = ? AND user_id = ? LIMIT 1",
         (room_token, user_id),
@@ -4596,6 +4708,7 @@ def is_room_dismissed(conn: sqlite3.Connection, room_token: str, user_id: str) -
 
 
 def list_room_members(conn: sqlite3.Connection, room_token: str) -> list[str]:
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     rows = conn.execute(
         "SELECT user_id FROM room_members WHERE room_token = ? ORDER BY user_id",
         (room_token,),
@@ -4634,6 +4747,7 @@ def add_web_room_member(
     one from hiding it again, and a present `principal` web participant row
     counts them in the room's audience before they have said anything.
     """
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     added = not is_room_member(conn, room_token, user_id)
     # The add endpoint refuses without `acknowledge_history`, so the creator
     # has said the new member may read what came before: no epoch (D3).
@@ -4657,10 +4771,13 @@ def drop_web_room_member(
     `web_chat_rooms` handle. So the handle goes too: with it, a removed member
     could post once and be re-added by `record_inbound`. Their messages stay.
     """
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     remove_room_member(conn, room_token, user_id)
+    refs = _room_ref_tokens(conn, room_token, include_surface_refs=False)
+    placeholders = ", ".join("?" for _ in refs)
     conn.execute(
-        "DELETE FROM web_chat_rooms WHERE user_id = ? AND token = ?",
-        (user_id, room_token),
+        f"DELETE FROM web_chat_rooms WHERE user_id = ? AND token IN ({placeholders})",
+        (user_id, *refs),
     )
 
 
@@ -4756,6 +4873,7 @@ def room_is_shared(conn: sqlite3.Connection, room_token: str) -> bool:
     istota users who read the room in the web view without being in the
     surface's roster: they are part of whoever reads an answer posted there.
     """
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     humans = conn.execute(
         "SELECT COUNT(DISTINCT CASE WHEN user_id IS NOT NULL THEN 'u:' || user_id "
         "  ELSE surface || ':' || surface_ref END) "
@@ -4779,6 +4897,7 @@ def room_was_ever_shared(conn: sqlite3.Connection, room_token: str) -> bool:
     delete), so a member or guest who left still counts, counted the way
     `room_is_shared` counts.
     """
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     humans = conn.execute(
         "SELECT COUNT(*) FROM ("
         "SELECT CASE WHEN user_id IS NOT NULL THEN 'u:' || user_id "
@@ -4810,30 +4929,71 @@ def audience_persons(conn: sqlite3.Connection, room_token: str) -> set[str]:
     any surface, `<surface>:<ref>` for anyone else — so one person on Talk and
     web is one reader.
     """
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     return {
         r[0] for r in conn.execute(_AUDIENCE_PERSONS_SQL, (room_token, room_token))
     }
 
 
-def _canonical_room_token(conn: sqlite3.Connection, token: str) -> str:
+def _canonical_room_token(
+    conn: sqlite3.Connection, token: str, *, surface: str = "",
+    cross_surface: bool = True,
+) -> str:
+    """Resolve a room identity, a permitted binding, then a permanent alias.
+
+    Unknown tokens stay unchanged for history callers. Delivery callers pass
+    their surface and disable cross-surface binding lookup, then verify the
+    result names a room. A mapping to a deleted room is not a live identity.
+    """
     if get_room(conn, token) is not None:
         return token
-    return find_room_token_by_ref(conn, token) or token
+    mapping = conn.execute(
+        "SELECT m.new_token, r.token FROM room_token_migration m "
+        "LEFT JOIN rooms r ON r.token = m.new_token WHERE m.old_token = ?",
+        (token,),
+    ).fetchone()
+    if mapping is not None and mapping[1] is None:
+        # The permanent alias is also a tombstone. A reused surface ref must
+        # not turn an old bookmark or descriptor into access to another room.
+        return token
+    bound = resolve_room_token(conn, surface, token) if surface else None
+    if bound is None and cross_surface:
+        bound = find_room_token_by_ref(conn, token)
+    if bound is not None:
+        return bound
+    return mapping[0] if mapping is not None else token
 
 
-def room_ref_tokens(conn: sqlite3.Connection, room_token: str) -> list[str]:
+def room_ref_tokens(
+    conn: sqlite3.Connection, room_token: str, *, include_surface_refs: bool = True,
+) -> list[str]:
     """`_room_ref_tokens`, for callers outside this module."""
-    return _room_ref_tokens(conn, room_token)
+    return _room_ref_tokens(conn, room_token, include_surface_refs=include_surface_refs)
 
 
-def _room_ref_tokens(conn: sqlite3.Connection, room_token: str) -> list[str]:
-    """The canonical token plus every surface ref bound to it: the values a
-    `tasks.conversation_token` or a Talk cache row for this room can carry."""
+def _room_ref_tokens(
+    conn: sqlite3.Connection, room_token: str, *, include_surface_refs: bool = True,
+) -> list[str]:
+    """The current identity, permanent aliases and optionally bound surface refs.
+
+    History keeps its existing token namespace by excluding surface refs;
+    audience cutoffs also cover the Talk cache's native references.
+    """
+    room_token = _canonical_room_token(conn, room_token, cross_surface=include_surface_refs)
     refs = [room_token]
+    if include_surface_refs:
+        for row in conn.execute(
+            "SELECT surface_ref FROM room_bindings WHERE room_token = ?", (room_token,),
+        ):
+            if row[0] not in refs:
+                refs.append(row[0])
     for row in conn.execute(
-        "SELECT surface_ref FROM room_bindings WHERE room_token = ?", (room_token,),
+        "SELECT old_token FROM room_token_migration WHERE new_token = ? ORDER BY old_token",
+        (room_token,),
     ):
-        if row[0] not in refs:
+        if row[0] not in refs and _canonical_room_token(
+            conn, row[0], cross_surface=False,
+        ) == room_token:
             refs.append(row[0])
     return refs
 
@@ -5094,7 +5254,7 @@ def ensure_side_room(
         if list_room_members(conn, existing.token) != [user_id]:
             raise ValueError("side_room_not_private")
         return existing
-    token = _new_web_chat_token(user_id)
+    token = mint_room_token()
     name = f"re: {room_display_name(parent, None) or 'room'}"[:80]
     conn.execute(
         "INSERT OR IGNORE INTO rooms (token, user_id, name, origin, side_of, side_for_user) "
@@ -5148,7 +5308,7 @@ def set_room_archived(conn: sqlite3.Connection, token: str, archived: bool) -> N
 def archive_orphaned_talk_rooms(
     conn: sqlite3.Connection, live_tokens: set[str],
 ) -> int:
-    """Archive Talk-origin registry rooms whose token is no longer among the
+    """Archive Talk-origin registry rooms whose Talk ref is no longer among the
     bot's live Talk conversations (`live_tokens`) — i.e. the conversation was
     deleted in Nextcloud, or the bot was removed from it. Without this a deleted
     Talk room keeps surfacing in the web room list forever, because its registry
@@ -5162,11 +5322,14 @@ def archive_orphaned_talk_rooms(
     `list_conversations` (not a partial/failed fetch) — an empty set here means
     the bot is genuinely in zero Talk rooms and archives all of them."""
     rows = conn.execute(
-        "SELECT token FROM rooms WHERE origin = 'talk' AND archived = 0"
+        "SELECT r.token, COALESCE(b.surface_ref, r.token) AS talk_ref "
+        "FROM rooms r LEFT JOIN room_bindings b "
+        "ON b.room_token = r.token AND b.surface = 'talk' "
+        "WHERE r.origin = 'talk' AND r.archived = 0"
     ).fetchall()
     archived = 0
     for row in rows:
-        if row["token"] not in live_tokens:
+        if row["talk_ref"] not in live_tokens:
             conn.execute(
                 "UPDATE rooms SET archived = 1 WHERE token = ?", (row["token"],)
             )
@@ -5356,6 +5519,7 @@ def replace_room_binding(
 def get_room_binding(
     conn: sqlite3.Connection, room_token: str, surface: str,
 ) -> RoomBinding | None:
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     row = conn.execute(
         "SELECT * FROM room_bindings WHERE room_token = ? AND surface = ?",
         (room_token, surface),
@@ -5366,6 +5530,7 @@ def get_room_binding(
 def list_room_bindings(
     conn: sqlite3.Connection, room_token: str,
 ) -> list[RoomBinding]:
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     rows = conn.execute(
         "SELECT * FROM room_bindings WHERE room_token = ? ORDER BY surface",
         (room_token,),
@@ -5395,12 +5560,49 @@ def talk_refs_for_member(
     return {row["room_token"]: row["surface_ref"] for row in rows}
 
 
+#: Surfaces whose binding makes a room the transcript of a phone thread
+#: (room-surface-model Phase 6). A private one is read-only in web; whether a
+#: binding is private is `transport.routing.phone_transcript_surface`'s test.
+PHONE_ROOM_SURFACES = ("sms", "whatsapp")
+
+
+def phone_bindings_for_member(
+    conn: sqlite3.Connection, user_id: str,
+) -> dict[str, RoomBinding]:
+    """Canonical room token -> its SMS or WhatsApp binding, for one user's rooms.
+
+    `talk_refs_for_member`'s shape and reason: one query for the polled room
+    listing rather than a lookup per room. A WhatsApp group room is in it too,
+    since its binding is a phone surface's; the listing badges both and asks
+    the private-thread question only of these.
+    """
+    rows = conn.execute(
+        "SELECT b.* FROM room_bindings b "
+        "JOIN room_members m ON m.room_token = b.room_token "
+        "WHERE b.surface IN (?, ?) AND m.user_id = ? ORDER BY b.surface",
+        (*PHONE_ROOM_SURFACES, user_id),
+    ).fetchall()
+    out: dict[str, RoomBinding] = {}
+    for row in rows:
+        out.setdefault(row["room_token"], _row_to_room_binding(row))
+    return out
+
+
+def room_has_phone_binding(conn: sqlite3.Connection, room_token: str) -> bool:
+    """Whether the room is bound to SMS or WhatsApp at all."""
+    return conn.execute(
+        "SELECT 1 FROM room_bindings WHERE room_token = ? AND surface IN (?, ?) "
+        "LIMIT 1",
+        (room_token, *PHONE_ROOM_SURFACES),
+    ).fetchone() is not None
+
+
 def resolve_room_token(
     conn: sqlite3.Connection, surface: str, surface_ref: str,
 ) -> str | None:
     """Find the canonical room token for a surface's native reference, or None
-    if no binding exists (origin-surface case: caller treats surface_ref as the
-    canonical token)."""
+    if no binding exists. New member rooms mint an identity before binding
+    this reference; private guest threads keep their own identifiers."""
     row = conn.execute(
         "SELECT room_token FROM room_bindings WHERE surface = ? AND surface_ref = ?",
         (surface, surface_ref),
@@ -6115,7 +6317,14 @@ def initialize_room_read_state(
 # `guest`, which is a coincidence rather than a derivation — the room-ownership
 # question is `surfaces.is_room_member`, and reading that one here would stop
 # an email `!confirm` recording its exchange.
-TRANSCRIPT_SURFACES = ("web", "talk", "email")
+#
+# `sms` and `whatsapp` joined when their conversations became rooms (Phase 6
+# of the room-surface model): a texted turn is a real user turn in a room the
+# user can read in web, on the same durable-place grounds as email. For both,
+# the `source_type` a task carries and the surface name are the same string,
+# which `tests/test_surface_table_is_load_bearing.py` asserts rather than
+# assumes. The migration DELETE below spares both too; see the comment there.
+TRANSCRIPT_SURFACES = ("web", "talk", "email", "sms", "whatsapp")
 
 TRANSCRIPT_SURFACE_FILTER = (
     "(m.role = 'assistant' "
@@ -7329,9 +7538,11 @@ def _migrate_nonconversational_transcript_cleanup(conn: sqlite3.Connection) -> N
 
     This one-shot generalizes `_migrate_scheduled_transcript_cleanup` from
     scheduled-only to every non-conversational source type. Over rows whose
-    `origin_surface NOT IN ('web','talk','scheduled','email')` (scheduled is
-    owned by its own marker, conversational surfaces are real turns, and `email`
-    joined them at ISSUE-136 — see the comment on the statement itself), and
+    `origin_surface NOT IN ('web','talk','scheduled','email','sms','whatsapp')`
+    (scheduled is owned by its own marker, conversational surfaces are real
+    turns, `email` joined them at ISSUE-136 and the two phone surfaces when
+    their conversations became rooms — see the comment on the statement
+    itself), and
     never touching
     `role='system'` (the notification/log lane), it:
 
@@ -7382,10 +7593,19 @@ def _migrate_nonconversational_transcript_cleanup(conn: sqlite3.Connection) -> N
         # superset, not an equality, so a pinned string cannot express it and
         # interpolating the tuple would quietly drop the fourth value on the
         # next reader who assumed the two were the same list.
+        #
+        # `sms` and `whatsapp` are spared for the same reason as `email`, and
+        # widening this list cannot reclassify a row it already processed: the
+        # DELETE and the marker commit together, so a marked database never
+        # runs this again. On an unmarked one (a partial run, a restored
+        # snapshot) every `sms` or `whatsapp` user row is a real inbound turn —
+        # a WhatsApp group's, or a phone room's since those rooms were minted —
+        # and the narrower list would have swept them.
         conn.execute(
             "DELETE FROM messages "
             "WHERE role = 'user' "
-            "AND origin_surface NOT IN ('web', 'talk', 'scheduled', 'email')"
+            "AND origin_surface NOT IN "
+            "('web', 'talk', 'scheduled', 'email', 'sms', 'whatsapp')"
         )
         # Normalize briefing assistant bodies that were stored as raw JSON.
         briefing_rows = conn.execute(
@@ -10956,17 +11176,19 @@ def get_completed_channel_tasks_since(
     later prompt in the room — so an exchange deliberately kept out of the room
     must not arrive there by the back door.
     """
+    refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
+    marks = ", ".join("?" for _ in refs)
     query = f"""
         SELECT {_TASK_COLUMNS}
         FROM tasks
-        WHERE conversation_token = ?
+        WHERE conversation_token IN ({marks})
         AND status = 'completed'
         AND result IS NOT NULL
         AND completed_at >= ?
         AND COALESCE(withheld_from_room, 0) = 0
         AND guest_participant_id IS NULL
     """
-    params: list = [conversation_token, since_datetime]
+    params: list = [*refs, since_datetime]
 
     floor = front_stage_cutoff(conn, conversation_token).task_id
     if after_task_id is not None:
@@ -11010,7 +11232,10 @@ def get_active_channel_tokens(
         """,
         (since_datetime,),
     )
-    return [row[0] for row in cursor.fetchall()]
+    return sorted({
+        _canonical_room_token(conn, row[0], cross_surface=False)
+        for row in cursor.fetchall()
+    })
 
 
 def get_completed_tasks_since(

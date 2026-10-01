@@ -27,6 +27,7 @@ paths:
 - `enabled` carries `bool(interval)` so 0 means off.
 - `shared-blocks`, `scheduled-jobs`, `sleep-cycles`, `cleanup` read `briefing_check_interval` though not briefings. Known; own keys are an operator-visible config change.
 - `on_error` / `one_shot_on_error` differ because the paths differed: `check_briefings` / `check_scheduled_jobs` failures abort the one-shot pass; the daemon logs past them.
+- `phone-room-backfill` (literal 60 seconds, `background`) replays each minted SMS or WhatsApp room's pre-mint history and writes the `_room_backfill` marker once nothing on the room's aliases is unfinished. A marked room costs one indexed read per pass; a WhatsApp group room or a shared phone room is never marked and is re-checked every pass. Mechanism in `transport.md` ("Phone rooms").
 
 ### Off-thread periodic checks (`_spawn_background_check`, ISSUE-144)
 

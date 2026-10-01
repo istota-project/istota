@@ -1,11 +1,8 @@
 """WhatsApp through Meta's hosted Cloud API.
 
-A direct chat is an external conversation, never a view of a room: nothing
-creates or joins a room for one, writes a canonical `messages` row, or mirrors
-a turn into Talk or web chat. The room facts on `WhatsAppTransport.capabilities`
-and in `surfaces.SURFACES` are all `None` for that reason. A Baileys *group* is
-the one exception (multiplayer D6): its JID is a room binding, registered and
-fed by `groups.py`, and its own turns are answered into it.
+Private chats and Baileys groups own rooms, but neither is an external view
+of the canonical transcript. Group registration still comes from `groups.py`,
+and only a group's own turns are answered into it.
 """
 
 from __future__ import annotations
@@ -46,9 +43,8 @@ def whatsapp_conversation_token(user_id: str) -> str:
     number, because a conversation token reaches task rows, log lines and the
     admin task views, none of which are private operator surfaces.
 
-    Not a room token: nothing registers it, and `transcript_room` finds no
-    registered room for it, which is what keeps the whole surface out of the
-    room model without a special case anywhere in `ingest`.
+    This stable surface ref binds the private chat to its separately minted
+    canonical room token.
     """
     digest = hashlib.sha256(f"istota-whatsapp-v1\0{user_id}".encode()).hexdigest()
     return "whatsapp-" + digest[:24]
@@ -100,10 +96,8 @@ def message_fingerprint(value: str | None) -> str:
 class WhatsAppTransport:
     """The `whatsapp` surface: an interactive, user-routable push transport.
 
-    Every room fact is `None`, and that is the declaration rather than an
-    omission — a WhatsApp exchange is its own external conversation, not a
-    second view of a Talk or web room, so it never creates or joins one, writes
-    no canonical `messages` row and is never mirrored into a transcript.
+    Inbound turns belong to rooms. `room_view` and `user_turn_mirror` remain
+    None: a phone thread shows its own half, and sends must be explicit.
 
     `max_message_length` is `None` too, and for the opposite kind of reason: the
     limit exists (4,096 characters) but the generic splitter must not apply it.
@@ -122,7 +116,7 @@ class WhatsAppTransport:
         surface_class="push",
         user_routable=True,
         room_view=None,
-        inbound_room_role=None,
+        inbound_room_role="member",
         user_turn_mirror=None,
     )
 

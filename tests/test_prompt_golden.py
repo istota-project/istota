@@ -460,11 +460,19 @@ CASES: tuple[Case, ...] = (
     Case("source_talk", source_type="talk", conversation_token="room-token"),
     Case("source_email", source_type="email"),
     Case("source_sms", source_type="sms"),
+    Case(
+        "room_sms", source_type="sms", conversation_token="rm_sms_fixture",
+        room=("SMS", "sms"), memory=True, history=True, history_source_type="sms",
+    ),
     # The channel guideline is standing instruction, so it must land in the
     # system half — the half a compaction summary does not replace. Asserted
     # below as well as snapshotted, because a golden records where the line is
     # and not which half it is in.
     Case("source_whatsapp", source_type="whatsapp"),
+    Case(
+        "room_whatsapp", source_type="whatsapp", conversation_token="rm_whatsapp_fixture",
+        room=("WhatsApp", "whatsapp"), memory=True, history=True, history_source_type="whatsapp",
+    ),
     # Memory is seeded here on purpose and must NOT appear: the eager `digest`
     # skill carries `exclude_memory`, which is the other half of the pair the
     # briefing case exists to witness. Without the seed, its absence would
@@ -820,6 +828,13 @@ def _seed_room(config: Config, case: Case) -> None:
             db.add_room_binding(
                 conn, case.conversation_token, "talk", case.room_talk_ref,
             )
+        if origin in ("sms", "whatsapp"):
+            # A minted phone room is always bound to the user's private ref.
+            from istota.transport.sms import sms_conversation_token
+            from istota.transport.whatsapp import whatsapp_conversation_token
+
+            ref = (sms_conversation_token if origin == "sms" else whatsapp_conversation_token)(USER)
+            db.add_room_binding(conn, case.conversation_token, origin, ref)
         if case.shared:
             from istota import room_policy
 

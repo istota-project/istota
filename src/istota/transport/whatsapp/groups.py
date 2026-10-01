@@ -56,7 +56,7 @@ _TEXT_TYPES = frozenset({"text"})
 
 
 def group_room_token(group_jid: str) -> str:
-    """The canonical token a group's room is registered under.
+    """The legacy canonical token, retained for migration tooling.
 
     A digest, never the JID: the token reaches task rows, log lines and the
     prompt header, and a group JID of the older `<creator>-<timestamp>` form
@@ -187,8 +187,7 @@ def _register(
             jid_fingerprint(group_jid),
         )
         return WhatsAppEventResult("group_no_principal")
-    token = group_room_token(group_jid)
-    db.register_room(conn, token, host, origin=SURFACE, name=roster.subject)
+    token = db.register_room(conn, None, host, origin=SURFACE, name=roster.subject).token
     db.add_room_binding(conn, token, SURFACE, group_jid)
     # Founders, not joiners: the group existed before the bot saw it, and
     # everyone in it now is who its history was written for.

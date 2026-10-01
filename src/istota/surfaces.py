@@ -3,20 +3,21 @@
 A room is one conversation bound to several surfaces. Which surfaces those can
 be, and what each may do with a room, was decided by ten hardcoded declarations
 of surface names across five files in four spellings. They agreed only because
-there are exactly two room surfaces today and one surface that can post into a
+there were exactly two room surfaces and one surface that could post into a
 room without being one, and three genuinely different questions shared the same
 literals:
 
 1. **Does this surface create and own rooms?** ``room_role``. ``member`` — an
    inbound message registers the room, binds the surface and adds membership
-   (talk, web). ``guest`` — an inbound message can join an existing room's
+   (talk, web, sms, whatsapp). ``guest`` — an inbound message can join an
+   existing room's
    transcript but never mints one (email); ISSUE-136's "existence, never
    creation" rule is this value. ``None`` — never a room turn at all. This is
    the *surface's* answer. A room container on email or WhatsApp (a thread with
    two or more humans besides the bot, a group) is a ``member`` for that room
    alone (multiplayer D10, overriding ``room-surface-model.md`` for that case),
-   answered by `is_room_member_for` rather than by a change to the record, so
-   every other conversation on the surface keeps its answer.
+   answered by `is_room_member_for`. WhatsApp now also owns private rooms;
+   email still needs the per-container override.
 2. **Does this surface have a view of the room, so a turn written into the room
    is already in front of its users?** ``room_view``, mirroring
    ``TransportCapabilities.room_view``: ``canonical`` for a view rendered from
@@ -39,16 +40,17 @@ implement.
 
 **Two questions that look like these and are not, so a converter does not
 reach for the wrong reader.** ``db._CONVERSATIONAL_SOURCE_TYPES`` is
-``("talk", "web")`` — the same members as ``room_role == "member"`` — and gates
+``("talk", "web")`` — the original members before phone rooms — and gates
 the caught-up dual-read. Its own comment says email is excluded *on purpose*
 and that "Mirroring is not the criterion; guaranteed completeness is": the
 store holds email turns only from ISSUE-136 forward, so counting them would pin
 a room to the legacy path forever. Collapsing it into a reader here would be
 this module's own mistake committed one question further along. And
 ``db.TRANSCRIPT_SURFACE_FILTER`` asks which surfaces' user rows the transcript
-renders — ``('web', 'talk', 'email')``, a set whose domain is ``source_type``
-values rather than surface names, and which must track a migration DELETE
-holding a fourth value no surface table will ever have. Both stay literals.
+renders — ``('web', 'talk', 'email', 'sms', 'whatsapp')``, a set whose
+domain is ``source_type`` values rather than surface names, and which must
+track a migration DELETE holding one more value (``scheduled``) no surface
+table will ever have. Both stay literals.
 
 **The key space is registry surface names only.** ``room`` and ``stream`` are
 names in the *destination grammar* (``parse_output_target`` yields
@@ -165,11 +167,12 @@ SURFACES: dict[str, SurfaceRoomFacts] = {
     #
     # Two literals in `db.py` cover the same names for a different question, and
     # neither is derived from this row: `TRANSCRIPT_SURFACE_FILTER`'s
-    # `('web', 'talk', 'email')` asks which surfaces' user rows the transcript
-    # renders, and the DELETE in `_migrate_nonconversational_transcript_cleanup`
-    # has to stay in step with it. That question's domain is `source_type`
-    # values rather than surface names, so it stays where it is. The two sets
-    # being equal today is a coincidence, not a derivation.
+    # `('web', 'talk', 'email', 'sms', 'whatsapp')` asks which surfaces' user
+    # rows the transcript renders, and the DELETE in
+    # `_migrate_nonconversational_transcript_cleanup` has to stay in step with
+    # it. That question's domain is `source_type` values rather than surface
+    # names, so it stays where it is. The two sets being equal is a
+    # coincidence, not a derivation.
     "email": SurfaceRoomFacts(
         room_role="guest", room_view=None, user_turn_mirror=None,
     ),
@@ -182,18 +185,14 @@ SURFACES: dict[str, SurfaceRoomFacts] = {
     "repl": SurfaceRoomFacts(
         room_role=None, room_view=None, user_turn_mirror=None,
     ),
+    # Phone threads own rooms but show only their own sends and replies, not
+    # the whole canonical transcript. Metered sends must be selected explicitly;
+    # neither assistant fan-out nor user-turn mirroring targets these bindings.
     "sms": SurfaceRoomFacts(
-        room_role=None, room_view=None, user_turn_mirror=None,
+        room_role="member", room_view=None, user_turn_mirror=None,
     ),
-    # A WhatsApp exchange is its own external conversation, not a second view
-    # of a Talk or web room, so all three are None: it creates no room, joins
-    # none, writes no canonical `messages` row and is mirrored nowhere. The
-    # durable-place test answers `room_view` the way it answers it for email —
-    # a WhatsApp thread lives on Meta's servers and on handsets we cannot write
-    # into — and `room_role` is `None` rather than email's `guest` because
-    # nothing threads a WhatsApp message back into a room in the first place.
     "whatsapp": SurfaceRoomFacts(
-        room_role=None, room_view=None, user_turn_mirror=None,
+        room_role="member", room_view=None, user_turn_mirror=None,
     ),
 }
 
@@ -234,23 +233,21 @@ def is_room_member(surface: object) -> bool:
 
     It is the wrong reader wherever the question is "may this surface put a
     ``role='user'`` row in a room at all", which admits email:
-    ``commands._TRANSCRIPT_SURFACES`` is ``("web", "talk", "email")`` and gates
+    ``commands._TRANSCRIPT_SURFACES`` admits ``email`` and gates
     ``_record_confirm_exchange``, so reading this predicate there would stop an
     email ``!confirm`` recording its exchange — and that row is a durable
     authorization record. The neighbouring ``!steer`` and ``!retry`` writes
-    really are ``("talk", "web")`` and really do ask this, and both read this
-    predicate. Three ``role='user'`` writes in one file, two questions — which
+    ask the ownership question and both read this predicate. Three user-row
+    writes in one file, two questions — which
     is why the ``!confirm`` gate keeps its literal and carries a comment saying
     so.
     """
     return _facts(surface).room_role == "member"
 
 
-#: Surfaces whose conversations are not rooms in general, but one container of
-#: which can be (multiplayer D10): a WhatsApp group, and an email thread with
-#: two or more humans besides the bot. Every other conversation on them — a
-#: 1:1 WhatsApp chat, a mail with one correspondent — keeps the surface's own
-#: answer above, so the per-surface record does not change.
+#: Surfaces with an explicit multiplayer room-container path. Email needs the
+#: membership override; WhatsApp retains its group context separately from the
+#: private rooms it also owns.
 ROOM_CONTAINER_SURFACES = frozenset({"email", "whatsapp"})
 
 
@@ -259,10 +256,9 @@ def is_room_member_for(surface: object, *, room_container: bool) -> bool:
 
     D10's answer is per room: a container its transport registered as a room
     (`transport/whatsapp/groups.py`, `transport/email/threads.py`) owns that
-    room as a member surface would, on a surface whose record says ``None``
-    (WhatsApp) or ``guest`` (email). ``room_container`` is that transport's
-    statement; it promotes only a surface listed above, so a flag from any
-    other surface cannot make one of its turns a room turn.
+    room as a member surface would. Email still needs this override; WhatsApp
+    is also a member for private chats. ``room_container`` promotes only a
+    surface listed above, so other non-members cannot gain room ownership.
     """
     if is_room_member(surface):
         return True
@@ -276,8 +272,8 @@ def is_room_view(surface: object) -> bool:
 
     Distinct from `is_room_member` at exactly one site — the scheduler's
     confirmation-prompt mirror gate, which asks whether a task's own origin
-    surface shows it the question itself. The two coincide for every surface
-    that exists today and are separate questions; keep them apart.
+    surface shows it the question itself. Phone surfaces own rooms without
+    showing the whole transcript, so membership must not imply a room view.
     """
     return _facts(surface).room_view is not None
 
@@ -321,7 +317,9 @@ def origin_surface_for_source_type(source_type: object) -> str | None:
     `(task.source_type or "") in ROOM_SURFACES`, and only the second is replaced
     by `is_room_view` rather than `is_room_member`. Both equivalences are pinned
     separately by `tests/test_surface_model_equivalence.py`, which was written
-    and run against those literals. The seven that are also surface names
+    and run against those literals. Phone membership deliberately widens the
+    store gate now; the confirmation view gate keeps its original answer.
+    The seven that are also surface names
     (``talk``, ``web``, ``email``, ``repl``, ``istota_file``, ``sms``,
     ``whatsapp``) pass through; the other seven (``briefing``, ``cli``, ``doctor``, ``heartbeat``, ``scheduled``,
     ``signup``, ``subtask``) do not.

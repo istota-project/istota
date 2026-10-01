@@ -98,9 +98,10 @@ class TestParseOutputTarget:
 
 
 class TestOriginDescriptor:
-    def test_web_with_token(self):
-        task = _task(source_type="web", conversation_token="rm_web123")
-        assert origin_descriptor(task) == "web:rm_web123"
+    def test_web_with_minted_token_names_the_canonical_room(self):
+        token = db.mint_room_token()
+        task = _task(source_type="web", conversation_token=token)
+        assert origin_descriptor(task) == f"room:{token}"
 
     def test_web_without_token(self):
         task = _task(source_type="web", conversation_token=None)

@@ -281,10 +281,13 @@ class TestPoll:
         assert result == []
         with db.get_db(path) as conn:
             tasks = db.list_tasks(conn, user_id="alice")
+            room_token = db.resolve_room_token(conn, "talk", "room1")
         assert len(tasks) == 1
         assert tasks[0].source_type == "talk"
         assert tasks[0].prompt == "Check my calendar"
-        assert tasks[0].conversation_token == "room1"
+        # The task sits on the room minted for the Talk ref, not on the ref.
+        assert room_token is not None and db.is_canonical_room_token(room_token)
+        assert tasks[0].conversation_token == room_token
         assert tasks[0].talk_message_id == 101
 
 
