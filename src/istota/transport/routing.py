@@ -112,6 +112,7 @@ def plan_user_turn_mirrors(
     from .. import db
 
     try:
+        room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
         room = db.get_room(conn, room_token)
         if room is None or room.archived:
             return []
@@ -256,8 +257,11 @@ def _canonical_room_token(
 ) -> str | None:
     """The canonical room token a raw token names, or None if it names no room.
 
-    Three tries, narrowest first: the token already *is* a canonical token; it
+    Three live tries, narrowest first: the token already *is* a canonical token; it
     is this surface's ref for one; it is *some other* surface's ref for one.
+
+    A final permanent-mapping lookup forwards a migrated identity when the
+    live tries miss, including when cross-surface lookup is disabled.
 
     The third is not hypothetical. An email continuation's
     ``conversation_token`` is whatever the originating send recorded — on a
@@ -282,12 +286,10 @@ def _canonical_room_token(
     """
     from .. import db
 
-    if db.get_room(conn, token) is not None:
-        return token
-    scoped = db.resolve_room_token(conn, surface, token)
-    if scoped is not None or not cross_surface:
-        return scoped
-    return db.find_room_token_by_ref(conn, token)
+    token = db._canonical_room_token(
+        conn, token, surface=surface, cross_surface=cross_surface,
+    )
+    return token if db.get_room(conn, token) is not None else None
 
 
 def origin_descriptor(task: "db.Task", conn=None) -> str | None:
@@ -398,7 +400,7 @@ def upgrade_legacy_origin(conn, origin: str) -> str | None:
         return None
     # A promoted room's per-surface ref is not its canonical token, so resolve
     # the binding before asking whether the room exists.
-    token = db.resolve_room_token(conn, surface, channel) or channel
+    token = db._canonical_room_token(conn, channel, surface=surface, cross_surface=False)
     room = db.get_room(conn, token)
     if room is None or getattr(room, "archived", 0):
         return None
@@ -666,11 +668,9 @@ def _expand_room_destinations(
             # per-surface ref is not its canonical token, and looking bindings up
             # by the raw value is the mistake this whole spec is cleaning up. A
             # token that is already canonical resolves to itself.
-            canonical = token
-            if origin_surface is not None:
-                canonical = (
-                    db.resolve_room_token(conn, origin_surface, token) or token
-                )
+            canonical = db._canonical_room_token(
+                conn, token, surface=origin_surface or "", cross_surface=False,
+            )
             # A room that went away between the send and the reply mirrors
             # nowhere — the bot has left it, or it never was one. The origin
             # delivery still stands, which is what keeps a reply from being
@@ -841,11 +841,12 @@ def transcript_room(
     exchange splits across two rooms again — which is this issue, reintroduced
     one level down.
     """
-    from .. import db
 
     try:
-        if conversation_token and db.get_room(conn, conversation_token) is not None:
-            return conversation_token
+        if conversation_token:
+            canonical = _canonical_room_token(conn, "", conversation_token, cross_surface=False)
+            if canonical is not None:
+                return canonical
         if source_type != "email":
             return None
         for dest in parse_output_target(output_target):
@@ -956,9 +957,9 @@ def _room_for_destination(
     # dispatch deliberately: `surface == "room"` is a name in the destination
     # grammar rather than a surface, and a member check placed ahead of it
     # would drop every `room:<token>` descriptor (ISSUE-247).
-    if is_room_member(surface):
-        candidate = db.resolve_room_token(conn, surface, candidate) or candidate
-    return candidate if db.get_room(conn, candidate) is not None else None
+    return _canonical_room_token(
+        conn, surface if is_room_member(surface) else "", candidate, cross_surface=False,
+    )
 
 
 def transcript_room_for_task(conn, config: "Config", task: "db.Task") -> str | None:
@@ -1292,11 +1293,7 @@ def refuse_shared_rooms(
                 return list(dests)
             own = None
             if conversation_token:
-                own = (
-                    conversation_token
-                    if db.get_room(conn, conversation_token) is not None
-                    else db.find_room_token_by_ref(conn, conversation_token)
-                )
+                own = canonical_room_token(conn, conversation_token)
             for d in legs:
                 room = _canonical_room_token(
                     conn, d.surface, d.channel, cross_surface=False,

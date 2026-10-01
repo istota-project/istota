@@ -2746,6 +2746,7 @@ def get_conversation_history(
             an epoch the current audience did not share are left out. Omitted
             by a reader that is not front stage (`!export`).
     """
+    conversation_token = _canonical_room_token(conn, conversation_token, cross_surface=False)
     if _messages_caught_up(conn, conversation_token):
         return _conversation_history_from_messages(
             conn, conversation_token, exclude_task_id, limit, exclude_source_types,
@@ -2776,16 +2777,18 @@ def _conversation_history_from_tasks(
     # task in the room, and it is not a rare path: it serves any room with no
     # completed talk/web task left in `tasks`, i.e. a mail-only room, or one
     # whose last chat turn aged past `task_retention_days`.
+    refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
+    ref_marks = ", ".join("?" for _ in refs)
     query = f"""
         SELECT id, prompt, result, created_at, actions_taken, source_type, user_id,
                {EMAIL_SENDER_SUBQUERY.format(alias="tasks")}
         FROM tasks
-        WHERE conversation_token = ?
+        WHERE conversation_token IN ({ref_marks})
         AND status = 'completed'
         AND result IS NOT NULL
         AND COALESCE(withheld_from_room, 0) = 0
     """
-    params: list = [conversation_token]
+    params: list = list(refs)
 
     if exclude_task_id is not None:
         query += " AND id != ?"
@@ -2943,13 +2946,15 @@ def _messages_caught_up(conn: sqlite3.Connection, conversation_token: str) -> bo
     forever (and re-expose the dormant-room history loss once those tasks are
     GC'd). `_CONVERSATIONAL_SOURCE_TYPES` keys the check on the turns the store
     actually mirrors as user+assistant pairs."""
+    refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
+    ref_marks = ", ".join("?" for _ in refs)
     placeholders = ", ".join("?" for _ in _CONVERSATIONAL_SOURCE_TYPES)
     types = tuple(_CONVERSATIONAL_SOURCE_TYPES)
     row = conn.execute(
         f"SELECT MAX(id) AS mx FROM tasks "
-        f"WHERE conversation_token = ? AND status = 'completed' "
+        f"WHERE conversation_token IN ({ref_marks}) AND status = 'completed' "
         f"AND result IS NOT NULL AND source_type IN ({placeholders})",
-        (conversation_token, *types),
+        (*refs, *types),
     ).fetchone()
     latest = row["mx"] if row else None
     if latest is None:
@@ -2958,14 +2963,14 @@ def _messages_caught_up(conn: sqlite3.Connection, conversation_token: str) -> bo
     # up -> fall back.
     gap = conn.execute(
         f"SELECT 1 FROM tasks t "
-        f"WHERE t.conversation_token = ? AND t.status = 'completed' "
+        f"WHERE t.conversation_token IN ({ref_marks}) AND t.status = 'completed' "
         f"  AND t.result IS NOT NULL AND t.source_type IN ({placeholders}) "
         f"  AND NOT EXISTS ("
         f"    SELECT 1 FROM messages m "
-        f"    WHERE m.room_token = t.conversation_token "
+        f"    WHERE m.room_token = ? "
         f"      AND m.task_id = t.id AND m.role = 'assistant'"
         f"  ) LIMIT 1",
-        (conversation_token, *types),
+        (*refs, *types, conversation_token),
     ).fetchone()
     return gap is None
 
@@ -3603,7 +3608,11 @@ def get_web_chat_room(conn: sqlite3.Connection, room_id: int) -> WebChatRoom | N
     row = conn.execute(
         "SELECT * FROM web_chat_rooms WHERE id = ?", (room_id,)
     ).fetchone()
-    return _row_to_web_chat_room(row) if row else None
+    if row is None:
+        return None
+    room = _row_to_web_chat_room(row)
+    room.token = _canonical_room_token(conn, room.token, cross_surface=False)
+    return room
 
 
 def get_web_chat_room_by_token(
@@ -3613,10 +3622,16 @@ def get_web_chat_room_by_token(
     handle — a shared Talk room has one handle per participant (ISSUE-134) — so
     this is only safe for reading token-invariant fields (e.g. the room name).
     Callers needing a specific user's handle must scope by `user_id`."""
+    canonical = _canonical_room_token(conn, token, cross_surface=False)
     row = conn.execute(
-        "SELECT * FROM web_chat_rooms WHERE token = ? LIMIT 1", (token,)
+        "SELECT * FROM web_chat_rooms WHERE token IN (?, ?) "
+        "ORDER BY token = ? DESC LIMIT 1", (canonical, token, canonical),
     ).fetchone()
-    return _row_to_web_chat_room(row) if row else None
+    if row is None:
+        return None
+    room = _row_to_web_chat_room(row)
+    room.token = canonical
+    return room
 
 
 def create_web_chat_room(
@@ -4476,6 +4491,7 @@ def add_room_member(
     A member reads the room, so a new one grows its audience and starts an
     epoch unless `acknowledged` — see `note_audience_join`.
     """
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     joining = not is_room_member(conn, room_token, user_id)
     audience = audience_persons(conn, room_token) if joining else set()
     conn.execute(
@@ -4497,6 +4513,7 @@ def remove_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) 
     to sync, so membership is the only thing saying they are still there, and a
     row left present would keep `room_is_shared` true for a room they left.
     """
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     conn.execute(
         "DELETE FROM room_members WHERE room_token = ? AND user_id = ?",
         (room_token, user_id),
@@ -4510,6 +4527,7 @@ def remove_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) 
 
 
 def is_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     row = conn.execute(
         "SELECT 1 FROM room_members WHERE room_token = ? AND user_id = ? LIMIT 1",
         (room_token, user_id),
@@ -4572,6 +4590,7 @@ def dismiss_room(conn: sqlite3.Connection, room_token: str, user_id: str) -> Non
     against the poll-time membership backfill — `list_member_rooms` excludes a
     dismissed room even while the user is still a member. Cleared by
     `undismiss_room` (the user's own next inbound)."""
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     conn.execute(
         "INSERT OR IGNORE INTO room_dismissals (room_token, user_id) VALUES (?, ?)",
         (room_token, user_id),
@@ -4581,6 +4600,7 @@ def dismiss_room(conn: sqlite3.Connection, room_token: str, user_id: str) -> Non
 def undismiss_room(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
     """Clear a hide tombstone — re-engagement un-hides (called from
     `record_inbound` on the sender's own message)."""
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     conn.execute(
         "DELETE FROM room_dismissals WHERE room_token = ? AND user_id = ?",
         (room_token, user_id),
@@ -4588,6 +4608,7 @@ def undismiss_room(conn: sqlite3.Connection, room_token: str, user_id: str) -> N
 
 
 def is_room_dismissed(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     row = conn.execute(
         "SELECT 1 FROM room_dismissals WHERE room_token = ? AND user_id = ? LIMIT 1",
         (room_token, user_id),
@@ -4596,6 +4617,7 @@ def is_room_dismissed(conn: sqlite3.Connection, room_token: str, user_id: str) -
 
 
 def list_room_members(conn: sqlite3.Connection, room_token: str) -> list[str]:
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     rows = conn.execute(
         "SELECT user_id FROM room_members WHERE room_token = ? ORDER BY user_id",
         (room_token,),
@@ -4634,6 +4656,7 @@ def add_web_room_member(
     one from hiding it again, and a present `principal` web participant row
     counts them in the room's audience before they have said anything.
     """
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     added = not is_room_member(conn, room_token, user_id)
     # The add endpoint refuses without `acknowledge_history`, so the creator
     # has said the new member may read what came before: no epoch (D3).
@@ -4657,6 +4680,7 @@ def drop_web_room_member(
     `web_chat_rooms` handle. So the handle goes too: with it, a removed member
     could post once and be re-added by `record_inbound`. Their messages stay.
     """
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     remove_room_member(conn, room_token, user_id)
     conn.execute(
         "DELETE FROM web_chat_rooms WHERE user_id = ? AND token = ?",
@@ -4756,6 +4780,7 @@ def room_is_shared(conn: sqlite3.Connection, room_token: str) -> bool:
     istota users who read the room in the web view without being in the
     surface's roster: they are part of whoever reads an answer posted there.
     """
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     humans = conn.execute(
         "SELECT COUNT(DISTINCT CASE WHEN user_id IS NOT NULL THEN 'u:' || user_id "
         "  ELSE surface || ':' || surface_ref END) "
@@ -4779,6 +4804,7 @@ def room_was_ever_shared(conn: sqlite3.Connection, room_token: str) -> bool:
     delete), so a member or guest who left still counts, counted the way
     `room_is_shared` counts.
     """
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     humans = conn.execute(
         "SELECT COUNT(*) FROM ("
         "SELECT CASE WHEN user_id IS NOT NULL THEN 'u:' || user_id "
@@ -4810,15 +4836,35 @@ def audience_persons(conn: sqlite3.Connection, room_token: str) -> set[str]:
     any surface, `<surface>:<ref>` for anyone else — so one person on Talk and
     web is one reader.
     """
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     return {
         r[0] for r in conn.execute(_AUDIENCE_PERSONS_SQL, (room_token, room_token))
     }
 
 
-def _canonical_room_token(conn: sqlite3.Connection, token: str) -> str:
+def _canonical_room_token(
+    conn: sqlite3.Connection, token: str, *, surface: str = "",
+    cross_surface: bool = True,
+) -> str:
+    """Resolve a room identity, a permitted binding, then a permanent alias.
+
+    Unknown tokens stay unchanged for history callers. Delivery callers pass
+    their surface and disable cross-surface binding lookup, then verify the
+    result names a room. A mapping to a deleted room is not a live identity.
+    """
     if get_room(conn, token) is not None:
         return token
-    return find_room_token_by_ref(conn, token) or token
+    bound = resolve_room_token(conn, surface, token) if surface else None
+    if bound is None and cross_surface:
+        bound = find_room_token_by_ref(conn, token)
+    if bound is not None:
+        return bound
+    row = conn.execute(
+        "SELECT r.token FROM room_token_migration m "
+        "JOIN rooms r ON r.token = m.new_token WHERE m.old_token = ?",
+        (token,),
+    ).fetchone()
+    return row[0] if row else token
 
 
 def room_ref_tokens(conn: sqlite3.Connection, room_token: str) -> list[str]:
@@ -4826,14 +4872,24 @@ def room_ref_tokens(conn: sqlite3.Connection, room_token: str) -> list[str]:
     return _room_ref_tokens(conn, room_token)
 
 
-def _room_ref_tokens(conn: sqlite3.Connection, room_token: str) -> list[str]:
+def _room_ref_tokens(
+    conn: sqlite3.Connection, room_token: str, *, include_surface_refs: bool = True,
+) -> list[str]:
     """The canonical token plus every surface ref bound to it: the values a
     `tasks.conversation_token` or a Talk cache row for this room can carry."""
+    room_token = _canonical_room_token(conn, room_token, cross_surface=include_surface_refs)
     refs = [room_token]
+    if include_surface_refs:
+        for row in conn.execute(
+            "SELECT surface_ref FROM room_bindings WHERE room_token = ?", (room_token,),
+        ):
+            if row[0] not in refs:
+                refs.append(row[0])
     for row in conn.execute(
-        "SELECT surface_ref FROM room_bindings WHERE room_token = ?", (room_token,),
+        "SELECT old_token FROM room_token_migration WHERE new_token = ? ORDER BY old_token",
+        (room_token,),
     ):
-        if row[0] not in refs:
+        if row[0] not in refs and _canonical_room_token(conn, row[0]) == room_token:
             refs.append(row[0])
     return refs
 
@@ -5356,6 +5412,7 @@ def replace_room_binding(
 def get_room_binding(
     conn: sqlite3.Connection, room_token: str, surface: str,
 ) -> RoomBinding | None:
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     row = conn.execute(
         "SELECT * FROM room_bindings WHERE room_token = ? AND surface = ?",
         (room_token, surface),
@@ -5366,6 +5423,7 @@ def get_room_binding(
 def list_room_bindings(
     conn: sqlite3.Connection, room_token: str,
 ) -> list[RoomBinding]:
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     rows = conn.execute(
         "SELECT * FROM room_bindings WHERE room_token = ? ORDER BY surface",
         (room_token,),

@@ -51,6 +51,7 @@ def granted_scopes(
 ) -> frozenset[str]:
     """What ``user_id`` has granted in ``room_token``. Empty on any error."""
     try:
+        room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
         rows = conn.execute(
             "SELECT scope FROM room_data_grants WHERE room_token = ? AND user_id = ?",
             (room_token, user_id),
@@ -80,6 +81,7 @@ def grant_scopes(
     and nobody grants on another member's behalf. Callers validate the names
     against `scope_names` first.
     """
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     conn.executemany(
         "INSERT OR IGNORE INTO room_data_grants (room_token, user_id, scope) "
         "VALUES (?, ?, ?)",
@@ -92,6 +94,7 @@ def revoke_scopes(
     scopes: Iterable[str] | None = None,
 ) -> None:
     """Withdraw ``user_id``'s grants in ``room_token``: the named ones, or all."""
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     if scopes is None:
         conn.execute(
             "DELETE FROM room_data_grants WHERE room_token = ? AND user_id = ?",
@@ -125,6 +128,7 @@ def grant_state(conn: sqlite3.Connection, room_token: str, *, policy: str) -> st
     somebody joins. ``active``: grants are what a member's turn may reach.
     `!room share` and the web grants pane both word their answer from this.
     """
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     from . import room_policy
 
     if policy == POLICY_OFF:
@@ -169,9 +173,7 @@ def task_withheld_scopes(
     from . import room_policy
 
     try:
-        room_token = conversation_token
-        if db.get_room(conn, room_token) is None:
-            room_token = db.find_room_token_by_ref(conn, room_token) or room_token
+        room_token = db._canonical_room_token(conn, conversation_token)
         shared = assume_shared or db.room_is_shared(conn, room_token)
         mixed = assume_mixed or room_policy.audience_class(
             conn, room_token, is_group_chat=assume_shared,
@@ -229,9 +231,8 @@ def canonical_token(conn, token: str | None) -> str | None:
     """
     if not token:
         return None
-    if db.get_room(conn, token) is not None:
-        return token
-    return db.find_room_token_by_ref(conn, token)
+    token = db._canonical_room_token(conn, token)
+    return token if db.get_room(conn, token) is not None else None
 
 
 #: The fence label a shared room's `CHANNEL.md` carries, in the prompt block,
@@ -309,13 +310,11 @@ def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
 
     from . import room_policy
 
-    room_token = task.conversation_token
-    if db.get_room(conn, room_token) is None:
-        room_token = db.find_room_token_by_ref(conn, room_token)
-        if room_token is None:
-            if _is_own_push_token(task.user_id, task.conversation_token):
-                return groups
-            room_token = task.conversation_token
+    room_token = canonical_token(conn, task.conversation_token)
+    if room_token is None:
+        if _is_own_push_token(task.user_id, task.conversation_token):
+            return groups
+        room_token = task.conversation_token
     room = room_policy.room_readers(conn, room_token)
     if room.guests or room.others:
         logger.debug(
