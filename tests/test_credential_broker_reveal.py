@@ -13,10 +13,15 @@ from istota import db, secrets_store
 from istota.config import Config
 from istota.credential_broker.bindings import parse_binding
 from istota.skill_proxy import SkillProxy
-from tests.test_skill_credential_fd import skill_program as skill_program, start_proxy
-from tests.test_vault_credential_fetch import (
-    VAULT, proxy, request, run_shim, sock_path as sock_path,
-)
+from tests import test_skill_credential_fd as _credential_fd
+from tests import test_vault_credential_fetch as _vault_fetch
+from tests.test_skill_credential_fd import start_proxy
+from tests.test_vault_credential_fetch import VAULT, proxy, request, run_shim
+
+# Shared fixtures, bound by assignment so the parameters using them are not
+# read as redefinitions of an unused import.
+skill_program = _credential_fd.skill_program
+sock_path = _vault_fetch.sock_path
 
 
 @pytest.fixture

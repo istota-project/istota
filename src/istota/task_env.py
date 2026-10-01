@@ -181,6 +181,7 @@ def build_task_runtime(
     user_resources: list,
     user_config: object | None,
     discovered_calendars: list | None = None,
+    conn: "db.sqlite3.Connection | None" = None,
 ) -> TaskRuntime:
     """Build the model's environment and the per-task proxies for one attempt.
 
@@ -558,10 +559,16 @@ def build_task_runtime(
         from . import db
         from .credential_broker.bindings import sync_forge_bindings
         from .credential_broker.grants import ensure_credential_grants
-        with db.get_db(config.db_path) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            sync_forge_bindings(conn, task.user_id, config.developer, available_names=available_forge_names)
-            ensure_credential_grants(conn, task.id, task.user_id)
+        # A caller holding a write transaction (execute_task_interactive) would
+        # deadlock a second connection's BEGIN IMMEDIATE, so join it instead.
+        with db.get_db_if_present(config.db_path, conn) as c:
+            began = not c.in_transaction
+            if began:
+                c.execute("BEGIN IMMEDIATE")
+            sync_forge_bindings(c, task.user_id, config.developer, available_names=available_forge_names)
+            ensure_credential_grants(c, task.id, task.user_id)
+            if began and c is conn:
+                c.commit()
 
     # PATH entries contributed by setup_env hooks — today the developer
     # skill's .developer dir, so the model can type `gh` and reach the
