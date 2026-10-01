@@ -91,6 +91,8 @@ const glyph = (name: string) =>
     .find((row) => row.querySelector('.room-name')?.textContent?.trim() === name)
     ?.querySelector<HTMLElement>('.room-origin');
 
+const headerGlyph = () => document.querySelector<HTMLElement>('.header .header-shared');
+
 const setRooms = (list: Record<string, unknown>[]) => {
   const session = getChatSession() as unknown as {
     rooms: { set: (v: unknown) => void };
@@ -143,5 +145,47 @@ describe('the shared room glyph', () => {
     renderPage();
     await waitFor(() => expect(glyph('Old')).toBeTruthy());
     expect(glyph('Old')!.classList.contains('shared')).toBe(false);
+  });
+});
+
+describe('the shared room glyph in the header', () => {
+  const setView = (v: string) =>
+    (getChatSession() as unknown as { view: { set: (v: unknown) => void } }).view.set(v);
+
+  afterEach(() => setView('room'));
+
+  it('follows the title of a shared room, before the badges', async () => {
+    setRooms([{ name: 'Team', shared: true, brain: 'native' }]);
+    renderPage();
+    await waitFor(() => expect(headerGlyph()).toBeTruthy());
+    const g = headerGlyph()!;
+    expect(g.getAttribute('title')).toBe('Shared room');
+    expect(g.getAttribute('aria-label')).toBe('Shared room');
+    // Directly after the title, inside the heading, so nothing in the nav
+    // snippet can come between them.
+    expect(g.closest('h1')).toBeTruthy();
+    expect(g.previousElementSibling?.textContent?.trim()).toBe('Team');
+  });
+
+  it('names Talk in the title of a shared Talk room', async () => {
+    setRooms([{ name: 'Group', shared: true, origin: 'talk' }]);
+    renderPage();
+    await waitFor(() => expect(headerGlyph()).toBeTruthy());
+    expect(headerGlyph()!.getAttribute('title')).toBe('Shared room, also on Nextcloud Talk');
+  });
+
+  it('shows nothing for a private room', async () => {
+    setRooms([{ name: 'Solo', shared: false }]);
+    renderPage();
+    await waitFor(() => expect(glyph('Solo')).toBeTruthy());
+    expect(headerGlyph()).toBeNull();
+  });
+
+  it('shows nothing in a view mode, where the title is not a room name', async () => {
+    setRooms([{ name: 'Team', shared: true }]);
+    setView('starred');
+    renderPage();
+    await waitFor(() => expect(glyph('Team')).toBeTruthy());
+    expect(headerGlyph()).toBeNull();
   });
 });

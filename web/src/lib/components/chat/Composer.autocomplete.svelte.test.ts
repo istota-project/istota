@@ -212,3 +212,45 @@ describe('Composer autocomplete', () => {
     expect(notPrevented).toBe(true);
   });
 });
+
+describe('Composer @mention suggestions (ISSUE-580)', () => {
+  const candidates = [
+    { name: 'alice', display: 'Alice', self: true },
+    { name: 'bob', display: 'Bob' },
+    { name: 'Istota' },
+  ];
+
+  it('offers the room, filters as you type, and inserts the mention without sending', async () => {
+    const onSend = vi.fn();
+    const { container } = render(Composer, { onSend, mentionCandidates: candidates });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    await type(textarea, 'thanks @');
+    const labels = () =>
+      [...container.querySelectorAll('[role="option"] .ac-label')].map((e) => e.textContent);
+    expect(labels()).toEqual(['@bob', '@Istota']);
+    await type(textarea, 'thanks @is');
+    expect(labels()).toEqual(['@Istota']);
+    key(textarea, 'Enter');
+    await tick();
+    expect(onSend).not.toHaveBeenCalled();
+    expect(textarea.value).toBe('thanks @Istota ');
+  });
+
+  it('sends on Enter when the message ends on a name typed in full', async () => {
+    const onSend = vi.fn();
+    const { container } = render(Composer, { onSend, mentionCandidates: candidates });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    await type(textarea, 'can you check @Istota');
+    expect(container.querySelector('[role="listbox"]')).toBeNull();
+    key(textarea, 'Enter');
+    await tick();
+    expect(onSend).toHaveBeenCalled();
+    expect(onSend.mock.calls[0][0]).toBe('can you check @Istota');
+  });
+
+  it('stays closed without candidates, as in a private room', async () => {
+    const { container, textarea } = mount();
+    await type(textarea, '@');
+    expect(container.querySelector('[role="listbox"]')).toBeNull();
+  });
+});

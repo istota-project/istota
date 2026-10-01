@@ -46,9 +46,13 @@
   import { dropDraft } from '$lib/stores/drafts';
   import { dropQueue, MAX_QUEUED_PER_ROOM } from '$lib/stores/sendQueue';
   import { isImeComposing } from '$lib/platform/input';
-  import type { ChatAttachment, ChatRoom, ChatView } from '$lib/api';
+  import type { ChatAttachment, ChatRoom, ChatView, RoomMember } from '$lib/api';
+  import { loadRoomMembers, dropRoomMembers } from '$lib/roomMembers';
   import { getCurrentUser } from '$lib/userContext';
-  import { getSelectableBrains } from '$lib/components/chat/autocomplete/providers';
+  import {
+    getSelectableBrains,
+    type MentionCandidate,
+  } from '$lib/components/chat/autocomplete/providers';
 
   const session = getChatSession();
   const {
@@ -172,6 +176,56 @@
   let composerH = $state(0);
 
   const activeRoom = $derived($rooms.find((r) => r.id === $activeRoomId) ?? null);
+  const isTalkRoom = (room: { origin?: string | null; talk_token?: string | null }) =>
+    room.origin === 'talk' || !!room.talk_token;
+  // One wording for the sidebar row and the header, so the two never disagree
+  // about what the glyph means.
+  const sharedRoomTitle = (room: { origin?: string | null; talk_token?: string | null }) =>
+    isTalkRoom(room) ? 'Shared room, also on Nextcloud Talk' : 'Shared room';
+
+  // Who may be `@`-mentioned in the open room (ISSUE-578): its members by user
+  // id, the viewer's own entry marked, and the bot's name. Only in a shared
+  // room, which is where a mention says something; a private room's only
+  // other reader is the bot. Keyed by room id so a slow fetch for the room
+  // just left never paints its members onto the one just opened.
+  let loadedMembers = $state<{ roomId: number; list: RoomMember[] } | null>(null);
+  // Bumped when this viewer changes the membership, so the fetch runs again.
+  let membersEpoch = $state(0);
+  const sharedRoomId = $derived(!inViewMode && activeRoom?.shared ? activeRoom.id : null);
+  $effect(() => {
+    const id = sharedRoomId;
+    void membersEpoch;
+    // Read so any update to the room list asks again; within the cache's
+    // lifetime that answers from memory, past it it refetches. Membership
+    // changes made elsewhere reach this page no other way.
+    void activeRoom;
+    if (id == null) return;
+    let live = true;
+    loadRoomMembers(id).then((list) => {
+      // The same cached array means nothing changed, and reassigning would
+      // re-render every row's mentions for nothing.
+      if (live && (loadedMembers?.roomId !== id || loadedMembers.list !== list)) {
+        loadedMembers = { roomId: id, list };
+      }
+    });
+    return () => {
+      live = false;
+    };
+  });
+  // One list for both readers: the transcript styles mentions from it and the
+  // composer's `@` suggestions (ISSUE-580) offer it, so a suggestion always
+  // inserts a name the transcript renders as a mention. `display` is for the
+  // suggestion row only; the matcher never reads it.
+  const mentionTargets = $derived.by((): MentionCandidate[] => {
+    if (sharedRoomId == null || loadedMembers?.roomId !== sharedRoomId) return [];
+    const list: MentionCandidate[] = loadedMembers.list.map((m) => ({
+      name: m.user_id,
+      display: m.display_name,
+      self: m.user_id === userId,
+    }));
+    list.push({ name: botName });
+    return list;
+  });
 
   // A room whose host left answers nobody until a member claims it (D14).
   const hostLost = $derived(!!activeRoom?.policy && activeRoom.policy.host === null);
@@ -919,6 +973,10 @@
   // with it the policy the modal shows, comes from the listing.
   async function membersChanged() {
     const id = settingsRoom?.id;
+    if (id != null) {
+      dropRoomMembers(id);
+      membersEpoch++;
+    }
     await session.refreshRooms();
     if (id != null) settingsRoom = $rooms.find((r) => r.id === id) ?? null;
   }
@@ -965,6 +1023,21 @@
       onTitleClick={() => (sidebarOpen = !sidebarOpen)}
       titleActionLabel="open rooms"
     >
+      {#snippet afterTitle()}
+        {#if !inViewMode && activeRoom?.shared}
+          <!-- The sidebar marks this too, but it is closed most of the time on
+               a phone, and who reads a message is what a sender needs before
+               typing. -->
+          <span
+            class="header-shared"
+            role="img"
+            title={sharedRoomTitle(activeRoom)}
+            aria-label={sharedRoomTitle(activeRoom)}
+          >
+            <Users size={14} />
+          </span>
+        {/if}
+      {/snippet}
       {#snippet leading()}
         <SidebarToggle
           open={sidebarOpen}
@@ -1079,7 +1152,7 @@
       </div>
 
       {#each sidebarRooms as { room, nested } (room.id)}
-        {@const isTalk = room.origin === 'talk' || !!room.talk_token}
+        {@const isTalk = isTalkRoom(room)}
         {@const unreadCount = room.unread_count ?? 0}
         {@const unread = unreadCount > 0 && room.id !== $activeRoomId}
         {@const waiting = room.id === $activeRoomId ? 0 : ($queuedCounts[room.token] ?? 0)}
@@ -1102,8 +1175,9 @@
 							     surface mirrors it. The Talk fact moves into the title. -->
               <span
                 class="room-origin shared"
-                title={isTalk ? 'Shared room, also on Nextcloud Talk' : 'Shared room'}
-                aria-label="Shared room"
+                role="img"
+                title={sharedRoomTitle(room)}
+                aria-label={sharedRoomTitle(room)}
               >
                 <Users size={13} />
               </span>
@@ -1276,6 +1350,7 @@
                 aggregate={inViewMode}
                 active={message.cid === activeCid}
                 touch={pointerIsTouch}
+                mentions={mentionTargets}
               />
             {/each}
           </div>
@@ -1364,6 +1439,7 @@
           replyTo={stagedReply}
           onReplyChange={(msgId) => (stagedReplyId = msgId)}
           restoreSend={returnedSend}
+          mentionCandidates={mentionTargets}
         />
       </div>
     {/if}
@@ -1755,6 +1831,11 @@
     color: var(--accent-amber);
   }
   .room-origin.shared {
+    color: var(--accent-blue);
+  }
+  .header-shared {
+    display: inline-flex;
+    flex-shrink: 0;
     color: var(--accent-blue);
   }
 
