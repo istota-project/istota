@@ -54,9 +54,12 @@ def _rows(conn, sql, *params):
 class TestTheMigration:
     TABLES = ("groups", "group_members", "group_kv")
 
-    def test_an_upgraded_database_matches_a_fresh_one(self, tmp_path, db_path):
-        """`_run_migrations` alone, with no `schema.sql` behind it, builds the
-        same three tables and indexes a fresh install gets."""
+    def test_the_migration_builds_what_schema_sql_declares(self, tmp_path):
+        """Both copies of the DDL, executed: `_run_migrations` on a database
+        missing the three tables, against `schema.sql` alone on an empty one.
+        `init_db` runs the migrations first, so on any real install the
+        migration's copy is the one that executes, and `schema.sql`'s only
+        describes it; this is what holds the two equal."""
         old = tmp_path / "old.db"
         db.init_db(old)
         raw = sqlite3.connect(old)
@@ -72,18 +75,24 @@ class TestTheMigration:
         ).fetchone()
         raw.close()
         assert marker is not None
-        with db.get_db(db_path) as fresh, db.get_db(old) as upgraded:
+        declared = tmp_path / "declared.db"
+        raw = sqlite3.connect(declared)
+        raw.executescript((SRC.parent.parent / "schema.sql").read_text())
+        raw.close()
+        with db.get_db(declared) as fresh, db.get_db(old) as upgraded:
             for table in self.TABLES:
                 a = [tuple(r) for r in fresh.execute(f"PRAGMA table_info({table})")]
                 b = [tuple(r) for r in upgraded.execute(f"PRAGMA table_info({table})")]
                 assert a and a == b, table
-                ia = sorted(r[1] for r in fresh.execute(f"PRAGMA index_list({table})"))
-                ib = sorted(r[1] for r in upgraded.execute(f"PRAGMA index_list({table})"))
+                ia = sorted(tuple(r)[1:4] for r in fresh.execute(
+                    f"PRAGMA index_list({table})"))
+                ib = sorted(tuple(r)[1:4] for r in upgraded.execute(
+                    f"PRAGMA index_list({table})"))
                 assert ia == ib, table
 
     def test_schema_sql_and_the_migration_carry_the_same_ddl(self):
-        """The migration's copy is the one an upgraded host runs; `schema.sql`'s
-        is the one a fresh install runs. Held equal statement by statement."""
+        """The same property as text: every migration statement appears in
+        `schema.sql`, comments and whitespace aside."""
         schema = (SRC.parent.parent / "schema.sql").read_text()
         squash = lambda s: re.sub(r"--[^\n]*", "", s)  # noqa: E731
         normal = lambda s: " ".join(squash(s).split()).rstrip(";")  # noqa: E731
@@ -190,6 +199,16 @@ class TestMembership:
         assert _rows(conn, "SELECT user_id, role FROM group_members") == [
             ("alice", "member")]
         assert db.is_group_member(conn, family, "alice")
+
+    def test_two_open_rows_are_refused_by_the_schema(self, conn, family):
+        """Not only by `add_group_member`'s logic: a raw second insert of an
+        open membership is a constraint violation."""
+        db.add_group_member(conn, family, "alice", added_by="op")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO group_members (group_id, user_id, added_by) "
+                "VALUES ('family', 'alice', 'op')"
+            )
 
     def test_ending_deletes_no_row(self, conn, family):
         db.add_group_member(conn, family, "alice", added_by="op")
@@ -416,6 +435,31 @@ class TestTheCli:
                                   group_id="family", namespace="ns", key="x").out)
         assert missing == {"status": "not_found"}
 
+    def test_kv_reads_show_a_value_that_is_not_json(self, cfg, db_path, capsys):
+        _run(capsys, cli.cmd_group_create, config=cfg, group_id="family",
+             kind="family", name=None)
+        with db.get_db(db_path) as conn:
+            db.group_kv_set(conn, "family", "ns", "a", "plain text", "alice")
+            db.group_kv_set(conn, "family", "ns", "b", "2", "alice")
+        got = json.loads(_run(capsys, cli.cmd_group_kv_get, config=cfg,
+                              group_id="family", namespace="ns", key="a").out)
+        assert got["value"] == "plain text"
+        listed = json.loads(_run(capsys, cli.cmd_group_kv_list, config=cfg,
+                                 group_id="family", namespace="ns").out)
+        assert [e["value"] for e in listed["entries"]] == ["plain text", 2]
+
+    def test_a_repeated_add_says_nothing_changed(self, cfg, db_path, capsys):
+        _run(capsys, cli.cmd_group_create, config=cfg, group_id="family",
+             kind="family", name=None)
+        _run(capsys, cli.cmd_group_add_member, config=cfg, group_id="family",
+             user_id="alice", role="member")
+        out = _run(capsys, cli.cmd_group_add_member, config=cfg, group_id="family",
+                   user_id="alice", role="owner").out
+        assert "already a member" in out
+        with db.get_db(db_path) as conn:
+            assert [h["role"] for h in db.group_membership_history(conn, "family")] \
+                == ["member"]
+
     def test_the_parser_reaches_every_verb(self, cfg, monkeypatch, capsys):
         """Through `main`, so the subparser and the dispatch table agree."""
         for argv in (
@@ -438,9 +482,22 @@ class TestTheCli:
 # ---------------------------------------------------------------------------
 
 
-def _attribute_reads(tree: ast.AST, field: str):
-    """Every `<name>["field"]`, `<name>.get("field")` and `<name>.field` whose
-    receiver's name mentions a group, as (node, receiver name)."""
+#: The helpers that hand a group's `kind` or a membership's `role` to a caller.
+_GROUP_READERS = {"get_group", "list_groups", "group_membership_history"}
+_GROUP_TABLE_SQL = re.compile(r"(?is)\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:groups|group_members)\b")
+_DECIDING_SQL = {
+    "kind": re.compile(
+        r"(?is)\bgroups\b[^;]*?\b(?:WHERE|AND|OR|ORDER\s+BY|GROUP\s+BY|CASE|ON)\b[^;]*\bkind\b"
+    ),
+    "role": re.compile(
+        r"(?is)\bgroup_members\b[^;]*?\b(?:WHERE|AND|OR|ORDER\s+BY|GROUP\s+BY|CASE|ON)\b[^;]*\brole\b"
+    ),
+}
+
+
+def _field_reads(tree: ast.AST, field: str):
+    """Every `<x>["field"]`, `<x>.get("field")` and `<x>.field`, with the
+    receiver's source text."""
     for node in ast.walk(tree):
         receiver = None
         if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) \
@@ -453,50 +510,84 @@ def _attribute_reads(tree: ast.AST, field: str):
             receiver = node.func.value
         elif isinstance(node, ast.Attribute) and node.attr == field:
             receiver = node.value
-        if receiver is None:
-            continue
-        name = ast.unparse(receiver)
-        if re.search(r"group(?!_chat)", name, re.IGNORECASE):
-            yield node, name
+        if receiver is not None:
+            yield node, ast.unparse(receiver)
+
+
+def _deciding_nodes(tree: ast.AST) -> set[int]:
+    """Ids of every node inside something that decides: a condition, a
+    comparison, a match subject, or the index of a lookup (a dispatch table)."""
+    roots = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.If, ast.IfExp, ast.While, ast.Assert)):
+            roots.append(node.test)
+        elif isinstance(node, ast.comprehension):
+            roots.extend(node.ifs)
+        elif isinstance(node, ast.Match):
+            roots.append(node.subject)
+        elif isinstance(node, (ast.Compare, ast.BoolOp)):
+            roots.append(node)
+        elif isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Constant):
+            roots.append(node.slice)
+    return {id(n) for root in roots for n in ast.walk(root)}
+
+
+def _reads_groups(func: ast.AST) -> bool:
+    """Whether a function obtains group rows: calls a reader, or names a group
+    table in its own SQL."""
+    for node in ast.walk(func):
+        if isinstance(node, ast.Call):
+            name = node.func.attr if isinstance(node.func, ast.Attribute) else \
+                getattr(node.func, "id", "")
+            if name in _GROUP_READERS:
+                return True
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                and _GROUP_TABLE_SQL.search(node.value):
+            return True
+    return False
 
 
 def _branching_reads(field: str, root: Path = SRC) -> list[str]:
-    """Reads of a group's `field` inside a condition, plus SQL filtering or
-    ordering on it. Reads files off disk, so `scripts/qt` cannot select this by
-    the lines it covers (the residual AGENTS.md names); it is cheap and runs in
-    the default suite."""
+    """Code that decides on a group's `field`.
+
+    Three shapes. A read in a condition, comparison or lookup index whose
+    receiver is named for a group, anywhere. The same with any receiver at all,
+    inside a function that obtains group rows (`_GROUP_READERS`, or its own SQL
+    on the group tables), which is where `row["kind"]` or `g["role"]` would be.
+    And SQL that filters, joins, groups or orders on the field, matched over
+    each string constant, so implicitly concatenated literals are one string.
+
+    The blind spot, stated: a group dict passed to a function that neither
+    reads groups itself nor names its parameter for one. Reads files off disk,
+    so `scripts/qt` cannot select this by coverage (the residual AGENTS.md
+    names); it is cheap and runs in the default suite.
+    """
     found = []
     for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
-        tests = set()
+        deciding = _deciding_nodes(tree)
+        where = path.relative_to(root)
+        hits = set()
+        for node, name in _field_reads(tree, field):
+            if id(node) in deciding and re.search(r"group(?!_chat)", name, re.I):
+                hits.add((node.lineno, name))
+        for func in ast.walk(tree):
+            if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                    and _reads_groups(func):
+                for node, name in _field_reads(func, field):
+                    if id(node) in deciding:
+                        hits.add((node.lineno, name))
+        found.extend(f"{where}:{line} {name}.{field}" for line, name in sorted(hits))
         for node in ast.walk(tree):
-            if isinstance(node, (ast.If, ast.IfExp, ast.While, ast.Assert)):
-                tests.add(node.test)
-            elif isinstance(node, ast.comprehension):
-                tests.update(node.ifs)
-            elif isinstance(node, ast.Match):
-                tests.add(node.subject)
-            elif isinstance(node, (ast.Compare, ast.BoolOp)):
-                tests.add(node)
-        test_nodes = set()
-        for t in tests:
-            test_nodes.update(id(n) for n in ast.walk(t))
-        for node, name in _attribute_reads(tree, field):
-            if id(node) in test_nodes:
-                found.append(f"{path.relative_to(root)}:{node.lineno} {name}.{field}")
-        text = path.read_text()
-        pattern = {
-            "kind": r"(?is)\bgroups\b[^;\"]*?\b(?:WHERE|AND|OR|ORDER\s+BY|CASE)\b[^;\"]*\bkind\b",
-            "role": r"(?is)\bgroup_members\b[^;\"]*?\b(?:WHERE|AND|OR|ORDER\s+BY|CASE)\b[^;\"]*\brole\b",
-        }[field]
-        for match in re.finditer(pattern, text):
-            line = text.count("\n", 0, match.start()) + 1
-            found.append(f"{path.relative_to(root)}:{line} SQL on {field}")
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                    and not re.match(r"(?i)\s*CREATE\b", node.value) \
+                    and _DECIDING_SQL[field].search(node.value):
+                found.append(f"{where}:{node.lineno} SQL on {field}")
     return found
 
 
 def test_kind_is_display_only():
-    """No code branches on a group's `kind` (D1). The day it gates behaviour,
+    """No code decides on a group's `kind` (D1). The day it gates behaviour,
     two features have been built where one was specced."""
     assert _branching_reads("kind") == []
 
@@ -507,17 +598,47 @@ def test_role_is_inert():
     assert _branching_reads("role") == []
 
 
-def test_the_inertness_detector_can_fail(tmp_path):
-    """Negative control: a planted branch on each field is found."""
-    planted = tmp_path / "src" / "istota"
-    planted.mkdir(parents=True)
-    (planted / "planted.py").write_text(
-        "def f(group, conn):\n"
-        "    if group['kind'] == 'family':\n"
-        "        return 1\n"
-        "    if group_row.get('role') == 'owner':\n"
-        "        return 2\n"
-        "    conn.execute(\"SELECT 1 FROM groups WHERE kind = 'team'\")\n"
+_PLANTED = {
+    "kind": [
+        "def f(group):\n    if group['kind'] == 'family':\n        return 1\n",
+        "def f(conn):\n    row = get_group(conn, 'x')\n"
+        "    if row['kind'] == 'family':\n        return 1\n",
+        "def f(conn):\n    return [g for g in list_groups(conn) if g['kind'] == 'x']\n",
+        "def f(conn):\n    conn.execute(\"SELECT 1 FROM groups g \" \"WHERE g.kind = 1\")\n",
+        "H = {}\ndef f(group):\n    return H[group['kind']]()\n",
+        "def f(group):\n    match group.kind:\n        case 'x':\n            return 1\n",
+    ],
+    "role": [
+        "def f(conn):\n    for h in group_membership_history(conn, 'x'):\n"
+        "        if h['role'] == 'owner':\n            return 1\n",
+        "def f(conn):\n    conn.execute(\"SELECT user_id FROM group_members \" "
+        "\"WHERE role = 'owner'\")\n",
+        "def f(group_row):\n    return group_row.get('role') == 'owner'\n",
+    ],
+}
+
+
+@pytest.mark.parametrize("field,source", [
+    (field, source) for field, sources in _PLANTED.items() for source in sources
+])
+def test_the_inertness_detector_finds_a_planted_branch(tmp_path, field, source):
+    """Negative control, one shape per case: each is found on its own."""
+    planted = tmp_path / "src"
+    planted.mkdir()
+    (planted / "planted.py").write_text(source)
+    assert len(_branching_reads(field, planted)) == 1
+
+
+def test_a_display_read_is_not_a_branch(tmp_path):
+    """The positive control: printing the kind and role decides nothing."""
+    planted = tmp_path / "src"
+    planted.mkdir()
+    (planted / "shown.py").write_text(
+        "def f(conn):\n"
+        "    for g in list_groups(conn):\n"
+        "        print(f\"{g['group_id']} {g['kind']}\")\n"
+        "    for h in group_membership_history(conn, 'x'):\n"
+        "        print(h['role'])\n"
     )
-    assert len(_branching_reads("kind", planted)) == 2
-    assert len(_branching_reads("role", planted)) == 1
+    assert _branching_reads("kind", planted) == []
+    assert _branching_reads("role", planted) == []

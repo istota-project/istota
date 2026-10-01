@@ -1979,11 +1979,16 @@ def cmd_group_add_member(args):
     if config.get_user(args.user_id) is None:
         _group_fail(f"{args.user_id!r} is not a configured user")
     with db.get_db(config.db_path) as conn:
+        already = db.is_group_member(conn, args.group_id, args.user_id)
         try:
             db.add_group_member(conn, args.group_id, args.user_id,
                                 role=args.role, added_by=_GROUP_OPERATOR)
         except ValueError as e:
             _group_fail(str(e))
+    if already:
+        print(f"{args.user_id} is already a member of {args.group_id!r}; "
+              "nothing changed.")
+        return
     print(f"{args.user_id} is a member of {args.group_id!r}.")
 
 
@@ -2008,6 +2013,15 @@ def cmd_group_archive(args):
     print(f"Archived group {args.group_id!r}. Its rows stay readable here.")
 
 
+def _group_kv_value(raw: str):
+    """The stored value, decoded where it is JSON and as written where not,
+    as the kv skill reads it: one bad row must not hide a namespace."""
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return raw
+
+
 def cmd_group_kv_get(args):
     """Read one value. Archived groups too: archiving stops loading, not this."""
     config = _group_config(args)
@@ -2017,7 +2031,7 @@ def cmd_group_kv_get(args):
         print(json.dumps({"status": "not_found"}))
         return
     print(json.dumps({
-        "status": "ok", "value": json.loads(result["value"]),
+        "status": "ok", "value": _group_kv_value(result["value"]),
         "written_by": result["written_by"],
     }))
 
@@ -2027,7 +2041,7 @@ def cmd_group_kv_list(args):
     with db.get_db(config.db_path) as conn:
         entries = db.group_kv_list(conn, args.group_id, args.namespace)
     print(json.dumps({"status": "ok", "entries": [
-        {"key": e["key"], "value": json.loads(e["value"]),
+        {"key": e["key"], "value": _group_kv_value(e["value"]),
          "written_by": e["written_by"], "updated_at": e["updated_at"]}
         for e in entries
     ]}))

@@ -7725,6 +7725,8 @@ _GROUPS_DDL = (
 )""",
     "CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id, ended_at)",
     "CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id, ended_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_group_members_current "
+    "ON group_members(group_id, user_id) WHERE ended_at IS NULL",
     """CREATE TABLE IF NOT EXISTS group_kv (
     group_id   TEXT NOT NULL REFERENCES groups(group_id) ON DELETE CASCADE,
     namespace  TEXT NOT NULL,
@@ -9762,15 +9764,10 @@ def add_group_member(
         raise ValueError(f"invalid user id: {user_id!r}")
     if get_group(conn, group_id) is None:
         raise ValueError(f"no such group: {group_id!r}")
-    current = conn.execute(
-        "SELECT 1 FROM group_members "
-        "WHERE group_id = ? AND user_id = ? AND ended_at IS NULL LIMIT 1",
-        (group_id, user_id),
-    ).fetchone()
-    if current is not None:
-        return
+    # `idx_group_members_current` allows one open row per (group, user), so
+    # the no-op is the constraint's rather than a check-then-insert's.
     conn.execute(
-        "INSERT INTO group_members (group_id, user_id, role, added_by) "
+        "INSERT OR IGNORE INTO group_members (group_id, user_id, role, added_by) "
         "VALUES (?, ?, ?, ?)",
         (group_id, user_id, role, added_by),
     )
@@ -9791,8 +9788,9 @@ def end_group_membership(
 
 
 def is_group_member(conn: sqlite3.Connection, group_id: str, user_id: str) -> bool:
-    """The gate: a current membership of a live group. False for anything it
-    cannot establish, an empty or non-string argument included."""
+    """The gate: a current membership of a live group. False for an unknown,
+    archived or ended one and for an empty or non-string argument. A database
+    error raises; a caller treats that as a refusal."""
     if not isinstance(group_id, str) or not isinstance(user_id, str):
         return False
     if not group_id or not user_id:

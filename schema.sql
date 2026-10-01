@@ -601,6 +601,8 @@ CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id, ende
 
 CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id, ended_at);
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_group_members_current ON group_members(group_id, user_id) WHERE ended_at IS NULL;
+
 -- `shared_kv` with an audience: the group's members. The table does no
 -- authorization; `written_by` is provenance and never an authorization input.
 CREATE TABLE IF NOT EXISTS group_kv (
