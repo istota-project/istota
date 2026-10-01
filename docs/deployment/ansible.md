@@ -359,3 +359,11 @@ These variables preserve the application's defaults and let inventory override t
 | `istota_security_credential_broker_enforce_reveal` | `false` | Refuse public reads of non-revealable credentials |
 | `istota_security_credential_broker_scan_max_bytes` | `1048576` | Positive byte limit for request scans and response scrubbing |
 | `istota_security_credential_broker_leaf_validity_hours` | `24` | Positive lifetime of per-host TLS certificates in hours |
+
+## Room identity migration
+
+The play and the unattended updater share an offline wrapper under the update lock, so neither can restart services during the other's migration. They stop every installed scheduler, web and webhook unit before running `istota init --relocate-rooms`. This initializes the schema, migrates legacy room tokens to minted `rm_` identities, then reconciles channel directories and the destinations in `CRON.md` and `BRIEFINGS.md`. The command runs as the service user. The maintenance window restores units that were running, including after a refusal or failure; absent and previously stopped units are not started by this window. A failed stop aborts migration.
+
+Exit 0 means success or an already migrated database. Exit 1 refuses the migration before any room changes; only the exact `refusal: live_tasks` is tolerated by deployment, reported, and retried at the next deploy. Finish or cancel pending confirmations before retrying `refusal: pending_confirmation`. Unknown columns, ambiguous bindings and unreadable state require operator attention. Exit 2 means some work may have completed: inspect the named failures, resolve file conflicts or restore workspace access, and rerun in another offline window. Do not delete the mapping table or manually replace surface tokens.
+
+For an inspection, set `ISTOTA_CONFIG_PATH` to the installed config and run `python -m istota.room_relocate --list` or `--dry-run` with the installation's Python. Add `--reconcile-mount --dry-run` to inspect the remaining workspace work. File rewrites keep dated originals under `Backups/`; conflicting files are preserved. The old and new channel directory names remain readable until a production reconciliation reports zero outstanding and the compatibility reader is removed in a separate change. The mapping table and forwarding of old bookmarks and sent-mail descriptors are permanent.

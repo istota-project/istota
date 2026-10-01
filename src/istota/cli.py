@@ -72,6 +72,17 @@ def cmd_init(args):
     config.db_path.parent.mkdir(parents=True, exist_ok=True)
     db.init_db(config.db_path)
     print(f"Database initialized at {config.db_path}")
+    if getattr(args, "relocate_rooms", False):
+        from .room_relocate import migrate_database, reconcile_mount
+        result = migrate_database(config.db_path)
+        if result != 0:
+            return result
+        # A fresh install has no mappings and may not have seeded its user
+        # workspaces yet. There is nothing for the reconciliation to rewrite.
+        with db.get_db(config.db_path) as conn:
+            if not conn.execute("SELECT 1 FROM room_token_migration LIMIT 1").fetchone():
+                return 0
+        return reconcile_mount(config)
 
 
 def cmd_doctor(args):
@@ -4670,7 +4681,11 @@ def main():
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # init
-    subparsers.add_parser("init", help="Initialize database")
+    init_parser = subparsers.add_parser("init", help="Initialize database")
+    init_parser.add_argument(
+        "--relocate-rooms", action="store_true",
+        help="Migrate room identities and reconcile workspace files; stop all writers first",
+    )
 
     # doctor
     doctor_parser = subparsers.add_parser(

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Server deployments now migrate existing room identities during a brief offline window, preserving room history, channel memories and old links. Standalone updates require stopping the local server first; Docker upgrades have an explicit offline migration step.
+
 - Room identity migration now carries channel memories and scheduled destinations to the new room names. Interrupted moves can resume, conflicting files are left for an operator to resolve, and schedule files are backed up before rewriting.
 
 - The web chat room list marks a shared room with a people icon, so a room that someone besides you reads is visible before you open it. For a shared Talk room, the icon's tooltip says it is also on Nextcloud Talk.

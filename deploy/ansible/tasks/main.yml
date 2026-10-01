@@ -2429,6 +2429,29 @@
     - istota_use_nextcloud_mount | default(false) | bool
     - (_legacy_db_snapshot_dirs.matched | default(0)) > 0
 
+# One lock covers the complete offline window, including restoration on error.
+# The cron holds this same lock and calls the wrapper with --lock-held.
+- name: Relocate room identities offline
+  command: >-
+    bash {{ istota_repo_dir }}/scripts/relocate-rooms.sh
+    {{ istota_namespace }} {{ istota_user }}
+    {{ istota_home }}/.venv/bin/istota {{ istota_repo_dir }}/config/config.toml
+    {{ istota_update_lock_wait }}
+  args:
+    chdir: "{{ istota_repo_dir }}"
+  register: _room_relocate
+  changed_when: "'migrated: ' in (_room_relocate.stdout | default(''))"
+  when:
+    - not istota_web_only
+    - not ansible_check_mode
+
+- name: Show room identity relocation output
+  debug:
+    msg: "{{ _room_relocate.stdout_lines + _room_relocate.stderr_lines }}"
+  when:
+    - not istota_web_only
+    - not ansible_check_mode
+
 # One-time relocation: `developer.repos_dir` from one shared tree into per-user
 # subtrees, `{repos_dir}/{namespace}/` -> `{repos_dir}/{user_id}/{namespace}/`.
 # The sandbox now binds a task's own subtree rather than the whole root, so a
