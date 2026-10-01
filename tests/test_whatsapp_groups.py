@@ -241,6 +241,54 @@ class TestTheHostLeaving:
             assert room_policy.get_policy(conn, ROOM).host_user_id is None
             assert db.get_room(conn, ROOM).archived
 
+    def test_a_host_listed_by_lid_alone_has_not_left(self, config):
+        """A LID-only entry could be anyone, the host included, and a wrong
+        answer here leaves the group for good."""
+        _apply(config, _roster([ALICE_JID, BOB_JID], added_by=BOB_JID))
+        (result,) = _apply(config, _roster([ALICE_JID, {"jid": "", "lid": GUEST_LID}]))
+
+        assert result.disposition == "roster_synced"
+        assert result.leave_group_jid is None
+
+    def test_a_host_whose_binding_changed_is_still_in_the_group(self, config):
+        _apply(config, _roster([ALICE_JID, BOB_JID], added_by=BOB_JID))
+        with db.get_db(config.db_path) as conn:
+            conn.execute("DELETE FROM whatsapp_user_bindings WHERE user_id = 'bob'")
+        (result,) = _apply(config, _roster([ALICE_JID, BOB_JID]))
+
+        assert result.leave_group_jid is None
+
+    def test_a_lost_leave_is_asked_again_and_the_room_stays_archived(self, config):
+        _apply(config, _roster([ALICE_JID, BOB_JID, GUEST_JID], added_by=BOB_JID))
+        _apply(config, _roster([ALICE_JID, GUEST_JID]))
+        (again,) = _apply(config, _roster([ALICE_JID, GUEST_JID]))
+
+        assert again.leave_group_jid == GROUP
+        assert _rows(config, "SELECT archived FROM rooms WHERE token=?", (ROOM,)) == [
+            {"archived": 1}]
+
+    def test_the_bot_re_added_revives_the_room(self, config):
+        _apply(config, _roster([ALICE_JID, BOB_JID]))
+        _apply(config, _roster([], bot_present=False))
+        _apply(config, _roster([ALICE_JID, BOB_JID]))
+
+        assert _rows(config, "SELECT archived FROM rooms WHERE token=?", (ROOM,)) == [
+            {"archived": 0}]
+
+    def test_a_member_who_leaves_the_group_leaves_the_room(self, config):
+        """Membership came from the group: without this, a member who left
+        could still read the backstage and post into the group."""
+        _apply(config, _roster([ALICE_JID, BOB_JID, GUEST_JID], added_by=ALICE_JID))
+        _apply(config, _roster([ALICE_JID, GUEST_JID]))
+
+        with db.get_db(config.db_path) as conn:
+            assert db.list_room_members(conn, ROOM) == ["alice"]
+            ident = db.create_task(conn, user_id="bob", source_type="web",
+                                   prompt="post it", conversation_token=ROOM)
+            with pytest.raises(ValueError):
+                db.ensure_side_room(conn, ROOM, "bob")
+            del ident
+
     def test_another_member_leaving_is_not_the_hosts_departure(self, config):
         _apply(config, _roster([ALICE_JID, BOB_JID, GUEST_JID], added_by=BOB_JID))
         (result,) = _apply(config, _roster([BOB_JID, GUEST_JID]))
@@ -406,7 +454,19 @@ class TestTheAnswerGoesToTheGroup:
             db.set_room_archived(conn, ROOM, True)
 
         asyncio.run(WhatsAppTransport(group).deliver(ROOM, "At seven.", task=task))
-        assert all(r.to != GROUP for r in sent)
+        assert sent == []
+        assert WhatsAppTransport(group).resolve_target(task) is None
+
+    def test_the_prompt_says_a_scheduled_job_cannot_post_into_the_group(self, group):
+        from istota.executor import room_identity_line
+
+        (result,) = _apply(group, _message("Istota, when is the dinner?"))
+        line = room_identity_line(group, _task(group, result.task_id),
+                                  rooms_cli_available=True)
+
+        assert "a WhatsApp group" in line
+        assert "cannot post into the group" in line
+        assert "target =" not in line
 
 
 class TestTheSideRoomsWhatsAppView:
@@ -427,6 +487,12 @@ class TestTheSideRoomsWhatsAppView:
         assert request.to == ALICE_JID
         assert request.text.startswith("re: Family")
         assert f"!confirm {result.task_id} yes" in request.text
+
+    def test_a_long_question_keeps_the_instruction_that_answers_it(self):
+        body = side_rooms.whatsapp_confirmation_body("x" * 10000, 7)
+
+        assert body.endswith("`!confirm 7 no`.")
+        assert len(body) + len("re: ") + 80 <= 4096
 
     def test_a_whisper_reaches_the_members_own_chat_headed_with_the_room(self, group, sent):
         with db.get_db(group.db_path) as conn:

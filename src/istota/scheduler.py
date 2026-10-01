@@ -4018,7 +4018,12 @@ def process_one_task(
                 config, user_id=task.user_id,
                 parent_token=side_confirmation.parent_token,
                 body=side_rooms.whatsapp_confirmation_body(result, task.id),
-                reference_id=f"istota:task:{task.id}:confirmation",
+                # Per question, so a task that parks twice asks twice: the
+                # ledger key is permanent, and a reused one reads as sent.
+                reference_id=(
+                    f"istota:task:{task.id}:confirmation:"
+                    f"{side_rooms.text_hash(result)[:16]}"
+                ),
             )))
         side_undelivered = side_msg_id is None and not side_whatsapp_sent
         if side_msg_id:

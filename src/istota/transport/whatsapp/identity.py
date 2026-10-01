@@ -213,7 +213,10 @@ def group_member_user(conn, jid: object) -> str | None:
     latched a JID yet. A group message or roster never latches, enrolls or
     raises an alert — those belong to the direct chat, where the person
     writes to the bot — and a number whose row already holds a *different*
-    JID is the recycled-line case and resolves to nobody. Nobody resolved
+    JID is the recycled-line case and resolves to nobody. So does a row
+    whose identity another adapter established: the direct chat re-
+    establishes that principal from the number only with the cross-adapter
+    alert, so the group waits for that first direct message. Nobody resolved
     means a guest (D1), which is also what a LID with no number is.
     """
     normalized = normalize_jid(jid)
@@ -224,7 +227,7 @@ def group_member_user(conn, jid: object) -> str | None:
         return bound.user_id
     number = jid_number(normalized)
     candidate = db.get_whatsapp_binding_by_phone(conn, number) if number else None
-    if candidate is None or candidate.jid:
+    if candidate is None or candidate.jid or candidate.bsuid:
         return None
     return candidate.user_id
 

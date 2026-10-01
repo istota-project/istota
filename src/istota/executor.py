@@ -6150,6 +6150,15 @@ def room_identity_line(
                 "you are already in."
             )
         )
+        if room.origin == "whatsapp":
+            # A group is answered only from its own turns (multiplayer D6):
+            # routing drops a scheduled job's leg into it, so naming a
+            # descriptor here would promise a post that never appears.
+            return (
+                f"\nRoom: this conversation is a registered room on {where}. "
+                "A scheduled job or a reminder cannot post into the group. "
+                + closing
+            )
         return (
             f"\nRoom: this conversation is a registered room on {where}. To "
             "deliver into it from a scheduled job or a reminder, write "

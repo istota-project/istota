@@ -189,7 +189,7 @@ class WhatsAppTransport:
                 "written; the caller passed neither a user nor a task",
             )
             return None
-        from .outbound import group_room_for_task  # noqa: PLC0415
+        from .outbound import group_room_for_task, is_group_task  # noqa: PLC0415
 
         # A group's own turn answers into the group (multiplayer D6), and
         # only when the planner's channel is that group's room: the token is
@@ -197,6 +197,13 @@ class WhatsAppTransport:
         group_room = group_room_for_task(self._config, task)
         if group_room is not None and target != group_room:
             group_room = None
+        if group_room is None and is_group_task(self._config, task):
+            log.warning(
+                "whatsapp.outbound.group_unavailable task=%s: the group this "
+                "answer belongs to is archived or unbound; nothing sent",
+                task.id,
+            )
+            return None
         logical_key = reference_id
         if not logical_key:
             logical_key = (
@@ -234,13 +241,16 @@ class WhatsAppTransport:
         user is enrolled at all — without the planner learning anything about
         who they are.
         """
-        from .outbound import current_destination, group_room_for_task
+        from .outbound import current_destination, group_room_for_task, is_group_task
 
         # A WhatsApp group's room token: still a conversation token rather
-        # than the group's JID, and only for that group's own turns.
+        # than the group's JID, and only for that group's own turns. A group
+        # that can no longer be reached has no channel, never the user's chat.
         group_room = group_room_for_task(self._config, task)
         if group_room is not None:
             return group_room
+        if is_group_task(self._config, task):
+            return None
         if not task.user_id or not current_destination(self._config, task.user_id):
             return None
         return whatsapp_conversation_token(task.user_id)

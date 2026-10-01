@@ -311,10 +311,15 @@ def whatsapp_confirmation_body(prompt: str, task_id: int) -> str:
 
     A bare YES in that chat answers only a question parked there, and this one
     is parked in the group's room, so the message names the command that
-    answers it by id.
+    answers it by id. The question is trimmed rather than the instruction,
+    leaving room for the ``re: <room>`` header the view puts in front.
     """
-    return (f"{prompt}\n\nTask #{task_id}. Reply `!confirm {task_id} yes` "
-            f"or `!confirm {task_id} no`.")
+    from .transport.whatsapp.outbound import WHATSAPP_TEXT_LIMIT, render_whatsapp
+
+    suffix = (f"\n\nTask #{task_id}. Reply `!confirm {task_id} yes` "
+              f"or `!confirm {task_id} no`.")
+    budget = WHATSAPP_TEXT_LIMIT - len(suffix) - len(HEADER_PREFIX) - _LABEL_MAX - 2
+    return render_whatsapp(prompt, limit=budget) + suffix
 
 
 # ---------------------------------------------------------------------------

@@ -1842,7 +1842,10 @@ class Session {
       if (!mine() || !Array.isArray(groups)) return;
       for (const meta of groups) {
         if (meta && isGroupJid(meta.id)) {
-          this.chainInbound(() => this.sendGroupRoster(meta.id, { metadata: meta }));
+          // A group created with the bot in it arrives here and not as an
+          // `add`, so its creator is who added the bot.
+          const addedBy = meta.author || meta.owner || '';
+          this.chainInbound(() => this.sendGroupRoster(meta.id, { metadata: meta, addedBy }));
         }
       }
     });

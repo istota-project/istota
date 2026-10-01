@@ -168,14 +168,6 @@ def _sync(
     db.sync_room_roster(conn, room_token=room_token, surface=SURFACE, present=present)
 
 
-def _on_whatsapp(conn, room_token: str, user_id: str) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM room_participants WHERE room_token = ? AND surface = ? "
-        "AND user_id = ? AND left_at IS NULL",
-        (room_token, SURFACE, user_id),
-    ).fetchone() is not None
-
-
 def _register(
     conn, config: "Config", group_jid: str, roster: WhatsAppGroupRoster,
     people: list[tuple[str, str, str | None, str | None]],
@@ -240,21 +232,28 @@ def apply_roster(conn, config: "Config", roster: WhatsAppGroupRoster) -> "WhatsA
     if room is None:
         return _register(conn, config, group_jid, roster, people)
 
-    if room.archived:
-        db.set_room_archived(conn, room.token, False)
-    if roster.subject and roster.subject != room.name:
-        db.rename_room(conn, room.token, roster.subject)
     # Fixed before the roster moves anyone: made afterwards, a policy would
     # take its host from whoever is left, and the departure D14 is about
     # would read as a hand-off to the next member.
     policy = room_policy.ensure_policy(conn, room.token)
     host = policy.host_user_id if policy is not None else None
-    host_was_here = bool(host) and _on_whatsapp(conn, room.token, host)
+    if room.archived:
+        if host is None:
+            # Archived by D14 and the bot is still in the group: the leave
+            # frame was lost, so ask again rather than reviving a room with
+            # no host.
+            return WhatsAppEventResult("host_left", leave_group_jid=group_jid)
+        # Archived because the bot was removed, and it is back.
+        db.set_room_archived(conn, room.token, False)
+    if roster.subject and roster.subject != room.name:
+        db.rename_room(conn, room.token, roster.subject)
+    before = _whatsapp_refs_by_user(conn, room.token)
     baseline = db.audience_baseline_pending(conn, room.token, SURFACE)
     _sync(conn, config, room.token, people, acknowledged=baseline)
     if baseline:
         db.mark_audience_baseline(conn, room.token, SURFACE)
-    if host_was_here and host not in {p[2] for p in people}:
+    departed = _departed(before, people)
+    if host in departed:
         # D14: the host left the group, so the bot leaves it too. The room
         # keeps its transcript, loses its host and is archived; the leave
         # itself is a frame the bridge writes after this commits.
@@ -265,7 +264,48 @@ def apply_roster(conn, config: "Config", roster: WhatsAppGroupRoster) -> "WhatsA
             jid_fingerprint(group_jid), room.token,
         )
         return WhatsAppEventResult("host_left", leave_group_jid=group_jid)
+    for user_id in departed:
+        # Membership came from the group, so it goes with the group: a member
+        # who left keeps neither the room's backstage nor a way to post into
+        # it through their side room.
+        db.remove_room_member(conn, room.token, user_id)
     return WhatsAppEventResult("roster_synced")
+
+
+def _whatsapp_refs_by_user(conn, room_token: str) -> dict[str, set[str]]:
+    """Each istota user's present WhatsApp refs in the room."""
+    refs: dict[str, set[str]] = {}
+    for row in conn.execute(
+        "SELECT user_id, surface_ref FROM room_participants WHERE room_token = ? "
+        "AND surface = ? AND user_id IS NOT NULL AND left_at IS NULL",
+        (room_token, SURFACE),
+    ):
+        refs.setdefault(row["user_id"], set()).add(row["surface_ref"])
+    return refs
+
+
+def _departed(
+    before: dict[str, set[str]],
+    people: list[tuple[str, str, str | None, str | None]],
+) -> set[str]:
+    """The users who were on the group's roster and are not on this one.
+
+    Judged by the refs they were present under, not by whether this roster's
+    entries still resolve to them: a number whose binding changed is still
+    the same person in the group. And nobody is judged gone while the roster
+    holds an entry WhatsApp shows only by LID, which could be any of them —
+    a wrong answer here archives the room and leaves the group for good.
+    """
+    if any(lid and ref == lid for ref, lid, _, _ in people):
+        return set()
+    present_refs = {ref for ref, _, _, _ in people} | {
+        lid for _, lid, _, _ in people if lid
+    }
+    present_users = {user_id for _, _, user_id, _ in people if user_id}
+    return {
+        user_id for user_id, refs in before.items()
+        if user_id not in present_users and not (refs & present_refs)
+    }
 
 
 def handle_group_message(

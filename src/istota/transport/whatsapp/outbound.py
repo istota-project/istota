@@ -1303,6 +1303,22 @@ def group_room_for_task(config: Config, task) -> str | None:
     return None
 
 
+def is_group_task(config: Config, task) -> bool:
+    """Whether a WhatsApp task was a group's turn, deliverable now or not.
+
+    The question `group_room_for_task` cannot answer by returning None: a
+    group whose room was archived or unbound since the turn must not have its
+    answer sent to the host's own chat instead.
+    """
+    if task is None or task.source_type != "whatsapp" or not task.conversation_token:
+        return False
+    if not config.db_path or not Path(config.db_path).exists():
+        return False
+    with db.get_db(config.db_path) as conn:
+        room = db.get_room(conn, task.conversation_token)
+    return room is not None and room.origin == "whatsapp"
+
+
 def current_destination(
     config: Config, user_id: str, caps: "WhatsAppProviderCaps | None" = None,
 ) -> str:
@@ -1817,6 +1833,7 @@ def is_whatsapp_configured(config: Config, user_id: str) -> bool:
 
 __all__ = [
     "group_room_for_task",
+    "is_group_task",
     "SERVICE_WINDOW",
     "TEMPLATE_PARAMETER_LIMIT",
     "TRUNCATION_SUFFIX",
