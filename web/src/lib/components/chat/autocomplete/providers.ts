@@ -1,9 +1,11 @@
 // Concrete completion providers + the shared per-session catalogue cache.
 // commandProvider drives the bare `!command` trigger; modelAliasProvider drives
 // the `!model <alias>` prefix. Both are fed by one cached GET /chat/commands.
+// mentionProvider drives `@name`, fed by the open room's members from the page.
 
 import { fetchChatCommands, type ChatCommands, type SelectableBrain } from '$lib/api';
 import type { CompletionProvider, Suggestion } from './types';
+import { codeRanges, inCode, mentionText } from '$lib/mentions';
 
 const EMPTY: ChatCommands = { commands: [], model_aliases: [], selectable_brains: [] };
 
@@ -331,4 +333,92 @@ export function modelAliasProvider(): CompletionProvider {
       }));
     },
   };
+}
+
+/** Someone the composer may offer after `@`: the name the mention is written
+ *  with (a user id, or the bot's name) and what to show beside it. */
+export interface MentionCandidate {
+  name: string;
+  display?: string;
+  /** The viewer, who is never offered: nobody mentions themselves. */
+  self?: boolean;
+}
+
+/**
+ * `@name` suggestions (ISSUE-580).
+ *
+ * Takes its list from the caller rather than fetching, because the page
+ * already holds the open room's members for rendering mentions (ISSUE-578)
+ * and the two have to be one list: a suggestion inserting a name the renderer
+ * would not match leaves plain text behind. The page passes an empty list for
+ * a private room, where the only candidate would be the bot, so the popover
+ * never opens there.
+ *
+ * Fires on an `@` at the start of the text or after whitespace, through to the
+ * caret. Not inside backtick code, where the renderer would not match either,
+ * and not in a `!command`, which is answered as a command and never shown as a
+ * message. The query takes Unicode letters, so a display name like "Zoë" can
+ * be typed into without the list closing.
+ *
+ * Stays closed once the name is typed in full and nothing else could still
+ * match, so a message ending `… @istota` sends on Enter. Ending on the bot's
+ * name is how a turn addresses it under the speech gate's mention mode, and
+ * an Enter that only completed the name would cost a second press every time.
+ */
+export function mentionProvider(candidates: () => readonly MentionCandidate[]): CompletionProvider {
+  return {
+    id: 'mention',
+    match(text, caret) {
+      if (text.trimStart().startsWith('!')) return null;
+      const before = text.slice(0, caret);
+      const m = /(^|\s)@([\p{L}\p{N}\p{M}_.-]*)$/u.exec(before);
+      if (!m) return null;
+      const at = m.index + m[1].length;
+      if (insideCode(before, at)) return null;
+      const others = candidates().filter((c) => !c.self);
+      if (others.length === 0) return null;
+      const tail = /^[\p{L}\p{N}\p{M}_.-]*/u.exec(text.slice(caret))![0];
+      const q = m[2].toLowerCase();
+      if (!tail && q && others.some((c) => c.name.toLowerCase() === q)) {
+        const longer = others.some(
+          (c) =>
+            c.name.toLowerCase() !== q &&
+            [c.name, c.display ?? ''].some((k) => k.toLowerCase().startsWith(q)),
+        );
+        if (!longer) return null;
+      }
+      return { query: m[2], range: [at, caret + tail.length] };
+    },
+    getSuggestions(query): Suggestion[] {
+      const q = query.toLowerCase();
+      const prefix: MentionCandidate[] = [];
+      const substr: MentionCandidate[] = [];
+      for (const c of candidates()) {
+        if (c.self) continue;
+        const keys = [c.name, c.display ?? ''].map((k) => k.toLowerCase());
+        if (!q || keys.some((k) => k.startsWith(q))) prefix.push(c);
+        else if (keys.some((k) => k.includes(q))) substr.push(c);
+      }
+      return [...prefix, ...substr].map((c) => ({
+        value: `${mentionText(c.name)} `,
+        label: mentionText(c.name),
+        description: c.display && c.display !== c.name ? c.display : undefined,
+        // Encoded: the key becomes an element id that `aria-activedescendant`
+        // names, and a bot name or user id may hold a space.
+        key: `mention:${encodeURIComponent(c.name)}`,
+      }));
+    },
+  };
+}
+
+/** Whether position `at` in `text` is in backtick code, closed or still being
+ *  typed: a closed span by `codeRanges`, an open one by a backtick before `at`
+ *  that no closed span accounts for. */
+function insideCode(text: string, at: number): boolean {
+  const ranges = codeRanges(text);
+  if (inCode(ranges, at)) return true;
+  for (let i = 0; i < at; i++) {
+    if (text[i] === '`' && !inCode(ranges, i)) return true;
+  }
+  return false;
 }

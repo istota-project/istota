@@ -48,9 +48,11 @@
   import { isImeComposing } from '$lib/platform/input';
   import type { ChatAttachment, ChatRoom, ChatView, RoomMember } from '$lib/api';
   import { loadRoomMembers, dropRoomMembers } from '$lib/roomMembers';
-  import type { MentionTarget } from '$lib/mentions';
   import { getCurrentUser } from '$lib/userContext';
-  import { getSelectableBrains } from '$lib/components/chat/autocomplete/providers';
+  import {
+    getSelectableBrains,
+    type MentionCandidate,
+  } from '$lib/components/chat/autocomplete/providers';
 
   const session = getChatSession();
   const {
@@ -210,14 +212,19 @@
       live = false;
     };
   });
-  const mentionTargets = $derived.by((): MentionTarget[] => {
+  // One list for both readers: the transcript styles mentions from it and the
+  // composer's `@` suggestions (ISSUE-580) offer it, so a suggestion always
+  // inserts a name the transcript renders as a mention. `display` is for the
+  // suggestion row only; the matcher never reads it.
+  const mentionTargets = $derived.by((): MentionCandidate[] => {
     if (sharedRoomId == null || loadedMembers?.roomId !== sharedRoomId) return [];
-    const targets: MentionTarget[] = loadedMembers.list.map((m) => ({
+    const list: MentionCandidate[] = loadedMembers.list.map((m) => ({
       name: m.user_id,
+      display: m.display_name,
       self: m.user_id === userId,
     }));
-    targets.push({ name: botName });
-    return targets;
+    list.push({ name: botName });
+    return list;
   });
 
   // A room whose host left answers nobody until a member claims it (D14).
@@ -1432,6 +1439,7 @@
           replyTo={stagedReply}
           onReplyChange={(msgId) => (stagedReplyId = msgId)}
           restoreSend={returnedSend}
+          mentionCandidates={mentionTargets}
         />
       </div>
     {/if}

@@ -5,7 +5,7 @@
  * own members plus the bot, and the viewer's own name is the `self` entry.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, cleanup, waitFor } from '@testing-library/svelte';
+import { render, cleanup, waitFor, fireEvent } from '@testing-library/svelte';
 
 const { members } = vi.hoisted(() => ({
   members: vi.fn(async (_id: number) => [
@@ -136,6 +136,22 @@ describe('mentions in the transcript', () => {
       { text: '@Istota', self: false },
     ]);
     expect(members).toHaveBeenCalledWith(1);
+  });
+
+  it('hands the composer the same people to suggest after @, never the viewer', async () => {
+    setRoom(true);
+    setMessages();
+    render(Harness, { component: Page, user: person });
+    await waitFor(() => expect(mentions().length).toBe(2));
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
+    textarea.value = 'hi @';
+    textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+    await fireEvent.input(textarea);
+    await waitFor(() =>
+      expect(
+        [...document.querySelectorAll('[role="option"] .ac-label')].map((e) => e.textContent),
+      ).toEqual(['@bob', '@Istota']),
+    );
   });
 
   it('styles nothing in a private room, and does not fetch its members', async () => {

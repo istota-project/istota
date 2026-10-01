@@ -16,9 +16,11 @@ import {
   getSelectableBrains,
   isKnownCommand,
   loadCommandNames,
+  mentionProvider,
   modelAliasProvider,
   resetCommandCatalogue,
 } from './providers';
+import { findMentions } from '$lib/mentions';
 
 const CATALOGUE = {
   commands: [
@@ -361,5 +363,80 @@ describe('getBrainNamespaces and getInheritedBrain', () => {
       brain_namespaces: ['anthropic'],
     });
     expect(await getBrainNamespaces()).toEqual({});
+  });
+});
+
+describe('mentionProvider (ISSUE-580)', () => {
+  const room = [
+    { name: 'alice', display: 'Alice', self: true },
+    { name: 'bob', display: 'Bob Smith' },
+    { name: 'carol', display: 'Carol' },
+    { name: 'Istota' },
+  ];
+  const p = mentionProvider(() => room);
+  const at = (text: string) => p.match(text, text.length);
+
+  it('fires on @ at the start or after whitespace, through the caret', () => {
+    expect(at('@')).toEqual({ query: '', range: [0, 1] });
+    expect(at('hi @bo')).toEqual({ query: 'bo', range: [3, 6] });
+    expect(at('line\n@c')).toEqual({ query: 'c', range: [5, 7] });
+  });
+
+  it('extends the range over a word tail past the caret', () => {
+    expect(p.match('hi @bo there', 6)).toEqual({ query: 'bo', range: [3, 6] });
+    expect(p.match('hi @bobby', 5)).toEqual({ query: 'b', range: [3, 9] });
+  });
+
+  it('does not fire mid-word, in code, or in a !command', () => {
+    expect(at('mail bob@ex')).toBeNull();
+    expect(at('see `@bo')).toBeNull();
+    expect(at('```\n@bo')).toBeNull();
+    expect(at('!relay ask @bo')).toBeNull();
+  });
+
+  it('fires after closed code', () => {
+    expect(at('`x` @bo')).toEqual({ query: 'bo', range: [4, 7] });
+  });
+
+  it('does not fire when the only candidate is the viewer', () => {
+    const solo = mentionProvider(() => [{ name: 'alice', self: true }]);
+    expect(solo.match('@', 1)).toBeNull();
+    expect(mentionProvider(() => []).match('@', 1)).toBeNull();
+  });
+
+  it('filters on user id and display name, prefix before substring, never the viewer', async () => {
+    const labels = async (q: string) => (await p.getSuggestions(q)).map((s) => s.label);
+    expect(await labels('')).toEqual(['@bob', '@carol', '@Istota']);
+    expect(await labels('sm')).toEqual(['@bob']);
+    expect(await labels('ar')).toEqual(['@carol']);
+    expect(await labels('al')).toEqual([]);
+  });
+
+  it('keeps filtering through a non-ASCII letter', async () => {
+    const zoe = mentionProvider(() => [{ name: 'zoe', display: 'Zoë Ł' }]);
+    expect(zoe.match('hi @zoë', 7)).toEqual({ query: 'zoë', range: [3, 7] });
+    expect((await zoe.getSuggestions('zoë')).map((s) => s.label)).toEqual(['@zoe']);
+  });
+
+  it('closes once a name is typed in full and nothing longer could match', () => {
+    // So a message ending on the bot's name sends on Enter.
+    expect(at('ask @istota')).toBeNull();
+    expect(at('ask @Bob')).toBeNull();
+    // Still open while another name extends it, or text follows the caret.
+    const pair = mentionProvider(() => [{ name: 'al' }, { name: 'alice' }]);
+    expect(pair.match('@al', 3)).toEqual({ query: 'al', range: [0, 3] });
+    expect(p.match('@bobx', 4)).toEqual({ query: 'bob', range: [0, 5] });
+  });
+
+  it('encodes the name in the key, which becomes an element id', async () => {
+    const spaced = mentionProvider(() => [{ name: 'My Bot' }]);
+    expect((await spaced.getSuggestions(''))[0].key).toBe('mention:My%20Bot');
+  });
+
+  it('inserts text the renderer reads back as the same mention', async () => {
+    const [bob] = await p.getSuggestions('bob');
+    expect(bob.value).toBe('@bob ');
+    expect(bob.description).toBe('Bob Smith');
+    expect(findMentions(`hi ${bob.value}`, room).map((s) => s.target.name)).toEqual(['bob']);
   });
 });
