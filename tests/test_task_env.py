@@ -935,3 +935,30 @@ class TestBrokerTrustSplit:
         config.db_path = runtime_inputs["user_temp_dir"] / "test.db"
         with pytest.raises(ValueError, match="sandbox"):
             task_env.build_task_runtime(config, **runtime_inputs)
+
+
+@pytest.mark.parametrize("proxy_enabled", [True, False])
+def test_broker_strips_forge_tokens_without_requiring_skill_proxy(tmp_path, runtime_inputs, proxy_enabled, caplog):
+    from istota.config import CredentialBrokerConfig
+    from istota import db
+    from istota.credential_broker.bindings import get_binding
+    config = _config(tmp_path, skill_proxy_enabled=proxy_enabled,
+                     credential_broker=CredentialBrokerConfig(enabled=True))
+    config.security.network.enabled = False
+    config.developer.enabled = True
+    config.developer.gitlab_token = "fixture-forge-password"
+    runtime_inputs["skill_index"] = {"developer": _skill("developer", EnvSpec(
+        var="GITLAB_TOKEN", source="config", config_path="developer.gitlab_token", sensitive=True,
+    ))}
+    runtime_inputs["selected_skills"] = ["developer"]
+    db.init_db(config.db_path)
+    with db.get_db(config.db_path) as conn:
+        task_id = db.create_task(conn, user_id="testuser", prompt="test", source_type="talk", conversation_token="room-a")
+        runtime_inputs["task"] = db.get_task(conn, task_id)
+    runtime = task_env.build_task_runtime(config, **runtime_inputs)
+    with db.get_db(config.db_path) as conn:
+        assert get_binding(conn, "testuser", "forge.gitlab") is not None
+    assert "placeholders cannot authenticate" in caplog.text
+    assert "GITLAB_TOKEN" not in runtime.env
+    if runtime.proxy_ctx:
+        assert "GITLAB_TOKEN" not in runtime.proxy_ctx.base_env

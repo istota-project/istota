@@ -22,7 +22,12 @@ PLACEHOLDER = b"{{cred:portal}}"
 
 
 @pytest.fixture
-def broker(tmp_path, monkeypatch, request):
+def broker_responder():
+    return None
+
+
+@pytest.fixture
+def broker(tmp_path, monkeypatch, request, broker_responder):
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
     (tmp_path / "daemon").mkdir()
     config = Config(db_path=tmp_path / "daemon" / "data.db")
@@ -43,6 +48,10 @@ def broker(tmp_path, monkeypatch, request):
     listener.settimeout(.2)
     upstream_host = getattr(request, "param", "localhost")
     host = f"{upstream_host}:{listener.getsockname()[1]}"
+    original_getaddrinfo = socket.getaddrinfo
+    def resolve_local(name, *args, **kwargs):
+        return original_getaddrinfo("127.0.0.1" if name == upstream_host else name, *args, **kwargs)
+    monkeypatch.setattr(socket, "getaddrinfo", resolve_local)
     secrets_store.upsert_secret(config.db_path, "alice", "vault_entries", "portal", VALUE.decode(),
                                binding=parse_binding("https://" + host, {}, []))
     with db.get_db(config.db_path) as conn:
@@ -79,6 +88,8 @@ def broker(tmp_path, monkeypatch, request):
                         response_headers = [(b"x-echo", VALUE)]
                         if request.target == b"/header-name":
                             response_headers.append((b"x-echo-" + VALUE, b"yes"))
+                        if broker_responder is not None:
+                            status, response_headers, response = broker_responder(request, body)
                         if request.target != b"/chunked":
                             response_headers.append((b"content-length", str(len(response)).encode()))
                         tls.sendall(parser.send(h11.Response(status_code=status, headers=response_headers)))

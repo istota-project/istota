@@ -138,3 +138,19 @@ class TestTheOrdinaryPathStillQueues:
         _config, calls = cli_env
         cli.cmd_task(_Args())
         assert calls == []
+
+
+@pytest.mark.parametrize("success", [True, False])
+def test_immediate_execution_persists_result_without_caller_transaction(cli_env, db_path, monkeypatch, success):
+    config, _ = cli_env
+    def execute(task, cfg, resources, **kwargs):
+        assert kwargs.get("conn") is None
+        return success, "fixture result", None, None
+    monkeypatch.setattr(cli, "execute_task", execute)
+    if success:
+        cli.cmd_task(_Args(execute=True))
+    else:
+        with pytest.raises(SystemExit) as exc:
+            cli.cmd_task(_Args(execute=True))
+        assert exc.value.code == 1
+    assert _task_rows(db_path)[0]["status"] == ("completed" if success else "failed")

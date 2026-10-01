@@ -190,30 +190,32 @@ def cmd_task(args):
         print("Executing task...")
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, task_id)
-            if task:
-                user_resources = db.get_user_resources(conn, args.user)
-                # Not `dry_run=args.dry_run`: a dry run returned above, so the
-                # only way to reach here is a real execution.
-                success, result, _actions, _trace = execute_task(
-                    task,
-                    config,
-                    user_resources,
-                    use_context=use_context,
-                    conn=conn,
-                )
+            user_resources = db.get_user_resources(conn, args.user) if task else []
+        if task:
+            # Match the scheduler: execution opens short write transactions for
+            # skill selection and credential admission, so hold no caller DB.
+            success, result, _actions, _trace = execute_task(
+                task,
+                config,
+                user_resources,
+                use_context=use_context,
+            )
+            with db.get_db(config.db_path) as conn:
                 if success:
                     db.update_task_status(conn, task_id, "completed", result=result)
-                    print("\n--- Result ---")
-                    print(result)
                 else:
                     db.update_task_status(
                         conn, task_id, "failed", result=task.partial_result,
                         error=result, actions_taken=_actions,
                         execution_trace=_trace,
                     )
-                    print("\n--- Error ---", file=sys.stderr)
-                    print(result, file=sys.stderr)
-                    sys.exit(1)
+            if success:
+                print("\n--- Result ---")
+                print(result)
+            else:
+                print("\n--- Error ---", file=sys.stderr)
+                print(result, file=sys.stderr)
+                sys.exit(1)
 
 
 def cmd_repl(args):

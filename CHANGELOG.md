@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- With the optional credential broker enabled, git, gh and glab authenticate through placeholders instead of receiving forge tokens. They require a grant and a working broker connection; the devbox keeps its separate credential path.
+
 - The optional HTTP credential broker lets tasks authenticate with placeholders while the proxy supplies the values to approved hosts. Small echoed responses are scrubbed, and diagnostics report readiness and containment limits. The broker is disabled by default.
 
 - Settings now lists credential bindings and lets you choose room access, HTTP methods and scheduled use. New credentials start ungranted; a one-time action grants the credentials already present. When the optional HTTP credential broker is enabled, those grants restrict placeholder authentication. Existing credential fetch commands remain available during the rollout.
@@ -62,6 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `browse interact --click` and `--fill` now drive the page the way the coordinate flags already did: the pointer travels to the element and presses it, and a value is typed key by key rather than inserted whole. A filled field used to receive no keystroke at all — the value simply appeared, which is exactly what a login form behind bot detection is watching for — and a click arrived with no movement behind it. Measured on the shipped container, the same fill went from no key events to ten, and a click from one pointer movement to fifteen along an approach path. Selectors, results and error codes are unchanged, each action now reports which element it matched, and the older method is still there as an automatic fallback when the typed path cannot run.
 
 ### Fixed
+
+- Immediate task execution from the command line no longer holds a database transaction across credential admission. This avoids a database-lock failure before the task starts.
 
 - The version on `/admin`, `istota --version`, the Nextcloud status file and native session logs now includes the running commit when istota runs from a git checkout, such as `0.42.0+a1b2c3d`, unless the checkout is exactly on that release's tag. Before, an Ansible host on an untagged commit of `main` reported the previous release. Docker images and the standalone install have no checkout and still show the plain version. The sign-in and other pages shown before login no longer show a version at all.
 - `istota-skill relay list` and `relay status` now work from a private room bound to Talk. They check the room's Talk participants before showing any relay content, and on a deployment that keeps the Nextcloud app password in its environment file the skill process never received that password, so every check failed. The proxy now hands the relay skill the app password, and a participant list that cannot be fetched is reported as `audience_unavailable` rather than as a room that is not private.

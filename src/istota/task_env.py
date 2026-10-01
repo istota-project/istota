@@ -346,6 +346,10 @@ def build_task_runtime(
     proxy_only_env, env = _split_credential_env(
         env, derive_proxy_only_set(skill_index),
     )
+    available_forge_names = {
+        "forge." + forge for forge in ("gitlab", "github")
+        if env.get(forge.upper() + "_TOKEN")
+    }
     credential_env = {}
     if config.security.skill_proxy_enabled:
         from .skill_proxy import SkillProxy, effective_client_wait
@@ -544,16 +548,19 @@ def build_task_runtime(
                 Path(os.environ.get("HOME", "/tmp")) / ".cache" / "huggingface"
             )
 
+    # Broker consumers never receive a raw forge token, even when the skill
+    # proxy is disabled. A missing network proxy must not restore raw values.
+    if config.security.credential_broker.enabled:
+        env.pop("GITLAB_TOKEN", None)
+        env.pop("GITHUB_TOKEN", None)
+
     if config.db_path and Path(config.db_path).is_file():
         from . import db
         from .credential_broker.bindings import sync_forge_bindings
         from .credential_broker.grants import ensure_credential_grants
         with db.get_db(config.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            sync_forge_bindings(conn, task.user_id, config.developer, available_names={
-                "forge." + forge for forge in ("gitlab", "github")
-                if forge.upper() + "_TOKEN" in credential_env
-            })
+            sync_forge_bindings(conn, task.user_id, config.developer, available_names=available_forge_names)
             ensure_credential_grants(conn, task.id, task.user_id)
 
     # PATH entries contributed by setup_env hooks — today the developer

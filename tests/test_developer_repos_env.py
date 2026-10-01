@@ -120,8 +120,10 @@ def _run_task(config: Config, user_id: str = "alice") -> dict:
                 conn, prompt="test", user_id=user_id, source_type="talk",
             )
             task = db.get_task(conn, task_id)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
+        # Match production: the daemon executes outside the task transaction.
+        from istota.executor import execute_task
+        result = execute_task(task, config, [])
+        assert result[0], result[1]
 
     return mock_run.call_args[1]["env"]
 
@@ -251,3 +253,24 @@ class TestManifestOutranksSetupEnv:
         overrides.mkdir(exist_ok=True)
         specs = {s.var: s for s in load_skill_index(overrides)[skill].env_specs}
         assert specs["DEVELOPER_REPOS_DIR"].source == "setup_env"
+
+
+
+def test_cli_immediate_execution_admits_grants_without_lock(tmp_path, monkeypatch):
+    from istota import cli
+    from tests.test_cli_task_dry_run import _Args
+    config = _base_config(tmp_path)
+    config.developer = DeveloperConfig(enabled=True, repos_dir=str(tmp_path / "repos"),
+                                       gitlab_token="fixture-forge-password")
+    config.db_path.parent.mkdir(parents=True)
+    (config.temp_dir / "alice").mkdir(parents=True)
+    db.init_db(config.db_path)
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    with patch("istota.executor.subprocess.run") as model, patch("istota.skill_proxy.SkillProxy"):
+        model.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        cli.cmd_task(_Args(execute=True, conversation_token="room-a"))
+    with db.get_db(config.db_path) as conn:
+        row = conn.execute("SELECT status, credential_grants_initialized FROM tasks").fetchone()
+        assert row["status"] == "completed"
+        assert row["credential_grants_initialized"] == 1
+    assert model.called
