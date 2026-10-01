@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { Button, IconButton, Input } from '$lib/components/ui';
-  import { Plus, X } from 'lucide-svelte';
+  import { Plus, X } from '@lucide/svelte';
 
   // A repeating threshold/rate row list. A flat state is one row, so it needs
   // no separate control — which is also why the data models a flat rate as a

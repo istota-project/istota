@@ -26,7 +26,7 @@
     ConfirmDialog,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
-  import { Cog } from 'lucide-svelte';
+  import { Cog } from '@lucide/svelte';
   import { formatDateTime } from '$lib/dateFormat';
 
   let { children } = $props();

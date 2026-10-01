@@ -5,7 +5,7 @@
    * the private 1:1 chat gets a filled bubble and a group the outline, so the
    * two can be told apart from the icon alone.
    */
-  import { Smartphone, MessageCircle } from 'lucide-svelte';
+  import { Smartphone, MessageCircle } from '@lucide/svelte';
 
   let {
     surface,

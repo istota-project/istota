@@ -1,6 +1,6 @@
 <script lang="ts">
   import { base } from '$app/paths';
-  import { LogOut } from 'lucide-svelte';
+  import { LogOut } from '@lucide/svelte';
   import { ConfirmDialog } from '$lib/components/ui';
   import { forgetLastUserId } from '$lib/offline/lastUser';
 

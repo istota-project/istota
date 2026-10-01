@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { ChevronLeft, ChevronRight, FileText, Play, Star, X, ExternalLink } from 'lucide-svelte';
+  import { ChevronLeft, ChevronRight, FileText, Play, Star, X, ExternalLink } from '@lucide/svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
   import { fileKind, inlineMedia, playerUrl, providerLabel } from '$lib/feeds/embed';

@@ -4,7 +4,7 @@
   import { page } from '$app/state';
   import { AppShell, ShellHeader, HeaderNav, Chip } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
-  import { Cog } from 'lucide-svelte';
+  import { Cog } from '@lucide/svelte';
 
   let { children } = $props();
 

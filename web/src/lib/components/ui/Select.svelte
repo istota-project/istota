@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Select as BitsSelect } from 'bits-ui';
-  import { ChevronDown } from 'lucide-svelte';
+  import { ChevronDown } from '@lucide/svelte';
 
   export interface SelectOption {
     value: string;

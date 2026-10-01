@@ -1,5 +1,5 @@
-import { UserRound, SlidersHorizontal, Send, KeyRound, Plug } from 'lucide-svelte';
-import type { ComponentType } from 'svelte';
+import { UserRound, SlidersHorizontal, Send, KeyRound, Plug } from '@lucide/svelte';
+import type { LucideIcon } from '@lucide/svelte';
 
 /**
  * The user settings sections, in sidebar order.
@@ -13,7 +13,7 @@ import type { ComponentType } from 'svelte';
 export interface UserSettingsSection {
   href: string;
   label: string;
-  icon: ComponentType;
+  icon: LucideIcon;
 }
 
 export const USER_SETTINGS_SECTIONS: UserSettingsSection[] = [

@@ -25,7 +25,7 @@
     Camera,
     Folder,
     Reply,
-  } from 'lucide-svelte';
+  } from '@lucide/svelte';
   import { IconButton } from '$lib/components/ui';
   import {
     uploadChatAttachment,

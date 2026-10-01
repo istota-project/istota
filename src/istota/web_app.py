@@ -859,7 +859,7 @@ _LOGIN_PAGE_THEME_SCRIPT = (
 )
 
 # Lucide icons, inlined. This page is server-rendered FastAPI HTML, so it can't
-# import `lucide-svelte` the way the SvelteKit app does — the path data and the
+# import `@lucide/svelte` the way the SvelteKit app does — the path data and the
 # default attributes are copied verbatim from the package so the two surfaces
 # draw the same glyphs.
 def _lucide(name: str, body: str) -> str:

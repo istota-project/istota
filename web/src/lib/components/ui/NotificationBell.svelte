@@ -19,7 +19,7 @@
    * a fixed 1.25rem gap in `markdown.css`; a fourth control does not change that
    * pitch, so nothing there needs re-deriving.
    */
-  import { Bell } from 'lucide-svelte';
+  import { Bell } from '@lucide/svelte';
   import { notificationCounts } from '$lib/stores/notifications';
   import CountPill from './CountPill.svelte';
   import NotificationPanel from './NotificationPanel.svelte';

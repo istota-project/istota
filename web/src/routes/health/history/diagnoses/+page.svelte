@@ -27,7 +27,7 @@
   } from '$lib/health/conditions';
   import DocumentList from '$lib/components/health/DocumentList.svelte';
   import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';
-  import { Paperclip } from 'lucide-svelte';
+  import { Paperclip } from '@lucide/svelte';
   import { formatDate } from '$lib/dateFormat';
 
   const getScrollRoot = getShellScrollRoot();

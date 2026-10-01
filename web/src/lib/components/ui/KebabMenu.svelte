@@ -1,6 +1,6 @@
 <script lang="ts">
   import { DropdownMenu } from 'bits-ui';
-  import { MoreVertical } from 'lucide-svelte';
+  import { MoreVertical } from '@lucide/svelte';
 
   export interface KebabItem {
     label: string;
