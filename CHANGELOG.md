@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Your own texts now show in the web view of an SMS or WhatsApp room, beside the answers, and answering a confirmation by text (a bare yes, a button, or `!confirm`) leaves the answer and its acknowledgement in that room. A `!confirm` sent from a WhatsApp group still leaves nothing in the group. The people's messages in a WhatsApp group room now show in its web view too, as they already did for Talk groups.
 
+- An SMS or WhatsApp room now also shows the conversation from before it existed: the scheduler copies your earlier texts and their answers into the room within a minute of your first text, once any answer still in progress has finished. The assistant also recalls memories from those earlier texts in the room. A room you delete and that is created again by a later text starts empty, and does not recall the deleted room's memories.
+
 - Server deployments now migrate existing room identities during a brief offline window, preserving room history, channel memories and old links. Standalone updates require stopping the local server first; Docker upgrades have an explicit offline migration step.
 
 - Room identity migration now carries channel memories and scheduled destinations to the new room names. Interrupted moves can resume, conflicting files are left for an operator to resolve, and schedule files are backed up before rewriting.

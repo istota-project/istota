@@ -75,6 +75,7 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     # clock-bypass reason. See `tests/test_whatsapp_pairing_poll.py`.
     ("whatsapp-requests", None),
     ("room-notices", None),
+    ("phone-room-backfill", None),
     ("whatsapp-pairing", None),
     ("skill-overlay-reindex", "skill_overlay_reindex_interval"),
     ("vault-sync", "vault_sync_interval"),
@@ -102,6 +103,7 @@ KNOWN_FIELD_MISMATCHES = {
 EXPECTED_BACKGROUND = {
     "whatsapp-requests",
     "room-notices",
+    "phone-room-backfill",
     "sleep-cycles",
     "travel-timezone",
     "email-poll",

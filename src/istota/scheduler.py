@@ -695,6 +695,101 @@ def _store_room_turn(conn, task, room_token: str | None, body: str) -> int | Non
     )
 
 
+# The reserved per-user KV namespace marking a phone room whose pre-room
+# history has been replayed. Keyed on the room token, so a room deleted and
+# minted again on the same binding is a new key and gets a pass of its own,
+# which finds nothing: its predecessor's alias is a tombstone.
+PHONE_ROOM_BACKFILL_NAMESPACE = "_room_backfill"
+_UNFINISHED_TASK_STATUSES = ("pending", "locked", "running", "pending_confirmation")
+
+
+def backfill_phone_rooms(config: Config) -> int:
+    """Replay each minted SMS or WhatsApp room's pre-room history into it.
+
+    room-surface-model §F: the transcript starts at the mint, and history from
+    before it lives on the per-user hash token the mint recorded as a permanent
+    alias. This is the scheduler-side half that folds it in, through
+    `db.backfill_room_messages_from_tasks` rather than a second converter, one
+    room per transaction so a failure costs that room's pass and nothing else.
+    The room stays usable either way; its transcript simply starts later.
+
+    The marker is written only once no task on an alias is still unfinished. A
+    task created on the hash token before the mint and completed after it has
+    no row from the delivery path, which resolves the room by the task's own
+    token; waiting for it here is what puts that answer in the transcript.
+
+    Returns rows written across every room.
+    """
+    try:
+        with db.get_db(config.db_path) as conn:
+            candidates = conn.execute(
+                "SELECT DISTINCT r.token, r.user_id, b.surface FROM rooms r "
+                "JOIN room_bindings b ON b.room_token = r.token "
+                "WHERE b.surface IN ('sms', 'whatsapp') "
+                "AND NOT EXISTS (SELECT 1 FROM istota_kv k "
+                "  WHERE k.user_id = r.user_id AND k.namespace = ? "
+                "  AND k.key = r.token)",
+                (PHONE_ROOM_BACKFILL_NAMESPACE,),
+            ).fetchall()
+    except Exception as e:
+        logger.warning("phone_room_backfill: candidate read failed: %s", e)
+        return 0
+    total = 0
+    for row in candidates:
+        try:
+            with db.get_db(config.db_path) as conn:
+                total += _backfill_phone_room(
+                    conn, row["token"], row["user_id"], row["surface"],
+                )
+        except Exception as e:
+            logger.warning(
+                "phone_room_backfill: room %s failed, retrying next pass: %s",
+                row["token"], e,
+            )
+    return total
+
+
+def _backfill_phone_room(conn, room_token: str, user_id: str, surface: str) -> int:
+    """One room's pass. Returns rows written; writes the marker when done.
+
+    Only the owner's own private phone room qualifies: a WhatsApp group carries
+    a `whatsapp` binding too, and a room another human reads is no private
+    transcript (`routing.private_phone_room`).
+    """
+    if private_phone_room(conn, surface, user_id) != room_token:
+        return 0
+    before = db.room_max_message_id(conn, room_token)
+    caught_up = db.get_room_read_state(conn, room_token, "web", user_id) >= before > 0
+    inserted = db.backfill_room_messages_from_tasks(
+        conn, room_token, alias_owner=user_id,
+    )
+    if inserted and caught_up:
+        # The history was read on the phone; a reader who had seen everything
+        # in web is not shown it again as unread.
+        db.set_room_read_state(
+            conn, room_token, "web", db.room_max_message_id(conn, room_token), user_id,
+        )
+    aliases = [
+        ref for ref in db.room_ref_tokens(conn, room_token, include_surface_refs=False)
+        if ref != room_token
+    ]
+    if aliases:
+        marks = ", ".join("?" for _ in aliases)
+        states = ", ".join("?" for _ in _UNFINISHED_TASK_STATUSES)
+        unfinished = conn.execute(
+            f"SELECT 1 FROM tasks WHERE conversation_token IN ({marks}) "
+            f"AND user_id = ? AND status IN ({states}) LIMIT 1",
+            (*aliases, user_id, *_UNFINISHED_TASK_STATUSES),
+        ).fetchone()
+        if unfinished:
+            return inserted
+    db.kv_set(
+        conn, user_id, PHONE_ROOM_BACKFILL_NAMESPACE, room_token,
+        json.dumps({"rows": inserted}),
+    )
+    return inserted
+
+
 def _room_turn_belongs_here(
     conn, task: db.Task, task_id: int, room_token: str | None, *,
     delivering_into_room: bool,
@@ -8683,6 +8778,9 @@ def build_interval_gates(
 
         run_coro(drain_room_notices(config))
 
+    def _phone_room_backfill(now: float) -> None:
+        backfill_phone_rooms(config)
+
     def _whatsapp_pairing(now: float) -> None:
         # Inline on the dispatch thread, deliberately: the poll's own cheap
         # read is what makes an every-tick gate affordable, and
@@ -8948,6 +9046,16 @@ def build_interval_gates(
             name="room-notices",
             run=_room_notices,
             fixed_interval=30,
+            background=True,
+        ),
+        # A minted SMS or WhatsApp room's history from before the mint
+        # (room-surface-model §F). Off the loop: a first pass over a long phone
+        # history is a write per turn. Once a room is marked done the pass is
+        # one indexed read.
+        IntervalGate(
+            name="phone-room-backfill",
+            run=_phone_room_backfill,
+            fixed_interval=60,
             background=True,
         ),
         IntervalGate(

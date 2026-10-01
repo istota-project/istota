@@ -5635,6 +5635,22 @@ def _recall_memories(
         with db.get_db_if_present(config.db_path, conn) as c:
             if c is None:
                 return None
+            if task.conversation_token:
+                # A room's permanent aliases are the same conversation under an
+                # older name: a phone thread's hash token from before its room
+                # was minted. Without surface refs, so a deleted room's
+                # tombstoned alias is not one and its memory stays out of the
+                # room that replaced it.
+                try:
+                    refs = db.room_ref_tokens(
+                        c, task.conversation_token, include_surface_refs=False,
+                    )
+                except Exception:
+                    logger.debug("Channel alias lookup failed for recall", exc_info=True)
+                    refs = []
+                for ref in refs:
+                    if f"channel:{ref}" not in include_ids:
+                        include_ids.append(f"channel:{ref}")
             results = search(
                 c, task.user_id, prompt,
                 limit=config.memory_search.auto_recall_limit,

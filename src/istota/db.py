@@ -3025,7 +3025,9 @@ def scheduled_assistant_body(heartbeat_silent: bool, result: str) -> str | None:
     return result
 
 
-def _backfill_turns_for(conn: sqlite3.Connection, where: str, params: tuple) -> int:
+def _backfill_turns_for(
+    conn: sqlite3.Connection, where: str, params: tuple, *, into: str | None = None,
+) -> int:
     """Shared transcript backfill: fold completed `tasks` rows matching `where`
     into the canonical `messages` store. One user row (body=prompt) + one
     assistant row (body=result) per conversational turn; a *scheduled* job
@@ -3033,7 +3035,8 @@ def _backfill_turns_for(conn: sqlite3.Connection, where: str, params: tuple) -> 
     `scheduled_assistant_body` (its synthetic cron prompt was never
     user-authored, so no user row, and a NO_ACTION tick is omitted entirely).
     Idempotent via the partial unique index (room_token, origin_surface, role,
-    task_id). Returns rows inserted."""
+    task_id). Rows land under each task's own `conversation_token` unless
+    `into` names the room they belong to. Returns rows inserted."""
     rows = conn.execute(
         f"SELECT id, conversation_token, prompt, result, source_type, "
         f"heartbeat_silent, created_at FROM tasks "
@@ -3042,7 +3045,7 @@ def _backfill_turns_for(conn: sqlite3.Connection, where: str, params: tuple) -> 
     ).fetchall()
     inserted = 0
     for r in rows:
-        token = r["conversation_token"]
+        token = into or r["conversation_token"]
         st = r["source_type"]
         created = r["created_at"]
         if st == "scheduled":
@@ -3064,11 +3067,44 @@ def _backfill_turns_for(conn: sqlite3.Connection, where: str, params: tuple) -> 
 
 def backfill_room_messages_from_tasks(
     conn: sqlite3.Connection, conversation_token: str,
+    *, alias_owner: str | None = None,
 ) -> int:
     """Populate the canonical `messages` store from completed `tasks` for one
-    room token. See `_backfill_turns_for` for the per-turn shape."""
+    room token. See `_backfill_turns_for` for the per-turn shape.
+
+    With ``alias_owner``, ``conversation_token`` is a room and the tasks read
+    are the ones on its permanent aliases rather than on the room token — a
+    phone conversation's history from before its room was minted — written
+    under the room token. The aliases are `_room_ref_tokens`' without surface
+    refs, so an alias tombstoned by a deleted room is not one, and a room
+    recreated on the same binding cannot reach its predecessor's history.
+    Only ``alias_owner``'s own turns are read, never a withheld or guest turn
+    (the two the history reader and the channel index already leave out), and
+    only conversational source types plus ``scheduled``: any other source
+    type would write its synthetic prompt as a user row, which is what
+    `_migrate_nonconversational_transcript_cleanup` had to sweep after the
+    unified-rooms fold. Tasks on the room token itself are the live writers'.
+    """
+    if alias_owner is None:
+        return _backfill_turns_for(
+            conn, "conversation_token = ?", (conversation_token,),
+        )
+    if get_room(conn, conversation_token) is None:
+        return 0
+    refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
+    aliases = [ref for ref in refs if ref != conversation_token]
+    if not aliases:
+        return 0
+    sources = TRANSCRIPT_SURFACES + ("scheduled",)
+    where = (
+        f"conversation_token IN ({', '.join('?' for _ in aliases)}) "
+        "AND user_id = ? "
+        "AND COALESCE(withheld_from_room, 0) = 0 "
+        "AND guest_participant_id IS NULL "
+        f"AND source_type IN ({', '.join('?' for _ in sources)})"
+    )
     return _backfill_turns_for(
-        conn, "conversation_token = ?", (conversation_token,),
+        conn, where, (*aliases, alias_owner, *sources), into=conversation_token,
     )
 
 
@@ -4900,9 +4936,11 @@ def _canonical_room_token(
     return mapping[0] if mapping is not None else token
 
 
-def room_ref_tokens(conn: sqlite3.Connection, room_token: str) -> list[str]:
+def room_ref_tokens(
+    conn: sqlite3.Connection, room_token: str, *, include_surface_refs: bool = True,
+) -> list[str]:
     """`_room_ref_tokens`, for callers outside this module."""
-    return _room_ref_tokens(conn, room_token)
+    return _room_ref_tokens(conn, room_token, include_surface_refs=include_surface_refs)
 
 
 def _room_ref_tokens(

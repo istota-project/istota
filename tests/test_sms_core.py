@@ -1769,6 +1769,28 @@ class TestSmsRoomMint:
             for table, count in [('rooms', 1), ('messages', 2), ('room_token_migration', 1)]:
                 assert conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == count
 
+    def test_pre_room_texts_are_backfilled_behind_the_first_minted_text(self, tmp_path):
+        """Stage 23 through the webhook: history on the hash token from before
+        the room existed lands in the room's transcript on the next pass."""
+        from istota import scheduler
+        config = _config(tmp_path)
+        old = sms_conversation_token('alice')
+        with db.get_db(config.db_path) as conn:
+            earlier = db.create_task(conn, prompt='what is on friday', user_id='alice',
+                                     source_type='sms', conversation_token=old)
+            conn.execute("UPDATE tasks SET status='completed', result='The dentist at 3.', "
+                         "created_at='2026-09-01 10:00:00' WHERE id=?", (earlier,))
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+            token = db.get_task(conn, first.task_id).conversation_token
+        assert scheduler.backfill_phone_rooms(config) == 2
+        with db.get_db(config.db_path) as conn:
+            rows = [(r['role'], r['body']) for r in conn.execute(
+                'SELECT role, body FROM messages WHERE room_token = ? '
+                'ORDER BY created_at, id', (token,))]
+        assert rows == [('user', 'what is on friday'), ('assistant', 'The dentist at 3.'),
+                        ('user', 'check the backup')]
+
     def test_command_mints_and_dispatches_on_canonical_token(self, tmp_path, monkeypatch):
         config = _config(tmp_path)
         calls = []
