@@ -1122,12 +1122,6 @@
             {/if}
             <span class="room-text">
               <span class="room-line">
-                {#if tint}
-                  <!-- The dot carries the colour where the wash cannot: a
-									     forced-colours or high-contrast mode drops the tinted
-									     background entirely, and this survives as a shape. -->
-                  <span class="room-dot" aria-hidden="true"></span>
-                {/if}
                 <span class="room-name" class:unread>{room.name}</span>
                 {#if unread}
                   <CountPill count={unreadCount} title={`${unreadCount} unread`} />
@@ -1794,21 +1788,6 @@
   .room-row.tinted:hover,
   .room-row.tinted.active {
     background: color-mix(in srgb, var(--room-tint) 26%, var(--surface-raised));
-  }
-  /* Sits in the title's flex line before the name, so a long name still
-	   truncates against the row rather than against the dot. */
-  .room-dot {
-    flex-shrink: 0;
-    width: 0.5rem;
-    height: 0.5rem;
-    border-radius: var(--radius-pill);
-    background: var(--room-tint);
-    /* Without this the dot is no fallback for the wash — it fails *with* it.
-		   Forced-colours substitutes a background-color exactly as it does the
-		   row tint, so the dot would flatten to the forced background and the
-		   colour would be gone from the row entirely. Opting out is what the
-		   escape exists for: here the colour is the content, not decoration. */
-    forced-color-adjust: none;
   }
 
   /* Jump-to-response: a brief pulse on the row a search result jumps to. The

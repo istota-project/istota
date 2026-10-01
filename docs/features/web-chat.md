@@ -8,7 +8,7 @@ Each room is a persistent conversation backed by its own per-surface channel tok
 
 - **Create / select** — rooms live in the sidebar; selecting one loads its history.
 - **Per-room settings** — a kebab (⋮) on each room opens a settings modal that renames the room (the token stays the same), copies its token (to paste into a `web:<token>` output route), sets the room's colour, sets its model/effort default and (for an admin, where the operator allows it) pins its brain, promotes a web-origin room to a real Nextcloud Talk conversation and binds the two, and hard-deletes the room behind a GitHub-style type-the-name confirm. A room with a task still running can't be deleted until it finishes.
-- **Room colour** — a choice from a fixed palette of eight, tuned separately for the light and dark themes, that tints the room's row in the sidebar and puts a dot beside its name. It is per-user and web-only: two members of a shared Talk room can tint it differently, and there is no `!room color` command, since Talk has nowhere to show one.
+- **Room colour** — a choice from a fixed palette of eight, tuned separately for the light and dark themes, that tints the room's row in the sidebar. It is per-user and web-only: two members of a shared Talk room can tint it differently, and there is no `!room color` command, since Talk has nowhere to show one.
 - **Deep link** — `/chat?room=<token>` selects a room on load, silently falling back if the token is unknown or belongs to another user.
 
 Deleting a room is a hard, token-scoped cascade across `task_events`, `tasks`, `web_chat_messages`, and `channel_sleep_cycle_state`, plus a best-effort removal of the `Channels/<token>/` workspace folder. (Channel `memory_chunks` are a documented residual.)

@@ -68,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A room colour now only tints the room's row in the web chat sidebar. The dot it also added beside the room name is gone.
 - **Breaking:** a task in a shared room now reads only what its sender has shared there. `[rooms] shared_room_data_policy = "restrict"` is the default, so on the day you upgrade every existing group Talk room loses access to each member's `USER.md`, workspace and private skills until that member runs `!room share all` (or shares single scopes) in the room. There is deliberately no migration that shares everything for existing rooms. `shared_room_data_policy = "off"` restores the old reach for members' turns.
 
   **Upgrade note:** decide per room. In each group room where members want the bot to use their data in front of the others, each of them runs `!room share all` there; otherwise leave it restricted.
