@@ -7619,7 +7619,6 @@ CREATE TABLE IF NOT EXISTS room_policy (
     speech_mode  TEXT,
     guest_reply  TEXT NOT NULL DEFAULT 'held'
                  CHECK (guest_reply IN ('off', 'held', 'direct')),
-    record_guests INTEGER NOT NULL DEFAULT 1,
     vetoed_by    INTEGER REFERENCES room_participants(id),
     max_bot_turns_without_human INTEGER NOT NULL DEFAULT 3,
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),

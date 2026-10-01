@@ -49,7 +49,6 @@ class RoomPolicy:
     host_user_id: str | None
     speech_mode: str | None
     guest_reply: str
-    record_guests: bool
     vetoed_by: int | None
     max_bot_turns_without_human: int
     vetoed_at: str | None = None
@@ -90,7 +89,6 @@ def _row_to_policy(row) -> RoomPolicy:
         host_user_id=row["host_user_id"],
         speech_mode=row["speech_mode"],
         guest_reply=row["guest_reply"],
-        record_guests=bool(row["record_guests"]),
         vetoed_by=row["vetoed_by"],
         max_bot_turns_without_human=int(row["max_bot_turns_without_human"]),
         vetoed_at=row["vetoed_at"],

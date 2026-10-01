@@ -11,6 +11,7 @@ room by.
 import asyncio
 import json
 import sqlite3
+from dataclasses import fields
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -111,6 +112,16 @@ class TestTheMigration:
             # Nothing is backfilled: a policy is made the first time a room
             # needs one, from the room as it is then.
             assert upgraded.execute("SELECT COUNT(*) FROM room_policy").fetchone()[0] == 0
+
+    def test_there_is_no_record_guests_switch(self, config):
+        """Dropped at Stage 28 rather than wired: switching guest recording off
+        would leave the classifier window and the audience without the guests,
+        which D1 exists to prevent, and a vetoed room already records nothing
+        (D12). Nothing ever read it."""
+        with db.get_db(config.db_path) as conn:
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(room_policy)")}
+        assert "record_guests" not in columns
+        assert "record_guests" not in {f.name for f in fields(room_policy.RoomPolicy)}
 
     def test_deleting_a_room_deletes_its_policy(self, config):
         with db.get_db(config.db_path) as conn:

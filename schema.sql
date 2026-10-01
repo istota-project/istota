@@ -1536,8 +1536,9 @@ CREATE TABLE IF NOT EXISTS room_data_grants (
 -- switched off by being removed from a WhatsApp group; `veto_on_by` is the
 -- member who asked to switch it back on before every vetoer agreed; everyone
 -- who switched it off is in `room_vetoes`. `announced_at` is when the bot
--- announced itself to the room's guests. `record_guests` is read by nothing:
--- D12 makes "record nothing" the only answer while a room is off. The FK
+-- announced itself to the room's guests. There is no switch to stop
+-- recording guests: D1 needs every turn, and a room that is off records
+-- nothing (D12). The FK
 -- cascade is decorative (foreign_keys unset); room deletion hand-deletes from
 -- here. Kept equal to `db._ROOM_POLICY_DDL` by tests/test_room_policy.py.
 CREATE TABLE IF NOT EXISTS room_policy (
@@ -1546,7 +1547,6 @@ CREATE TABLE IF NOT EXISTS room_policy (
     speech_mode  TEXT,
     guest_reply  TEXT NOT NULL DEFAULT 'held'
                  CHECK (guest_reply IN ('off', 'held', 'direct')),
-    record_guests INTEGER NOT NULL DEFAULT 1,
     vetoed_by    INTEGER REFERENCES room_participants(id),
     max_bot_turns_without_human INTEGER NOT NULL DEFAULT 3,
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
