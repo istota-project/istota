@@ -12,7 +12,7 @@ Subsystems:
 - `executor.md` — `execute_task()`, env mapping, prompt assembly, security
 - `prompts.md` — the two halves of a task prompt, and the control directory that hands them over
 - `scheduler.md` — daemon loop, worker pool, DB tables, deferred ops
-- `config.md` — every dataclass field + TOML mapping
+- `config.md` — the config rules that are not obvious from the dataclasses, and the TOML mapping
 - `skills.md` — skill metadata, single-axis selection (eager vs menu), per-skill user overlays, CLI modules
 - `transport.md` — Transport seam over messaging surfaces (Talk + email; Matrix / web chat designed-for), plus the room model and multiplayer rooms (speech gate, participants, host and guests, audience, epochs, shared-room delivery refusal)
 - `sms.md` — provider-neutral SMS surface, Twilio and Telnyx adapters, delivery states, and switching
@@ -287,7 +287,7 @@ This repo is public, so `.githooks/pre-commit` scans staged content twice: `gitl
 
 Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config/istota/config.toml` → `/etc/istota/config.toml`. Override with `-c PATH`.
 
-Per-user data lives in DB tables (`user_profiles`, `user_resources`, `briefing_configs`, `secrets`) populated by `istota user|resource|briefing|secret ensure`. The `[users.X]` block in `config.toml` (docker entrypoint path) is also accepted; DB rows win at config-load time. The retired `config/users/{user}.toml` mechanism is gone. CalDAV derived from Nextcloud. Field-by-field reference in `.claude/rules/config.md`.
+Per-user data lives in DB tables (`user_profiles`, `user_resources`, `briefing_configs`, `secrets`) populated by `istota user|resource|briefing|secret ensure`. The `[users.X]` block in `config.toml` (docker entrypoint path) is also accepted; DB rows win at config-load time. The retired `config/users/{user}.toml` mechanism is gone. CalDAV derived from Nextcloud. The dataclasses in `config.py` and `config.example.toml` list every field; the non-obvious rules are in `.claude/rules/config.md`.
 
 ## Deployment
 

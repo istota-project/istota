@@ -144,7 +144,7 @@ class TestTheSecondBootReadsTheEnvironmentAgain:
         assert "developer" not in second
 
     def test_the_location_ingest_token_tracks_the_environment(self, tmp_path):
-        """`.claude/rules/testbed.md`'s "second entrypoint wart" is this issue.
+        """A regenerated ingest token reaches the config, not only the flag file.
 
         With location enabled, regenerating `LOCATION_INGEST_TOKEN` wrote it to
         the flag file while the config kept the old one, so the flag recorded a
