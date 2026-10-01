@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import secrets
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -4428,6 +4429,16 @@ def _row_to_message(row: sqlite3.Row) -> Message:
         external_ids=external,
         created_at=row["created_at"],
     )
+
+
+def mint_room_token() -> str:
+    """Mint a path-safe, surface-independent room identity with 128 random bits."""
+    return "rm_" + secrets.token_urlsafe(16)
+
+
+def is_canonical_room_token(token: object) -> bool:
+    """Recognise the minted namespace, without checking format or existence."""
+    return isinstance(token, str) and token.startswith("rm_")
 
 
 def register_room(

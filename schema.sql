@@ -1308,6 +1308,14 @@ CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rooms_side
 ON rooms (side_of, side_for_user) WHERE side_of IS NOT NULL;
 
+-- Permanent forwarding from pre-migration tokens, including descriptors in
+-- mail already sent. No room FK: the mapping must survive room deletion.
+CREATE TABLE IF NOT EXISTS room_token_migration (
+    old_token   TEXT PRIMARY KEY,
+    new_token   TEXT NOT NULL,
+    migrated_at TEXT NOT NULL
+);
+
 -- Per-user room membership (ISSUE-134). A room is shared (one token, one
 -- transcript) but each participant has a membership row; web visibility is
 -- resolved through this, not the single-owner `rooms.user_id`.
