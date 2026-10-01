@@ -203,7 +203,7 @@ Markdown with TOML `[[jobs]]`. Types: `prompt`, `prompt_file`, `command`. Per-jo
 
 ### Which brain a task runs
 
-`tasks.brain` > `[brain.source_type_overrides][source_type]` > `[brain] kind`, resolved by `brain.resolve_brain_kind`. The column has two producers: `rooms.brain` at task creation (Talk and web only) and `scheduled_jobs.brain` from a CRON.md job. The column is what makes a room or a file edited mid-flight change nothing already running; retries and subtasks inherit it.
+`tasks.brain` > `[brain.source_type_overrides][source_type]` > `[brain] kind`, resolved by `brain.resolve_brain_kind`. The column has two producers: `rooms.brain` at task creation (Talk, web and the SMS and WhatsApp phone rooms) and `scheduled_jobs.brain` from a CRON.md job. The column is what makes a room or a file edited mid-flight change nothing already running; retries and subtasks inherit it.
 
 A room or a job may only pin a kind the operator listed in `[brain] room_selectable`, which is empty by default, and only an admin may write it — brain kind decides which process holds the agent loop, which credentials it carries and which `SandboxProfile` is built. An unknown or unlisted pin is a WARNING and a fallthrough, never a failed task. A pinned room or job has **no availability failover**: `resolve_brain_kind` clears `fallback` on the admission path, so a turn the pinned brain cannot run fails with that brain's own reason. Set from chat with `!brain`, from the web room settings, or per job with `brain` in CRON.md. Full rules in `.claude/rules/brain.md`.
 

@@ -86,7 +86,7 @@ That block appears when a reading is available, not when `brain.kind` is `claude
 
 ## Room model default
 
-`!room` shows the room's standing model/effort default; `!room model <alias>` and `!room effort <level>` set it, and `default` clears it. The default lives on the shared room registry, so it applies to every message in that room on both Talk and web, and to every participant. Precedence: an inline `!model` prefix wins over the room default, which wins over the instance `model` config.
+`!room` shows the room's standing model/effort default; `!room model <alias>` and `!room effort <level>` set it, and `default` clears it. The default lives on the shared room registry, so it applies to every message in that room on Talk, web and, for an SMS or WhatsApp room, texts, and to every participant. Precedence: an inline `!model` prefix wins over the room default, which wins over the instance `model` config.
 
 ## Shared rooms
 
@@ -102,7 +102,7 @@ In a room more than one person reads, `!room share` lists the scopes you share t
 
 `!brain` on its own reports which brain the room's turns run under and how that was decided — the room's own setting, the rule for this surface, the instance default, and what happens if the brain is unavailable. Anyone in the room can read it.
 
-`!brain <kind>` pins the room to one brain and `!brain default` clears the pin. Both are admin-only, and the kinds on offer are whatever the operator listed under `[brain] room_selectable`, which is empty by default — so on a deployment that has not opted in, `!brain <kind>` says so and names no kinds. A pin applies to every participant's turns in that room, the way the model default does, and to Talk and web turns only: mail threaded into the room, and scheduled work delivering into it, run the deployment's own answer. A scheduled job can name its own brain instead, with a `brain` field in CRON.md rather than here — same allowlist, same admin gate, and the same no-failover rule. See [scheduling](../features/scheduling.md).
+`!brain <kind>` pins the room to one brain and `!brain default` clears the pin. Both are admin-only, and the kinds on offer are whatever the operator listed under `[brain] room_selectable`, which is empty by default — so on a deployment that has not opted in, `!brain <kind>` says so and names no kinds. A pin applies to every participant's turns in that room, the way the model default does, and to Talk, web and texted turns only: mail threaded into the room, and scheduled work delivering into it, run the deployment's own answer. A scheduled job can name its own brain instead, with a `brain` field in CRON.md rather than here — same allowlist, same admin gate, and the same no-failover rule. See [scheduling](../features/scheduling.md).
 
 Two consequences the set reply names, because neither is obvious. **A pinned room does not fail over.** If the brain it names is unavailable, a turn fails with the real reason instead of quietly being answered by the deployment's backup brain; `!brain default` restores both the inherited brain and its failover. And **switching to a brain that reads model names differently clears the room's model default**, since the stored name would not resolve under the new one — the reply says what it dropped. Switching between two brains that share a namespace keeps the pin.
 
