@@ -408,3 +408,34 @@ class TestExternalIdLedger:
             db.set_message_external_id(conn, mid, "talk", "8888")
             assert db.message_has_external_id(conn, "r", "talk", "8888") is True
             assert db.message_has_external_id(conn, "r", "talk", "9999") is False
+
+
+@pytest.mark.parametrize("surface", ["sms", "whatsapp"])
+@pytest.mark.parametrize("source_type", ["web", "scheduled"])
+def test_phone_bindings_never_add_implicit_sends(config, surface, source_type):
+    config.sms.enabled = True
+    config.whatsapp.enabled = True
+    with db.get_db(config.db_path) as conn:
+        token = db.register_room(conn, None, "alice", origin=surface).token
+        db.add_room_binding(conn, token, surface, surface + "-alice-thread")
+        db.add_room_binding(conn, token, "web", token)
+    task = _task(source_type=source_type, conversation_token=token, output_target="room")
+    plan = resolve_delivery_plan(config, task, make_registry(config))
+    assert [dest.surface for dest in plan] == ["web"]
+
+
+@pytest.mark.parametrize("surface", ["sms", "whatsapp"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_phone_origin_and_explicit_sends_remain_available(config, surface, explicit):
+    config.sms.enabled = True
+    config.whatsapp.enabled = True
+    with db.get_db(config.db_path) as conn:
+        token = db.register_room(conn, None, "alice", origin=surface).token
+        db.add_room_binding(conn, token, surface, surface + "-alice-thread")
+    task = _task(
+        source_type="scheduled" if explicit else surface,
+        conversation_token=token, output_target=surface if explicit else "room",
+    )
+    plan = resolve_delivery_plan(config, task, make_registry(config))
+    assert [dest.surface for dest in plan] == [surface]
+    assert plan[0].mirror is False

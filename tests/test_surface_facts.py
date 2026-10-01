@@ -102,7 +102,7 @@ class TestTheTable:
         assert surfaces.is_room_view("email") is False
 
     @pytest.mark.parametrize(
-        "surface", ["ntfy", "istota_file", "repl", "sms", "whatsapp"],
+        "surface", ["ntfy", "istota_file", "repl"],
     )
     def test_the_non_room_surfaces_answer_nothing(self, surface):
         assert surfaces.room_role(surface) is None
@@ -110,6 +110,14 @@ class TestTheTable:
         assert surfaces.user_turn_mirror(surface) is None
         assert surfaces.is_room_member(surface) is False
         assert surfaces.is_room_view(surface) is False
+
+    @pytest.mark.parametrize("surface", ["sms", "whatsapp"])
+    def test_phone_surfaces_own_rooms_without_being_room_views(self, surface):
+        assert surfaces.room_role(surface) == "member"
+        assert surfaces.is_room_member(surface) is True
+        assert surfaces.room_view(surface) is None
+        assert surfaces.is_room_view(surface) is False
+        assert surfaces.user_turn_mirror(surface) is None
 
     def test_a_mirror_mode_is_only_declared_on_an_external_room_view(self):
         # `user_turn_mirror` is a refinement of `room_view == "external"`, not
@@ -145,11 +153,9 @@ class TestTheTable:
 
 
 class TestTheTwoPredicatesAreSeparateReads:
-    """Every shipped surface answers `is_room_member` and `is_room_view` the
-    same way, so nothing above distinguishes them — a change routing one
-    through the other would keep the whole file green. These are the only
-    assertions that prove they read different fields, which is what the
-    scheduler's confirmation gate depends on being true.
+    """The two predicates read independent fields, including unshipped shapes.
+
+    Phone rooms now also exercise the member-without-view shape in the table.
     """
 
     def test_a_member_with_no_view_is_not_a_room_view(self, monkeypatch):
@@ -224,11 +230,10 @@ class TestOriginSurfaceForSourceType:
     def test_the_room_predicates_answer_todays_answer(self, source_type):
         # The two scheduler gates used to test `task.source_type` against a
         # `("talk", "web")` literal directly. Routing the same source type
-        # through the leaf must not change either answer for any shipped value.
+        # through the leaf now admits phone membership, but not phone views.
         origin = surfaces.origin_surface_for_source_type(source_type)
-        expected = source_type in ("talk", "web")
-        assert surfaces.is_room_member(origin) is expected
-        assert surfaces.is_room_view(origin) is expected
+        assert surfaces.is_room_member(origin) is (source_type in ("talk", "web", "sms", "whatsapp"))
+        assert surfaces.is_room_view(origin) is (source_type in ("talk", "web"))
 
     def test_it_is_not_the_delivery_mapping(self):
         # The defect this function exists to avoid, asserted rather than

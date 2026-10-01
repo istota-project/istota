@@ -713,6 +713,11 @@ def _expand_room_destinations(
                        getattr(task, "id", "?"), e)
         return dests
     for b in bindings:
+        # Static absence means this surface never shows the room transcript.
+        # A disabled Talk transport also has no *live* view, but retains its
+        # existing resolution/fallback path. Phone bindings must not imply sends.
+        if room_view(b.surface) is None:
+            continue
         # Both skips compensate for what an origin leg already delivered, so
         # neither applies to a task that has no origin leg. See above.
         if origin_surface is not None:

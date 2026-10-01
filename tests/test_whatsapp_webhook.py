@@ -12,10 +12,8 @@ drive `handle_whatsapp_batch` on an open connection, the way the SMS suite
 drives `handle_provider_event`, because the disposition ladder is database
 behaviour rather than HTTP behaviour.
 
-Two things every case here holds, and they are the reason the surface exists in
-this shape at all: no room, binding, membership or canonical `messages` row is
-ever written, and no authenticated identifier — phone number, BSUID, send id,
-message body — reaches a log line.
+Private inbound turns now own canonical room rows. Authenticated identifiers,
+phone numbers, BSUIDs, send ids and message bodies must still stay out of logs.
 """
 
 from __future__ import annotations
@@ -1435,8 +1433,8 @@ class TestTheServiceWindowClock:
 
 
 class TestInboundDispositions:
-    def test_an_ordinary_message_creates_one_task_and_no_room_rows(self, tmp_path):
-        """The whole non-room claim, held on rows rather than on a flag."""
+    def test_an_ordinary_message_creates_one_task_and_room_rows(self, tmp_path):
+        """Membership reaches the real inbound transaction and canonical store."""
         config = _config(tmp_path)
         _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
 
@@ -1446,13 +1444,14 @@ class TestInboundDispositions:
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, results[0].task_id)
             assert task.source_type == "whatsapp"
-            assert task.conversation_token == whatsapp_conversation_token("alice")
+            assert task.conversation_token == db.resolve_room_token(conn, "whatsapp", whatsapp_conversation_token("alice"))
+            assert db.is_canonical_room_token(task.conversation_token)
             assert task.output_target == "whatsapp"
             assert task.prompt == "check the backup"
             for table in ("rooms", "room_bindings", "room_members", "messages"):
                 assert conn.execute(
                     f"SELECT count(*) FROM {table}"
-                ).fetchone()[0] == 0, f"{table} must stay empty for WhatsApp"
+                ).fetchone()[0] == 1, f"{table} must hold the inbound room turn"
             row = conn.execute("SELECT * FROM processed_whatsapp").fetchone()
         assert row["disposition"] == "task"
         assert row["task_id"] == results[0].task_id

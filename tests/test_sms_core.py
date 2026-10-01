@@ -131,14 +131,14 @@ class TestSmsIdentityAndRouting:
         assert "twilio" not in first
         assert "1555" not in first
 
-    def test_sms_is_non_room_and_bare_route_only(self, tmp_path):
+    def test_sms_is_a_room_member_and_bare_route_only(self, tmp_path):
         config = _config(tmp_path)
         adapter = _adapter(lambda _req: SmsSendResult("opaque-1", "accepted", 1))
         transport = SmsTransport(config, providers=_providers(adapter))
 
         assert transport.capabilities.room_view is None
-        assert transport.capabilities.inbound_room_role is None
-        assert surfaces.room_role("sms") is None
+        assert transport.capabilities.inbound_room_role == "member"
+        assert surfaces.room_role("sms") == "member"
         assert parse_output_target("both") == [Destination("talk"), Destination("email")]
         assert parse_output_target("all") == [
             Destination("talk"), Destination("email"), Destination("ntfy")
@@ -172,7 +172,7 @@ class TestSmsIdentityAndRouting:
 
 
 class TestInboundDomainHandling:
-    def test_ordinary_message_creates_one_task_and_no_room_rows(self, tmp_path):
+    def test_ordinary_message_creates_one_task_and_room_rows(self, tmp_path):
         config = _config(tmp_path)
         providers = _providers(_adapter(lambda _req: SmsSendResult("opaque", "accepted", 1)))
 
@@ -184,10 +184,11 @@ class TestInboundDomainHandling:
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, first.task_id)
             assert task.source_type == "sms"
-            assert task.conversation_token == sms_conversation_token("alice")
+            assert task.conversation_token == db.resolve_room_token(conn, "sms", sms_conversation_token("alice"))
+            assert db.is_canonical_room_token(task.conversation_token)
             assert task.output_target == "sms"
-            assert conn.execute("SELECT count(*) FROM rooms").fetchone()[0] == 0
-            assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+            assert conn.execute("SELECT count(*) FROM rooms").fetchone()[0] == 1
+            assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 1
             assert conn.execute("SELECT count(*) FROM processed_sms").fetchone()[0] == 1
 
     @pytest.mark.parametrize(
@@ -758,7 +759,8 @@ class TestNotificationsAndIsolation:
 
 
 class TestSchedulerSmsDelivery:
-    def test_completed_task_delivers_once_through_sms_ledger(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("room_exists", [False, True])
+    def test_completed_task_delivers_once_through_sms_ledger(self, tmp_path, monkeypatch, room_exists):
         calls = []
 
         def send(req):
@@ -776,9 +778,13 @@ class TestSchedulerSmsDelivery:
             ),
         )
         with db.get_db(config.db_path) as conn:
+            token = sms_conversation_token("alice")
+            if room_exists:
+                token = db.register_room(conn, None, "alice", origin="sms").token
+                db.add_room_binding(conn, token, "sms", sms_conversation_token("alice"))
             task_id = db.create_task(
                 conn, prompt="check", user_id="alice", source_type="sms",
-                conversation_token=sms_conversation_token("alice"), output_target="sms",
+                conversation_token=token, output_target="sms",
             )
 
         from istota.scheduler import process_one_task
@@ -786,6 +792,11 @@ class TestSchedulerSmsDelivery:
         assert calls == ["Finished the check."]
         with db.get_db(config.db_path) as conn:
             assert db.get_task(conn, task_id).status == "completed"
+            turns = conn.execute(
+                "SELECT room_token, body FROM messages WHERE role = 'assistant' AND task_id = ?",
+                (task_id,),
+            ).fetchall()
+            assert [tuple(row) for row in turns] == ([(token, "Finished the check.")] if room_exists else [])
             row = conn.execute("SELECT * FROM sent_sms").fetchone()
             assert row["logical_key"] == f"task-result:{task_id}"
 

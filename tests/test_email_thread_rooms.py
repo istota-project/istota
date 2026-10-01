@@ -397,11 +397,13 @@ class TestTheSideRoomsEmailView:
 
 
 class TestTheContainerAnswer:
-    def test_only_email_and_whatsapp_containers_are_rooms(self):
+    def test_email_container_override_and_phone_membership(self):
         assert is_room_member_for("email", room_container=True)
         assert is_room_member_for("whatsapp", room_container=True)
         assert not is_room_member_for("email", room_container=False)
-        assert not is_room_member_for("sms", room_container=True)
+        assert is_room_member_for("sms", room_container=False)
+        assert is_room_member_for("whatsapp", room_container=False)
+        assert not is_room_member_for("ntfy", room_container=True)
         assert is_room_member_for("talk", room_container=False)
 
 

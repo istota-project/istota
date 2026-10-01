@@ -67,3 +67,26 @@ def test_container_bindings_are_not_external_views(db_path):
         assert routing.plan_user_turn_mirrors(conn, Config(), room.canonical, "web") == [
             routing.UserTurnMirror("talk", room.talk_ref, "as_user"),
         ]
+
+
+@pytest.mark.parametrize("surface", ["sms", "whatsapp"])
+def test_phone_bindings_are_not_user_turn_mirror_targets(db_path, surface):
+    with db.get_db(db_path) as conn:
+        room = promoted_room(conn, "alice")
+        db.add_room_binding(conn, room.canonical, surface, surface + "-alice-thread")
+        assert routing.plan_user_turn_mirrors(conn, Config(), room.canonical, "web") == [
+            routing.UserTurnMirror("talk", room.talk_ref, "as_user"),
+        ]
+
+
+@pytest.mark.parametrize("surface", ["sms", "whatsapp"])
+def test_phone_view_alone_cannot_enable_user_turn_mirroring(db_path, monkeypatch, surface):
+    monkeypatch.setitem(surfaces.SURFACES, surface, replace(
+        surfaces.SURFACES[surface], room_view="external",
+    ))
+    with db.get_db(db_path) as conn:
+        room = promoted_room(conn, "alice")
+        db.add_room_binding(conn, room.canonical, surface, surface + "-alice-thread")
+        assert routing.plan_user_turn_mirrors(conn, Config(), room.canonical, "web") == [
+            routing.UserTurnMirror("talk", room.talk_ref, "as_user"),
+        ]

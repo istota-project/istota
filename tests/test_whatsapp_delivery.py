@@ -2082,14 +2082,14 @@ class TestTheSurface:
         assert capabilities.surface_class == "push"
         assert capabilities.user_routable is True
         assert capabilities.room_view is None
-        assert capabilities.inbound_room_role is None
+        assert capabilities.inbound_room_role == "member"
         assert capabilities.user_turn_mirror is None
 
-    def test_the_room_facts_are_all_absent(self):
-        assert surfaces.room_role("whatsapp") is None
+    def test_private_chats_own_rooms_without_a_room_view(self):
+        assert surfaces.room_role("whatsapp") == "member"
         assert surfaces.room_view("whatsapp") is None
         assert surfaces.user_turn_mirror("whatsapp") is None
-        assert surfaces.is_room_member("whatsapp") is False
+        assert surfaces.is_room_member("whatsapp") is True
         assert surfaces.is_room_view("whatsapp") is False
         assert surfaces.origin_surface_for_source_type("whatsapp") == "whatsapp"
 
@@ -2455,8 +2455,9 @@ class TestSchedulerDelivery:
                 output_target="whatsapp",
             )
 
+    @pytest.mark.parametrize("room_exists", [False, True])
     def test_a_completed_task_delivers_once_through_the_ledger(
-        self, tmp_path, monkeypatch,
+        self, tmp_path, monkeypatch, room_exists,
     ):
         from istota.scheduler import process_one_task
 
@@ -2465,17 +2466,25 @@ class TestSchedulerDelivery:
         client = _FakeClient()
         task_id = self._task(config, monkeypatch, client, "Finished the check.")
 
+        with db.get_db(config.db_path) as conn:
+            if room_exists:
+                token = db.register_room(conn, None, "alice", origin="whatsapp").token
+                db.add_room_binding(conn, token, "whatsapp", whatsapp_conversation_token("alice"))
+                conn.execute("UPDATE tasks SET conversation_token = ? WHERE id = ?", (token, task_id))
+
         assert process_one_task(config) == (task_id, True)
 
         assert [r.text for r in client.requests] == ["Finished the check."]
         with db.get_db(config.db_path) as conn:
             assert db.get_task(conn, task_id).status == "completed"
-            # No room, no membership, no canonical transcript row: WhatsApp is
-            # its own external conversation and is never a view of a room.
-            for table in ("rooms", "room_bindings", "room_members", "messages"):
-                assert conn.execute(
-                    f"SELECT count(*) FROM {table}"
-                ).fetchone()[0] == 0
+            turns = conn.execute(
+                "SELECT room_token, body FROM messages WHERE role = 'assistant' AND task_id = ?",
+                (task_id,),
+            ).fetchall()
+            assert [tuple(row) for row in turns] == ([(token, "Finished the check.")] if room_exists else [])
+            # Delivering an old task without a room must not mint one.
+            for table in ("rooms", "room_bindings"):
+                assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == int(room_exists)
         assert [row["logical_key"] for row in _rows(config)] == [
             f"task-result:{task_id}"
         ]

@@ -449,13 +449,23 @@ class TestTheAnswerGoesToTheGroup:
         (request,) = sent
         assert request.to == ALICE_JID
 
-    def test_an_archived_group_receives_nothing(self, group, sent):
+    @pytest.mark.parametrize("state", ["archived", "unbound", "foreign_private_ref"])
+    def test_an_unavailable_group_receives_nothing(self, group, sent, state):
         (result,) = _apply(group, _message("Istota, when is the dinner?"))
         task = _task(group, result.task_id)
         with db.get_db(group.db_path) as conn:
-            db.set_room_archived(conn, _room(group), True)
+            if state == "archived":
+                db.set_room_archived(conn, _room(group), True)
+            elif state == "unbound":
+                conn.execute("DELETE FROM room_bindings WHERE room_token = ?", (_room(group),))
+            else:
+                from istota.transport.whatsapp import whatsapp_conversation_token
+                conn.execute(
+                    "UPDATE room_bindings SET surface_ref = ? WHERE room_token = ? AND surface = 'whatsapp'",
+                    (whatsapp_conversation_token("bob"), _room(group)),
+                )
 
-        asyncio.run(WhatsAppTransport(group).deliver(_room(group), "At seven.", task=task))
+        asyncio.run(WhatsAppTransport(group).deliver(task.conversation_token, "At seven.", task=task))
         assert sent == []
         assert WhatsAppTransport(group).resolve_target(task) is None
 
