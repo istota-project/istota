@@ -51,7 +51,7 @@ class LocalCredentialError(ValueError):
         self.field = field
 
 
-def _derived_names(name: str) -> tuple[str | None, str | None]:
+def derived_names(name: str) -> tuple[str | None, str | None]:
     return (
         secrets_vault.slug_name((name, secrets_vault._USERNAME_SEGMENT)),
         secrets_vault.slug_name((name, secrets_vault._URL_SEGMENT)),
@@ -70,7 +70,7 @@ def _check_name(name: object) -> tuple[str, str, str]:
             "name",
             "use lowercase letters, digits and single underscores, starting with a letter",
         )
-    username_name, url_name = _derived_names(name)
+    username_name, url_name = derived_names(name)
     if username_name is None or url_name is None:
         raise LocalCredentialError("name", "the name is too long")
     return name, username_name, url_name
@@ -173,8 +173,37 @@ def is_local(conn, user_id: str, name: str) -> bool:
     return row is not None and row[0] == SOURCE
 
 
+def stored_fields(conn, user_id: str, name: str) -> dict:
+    """What the edit form may know about a local credential: its URL, and whether a username is set.
+
+    The URL is a binding input and not secret; the username and the value are
+    never read back.
+    """
+    username_name, url_name = derived_names(name)
+    url = ""
+    if url_name and _owned_field(conn, user_id, name, url_name):
+        stored = secrets_store.get_secret(None, user_id, _SERVICE, url_name, connection=conn)
+        url = stored if isinstance(stored, str) else ""
+    return {
+        "url": url,
+        "username_set": bool(username_name) and _owned_field(conn, user_id, name, username_name),
+    }
+
+
+def _owned_field(conn, user_id: str, owner: str, field_name: str) -> bool:
+    """Whether ``field_name`` is stored and is ``owner``'s own local field row."""
+    stored = conn.execute(
+        "SELECT 1 FROM secrets WHERE user_id=? AND service=? AND key=?",
+        (user_id, _SERVICE, field_name),
+    ).fetchone()
+    return stored is not None and not _foreign_field(conn, user_id, owner, field_name)
+
+
 def _write_fields(conn, user_id, name, username_name, url_name, *, value, username, url, binding):
-    """Write or remove each field row with the shared binding. ``value=None`` keeps it."""
+    """Write or remove each field row with the shared binding.
+
+    ``value=None`` and ``username=None`` keep that row, rebinding it.
+    """
     owned = {**binding, "credential": name}
     if value is not None:
         secrets_store.set_secret(None, user_id, _SERVICE, name, value,
@@ -182,7 +211,10 @@ def _write_fields(conn, user_id, name, username_name, url_name, *, value, userna
     else:
         _bindings.put_binding(conn, user_id, name, owned)
     for field_name, field_value in ((username_name, username), (url_name, url)):
-        if field_value:
+        if field_value is None:
+            if _owned_field(conn, user_id, name, field_name):
+                _bindings.put_binding(conn, user_id, field_name, owned)
+        elif field_value:
             secrets_store.set_secret(None, user_id, _SERVICE, field_name, field_value,
                                      binding=owned, connection=conn)
         else:
@@ -239,11 +271,13 @@ def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = N
     }
 
 
-def update(conn, user_id: str, name: str, *, value: str | None, username: str, url: str,
+def update(conn, user_id: str, name: str, *, value: str | None, username: str | None, url: str,
            extra_hosts: str, headers: str, revealable: bool) -> dict:
     """Replace a local credential's metadata, and its value unless ``value`` is ``None``.
 
-    An empty username or URL deletes that row. Every field's binding is
+    ``username=None`` keeps the stored username, which the edit form needs
+    because it can never read it back. An empty username or URL deletes that
+    row. Every field's binding is
     rewritten from the new inputs; a host change takes effect on the next
     request, as a KeePassXC edit does.
     """
@@ -257,10 +291,12 @@ def update(conn, user_id: str, name: str, *, value: str | None, username: str, u
     _, username_name, url_name = _check_name(name)
     if value is not None:
         value = _check_text("value", value, required=True)
-    username = _check_text("username", username, required=False)
+    if username is not None:
+        username = _check_text("username", username, required=False)
     binding = _build_binding(url, extra_hosts, headers, revealable)
-    for field, field_name in (("username", username_name), ("url", url_name)):
-        if _foreign_field(conn, user_id, name, field_name):
+    for field, field_name, field_value in (("username", username_name, username),
+                                           ("url", url_name, url)):
+        if field_value is not None and _foreign_field(conn, user_id, name, field_name):
             raise LocalCredentialError(
                 field, f"{name} would clash with the existing credential {field_name}"
             )
@@ -271,9 +307,11 @@ def update(conn, user_id: str, name: str, *, value: str | None, username: str, u
 
     _write_fields(conn, user_id, name, username_name, url_name,
                   value=value, username=username, url=url, binding=binding)
+    has_username = (bool(username) if username is not None
+                    else _owned_field(conn, user_id, name, username_name))
     return {
         "name": name,
-        "username_name": username_name if username else None,
+        "username_name": username_name if has_username else None,
         "url_name": url_name if url else None,
         "grant": _grants.get_grant(conn, user_id, name),
     }

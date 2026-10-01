@@ -11,6 +11,9 @@ from tests.test_web_app import app, client, config  # noqa: F401 -- shared web f
 async def signed_client(client, monkeypatch, config):  # noqa: F811 -- imported fixtures
     import istota.web_app as mod
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
+    # The shared fixture is multi-user and unsandboxed; the delete route is
+    # behind the store's isolation gate, which needs the operator's opt-in here.
+    config.security.allow_unsandboxed_multi_user_vaults = True
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": "alice"})
     await client.get("/istota/callback", follow_redirects=False)
     secrets_store.upsert_secret(config.db_path, "alice", "vault_entries", "portal", "fixture-password",
@@ -246,3 +249,38 @@ async def test_vault_status_counts_entries_instead_of_fields(signed_client, conf
     assert body["entry_names"] == ["other_username", "portal", "service"]
     assert body["entry_names_truncated"] is False
     assert "fixture-password" not in response.text
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_list_reports_broker_and_add_availability(signed_client, config, enabled):  # noqa: F811
+    config.security.credential_broker.enabled = enabled
+    body = (await signed_client.get("/istota/api/settings/credentials")).json()
+    assert body["broker_enabled"] is enabled
+    assert body["can_add"] is True
+    assert body["add_blocked_reason"] == ""
+    assert body["credentials"][0]["source"] == "vault"
+
+
+async def test_grant_save_refuses_through_the_shared_validator(signed_client):
+    base = "/istota/api/settings/credentials/portal"
+    origin = {"Origin": "https://example.com"}
+    response = await signed_client.put(base, json={"scope_mode": "all", "extra": 1}, headers=origin)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "unknown credential grant field"
+    response = await signed_client.put(base, json={"rooms": "not-a-list"}, headers=origin)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "room is not available to this user"
+
+
+async def test_vault_payload_carries_name_conflicts(signed_client, config):  # noqa: F811
+    from istota import secrets_vault
+    from istota.config import UserConfig
+
+    config.users["alice"] = UserConfig(vault_path="config/vault.kdbx")
+    secrets_store.set_secret(config.db_path, "alice", "vault", "passphrase", "fixture-passphrase")
+    response = await signed_client.get("/istota/api/settings/vault")
+    assert response.json()["name_conflicts"] == 0
+    secrets_vault._record_sync_state(config.db_path, "alice", secrets_vault.OUTCOME_OK, "",
+                                     name_conflicts=2)
+    response = await signed_client.get("/istota/api/settings/vault")
+    assert response.json()["name_conflicts"] == 2
