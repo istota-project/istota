@@ -2521,6 +2521,34 @@ class TestSchedulerDelivery:
         # write must not reach it on its own either.
         assert self._turns(config, task_id) == []
 
+    def test_an_unreachable_group_turn_never_lands_in_the_private_room(
+        self, tmp_path, monkeypatch,
+    ):
+        # An archived group's planned channel is None; that must not read as
+        # the member's own chat, or a group answer lands in a private transcript.
+        from istota.scheduler import process_one_task
+
+        config = _config(tmp_path)
+        _bind(config)
+        client = _FakeClient()
+        task_id = self._task(config, monkeypatch, client, "Group answer.")
+        private = self._phone_room(config)
+        with db.get_db(config.db_path) as conn:
+            group = db.register_room(conn, None, "alice", origin="whatsapp").token
+            db.add_room_binding(conn, group, "whatsapp", "120363000000000001@g.us")
+            db.set_room_archived(conn, group, True)
+            conn.execute(
+                "UPDATE tasks SET conversation_token = ? WHERE id = ?", (group, task_id),
+            )
+
+        assert process_one_task(config) == (task_id, True)
+
+        assert client.requests == []
+        with db.get_db(config.db_path) as conn:
+            assert conn.execute(
+                "SELECT count(*) FROM messages WHERE room_token = ?", (private,),
+            ).fetchone()[0] == 0
+
     @pytest.mark.parametrize("source_type", ["whatsapp", "scheduled"])
     def test_a_window_closed_send_still_writes_its_one_row(
         self, tmp_path, monkeypatch, source_type,

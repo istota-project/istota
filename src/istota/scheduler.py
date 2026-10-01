@@ -3099,6 +3099,13 @@ def process_one_task(
     _own_origin_web = plan_web and task.source_type == "web"
     _own_origin_sms = plan_sms and task.source_type == "sms"
     _own_origin_whatsapp = plan_whatsapp and task.source_type == "whatsapp"
+    # A WhatsApp group's turn has no private transcript: its answer belongs to
+    # the group's room, and when the group is archived or unbound the planned
+    # channel is None, which must not read as the user's own chat.
+    _whatsapp_group_turn = False
+    if plan_whatsapp and task.source_type == "whatsapp":
+        from .transport.whatsapp.outbound import is_group_task
+        _whatsapp_group_turn = is_group_task(config, task)
     # An email thread room's own task (multiplayer D6): its only leg is the
     # reply-all, which must never carry the question, and the room is shared,
     # so the question parks and goes to the principal's side room and its
@@ -3519,6 +3526,8 @@ def process_one_task(
                         ("sms", plan_sms), ("whatsapp", plan_whatsapp),
                     ):
                         if not _phone_planned:
+                            continue
+                        if _phone_surface == "whatsapp" and _whatsapp_group_turn:
                             continue
                         _phone_dest = next(
                             d for d in plan if d.surface == _phone_surface

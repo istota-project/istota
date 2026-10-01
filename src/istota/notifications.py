@@ -804,12 +804,14 @@ def _dispatch(
             if _send_web(config, user_id, body, dest.channel, title=title):
                 sent = True
         elif dest.surface == "sms":
-            if _send_sms(config, user_id, message or title or "", reference_id):
-                sent = True
-            mirror_phone_to_room(
-                config, "sms", user_id, body or title or "",
-                title=title, reference_id=reference_id,
-            )
+            try:
+                if _send_sms(config, user_id, message or title or "", reference_id):
+                    sent = True
+            finally:
+                mirror_phone_to_room(
+                    config, "sms", user_id, body or title or "",
+                    title=title, reference_id=reference_id,
+                )
         elif dest.surface == "whatsapp":
             # The one arm with its own guard, and the reason is the surface
             # rather than the route: `deliver_whatsapp` settles a claimed
