@@ -1,7 +1,9 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { ChatRoom, RoomPatch, SelectableBrain } from '$lib/api';
+  import type { ChatRoom, GuestReply, RoomPatch, SelectableBrain } from '$lib/api';
   import { Modal, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
+  import RoomMembers from './RoomMembers.svelte';
+  import RoomShareScopes from './RoomShareScopes.svelte';
   import { ROOM_COLORS, ROOM_COLOR_LABELS, roomColorVar } from '$lib/roomColors';
   import {
     getBaseModelChoices,
@@ -18,9 +20,40 @@
     onDelete: () => void;
     onPromote?: () => void;
     onClose: () => void;
+    /** The viewer's user id, for the members pane's Leave. */
+    userId?: string;
+    /** Membership changed, so the room's sharing state may have. */
+    onMembersChanged?: () => void;
   }
 
-  let { open = $bindable(true), room, onSave, onDelete, onPromote, onClose }: Props = $props();
+  let {
+    open = $bindable(true),
+    room,
+    onSave,
+    onDelete,
+    onPromote,
+    onClose,
+    userId,
+    onMembersChanged,
+  }: Props = $props();
+
+  // In a shared room the name, model, effort, brain and the Talk conversation
+  // apply to every member's turn, so they are the host's (multiplayer Stage
+  // 16). The server's own refusal says why, and the controls show the values
+  // without offering to change them; colour is per member and stays live.
+  const lockedReason = $derived(room.policy?.settings_refusal ?? null);
+  const locked = $derived(!!lockedReason);
+  const isSideRoom = $derived(!!room.side_of);
+
+  // How a guest's turn is answered (D11). Only a shared room has a policy to
+  // show, and only its host may change it.
+  const GUEST_REPLY_OPTIONS: SelectOption[] = [
+    { value: 'direct', label: 'Answer in the room' },
+    { value: 'held', label: 'Propose the answer to the host first' },
+    { value: 'off', label: 'Record only, never answer' },
+  ];
+  let guestReplyValue = $state<GuestReply>(untrack(() => room.policy?.guest_reply ?? 'direct'));
+  const guestReplyChanged = $derived(!!room.policy && guestReplyValue !== room.policy.guest_reply);
 
   // Model + effort defaults for this room (canonical values, shared Talk+web).
   // "" is the "instance default" sentinel (cleared on the backend as null).
@@ -195,6 +228,7 @@
       modelValue = room.model ?? '';
       effortValue = room.effort ?? '';
       brainValue = room.brain ?? '';
+      guestReplyValue = room.policy?.guest_reply ?? 'direct';
       showDeleteConfirm = false;
       copied = false;
       copyError = '';
@@ -217,7 +251,9 @@
   // Saveable when anything changed, and the name is never blanked.
   const canSave = $derived(
     trimmed.length > 0 &&
-      (nameChanged || modelChanged || effortChanged || brainChanged || colorChanged),
+      (colorChanged ||
+        guestReplyChanged ||
+        (!locked && (nameChanged || modelChanged || effortChanged || brainChanged))),
   );
 
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -240,11 +276,14 @@
     // which would 400 the whole PATCH; the backend leaves absent fields
     // untouched.
     const patch: RoomPatch = {};
-    if (nameChanged) patch.name = trimmed;
-    if (modelChanged) patch.model = modelValue || null;
-    if (effortChanged) patch.effort = effortValue || null;
-    if (brainChanged) patch.brain = brainValue || null;
+    if (!locked) {
+      if (nameChanged) patch.name = trimmed;
+      if (modelChanged) patch.model = modelValue || null;
+      if (effortChanged) patch.effort = effortValue || null;
+      if (brainChanged) patch.brain = brainValue || null;
+    }
     if (colorChanged) patch.color = colorValue || null;
+    if (guestReplyChanged) patch.guest_reply = guestReplyValue;
     onSave(patch);
   }
 
@@ -254,12 +293,16 @@
 </script>
 
 <Modal bind:open title="Room settings" onOpenChange={handleOpenChange} width="380px">
+  {#if lockedReason}
+    <p class="caption locked-note" role="note">{lockedReason}</p>
+  {/if}
   <label class="field">
     <span>Name</span>
     <input
       type="text"
       bind:value={name}
       maxlength="80"
+      readonly={locked}
       placeholder="Room name"
       onkeydown={(e) => {
         if (e.key === 'Enter') handleSave();
@@ -313,6 +356,7 @@
         options={brainOptions}
         onValueChange={(v) => (brainValue = v)}
         ariaLabel="Room brain"
+        disabled={locked}
         fullWidth
       />
       <p class="caption">
@@ -329,6 +373,7 @@
       options={modelOptions}
       onValueChange={(v) => (modelValue = v)}
       ariaLabel="Room model default"
+      disabled={locked}
       fullWidth
     />
     {#if crossesNamespace}
@@ -352,9 +397,45 @@
       options={EFFORT_OPTIONS}
       onValueChange={(v) => (effortValue = v)}
       ariaLabel="Room effort default"
+      disabled={locked}
       fullWidth
     />
   </div>
+
+  {#if room.policy}
+    <div class="field">
+      <span>Guests</span>
+      <Select
+        value={guestReplyValue}
+        options={GUEST_REPLY_OPTIONS}
+        onValueChange={(v) => (guestReplyValue = v as GuestReply)}
+        ariaLabel="How guests are answered"
+        disabled={!room.policy.is_host}
+        fullWidth
+      />
+      <p class="caption">
+        {#if room.policy.is_host}
+          A guest's turn runs on your behalf, as this room's host.
+        {:else if room.policy.host}
+          A guest's turn runs on behalf of this room's host, {room.policy.host}, who sets this.
+        {:else}
+          This room has no host, so guests are not answered until a member claims it.
+        {/if}
+      </p>
+    </div>
+  {/if}
+
+  {#if !isSideRoom}
+    <div class="field">
+      <span>Members</span>
+      <RoomMembers roomId={room.id} {userId} talkBound={onTalk} onChanged={onMembersChanged} />
+    </div>
+
+    <div class="field">
+      <span>What you share here</span>
+      <RoomShareScopes roomId={room.id} />
+    </div>
+  {/if}
 
   <div class="field">
     <span>Room token</span>
@@ -375,7 +456,7 @@
         This room is also open in Nextcloud Talk — replies sync to your phone.
       </p>
     {/if}
-    {#if canPromote && onPromote}
+    {#if canPromote && onPromote && !locked}
       <button class="talk-btn" type="button" disabled={promoting} onclick={handlePromote}>
         {#if promoting}
           {isPromoted ? 'Checking…' : 'Opening…'}
@@ -553,6 +634,10 @@
 
   .talk-on {
     color: var(--text-muted);
+  }
+
+  .locked-note {
+    margin: 0 0 var(--space-3);
   }
 
   .hide-hint {

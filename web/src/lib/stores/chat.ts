@@ -39,6 +39,7 @@ import {
   setChatMessageStarred,
   updateChatRoom,
   promoteChatRoom,
+  claimRoomHost,
   type ChatAttachment,
   type ChatConfig,
   type ChatRoom,
@@ -336,6 +337,10 @@ export interface ChatSession {
   renameRoom: (id: number, name: string) => Promise<void>;
   updateRoomSettings: (id: number, patch: RoomPatch) => Promise<void>;
   promoteRoom: (id: number) => Promise<void>;
+  /** `!room host` from the web: claim a room that lost its host. */
+  claimHost: (id: number) => Promise<void>;
+  /** Re-read the room list: membership changed what a room's policy says. */
+  refreshRooms: () => Promise<void>;
   archiveRoom: (id: number) => Promise<void>;
   deleteRoom: (id: number) => Promise<void>;
   // The last send the backend acked: a monotonic counter plus the room it
@@ -2025,7 +2030,41 @@ function createSession(): ChatSession {
       return;
     }
     feedAggregateView(row);
-    if (room) bumpBackgroundRoom(room.id, row, opts.countUnread ?? true);
+    if (room) {
+      showInParent(room, row);
+      bumpBackgroundRoom(room.id, row, opts.countUnread ?? true);
+    }
+  }
+
+  // Side-room rows already shown inline in their parent, by durable id.
+  const ephemeralShown = new Set<number>();
+
+  // Something produced for the viewer alone in a shared room — a private
+  // answer, a whisper, a proposal — lands in their side room. While they are
+  // looking at the parent it is also shown there inline, as a bubble only they
+  // see (multiplayer D4): only they receive the side room's rows at all, so
+  // nothing here decides who may see it. Client-only, so a reload drops it and
+  // the side room keeps the durable copy.
+  function showInParent(room: ChatRoom, row: ChatRoomEvent) {
+    if (row.role === 'user' || !room.side_of || get(view) !== 'room') return;
+    const active = get(rooms).find((r) => r.id === get(activeRoomId));
+    if (!active || active.token !== room.side_of) return;
+    if (typeof row.msg_id === 'number') {
+      if (ephemeralShown.has(row.msg_id)) return;
+      ephemeralShown.add(row.msg_id);
+    }
+    const built = buildHistoryMessage(row);
+    messages.update((arr) =>
+      appendAboveClientOnly(arr, {
+        ...built,
+        msgId: undefined,
+        starred: undefined,
+        taskId: undefined,
+        roomToken: undefined,
+        roomName: undefined,
+        ephemeral: { roomToken: room.token, roomName: room.name },
+      }),
+    );
   }
 
   // `message_deleted` frame: rows another client (or another tab) removed.
@@ -2635,6 +2674,7 @@ function createSession(): ChatSession {
       // stream mark the same turns as external.
       origin: typeof m.origin === 'string' && m.origin ? m.origin : undefined,
       subject: typeof m.subject === 'string' && m.subject ? m.subject : undefined,
+      deletable: m.deletable === false ? false : undefined,
       // Persisted server-side, so the chip survives leaving the room and
       // coming back (the composer's names are long gone by then).
       attachments: m.attachments?.length ? m.attachments : undefined,
@@ -3361,6 +3401,20 @@ function createSession(): ChatSession {
           : "This room's model default was cleared — that model belongs to the previous brain.",
         { key: 'chat:room-model-cleared' },
       );
+    }
+  }
+
+  /** `!room host` from the web. The server answers with the room's sharing
+   * view, merged as a PATCH response is, so the hostless notice clears. */
+  async function claimHost(id: number) {
+    try {
+      const { shared, policy } = await claimRoomHost(id);
+      rooms.update((r) => r.map((x) => (x.id === id ? { ...x, shared, policy } : x)));
+      notifySuccess('You are now this room’s host.', { key: 'chat:claim-host' });
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : 'Couldn’t claim this room.', {
+        key: 'chat:claim-host',
+      });
     }
   }
 
@@ -5121,6 +5175,8 @@ function createSession(): ChatSession {
     scrollToCid,
     scrollTarget,
     promoteRoom,
+    claimHost,
+    refreshRooms: () => refreshRooms(),
     archiveRoom,
     deleteRoom,
     sendSettled,

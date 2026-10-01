@@ -255,8 +255,8 @@ describe('webRoomOptions', () => {
 
 describe('webRoomOptions marks', () => {
   it('a room somebody else reads, and the ones the bot owns', () => {
-    // Both are refused as the implicit default; pinning one is allowed, and the
-    // mark is what makes that an informed choice rather than a surprise.
+    // Both are refused as the implicit default. A channel room may still be
+    // pinned; a shared one is marked and disabled (below).
     const marked = [
       { token: 't1', name: 'team', default: false, shared: true, channel: false },
       { token: 't2', name: 'logs', default: false, shared: false, channel: true },
@@ -306,6 +306,41 @@ describe('webRoomOptions marks', () => {
       'notes (shared, aaa111)',
       'notes (shared, bbb222)',
     ]);
+  });
+});
+
+describe('a shared room is refused, and says so (multiplayer Stage 17)', () => {
+  // Delivery drops personal content in a room another human reads and the save
+  // refuses it, so the option is shown, marked, and not choosable.
+  const rooms = [
+    { token: 't1', name: 'team', default: false, shared: true, channel: false },
+    { token: 't2', name: 'mine', default: false, shared: false, channel: false },
+  ];
+
+  it('disables a shared web room', () => {
+    const opts = webRoomOptions(rooms, '');
+    expect(opts.find((o) => o.value === 't1')).toEqual({
+      value: 't1',
+      label: 'team (shared)',
+      disabled: true,
+    });
+    expect(opts.find((o) => o.value === 't2')?.disabled).toBeUndefined();
+  });
+
+  it('keeps a pin that became shared selectable, so the select can show it', () => {
+    const opt = webRoomOptions(rooms, 't1').find((o) => o.value === 't1');
+    expect(opt?.disabled).toBeUndefined();
+    expect(opt?.label).toBe('team (shared)');
+  });
+
+  it('marks and disables a Talk conversation another human reads', () => {
+    const talk = [
+      { token: 'conv-family', name: 'family', channel: false, shared: true },
+      { token: 'conv-me', name: 'me and the bot', channel: false, shared: false },
+    ];
+    const opts = talkRoomOptions(talk, '', 'Default');
+    expect(opts[1]).toEqual({ value: 'conv-family', label: 'family (shared)', disabled: true });
+    expect(opts[2]).toEqual({ value: 'conv-me', label: 'me and the bot' });
   });
 });
 

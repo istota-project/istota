@@ -38,6 +38,7 @@
     onRoomClick,
     onJump,
     onImageOpen,
+    onOpenRoom,
     drafts = [],
     draftActions,
     externalDisplay = 'collapsed',
@@ -107,6 +108,8 @@
     // surface it landed on — so a surface that mounts one is the way to fix it,
     // not a flag on the renderer.
     onImageOpen?: (images: string[], index: number) => void;
+    // Open a room by token: the side room an inline private row came from.
+    onOpenRoom?: (token: string) => void;
     // Outbound mail this turn's task composed and the gate is holding. Placed
     // under the turn that produced it, which is where the drafted text and the
     // "this task also created a calendar event" summary are legible together.
@@ -295,7 +298,12 @@
   const showCopy = $derived(!message.streaming && !!copySource.trim());
   // Delete needs a durable row — a live placeholder isn't stored yet — and a
   // handler willing to confirm it.
-  const showDelete = $derived(typeof message.msgId === 'number' && !!onDelete);
+  // And the server has not said the row is somebody else's: in a shared room a
+  // member deletes their own turns only, and offering the control on another's
+  // would only end in a refusal.
+  const showDelete = $derived(
+    typeof message.msgId === 'number' && !!onDelete && message.deletable !== false,
+  );
   // Star appears twice on a turn, and the two are not redundant. The hover bar's
   // is the one that *persists* at rest on a starred row, which is what makes a
   // starred message legible without hovering it; this one is where the hand
@@ -592,6 +600,24 @@
     {/if}
   </div>
 {/snippet}
+
+{#if message.ephemeral}
+  <!-- A row from the reader's side room, shown here because they are looking
+       at its parent. Nobody else in the room sees it; this line says so, and
+       where the durable copy lives. -->
+  <div class="ephemeral-note" role="note">
+    <span>Only you can see this — it is in your side room.</span>
+    {#if onOpenRoom}
+      <button
+        class="ephemeral-open"
+        type="button"
+        onclick={() => onOpenRoom?.(message.ephemeral!.roomToken)}
+      >
+        Open
+      </button>
+    {/if}
+  </div>
+{/if}
 
 {#if isSystem}
   <!-- Command (!…) output / delivered notifications. Left-aligned block, not a
@@ -1637,6 +1663,25 @@
 	   around it. A system row is always its own group (there is no continuation
 	   case for a notice), so it takes the fresh-group top padding unconditionally
 	   rather than through a class. */
+  /* Starts where a message body starts, so it reads as a label on the row
+     below it rather than as a row of its own. */
+  .ephemeral-note {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--chat-row-inline) 0;
+    padding-left: calc(var(--chat-row-inline) + var(--chat-gutter) + var(--chat-avatar-gap));
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+  .ephemeral-open {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent-blue);
+    cursor: pointer;
+  }
   .cmd-row {
     display: flex;
     gap: var(--chat-avatar-gap);
