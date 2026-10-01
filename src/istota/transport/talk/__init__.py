@@ -512,6 +512,15 @@ class TalkTransport:
         await client.edit_message(target, message_id, text)
         return None
 
+    async def delete(self, target: str, message_id: int) -> None:
+        """Delete a message the bot posted. Raises on API error (the scheduler
+        ``delete_talk_message`` shim catches and returns False)."""
+        if not self._config.nextcloud.url or not target:
+            return None
+        client = get_talk_client(self._config)
+        await client.delete_message(target, message_id)
+        return None
+
     async def resolve_channel_name(self, token: str) -> str:
         """Resolve a Talk room token to its display name, falling back to the
         token on any OCS error / missing config. Houses the last log-path OCS

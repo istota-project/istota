@@ -895,6 +895,26 @@ async def edit_talk_message(
         return False
 
 
+async def delete_talk_message(
+    config: Config, task: db.Task, message_id: int,
+    *, target_token: str | None = None,
+) -> bool:
+    """Delete a message the bot posted. True on success, False on failure.
+
+    The same ``target_token`` rule as ``edit_talk_message``; thin shim over
+    ``TalkTransport.delete``."""
+    token = target_token or task.conversation_token
+    if not config.nextcloud.url or not token:
+        return False
+    from .transport.talk import TalkTransport
+    try:
+        await TalkTransport(config).delete(token, message_id)
+        return True
+    except Exception as e:
+        logger.debug("Delete message %d failed: %s", message_id, e)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Log channel — verbose per-user task execution log
 # ---------------------------------------------------------------------------

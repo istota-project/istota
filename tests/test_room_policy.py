@@ -462,6 +462,34 @@ class TestGuestReplyThroughTheScheduler:
                 "SELECT body FROM messages WHERE room_token = 'grp' AND role = 'system'")]
         assert posted == [REPLY]
 
+    def test_the_room_keeps_no_ack_and_a_watching_client_still_finishes(
+        self, tmp_path, monkeypatch, fake_talk,
+    ):
+        """Stage 17's two loose ends from Stage 11. The progress ack the guest's
+        turn posted in the room is taken down when it parks, since the answer
+        went to the host. And approving completes the task without a re-run and
+        prunes the parked `done`, so a client still watching the task stream
+        must be given a terminal frame by the backstop rather than wait on
+        one nothing will write."""
+        import istota.web_app as web_app
+        config, ident, _ = _run_guest_task(tmp_path, monkeypatch, fake_talk, "held")
+        assert fake_talk.calls_to("grp", method="delete_message")
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, ident)
+            side = db.get_side_room(conn, "grp", "alice")
+            confirmations.apply_answer(
+                conn, task, confirmations.Answer(approve=True, trust_sender=False),
+                config, by="web", conversation_token=side.token,
+            )
+            assert db.get_task(conn, ident).status == "completed"
+            last_seq = db.get_max_task_event_seq(conn, ident)
+            kinds = [e["kind"] for e in db.get_task_events(conn, ident, 0)]
+        assert "done" not in kinds
+        monkeypatch.setattr(web_app, "_config", config)
+        frames = web_app._synthetic_terminal_events(ident, last_seq)
+        assert [f["kind"] for f in frames] == ["result", "done"]
+        assert frames[0]["payload"]["text"] == REPLY
+
     def test_a_declined_proposal_posts_nothing(self, tmp_path, monkeypatch, fake_talk):
         config, ident, _ = _run_guest_task(tmp_path, monkeypatch, fake_talk, "held")
         with db.get_db(config.db_path) as conn:
