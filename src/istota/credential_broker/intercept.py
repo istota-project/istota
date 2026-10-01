@@ -123,7 +123,7 @@ def _headers(broker, request, host):
                     raise Refused("credential_header_not_allowed")
                 reason = check_credential_grant(
                     conn, broker.task_id, broker.user_id, name, host,
-                    request.method.decode("ascii"), header.decode("ascii"), config=broker.config,
+                    header.decode("ascii"), config=broker.config,
                 )
                 if reason:
                     raise Refused(reason)

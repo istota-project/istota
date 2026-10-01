@@ -203,7 +203,6 @@ def test_basic_decode_and_live_revocation(broker):
 
 
 @pytest.mark.parametrize("options,reason", [
-    ({"method": b"DELETE"}, b"credential_method_not_allowed"),
     ({"header": b"x-not-auth"}, b"credential_header_not_allowed"),
     ({"body": PLACEHOLDER}, b"credential_in_body"),
     ({"value": b"{{cred:missing}}"}, b"credential_not_granted"),
@@ -216,6 +215,19 @@ def test_refusal_never_forwards(broker, options, reason):
         assert response.status_code == 403
         assert dict(response.headers)[b"x-istota-refused"] == reason
     assert broker[6] == []
+
+
+@pytest.mark.parametrize("method", [b"GET", b"DELETE", b"OPTIONS", b"PROPFIND"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_grants_allow_every_method_on_the_bound_host(broker, method, legacy):
+    if legacy:
+        with db.get_db(broker[0].db_path) as conn:
+            conn.execute("UPDATE credential_grants SET methods='[\"GET\"]'")
+    with connect(broker) as tls:
+        response, _ = exchange(tls, broker[5], method=method)
+        assert response.status_code == 200
+    assert broker[6][0][0].method == method
+    assert dict(broker[6][0][0].headers)[b"authorization"] == VALUE
 
 
 def test_body_after_cap_is_literal_and_large_response_is_unscrubbed(broker):

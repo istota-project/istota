@@ -72,7 +72,6 @@ it('shows one row per credential with its host and access state', async () => {
           grant: {
             scope_mode: 'rooms',
             rooms: ['r1', 'r2'],
-            methods: ['GET', 'POST'],
             allow_scheduled: true,
           },
         }),
@@ -88,7 +87,7 @@ it('shows one row per credential with its host and access state', async () => {
   expect(within(billing).getByText('billing.example, api.billing.example')).toBeTruthy();
   expect(within(billing).getByText('Revealable')).toBeTruthy();
   expect(within(billing).queryByText('Ungranted')).toBeNull();
-  expect(billing.textContent).toContain('2 rooms · GET, POST · scheduled');
+  expect(billing.textContent).toContain('2 rooms · scheduled');
   expect(billing.textContent).toContain('Deployment configuration');
   expect(within(row('loose')).getByText('Unbound')).toBeTruthy();
   expect(screen.getByText(/values are not contained/i)).toBeTruthy();
@@ -100,13 +99,13 @@ it('edits a grant from the row menu and saves narrow defaults', async () => {
   render(CredentialGrantsCard);
   await screen.findByText('portal.example');
   await chooseAction('portal', 'Edit grant');
+  expect(screen.queryByText('Allowed HTTP methods')).toBeNull();
   expect((screen.getByLabelText('Allow scheduled tasks') as HTMLInputElement).checked).toBe(false);
   await fireEvent.click(screen.getByRole('button', { name: 'Save grant' }));
   await waitFor(() =>
     expect(saveCredentialGrant).toHaveBeenCalledWith('portal', {
       scope_mode: 'all',
       rooms: [],
-      methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH'],
       allow_scheduled: false,
       allow_http: false,
     }),
@@ -131,12 +130,12 @@ it('cancels grant edits without saving', async () => {
   await chooseAction('portal', 'Edit grant');
   const dialog = screen.getByRole('dialog', { name: 'Edit grant' });
   expect(within(dialog).getByText('portal')).toBeTruthy();
-  await fireEvent.click(within(dialog).getByRole('checkbox', { name: 'DELETE' }));
+  await fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Allow scheduled tasks' }));
   await fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   expect(saveCredentialGrant).not.toHaveBeenCalled();
   await chooseAction('portal', 'Edit grant');
-  expect(screen.getByRole('checkbox', { name: 'DELETE' })).not.toBeChecked();
+  expect(screen.getByRole('checkbox', { name: 'Allow scheduled tasks' })).not.toBeChecked();
 });
 
 it('confirms deletion of an unbound credential and refreshes the list', async () => {
@@ -187,7 +186,7 @@ it('asks before revoking a grant', async () => {
     settings({
       credentials: [
         portal({
-          grant: { scope_mode: 'all', rooms: [], methods: ['GET'], allow_scheduled: false },
+          grant: { scope_mode: 'all', rooms: [], allow_scheduled: false },
         }),
       ],
     }),
@@ -229,7 +228,6 @@ it('drops unavailable room selections so a grant can still be narrowed', async (
           grant: {
             scope_mode: 'rooms',
             rooms: ['live-room', 'deleted-room'],
-            methods: ['GET'],
             allow_scheduled: false,
           },
         }),
@@ -246,7 +244,6 @@ it('drops unavailable room selections so a grant can still be narrowed', async (
     expect(saveCredentialGrant).toHaveBeenCalledWith('portal', {
       scope_mode: 'rooms',
       rooms: ['live-room'],
-      methods: ['GET'],
       allow_scheduled: false,
       allow_http: false,
     }),
@@ -270,4 +267,10 @@ it('requires an explicit HTTP override', async () => {
       expect.objectContaining({ allow_http: true }),
     ),
   );
+});
+
+it('uses the shared card description so wrapping matches the vault card', async () => {
+  vi.mocked(getCredentialGrants).mockResolvedValue(settings());
+  render(CredentialGrantsCard);
+  expect(screen.getByText(/A credential is sent only/)).toHaveClass('hint');
 });

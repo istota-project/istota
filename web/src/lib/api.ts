@@ -4257,7 +4257,6 @@ export { AuthError };
 
 export interface CredentialGrant {
   scope_mode: 'all' | 'rooms';
-  methods: string[];
   rooms: string[];
   allow_scheduled: boolean;
   allow_http?: boolean;

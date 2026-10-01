@@ -10,8 +10,6 @@ import json
 from .. import db
 from .bindings import get_binding, forge_bindings, credential_name, get_entry_binding
 
-DEFAULT_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH"]
-METHODS = frozenset([*DEFAULT_METHODS, "DELETE", "OPTIONS"])
 NAMESPACE = "_credential_grants"
 
 
@@ -24,7 +22,8 @@ def get_grant(conn, user_id, name):
     grant = dict(row)
     option = db.kv_get(conn, user_id, NAMESPACE, "allow_http:" + name)
     grant["allow_http"] = bool(option and option["value"] == "true")
-    grant["methods"] = json.loads(grant["methods"])
+    # Keep the legacy column on disk, but grants no longer restrict methods.
+    grant.pop("methods")
     grant["allow_scheduled"] = bool(grant["allow_scheduled"])
     grant["rooms"] = [r[0] for r in conn.execute(
         "SELECT conversation_token FROM credential_grant_rooms "
@@ -32,13 +31,10 @@ def get_grant(conn, user_id, name):
     return grant
 
 
-def put_grant(conn, user_id, name, *, scope_mode="all", methods=None,
+def put_grant(conn, user_id, name, *, scope_mode="all",
               allow_scheduled=False, rooms=(), allow_http=False):
     name = credential_name(conn, user_id, name)
-    methods = DEFAULT_METHODS.copy() if methods is None else methods
     if (scope_mode not in ("all", "rooms") or type(allow_scheduled) is not bool or type(allow_http) is not bool
-            or not isinstance(methods, list) or not methods
-            or any(not isinstance(m, str) or m not in METHODS for m in methods)
             or not isinstance(rooms, (list, tuple))
             or any(not isinstance(r, str) or not r for r in rooms)):
         raise ValueError("invalid credential grant policy")
@@ -56,12 +52,11 @@ def put_grant(conn, user_id, name, *, scope_mode="all", methods=None,
     conn.execute("""
         INSERT INTO credential_grants
             (user_id, name, scope_mode, methods, allow_scheduled, policy_revision)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, '[]', ?, ?)
         ON CONFLICT(user_id, name) DO UPDATE SET scope_mode=excluded.scope_mode,
             methods=excluded.methods, allow_scheduled=excluded.allow_scheduled,
             policy_revision=excluded.policy_revision, updated_at=datetime('now')
-    """, (user_id, name, scope_mode, json.dumps(list(dict.fromkeys(methods))),
-          int(allow_scheduled), revision))
+    """, (user_id, name, scope_mode, int(allow_scheduled), revision))
     conn.execute("DELETE FROM credential_grant_rooms WHERE user_id=? AND name=?", (user_id, name))
     conn.executemany("INSERT INTO credential_grant_rooms VALUES (?, ?, ?)",
                      [(user_id, name, room) for room in sorted(set(rooms))])
@@ -144,7 +139,7 @@ def ensure_credential_grants(conn, task_id, user_id):
         (task_id, user_id))}
 
 
-def check_credential_grant(conn, task_id, user_id, name, host, method, header, *, config=None):
+def check_credential_grant(conn, task_id, user_id, name, host, header, *, config=None):
     """Return a refusal reason, or None. Read live policy and binding on every use."""
     if not conn.in_transaction:
         conn.execute("BEGIN")
@@ -174,6 +169,4 @@ def check_credential_grant(conn, task_id, user_id, name, host, method, header, *
         return "credential_https_required"
     if header.lower() not in binding["headers"]:
         return "credential_header_not_allowed"
-    if method not in grant["methods"]:
-        return "credential_method_not_allowed"
     return None

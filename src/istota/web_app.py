@@ -10742,7 +10742,7 @@ def _credential_settings(username: str, action="list", name="", payload=None):
                  for room in db.list_member_rooms(conn, username)]
         if action == "save":
             payload = payload or {}
-            allowed = {"scope_mode", "methods", "allow_scheduled", "rooms", "allow_http"}
+            allowed = {"scope_mode", "allow_scheduled", "rooms", "allow_http"}
             if payload.keys() - allowed:
                 raise HTTPException(status_code=400, detail="unknown credential grant field")
             requested_rooms = payload.get("rooms", [])
@@ -10940,7 +10940,7 @@ def _vault_settings_payload(username: str) -> dict:
         # admin. This is that user's own page, and the read is scoped by
         # `username`.
         #
-        # Names, never values: `list_user_services` decrypts nothing.
+        # Names, never values: entry grouping decrypts nothing.
         "entry_names": list(entries.names),
         # Whether the list above was cut. A card silently showing the first
         # fifty of four hundred names would answer "did mine arrive" wrongly,
@@ -11045,11 +11045,8 @@ class _VaultEntries:
 def _vault_entries(username: str) -> _VaultEntries:
     """This user's shared credential names, and how many there are.
 
-    `list_user_services` rather than `get_service_secrets`, and the difference
-    is not an optimisation: the latter decrypts every value to answer, which on
-    a settings page load would decrypt the user's whole shared namespace and
-    stamp `last_accessed_at` across it. This one returns key names and
-    timestamps and no plaintext at all, and only the names leave here.
+    Group stored fields by the parser's entry metadata, as the grants list
+    does. This reads no credential values and does not update last_accessed_at.
 
     **The count is of the whole namespace and the list is capped**, which is
     what makes a cut legible: `truncated` says the list is short and `count`
@@ -11062,10 +11059,10 @@ def _vault_entries(username: str) -> _VaultEntries:
     if _config is None or not _config.db_path:
         return _VaultEntries(0, (), False)
     try:
-        from . import secrets_store, secrets_vault
-        stored = secrets_store.list_user_services(_config.db_path, username)
-        rows = stored.get(secrets_vault.VAULT_ENTRY_SERVICE, [])
-        names = sorted(str(row["key"]) for row in rows)
+        from . import db
+        from .credential_broker.bindings import credential_groups
+        with db.get_db(_config.db_path) as conn:
+            names = sorted(credential_groups(conn, username))
     except Exception:  # pragma: no cover - defensive
         logger.debug("vault entry listing failed for %r", username)
         return _VaultEntries(0, (), False)
