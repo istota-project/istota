@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import db, secrets_store, secrets_vault
 from .credential_broker import bindings as _bindings
@@ -94,6 +95,19 @@ def _check_text(field: str, value: object, *, required: bool) -> str:
     return value
 
 
+def _site_shaped(url: str) -> bool:
+    """Whether ``url`` is a site and nothing more: ``[scheme://]host[:port][/]``.
+
+    The stored URL is returned by the list payload, so a path, query string,
+    fragment or userinfo is refused rather than stored: a token pasted into
+    one would otherwise come back on every read.
+    """
+    if any(mark in url for mark in ("?", "#", "@")):
+        return False
+    parts = urlsplit(url if "://" in url else "//" + url)
+    return parts.path in ("", "/")
+
+
 def _build_binding(url: object, extra_hosts: object, headers: object, revealable: object) -> dict:
     """The one host parser, ``parse_binding``, with its silent clears made refusals."""
     url = _check_text("url", url, required=False)
@@ -102,7 +116,8 @@ def _build_binding(url: object, extra_hosts: object, headers: object, revealable
     if type(revealable) is not bool:
         raise LocalCredentialError("revealable", "revealable must be true or false")
 
-    if url and not _bindings.parse_binding(url, {}, [], source=SOURCE)["hosts"]:
+    if url and (not _site_shaped(url)
+                or not _bindings.parse_binding(url, {}, [], source=SOURCE)["hosts"]):
         raise LocalCredentialError("url", "not a hostname or https URL")
     if extra_hosts and not _bindings.parse_binding(
         "", {"istota_hosts": extra_hosts}, [], source=SOURCE

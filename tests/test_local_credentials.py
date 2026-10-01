@@ -202,12 +202,22 @@ class TestCreate:
 
     @pytest.mark.parametrize("url", [
         "https://user@host.example", "ftp://x.example", "host.example/path", "not a host",
+        "https://host.example/v1", "https://host.example/?key=abc", "host.example?key=abc",
+        "https://host.example#frag", "http://host.example:8080/login",
     ])
     def test_an_invalid_site_is_refused(self, db_path, url):
         with pytest.raises(LocalCredentialError) as exc:
             _create(db_path, LocalCredential(name="api_key", value=VALUE, url=url))
         assert exc.value.field == "url"
         assert _counts(db_path)[0] == 0
+
+    @pytest.mark.parametrize("url", [
+        "host.example", "host.example:8443", "https://host.example", "https://host.example/",
+        "http://192.0.2.10:8080",
+    ])
+    def test_a_site_without_path_or_query_is_accepted(self, db_path, url):
+        _create(db_path, LocalCredential(name="api_key", value=VALUE, url=url))
+        assert _counts(db_path)[0] == 2
 
     @pytest.mark.parametrize("hosts", ["bad/host", "ok.example, http://x.example", "@x"])
     def test_invalid_extra_hosts_are_refused(self, db_path, hosts):

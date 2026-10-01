@@ -150,6 +150,25 @@ async def test_refusals_name_their_field_and_write_nothing(signed_client, config
         assert conn.execute("SELECT COUNT(*) FROM credential_grants").fetchone()[0] == 0
 
 
+async def test_a_token_in_the_site_url_is_refused_and_never_listed(signed_client, config):  # noqa: F811
+    leaky = "https://openrouter.ai/v1?key=fixture-query-token"
+    response = await signed_client.post(BASE, json=_body(url=leaky), headers=ORIGIN)
+    assert response.status_code == 400
+    assert response.json()["field"] == "url"
+    assert "fixture-query-token" not in response.text
+    assert _rows(config) == (0, 0)
+
+    assert (await signed_client.post(BASE, json=_body(), headers=ORIGIN)).status_code == 200
+    response = await signed_client.patch(
+        BASE + "/openrouter_key/local", json=_update(url=leaky), headers=ORIGIN)
+    assert response.status_code == 400
+    assert response.json()["field"] == "url"
+    listing = await signed_client.get(BASE)
+    assert "fixture-query-token" not in listing.text
+    row = next(c for c in listing.json()["credentials"] if c["name"] == "openrouter_key")
+    assert row["url"] == "openrouter.ai"
+
+
 async def test_access_to_own_room_is_accepted(signed_client, config):  # noqa: F811
     with db.get_db(config.db_path) as conn:
         room = db.create_web_chat_room(conn, "alice", "Personal")
