@@ -380,3 +380,74 @@ class TestTheConvergeIsIdempotent:
         assert state.stdout.strip() == "active", (
             state.stdout + converged_host.journal("istota-scheduler")
         )
+
+
+class TestRoomMigrationEnvironment:
+    def test_systemd_supplies_literal_credentials_and_propagates_refusal(self, converged_host):
+        """The migration runner reads systemd syntax, never shell-evaluates it."""
+        import shlex
+        env_path = '/tmp/room-migration-test.env'
+        # Fabricated shell metacharacters: a shell-sourced file changes these.
+        value = 'fixture-$HOME-$(false)-`false`'
+        write = converged_host.exec(
+            f"printf '%s\\n' {shlex.quote('ISTOTA_NEXTCLOUD_APP_PASSWORD=' + value)} > {env_path}"
+        )
+        assert write.returncode == 0, write.stderr
+        python = f'{converged_host.home}/.venv/bin/python'
+        check = f'import os,sys; sys.exit(1 if os.environ.get("ISTOTA_NEXTCLOUD_APP_PASSWORD") == {value!r} else 2)'
+        result = converged_host.exec(
+            f'systemd-run --quiet --wait --pipe --collect --uid=istota '
+            f'--property=EnvironmentFile=-{env_path} {python} -c {shlex.quote(check)}'
+        )
+        assert result.returncode == 1, result.stdout + result.stderr
+        missing = converged_host.exec(
+            f'systemd-run --quiet --wait --pipe --collect --uid=istota '
+            f'--property=EnvironmentFile=-/tmp/absent-room-env-file {python} -c {shlex.quote("raise SystemExit(0)")}'
+        )
+        assert missing.returncode == 0, missing.stdout + missing.stderr
+
+    def test_room_relocation_reapplies_and_restores_the_running_scheduler(self, converged_host):
+        import json
+        import shlex
+
+        python = f'{converged_host.home}/.venv/bin/python'
+        config_path = f'{converged_host.home}/istota/config/config.toml'
+        seed = f'''
+from pathlib import Path
+from istota import db
+from istota.config import load_config
+config = load_config(Path({config_path!r}))
+with db.get_db(config.db_path) as conn:
+    db.register_room(conn, 'deployment-room', 'istota', origin='talk')
+    db.add_room_binding(conn, 'deployment-room', 'talk', 'deployment-room')
+    db.add_message(conn, 'deployment-room', role='user', body='Retained deployment history', origin_surface='talk')
+path = config.workspace_path / 'Channels' / 'deployment-room'
+path.mkdir(parents=True)
+(path / 'CHANNEL.md').write_text('Retained deployment memory')
+'''
+        seeded = converged_host.exec(f'{python} -c {shlex.quote(seed)}', user='istota')
+        assert seeded.returncode == 0, seeded.stdout + seeded.stderr
+        assert converged_host.unit_property('istota-scheduler', 'ActiveState') == 'active'
+        result = converged_host.reapply_role()
+        assert result.returncode == 0, result.stdout[-6000:] + result.stderr[-2000:]
+        assert 'migrated: deployment-room -> rm_' in result.stdout
+        assert converged_host.unit_property('istota-scheduler', 'ActiveState') == 'active'
+        check = f'''
+import json
+from pathlib import Path
+from istota import db
+from istota.config import load_config
+config = load_config(Path({config_path!r}))
+with db.get_db(config.db_path) as conn:
+    token = conn.execute("SELECT new_token FROM room_token_migration WHERE old_token='deployment-room'").fetchone()[0]
+    binding = tuple(conn.execute("SELECT room_token,surface_ref FROM room_bindings WHERE surface_ref='deployment-room'").fetchone())
+    message = tuple(conn.execute("SELECT room_token,body FROM messages WHERE body='Retained deployment history'").fetchone())
+print(json.dumps([token, binding, message, (config.workspace_path / 'Channels' / token / 'CHANNEL.md').read_text()]))
+'''
+        checked = converged_host.exec(f'{python} -c {shlex.quote(check)}', user='istota')
+        assert checked.returncode == 0, checked.stdout + checked.stderr
+        token, binding, message, memory = json.loads(checked.stdout)
+        assert token.startswith('rm_')
+        assert binding == [token, 'deployment-room']
+        assert message == [token, 'Retained deployment history']
+        assert memory == 'Retained deployment memory'

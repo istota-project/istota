@@ -60,8 +60,6 @@ def test_update_script_offline_window_and_refusals(tmp_path, rc, reason):
         f'echo "refusal: {reason}" >&2\nexit {rc}\n'
     )
     (rig.home / '.venv/bin/istota').chmod(0o755)
-    rig._stub(rig.bin / 'runuser')
-    (rig.bin / 'runuser').write_text('#!/bin/sh\nshift 3\nexec "$@"\n')
     result = rig.run()
     calls = rig.calls()
     migrations = [i for i, c in enumerate(calls) if 'init --relocate-rooms' in c]
@@ -155,3 +153,70 @@ def test_maintenance_window_shares_the_cron_lock(tmp_path):
     assert allowed.returncode == 0, allowed.stderr
     assert 'systemctl stop istota-scheduler' in rig.calls()
     assert 'systemctl restart istota-scheduler' in rig.calls()
+
+
+def test_later_role_restart_cannot_reopen_a_writer_during_cron_migration(tmp_path):
+    import os
+    import shlex
+    import subprocess
+    import time
+    from jinja2 import Environment
+
+    rig = Rig(tmp_path)
+    rig.commit({'src/app.py': 'x = 2\n'})
+    entered, release = tmp_path / 'entered', tmp_path / 'release'
+    (rig.home / '.venv/bin/istota').write_text(
+        '#!/usr/bin/env python3\n'
+        'from pathlib import Path\nimport time\n'
+        f'Path({str(entered)!r}).touch()\n'
+        f'while not Path({str(release)!r}).exists(): time.sleep(0.02)\n'
+    )
+    script = tmp_path / 'update.sh'
+    script.write_text(rig.script())
+    env = dict(os.environ, PATH=f'{rig.bin}:{rig.tools}')
+    process = subprocess.Popen(['bash', str(script)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 10
+        while not entered.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert entered.exists(), rig.log.read_text()
+        tasks = yaml.safe_load((REPO / 'deploy/ansible/tasks/main.yml').read_text())
+        task = next(t for t in tasks if t.get('name') == 'Restart web interface (web-only mode)')
+        command = Environment().from_string(task['command']).render(
+            istota_namespace='istota', istota_update_lock_wait=0,
+        ).replace('/tmp/istota-update.lock', str(tmp_path / 'lock'))
+        blocked = subprocess.run(shlex.split(command), env=env, capture_output=True, timeout=10)
+        assert blocked.returncode != 0
+        assert not any('systemctl restart' in call for call in rig.calls())
+    finally:
+        release.touch()
+        process.communicate(timeout=10)
+    assert process.returncode == 0, rig.log.read_text()
+    allowed = subprocess.run(shlex.split(command), env=env, capture_output=True, timeout=10)
+    assert allowed.returncode == 0
+
+
+def test_migration_uses_the_services_environment_file(tmp_path):
+    rig = Rig(tmp_path)
+    rig.commit({'src/app.py': 'x = 2\n'})
+    runner = rig.bin / 'systemd-run'
+    runner.write_text(
+        '#!/bin/sh\n'
+        f'echo "systemd-run $*" >> "{rig.stub_log}"\n'
+        'while [ "${1#--}" != "$1" ]; do shift; done\nexec "$@"\n'
+    )
+    assert rig.run().returncode == 0
+    call = next(call for call in rig.calls() if call.startswith('systemd-run '))
+    assert '--uid=istota' in call
+    assert '--property=EnvironmentFile=-/etc/istota/secrets.env' in call
+    assert '--wait --pipe --collect' in call
+
+
+def test_role_repairs_database_sidecar_ownership_before_migration():
+    tasks = yaml.safe_load((REPO / 'deploy/ansible/tasks/main.yml').read_text())
+    by_name = {task['name']: task for task in tasks if 'name' in task}
+    files = by_name['Find framework database and sidecars']
+    assert set(files['find']['patterns']) == {'istota.db', 'istota.db-wal', 'istota.db-shm'}
+    ownership = by_name['Set ownership of database']
+    assert ownership['loop'] == '{{ _framework_db_files.files }}'
+    assert tasks.index(ownership) < tasks.index(by_name['Relocate room identities offline'])

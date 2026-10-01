@@ -36,7 +36,11 @@ for suffix in scheduler web webhooks; do
 done
 
 result=0
-output=$(runuser -u "$service_user" -- "$istota_bin" -c "$config_path" init --relocate-rooms 2>&1) || result=$?
+# Let systemd parse its own EnvironmentFile; it is not a shell script. The
+# trusted CLI needs the same Nextcloud credential as the stopped services.
+output=$(systemd-run --quiet --wait --pipe --collect --uid="$service_user" \
+    --property="EnvironmentFile=-/etc/${namespace}/secrets.env" \
+    "$istota_bin" -c "$config_path" init --relocate-rooms 2>&1) || result=$?
 printf '%s\n' "$output"
 if [ "$result" -ne 0 ]; then
     if [ "$result" -ne 1 ] || ! grep -qx 'refusal: live_tasks' <<< "$output"; then

@@ -2043,9 +2043,9 @@
     # restart handlers for end-of-play, but on a re-run where the template
     # didn't change those wouldn't fire and we'd leave services down.
     - name: Restart services after legacy DB rename
-      systemd:
-        name: "{{ item }}"
-        state: started
+      command: >-
+        flock -w {{ istota_update_lock_wait }} /tmp/{{ istota_namespace }}-update.lock
+        systemctl start {{ item }}
       loop:
         - "{{ istota_namespace }}-scheduler"
         - "{{ istota_namespace }}-web"
@@ -2372,11 +2372,25 @@
   changed_when: false  # Idempotent - silently fails if column already exists
   when: not istota_web_only
 
+# Root-run provisioning commands can leave WAL/SHM sidecars behind. Owning
+# only the main file lets the daemon read it but SQLite refuses its writes.
+- name: Find framework database and sidecars
+  find:
+    paths: "{{ istota_home }}/data"
+    patterns: [istota.db, istota.db-wal, istota.db-shm]
+    recurse: false
+    file_type: file
+  register: _framework_db_files
+  when: not ansible_check_mode and not istota_web_only
+
 - name: Set ownership of database
   file:
-    path: "{{ istota_home }}/data/istota.db"
+    path: "{{ item.path }}"
     owner: "{{ istota_user }}"
     group: "{{ istota_group }}"
+  loop: "{{ _framework_db_files.files }}"
+  loop_control:
+    label: "{{ item.path }}"
   when: not ansible_check_mode and not istota_web_only
 
 # The scheduler's dated snapshots used to live at a separate top-level mount
@@ -2420,9 +2434,9 @@
         msg: "{{ _db_backup_relocate.stdout_lines + _db_backup_relocate.stderr_lines }}"
   always:
     - name: Restart scheduler after database snapshot relocation
-      systemd:
-        name: "{{ istota_namespace }}-scheduler"
-        state: started
+      command: >-
+        flock -w {{ istota_update_lock_wait }} /tmp/{{ istota_namespace }}-update.lock
+        systemctl start {{ istota_namespace }}-scheduler
       failed_when: false
   when:
     - not istota_web_only
@@ -2713,9 +2727,9 @@
     # but on a re-run where templates didn't change those wouldn't fire and
     # we'd leave services down — same pattern as the istota.db rename block.
     - name: Restart services after location migration
-      systemd:
-        name: "{{ item }}"
-        state: started
+      command: >-
+        flock -w {{ istota_update_lock_wait }} /tmp/{{ istota_namespace }}-update.lock
+        systemctl start {{ item }}
       loop:
         - "{{ istota_namespace }}-scheduler"
         - "{{ istota_namespace }}-web"
@@ -2788,9 +2802,9 @@
     # Bring services back up explicitly (end-of-play handlers wouldn't fire on a
     # re-run where no template changed) — same pattern as the location block.
     - name: Restart services after module DB relocation
-      systemd:
-        name: "{{ item }}"
-        state: started
+      command: >-
+        flock -w {{ istota_update_lock_wait }} /tmp/{{ istota_namespace }}-update.lock
+        systemctl start {{ item }}
       loop:
         - "{{ istota_namespace }}-scheduler"
         - "{{ istota_namespace }}-web"
@@ -3821,11 +3835,9 @@
     - "restart istota-webhooks"
 
 - name: Enable and start webhook receiver
-  systemd:
-    name: "{{ istota_namespace }}-webhooks"
-    enabled: yes
-    state: started
-    daemon_reload: yes
+  command: >-
+    flock -w {{ istota_update_lock_wait }} /tmp/{{ istota_namespace }}-update.lock
+    systemctl enable --now {{ istota_namespace }}-webhooks
   when: istota_webhooks_enabled | bool and not istota_web_only
 
 - name: Find existing webhooks service
@@ -4098,17 +4110,15 @@
     - "restart istota-web"
 
 - name: Enable and start web interface
-  systemd:
-    name: "{{ istota_namespace }}-web"
-    enabled: yes
-    state: started
-    daemon_reload: yes
+  command: >-
+    flock -w {{ istota_update_lock_wait }} /tmp/{{ istota_namespace }}-update.lock
+    systemctl enable --now {{ istota_namespace }}-web
   when: istota_web_enabled | default(false) and not istota_web_only
 
 - name: Restart web interface (web-only mode)
-  systemd:
-    name: "{{ istota_namespace }}-web"
-    state: restarted
+  command: >-
+    flock -w {{ istota_update_lock_wait }} /tmp/{{ istota_namespace }}-update.lock
+    systemctl restart {{ istota_namespace }}-web
   when: istota_web_only and (istota_web_enabled | default(false))
 
 - name: Find existing web service
@@ -4315,11 +4325,9 @@
   when: not istota_web_only
 
 - name: "Enable and start istota-scheduler"
-  systemd:
-    name: "{{ istota_namespace }}-scheduler"
-    enabled: yes
-    state: started
-    daemon_reload: yes
+  command: >-
+    flock -w {{ istota_update_lock_wait }} /tmp/{{ istota_namespace }}-update.lock
+    systemctl enable --now {{ istota_namespace }}-scheduler
   when: not istota_web_only
 
 # Update-only mode is "pull latest code, restart services". Handler-based
@@ -4328,9 +4336,9 @@
 # pinned to old code. Force the restart explicitly here, mirroring the
 # `istota_web_only` pattern further up the file.
 - name: Restart services (update-only mode)
-  systemd:
-    name: "{{ item.name }}"
-    state: restarted
+  command: >-
+    flock -w {{ istota_update_lock_wait }} /tmp/{{ istota_namespace }}-update.lock
+    systemctl restart {{ item.name }}
   loop:
     - { name: "{{ istota_namespace }}-scheduler", enabled: true }
     - { name: "{{ istota_namespace }}-web", enabled: "{{ istota_web_enabled | default(false) }}" }
