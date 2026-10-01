@@ -6098,7 +6098,9 @@ def room_identity_line(
     if not task.conversation_token or not config.db_path:
         return ""
     try:
-        from .transport.routing import canonical_room_token, room_target_descriptor
+        from .transport.routing import (
+            canonical_room_token, private_phone_room, room_target_descriptor,
+        )
 
         def _lookup(c):
             tok = canonical_room_token(c, task.conversation_token)
@@ -6108,23 +6110,21 @@ def room_identity_line(
             if found is None:
                 return None, None, None, None
             binding = db.get_room_binding(c, tok, "talk")
-            phone = db.get_room_binding(c, tok, "whatsapp")
-            return tok, found, (binding.surface_ref if binding else None), phone
+            # The owner's own private phone thread, by the exact ref
+            # `is_group_task` also excepts: a WhatsApp group is not one.
+            phone_surface = None
+            for surface in ("sms", "whatsapp"):
+                if private_phone_room(c, surface, task.user_id) == tok:
+                    phone_surface = surface
+            return tok, found, (binding.surface_ref if binding else None), phone_surface
 
         with db.get_db_if_present(config.db_path, conn) as c:
             if c is None:
                 return ""
-            token, room, talk_ref, phone = _lookup(c)
+            token, room, talk_ref, phone_surface = _lookup(c)
         if room is None:
             return ""
         origin = room.origin
-        if origin == "whatsapp" and phone is not None:
-            from .transport.whatsapp import whatsapp_conversation_token
-
-            # The owner's exact private ref is a one-to-one chat, not a group,
-            # and reads like an SMS room (the exception `is_group_task` makes).
-            if phone.surface_ref == whatsapp_conversation_token(task.user_id):
-                origin = "web"
         # "Talk", never "Nextcloud Talk": `tests/test_storage_identity.py`
         # requires the assembled prompt to carry no "Nextcloud" literal on the
         # storage-neutral backend, and a local-backend deployment can hold
@@ -6154,6 +6154,18 @@ def room_identity_line(
                 "you are already in."
             )
         )
+        if phone_surface is not None:
+            # The web view of a phone room is read-only, so a reminder asked
+            # for by text has to be sent by text; the bare surface resolves the
+            # user's own binding, and the push is recorded in this room.
+            label = "SMS" if phone_surface == "sms" else "WhatsApp"
+            return (
+                f"\nRoom: this conversation is a registered room on {label}, "
+                "readable but not writable in web chat. To deliver into it from "
+                "a scheduled job or a reminder, write "
+                f'target = "{phone_surface}" and room = "{safe_token}"; that '
+                "sends it to the user's phone and records it here. " + closing
+            )
         if origin in ("whatsapp", "email"):
             # A group or a thread is answered only from its own turns
             # (multiplayer D6): a scheduled job's leg into it reaches nobody on

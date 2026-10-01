@@ -636,7 +636,7 @@ class TestAPrivateRoomBesideAGroup:
         assert _rows(group, "SELECT count(*) AS n FROM rooms")[0]["n"] == 1
         assert _rows(group, "SELECT count(*) AS n FROM room_token_migration")[0]["n"] == 0
 
-    def test_the_prompt_calls_the_private_room_web_chat_not_a_group(self, group):
+    def test_the_prompt_sends_the_private_room_by_whatsapp_not_as_a_group(self, group):
         from istota.executor import room_identity_line
 
         (private,) = _apply(group, _direct("check the backup"))
@@ -648,6 +648,7 @@ class TestAPrivateRoomBesideAGroup:
             group, _task(group, in_group.task_id), rooms_cli_available=True,
         )
 
-        assert "registered room on web chat" in private_line
+        assert "registered room on WhatsApp" in private_line
+        assert 'target = "whatsapp"' in private_line
         assert "group" not in private_line
         assert "a WhatsApp group" in group_line

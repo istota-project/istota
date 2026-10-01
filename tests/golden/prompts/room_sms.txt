@@ -7,7 +7,7 @@ User timezone: UTC
 Current UTC: <UTC>
 Current task ID: <TASK_ID>
 Conversation token: rm_sms_fixture
-Room: this conversation is a registered room on web chat. To deliver into it from a scheduled job or a reminder, write target = "web:rm_sms_fixture" and room = "rm_sms_fixture". `istota-skill rooms list` names every room you are in; never create a Talk conversation in order to post into one.
+Room: this conversation is a registered room on SMS, readable but not writable in web chat. To deliver into it from a scheduled job or a reminder, write target = "sms" and room = "rm_sms_fixture"; that sends it to the user's phone and records it here. `istota-skill rooms list` names every room you are in; never create a Talk conversation in order to post into one.
 Source: sms
 Output target: sms
 Database: reachable only through skill CLIs (no file access)
