@@ -166,6 +166,7 @@ from .surfaces import (
     origin_surface_for_source_type,
 )
 from .transport.registry import _surface_for_source_type
+from .transport.routing import private_phone_room
 from .storage import ensure_user_directories_v2
 
 # Deferred-op handlers were extracted to a sibling module; re-export the
@@ -3505,6 +3506,29 @@ def process_one_task(
                         ),
                     ):
                         _store_room_turn(conn, task, transcript_token, room_body)
+                    # A phone leg's own transcript row (room-surface-model §F):
+                    # a minted SMS or WhatsApp room is the readable copy of what
+                    # was texted. Written here, inside the transaction and ahead
+                    # of the send, so a blocked send (window closed, budget,
+                    # opt-out) still leaves it, and no network call runs under
+                    # the lock. An origin-path answer already has its row from
+                    # the conversational store above; `store_turn_message`
+                    # dedups on (room, role, task), so this adds none. A miss
+                    # writes nothing and the send goes ahead as before.
+                    for _phone_surface, _phone_planned in (
+                        ("sms", plan_sms), ("whatsapp", plan_whatsapp),
+                    ):
+                        if not _phone_planned:
+                            continue
+                        _phone_dest = next(
+                            d for d in plan if d.surface == _phone_surface
+                        )
+                        _phone_room = private_phone_room(
+                            conn, _phone_surface, task.user_id,
+                            _phone_dest.channel,
+                        )
+                        if _phone_room:
+                            _store_room_turn(conn, task, _phone_room, delivery_result)
                     if plan_talk and talk_token:
                         # `room_body`, not `delivery_result`: for an email task
                         # whose result *is* the `{"subject","body","format"}`

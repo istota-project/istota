@@ -722,6 +722,42 @@ class TestNotificationsAndIsolation:
                 ("notification:18", "accepted"),
             ]
 
+    @pytest.mark.parametrize("room_exists", [False, True])
+    def test_a_notification_lands_once_in_the_phone_room_when_it_exists(
+        self, tmp_path, monkeypatch, room_exists,
+    ):
+        calls = []
+        config = _config(tmp_path)
+        providers = _providers(_adapter(
+            lambda req: calls.append(req.text) or SmsSendResult("opaque", "accepted", 1)
+        ))
+        monkeypatch.setattr(
+            "istota.transport.sms.providers.registry.make_provider_registry",
+            lambda _config: providers,
+        )
+        token = None
+        if room_exists:
+            with db.get_db(config.db_path) as conn:
+                token = db.register_room(conn, None, "alice", origin="sms").token
+                db.add_room_binding(conn, token, "sms", sms_conversation_token("alice"))
+
+        for _ in range(2):
+            notifications.send_notification(
+                config, "alice", "Heartbeat\n\nDisk is full", surface="sms",
+                title="Heartbeat", reference_id="heartbeat:disk",
+            )
+
+        # The repeat costs nothing at the provider and nothing in the transcript.
+        assert calls == ["Heartbeat\n\nDisk is full"]
+        with db.get_db(config.db_path) as conn:
+            rows = [tuple(r) for r in conn.execute(
+                "SELECT room_token, role, title, body, origin_surface FROM messages"
+            )]
+            assert conn.execute("SELECT count(*) FROM rooms").fetchone()[0] == int(room_exists)
+        assert rows == (
+            [(token, "system", "Heartbeat", "Disk is full", "sms")] if room_exists else []
+        )
+
     def test_failure_alert_dispatches_off_the_persistent_runtime_loop(
         self, tmp_path, monkeypatch
     ):
@@ -800,6 +836,86 @@ class TestSchedulerSmsDelivery:
             assert [tuple(row) for row in turns] == ([(token, "Finished the check.")] if room_exists else [])
             row = conn.execute("SELECT * FROM sent_sms").fetchone()
             assert row["logical_key"] == f"task-result:{task_id}"
+
+    @staticmethod
+    def _run(tmp_path, monkeypatch, *, source_type, room, answer="Nightly summary.",
+             extra_member=None, opted_out=False):
+        """One SMS-planned task through `process_one_task`, optionally in a minted room."""
+        calls = []
+        config = _config(tmp_path)
+        providers = _providers(_adapter(
+            lambda req: calls.append(req.text) or SmsSendResult("opaque", "accepted", 1)
+        ))
+        monkeypatch.setattr(
+            "istota.transport.sms.providers.registry.make_provider_registry",
+            lambda _config: providers,
+        )
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task",
+            lambda *_args, **_kwargs: (True, answer, None, None),
+        )
+        token = None
+        with db.get_db(config.db_path) as conn:
+            if room:
+                token = db.register_room(conn, None, "alice", origin="sms").token
+                db.add_room_binding(conn, token, "sms", sms_conversation_token("alice"))
+                if extra_member:
+                    db.add_room_member(conn, token, extra_member)
+            if opted_out:
+                conn.execute(
+                    "INSERT INTO sms_opt_outs VALUES (?, datetime('now'), datetime('now'))",
+                    (USER_NUMBER,),
+                )
+            task_id = db.create_task(
+                conn, prompt="run", user_id="alice", source_type=source_type,
+                conversation_token=token if source_type == "sms" else None,
+                output_target="sms",
+            )
+        from istota.scheduler import process_one_task
+        assert process_one_task(config) == (task_id, True)
+        with db.get_db(config.db_path) as conn:
+            rows = [tuple(r) for r in conn.execute(
+                "SELECT room_token, role, body FROM messages WHERE task_id = ? "
+                "AND role != 'user' ORDER BY id", (task_id,),
+            )]
+            rooms = conn.execute("SELECT count(*) FROM rooms").fetchone()[0]
+        return calls, rows, rooms, token
+
+    @pytest.mark.parametrize("room_exists", [False, True])
+    def test_an_explicit_push_lands_in_the_phone_room_only_when_it_exists(
+        self, tmp_path, monkeypatch, room_exists,
+    ):
+        calls, rows, rooms, token = self._run(
+            tmp_path, monkeypatch, source_type="scheduled", room=room_exists,
+        )
+        # The send is unchanged either way; a miss writes nothing and mints nothing.
+        assert calls == ["Nightly summary."]
+        assert rows == ([(token, "assistant", "Nightly summary.")] if room_exists else [])
+        assert rooms == int(room_exists)
+
+    def test_an_explicit_push_never_lands_in_a_room_another_human_reads(
+        self, tmp_path, monkeypatch,
+    ):
+        calls, rows, _rooms, _token = self._run(
+            tmp_path, monkeypatch, source_type="scheduled", room=True,
+            extra_member="bob",
+        )
+        assert calls == ["Nightly summary."]
+        assert rows == []
+
+    @pytest.mark.parametrize("source_type", ["sms", "scheduled"])
+    def test_a_blocked_send_still_writes_its_one_row(
+        self, tmp_path, monkeypatch, source_type,
+    ):
+        calls, rows, _rooms, token = self._run(
+            tmp_path, monkeypatch, source_type=source_type, room=True,
+            opted_out=True,
+        )
+        assert calls == []
+        assert rows == [(token, "assistant", "Nightly summary.")]
+        config_db = tmp_path / "istota.db"
+        with db.get_db(config_db) as conn:
+            assert [r["status"] for r in conn.execute("SELECT status FROM sent_sms")] == ["blocked_opt_out"]
 
     def test_sms_confirmation_parks_and_includes_answer_instruction(
         self, tmp_path, monkeypatch

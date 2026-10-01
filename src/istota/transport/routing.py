@@ -972,6 +972,39 @@ def _room_for_destination(
     )
 
 
+def private_phone_room(
+    conn, surface: str, user_id: str, channel: str | None = None,
+) -> str | None:
+    """The user's own SMS or WhatsApp room, if one was minted, else None.
+
+    The room a phone push lands in as a transcript row. Existence, never
+    creation: a push is the system talking, so a miss writes nothing and the
+    send goes ahead exactly as before. A room another human reads is refused
+    like any other personal delivery. ``channel`` is the planned destination; a
+    WhatsApp channel that is not the user's private chat (a group's room) has
+    no private transcript to land in. SMS has no such alternative, since its
+    send always resolves the user's own binding.
+    """
+    from .. import db
+    from .sms import sms_conversation_token
+    from .whatsapp import whatsapp_conversation_token
+
+    if surface == "sms":
+        surface_ref = sms_conversation_token(user_id)
+    elif surface == "whatsapp":
+        surface_ref = whatsapp_conversation_token(user_id)
+        if channel is not None and channel != surface_ref:
+            return None
+    else:
+        return None
+    token = db.resolve_room_token(conn, surface, surface_ref)
+    if not token or db.get_room(conn, token) is None:
+        return None
+    if user_id not in db.list_room_members(conn, token) or db.room_is_shared(conn, token):
+        return None
+    return token
+
+
 def transcript_room_for_task(conn, config: "Config", task: "db.Task") -> str | None:
     """The transcript room for a task that already exists.
 

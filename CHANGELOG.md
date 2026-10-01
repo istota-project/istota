@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The first accepted private WhatsApp message creates a room named WhatsApp, in the same way. WhatsApp groups keep their own rooms, and the private chat is no longer described to the assistant as a group.
 
+- Scheduled jobs and alerts sent to you by SMS or WhatsApp now also appear in that phone's room once the room exists, as does an answer whose send was blocked (a closed WhatsApp window, an opt-out), so it can be read in web chat rather than being lost. Nothing is written for a user who has never texted in, and a room another person reads never receives these.
+
 - Private SMS and WhatsApp turns now enter the room transcript. Room-wide delivery skips phone bindings, so a reply from another surface does not trigger an implicit phone send.
 
 - Server deployments now migrate existing room identities during a brief offline window, preserving room history, channel memories and old links. Standalone updates require stopping the local server first; Docker upgrades have an explicit offline migration step.
