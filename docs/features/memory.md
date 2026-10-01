@@ -32,7 +32,7 @@ USER.md is also indexed into `memory_chunks` with `source_type = "user_memory"`.
 
 ### Layer 2 — Channel memory (CHANNEL.md)
 
-Per-conversation memory at `/Channels/{conversation_token}/CHANNEL.md`. Loaded into the prompt when `conversation_token` is set. Holds shared context for group conversations: decisions, agreements, project status. Written through the same `memory` skill and refreshed by the channel sleep cycle. In a room more than one person reads, the file reaches the model inside untrusted-content markers, since everyone in the room can write it; a private room's notes are loaded as they are.
+Per-conversation memory at `/Channels/{conversation_token}/CHANNEL.md`. Loaded into the prompt when `conversation_token` is set. Holds shared context for group conversations: decisions, agreements, project status. Written through the same `memory` skill and refreshed by the channel sleep cycle. In a room more than one person reads or has read, the file reaches the model inside untrusted-content markers, since everyone in the room can write it, and so do the room's notes when they come back through memory search; a private room's notes are loaded as they are.
 
 CHANNEL.md is indexed under `source_type = "channel_memory_durable"` — a separate type from the dated `channel_memory` files, so it survives retention pruning the way USER.md does.
 
