@@ -98,6 +98,35 @@ class TestATaskNobodyAskedInTheRoom:
         }
 
 
+class TestATurnWrittenBySomeoneElse:
+    """An outside correspondent's reply continuing a shared room's email
+    thread runs as the member it was routed to, but no member asked it."""
+
+    INDEX = _index(calendar="private")
+
+    def _turn(self, conn, token, **author):
+        tid = db.create_task(conn, user_id="alice", source_type="email",
+                             prompt="p", conversation_token=token)
+        db.add_message(conn, token, role="user", body="p", origin_surface="email",
+                       task_id=tid, **author)
+        return db.get_task(conn, tid)
+
+    def test_an_outside_sender_withholds_every_scope(self, conn):
+        task = self._turn(conn, _shared_room(conn), author_label="carol@example.com")
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == {
+            "calendar", "files", "memory",
+        }
+
+    def test_control_the_members_own_mail_withholds_nothing(self, conn):
+        task = self._turn(conn, _shared_room(conn), author_user_id="alice")
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == frozenset()
+
+    def test_control_a_private_room_withholds_nothing(self, conn):
+        room = db.create_web_chat_room(conn, "alice", "Mine")
+        task = self._turn(conn, room.token, author_label="carol@example.com")
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == frozenset()
+
+
 class TestAmbientMemory:
     """The one thing a member's turn in a shared room loses."""
 

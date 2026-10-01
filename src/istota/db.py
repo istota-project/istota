@@ -2860,6 +2860,7 @@ def _conversation_history_from_messages(
                COALESCE(t.source_type, mu.origin_surface) AS source_type,
                COALESCE(mu.author_user_id, t.user_id) AS user_id,
                mu.author_label AS author_label,
+               mu.author_user_id AS author_user_id,
                {EMAIL_SENDER_SUBQUERY.format(alias="t")}
         FROM messages mu
         LEFT JOIN tasks t
@@ -2905,13 +2906,24 @@ def _conversation_history_from_messages(
             # An answered email turn's sender comes off `processed_emails` as
             # before; an unanswered row has no task, so its stored label (already
             # sanitized at ingest) is the only record of who wrote it.
+            # A row with a label and no user id was written by somebody who is
+            # not a user (a guest, an outside correspondent), answered or not.
+            # Without this an answered guest turn reads as the host's own,
+            # since `user_id` falls back to the task's (ISSUE-576).
             external_sender=(
-                _external_sender_for_row(row, user_email_addresses)
+                (_external_sender_for_row(row, user_email_addresses)
+                 or _third_party_label(row))
                 if answered else row["author_label"]
             ),
             message_id=row["message_id"],
         ))
     return history
+
+
+def _third_party_label(row) -> str | None:
+    if row["author_user_id"] is None and row["author_label"]:
+        return row["author_label"]
+    return None
 
 
 def _messages_caught_up(conn: sqlite3.Connection, conversation_token: str) -> bool:

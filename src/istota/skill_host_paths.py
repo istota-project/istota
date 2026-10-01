@@ -256,8 +256,8 @@ def withheld_from_env() -> frozenset[str]:
 def memory_refusal(resolved: Path) -> str | None:
     """A refusal when ``resolved`` is the user's memory and the room withholds it.
 
-    Only a guest's turn withholds anything now, and it withholds ``files``
-    too, which already drops the workspace root; this stays as the narrower
+    Since ISSUE-576 anything withheld is every scope, ``files`` included,
+    which already drops the workspace root; this stays as the narrower
     refusal should the two ever be withheld apart. None when nothing is
     refused.
     """

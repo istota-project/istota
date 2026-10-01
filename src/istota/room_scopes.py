@@ -48,7 +48,7 @@ def scope_names(skill_index: Mapping[str, object]) -> list[str]:
 
 
 def all_scopes(skill_index: Mapping[str, object]) -> frozenset[str]:
-    """Every scope, which is what a guest's turn withholds."""
+    """Every scope, which is what a restricted task withholds."""
     return frozenset(scope_names(skill_index))
 
 
@@ -61,39 +61,62 @@ def withheld_for_task(
     """What one task may not reach, from its own row. The one derivation the
     executor's reach seams and the `skills` CLI's guard both read.
 
-    Every scope on a guest's turn. Every scope, too, on a task no member asked
-    for whose conversation is a room more than one human reads: a cron job, a
-    briefing or a subtask run there has no sender asking in front of the room,
-    so the consent a member's turn carries does not reach it, and its answer
-    lands in the room (`transport.routing`). Nothing otherwise: a member's turn
-    runs at full reach in every room (ISSUE-576).
+    Every scope on a guest's turn. Every scope, too, on a task in a room more
+    than one human reads that no member asked there: one with no origin
+    surface (a cron job, a briefing, a subtask, a CLI task), or one whose
+    stored turn was written by somebody who is not the task's user (an outside
+    correspondent's email continuing the room's thread). Such a task's answer
+    lands in the room with no member asking, so the consent a member's turn
+    carries does not reach it. Nothing otherwise: a member's turn runs at full
+    reach in every room (ISSUE-576).
 
-    ``conn`` is read only for that second case. ``None`` is a database that
-    does not exist, which holds no room; any error reading the audience
-    withholds every scope.
+    ``conn`` is ``None`` for a database that does not exist, which holds no
+    room. Any error reading the room withholds every scope.
     """
     from .surfaces import origin_surface_for_source_type
 
     if task.guest_participant_id is not None:
         return all_scopes(skill_index)
-    if origin_surface_for_source_type(task.source_type) is not None:
-        return frozenset()
     if not task.conversation_token:
         return frozenset()
-    if task.is_group_chat or task.audience == "mixed":
+    member_surface = origin_surface_for_source_type(task.source_type) is not None
+    if not member_surface and (task.is_group_chat or task.audience == "mixed"):
         return all_scopes(skill_index)
     if conn is None:
         return frozenset()
     try:
         token = canonical_token(conn, task.conversation_token)
-        shared = token is not None and db.room_is_shared(conn, token)
+        if token is None or not (
+            db.room_is_shared(conn, token) or task.is_group_chat
+            or task.audience == "mixed"
+        ):
+            return frozenset()
+        if not member_surface or _written_by_someone_else(conn, task):
+            return all_scopes(skill_index)
     except Exception as exc:
         logger.warning(
-            "room_scopes: could not read the audience of %s, withholding every "
+            "room_scopes: could not read the room %s, withholding every "
             "scope: %s", task.conversation_token, exc,
         )
         return all_scopes(skill_index)
-    return all_scopes(skill_index) if shared else frozenset()
+    return frozenset()
+
+
+def _written_by_someone_else(conn: sqlite3.Connection, task: "db.Task") -> bool:
+    """Whether the stored turn this task answers names an author other than
+    the task's user. A row with neither column set predates attribution and is
+    read as the user's, as every history reader reads it."""
+    row = conn.execute(
+        "SELECT author_user_id, author_label FROM messages "
+        "WHERE task_id = ? AND role = 'user' ORDER BY id LIMIT 1",
+        (task.id,),
+    ).fetchone()
+    if row is None:
+        return False
+    author_user_id, author_label = row[0], row[1]
+    if author_user_id is None:
+        return bool(author_label)
+    return author_user_id != task.user_id
 
 
 def ambient_memory_off(conn: sqlite3.Connection | None, task: "db.Task") -> bool:

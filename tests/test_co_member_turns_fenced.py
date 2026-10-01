@@ -94,3 +94,41 @@ class TestThroughTheExecutor:
         assert _fenced(context, INJECTION)
         assert "what's for lunch?" in context
         assert context.count(OTHER_PARTICIPANT_LABEL) == 2
+
+    def _guest_row(self, conn, token, *, answered):
+        from istota import db
+
+        tid = None
+        if answered:
+            tid = db.create_task(conn, user_id="alice", source_type="talk",
+                                 prompt="(fenced guest prompt)", conversation_token=token)
+            conn.execute("UPDATE tasks SET status='completed', result='ok' WHERE id=?",
+                         (tid,))
+        db.add_message(conn, token, role="user", body=INJECTION, origin_surface="talk",
+                       task_id=tid, author_user_id=None, author_label="Gary (guest)")
+        if answered:
+            db.add_message(conn, token, role="assistant", body="ok",
+                           origin_surface="talk", task_id=tid)
+
+    def test_an_answered_guest_turn_is_not_the_hosts(self, config):
+        # The guest's turn runs as the host, so the task's user is the host;
+        # the stored row says who wrote it.
+        from istota import db
+
+        with db.get_db(config.db_path) as conn:
+            token = _talk_group(conn, config)
+            self._guest_row(conn, token, answered=True)
+            context = _db_context(config, conn, _front_stage_task(conn, token))
+        assert _fenced(context, INJECTION)
+        assert f"alice: {INJECTION}" not in context
+
+    def test_an_unanswered_guest_turn_is_fenced(self, config):
+        from istota import db
+
+        with db.get_db(config.db_path) as conn:
+            token = _talk_group(conn, config)
+            # The store serves history once a completed turn is in it.
+            _turn(conn, token, "alice", "what's for lunch?", "soup")
+            self._guest_row(conn, token, answered=False)
+            context = _db_context(config, conn, _front_stage_task(conn, token))
+        assert _fenced(context, INJECTION)

@@ -361,7 +361,7 @@ def effective_disabled_skills(
 
     Unions ``config.disabled_skills``, the user's per-user ``disabled_skills``,
     any skill whose ``requires_capability`` isn't in
-    ``config.available_capabilities()``, and the skills a guest's turn withholds
+    ``config.available_capabilities()``, and the skills a restricted task withholds
     (``room_scopes.withheld_for_task``; the synthetic scopes name no skill
     and fall out of the intersection). This is the single place the executor
     and the ``skills`` CLI both call so their view of "disabled" can't drift;

@@ -188,7 +188,8 @@ def build_task_runtime(
     """Build the model's environment and the per-task proxies for one attempt.
 
     ``withheld_scopes`` is what this task may not reach: every scope on a
-    guest's turn (``room_scopes.withheld_for_task``), empty everywhere else. Three of the
+    guest's turn or a task no member asked in a shared room
+    (``room_scopes.withheld_for_task``), empty everywhere else. Three of the
     disclosure gate's reach seams are here, and each is needed because the
     others leave its route open: hooks and identity vars are resolved over the
     whole index rather than the authorized set, credential auto-authorization

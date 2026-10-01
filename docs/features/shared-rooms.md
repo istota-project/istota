@@ -63,7 +63,7 @@ One thing is left out. In a shared room the bot does not load your personal memo
 Two kinds of task run with less:
 
 - **A guest's turn** runs as the room's host and reaches nothing of the host's: no workspace, no private skill, no memory. Only skills that read nothing personal (the room's own tools, untrusted-input handling) and the room's `CHANNEL.md` are available.
-- **A task nobody asked in the room**, such as a scheduled job, a briefing or a subtask whose conversation is a shared room, is restricted the same way, since its answer lands in the room with no member asking there.
+- **A task nobody asked in the room** is restricted the same way, since its answer lands in the room with no member asking there: a scheduled job, a briefing or a subtask whose conversation is a shared room, or an outside correspondent's reply to an email the bot sent from that room.
 
 Other participants' messages in the conversation history are shown to the model as content from someone else, not as instructions, so a co-member cannot use the transcript to steer your turn.
 

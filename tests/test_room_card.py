@@ -117,6 +117,14 @@ class TestAPrincipalsTurn:
         assert "!room share" not in text
         assert "Withheld" not in text
 
+    def test_a_task_nobody_asked_here_is_told_what_is_withheld(self, config):
+        with db.get_db(config.db_path) as conn:
+            _shared(conn)
+        text = _card(config, _task("bob", source_type="scheduled"))
+        assert "because no member of this room asked it here" in text
+        assert "runs with everything" not in text
+        assert "answer-privately" not in text
+
     def test_the_side_room_verb_is_named_only_where_it_can_run(self, config):
         with db.get_db(config.db_path) as conn:
             _shared(conn)

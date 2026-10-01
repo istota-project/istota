@@ -548,9 +548,10 @@ def task_temp_dir(
     what their private tasks left: downloads, staged attachments, deferred-op
     files. A task with anything withheld (``restricted``) gets a directory of
     its own inside it, bound instead of it (multiplayer Stage 13). Since
-    ISSUE-576 that is only ever a guest's turn, which takes the branch below;
-    the ``room-task-`` arm still answers for a task an earlier release ran
-    restricted, so a retry across the upgrade writes where the scheduler reads.
+    ISSUE-576 that is a task in a shared room no member asked there (a guest's
+    turn takes the branch below), and the arm also answers for a task an
+    earlier release ran restricted, so a retry across the upgrade writes where
+    the scheduler reads.
 
     A guest's turn always gets one, under its own prefix. It runs as the host (multiplayer D2) with less authority than
     the host, and the per-user directory is where the host's other tasks leave
@@ -6271,6 +6272,11 @@ def room_card(
                 f"Withheld from this turn, because a guest wrote it: "
                 f"{scopes or 'nothing'}."
             )
+        elif withheld_scopes:
+            lines.append(
+                f"Withheld from this turn, because no member of this room asked "
+                f"it here: {scopes}."
+            )
         else:
             lines.append(
                 f"This turn runs with everything '{principal}' can reach, and "
@@ -6286,6 +6292,11 @@ def room_card(
             lines.append(
                 f"Anything else goes to '{principal}''s private side room with "
                 "`istota-skill room whisper`."
+            )
+        elif withheld_scopes:
+            lines.append(
+                f"Anything only '{principal}' should see goes to their private "
+                "side room with `istota-skill room whisper`."
             )
         else:
             lines.append(
@@ -6980,7 +6991,14 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # most the snapshot's 1000 characters, which is the price of the frame
     # always being there.
     reply_quote_section = ""
-    if task.reply_to_content:
+    if task.reply_to_content and channel_memory_shared:
+        # A room several people have written in: the quoted message may be
+        # another participant's, and this turn runs at full reach (ISSUE-576).
+        reply_quote_section = (
+            "Replying to this message, which may be another participant's:\n"
+            f"{frame_untrusted(task.reply_to_content, REPLY_QUOTE_LABEL)}\n\n"
+        )
+    elif task.reply_to_content:
         quoted = "\n".join(
             f"> {line}" for line in task.reply_to_content.splitlines() or [""]
         )
@@ -7297,6 +7315,10 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
         )
 
     return assembled.prompt
+
+
+#: The fence label on a quoted reply parent in a shared room.
+REPLY_QUOTE_LABEL = "QUOTED MESSAGE"
 
 
 def _task_withheld_scopes(

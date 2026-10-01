@@ -475,9 +475,11 @@ def format_context_for_prompt(
         timestamp = _format_created_at(msg.created_at, user_tz)
         speaker = _speaker_label(msg)
         prompt = msg.prompt
-        if (msg.user_id and not msg.external_sender
-                and speaker not in ("Scheduled", "User")):
-            prompt = _fence_other(msg.user_id, prompt, principal)
+        if principal is not None and speaker not in ("Scheduled", "User"):
+            # An outside sender's words are someone else's whatever `user_id`
+            # says, since that is the user the turn was routed to.
+            author = None if msg.external_sender else msg.user_id
+            prompt = _fence_other(author or "", prompt, principal)
         formatted.append(f"[{timestamp}] {speaker}: {prompt}")
         result = msg.result
         if result is not None:

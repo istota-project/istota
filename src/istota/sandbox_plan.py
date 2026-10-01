@@ -338,8 +338,9 @@ def build_mount_plan(
     a guest, an agent or a non-member reads the room, so ``withheld_scopes``
     does not touch these binds.
 
-    ``withheld_scopes`` is what this task may not reach, which is every scope
-    on a guest's turn and nothing otherwise (``room_scopes``, ISSUE-576).
+    ``withheld_scopes`` is what this task may not reach: every scope on a
+    guest's turn or a task no member asked in a shared room, nothing otherwise
+    (``room_scopes.withheld_for_task``, ISSUE-576).
     Without ``files`` the user's workspace and their
     per-resource mounts are not bound at all, which is what makes the
     disclosure gate a boundary rather than advice: no skill gate touches a
