@@ -1,7 +1,7 @@
 """Which process is on the other end of a Unix socket, and whose tree it is in.
 
-The skill proxy's socket is 0600, which keeps out other OS users and nobody
-else: every task runs as the daemon's uid. Under bubblewrap only a task's own
+The skill and network proxies' sockets are 0600, which keeps out other OS
+users and nobody else: every task runs as the daemon's uid. Under bubblewrap only a task's own
 socket is bound into its namespace, so that was enough there. On every shape
 where the model runs without the sandbox — macOS, a container whose bwrap
 probe fails, a Linux host with no bwrap — all tasks share one uid and one
@@ -38,11 +38,13 @@ import socket
 import struct
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
 __all__ = [
     "MAX_DEPTH",
+    "PeerRoots",
     "descends_from",
     "parent_pid",
     "peer_pid",
@@ -266,3 +268,47 @@ def reporting_pid(
         # reader sees EOF and exits.
         os.close(write_fd)
         reader.join(timeout=5)
+
+
+class PeerRoots:
+    """Thread-safe task roots shared by the skill and network proxies.
+
+    A root is pinned to its start time. Connections may wait briefly for the
+    spawn callback to register a process that already reached the socket.
+    """
+
+    def __init__(self):
+        self._roots: dict[int, int] = {}
+        self._changed = threading.Condition()
+
+    def authorize(self, pid: int) -> bool:
+        pid = int(pid)
+        started = start_time(pid)
+        if started is None:
+            return False
+        with self._changed:
+            self._roots[pid] = started
+            self._changed.notify_all()
+        return True
+
+    def revoke(self, pid: int) -> None:
+        with self._changed:
+            self._roots.pop(int(pid), None)
+
+    @property
+    def pids(self) -> frozenset[int]:
+        with self._changed:
+            return frozenset(self._roots)
+
+    def contains(self, pid: int | None, *, grace_seconds: float) -> bool:
+        if pid is None:
+            return False
+        deadline = time.monotonic() + grace_seconds
+        with self._changed:
+            while True:
+                if descends_from(pid, dict(self._roots)):
+                    return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._changed.wait(remaining)

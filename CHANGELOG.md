@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- With the optional credential broker enabled, git, gh and glab authenticate through placeholders instead of receiving forge tokens. They require a grant and a working broker connection; the devbox keeps its separate credential path.
+
+- The optional HTTP credential broker lets tasks authenticate with placeholders while the proxy supplies the values to approved hosts. Small echoed responses are scrubbed, and diagnostics report readiness and containment limits. The broker is disabled by default.
+
+- Settings now lists credential bindings and lets you choose room access, HTTP methods and scheduled use. New credentials start ungranted; a one-time action grants the credentials already present. When the optional HTTP credential broker is enabled, those grants restrict placeholder authentication. Existing credential fetch commands remain available during the rollout.
+
 - The web UI supports email and password login or one-time email sign-in links, alongside Nextcloud login or on its own. Admins can invite users and manage login access; operators can print recovery links when mail is unavailable. Changing a password signs out every existing session.
 
 - You can ask another user of your installation a question, and their explicit reply comes back unchanged to the private conversation you asked from. The question reaches them in their default room (web chat, and Talk when the room is bound), on WhatsApp or by SMS; they can pick where in Settings, and their choice outranks yours. It also waits in their notification inbox until it is answered. They answer by replying to it, quoting it on WhatsApp or sending `!relay reply`, and nothing else they say is shared. You approve each question's exact wording first, unless the message you sent named the recipient and asking was the first thing the task did. No permission is needed beforehand, and `!relay block` stops questions from a particular user; blocked or uncertain answers stay readable through `!relay show` for 30 days.
@@ -64,6 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `browse interact --click` and `--fill` now drive the page the way the coordinate flags already did: the pointer travels to the element and presses it, and a value is typed key by key rather than inserted whole. A filled field used to receive no keystroke at all — the value simply appeared, which is exactly what a login form behind bot detection is watching for — and a click arrived with no movement behind it. Measured on the shipped container, the same fill went from no key events to ten, and a click from one pointer movement to fifteen along an approach path. Selectors, results and error codes are unchanged, each action now reports which element it matched, and the older method is still there as an automatic fallback when the typed path cannot run.
 
 ### Fixed
+
+- Immediate task execution from the command line no longer holds a database transaction across credential admission. It reserves the task before starting and reports liveness during execution, so the scheduler cannot also claim it.
 
 - Assembling a task prompt with the default configuration no longer creates an empty `data/istota.db` in the working directory. The room lookup in the prompt header now skips a database file that does not exist instead of opening it, which created it (ISSUE-570).
 - Browser requests from `istota-skill browse` and `markets finviz` no longer create a `data/` directory in the current directory when `ISTOTA_DB_PATH` is unset, which is the case with the skill proxy off. They now take the browser admission lock beside the database the config file names, the same lock the daemon uses, and refuse when no config file names an absolute database path. Before, they locked a file under `data/` that no other caller shared (ISSUE-572).
@@ -172,6 +180,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A Docker build of the web UI no longer prints `/bin/sh: git: not found` twice. That stage carries no git and has no repository in its context, so the version stamp was already falling back to `unknown`; what reached the log was the shell's own error, which reads as a build failure. The same two lines appeared in any `npm run build` run outside a checkout.
 
 ### Security
+
+- Operators can now audit and then refuse direct reads of brokered credentials. Vault entries explicitly marked revealable keep direct access; host-side skills keep working through their private channel. Enforcement also refuses direct reads of deployment credentials, including forge tokens, and remains off until the operator completes the audit period.
+
+- Browser credential fills now require the destination to match the credential's HTTPS URL or explicitly configured hosts in the password vault. Rebuild the browser image to enable fills; older images are refused. The credential list now shows bound hosts and reveal metadata.
+
+- A task can no longer use another task’s network proxy by connecting to its socket. New connections must come from the task’s own process tree, as skill-proxy connections already do.
 
 - Deployments behind the shipped public proxies now refuse no-auth mode at startup, including loopback web backends. No-auth is supported only by the direct local launcher on loopback. Email login token URLs are excluded from the shipped proxy and web server access logs.
 

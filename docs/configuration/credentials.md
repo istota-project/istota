@@ -149,6 +149,16 @@ USER_VAULT_PATH=istota/vault/credentials.kdbx
 
 with `ISTOTA_SCHEDULER_VAULT_SYNC_INTERVAL` for the cadence.
 
+### Credential bindings
+
+A vault entry's HTTPS URL binds all its credential names to that host and port. Add exact `host[:port]` names in the comma-separated custom field `istota_hosts` for other destinations. Wildcards and plain HTTP are refused. Invalid host metadata leaves the entry unbound. Custom fields beginning with `istota_` are reserved metadata and never become credential names.
+
+`istota_headers` sets the comma-separated allowed authentication headers; the default is `Authorization`, `PRIVATE-TOKEN`, `X-API-Key` and `X-Auth-Token`. `Proxy-Authorization` is never allowed. The `istota:reveal` tag permits public value reads when reveal enforcement is enabled. Grants govern placeholder use; the reveal tag is a separate exception for commands that must hold the value.
+
+`istota-credential list` shows bound hosts, whether an entry is revealable, and its grant status. Configured forge tokens appear as `forge.gitlab` and `forge.github` for tasks already authorized to use them. Their hosts come from the deployment's forge URLs; public GitHub also includes `api.github.com`.
+
+Browser credential fills require a bound HTTPS origin now. An unbound entry or a field on another origin returns `credential_origin_mismatch` before input. Add the correct URL in KeePassXC and let the vault sync before retrying. This requires a rebuilt browser image: older images are refused before receiving any credential action. Credential fills update the checked element and emit input/change events in one CDP evaluation, so navigation cannot redirect a keyboard fill into another page.
+
 ### The passphrase
 
 The passphrase is a per-user secret like any other, stored in the `secrets` table under the `vault` service. It is set once, either from the vault card in Settings, Connected services — **Generate a new passphrase** — or from a host shell:
@@ -364,3 +374,33 @@ For the full skill development workflow including env var mapping, see [adding s
 **CalDAV** — currently global (one service account with shared calendar access via Nextcloud). If Istota ever supports users bringing their own CalDAV servers, this would need a per-user path.
 
 **Browser** — `BROWSER_API_URL` and `BROWSER_VNC_URL` are deployment-level config, not credentials. They point to the headless browser container.
+
+
+## HTTP credential broker
+
+The broker is off by default. Set `[security.credential_broker] enabled = true` with the network proxy enabled to use literal placeholders in authentication headers. `istota-credential list` shows names and bindings; `istota-credential placeholder NAME` prints the placeholder on stdout and its bound hosts on stderr without fetching a value.
+
+```sh
+curl -H 'Authorization: Bearer {{cred:portal_token}}' https://portal.example/api
+```
+
+Bind a vault entry using its HTTPS URL or `istota_hosts`, and grant access in Settings. Grants limit rooms, methods and scheduled use. Each task keeps its original grant snapshot across retries; revoking or changing a grant refuses its next use. Default methods exclude DELETE. The broker decodes Basic authentication before substituting a placeholder password, so clients can build the Basic header themselves.
+
+Only a host bound to a credential in the task snapshot is intercepted. Every other connection keeps its original TLS session and carries placeholders as literal text. On an intercepted connection, SNI and Host must match the CONNECT host. IP-literal destinations may omit SNI, as standard TLS clients do. A placeholder in a disallowed header or URL is refused. A placeholder in the first `scan_max_bytes` of a request body is refused before forwarding; later body bytes stream unchanged and are never substituted. The default cap is 1 MiB.
+
+Response headers and bodies no larger than that cap are scrubbed for the exact substituted bytes. A response field name containing a substituted value is refused, since a placeholder cannot be a valid field name. Larger bodies stream without body scrubbing; audit records state both scan limits. This is not protection against an upstream service deliberately encoding or transforming a credential in its response. Compressed request bodies, compressed responses to authenticated requests, trailers and upgrades are unsupported. Both TLS legs use HTTP/1.1, so pinned-certificate clients and clients that require HTTP/2 need a host-side skill or a revealable credential.
+
+`istota doctor --only security.credential_broker` reports the CA, task trust bundles, proxy and peer-check readiness, effective sandboxing, and counts of unbound or ungranted entries. The CA stays in daemon state; only public trust bundles enter tasks. The daemon verifies upstream TLS using its own trust store. Without effective sandboxing, credentials are not contained. With the broker enabled, developer git helpers and gh/glab use placeholders. Public value reads remain available until reveal enforcement is enabled.
+
+
+### Reveal enforcement rollout
+
+`[security.credential_broker] enforce_reveal = false` is the default. Each public value read of a brokered credential logs a WARNING with `credential_reveal`, `action=would_refuse`, the task, request type, credential name and claimed mode. Values are never logged. This includes callers claiming `mode=skill`: only the private inherited channel given to a host-side skill is trusted. Audit logging does not contain credentials; callers still receive values in this mode.
+
+Enable the broker and migrate scripts to placeholders or host-side skills. Watch the `credential_reveal` records for a week of normal use. Resolve every `would_refuse` use, then observe a full week without one before setting `enforce_reveal = true`. This is an operator rollout step, with no automatic timer or activation. Restart the daemon after changing the setting. Setting it back to false restores public reads and their audit records.
+
+Under enforcement, `get`, `run` and `run --stdin` return `credential_brokered` for an entry without the `istota:reveal` tag. The daemon checks live metadata on each read, so removing the tag and syncing revokes the exception for running tasks too. A missing binding grants no exception. Revealable reads keep the existing fetch cap and read WARNING. `list`, `placeholder` and `new` remain available; a new entry is brokered by default.
+
+`env` reads manifest variables, which have no reveal marker, so enforcement refuses all of them, including forge tokens. A hand-written socket client receives the same refusal. Use the forge placeholders or a host-side skill instead; skills still receive their declared environment credentials and resolve vault names through their private channel. A forge wrapper still on its legacy token path will fail until the broker is enabled. The devbox has a separate proxy and is outside this rollout.
+
+Enforcement is independent of the interception switch. Turning it on before migrating consumers can break their authentication. It cannot contain values on an unsandboxed deployment.

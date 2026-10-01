@@ -16,7 +16,7 @@ from .user_scope import is_scopable_user_id
 from .config import load_config
 from .logging_setup import setup_logging
 from .executor import execute_task
-from .scheduler import process_one_task, check_briefings
+from .scheduler import process_one_task, check_briefings, _task_heartbeat
 from .email_support import get_email_config
 from .transport.email import poll_emails
 from .skills.email import list_emails, send_email
@@ -187,6 +187,10 @@ def cmd_task(args):
             # (ISSUE-402), so the refusal is intended — a traceback is not.
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
+        if args.execute:
+            # Reserve before creation commits, so the scheduler never sees an
+            # immediate task as pending while this process is executing it.
+            db.update_task_status(conn, task_id, "running")
         print(f"Task created: {task_id}")
 
     if args.execute:
@@ -194,30 +198,33 @@ def cmd_task(args):
         print("Executing task...")
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, task_id)
-            if task:
-                user_resources = db.get_user_resources(conn, args.user)
-                # Not `dry_run=args.dry_run`: a dry run returned above, so the
-                # only way to reach here is a real execution.
+            user_resources = db.get_user_resources(conn, args.user) if task else []
+        if task:
+            # Match the scheduler: execution opens short write transactions for
+            # skill selection and credential admission, so hold no caller DB.
+            with _task_heartbeat(config, task_id):
                 success, result, _actions, _trace = execute_task(
                     task,
                     config,
                     user_resources,
                     use_context=use_context,
-                    conn=conn,
                 )
+            with db.get_db(config.db_path) as conn:
                 if success:
                     db.update_task_status(conn, task_id, "completed", result=result)
-                    print("\n--- Result ---")
-                    print(result)
                 else:
                     db.update_task_status(
                         conn, task_id, "failed", result=task.partial_result,
                         error=result, actions_taken=_actions,
                         execution_trace=_trace,
                     )
-                    print("\n--- Error ---", file=sys.stderr)
-                    print(result, file=sys.stderr)
-                    sys.exit(1)
+            if success:
+                print("\n--- Result ---")
+                print(result)
+            else:
+                print("\n--- Error ---", file=sys.stderr)
+                print(result, file=sys.stderr)
+                sys.exit(1)
 
 
 def cmd_repl(args):

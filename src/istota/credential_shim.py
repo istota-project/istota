@@ -18,38 +18,30 @@ deployment that has not reinstalled still runs the current one. And it is the
 program ``skills/developer`` used to generate as a string literal, promoted —
 the shape it replaces, not a new one.
 
-It replaces the five-line socket client ``skills/developer.setup_env`` used to
-generate as a string literal. Two socket clients for one protocol is the
-duplication ``AGENTS.md`` opens with, so the developer skill's git credential
-helper now shells out to the ``env`` verb here, which is that generated
-program's behaviour byte for byte.
+It replaces the socket client ``skills/developer.setup_env`` used to generate.
+With the broker enabled, developer credential helpers use placeholders. The
+legacy ``env`` verb still uses the same public socket and reveal policy.
 
-Six verbs::
+Seven verbs::
 
     istota-credential list                       # shared credential names
+    istota-credential placeholder <name>         # inert auth-header text
     istota-credential run VAR=name [...] -- cmd  # exec cmd with those set
     istota-credential run --stdin name -- cmd    # value on the child's stdin
     istota-credential get <name>                 # the value on stdout
     istota-credential env <VAR>                  # a manifest-declared var
     istota-credential new <slug> [options]        # create a vault entry
 
-``run`` is the verb this exists for. It resolves each name over the proxy
-socket and ``execvpe``s the given argv with those variables added to its own
-environment, so the ordinary path — a script, a ``curl``, a CLI that wants a
-token — puts the credential in front of the program that needs it and nowhere
-else: not in the model's context, not in the transcript, not in the argv of
-anything. ``get`` is kept because removing it would be theatre
-(``run X=n -- sh -c 'echo "$X"'`` is the same thing in one more step) and it is
-what a skill CLI or a person on a host shell wants; it is demoted instead —
-absent from the prompt, and sent with ``mode: read`` so the proxy logs it at
-WARNING while an injection logs at INFO.
+``placeholder`` is the broker path: the value is added outside the sandbox.
+``get`` and both forms of ``run`` ask for a value and, under reveal enforcement,
+work only for vault entries tagged ``istota:reveal``. ``env`` reads manifest
+variables, which have no reveal marker and are all refused under enforcement.
+Before enforcement, the proxy audits the public reads it would refuse.
 
-**This program is not a boundary and must not be read as one.** It sits in a
-directory bound read-write into the sandbox, so the model can overwrite it, and
-the socket answers a hand-rolled five-line client just as readily. Every rule
-that matters — which names exist, how many fetches an attempt may make — is
-enforced in ``SkillProxy``. What this buys is that the ordinary path leaves no
-copy of the value anywhere.
+The shim is a convenience, not the gate. A hand-written client can speak the
+same protocol; ``SkillProxy`` enforces reveal permission and the fetch cap.
+Host-side skill CLIs use a private inherited fd, selected explicitly by
+``_credref``, to resolve credentials without giving values to the model.
 
 Exit codes: ``1`` for a refusal, an absent name or a usage error; ``2`` when
 ``ISTOTA_SKILL_PROXY_SOCK`` is unset, which is what a deployment with the skill
@@ -141,6 +133,7 @@ EXIT_NOT_FOUND = 127
 USAGE = (
     "Usage:\n"
     "  istota-credential list\n"
+    "  istota-credential placeholder NAME\n"
     "  istota-credential run VAR=NAME [VAR2=NAME2 ...] [--stdin NAME] -- CMD [ARGS...]\n"
     "  istota-credential get NAME\n"
     "  istota-credential env VAR\n"
@@ -164,7 +157,10 @@ class ProxyError(Exception):
     """
 
 
-def _request(payload: dict, *, timeout: int = SOCKET_TIMEOUT_SECONDS) -> dict:
+def _request(
+    payload: dict, *, timeout: int = SOCKET_TIMEOUT_SECONDS,
+    credential_fd: str | None = None,
+) -> dict:
     """One JSON line to the proxy, one JSON line back.
 
     Raises ``ProxyError`` for anything that is not a well-formed reply. The
@@ -172,13 +168,22 @@ def _request(payload: dict, *, timeout: int = SOCKET_TIMEOUT_SECONDS) -> dict:
     a response was lost.
     """
     sock_path = os.environ.get("ISTOTA_SKILL_PROXY_SOCK", "")
-    if not sock_path:
+    if credential_fd is None and not sock_path:
         raise ProxyError("ISTOTA_SKILL_PROXY_SOCK is not set")
 
-    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    conn.settimeout(timeout)
+    # Duplicate the invocation's endpoint: closing this request must leave it
+    # usable for the next stamped argument. Never fall back after an fd error.
     try:
-        conn.connect(sock_path)
+        if credential_fd is None:
+            conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        else:
+            conn = socket.fromfd(int(credential_fd), socket.AF_UNIX, socket.SOCK_STREAM)
+    except (OSError, ValueError, OverflowError) as exc:
+        raise ProxyError("the private credential channel is unavailable") from exc
+    try:
+        conn.settimeout(timeout)
+        if credential_fd is None:
+            conn.connect(sock_path)
         conn.sendall(json.dumps(payload).encode("utf-8") + b"\n")
         chunks = []
         while True:
@@ -210,7 +215,9 @@ def _request(payload: dict, *, timeout: int = SOCKET_TIMEOUT_SECONDS) -> dict:
     return reply
 
 
-def fetch_credential(name: str, mode: str) -> str:
+def fetch_credential(
+    name: str, mode: str, *, binding: bool = False, credential_fd: str | None = None,
+) -> str | tuple[str, list[str]]:
     """One shared credential, by name, under a declared mode.
 
     ``mode`` is a claim rather than a fact — the proxy sees a socket, not a
@@ -219,16 +226,26 @@ def fetch_credential(name: str, mode: str) -> str:
 
     **Public because it has a second caller inside the package**:
     ``skills/_credref`` resolves a stamped argument through this same request,
-    with ``mode="skill"``. That is a *host-side* caller rather than a copy of
+    with ``mode="skill"`` and an explicit private ``credential_fd`` when
+    spawned by the proxy. The model-facing shim never selects that fd from
+    its environment. That is a *host-side* caller rather than a copy of
     this program — the shim runs in the sandbox with no istota package on its
     path, a skill CLI runs outside it with the package — and the two speaking
     one client is the point. Raises ``ProxyError``, which is the whole error
     surface either caller has to handle.
     """
-    reply = _request({"type": "vault_credential", "name": name, "mode": mode})
+    request = {"type": "vault_credential", "name": name, "mode": mode}
+    if binding:
+        request["binding"] = True
+    reply = _request(request, credential_fd=credential_fd)
     value = reply.get("value")
     if not isinstance(value, str):
         raise ProxyError(f"no value for {name!r}")
+    if binding:
+        hosts = reply.get("bound_hosts", [])
+        if not isinstance(hosts, list) or not all(isinstance(host, str) for host in hosts):
+            raise ProxyError("the credential proxy answered unparseably")
+        return value, hosts
     return value
 
 
@@ -241,9 +258,32 @@ def _cmd_list() -> int:
     # wrong.
     if not isinstance(names, list):
         raise ProxyError("the credential proxy answered unparseably")
-    for name in names:
-        print(name)
+    credentials = reply.get("credentials")
+    if isinstance(credentials, list):
+        print("NAME\tBOUND HOSTS\tREVEALABLE\tGRANT")
+        for item in credentials:
+            print("\t".join((item["name"], ",".join(item["bound_hosts"]) or "unbound",
+                             "yes" if item["revealable"] else "no", item["grant"])))
+    else:
+        for name in names:
+            print(name)
     return 0
+
+
+def _cmd_placeholder(args: list[str]) -> int:
+    """Print inert text; discover binding metadata without fetching a value."""
+    if len(args) != 1 or re.fullmatch(r"[A-Za-z0-9_-]+|forge\.(?:gitlab|github)", args[0]) is None:
+        print(USAGE, file=sys.stderr)
+        return EXIT_REFUSED
+    name = args[0]
+    reply = _request({"type": "vault_list"})
+    for item in reply.get("credentials", []):
+        if item.get("name") == name:
+            hosts = item.get("bound_hosts", [])
+            print("Bound hosts: " + (", ".join(hosts) or "unbound"), file=sys.stderr)
+            print("{{cred:" + name + "}}", end="")
+            return 0
+    raise ProxyError("credential name is unavailable")
 
 
 def _cmd_get(args: list[str]) -> int:
@@ -291,7 +331,7 @@ def _cmd_new(args: list[str]) -> int:
 
 
 def _cmd_env(args: list[str]) -> int:
-    """The manifest-declared variable fetch, byte for byte as it was.
+    """A manifest-declared variable fetch, refused under reveal enforcement.
 
     A different namespace from the three verbs above — ``derive_lookup_allowlist``
     over skill manifests, not the user's vault — reached through the proxy's
@@ -418,6 +458,7 @@ def main(argv: list[str] | None = None) -> int:
     verb, rest = args[0], args[1:]
     handlers = {
         "list": lambda: _cmd_list(),
+        "placeholder": lambda: _cmd_placeholder(rest),
         "run": lambda: _cmd_run(rest),
         "get": lambda: _cmd_get(rest),
         "env": lambda: _cmd_env(rest),

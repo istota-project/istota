@@ -168,6 +168,8 @@ class TestHappyPath:
         seen = []
         h.brain.execute(_req(tmp_path, on_pid=seen.append))
         assert seen == [4242]
+        # Startup network calls need authorization before Claude is launched.
+        assert h.names().index("_pane_pid") < h.names().index("_launch_claude")
 
     def test_on_progress_emits_whole_turn_events(self, monkeypatch, tmp_path):
         tr = _write_transcript(tmp_path, [

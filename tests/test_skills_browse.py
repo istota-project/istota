@@ -1964,7 +1964,7 @@ class TestFillCredential:
 
     @pytest.fixture(autouse=True)
     def isolated_browser(self):
-        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json={"per_user_profiles": True})):
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json={"per_user_profiles": True, "credential_origin_check": True})):
             yield
 
     @pytest.fixture
@@ -2015,7 +2015,7 @@ class TestFillCredential:
                 "type": "fill",
                 "selector": "#password",
                 "value": self.VAULT["acme_password"],
-                "credential": True,
+                "credential": True, "bound_hosts": [],
             },
         ]
         # The name is the model's own label and is not what the browser is
@@ -2088,7 +2088,7 @@ class TestFillCredential:
                 "type": "fill",
                 "selector": "#password",
                 "value": self.VAULT["acme_password"],
-                "credential": True,
+                "credential": True, "bound_hosts": [],
             },
             {"type": "click", "selector": "button[type=submit]"},
         ]
@@ -2121,7 +2121,7 @@ class TestFillCredential:
                 "type": "fill",
                 "selector": "#password",
                 "value": self.VAULT["acme_password"],
-                "credential": True,
+                "credential": True, "bound_hosts": [],
             },
         ]
 
@@ -2258,7 +2258,7 @@ class TestFillCredential:
                 "type": "fill",
                 "selector": "input[type=password]",
                 "value": self.VAULT["acme_password"],
-                "credential": True,
+                "credential": True, "bound_hosts": [],
             },
         ]
 
@@ -3582,7 +3582,7 @@ def test_text_offset_session_passthrough(mock_url, mock_request, verb, command):
 
 
 class TestProfileHandshake:
-    @pytest.mark.parametrize("health", [{}, {"per_user_profiles": False}, {"per_user_profiles": "true"}])
+    @pytest.mark.parametrize("health", [{}, {"per_user_profiles": False}, {"per_user_profiles": "true"}, {"per_user_profiles": True}])
     def test_credential_refused_before_post(self, monkeypatch, health):
         from istota.skills._credref import CredentialPair, SecretValue
 
@@ -3605,7 +3605,7 @@ class TestProfileHandshake:
         return args
 
     @pytest.mark.parametrize("response", [
-        httpx.Response(503, json={"per_user_profiles": True}),
+        httpx.Response(503, json={"per_user_profiles": True, "credential_origin_check": True}),
         httpx.Response(200, text="not JSON"),
         httpx.Response(200, json=[]),
         httpx.ReadTimeout("timed out"),
@@ -3626,7 +3626,7 @@ class TestProfileHandshake:
         body = {"status": "ok", "actions": [{"action": "fill", "ok": True}]}
         if scope is not None:
             body["user_scope"] = scope
-        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json={"per_user_profiles": True})) as get, patch("istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=body)) as post:
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json={"per_user_profiles": True, "credential_origin_check": True})) as get, patch("istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=body)) as post:
             result = cmd_interact(self.credential_args())
         assert get.call_args.kwargs["headers"] == {"X-Istota-User": "alice"}
         assert post.call_args.kwargs["json"]["actions"][0]["credential"] is True
@@ -3721,7 +3721,7 @@ class TestProfileHandshake:
         args = self.credential_args()
         args.fill_credential = [CredentialPair("#username", SecretValue("example", "alice"))]
         body = {"status": "ok", "user_scope": "alice", "actions": [{"action": "fill", "ok": True}]}
-        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json={"per_user_profiles": True})), patch("istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=body)):
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json={"per_user_profiles": True, "credential_origin_check": True})), patch("istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=body)):
             result = cmd_interact(args)
         assert result["status"] == "ok"
         assert "alice" not in json.dumps(result)

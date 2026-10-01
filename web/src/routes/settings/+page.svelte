@@ -60,6 +60,7 @@
   import {
     ServiceCard,
     SecurityCard,
+    CredentialGrantsCard,
     GarminCard,
     GoogleWorkspaceCard,
     HeaderSave,
@@ -1395,6 +1396,8 @@
         </div>
       </SettingsCard>
     {/if}
+
+    <CredentialGrantsCard onSignedOut={identity.expireSession} />
 
     {#if ncToken}
       {@const nc = ncToken}

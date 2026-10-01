@@ -327,6 +327,10 @@ would inherit the http-level default and serve the distro page.
 enabled: bool = True         allow_pypi: bool = True      extra_hosts: list[str] = []
 ```
 
+### `CredentialBrokerConfig`
+
+`[security.credential_broker]` maps to `SecurityConfig.credential_broker`. Defaults: `enabled = false`, `enforce_reveal = false`, `scan_max_bytes = 1048576`, `leaf_validity_hours = 24`. The two integer limits must be positive; malformed values warn and retain the default. Enabled with sandboxing disabled is allowed and warns that values are not contained. `enabled` controls interception. Independently, `enforce_reveal` switches public credential reads from WARNING audit records (`credential_reveal action=would_refuse`) to refusal for non-revealable entries, including every manifest `env` lookup. Host-side skill injection is unchanged. Enable enforcement only after a week of normal use without would-refuse events; it never activates itself.
+
 ### `SecurityConfig`
 ```
 sandbox_enabled: bool = True         skill_proxy_enabled: bool = True

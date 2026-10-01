@@ -2462,6 +2462,28 @@ def _cdp_selector_action(page, action, path, why):
     }
 
 
+_CREDENTIAL_FILL_JS = """(el, {value, origin}) => {
+    if (document.location.origin !== origin || el.ownerDocument !== document || !el.isConnected)
+        return {ok: false, error: "credential_origin_mismatch"};
+    if (el.disabled || el.readOnly)
+        return {ok: false, error: "credential_field_unfillable"};
+    let setter;
+    if (el instanceof HTMLInputElement &&
+        ["text", "email", "password", "search", "tel", "url", "number"].includes(el.type))
+        setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+    else if (el instanceof HTMLTextAreaElement)
+        setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
+    else if (!el.isContentEditable)
+        return {ok: false, error: "credential_field_unfillable"};
+    el.__istotaCredential = true;
+    if (setter) setter.call(el, value);
+    else el.textContent = value;
+    el.dispatchEvent(new InputEvent("input", {bubbles: true, inputType: "insertText", data: value}));
+    el.dispatchEvent(new Event("change", {bubbles: true}));
+    return {ok: true};
+}"""
+
+
 def _selector_action(session, page, action, others=(), owned=()):
     """Run one selector action, through the pointer and the keyboard.
 
@@ -2471,19 +2493,32 @@ def _selector_action(session, page, action, others=(), owned=()):
     fill whose keystrokes did not arrive as sent.
     """
     action_type = action["type"]
-    if action_type == "fill" and action.get("credential"):
-        # Register before either input path, including partially failed fills.
-        value = action.get("value", "")
-        if value:
-            _credential_values.add(value)
     selector = action.get("selector") or ""
     if selector and action_type == "fill" and action.get("credential"):
-        # Preserve the fill's wait for dynamically inserted controls. Mark
-        # the resolved handle before either input path can write a credential.
         handle = page.wait_for_selector(
             selector, state="visible", timeout=SELECTOR_TIMEOUT_MS,
         )
-        handle.evaluate("el => { el.__istotaCredential = true; }")
+        # Read the field's own document, including a selector into a frame.
+        # Filling that handle cannot re-resolve the selector after navigation.
+        frame = handle.owner_frame()
+        try:
+            parsed = urlsplit(frame.url if frame else "")
+            origin, _ = _forget_origin(f"{parsed.scheme}://{parsed.netloc}")
+        except ValueError:
+            origin = ""
+        hosts = action.get("bound_hosts", [])
+        if (not isinstance(hosts, list) or not origin.startswith("https://")
+                or origin[len("https://"):] not in hosts):
+            return {"action": "fill", "selector": selector, "ok": False,
+                    "error": "credential_origin_mismatch"}
+        value = action.get("value", "")
+        if value:
+            _credential_values.add(value)
+        # Even ElementHandle.fill uses keyboard insertion internally. Keep the
+        # origin check and DOM write in one evaluation, with no focus dispatch.
+        result = handle.evaluate(_CREDENTIAL_FILL_JS, {"value": value, "origin": origin})
+        return {"action": "fill", "selector": selector, **result,
+                "path": "cdp", "path_reason": "credential origin checked"}
     if not selector:
         return {"action": action_type, "ok": False,
                 "error": "selector is required"}
@@ -3003,6 +3038,7 @@ def health():
     data = {
         "status": "degraded" if (not running or wedged or looping) else "ok",
         "per_user_profiles": True,
+        "credential_origin_check": True,
         "browser_connected": bool(instances) and running,
         "cdp_healthy": not wedged,
         "cdp_consecutive_failures": sum(cdp["consecutive_failures"] for cdp in records),

@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     locked_by TEXT,
     started_at TEXT,
     completed_at TEXT,
+    credential_grants_initialized INTEGER NOT NULL DEFAULT 0,
     attempt_count INTEGER DEFAULT 0,
     max_attempts INTEGER DEFAULT 3,
 
@@ -314,6 +315,7 @@ CREATE TABLE IF NOT EXISTS istota_file_tasks (
     task_id INTEGER,
     result_summary TEXT,
     error_message TEXT,
+    credential_grants_initialized INTEGER NOT NULL DEFAULT 0,
     attempt_count INTEGER DEFAULT 0,
     max_attempts INTEGER DEFAULT 3,
     file_path TEXT NOT NULL,
@@ -1818,3 +1820,32 @@ CREATE TABLE IF NOT EXISTS web_auth_attempts (
     at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_web_auth_attempts ON web_auth_attempts(kind, key, at);
+
+CREATE TABLE IF NOT EXISTS credential_bindings (
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    hosts TEXT NOT NULL,
+    headers TEXT NOT NULL,
+    revealable INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS credential_grants (
+    user_id TEXT NOT NULL, name TEXT NOT NULL,
+    scope_mode TEXT NOT NULL CHECK (scope_mode IN ('all', 'rooms')),
+    methods TEXT NOT NULL, allow_scheduled INTEGER NOT NULL,
+    policy_revision INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, name)
+);
+CREATE TABLE IF NOT EXISTS credential_grant_rooms (
+    user_id TEXT NOT NULL, name TEXT NOT NULL, conversation_token TEXT NOT NULL,
+    PRIMARY KEY (user_id, name, conversation_token)
+);
+CREATE TABLE IF NOT EXISTS credential_task_grants (
+    task_id INTEGER NOT NULL, user_id TEXT NOT NULL, name TEXT NOT NULL,
+    policy_revision INTEGER NOT NULL,
+    PRIMARY KEY (task_id, name)
+);

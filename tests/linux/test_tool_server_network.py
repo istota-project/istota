@@ -30,6 +30,7 @@ separate capability from creating one — see `_can_unshare_net`.
 """
 
 import asyncio
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -147,7 +148,7 @@ def proxy(tmp_path):
     one not — to say anything at all.
     """
     sock = tmp_path / "net.sock"
-    with NetworkProxy(sock, ["example.com:443"]):
+    with NetworkProxy(sock, ["example.com:443"], trusted_roots={os.getpid()}):
         yield sock
 
 

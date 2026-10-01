@@ -426,6 +426,7 @@ class VaultRead:
     scoped: bool
     skipped: tuple[tuple[str, str], ...] = ()
     generated_count: int = 0
+    bindings: dict[str, dict] = field(default_factory=dict)
 
     def __repr__(self) -> str:
         """Everything but the values.
@@ -933,7 +934,9 @@ def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResul
         # backwards about what happened to their credentials.
         existed = name in stored
         state = secrets_store.upsert_secret(
-            db_path, user_id, VAULT_ENTRY_SERVICE, name, read.services[name]
+            db_path, user_id, VAULT_ENTRY_SERVICE, name, read.services[name],
+            binding=read.bindings.get(name, {"hosts": [], "headers": [],
+                                             "revealable": False, "source": "vault"}),
         )
         written.add(name)
         if state == "created" and existed:
@@ -955,6 +958,15 @@ def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResul
             result.unchanged += 1
         else:  # pragma: no cover - the store's contract is three literals
             raise ValueError(f"unexpected upsert state {state!r}")
+
+    # A held value stays stored, but an edited URL or removed reveal tag must
+    # still revoke its old policy. Ambiguous names are unbound by the parser.
+    from . import db
+    from .credential_broker.bindings import put_binding
+    with db.get_db(db_path) as conn:
+        for name in sorted(read.held & stored):
+            if name in read.bindings:
+                put_binding(conn, user_id, name, read.bindings[name])
 
     if read.truncated:
         result.swept = False
@@ -1148,6 +1160,7 @@ class _Walk:
     #: name -> every value produced under it, so a second producer is a
     #: collision rather than an overwrite.
     candidates: dict[str, list[str]] = field(default_factory=dict)
+    bindings: dict[str, dict] = field(default_factory=dict)
     skipped: list[tuple[str, str]] = field(default_factory=list)
     entries_visited: int = 0
     fields_examined: int = 0
@@ -1392,6 +1405,9 @@ def _map_groups(kp, digest: str) -> VaultRead:
         scoped=scoped,
         skipped=tuple(walk.skipped),
         generated_count=generated_count,
+        bindings={name: (walk.bindings[name] if len(walk.candidates[name]) == 1
+                         else {"hosts": [], "headers": [], "revealable": False, "source": "vault"})
+                  for name in services.keys() | held},
     )
 
 
@@ -1450,6 +1466,9 @@ def _take_entry(walk: _Walk, entry, group_path: tuple[str, ...]) -> None:
         )
         return
 
+    from .credential_broker.bindings import parse_binding
+    attributes = entry.custom_properties
+    binding = parse_binding(entry.url, attributes, entry.tags)
     fields: list[tuple[tuple[str, ...], object]] = [
         (path, entry.password),
         ((*path, _USERNAME_SEGMENT), entry.username),
@@ -1462,6 +1481,8 @@ def _take_entry(walk: _Walk, entry, group_path: tuple[str, ...]) -> None:
     for field_name, raw in sorted(
         entry.custom_properties.items(), key=lambda kv: str(kv[0])
     ):
+        if str(field_name).casefold().startswith("istota_"):
+            continue
         fields.append(((*path, field_name), raw))
 
     produced = 0
@@ -1489,6 +1510,7 @@ def _take_entry(walk: _Walk, entry, group_path: tuple[str, ...]) -> None:
                 )
             continue
         walk.candidates.setdefault(name, []).append(value)
+        walk.bindings[name] = binding
         if value:
             produced += 1
 

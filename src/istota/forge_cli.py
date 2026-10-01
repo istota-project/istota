@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Thin wrapper around the real ``gh`` / ``glab`` binaries.
 
-Installed under both names, ahead of the real binaries on PATH. It fetches a
-token from whichever credential proxy the environment has, checks the argv
-against a policy, builds a deliberate child environment, and ``execve``s the
-real CLI. Everything after the exec is the real CLI.
+Installed under both names, ahead of the real binaries on PATH. It checks the
+argv against a policy, obtains a placeholder or a token as that policy directs,
+builds a deliberate child environment, and ``execve``s the real CLI.
+Everything after the exec is the real CLI.
 
 Two homes, one file. The canonical copy is here; ``docker/devbox/lib/`` holds a
 byte-identical copy because Docker cannot COPY from outside its build context.
@@ -393,6 +393,7 @@ def load_policy(path: str | None, forge: str) -> dict:
             value = section.get(key)
             if isinstance(value, str) and value:
                 loaded[key] = value
+        loaded["credential_broker"] = section.get("credential_broker") is True
         loaded["direct_token"] = bool(section.get("direct_token", False))
         return loaded
     except Exception as e:
@@ -614,7 +615,7 @@ def _sock_roundtrip(sock_path: str, request: dict) -> dict:
 def fetch_forge_credentials(
     forge: str, parent_env: dict[str, str], policy: dict | None = None,
 ) -> tuple[str, str]:
-    """Ask whichever proxy this environment has for the token and the URL.
+    """Return a broker placeholder, or ask the credential proxy for a token.
 
     Returns ``(token, url_hint)``. ``url_hint`` is ``""`` everywhere except
     the devbox: the image is built once and shared by every user, so its baked
@@ -642,6 +643,12 @@ def fetch_forge_credentials(
     "direct mode" flag would let it opt itself into reading whatever token it
     had planted.
     """
+    # The sandbox policy selects this mode. Devbox policies never set it;
+    # their separate proxy remains responsible for tokens and destination URLs.
+    # Missing interception must fail authentication, never fetch a raw value.
+    if policy and policy.get("credential_broker") is True:
+        return "{{cred:forge." + forge + "}}", ""
+
     if policy and policy.get("direct_token"):
         ambient = parent_env.get(_TOKEN_VAR[forge], "")
         if ambient:
@@ -709,6 +716,7 @@ _CARRY_EXACT = (
     "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
     "https_proxy", "http_proxy", "no_proxy",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
     "ISTOTA_SKILL_PROXY_SOCK", "ISTOTA_CRED_SOCK",
 )
 _CARRY_PREFIX = ("LC_",)

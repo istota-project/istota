@@ -3703,6 +3703,78 @@ def check_vault_isolation(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def check_credential_broker(config: "Config", probe: bool) -> list[CheckResult]:
+    """Read broker readiness without generating a CA or fetching secret values."""
+    import json
+    import sqlite3
+    from cryptography.hazmat.primitives import serialization
+    from .credential_broker import ca
+    from . import peer_process
+
+    prefix = "security.credential_broker"
+    if not config.security.credential_broker.enabled:
+        return [CheckResult(prefix, SKIP, "credential broker is disabled")]
+    effective, _ = _deployment_sandboxing(config, probe)
+    results = [CheckResult(
+        prefix + ".containment", OK if effective else WARN,
+        "broker enabled with effective sandboxing" if effective else
+        "broker enabled; effective sandboxing is absent or unverified, so values are not contained",
+    ), CheckResult(
+        prefix + ".proxy", OK if config.security.network.enabled else FAIL,
+        "network proxy enabled" if config.security.network.enabled else
+        "network proxy disabled; placeholders cannot authenticate",
+    ), CheckResult(
+        prefix + ".peer_check", OK if peer_process.supported() else FAIL,
+        "network proxy authenticates task process ancestry" if peer_process.supported() else
+        "kernel peer identity unavailable; network proxy refuses connections",
+    )]
+    certificate = None
+    try:
+        state = ca.state_directory(config)
+        certificate = ca.read_ca(state).certificate
+    except FileNotFoundError:
+        results.append(CheckResult(prefix + ".ca", WARN, "CA not created yet; it is generated at task setup"))
+    except Exception:
+        certificate = None
+        results.append(CheckResult(prefix + ".ca", FAIL, "CA is unreadable, invalid, or has unsafe ownership or permissions"))
+    else:
+        results.append(CheckResult(prefix + ".ca", OK, "CA is valid and private to the daemon account"))
+    bundle_found = False
+    if certificate is not None:
+        public = certificate.public_bytes(serialization.Encoding.PEM)
+        try:
+            for bundle in (Path(config.temp_dir) / ".control").glob("*/task_*/trust/ca-bundle.pem"):
+                if public in bundle.read_bytes():
+                    bundle_found = True
+                    break
+        except OSError:
+            pass
+    results.append(CheckResult(
+        prefix + ".bundle", OK if bundle_found else WARN,
+        "task trust bundle includes the current broker CA" if bundle_found else
+        "no current task trust bundle found; bundles are written at task setup",
+    ))
+    try:
+        conn = sqlite_util.connect_read_only(config.db_path)
+        try:
+            unbound = ungranted = 0
+            for hosts, granted in conn.execute(
+                "SELECT b.hosts, g.name FROM credential_bindings b LEFT JOIN credential_grants g "
+                "ON b.user_id=g.user_id AND b.name=g.name"
+            ):
+                if not json.loads(hosts):
+                    unbound += 1
+                elif granted is None:
+                    ungranted += 1
+        finally:
+            conn.close()
+        results.append(CheckResult(prefix + ".bindings", WARN if unbound or ungranted else OK,
+                                   f"{unbound} unbound; {ungranted} bound without grants"))
+    except (OSError, sqlite3.Error, ValueError):
+        results.append(CheckResult(prefix + ".bindings", WARN, "binding counts unavailable; database not ready"))
+    return results
+
+
 def check_proxy_peer_check(config: "Config", probe: bool) -> CheckResult:
     """Whether the skill proxy can tell its own task's processes from others.
 
@@ -9176,6 +9248,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.sandbox_effective", check_sandbox_effective),
     ("security.sandbox_credentials", check_sandbox_credentials),
     ("security.proxy_peer_check", check_proxy_peer_check),
+    ("security.credential_broker", check_credential_broker),
     ("security.skill_model_credential", check_skill_model_credential),
     ("security.secret_key", check_secret_key),
     ("security.vault_isolation", check_vault_isolation),
@@ -9280,6 +9353,7 @@ CHECK_SCOPES: dict[str, str] = {
     # and must not go red for a deployment's own decision.
     "security.sandbox_credentials": DEPLOYMENT,
     "security.proxy_peer_check": DEPLOYMENT,
+    "security.credential_broker": DEPLOYMENT,
     "security.skill_model_credential": DEPLOYMENT,
     # Deployment, not image: a master key is a property of an install, and the
     # thing it unlocks is that install's own secrets table. A bare `docker run`

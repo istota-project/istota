@@ -7,3 +7,4 @@ export { default as SettingsLayout } from './SettingsLayout.svelte';
 export { default as SettingsCard } from './SettingsCard.svelte';
 export { default as SettingsField } from './SettingsField.svelte';
 export { default as SecurityCard } from './SecurityCard.svelte';
+export { default as CredentialGrantsCard } from './CredentialGrantsCard.svelte';

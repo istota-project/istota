@@ -7,7 +7,8 @@ ISSUE-270) before generating anything. Then generates, inside the task's user
 temp directory:
 
 - the per-platform git-credential-helper scripts and the ``GIT_CONFIG_*``
-  vars that point git at them. The helpers fetch their token by shelling out
+  vars that point git at them. With the broker enabled, helpers emit literal
+  placeholders. Otherwise they fetch their token by shelling out
   to the framework credential shim (:mod:`istota.credential_shim`), which
   ``task_env`` writes; this hook generated its own socket client until that
   program existed;
@@ -478,6 +479,7 @@ def setup_env(ctx) -> dict[str, str]:
     dev_bin.mkdir(parents=True, exist_ok=True)
 
     use_proxy = config.security.skill_proxy_enabled
+    use_broker = config.security.credential_broker.enabled
     # The five-line socket client this function used to generate as a string
     # literal is now `istota.credential_shim`, written by `task_env` as a
     # framework program with four verbs — of which `env` is this one's
@@ -499,6 +501,9 @@ def setup_env(ctx) -> dict[str, str]:
         logger.warning("developer: could not remove the stale credential-fetch: %s", exc)
 
     def _token_expr(var_name: str) -> str:
+        if use_broker:
+            forge = var_name.removesuffix("_TOKEN").lower()
+            return "'{{cred:forge." + forge + "}}'"
         # Quoted: git's credential protocol wants the value verbatim, and an
         # unquoted expansion is word-split by sh and rejoined by echo on
         # single spaces. No PAT format has whitespace today; this costs two
@@ -573,7 +578,8 @@ def setup_env(ctx) -> dict[str, str]:
             # escaped a stripping step. Saying so here rather than in an env
             # var matters: this file is the one input the model cannot
             # redirect, so it is the only safe place to grant that permission.
-            section["direct_token"] = not use_proxy
+            section["credential_broker"] = use_broker
+            section["direct_token"] = not use_proxy and not use_broker
             return section
 
         policy = {

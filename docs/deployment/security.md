@@ -209,7 +209,7 @@ Additional hosts added automatically:
 
 The forge wrapper sets `GH_TELEMETRY=0` and `DO_NOT_TRACK=1`, so no telemetry host needs allowlisting and no command spends a rejected CONNECT on one. GitHub Enterprise Server needs no extra entry: its API is a path on the same host (`<host>/api/v3`), already added as the git remote.
 
-No MITM -- TLS is end-to-end between Claude Code and the destination.
+TLS is end-to-end by default. With the optional [HTTP credential broker](../configuration/credentials.md#http-credential-broker), only hosts bound to a credential in the task snapshot are intercepted for header substitution. Other connections remain raw TLS.
 
 ## Deferred DB operations
 

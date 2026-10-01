@@ -10719,6 +10719,84 @@ async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
     return {"services": cards}
 
 
+def _credential_settings(username: str, action="list", name="", payload=None):
+    """Read metadata or edit the signed-in user's grants in one transaction."""
+    from . import db
+    from .credential_broker import bindings, grants
+    from .executor import effective_sandboxing
+
+    if _config is None or not _config.db_path:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    with db.get_db(_config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        # Match the developer skill's identity gate. Config tokens are not
+        # per-user vault entries, and must not appear for non-admin users.
+        available = None if _config.is_admin(username) and _config.developer.enabled else set()
+        bindings.sync_forge_bindings(conn, username, _config.developer, available_names=available)
+        if action == "existing":
+            return {"ok": True, "count": grants.grant_what_exists(conn, username)}
+        if action == "delete":
+            grants.delete_grant(conn, username, name)
+            return {"ok": True}
+        rooms = [{"token": room.token, "name": room.name or room.token}
+                 for room in db.list_member_rooms(conn, username)]
+        if action == "save":
+            payload = payload or {}
+            allowed = {"scope_mode", "methods", "allow_scheduled", "rooms"}
+            if payload.keys() - allowed:
+                raise HTTPException(status_code=400, detail="unknown credential grant field")
+            requested_rooms = payload.get("rooms", [])
+            if (not isinstance(requested_rooms, list)
+                    or any(not isinstance(r, str) or r not in {room["token"] for room in rooms}
+                           for r in requested_rooms)):
+                raise HTTPException(status_code=400, detail="room is not available to this user")
+            try:
+                grant = grants.put_grant(conn, username, name, **payload)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return {"ok": True, "grant": grant}
+        names = {row[0] for row in conn.execute(
+            "SELECT key FROM secrets WHERE user_id=? AND service='vault_entries'", (username,))}
+        names.update(row[0] for row in conn.execute(
+            "SELECT name FROM credential_bindings WHERE user_id=? AND source='config'", (username,)))
+        credentials = []
+        for credential_name in sorted(names):
+            binding = bindings.get_binding(conn, username, credential_name) or {
+                "hosts": [], "headers": [], "revealable": False, "source": "vault"}
+            credentials.append({"name": credential_name, **binding,
+                                "grant": grants.get_grant(conn, username, credential_name)})
+        existing_available = db.kv_get(conn, username, grants.NAMESPACE, "granted_existing") is None
+    return {"credentials": credentials, "rooms": rooms,
+            "grant_existing_available": existing_available, "sandboxed": effective_sandboxing(_config)}
+
+
+@api_router.get("/settings/credentials")
+async def settings_credentials(user: dict = Depends(_require_api_auth)) -> dict:
+    return await asyncio.to_thread(_credential_settings, user["username"])
+
+
+@api_router.post("/settings/credentials/grant-existing")
+async def settings_credentials_grant_existing(
+    user: dict = Depends(_require_api_auth), _csrf: None = Depends(_verify_origin),
+) -> dict:
+    return await asyncio.to_thread(_credential_settings, user["username"], "existing")
+
+
+@api_router.put("/settings/credentials/{name}")
+async def settings_credential_grant(
+    name: str, payload: dict, user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    return await asyncio.to_thread(_credential_settings, user["username"], "save", name, payload)
+
+
+@api_router.delete("/settings/credentials/{name}")
+async def settings_credential_revoke(
+    name: str, user: dict = Depends(_require_api_auth), _csrf: None = Depends(_verify_origin),
+) -> dict:
+    return await asyncio.to_thread(_credential_settings, user["username"], "delete", name)
+
+
 def _vault_settings_payload(username: str) -> dict:
     """The credential vault's status and the folder's listing, for the card.
 

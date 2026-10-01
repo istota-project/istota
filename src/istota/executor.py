@@ -4481,6 +4481,7 @@ def build_bwrap_cmd(
     workspace_dir: Path | None = None,
     *,
     profile: SandboxProfile,
+    sandbox_env: dict[str, str] | None = None,
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
@@ -4516,6 +4517,7 @@ def build_bwrap_cmd(
     )
     return render_bwrap_argv(
         plan, cmd, net_proxy_sock=net_proxy_sock, user_temp_dir=user_temp_dir,
+        sandbox_env=sandbox_env,
     )
 
 
@@ -6371,7 +6373,20 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # the value — which is the one outcome `run` exists to avoid. One line here
     # costs less than that.
     shared_credentials_line = ""
-    if shared_credentials:
+    if config.security.credential_broker.enabled:
+        shared_credentials_line = (
+            "\n- Credential broker: `istota-credential list` shows names and bound hosts. "
+            "`istota-credential placeholder NAME` prints `{{cred:NAME}}`. Put that literal "
+            "only in an allowed authentication header, never in a URL or body. For example: "
+            "`curl -H 'Authorization: Bearer {{cred:NAME}}' https://service.example/api`. "
+            "The proxy adds the value only for a bound host admitted by this task's grant; "
+            "a host outside the snapshot keeps ordinary TLS and receives inert text. "
+            "Grant refusals name the reason in X-Istota-Refused; ask the user to update "
+            "the credential settings instead of trying to obtain the value. Browser logins "
+            "use browse --fill-credential. Non-HTTP protocols and signing need a host-side "
+            "skill or an entry the user has marked revealable."
+        )
+    elif shared_credentials:
         shared_credentials_line = (
             "\n- Shared credentials: this user has stored credentials for you to "
             "use. `istota-credential list` names them; you are not told the "
@@ -7428,6 +7443,7 @@ def execute_task(
                     authorized_skills=authorized_skills,
                     workspace_dir=workspace_dir,
                     profile=sandbox_profile,
+                    sandbox_env=_runtime.sandbox_env,
                 )
 
             return _wrap
@@ -7462,11 +7478,13 @@ def execute_task(
             )
 
         def _on_pid(pid: int) -> None:
-            # The skill proxy serves only this pid's descendants (ISSUE-550),
-            # so it hears first: a child can reach the socket before the DB
+            # Both proxies serve only this pid's descendants (ISSUE-550),
+            # so they hear first: a child can reach the socket before the DB
             # write below returns, and the proxy's grace wait is bounded.
             if _proxy_ctx is not None:
                 _proxy_ctx.authorize_pid(pid)
+            if _net_proxy_ctx is not None:
+                _net_proxy_ctx.authorize_pid(pid)
             # Placement first, DB second. `update_task_pid` can block on the
             # SQLite write lock, and the whole value of the cgroup is in the
             # window before the child's own work starts.
