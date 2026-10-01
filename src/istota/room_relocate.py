@@ -166,6 +166,26 @@ def check_inventory(conn: sqlite3.Connection) -> set[tuple[str, str]]:
     return columns
 
 
+def load_vector_extension(conn: sqlite3.Connection) -> None:
+    """Load sqlite-vec when the database holds the vec0 index.
+
+    `check_inventory` reads `table_info` on every table, and a vec0 table
+    cannot be read without its module, so every connection that preflights
+    needs this, the mount sweep's read-only one included.
+    """
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='memory_chunks_vec'").fetchone():
+        return
+    from .memory.search import enable_vec_extension
+    # The loader opens the installed package's extension, never a DB-
+    # supplied path. Restrict extension loading again immediately.
+    conn.enable_load_extension(True)
+    try:
+        if not enable_vec_extension(conn):
+            raise MigrationRefusal("vector_extension_unavailable")
+    finally:
+        conn.enable_load_extension(False)
+
+
 def _preflight(conn: sqlite3.Connection) -> None:
     try:
         live = db.get_users_with_live_tasks(conn)
@@ -376,16 +396,7 @@ def migrate_database(db_path: Path, *, dry_run: bool = False, list_only: bool = 
             conn = sqlite_util.connect(
                 path, timeout=5, busy_timeout_ms=None, foreign_keys=False, create=False,
             )
-        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='memory_chunks_vec'").fetchone():
-            from .memory.search import enable_vec_extension
-            # The loader opens the installed package's extension, never a DB-
-            # supplied path. Restrict extension loading again immediately.
-            conn.enable_load_extension(True)
-            try:
-                if not enable_vec_extension(conn):
-                    raise MigrationRefusal("vector_extension_unavailable")
-            finally:
-                conn.enable_load_extension(False)
+        load_vector_extension(conn)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("BEGIN" if dry_run or list_only else "BEGIN IMMEDIATE")
         _preflight(conn)

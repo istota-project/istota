@@ -290,3 +290,18 @@ def test_rclone_fallback_requires_a_missing_file(migrated, returncode, expected)
     ]) as command:
         assert storage.read_channel_memory(config, new) == expected
     assert command.call_count == (1 if returncode == 1 else 2)
+
+
+def test_existing_vector_index_does_not_refuse_the_sweep(migrated, monkeypatch):
+    # The inventory reads table_info on every table, a vec0 one included, so
+    # the sweep's own connection needs the extension the database half loads.
+    sqlite_vec = pytest.importorskip("sqlite_vec")
+    monkeypatch.setattr("istota.memory.search._vec_available", None)
+    config, old, new = migrated
+    with db.get_db(config.db_path) as conn:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.execute("CREATE VIRTUAL TABLE memory_chunks_vec USING vec0(chunk_id INTEGER PRIMARY KEY, embedding FLOAT[384])")
+    put(config, f"Channels/{old}/CHANNEL.md", "remember this")
+    assert room_relocate.reconcile_mount(config) == 0
+    assert (config.workspace_path / "Channels" / new / "CHANNEL.md").read_text() == "remember this"

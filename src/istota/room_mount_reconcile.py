@@ -20,7 +20,9 @@ import tomli_w
 from . import cron_loader, db, storage
 from .nextcloud import dav
 from .nextcloud._http import OcsError, dav_files_url, dav_request
-from .room_relocate import EXIT_OK, EXIT_PARTIAL, EXIT_REFUSED, _descriptor, _preflight, _refusal
+from .room_relocate import (
+    EXIT_OK, EXIT_PARTIAL, EXIT_REFUSED, _descriptor, _preflight, _refusal, load_vector_extension,
+)
 from .sqlite_util import connect_read_only
 from .toml_fence import BACKTICK_RUN_RE, FENCE_OPEN_RE, find_toml_block
 from .user_scope import is_scopable_user_id
@@ -260,6 +262,7 @@ def reconcile(config, *, dry_run: bool = False) -> int:
     try:
         with closing(connect_read_only(config.db_path.resolve())) as conn:
             conn.row_factory = sqlite3.Row
+            load_vector_extension(conn)
             _preflight(conn)
             # A deleted room leaves an alias tombstone. Never resurrect its
             # files and never make every future sweep report it incomplete.
