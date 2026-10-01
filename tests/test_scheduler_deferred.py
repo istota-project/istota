@@ -915,3 +915,35 @@ class TestDrainContainsAHandlerThatRaises:
             entry["level"] == "error" and "CancelledError" in entry["message"]
             for entry in logs
         )
+
+
+
+class TestSubtaskAudienceInheritance:
+    """A subtask in the parent's room is read by the parent's audience, so the
+    row fields the reach gate and the group set read travel with the token."""
+
+    def test_the_audience_fields_are_inherited(self, config, db_path):
+        with db.get_db(db_path) as conn:
+            task = _parent(conn, is_group_chat=True, audience="mixed",
+                           guest_participant_id=3)
+        user_temp = _write_subtask_file(config, task, [{"prompt": "follow up"}])
+        assert _process_deferred_subtasks(config, task, user_temp) == 1
+        child = _subtask(db_path)
+        assert child.is_group_chat is True
+        assert child.audience == "mixed"
+        assert child.guest_participant_id == 3
+
+    def test_a_group_chat_subtask_resolves_no_group(self, config, db_path):
+        from istota.room_scopes import task_group_ids
+
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="talk", name="r")
+            db.create_group(conn, "fam", kind="family", display_name="Fam",
+                            created_by="operator")
+            db.add_group_member(conn, "fam", "alice", added_by="operator")
+            task = _parent(conn, is_group_chat=True)
+            assert task_group_ids(conn, task) == []
+        user_temp = _write_subtask_file(config, task, [{"prompt": "follow up"}])
+        assert _process_deferred_subtasks(config, task, user_temp) == 1
+        with db.get_db(db_path) as conn:
+            assert task_group_ids(conn, _subtask(db_path)) == []

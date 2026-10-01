@@ -276,10 +276,16 @@ class RoomReaders:
     Members are named by istota user id, which the operator assigns; guests are
     counted and never named, because a display name is text its owner chose and
     the card is in the system half.
+
+    ``others`` counts the present participants that are neither: agents, and
+    a principal row no user id was mapped onto. The card does not show them;
+    the group gate (``room_scopes.task_group_ids``) treats any of them as a
+    reader who is not a group member.
     """
     members: tuple[str, ...]
     guests: int
     host: str | None
+    others: int = 0
 
 
 def room_readers(conn: sqlite3.Connection, room_token: str) -> RoomReaders:
@@ -287,15 +293,18 @@ def room_readers(conn: sqlite3.Connection, room_token: str) -> RoomReaders:
     members = set(db.list_room_members(conn, room_token))
     rows = conn.execute(
         "SELECT kind, user_id, surface, surface_ref FROM room_participants "
-        "WHERE room_token = ? AND left_at IS NULL AND kind != 'agent'",
+        "WHERE room_token = ? AND left_at IS NULL",
         (room_token,),
     ).fetchall()
     guests = set()
+    others = set()
     for row in rows:
         if row["kind"] == "principal" and row["user_id"]:
             members.add(row["user_id"])
         elif row["kind"] == "guest":
             guests.add((row["surface"], row["surface_ref"]))
+        else:
+            others.add((row["surface"], row["surface_ref"]))
     policy = get_policy(conn, room_token)
     if policy is None:
         # No row yet: the host `ensure_policy` would fix, without writing it.
@@ -305,7 +314,7 @@ def room_readers(conn: sqlite3.Connection, room_token: str) -> RoomReaders:
         host = policy.host_user_id
         if host and not host_present(conn, room_token, host):
             host = None
-    return RoomReaders(tuple(sorted(members)), len(guests), host)
+    return RoomReaders(tuple(sorted(members)), len(guests), host, len(others))
 
 
 def bot_turns_since_principal(conn: sqlite3.Connection, room_token: str) -> int:

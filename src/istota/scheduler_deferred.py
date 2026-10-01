@@ -338,6 +338,12 @@ def _process_deferred_subtasks(
                 parent_task_id=task.id,
                 conversation_token=conv_token,
                 withheld_from_room=task.withheld_from_room,
+                # Who reads the room travels with the token: the reach gate and
+                # the group set read these off the row, and a subtask without
+                # them would be answered as a private principal turn.
+                is_group_chat=task.is_group_chat,
+                audience=task.audience,
+                guest_participant_id=task.guest_participant_id,
                 priority=entry.get("priority", 5),
                 queue=task.queue,
                 output_target=output_target,

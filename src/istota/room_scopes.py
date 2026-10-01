@@ -238,7 +238,11 @@ def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
     is "may be said in front of every member", and a guest or another bot is
     not one. Nothing either where the audience cannot be read: a room with no
     recorded readers, or a surface roster saying "group" over a room the
-    registry records one person in.
+    registry records one person in. A token naming no registered room is the
+    first case, so a push surface's per-user token (``sms-<hash>``,
+    ``whatsapp-<hash>``) or an email thread with no thread room loads nothing:
+    fail closed, since this function cannot tell a private push token from a
+    room that was never recorded.
 
     Independent of the room's grants. A grant is the sender's consent to
     disclose their own data and never reaches group material; the audience
@@ -251,23 +255,19 @@ def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
     if not groups or not task.conversation_token:
         return groups
 
+    from . import room_policy
+
     room_token = task.conversation_token
     if db.get_room(conn, room_token) is None:
         room_token = db.find_room_token_by_ref(conn, room_token) or room_token
-    readers = set(db.list_room_members(conn, room_token))
-    rows = conn.execute(
-        "SELECT kind, user_id FROM room_participants "
-        "WHERE room_token = ? AND left_at IS NULL",
-        (room_token,),
-    ).fetchall()
-    for row in rows:
-        if row["kind"] != "principal" or not row["user_id"]:
-            logger.debug(
-                "group_memory_skipped reason=non_member_reader token=%s",
-                task.conversation_token,
-            )
-            return []
-        readers.add(row["user_id"])
+    room = room_policy.room_readers(conn, room_token)
+    if room.guests or room.others:
+        logger.debug(
+            "group_memory_skipped reason=non_member_reader token=%s",
+            task.conversation_token,
+        )
+        return []
+    readers = set(room.members)
     if not readers or (task.is_group_chat and len(readers) < 2):
         logger.debug(
             "group_memory_skipped reason=room_members_unknown token=%s",
