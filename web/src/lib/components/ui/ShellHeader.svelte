@@ -6,6 +6,10 @@
     /* Leading slot, before the title — the conventional home for a drawer
        toggle (Material's navigation-icon slot). */
     leading?: Snippet;
+    /* Inside the heading, directly after the title: a fact about what the
+       title names (the chat's shared-room glyph), not a control, so it sits
+       before `nav` and nothing there can come between the two. */
+    afterTitle?: Snippet;
     nav?: Snippet;
     tools?: Snippet;
     /* When set, the title itself is a second hit target for the same action as
@@ -15,12 +19,12 @@
     titleActionLabel?: string;
   }
 
-  let { title, leading, nav, tools, onTitleClick, titleActionLabel }: Props = $props();
+  let { title, leading, afterTitle, nav, tools, onTitleClick, titleActionLabel }: Props = $props();
 </script>
 
 <div class="header">
   {#if leading}{@render leading()}{/if}
-  <h1>
+  <h1 class:with-after={!!afterTitle}>
     {#if onTitleClick}
       <button
         class="title-btn"
@@ -33,6 +37,7 @@
     {:else}
       {title}
     {/if}
+    {#if afterTitle}{@render afterTitle()}{/if}
   </h1>
   {#if nav}<div class="header-nav">{@render nav()}</div>{/if}
   {#if tools}<div class="header-tools">{@render tools()}</div>{/if}
@@ -51,6 +56,16 @@
     font-size: 1rem;
     font-weight: 600;
     margin: 0;
+    min-width: 0;
+  }
+
+  .header h1.with-after {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .header h1.with-after .title-btn {
     min-width: 0;
   }
 

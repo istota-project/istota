@@ -172,6 +172,12 @@
   let composerH = $state(0);
 
   const activeRoom = $derived($rooms.find((r) => r.id === $activeRoomId) ?? null);
+  const isTalkRoom = (room: { origin?: string | null; talk_token?: string | null }) =>
+    room.origin === 'talk' || !!room.talk_token;
+  // One wording for the sidebar row and the header, so the two never disagree
+  // about what the glyph means.
+  const sharedRoomTitle = (room: { origin?: string | null; talk_token?: string | null }) =>
+    isTalkRoom(room) ? 'Shared room, also on Nextcloud Talk' : 'Shared room';
 
   // A room whose host left answers nobody until a member claims it (D14).
   const hostLost = $derived(!!activeRoom?.policy && activeRoom.policy.host === null);
@@ -965,6 +971,21 @@
       onTitleClick={() => (sidebarOpen = !sidebarOpen)}
       titleActionLabel="open rooms"
     >
+      {#snippet afterTitle()}
+        {#if !inViewMode && activeRoom?.shared}
+          <!-- The sidebar marks this too, but it is closed most of the time on
+               a phone, and who reads a message is what a sender needs before
+               typing. -->
+          <span
+            class="header-shared"
+            role="img"
+            title={sharedRoomTitle(activeRoom)}
+            aria-label={sharedRoomTitle(activeRoom)}
+          >
+            <Users size={14} />
+          </span>
+        {/if}
+      {/snippet}
       {#snippet leading()}
         <SidebarToggle
           open={sidebarOpen}
@@ -1079,7 +1100,7 @@
       </div>
 
       {#each sidebarRooms as { room, nested } (room.id)}
-        {@const isTalk = room.origin === 'talk' || !!room.talk_token}
+        {@const isTalk = isTalkRoom(room)}
         {@const unreadCount = room.unread_count ?? 0}
         {@const unread = unreadCount > 0 && room.id !== $activeRoomId}
         {@const waiting = room.id === $activeRoomId ? 0 : ($queuedCounts[room.token] ?? 0)}
@@ -1102,8 +1123,9 @@
 							     surface mirrors it. The Talk fact moves into the title. -->
               <span
                 class="room-origin shared"
-                title={isTalk ? 'Shared room, also on Nextcloud Talk' : 'Shared room'}
-                aria-label="Shared room"
+                role="img"
+                title={sharedRoomTitle(room)}
+                aria-label={sharedRoomTitle(room)}
               >
                 <Users size={13} />
               </span>
@@ -1755,6 +1777,11 @@
     color: var(--accent-amber);
   }
   .room-origin.shared {
+    color: var(--accent-blue);
+  }
+  .header-shared {
+    display: inline-flex;
+    flex-shrink: 0;
     color: var(--accent-blue);
   }
 
