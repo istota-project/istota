@@ -414,9 +414,16 @@ def migrate_database(db_path: Path, *, dry_run: bool = False, list_only: bool = 
             conn.close()
 
 
+def reconcile_mount(config, *, dry_run: bool = False, list_only: bool = False) -> int:
+    """The resumable filesystem half, driven only by committed mappings."""
+    from .room_mount_reconcile import reconcile
+    return reconcile(config, dry_run=dry_run or list_only)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Migrate database room identities. Stop all service units first.")
     parser.add_argument("--db-path", type=Path, help="Database path; defaults to the configured database.")
+    parser.add_argument("--reconcile-mount", action="store_true", help="Reconcile channel directories and workspace files from the mapping table.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Report pending rooms without writing.")
     mode.add_argument("--list", action="store_true", dest="list_only", help="List current room identities.")
@@ -431,6 +438,12 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError):
             pass
     try:
+        if args.reconcile_mount:
+            from .config import load_config
+            config = load_config()
+            if args.db_path is not None:
+                config.db_path = args.db_path
+            return reconcile_mount(config, dry_run=args.dry_run, list_only=args.list_only)
         path = args.db_path
         if path is None:
             from .config import load_config

@@ -391,3 +391,64 @@ class TestNotifications:
             "the client saw the notification and a plain OCS read did not: "
             f"{[(row.get('app'), row.get('subject')) for row in direct]}"
         )
+
+
+@FULL
+class TestRoomMountReconcile:
+    def test_server_move_preserves_notes_and_dated_memories(self, stack):
+        """A committed mapping drives real MOVE; the volume only observes it."""
+        old = _unique("legacy-room")
+        setup = "\n" + f"""
+from istota import db, room_relocate
+c.db_path = pathlib.Path('/tmp/{old}.db')
+c.users = {{'testuser': c.users['testuser']}}
+db.init_db(c.db_path)
+with db.get_db(c.db_path) as conn:
+    db.register_room(conn, {old!r}, 'testuser', origin='talk')
+base = c.workspace_path / 'Channels' / {old!r}
+(base / 'memories').mkdir(parents=True)
+(base / 'CHANNEL.md').write_text('durable notes')
+(base / 'memories' / '2026-01-01.md').write_text('dated notes')
+assert room_relocate.migrate_database(c.db_path) == 0
+with db.get_db(c.db_path) as conn:
+    new = conn.execute('SELECT new_token FROM room_token_migration').fetchone()[0]
+print('NEW', new)
+"""
+        new = _tagged(_run(stack, setup), "NEW").strip()
+        nextcloud = stack.service("nextcloud")
+        assert f"{BOT_MOUNT_POINT}/Channels/{old}/CHANNEL.md" in nextcloud.files(
+            f"{BOT_MOUNT_POINT}/Channels/{old}"
+        )
+        # Negative control in the same boot: a no-op MOVE must fail the
+        # physical-path oracle even if the sweep's status claims success.
+        control = "\n" + f"""
+from unittest.mock import patch
+from istota import room_relocate
+c.db_path = pathlib.Path('/tmp/{old}.db')
+c.users = {{'testuser': c.users['testuser']}}
+with patch('istota.room_mount_reconcile._move_dav'):
+    assert room_relocate.reconcile_mount(c) == 0
+assert (c.workspace_path / 'Channels' / {new!r} / 'CHANNEL.md').exists(), 'MOVE was a no-op'
+"""
+        result = stack.exec(["uv", "run", "python", "-c", _PREAMBLE + control], timeout=180)
+        assert result.returncode != 0 and 'MOVE was a no-op' in result.stderr, result
+        actual = "\n" + f"""
+from unittest.mock import patch
+from istota import room_relocate, storage
+from istota.room_mount_reconcile import dav_request
+c.db_path = pathlib.Path('/tmp/{old}.db')
+c.users = {{'testuser': c.users['testuser']}}
+with patch('istota.room_mount_reconcile.os.rename', side_effect=AssertionError('FUSE rename')), patch('istota.room_mount_reconcile.dav_request', wraps=dav_request) as requests:
+    assert room_relocate.reconcile_mount(c) == 0
+assert any(call.args[1] == 'MOVE' for call in requests.call_args_list)
+assert not (c.workspace_path / 'Channels' / {old!r}).exists()
+assert storage.read_channel_memory(c, {new!r}) == 'durable notes'
+assert storage.read_channel_memory(c, {old!r}) == 'durable notes'
+assert (c.workspace_path / 'Channels' / {new!r} / 'memories/2026-01-01.md').read_text() == 'dated notes'
+assert room_relocate.reconcile_mount(c) == 0
+print('MOVE', 'verified')
+"""
+        assert _tagged(_run(stack, actual), "MOVE").strip() == "verified"
+        assert nextcloud.read_file(f"{BOT_MOUNT_POINT}/Channels/{new}/CHANNEL.md").decode() == "durable notes"
+        assert nextcloud.read_file(f"{BOT_MOUNT_POINT}/Channels/{new}/memories/2026-01-01.md").decode() == "dated notes"
+        assert f"{BOT_MOUNT_POINT}/Channels/{old}" not in nextcloud.files(f"{BOT_MOUNT_POINT}/Channels")

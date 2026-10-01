@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Room identity migration now carries channel memories and scheduled destinations to the new room names. Interrupted moves can resume, conflicting files are left for an operator to resolve, and schedule files are backed up before rewriting.
+
 - The web chat room list marks a shared room with a people icon, so a room that someone besides you reads is visible before you open it. For a shared Talk room, the icon's tooltip says it is also on Nextcloud Talk.
 - Rooms can hold more than one person on every surface. A web chat room's creator can add other users of the installation under Members, Talk group conversations work as before, a WhatsApp group the bot's number is in becomes a room on the Baileys adapter, and an email thread with two or more people besides the bot becomes a room for its owner. See [shared rooms](docs/features/shared-rooms.md).
 

@@ -2447,6 +2447,36 @@ def ensure_channel_directories(config: "Config", conversation_token: str) -> boo
         return True
 
 
+def channel_memory_tokens(config: "Config", conversation_token: str) -> list[str]:
+    """Canonical name first, then live aliases, while the mount catches up.
+
+    A read-only open must not create a database on storage-only callers. A
+    deleted room's permanent mapping is a tombstone, never a fallback path.
+    """
+    import sqlite3
+    from contextlib import closing
+
+    validate_conversation_token(conversation_token)
+    try:
+        with closing(sqlite3.connect(config.db_path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+            row = conn.execute(
+                "SELECT m.new_token FROM room_token_migration m JOIN rooms r ON r.token=m.new_token "
+                "WHERE m.old_token=?", (conversation_token,),
+            ).fetchone()
+            canonical = row[0] if row else conversation_token
+            aliases = [r[0] for r in conn.execute(
+                "SELECT m.old_token FROM room_token_migration m JOIN rooms r ON r.token=m.new_token "
+                "WHERE m.new_token=? ORDER BY m.old_token", (canonical,),
+            )]
+            if not row and conn.execute(
+                "SELECT 1 FROM room_token_migration WHERE old_token=?", (conversation_token,),
+            ).fetchone():
+                return []
+        return [validate_conversation_token(t) for t in [canonical, *aliases]]
+    except (sqlite3.Error, OSError, AttributeError):
+        return [conversation_token]
+
+
 def read_channel_memory(config: "Config", conversation_token: str) -> str | None:
     """
     Read the channel's memory file (mount-aware).
@@ -2468,30 +2498,32 @@ def read_channel_memory(config: "Config", conversation_token: str) -> str | None
     here would make the same bytes hash two ways and every save read as a
     conflict.
     """
-    if config.has_workspace:
-        channel_dir = _contained_channel_dir(config, conversation_token)
-        if channel_dir is None:
-            logger.warning(
-                "channel_memory_read_refused token=%s reason=outside_channel_root",
-                conversation_token,
-            )
-            return None
-        content, reason = read_regular_file(channel_dir / "CHANNEL.md")
-        if reason is not None:
-            logger.warning(
-                "channel_memory_read_refused token=%s reason=%s",
-                conversation_token, reason,
-            )
-            return None
-        if not content or not content.strip():
-            return None
-        return content
-    else:
-        memory_path = get_channel_memory_path(conversation_token)
-        content = _rclone_cat(config.rclone_remote, memory_path)
-        if content is None or not content.strip():
-            return None
-        return content
+    for token in channel_memory_tokens(config, conversation_token):
+        if config.has_workspace:
+            channel_dir = _contained_channel_dir(config, token)
+            if channel_dir is None:
+                logger.warning("channel_memory_read_refused token=%s reason=outside_channel_root", token)
+                return None
+            try:
+                (channel_dir / "CHANNEL.md").lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return None
+            content, reason = read_regular_file(channel_dir / "CHANNEL.md")
+            if reason is not None:
+                logger.warning("channel_memory_read_refused token=%s reason=%s", token, reason)
+                return None
+            # Only absence falls back. An intentionally empty canonical file
+            # must not revive notes somebody just cleared.
+            if content is None:
+                continue
+        else:
+            content = _rclone_cat(config.rclone_remote, get_channel_memory_path(token))
+            if content is None:
+                continue
+        return content if content.strip() else None
+    return None
 
 
 def write_channel_memory(
