@@ -42,9 +42,11 @@ from . import acf, media
 from .client import WordPressError, fence, fence_tree, raw_text, selector, selectors
 from .common import (  # noqa: F401 (MAX_LIMIT, limit_arg, total_header re-exported)
     MAX_LIMIT,
+    gate,
     int_or_none,
     limit_arg,
     lookup,
+    lookup_hint,
     read_text_file,
     total_header,
 )
@@ -449,10 +451,6 @@ def build_payload(args) -> dict:
     return payload
 
 
-def _where(ctx) -> str:
-    return f"{ctx.record.name}/{ctx.blog}" if ctx.blog else ctx.record.name
-
-
 def _label(item: dict, type_slug: str, post_id: int) -> str:
     title = raw_text(item.get("title"))
     if len(title) > _TITLE_IN_DESCRIPTION:
@@ -471,20 +469,6 @@ def _when(args) -> str:
     key, value = args.date_field
     zone = " UTC" if key == "date_gmt" else " site time"
     return f", dated {value}{zone} (at once if that time has passed)"
-
-
-def gate(args, ctx, actions: list[str]) -> None:
-    """Refuse unless confirmed, naming every gated action of this call."""
-    if not actions or args.confirmed:
-        return
-    would = [f"would {action} on {_where(ctx)}" for action in actions]
-    raise WordPressError(
-        "Not done: this needs the user's agreement first. " + "; ".join(would) + ". "
-        "Show the user exactly this, and pass --confirmed only after they agree in "
-        "the conversation.",
-        "confirmation_required",
-        would=would,
-    )
 
 
 def _current(ctx, route: str, post_id: int) -> dict:
@@ -590,7 +574,7 @@ def post_term(ctx, route: str, taxonomy: str, body: dict) -> dict:
                 "outcome_unknown",
             )
     except WordPressError as exc:
-        _lookup_hint(exc, hint)
+        lookup_hint(exc, hint)
         raise
     return term
 
@@ -684,11 +668,6 @@ def _written(ctx, route: str, type_slug: str, post_id: int, written, payload: di
     }
 
 
-def _lookup_hint(exc: WordPressError, hint: str) -> None:
-    if exc.reason == "outcome_unknown":
-        exc.extra["lookup"] = hint
-
-
 def _post_id(item, verb: str) -> int:
     post_id = item.get("id") if isinstance(item, dict) else None
     if not isinstance(post_id, int):
@@ -773,7 +752,7 @@ def cmd_create(args) -> dict:
                                      idempotent=False)
         post_id = _post_id(item, "create")
     except WordPressError as exc:
-        _lookup_hint(exc, hint)
+        lookup_hint(exc, hint)
         _write_failed(exc, report, created_terms)
         raise
     out = {"status": "ok", **ctx.envelope(), "created": True,
@@ -849,7 +828,7 @@ def cmd_delete(args) -> dict:
                 f"--force --confirmed, after the user agrees.",
                 "request_refused", **exc.extra,
             ) from None
-        _lookup_hint(exc, lookup(ctx, "get", "--id", str(args.id), "--type", args.type))
+        lookup_hint(exc, lookup(ctx, "get", "--id", str(args.id), "--type", args.type))
         raise
     return {"status": "ok", **ctx.envelope(), "id": args.id, "type": args.type,
             "trashed": not args.force, "deleted": bool(args.force)}

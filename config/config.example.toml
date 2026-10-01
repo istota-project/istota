@@ -1678,7 +1678,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #                                 #   put it behind the reverse proxy, not on 0.0.0.0.
 
 # ============================================================================
-# WordPress skill (experimental: add "skill_wordpress" to [experimental] features)
+# WordPress skill (docs/features/wordpress.md)
 # ============================================================================
 # Sites live in each user's config/WORDPRESS.md; credentials in their vault.
 # [wordpress]

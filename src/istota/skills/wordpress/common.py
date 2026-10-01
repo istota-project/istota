@@ -1,12 +1,13 @@
 """Small helpers every verb module shares: paging arguments, a total header,
-and the lookup command an ambiguous write reports.
+the lookup command an ambiguous write reports, and the confirmation gate.
 
 A module of its own so `media` (which `content`'s post writes upload through)
-does not have to import `content` back.
+and `admin` and `generic` do not have to import `content`.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import stat
@@ -45,6 +46,43 @@ def lookup(ctx, *argv: str) -> str:
     if ctx.blog:
         scope += ["--blog", ctx.blog]
     return " ".join(shlex.quote(part) for part in (*argv, *scope))
+
+
+def where(ctx) -> str:
+    return f"{ctx.record.name}/{ctx.blog}" if ctx.blog else ctx.record.name
+
+
+def gate(args, ctx, actions: list[str]) -> None:
+    """Refuse unless confirmed, naming every gated action of this call."""
+    if not actions or args.confirmed:
+        return
+    would = [f"would {action} on {where(ctx)}" for action in actions]
+    raise WordPressError(
+        "Not done: this needs the user's agreement first. " + "; ".join(would) + ". "
+        "Show the user exactly this, and pass --confirmed only after they agree in "
+        "the conversation.",
+        "confirmation_required",
+        would=would,
+    )
+
+
+def quoted(value) -> str:
+    """A value the model supplied, quoted so its edges show in a `would` line."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def lookup_hint(exc: WordPressError, hint: str) -> None:
+    """Attach the lookup to an ambiguous write's refusal."""
+    if exc.reason == "outcome_unknown":
+        exc.extra["lookup"] = hint
+
+
+def read_json_file(path: str, label: str, cap: int):
+    """A JSON file the `EGRESS` stamp resolved, read as `read_text_file` reads."""
+    try:
+        return json.loads(read_text_file(path, label, cap))
+    except ValueError:
+        raise WordPressError(f"{label} is not valid JSON.", "validation_error") from None
 
 
 def read_text_file(path: str, label: str, cap: int) -> str:

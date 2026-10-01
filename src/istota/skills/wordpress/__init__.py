@@ -15,10 +15,16 @@ Usage:
     python -m istota.skills.wordpress media upload --file PATH [--title T] [--alt A] [--caption C]
     python -m istota.skills.wordpress media update --id N [--title T] [--alt A] [--caption C]
     python -m istota.skills.wordpress users list|get ...
+    python -m istota.skills.wordpress users create --username U --email E --role R --confirmed
+    python -m istota.skills.wordpress users update --id N [--role R] [--name N] ... --confirmed
     python -m istota.skills.wordpress settings get
+    python -m istota.skills.wordpress settings update --set KEY=JSON ... --confirmed
     python -m istota.skills.wordpress plugins list
-    python -m istota.skills.wordpress rest GET ROUTE [--query K=V ...]
+    python -m istota.skills.wordpress plugins activate|deactivate --plugin DIR/FILE [--network] --confirmed
+    python -m istota.skills.wordpress plugins install --slug S [--activate [--network]] --confirmed
+    python -m istota.skills.wordpress rest METHOD ROUTE [--query K=V ...] [--body-file F] [--confirmed]
     python -m istota.skills.wordpress abilities list [--category C]
+    python -m istota.skills.wordpress abilities run NAME [--input-file F] [--confirmed]
 
 Every verb but `sites` takes ``--site`` and, on a multisite record, ``--blog``.
 
@@ -48,7 +54,7 @@ from pathlib import Path
 
 from istota.skills._cli import error_envelope, fail, parse_and_resolve, run_skill_cli
 from istota.skills._credref import resolve_entry
-from istota.skills._hostpath import EGRESS, WRITE, host_path
+from istota.skills._hostpath import EGRESS, REMOTE, WRITE, host_path
 
 from . import admin, content, discovery, generic, media
 from .cache import Cache
@@ -67,8 +73,6 @@ from .sites import (
 )
 
 log = logging.getLogger(__name__)
-
-FEATURE = "skill_wordpress"
 
 
 @dataclass
@@ -244,28 +248,76 @@ def build_parser() -> argparse.ArgumentParser:
     p = users.add_parser("get", help="one user, with capabilities")
     _site_args(p)
     p.add_argument("--id", required=True, help="user id, or `me`")
+    p = users.add_parser("create", help="create a user with a role (needs --confirmed)")
+    _site_args(p)
+    p.add_argument("--username", required=True, help="the login")
+    p.add_argument("--email", required=True, help="the user's email address")
+    p.add_argument("--role", required=True, help="role slug, e.g. editor")
+    p.add_argument("--name", help="display name")
+    _confirmed(p)
+    p = users.add_parser("update", help="change a user's role or profile (needs --confirmed)")
+    _site_args(p)
+    p.add_argument("--id", required=True, help="user id, or `me`")
+    p.add_argument("--role", help="role slug; replaces the user's roles")
+    p.add_argument("--name", help="display name")
+    p.add_argument("--email", help="email address")
+    p.add_argument("--first-name", help="first name")
+    p.add_argument("--last-name", help="last name")
+    _confirmed(p)
 
     p = sub.add_parser("settings", help="site settings")
     settings = p.add_subparsers(dest="settings_command", required=True)
     p = settings.add_parser("get", help="read /wp/v2/settings")
     _site_args(p)
+    p = settings.add_parser("update", help="change site settings (needs --confirmed)")
+    _site_args(p)
+    p.add_argument("--set", action="append", required=True,
+                   help="KEY=JSON, one setting; repeatable (a string is quoted: title='\"x\"')")
+    _confirmed(p)
 
     p = sub.add_parser("plugins", help="installed plugins")
     plugins = p.add_subparsers(dest="plugins_command", required=True)
     p = plugins.add_parser("list", help="list plugins and their status")
     _site_args(p)
+    for verb in ("activate", "deactivate"):
+        p = plugins.add_parser(verb, help=f"{verb} a plugin (needs --confirmed)")
+        _site_args(p)
+        host_path(p, "--plugin", mode=REMOTE, required=True,
+                  note="a plugin's dir/file on the WordPress host, checked by "
+                       "admin.plugin_id and resolved by WordPress",
+                  help="dir/file, as `plugins list` names it")
+        p.add_argument("--network", action="store_true",
+                       help="network-wide, on a multisite record (needs a super admin)")
+        _confirmed(p)
+    p = plugins.add_parser("install", help="install from WordPress.org (needs --confirmed)")
+    _site_args(p)
+    p.add_argument("--slug", required=True, help="the WordPress.org plugin slug")
+    p.add_argument("--activate", action="store_true", help="activate it once installed")
+    p.add_argument("--network", action="store_true",
+                   help="with --activate: network-wide, on a multisite record")
+    _confirmed(p)
 
     p = sub.add_parser("rest", help="call a REST route the other verbs do not cover")
     _site_args(p)
-    p.add_argument("method", choices=["GET"], help="HTTP method (GET only for now)")
+    p.add_argument("method", choices=generic.REST_METHODS,
+                   help="HTTP method; anything but GET needs --confirmed")
     p.add_argument("route", help="route under the site's /wp-json/, e.g. wp/v2/menus")
     p.add_argument("--query", action="append", help="query parameter K=V; repeatable")
+    host_path(p, "--body-file", mode=EGRESS,
+              help="a JSON request body, from your own workspace (not with GET)")
+    _confirmed(p)
 
     p = sub.add_parser("abilities", help="the Abilities API (WordPress 6.9+)")
     abilities = p.add_subparsers(dest="abilities_command", required=True)
     p = abilities.add_parser("list", help="list registered abilities")
     _site_args(p)
     p.add_argument("--category", help="only this ability category")
+    p = abilities.add_parser("run", help="run an ability (needs --confirmed unless readonly)")
+    _site_args(p)
+    p.add_argument("name", help="the ability, namespace/name")
+    host_path(p, "--input-file", mode=EGRESS,
+              help="the ability's input as JSON, from your own workspace")
+    _confirmed(p)
 
     return parser
 
@@ -322,26 +374,10 @@ def _entry_text(entry, field: str) -> str:
     return value.reveal().strip() if value is not None else ""
 
 
-def _require_enabled(config) -> None:
-    """Refuse unless the operator enabled the skill.
-
-    The proxy runs every `cli: true` skill whatever the experimental gate
-    says (that gate decides selection and the menu), so a CLI that reaches
-    the vault and the network carries its own (`skills.md`).
-    """
-    if not config.experimental.is_enabled(FEATURE):
-        raise SiteError(
-            f"The wordpress skill is not enabled on this deployment; the operator "
-            f"adds {FEATURE!r} to [experimental] features.",
-            "skill_disabled",
-        )
-
-
 def _open_site(args) -> SiteContext:
     """The record, the entry and a client, in the order that spends least first."""
     user_id = _user_id()
     config = getattr(args, "config", None) or _load_config()
-    _require_enabled(config)
     records, errors = _read_records(config, user_id)
     try:
         record = select_site(records, args.site)
@@ -428,9 +464,7 @@ def _check_blog_exists(ctx: SiteContext, *, refresh: bool) -> None:
 
 def cmd_sites(args) -> dict:
     """The records in WORDPRESS.md. No network and no vault fetch."""
-    config = _load_config()
-    _require_enabled(config)
-    records, errors = _read_records(config, _user_id())
+    records, errors = _read_records(_load_config(), _user_id())
     return {
         "status": "ok",
         "file": f"config/{SITES_FILE}",
@@ -443,9 +477,8 @@ def _site_verb(handler, precheck=None):
     """`handler` with the site opened first and the client closed after.
 
     Opening the site is the vault fetch, so it happens only once the argv has
-    parsed, every host path has resolved, the skill is known to be enabled and
-    `precheck` (the verb's own local checks, with ``args.config`` loaded) has
-    passed, and never for `sites`.
+    parsed, every host path has resolved and `precheck` (the verb's own local
+    checks, with ``args.config`` loaded) has passed, and never for `sites`.
     """
 
     def run(args):
@@ -454,7 +487,6 @@ def _site_verb(handler, precheck=None):
         args.closers = []
         try:
             args.config = _load_config()
-            _require_enabled(args.config)
             if precheck is not None:
                 precheck(args)
             args.wp = _open_site(args)
@@ -512,10 +544,17 @@ COMMANDS = {
     "media update": _write_verb(media.cmd_media_update, media.check_media_update),
     "users list": _site_verb(admin.cmd_users_list, content.check_paging),
     "users get": _site_verb(admin.cmd_users_get, admin.check_user_id),
+    "users create": _site_verb(admin.cmd_users_create, admin.check_users_create),
+    "users update": _site_verb(admin.cmd_users_update, admin.check_users_update),
     "settings get": _site_verb(admin.cmd_settings_get),
+    "settings update": _site_verb(admin.cmd_settings_update, admin.check_settings_update),
     "plugins list": _site_verb(admin.cmd_plugins_list),
+    "plugins activate": _site_verb(admin.cmd_plugins_activate, admin.check_plugin_status),
+    "plugins deactivate": _site_verb(admin.cmd_plugins_deactivate, admin.check_plugin_status),
+    "plugins install": _site_verb(admin.cmd_plugins_install, admin.check_plugin_install),
     "rest": _site_verb(generic.cmd_rest, generic.prepare_rest),
     "abilities list": _site_verb(generic.cmd_abilities_list),
+    "abilities run": _site_verb(generic.cmd_abilities_run, generic.check_ability),
 }
 
 

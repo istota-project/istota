@@ -106,7 +106,7 @@ def env(tmp_path, monkeypatch):
     db.init_db(db_path)
     config = Config(workspace_path=mount, db_path=db_path,
                     wordpress=WordPressConfig(private_hosts=[]),
-                    experimental=ExperimentalConfig(features=["skill_wordpress"]))
+                    experimental=ExperimentalConfig(features=[]))
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
     monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
     monkeypatch.delenv("ISTOTA_CRED_FD", raising=False)
@@ -274,13 +274,6 @@ class TestTheCredential:
         code, out = run(["describe"], capsys)
         assert out["reason"] == "host_refused"
         assert env.site.requests == []
-
-    def test_the_cli_refuses_unless_the_operator_enabled_it(self, env, capsys):
-        env.config.experimental.features = []
-        for argv in (["sites"], ["describe"]):
-            code, out = run(argv, capsys)
-            assert code == 1 and out["reason"] == "skill_disabled"
-        assert env.fetches == [] and env.site.requests == []
 
     def test_a_bare_host_in_the_url_field_reads_as_https(self, env, capsys):
         env.vault["wordpress_blog"] = ({"password": PASSWORD, "username": "e",
@@ -624,9 +617,9 @@ class TestOtherReads:
         assert out["items"][0]["username"].startswith("[UNTRUSTED WORDPRESS CONTENT")
         assert out["items"][1]["username"] == "ann"
 
-    def test_rest_takes_get_only_for_now(self, env, capsys):
+    def test_rest_takes_only_the_five_methods(self, env, capsys):
         with pytest.raises(SystemExit):
-            wp.main(["rest", "POST", "wp/v2/posts"])
+            wp.main(["rest", "OPTIONS", "wp/v2/posts"])
         capsys.readouterr()
         assert env.site.requests == []
 
@@ -1173,7 +1166,6 @@ def test_the_password_is_in_no_output_and_no_log_line(env, capsys, caplog):
     assert {r.headers["host"] for r in env.site.requests} == {HOST}
 
 
-def test_the_skill_md_frontmatter_is_experimental():
+def test_the_skill_md_frontmatter_declares_no_env():
     text = (Path(wp.__file__).parent / "skill.md").read_text()
-    assert "experimental: true" in text
     assert "\nenv:" not in text
