@@ -386,7 +386,7 @@ The broker is off by default. Set `[security.credential_broker] enabled = true` 
 curl -H 'Authorization: Bearer {{cred:portal_token}}' https://portal.example/api
 ```
 
-Bind a vault entry using an HTTPS URL, a bare host in its URL field, or `istota_hosts`, and grant access in Settings. Grants limit rooms, methods and scheduled use. Each task keeps its original grant snapshot across retries; revoking or changing a grant refuses its next use. Default methods exclude DELETE. The broker decodes Basic authentication before substituting a placeholder password, so clients can build the Basic header themselves.
+Bind a vault entry using an HTTPS URL, a bare host in its URL field, or `istota_hosts`, and grant access in Settings. Grants limit rooms and scheduled use. Every HTTP method is allowed on a bound host, including DELETE and WebDAV methods; saved method restrictions from older versions no longer apply. Each task keeps its original grant snapshot across retries; revoking or changing a grant refuses its next use. The broker decodes Basic authentication before substituting a placeholder password, so clients can build the Basic header themselves.
 
 Only a host bound to a credential in the task snapshot is intercepted. Every other connection keeps its original TLS session and carries placeholders as literal text. On an intercepted connection, SNI and Host must match the CONNECT host. IP-literal destinations may omit SNI, as standard TLS clients do. A placeholder in a disallowed header or URL is refused. A placeholder in the first `scan_max_bytes` of a request body is refused before forwarding; later body bytes stream unchanged and are never substituted. The default cap is 1 MiB.
 

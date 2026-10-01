@@ -32,15 +32,12 @@
   let editorOpen = $state(false);
   let scope = $state<'all' | 'rooms'>('all');
   let rooms: string[] = $state([]);
-  let methods: string[] = $state([]);
   let scheduled = $state(false);
   let allowHttp = $state(false);
   let omittedRooms = $state(false);
   let confirmExisting = $state(false);
   let confirmRevoke: string | null = $state(null);
   let confirmDelete: string | null = $state(null);
-  const defaultMethods = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH'];
-  const allMethods = [...defaultMethods, 'DELETE', 'OPTIONS'];
 
   function report(e: unknown) {
     if (e instanceof AuthError) onSignedOut();
@@ -61,7 +58,6 @@
     const availableRooms = new Set(data?.rooms.map((room) => room.token));
     rooms = (grant?.rooms ?? []).filter((room) => availableRooms.has(room));
     omittedRooms = rooms.length !== (grant?.rooms.length ?? 0);
-    methods = [...(grant?.methods ?? defaultMethods)];
     scheduled = grant?.allow_scheduled ?? false;
     allowHttp = grant?.allow_http ?? false;
     error = '';
@@ -87,7 +83,6 @@
       saveCredentialGrant(editing, {
         scope_mode: scope,
         rooms: scope === 'rooms' ? rooms : [],
-        methods,
         allow_scheduled: scheduled,
         allow_http: allowHttp,
       }),
@@ -109,12 +104,11 @@
     return c.source === 'config' ? 'Deployment configuration' : 'Password vault';
   }
 
-  /** What the grant allows, on one line: where, which methods, and whether a
-   * scheduled task may use it. */
+  /** Room scope, scheduled access and the HTTP override. */
   function grantSummary(grant: CredentialGrant): string {
     const n = grant.rooms.length;
     const where = grant.scope_mode === 'all' ? 'All rooms' : `${n} room${n === 1 ? '' : 's'}`;
-    const parts = [where, grant.methods.join(', ')];
+    const parts = [where];
     if (grant.allow_scheduled) parts.push('scheduled');
     if (grant.allow_http) parts.push('HTTP allowed');
     return parts.join(' · ');
@@ -144,7 +138,10 @@
   }
 </script>
 
-<SettingsCard title={data ? `Credentials (${data.credentials.length})` : 'Credentials'}>
+<SettingsCard
+  title={data ? `Credentials (${data.credentials.length})` : 'Credentials'}
+  description="Choose which rooms and scheduled tasks may use each credential. A credential is sent only to its bound domains, with all HTTP methods allowed. Grants take effect when the credential broker is enabled."
+>
   {#snippet actions()}
     {#if data?.grant_existing_available}
       <Button variant="pill" size="sm" onclick={() => (confirmExisting = true)} disabled={busy}>
@@ -152,10 +149,6 @@
       </Button>
     {/if}
   {/snippet}
-  <p class="card-hint">
-    Which rooms, HTTP methods and scheduled tasks may use each credential. A credential is sent only
-    to the hosts it is bound to. Grants take effect when the credential broker is enabled.
-  </p>
   {#if error && !editorOpen}<p class="banner error" role="alert">{error}</p>{/if}
   {#if data}
     {#if !data.sandboxed}
@@ -181,7 +174,7 @@
                 </span>
               {/if}
               <!-- Written without template whitespace so the line reads
-                   exactly "Source · Rooms · Methods" with no stray gaps. -->
+                   exactly "Source · Rooms" with no stray gaps. -->
               <span class="cred-meta"
                 >{sourceLabel(credential)}{#if credential.grant}{' · ' +
                     grantSummary(credential.grant)}{/if}</span
@@ -238,16 +231,6 @@
           </p>{/if}
       </fieldset>
     {/if}
-    <fieldset class="grant-options">
-      <legend>Allowed HTTP methods</legend>
-      <div class="method-options">
-        {#each allMethods as method}
-          <Field label={method} checkbox>
-            <input type="checkbox" bind:group={methods} value={method} />
-          </Field>
-        {/each}
-      </div>
-    </fieldset>
     <Field label="Allow scheduled tasks" checkbox>
       <input type="checkbox" bind:checked={scheduled} />
     </Field>
@@ -262,9 +245,7 @@
   </div>
   {#snippet footer()}
     <Button variant="ghost" onclick={() => (editorOpen = false)} disabled={busy}>Cancel</Button>
-    <Button variant="primary" onclick={save} loading={busy} disabled={!methods.length}>
-      Save grant
-    </Button>
+    <Button variant="primary" onclick={save} loading={busy}>Save grant</Button>
   {/snippet}
 </Modal>
 <ConfirmDialog
@@ -279,7 +260,7 @@
 <ConfirmDialog
   bind:open={confirmExisting}
   title="Grant current credentials"
-  message="Allow all currently bound credentials in every room, including scheduled tasks? DELETE stays disabled. Credentials added later remain ungranted."
+  message="Allow all currently bound credentials in every room, including scheduled tasks? Credentials added later remain ungranted."
   confirmLabel="Grant what exists"
   onConfirm={() => mutate(grantExistingCredentials)}
   confirmDisabled={busy}
@@ -296,12 +277,6 @@
 />
 
 <style>
-  .card-hint {
-    margin: 0 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-
   .cred-list {
     list-style: none;
     margin: 0;
@@ -408,12 +383,6 @@
     margin-bottom: var(--space-2);
     font-size: var(--text-sm);
     color: var(--text-muted);
-  }
-
-  .method-options {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(6rem, 1fr));
-    gap: var(--space-2);
   }
 
   .room-options {

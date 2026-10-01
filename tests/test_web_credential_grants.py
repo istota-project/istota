@@ -30,6 +30,7 @@ async def test_settings_list_and_save_are_user_scoped(signed_client, config):  #
     response = await signed_client.put(base + "/portal", json={}, headers={"Origin": "https://example.com"})
     assert response.status_code == 200
     assert response.json()["grant"]["allow_scheduled"] is False
+    assert "methods" not in response.json()["grant"]
     with db.get_db(config.db_path) as conn:
         assert conn.execute("SELECT user_id FROM credential_grants").fetchone()[0] == "alice"
     response = await signed_client.put(base + "/portal", json={"scope_mode": "rooms", "rooms": ["foreign"]},
@@ -135,7 +136,7 @@ async def test_rooms_and_forge_identity_are_checked(signed_client, config):  # n
     response = await signed_client.put(base + "/portal", json={"scope_mode": "rooms", "rooms": [room.token]},
                                       headers={"Origin": "https://example.com"})
     assert response.status_code == 200
-    for payload in [{"methods": ["CONNECT"]}, {"allow_scheduled": "false"}, {"user_id": "bob"}]:
+    for payload in [{"methods": ["GET"]}, {"allow_scheduled": "false"}, {"user_id": "bob"}]:
         response = await signed_client.put(base + "/portal", json=payload, headers={"Origin": "https://example.com"})
         assert response.status_code == 400
 
@@ -155,7 +156,7 @@ async def test_deleted_room_can_be_removed_from_grant(signed_client, config):  #
     assert data["rooms"] == [{"token": kept.token, "name": "Personal"}]
     assert removed.token in data["credentials"][0]["grant"]["rooms"]
     response = await signed_client.put(base + "/portal", headers=origin,
-                                      json={"scope_mode": "rooms", "rooms": [kept.token], "methods": ["GET"]})
+                                      json={"scope_mode": "rooms", "rooms": [kept.token]})
     assert response.status_code == 200
     assert response.json()["grant"]["rooms"] == [kept.token]
 
@@ -183,21 +184,21 @@ async def test_entry_fields_share_grant_and_http_override(signed_client, config,
                               conversation_token="room-a")
         grants.ensure_credential_grants(conn, task, "alice")
         assert grants.check_credential_grant(conn, task, "alice", "portal_username",
-            "http://192.0.2.10:8080", "GET", "authorization") == "credential_https_required"
+            "http://192.0.2.10:8080", "authorization") == "credential_https_required"
     response = await signed_client.put(base + "/portal", json={"allow_http": True}, headers=origin)
     assert response.status_code == 200
     with db.get_db(config.db_path) as conn:
         assert grants.check_credential_grant(conn, task, "alice", "portal_username",
-            "http://192.0.2.10:8080", "GET", "authorization") == "credential_changed"
+            "http://192.0.2.10:8080", "authorization") == "credential_changed"
         task = db.create_task(conn, user_id="alice", prompt="test", source_type="talk",
                               conversation_token="room-a")
         assert set(grants.ensure_credential_grants(conn, task, "alice")) == {"portal"}
         assert grants.check_credential_grant(conn, task, "alice", "portal_username",
-            "http://192.0.2.10:8080", "GET", "authorization") is None
+            "http://192.0.2.10:8080", "authorization") is None
     await signed_client.delete(base + "/portal", headers=origin)
     with db.get_db(config.db_path) as conn:
         assert grants.check_credential_grant(conn, task, "alice", "portal_username",
-            "http://192.0.2.10:8080", "GET", "authorization") == "credential_not_granted"
+            "http://192.0.2.10:8080", "authorization") == "credential_not_granted"
 
 
 async def test_grouping_uses_entry_identity_with_custom_fields_and_no_password(signed_client, config, tmp_path):  # noqa: F811
@@ -219,3 +220,29 @@ async def test_grouping_uses_entry_identity_with_custom_fields_and_no_password(s
     assert response.json()["deleted"] is True
     assert not secrets_store.secret_exists(config.db_path, "alice", "vault_entries", "service_api_token")
     assert secrets_store.secret_exists(config.db_path, "alice", "vault_entries", "other_username")
+
+
+async def test_vault_status_counts_entries_instead_of_fields(signed_client, config, tmp_path):  # noqa: F811
+    from istota import secrets_vault
+    from istota.config import UserConfig
+    from tests.test_secrets_vault import _new_db, _read
+
+    config.users["alice"] = UserConfig(vault_path="config/vault.kdbx")
+    secrets_store.set_secret(config.db_path, "alice", "vault", "passphrase", "fixture-passphrase")
+    kp, path = _new_db(tmp_path)
+    kp.add_entry(kp.root_group, "portal", "alice", "fixture-password", url="https://portal.example")
+    entry = kp.add_entry(kp.root_group, "service", "alice", "", url="https://service.example")
+    entry.set_custom_property("api_token", "fixture-token")
+    kp.add_entry(kp.root_group, "other_username", "", "fixture-other")
+    kp.save()
+    read, _ = _read(path)
+    secrets_vault.apply_vault(config.db_path, "alice", read)
+    secrets_store.set_secret(config.db_path, "bob", "vault_entries", "private", "fixture-private")
+
+    response = await signed_client.get("/istota/api/settings/vault")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["entry_count"] == 3
+    assert body["entry_names"] == ["other_username", "portal", "service"]
+    assert body["entry_names_truncated"] is False
+    assert "fixture-password" not in response.text

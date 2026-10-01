@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The optional HTTP credential broker lets tasks authenticate with placeholders while the proxy supplies the values to approved hosts. Small echoed responses are scrubbed, and diagnostics report readiness and containment limits. The broker is disabled by default.
 
-- Settings now lists credential bindings and lets you choose room access, HTTP methods and scheduled use. New credentials start ungranted; a one-time action grants the credentials already present. When the optional HTTP credential broker is enabled, those grants restrict placeholder authentication. Existing credential fetch commands remain available during the rollout.
+- Settings now lists credential bindings and lets you choose room access and scheduled use. New credentials start ungranted; a one-time action grants the credentials already present. When the optional HTTP credential broker is enabled, those grants restrict placeholder authentication. Existing credential fetch commands remain available during the rollout.
 
 - The web UI supports email and password login or one-time email sign-in links, alongside Nextcloud login or on its own. Admins can invite users and manage login access; operators can print recovery links when mail is unavailable. Changing a password signs out every existing session.
 
@@ -103,6 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Upgrade note:** the Baileys sidecar and the daemon gained the `group_roster` and `leave_group` frames and three inbound fields. They are additive and the protocol version is unchanged, but group support needs both sides updated; restart the sidecar with the daemon.
 
+- Credential grants allow every HTTP method on their bound domains, including DELETE. The method picker is removed, and existing grants no longer restrict methods.
+
 - User settings is split into sections with a sidebar: Account, Preferences, Delivery, Credentials and Connections, instead of one long page. An unsaved edit survives switching sections and is still covered by the Save button, and links from notifications and the Google connect flow open the relevant section.
 
 - Credentials in Settings are now a compact list with one row per credential showing its hosts, where it comes from and what its grant allows, with Edit grant and Revoke grant in each row's menu. Revoking a grant now asks for confirmation first.
@@ -130,6 +132,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `browse interact --click` and `--fill` now drive the page the way the coordinate flags already did: the pointer travels to the element and presses it, and a value is typed key by key rather than inserted whole. A filled field used to receive no keystroke at all — the value simply appeared, which is exactly what a login form behind bot detection is watching for — and a click arrived with no movement behind it. Measured on the shipped container, the same fill went from no key events to ten, and a click from one pointer movement to fifteen along an approach path. Selectors, results and error codes are unchanged, each action now reports which element it matched, and the older method is still there as an automatic fallback when the typed path cannot run.
 
 ### Fixed
+
+- The credential vault card counts each credential once instead of counting its password, username and other fields separately. The credentials card description now wraps at the same width as the vault card.
 
 - Credential settings now groups a vault entry’s password, username, URL and custom fields under one grant. Deleting a credential removes all its imported fields. HTTP vault URLs keep their destination and can be used through the credential broker after enabling the explicit HTTP override in the grant popup; HTTPS remains the default requirement.
 

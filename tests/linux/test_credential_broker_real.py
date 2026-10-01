@@ -10,7 +10,7 @@ from istota import db
 from istota.executor import SandboxProfile, _bwrap_available, build_bwrap_cmd
 from istota.network_proxy import write_bridge_script
 from istota.credential_broker import ca
-from tests.test_credential_broker_intercept import broker as tls_broker, broker_responder, VALUE, PLACEHOLDER  # noqa: F401 - shared fixture
+from tests.test_credential_broker_intercept import broker as tls_broker, broker_responder, broker_scheme, VALUE, PLACEHOLDER  # noqa: F401 - shared fixture
 from .test_sandbox_real import _can_unshare_net, _unavailable
 
 broker = tls_broker

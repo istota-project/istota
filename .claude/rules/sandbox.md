@@ -133,6 +133,8 @@ The reserved per-user KV namespace `_credential_grants` holds `granted_existing`
 
 ## Credential broker CA
 
+Credential grants scope access by bound host, room and scheduled use. They allow every HTTP method; the legacy `credential_grants.methods` column is retained for database compatibility but is neither exposed nor enforced. Exact host and port matching, authentication-header restrictions, the explicit HTTP override and live grant revocation still apply.
+
 `credential_broker/ca.py` owns the opt-in deployment CA under `{db_path.parent}/credential-broker`. The directory is `0700`; an atomic `0600` record holds the P-256 key and its ten-year certificate together. A file lock serializes creation across workers and processes. Corrupt or insecure key records fail closed. Deleting `ca-key.pem` and restarting rotates the CA. Runtime setup rejects any state location covered by a configured sandbox bind, even where a database mask would otherwise hide it.
 
 Leaves have exact DNS or IP SANs, default to 24 hours, and stay in a bounded in-memory cache. Loading a server TLS context uses a temporary private file inside the daemon-only CA directory and immediately removes it. Both TLS context builders offer only HTTP/1.1. The interception caller enforces SNI and Host equality and verifies upstream TLS using the daemon trust context.

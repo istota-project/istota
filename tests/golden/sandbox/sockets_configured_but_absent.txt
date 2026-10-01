@@ -26,4 +26,4 @@ bwrap	<HOST-SYSTEM-BINDS>
 --disable-userns
 --die-with-parent
 --chdir	<TMP>/temp/alice
---	/bin/sh	-c	python3 <TMP>/temp/alice/.developer/net-bridge <TMP>/sockets/net.sock 18080 </dev/null & exec env HTTPS_PROXY=http://127.0.0.1:18080 HTTP_PROXY=http://127.0.0.1:18080 NO_PROXY= "$@"	sh	claude	-p	test
+--	/bin/sh	-c	python3 <TMP>/temp/alice/.developer/net-bridge <TMP>/sockets/net.sock 18080 </dev/null & exec env HTTPS_PROXY=http://127.0.0.1:18080 HTTP_PROXY=http://127.0.0.1:18080 http_proxy=http://127.0.0.1:18080 NO_PROXY= no_proxy= "$@"	sh	claude	-p	test

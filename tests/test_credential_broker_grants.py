@@ -23,8 +23,7 @@ def task(conn, **kwargs):
 
 def check(conn, task_id, **kwargs):
     return grants.check_credential_grant(conn, task_id, "alice", "portal",
-                                       "portal.example", kwargs.pop("method", "POST"),
-                                       "authorization", **kwargs)
+                                       "portal.example", "authorization", **kwargs)
 
 
 def test_narrow_defaults_and_live_policy(database):
@@ -34,14 +33,13 @@ def test_narrow_defaults_and_live_policy(database):
         assert grants.ensure_credential_grants(conn, first, "alice") == {}
         assert check(conn, first) == "credential_not_granted"
         grant = grants.put_grant(conn, "alice", "portal")
-        assert grant["methods"] == ["GET", "HEAD", "POST", "PUT", "PATCH"]
+        assert "methods" not in grant
         assert grant["allow_scheduled"] is False
         second = task(conn)
     with db.get_db(database) as conn:
         assert grants.ensure_credential_grants(conn, second, "alice") == {"portal": 1}
         assert check(conn, second) is None
-        assert check(conn, second, method="DELETE") == "credential_method_not_allowed"
-        grants.put_grant(conn, "alice", "portal", methods=["DELETE"])
+        grants.put_grant(conn, "alice", "portal", allow_scheduled=True)
         assert check(conn, second) == "credential_changed"
 
 
@@ -149,7 +147,7 @@ def test_scheduled_ancestor_and_live_header_refusal(database):
     with db.get_db(database) as conn:
         assert grants.ensure_credential_grants(conn, allowed, "alice") == {"portal": 2}
         assert grants.check_credential_grant(conn, allowed, "alice", "portal", "portal.example",
-                                              "POST", "proxy-authorization") == "credential_header_not_allowed"
+                                              "proxy-authorization") == "credential_header_not_allowed"
 
 
 def test_task_retention_explicitly_removes_snapshots(database):
@@ -174,7 +172,7 @@ def test_forge_uses_live_config_on_every_check(database):
         identifier = task(conn)
     with db.get_db(database) as conn:
         grants.ensure_credential_grants(conn, identifier, "alice")
-        args = (conn, identifier, "alice", "forge.github", "api.github.com", "GET", "authorization")
+        args = (conn, identifier, "alice", "forge.github", "api.github.com", "authorization")
         assert grants.check_credential_grant(*args, config=config) is None
         developer.github_token = ""
         assert grants.check_credential_grant(*args, config=config) == "credential_not_bound"
@@ -216,7 +214,7 @@ def test_live_forge_check_rechecks_admin_and_enabled(database):
         identifier = task(conn)
     with db.get_db(database) as conn:
         grants.ensure_credential_grants(conn, identifier, "alice")
-        args = (conn, identifier, "alice", "forge.github", "api.github.com", "GET", "authorization")
+        args = (conn, identifier, "alice", "forge.github", "api.github.com", "authorization")
         assert grants.check_credential_grant(*args, config=config) is None
         config.admin_users = {"bob"}
         assert grants.check_credential_grant(*args, config=config) == "credential_not_granted"
