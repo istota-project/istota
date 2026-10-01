@@ -537,8 +537,8 @@ CASES: tuple[Case, ...] = (
     # values are in neither golden, because they are in neither prompt.
     Case("shared_credentials", shared_credentials=True),
     # The room card (multiplayer Stage 12), against `room_web`, which differs
-    # from it in nothing but the second member: the diff is the card and what
-    # the two withheld scopes (`files`, `memory`) take away.
+    # from it in nothing but the second member: the diff is the card and the
+    # ambient memory a shared room leaves out (ISSUE-576).
     Case(
         "shared_room",
         source_type="web",
@@ -548,7 +548,7 @@ CASES: tuple[Case, ...] = (
     ),
     # A guest's turn in a Talk room the user hosts: the header's first line,
     # the card saying who wrote it and who the bot acts for, and every scope
-    # withheld whatever the host granted.
+    # withheld.
     Case(
         "guest_turn",
         source_type="talk",
@@ -821,16 +821,10 @@ def _seed_room(config: Config, case: Case) -> None:
                 conn, case.conversation_token, "talk", case.room_talk_ref,
             )
         if case.shared:
-            from istota import room_policy, room_scopes
-            from istota.skills._loader import load_skill_index
+            from istota import room_policy
 
             db.add_web_room_member(conn, case.conversation_token, OTHER_USER)
             room_policy.ensure_policy(conn, case.conversation_token)
-            index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
-            room_scopes.grant_scopes(
-                conn, case.conversation_token, USER,
-                [s for s in room_scopes.scope_names(index) if s not in ("files", "memory")],
-            )
         if case.guest_turn:
             db.upsert_room_participant(
                 conn, room_token=case.conversation_token, surface="talk",

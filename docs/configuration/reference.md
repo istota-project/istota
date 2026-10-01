@@ -202,14 +202,6 @@ Whether the bot replies to a turn nobody addressed to it, in a room more than on
 
 Docker: `ISTOTA_SPEECH_GATE_MODE`, `ISTOTA_SPEECH_GATE_MODEL`, `ISTOTA_SPEECH_GATE_WINDOW_MESSAGES`, `ISTOTA_SPEECH_GATE_MAX_MESSAGE_CHARS`, `ISTOTA_SPEECH_GATE_TIMEOUT_SECONDS`, `ISTOTA_SPEECH_GATE_DECISION_RETENTION_DAYS`. Ansible: `istota_speech_gate_*` with the same suffixes.
 
-## `[rooms]`
-
-| Setting | Default | Description |
-|---|---|---|
-| `shared_room_data_policy` | `"restrict"` | `"restrict"` gives a task in a shared room only the scopes its sender granted there; `"off"` gives it everything a private task gets. Any value but `"off"` restricts. A guest's turn is restricted under either value |
-
-Docker: `ISTOTA_ROOMS_SHARED_ROOM_DATA_POLICY`. Ansible: `istota_rooms_shared_room_data_policy`. See [shared rooms](../features/shared-rooms.md#what-a-task-can-reach).
-
 ## `[logging]`
 
 | Setting | Default | Description |

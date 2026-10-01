@@ -11,7 +11,7 @@ Room: this conversation is a registered room on web chat. To deliver into it fro
 Shared room: everything you post here is read by everyone in it — members alice, bob.
 You are acting for 'alice', this room's host.
 The persona in use is that of 'alice'.
-Withheld from this turn: files, memory. 'alice' can grant one here with `!room share <scope>` (`!room share all` grants every one); everyone in this room then sees answers that use it.
+This turn runs with everything 'alice' can reach, and anything you reach may end up in front of everyone here. Their personal memory is not loaded into this room; read it with the memory skill only when they ask for it.
 Room notes (CHANNEL.md) are read by everyone in this room.
 Source: web
 Output target: text

@@ -1,7 +1,7 @@
 ---
 name: room
-triggers: [whisper, privately, side room, only me, post to the room, post in the room, tell the room, withheld]
-description: Write privately to your principal in a shared room, answer their question privately when the room withholds what it needs, or post from a side room into its room
+triggers: [whisper, privately, side room, only me, answer privately, post to the room, post in the room, tell the room]
+description: Write privately to your principal in a shared room, answer their question privately in their side room, or post from a side room into its room
 cli: true
 shared_room: safe
 companion_skills: [untrusted_input]
@@ -20,13 +20,13 @@ Puts `text` in the side room of the user you are acting for. Only they read it. 
 
 It returns `queued`; the daemon delivers it. It is refused (`not_a_shared_room`) outside a shared room, where your ordinary answer already reaches only the user.
 
-## `room answer-privately` — a question the room withholds the data for
+## `room answer-privately` — answer the question in their side room instead
 
 ```bash
 istota-skill room answer-privately
 ```
 
-When answering the user you are acting for needs something this room withholds (their calendar, files, memory, email and so on), do not answer from what you can reach and do not ask them to share it here. Run this: their own question is asked again in their side room, where it is answered with everything of theirs, and only they read the answer. Then tell the room, briefly, that you have answered them privately. The command takes no text: what is asked again is their message as they wrote it.
+When the user you are acting for asks something whose answer should not be read by everyone here (their health, money, private mail and so on), or asks you to answer privately, run this instead of answering in the room: their own question is asked again in their side room, where only they read the answer and their personal memory is available. Then tell the room, briefly, that you have answered them privately. The command takes no text: what is asked again is their message as they wrote it.
 
 It returns `queued` with the side-room task's id. It is refused for a guest's message (`guest_turn`), outside a shared room (`not_a_shared_room`), and for anything but the user's own message (`unsupported_origin`).
 

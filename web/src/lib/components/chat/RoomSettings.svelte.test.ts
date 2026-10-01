@@ -2,14 +2,13 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 
-// The members and grants panes fetch on mount. Answered with an empty room so
+// The members and group panes fetch on mount. Answered with an empty room so
 // they settle quietly; their own behaviour is in their own test files.
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api, {
   getRoomMembers: vi.fn(async () => ({ members: [], can_manage: false, message_count: 0 })),
   getChatUsers: vi.fn(async () => ({ users: [] })),
-  getRoomGrants: vi.fn(async () => ({ scopes: [], state: 'private' })),
   getRoomGroup: vi.fn(async () => ({
     group_id: null,
     group_name: null,

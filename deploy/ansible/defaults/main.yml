@@ -497,11 +497,6 @@ istota_speech_gate_max_message_chars: 400  # per-turn cap inside the window
 istota_speech_gate_timeout_seconds: 8.0
 istota_speech_gate_decision_retention_days: 30  # 0 keeps speech_gate_decisions rows forever
 
-# Shared rooms: "restrict" withholds a sender's files, memory and private skills
-# in a room more than one human reads, until they share them there; "off" gives
-# a shared-room task everything a private one gets. Any other value restricts.
-istota_rooms_shared_room_data_policy: "restrict"
-
 # Admin users — full system access (DB, all mount paths, admin-only skills).
 # Deployed as /etc/<namespace>/admins, root-owned. An EMPTY list is asymmetric:
 # sandbox / skills / commands treat everyone as admin (back-compat), while the

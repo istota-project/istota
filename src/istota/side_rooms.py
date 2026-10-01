@@ -32,12 +32,13 @@ What this module holds, and what it deliberately does not:
   thread (`push_to_email_view`), when the parent is an email thread room.
   Nothing binds the side room to either: it is its own room.
 
-- **Side-room answers** (D4 item 1). A task in a shared room that needs a scope
-  the room withholds asks for the answer privately (`queue_side_answer`): the
+- **Side-room answers** (D4 item 1). A task in a shared room whose answer
+  should not be read there asks for it privately (`queue_side_answer`): the
   principal's own question is put in their side room as a turn of theirs, and
-  runs there as an ordinary private task. The shared-room task never gains the
-  scope, and the side-room task's answer reaches the room only through a held
-  `room post`.
+  runs there as an ordinary private task, with their personal memory loaded.
+  The side-room task's answer reaches the room only through a held
+  `room post`. Since ISSUE-576 nothing forces this; it is a verb a member, or
+  the model on their behalf, chooses.
 
 Not here: the nested and ephemeral web rendering (Stage 17).
 """
@@ -667,8 +668,8 @@ SIDE_ANSWER_REFERENCE = "side-answer:"
 def queue_side_answer(conn, config, *, actor_user_id: str, task_id: int) -> dict:
     """Ask a shared-room task's question again, privately, in the side room.
 
-    For a question the room withholds the scope to answer (multiplayer D4 item
-    1). What goes to the side room is the principal's own turn, as stored with
+    For a question whose answer should not be read in the room (multiplayer
+    D4 item 1). What goes to the side room is the principal's own turn, as stored with
     the task, never text the model wrote: the side-room task runs at the
     principal's full reach, so a question composed by a model that has been
     reading guests' words would be an injection route to that reach. It is

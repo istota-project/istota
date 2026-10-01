@@ -1,14 +1,12 @@
 """A shared room's reach, looked at from inside a live task in the shipped image.
 
-A room more than one human reads withholds the sender's ungranted scopes, and
-the filesystem half of that is the sandbox mount plan: no `Users/{uid}` bind
-without `files`, a per-task `room-task-<id>` temp dir instead of the per-user
-one, no flat Talk directory, read-only tmpfs masks over the memory directories
-when `files` is granted without `memory` (made first when absent, put on the
-target when a symlink), the bot directory bound onto itself so it cannot be
-renamed out from under those masks and checked by inode before the command
-runs, and a `Groups/<id>` bind for the groups
-the task resolves (multiplayer Stages 9, 13, 16, 23 and 28).
+A turn runs with its sender's reach (ISSUE-576). A member's turn in a room more
+than one human reads binds what their private room does. What is withheld is
+withheld from a guest's turn and from a task nobody asked in the room (here a
+`cli` task, the same rule as a cron job): no `Users/{uid}` bind, a per-task
+temp dir instead of the per-user one (`room-task-<id>`, or `emissary-task-<id>`
+for a guest), and no flat Talk directory. Independently, a `Groups/<id>` bind
+for the groups the task resolves (multiplayer Stages 9, 13, 23).
 
 The default suite patches `_bwrap_available` and reads argv, so it has never
 run any of that. This tier does. Every scenario reads the same probe from
@@ -17,9 +15,9 @@ session and requires the opposite answers, so an absence here is the room's
 doing and not a stack that never had the files.
 
 Rooms and tasks are seeded through a Python script run in the container
-against the daemon's own database: there is no CLI that adds a room member,
-writes a grant or creates a guest's turn, and the principal turns still go in
-through `istota task`, which is the shipped path.
+against the daemon's own database: there is no CLI that adds a room member or
+creates a guest's turn, and the other turns still go in through `istota task`,
+which is the shipped path.
 """
 
 from __future__ import annotations
@@ -44,12 +42,12 @@ USER_DIR = f"{WORKSPACE}/Users/{USER}"
 BOT = f"{USER_DIR}/{BOT_DIR}"
 GROUPS = f"{WORKSPACE}/Groups"
 
-#: Rooms. `restricted` and `guest` are read by testuser and bob, both members of
-#: `fam`; `files` is read by testuser and carol, who is in no group; `private`
-#: is testuser's alone. testuser is also in `other`, which bob is not, so only
-#: the private room can load it.
-RESTRICTED = "sr-restricted"
-FILES = "sr-files"
+#: Rooms. `shared` and `guest` are read by testuser and bob, both members of
+#: `fam`; `outsider` is read by testuser and carol, who is in no group;
+#: `private` is testuser's alone. testuser is also in `other`, which bob is
+#: not, so only the private room can load it.
+SHARED = "sr-shared"
+OUTSIDER = "sr-outsider"
 GUEST = "sr-guest"
 PRIVATE = "sr-private"
 
@@ -70,7 +68,7 @@ with db.get_db(config.db_path) as conn:
             for m in members:
                 db.add_group_member(conn, gid, m, added_by="test")
     rooms = {{
-        {RESTRICTED!r}: ("bob",), {FILES!r}: ("carol",), {GUEST!r}: ("bob",),
+        {SHARED!r}: ("bob",), {OUTSIDER!r}: ("carol",), {GUEST!r}: ("bob",),
         {PRIVATE!r}: (),
     }}
     for token, others in rooms.items():
@@ -79,10 +77,6 @@ with db.get_db(config.db_path) as conn:
             db.add_room_member(conn, token, "testuser")
             for other in others:
                 db.add_room_member(conn, token, other)
-    conn.execute(
-        "INSERT OR IGNORE INTO room_data_grants (room_token, user_id, scope) "
-        "VALUES (?, 'testuser', 'files')", ({FILES!r},),
-    )
     policy = room_policy.ensure_policy(conn, {GUEST!r})
     conn.execute("UPDATE room_policy SET guest_reply = 'direct' WHERE room_token = ?",
                  ({GUEST!r},))
@@ -116,10 +110,7 @@ chown -R "$owner" {USER_DIR} {GROUPS} {WORKSPACE}/Talk {TEMP}/{USER}
 
 MARK = "SHARED_ROOM_PROBE"
 
-#: Facts about the task's view, each a line. `memory_readable` and
-#: `config_entries` are the discriminators for the masks (the workspace volume
-#: may itself be a tmpfs, so `*_fs` is a diagnosis rather than a verdict).
-#: `rename` moves the bot directory and puts it back when that worked.
+#: Facts about the task's view, each a line.
 PROBE = f"""
 M={MARK}
 S=SENTINEL
@@ -129,12 +120,8 @@ echo "user_dir=$(present {USER_DIR})"
 echo "talk_dir=$(present {WORKSPACE}/Talk)"
 echo "deferred=$(basename "${{ISTOTA_DEFERRED_DIR:-unset}}")"
 echo "temp_entries=[$(ls -A {TEMP}/{USER} 2>&1 | tr '\\n' ' ')]"
-echo "memories_fs=$(stat -f -c %T {USER_DIR}/memories 2>&1)"
-echo "config_fs=$(stat -f -c %T {BOT}/config 2>&1)"
-echo "playbooks_fs=$(stat -f -c %T {BOT}/playbooks 2>&1)"
 echo "config_entries=[$(ls -A {BOT}/config 2>&1 | tr '\\n' ' ')]"
-echo "archive_entries=[$(ls -A {USER_DIR}/archive/mem 2>&1 | tr '\\n' ' ')]"
-if grep -rqs "${{S}}-MEM" {BOT}/config {USER_DIR}/memories {USER_DIR}/archive; then
+if grep -rqs "${{S}}-MEM" {BOT}/config {USER_DIR}/memories; then
   echo "memory_readable=yes"
 else
   echo "memory_readable=no"
@@ -143,16 +130,6 @@ if touch {USER_DIR}/probe-note 2>/dev/null; then
   echo "files_writable=yes"; rm -f {USER_DIR}/probe-note
 else
   echo "files_writable=no"
-fi
-if touch {BOT}/playbooks/probe 2>/dev/null; then
-  echo "playbook_writable=yes"; rm -f {BOT}/playbooks/probe
-else
-  echo "playbook_writable=no"
-fi
-if out=$(mv {BOT} {USER_DIR}/.moved-bot 2>&1); then
-  echo "rename=ok"; mv {USER_DIR}/.moved-bot {BOT}
-else
-  echo "rename=refused [$out]"
 fi
 echo "groups_entries=[$(ls -A {GROUPS} 2>&1 | tr '\\n' ' ')]"
 if touch {GROUPS}/fam/probe 2>/dev/null; then
@@ -178,10 +155,12 @@ def _seed(stack, *args: str) -> dict:
     return json.loads(rows.stdout.strip().splitlines()[-1])
 
 
-def _principal_task(stack, token: str) -> int:
+def _task(stack, token: str, source_type: str) -> int:
+    """A task in ``token``: ``web`` is a member's turn, ``cli`` one nobody
+    asked in the room."""
     result = stack.exec(
         ["uv", "run", "istota", "-c", CONFIG, "task", "probe the room",
-         "-u", USER, "--source-type", "cli", "-t", token],
+         "-u", USER, "--source-type", source_type, "-t", token],
         timeout=120,
     )
     assert result.returncode == 0, result.stderr
@@ -218,99 +197,51 @@ def _show(facts) -> str:
 def shared_rooms(stack):
     _seed(stack)
     yield stack
-    stack.exec(["sh", "-c",
-                f"rm -rf {USER_DIR}/archive {USER_DIR}/.moved-bot; "
-                f"[ -L {USER_DIR}/memories ] && rm {USER_DIR}/memories; true"])
+    stack.exec(["sh", "-c", f"rm -rf {USER_DIR}/.moved-bot; true"])
 
 
-class TestASharedRoomWithNothingGranted:
+class TestAMembersTurnInASharedRoom:
+    """The regression for ISSUE-576, in a namespace: nothing is withheld."""
+
+    @pytest.mark.script(SCRIPT)
+    def test_the_workspace_talk_and_per_user_temp_are_there(self, shared_rooms):
+        facts = _observe(shared_rooms, _task(shared_rooms, SHARED, "web"))
+        report = _show(facts)
+        assert facts["user_dir"] == "yes", report
+        assert facts["files_writable"] == "yes", report
+        assert facts["talk_dir"] == "yes", report
+        assert facts["deferred"] == USER, report
+        # Out of the prompt, not out of reach: the files are on disk.
+        assert facts["memory_readable"] == "yes", report
+
+    @pytest.mark.script(SCRIPT)
+    def test_a_group_every_reader_is_in_is_bound_and_no_other(self, shared_rooms):
+        facts = _observe(shared_rooms, _task(shared_rooms, SHARED, "web"))
+        report = _show(facts)
+        assert facts["groups_entries"].strip("[] ") == "fam", report
+        assert facts["fam_writable"] == "yes", report
+        assert facts["other_group"] == "no", report
+
+    @pytest.mark.script(SCRIPT)
+    def test_a_room_with_a_reader_outside_the_group_binds_no_group(self, shared_rooms):
+        facts = _observe(shared_rooms, _task(shared_rooms, OUTSIDER, "web"))
+        assert facts["user_dir"] == "yes", _show(facts)
+        assert "No such file" in facts["groups_entries"], _show(facts)
+
+
+class TestATaskNobodyAskedInTheRoom:
+    """A `cli` task, like a cron job, lands its answer in the room with no
+    member asking in it, so it runs at room-safe reach."""
+
     @pytest.mark.script(SCRIPT)
     def test_the_workspace_talk_and_per_user_temp_are_not_there(self, shared_rooms):
-        facts = _observe(shared_rooms, _principal_task(shared_rooms, RESTRICTED))
+        facts = _observe(shared_rooms, _task(shared_rooms, SHARED, "cli"))
         report = _show(facts)
         assert facts["user_dir"] == "no", report
         assert facts["talk_dir"] == "no", report
         assert facts["deferred"] == f"room-task-{facts['_task_id']}", report
         assert "planted-sibling.txt" not in facts["temp_entries"], report
         assert facts["memory_readable"] == "no", report
-
-    @pytest.mark.script(SCRIPT)
-    def test_a_group_every_reader_is_in_is_bound_and_no_other(self, shared_rooms):
-        facts = _observe(shared_rooms, _principal_task(shared_rooms, RESTRICTED))
-        report = _show(facts)
-        assert facts["groups_entries"].strip("[] ") == "fam", report
-        assert facts["fam_writable"] == "yes", report
-        assert facts["other_group"] == "no", report
-
-
-class TestFilesGrantedWithoutMemory:
-    @pytest.mark.script(SCRIPT)
-    def test_the_workspace_is_there_and_its_memory_is_not(self, shared_rooms):
-        facts = _observe(shared_rooms, _principal_task(shared_rooms, FILES))
-        report = _show(facts)
-        assert facts["user_dir"] == "yes", report
-        assert facts["files_writable"] == "yes", report
-        assert facts["memory_readable"] == "no", report
-        assert facts["config_entries"] == "[]", report
-        # Absent before the task: made by the daemon and masked read-only.
-        assert facts["playbooks_fs"] == "tmpfs", report
-        assert facts["playbook_writable"] == "no", report
-
-    @pytest.mark.script(SCRIPT)
-    def test_the_bot_directory_cannot_be_renamed_out_from_under_the_masks(
-        self, shared_rooms,
-    ):
-        """Stage 16's open question, answered live: rename(2) refuses only a
-        mountpoint, and the self-bind is what makes the bot directory one."""
-        facts = _observe(shared_rooms, _principal_task(shared_rooms, FILES))
-        assert facts["rename"].startswith("refused"), _show(facts)
-        assert "busy" in facts["rename"].lower(), _show(facts)
-
-    @pytest.mark.script(SCRIPT)
-    def test_a_symlinked_memory_directory_is_masked_where_it_points(self, shared_rooms):
-        moved = shared_rooms.exec(["sh", "-c", (
-            f"mkdir -p {USER_DIR}/archive && mv {USER_DIR}/memories {USER_DIR}/archive/mem "
-            f"&& ln -s {USER_DIR}/archive/mem {USER_DIR}/memories "
-            f"&& chown -h $(stat -c %u:%g {TEMP}) {USER_DIR}/memories {USER_DIR}/archive"
-        )])
-        assert moved.returncode == 0, moved.stderr
-        try:
-            facts = _observe(shared_rooms, _principal_task(shared_rooms, FILES))
-        finally:
-            shared_rooms.exec(["sh", "-c", (
-                f"rm {USER_DIR}/memories && mv {USER_DIR}/archive/mem {USER_DIR}/memories "
-                f"&& rm -rf {USER_DIR}/archive"
-            )])
-        report = _show(facts)
-        assert facts["archive_entries"] == "[]", report
-        assert facts["memory_readable"] == "no", report
-
-    @pytest.mark.script(SCRIPT)
-    def test_a_room_with_a_reader_outside_the_group_binds_no_group(self, shared_rooms):
-        facts = _observe(shared_rooms, _principal_task(shared_rooms, FILES))
-        assert "No such file" in facts["groups_entries"], _show(facts)
-
-
-class TestTheIdentityGuard:
-    """The self-bind's source can be swapped for a symlink between the plan
-    and bwrap's mount, by another task of the same user. What runs the
-    command is a check, after every mount, that the path is the inode the plan
-    saw. The files tests above pass through it in a real namespace; this is
-    its refusal, run in the image's own shell and `stat`."""
-
-    def test_it_runs_the_command_only_for_the_planned_inode(self, shared_rooms):
-        from istota.sandbox_plan import IDENTITY_GUARD
-
-        ident = shared_rooms.exec(["stat", "-c", "%d:%i", BOT]).stdout.strip()
-        assert re.fullmatch(r"\d+:\d+", ident), ident
-        guarded = ["/bin/sh", "-c", IDENTITY_GUARD, "sh", BOT]
-        ran = shared_rooms.exec([*guarded, ident, "--", "echo", "GUARD_RAN"])
-        assert ran.returncode == 0 and "GUARD_RAN" in ran.stdout, ran.stderr
-        other = shared_rooms.exec(["stat", "-c", "%d:%i", USER_DIR]).stdout.strip()
-        refused = shared_rooms.exec([*guarded, other, "--", "echo", "GUARD_RAN"])
-        assert refused.returncode == 125, (refused.returncode, refused.stderr)
-        assert "GUARD_RAN" not in refused.stdout
-        assert "not the directory that was planned" in refused.stderr
 
 
 class TestAGuestsTurn:
@@ -328,19 +259,18 @@ class TestAGuestsTurn:
 class TestThePrivateRoomControl:
     """The same probe, in testuser's own room, in the same session.
 
-    Every assertion above is an absence, and each is equally true of a stack
-    that never had the files or a task whose sandbox bound none of them. Here
-    the same paths are present, readable, and the bot directory renames.
+    Every absence above is equally true of a stack that never had the files or
+    a task whose sandbox bound none of them. Here the same paths are present
+    and readable.
     """
 
     @pytest.mark.script(SCRIPT)
     def test_everything_withheld_above_is_reachable_here(self, shared_rooms):
-        facts = _observe(shared_rooms, _principal_task(shared_rooms, PRIVATE))
+        facts = _observe(shared_rooms, _task(shared_rooms, PRIVATE, "cli"))
         report = _show(facts)
         assert facts["user_dir"] == "yes", report
         assert facts["talk_dir"] == "yes", report
         assert facts["memory_readable"] == "yes", report
         assert "USER.md" in facts["config_entries"], report
         assert "planted-sibling.txt" in facts["temp_entries"], report
-        assert facts["rename"] == "ok", report
         assert "fam" in facts["groups_entries"] and facts["other_group"] == "yes", report

@@ -306,19 +306,6 @@ class SpeechGateConfig:
 
 
 @dataclass
-class RoomsConfig:
-    """What a task in a room more than one human reads may reach.
-
-    Read by ``room_scopes.task_withheld_scopes``. ``"restrict"`` withholds every
-    scope the sender has not granted in that room; ``"off"`` gives a shared-room
-    task everything a private one gets. Any other value restricts, since a typo
-    must not reopen the disclosure the default closes.
-    """
-
-    shared_room_data_policy: str = "restrict"
-
-
-@dataclass
 class SchedulerConfig:
     # 5, not 2, because 5 is what every deployment actually runs: the Ansible
     # template, the Docker render, `config.example.toml` and `istota setup` all
@@ -2101,7 +2088,6 @@ class Config:
     whatsapp: WhatsAppConfig = field(default_factory=WhatsAppConfig)
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     speech_gate: SpeechGateConfig = field(default_factory=SpeechGateConfig)
-    rooms: RoomsConfig = field(default_factory=RoomsConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     devbox: DevboxConfig = field(default_factory=DevboxConfig)
@@ -3527,6 +3513,7 @@ _RETIRED = frozenset({
     "site.enabled",
     "site.base_path",
     "security.sandbox_admin_db_write",
+    "rooms",
     # Still honoured, by `_apply_renamed_keys`, which warns in its own terms.
     "scheduler.istota_file_poll_interval",
 })
@@ -4265,6 +4252,14 @@ def load_config(config_path: Path | None = None) -> Config:
                 "take it down separately.",
                 ", ".join(retired),
             )
+
+    if "shared_room_data_policy" in (data.get("rooms") or {}):
+        logger.warning(
+            "[rooms] shared_room_data_policy is no longer supported and is being "
+            "ignored. A member's turn in a shared room runs with that member's "
+            "full reach, and their personal memory is never loaded there "
+            "(ISSUE-576). Remove the key."
+        )
 
     if "security" in data:
         sec = data["security"]

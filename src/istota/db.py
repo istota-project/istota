@@ -1140,7 +1140,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_messages_author(conn)
     # After the author backfill, which is what it reads.
     _migrate_room_participants(conn)
-    _migrate_room_data_grants(conn)
+    _migrate_drop_room_data_grants(conn)
     _migrate_side_rooms(conn)
     _migrate_room_policy(conn)
     _migrate_room_veto(conn)
@@ -4280,7 +4280,6 @@ def delete_web_chat_room(
     conn.execute("DELETE FROM room_members WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_dismissals WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_participants WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_data_grants WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_policy WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_vetoes WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_notices WHERE room_token = ?", (token,))
@@ -7611,35 +7610,21 @@ def _migrate_room_participants(conn: sqlite3.Connection) -> None:
     )
 
 
-# Kept equal to schema.sql's copy by tests/test_room_members_api.py.
-_ROOM_DATA_GRANTS_DDL = """
-CREATE TABLE IF NOT EXISTS room_data_grants (
-    room_token TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
-    user_id    TEXT NOT NULL,
-    scope      TEXT NOT NULL,
-    granted_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (room_token, user_id, scope)
-)
-"""
+def _migrate_drop_room_data_grants(conn: sqlite3.Connection) -> None:
+    """Drop the retired per-room scope grants (ISSUE-576).
 
+    A member's turn in a shared room now runs at full reach, so a grant decides
+    nothing and its rows carry nothing forward. One way: a checkout rolled back
+    past this recreates the table empty from its own `schema.sql`, which reads
+    as "nothing granted", the default every member had before granting.
 
-def _migrate_room_data_grants(conn: sqlite3.Connection) -> None:
-    """Create `room_data_grants`, empty, and record that it was created empty.
-
-    **No backfill, and the marker is what says so.** Granting every scope to
-    every existing shared room would reopen the disclosure hole the table exists
-    to close, under a name that looks like consent nobody gave. The marker
-    (`room_grants_v1`) records that this database got the table with nothing in
-    it, so a later migration cannot mistake an empty table on an upgraded
-    install for one that predates the decision.
+    `IF EXISTS` and no marker, as `_migrate_drop_retired_vault_table`: the
+    statement is idempotent and a failed run is retried by the next boot.
     """
-    conn.execute(_ROOM_DATA_GRANTS_DDL)
     try:
-        conn.execute(
-            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_grants_v1')"
-        )
-    except sqlite3.OperationalError:
-        return  # marker table not created yet (very early fresh install)
+        conn.execute("DROP TABLE IF EXISTS room_data_grants")
+    except sqlite3.OperationalError as e:
+        logger.warning("retired room grants table drop failed: %s", e)
 
 
 def _migrate_side_rooms(conn: sqlite3.Connection) -> None:

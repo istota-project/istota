@@ -1,9 +1,11 @@
-"""Seam 6: the `skills` CLI honours the calling task's room (multiplayer Stage 16).
+"""Seam 6: the `skills` CLI honours what the calling task withholds (multiplayer Stage 16).
 
 `istota-skill skills list|show|overlay` runs host-side in a subprocess and used
-to compute "disabled" with no room at all, so a task in a shared room was
-offered, and could load, the bodies and the per-user overlays its room
-withholds. The executor's seams are what enforce; this pins the backstop.
+to compute "disabled" with no task at all, so a guest's turn was offered, and
+could load, the bodies and the per-user overlays it may not reach. Since
+ISSUE-576 only a guest's turn withholds anything; a member's turn in a shared
+room sees what their private room does. The executor's seams are what enforce;
+this pins the backstop.
 """
 import argparse
 import json
@@ -80,11 +82,13 @@ def _show(name, capsys):
 
 
 class TestTheSkillsCliReadsTheRoom:
-    def test_a_shared_room_task_is_not_offered_a_withheld_skill(self, env, monkeypatch, capsys):
+    def test_a_members_turn_in_a_shared_room_is_offered_everything(
+        self, env, monkeypatch, capsys,
+    ):
         config, shared, _solo = env
         _task_in(config, monkeypatch, shared)
-        assert _list(capsys) == {"weather"}
-        assert "disabled" in _show("calendar", capsys)
+        assert _list(capsys) == {"calendar", "weather"}
+        assert "# calendar body" in _show("calendar", capsys)
 
     def test_a_private_room_task_is(self, env, monkeypatch, capsys):
         config, _shared, solo = env
@@ -92,23 +96,11 @@ class TestTheSkillsCliReadsTheRoom:
         assert _list(capsys) == {"calendar", "weather"}
         assert "# calendar body" in _show("calendar", capsys)
 
-    def test_a_grant_reaches_the_cli(self, env, monkeypatch, capsys):
-        from istota import room_scopes
-
+    def test_a_guests_turn_is_offered_only_safe_skills(self, env, monkeypatch, capsys):
         config, shared, _solo = env
-        with db.get_db(config.db_path) as conn:
-            room_scopes.grant_scopes(conn, shared, "alice", ["calendar"])
-        _task_in(config, monkeypatch, shared)
-        assert "calendar" in _list(capsys)
-
-    def test_a_guests_turn_withholds_whatever_was_granted(self, env, monkeypatch, capsys):
-        from istota import room_scopes
-
-        config, shared, _solo = env
-        with db.get_db(config.db_path) as conn:
-            room_scopes.grant_scopes(conn, shared, "alice", ["calendar", "memory"])
         _task_in(config, monkeypatch, shared, guest_participant_id=1)
         assert _list(capsys) == {"weather"}
+        assert "disabled" in _show("calendar", capsys)
 
     def test_the_executors_set_is_honoured_without_a_task(self, env, monkeypatch, capsys):
         monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", "calendar")
@@ -123,23 +115,23 @@ class TestTheSkillsCliReadsTheRoom:
 
 
 class TestOverlaysAreMemory:
-    def test_show_leaves_the_overlay_out_where_memory_is_withheld(self, env, monkeypatch, capsys):
+    def test_show_leaves_the_overlay_out_on_a_guests_turn(self, env, monkeypatch, capsys):
         config, shared, _solo = env
-        _task_in(config, monkeypatch, shared)
+        _task_in(config, monkeypatch, shared, guest_participant_id=1)
         out = _show("weather", capsys)
         assert "# weather body" in out
         assert "Elm Street" not in out
 
-    def test_and_keeps_it_in_a_private_room(self, env, monkeypatch, capsys):
-        config, _shared, solo = env
-        _task_in(config, monkeypatch, solo)
+    def test_and_keeps_it_on_a_members_turn(self, env, monkeypatch, capsys):
+        config, shared, _solo = env
+        _task_in(config, monkeypatch, shared)
         assert "Elm Street" in _show("weather", capsys)
 
-    def test_overlay_and_overlays_refuse(self, env, monkeypatch, capsys):
+    def test_overlay_and_overlays_refuse_a_guests_turn(self, env, monkeypatch, capsys):
         from istota.skills.skills import cmd_overlay, cmd_overlays
 
         config, shared, _solo = env
-        _task_in(config, monkeypatch, shared)
+        _task_in(config, monkeypatch, shared, guest_participant_id=1)
         for call in (lambda: cmd_overlay(argparse.Namespace(name="weather")),
                      lambda: cmd_overlays(argparse.Namespace())):
             with pytest.raises(SystemExit):

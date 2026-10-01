@@ -256,7 +256,7 @@ def dispatch_setup_env_hooks(
     CLIs, which is a security property rather than tidiness. See the
     application site in ``execute_task``.
 
-    ``withheld`` names skills a shared room withholds (``room_scopes``). Their
+    ``withheld`` names skills a guest's turn withholds (``room_scopes``). Their
     hooks still run, because some have side effects the rest of the task relies
     on (the developer hook scrubs credentials out of the repos before anything
     can bind them), but what they return is dropped: ``HEALTH_DB_PATH`` and its

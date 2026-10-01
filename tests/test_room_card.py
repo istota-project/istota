@@ -108,19 +108,14 @@ class TestAPrincipalsTurn:
         assert "You are acting for 'bob'" in text
         assert "host is 'alice'" in text
 
-    def test_withheld_scopes_are_listed_with_the_command_that_grants_one(self, config):
-        with db.get_db(config.db_path) as conn:
-            _shared(conn)
-        text = _card(config, _task("bob"))
-        assert "Withheld from this turn: calendar, files, memory." in text
-        assert "`!room share <scope>`" in text
-
-    def test_nothing_withheld_is_said_as_such(self, config):
+    def test_a_members_turn_says_full_reach_and_no_ambient_memory(self, config):
         with db.get_db(config.db_path) as conn:
             _shared(conn)
         text = _card(config, _task("bob"), withheld=frozenset())
-        assert "Nothing is withheld from this turn" in text
+        assert "This turn runs with everything 'bob' can reach" in text
+        assert "personal memory is not loaded into this room" in text
         assert "!room share" not in text
+        assert "Withheld" not in text
 
     def test_the_side_room_verb_is_named_only_where_it_can_run(self, config):
         with db.get_db(config.db_path) as conn:
