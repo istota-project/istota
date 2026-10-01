@@ -84,6 +84,28 @@ def _bodies(fake_talk, shape):
 
 class TestMirrorRepostSuppression:
     @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
+    def test_disabled_mirror_mode_posts_only_the_answer(
+        self, mock_run, db_path, tmp_path, fake_talk, monkeypatch,
+    ):
+        from dataclasses import replace
+        from istota import surfaces
+
+        monkeypatch.setitem(surfaces.SURFACES, "talk", replace(
+            surfaces.SURFACES["talk"], user_turn_mirror=None,
+        ))
+        config = _make_config(db_path, tmp_path)
+        shape, _ = _seed_web_mirror_task(db_path)
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(True, "It's sunny.", None, None),
+        ):
+            result = process_one_task(config)
+
+        assert result is not None and result[1] is True
+        assert _bodies(fake_talk, shape) == ["It's sunny."]
+        assert fake_talk.refusals == []
+
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_stamped_turn_suppresses_repost(
         self, mock_run, db_path, tmp_path, fake_talk,
     ):

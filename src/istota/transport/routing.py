@@ -24,7 +24,13 @@ from typing import TYPE_CHECKING
 # The static room-model table. A stdlib-only leaf that imports nothing, so a
 # module-level import here costs nothing and introduces no cycle — unlike
 # `db`, which this module deliberately imports per function.
-from ..surfaces import is_room_member, origin_surface_for_source_type
+from ..surfaces import (
+    UserTurnMirror as UserTurnMirrorMode,
+    is_room_member,
+    origin_surface_for_source_type,
+    room_view,
+    user_turn_mirror,
+)
 
 if TYPE_CHECKING:
     from .. import db
@@ -76,6 +82,52 @@ class Destination:
     channel: str | None = None
     kind: str = "push"
     mirror: bool = False
+
+
+@dataclass(frozen=True)
+class UserTurnMirror:
+    """A bound external view that needs a copy of a non-native user turn.
+
+    ``surface_ref`` is the destination's address, never the canonical room
+    token. ``mode`` describes authorship, not content policy: callers must
+    still choose content by origin. In particular, email reposts carry sender
+    and subject only, never the wrapped untrusted body. ``as_user`` degrades
+    to an attributed repost when no author credential is available.
+    """
+
+    surface: str
+    surface_ref: str
+    mode: UserTurnMirrorMode
+
+
+def plan_user_turn_mirrors(
+    conn, config: "Config", room_token: str, origin_surface: str,
+) -> list[UserTurnMirror]:
+    """Plan user-turn copies from static facts and one binding lookup.
+
+    Config does not gate the room model: a disabled transport still has its
+    declared role, and its caller handles post failures. Missing, archived or
+    unbound rooms have no targets. A DB failure must not fail the original send.
+    """
+    from .. import db
+
+    try:
+        room = db.get_room(conn, room_token)
+        if room is None or room.archived:
+            return []
+        mirrors = []
+        for binding in db.list_room_bindings(conn, room_token):
+            if binding.surface == origin_surface:
+                continue
+            if room_view(binding.surface) != "external":
+                continue
+            mode = user_turn_mirror(binding.surface)
+            if mode is not None:
+                mirrors.append(UserTurnMirror(binding.surface, binding.surface_ref, mode))
+        return mirrors
+    except Exception as e:
+        logger.warning("user-turn mirror planning failed for room %s: %s", room_token, e)
+        return []
 
 
 def parse_output_target(

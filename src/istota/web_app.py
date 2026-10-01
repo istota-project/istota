@@ -8156,15 +8156,17 @@ async def _mirror_web_turn_as_user(
     it does not close it.
     """
     from . import db, web_tokens
+    from .transport.routing import plan_user_turn_mirrors
 
     if not _config or not web_tokens.feature_enabled(_config):
         return
 
     def _lookup() -> tuple[str | None, int | None, int | None]:
         with db.get_db(_config.db_path) as conn:
-            bindings = db.list_room_bindings(conn, room_token)
+            mirrors = plan_user_turn_mirrors(conn, _config, room_token, "web")
             talk_ref = next(
-                (b.surface_ref for b in bindings if b.surface == "talk"), None,
+                (m.surface_ref for m in mirrors
+                 if m.surface == "talk" and m.mode == "as_user"), None,
             )
             if talk_ref is None:
                 return None, None, None

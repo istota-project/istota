@@ -2962,6 +2962,11 @@ def process_one_task(
     # job mailing an external address — and stays task-only.
     with db.get_db(config.db_path) as _room_conn:
         transcript_token = transcript_room_for_task(_room_conn, config, task)
+        from .transport.routing import plan_user_turn_mirrors
+        user_turn_mirrors = (
+            plan_user_turn_mirrors(_room_conn, config, transcript_token, task.source_type)
+            if transcript_token else []
+        )
 
     # Split by whether the push target IS the exchange's own room. For a
     # canonical room view, a push at that room *is* the assistant row —
@@ -3980,10 +3985,17 @@ def process_one_task(
         # answering (ISSUE-247). What used to carry that on Talk was
         # `_notify_confirmed_email_result`'s `Email reply sent to <sender>`
         # prefix, and only for a gated task.
+        # Only repost to a planned binding that the result itself will reach.
+        # The planner chooses the address and authorship mode; content remains
+        # origin-specific, especially email's sender/subject-only policy.
+        _user_mirror = next(
+            (m for m in user_turn_mirrors
+             if m.surface == "talk" and m.surface_ref == talk_token), None,
+        )
         _repost = None
-        if _talk_is_mirror and task.source_type == "web" and task.prompt:
+        if _user_mirror and _talk_is_mirror and task.source_type == "web" and task.prompt:
             _repost = _format_mirror_user_repost(config, task)
-        elif task.source_type == "email" and transcript_token:
+        elif _user_mirror and task.source_type == "email":
             _repost = _format_email_user_repost(config, task, talk_token)
         if _repost:
             _user_posted = False
@@ -4001,7 +4013,7 @@ def process_one_task(
                 run_coro(post_result_to_talk(
                     config, task, _repost,
                     reference_id=f"istota:task:{task.id}:prompt",
-                    target_token=talk_token,
+                    target_token=_user_mirror.surface_ref,
                 ))
         response_msg_id = run_coro(post_result_to_talk(
             config, task, post_talk_message, use_reply_threading=True,
