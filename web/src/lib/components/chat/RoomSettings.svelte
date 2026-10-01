@@ -441,6 +441,7 @@
         roomId={room.id}
         {userId}
         talkBound={onTalk}
+        phoneLabel={room.read_only ? phoneLabel : null}
         onChanged={onMembersChanged}
         {onLeft}
       />

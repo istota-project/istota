@@ -329,3 +329,131 @@ class TestAPreMintTask:
         )
         assert decline.status_code == 409
         assert decline.json()["read_only"] is True
+
+
+def _finish(conn, task_id):
+    db.update_task_status(conn, task_id, "completed", result="done")
+
+
+@web_only
+class TestNoMemberIsAddedToAPhoneRoom:
+    """A private phone thread has one reader. A second member would make it
+    shared, and a shared phone room is answered, recorded into and backfilled
+    by nothing (`routing.private_phone_room` refuses it), so the add is refused
+    at the endpoint rather than left to break those three quietly."""
+
+    async def test_an_add_to_a_private_phone_room_is_refused(
+        self, client, db_path, tmp_path,
+    ):
+        config = _config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            sms = _mint(conn, config, "sms").room_token
+            wa = _mint(conn, config, "whatsapp").room_token
+        cookies = await _login(client)
+        rooms = await _rooms(client, cookies)
+        for token in (sms, wa):
+            resp = await client.post(
+                f"/istota/api/chat/rooms/{rooms[token]['id']}/members",
+                json={"user_id": "bob", "acknowledge_history": True},
+                cookies=cookies, headers=ORIGIN,
+            )
+            assert resp.status_code == 409
+            assert resp.json()["read_only"] is True
+        with db.get_db(db_path) as conn:
+            assert db.list_room_members(conn, sms) == ["alice"]
+            assert db.list_room_members(conn, wa) == ["alice"]
+
+    async def test_a_group_room_and_a_web_room_still_take_a_member(
+        self, client, db_path, tmp_path,
+    ):
+        """The control: the refusal is the private-thread test, not "has a
+        phone binding", so a WhatsApp group room still takes a member."""
+        with db.get_db(db_path) as conn:
+            group = _group_room(conn)
+            db.ensure_web_chat_handle(conn, "alice", group, "Family")
+            web = db.create_web_chat_room(conn, "alice", "general").token
+        cookies = await _login(client)
+        rooms = await _rooms(client, cookies)
+        for token in (group, web):
+            resp = await client.post(
+                f"/istota/api/chat/rooms/{rooms[token]['id']}/members",
+                json={"user_id": "bob", "acknowledge_history": True},
+                cookies=cookies, headers=ORIGIN,
+            )
+            assert resp.status_code == 201, resp.json()
+
+
+@web_only
+class TestDeletingAPhoneRoom:
+    """Deleting a phone room deletes its history, the pre-room tasks on its
+    alias included. What it may not do is delete an unfinished one."""
+
+    async def _delete(self, client, cookies, token):
+        rooms = await _rooms(client, cookies)
+        return await client.delete(
+            f"/istota/api/chat/rooms/{rooms[token]['id']}",
+            cookies=cookies, headers=ORIGIN,
+        )
+
+    async def test_an_unfinished_task_on_the_alias_refuses_the_delete(
+        self, client, db_path, tmp_path,
+    ):
+        config = _config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            old = db.create_task(
+                conn, prompt="still going", user_id="alice", source_type="sms",
+                conversation_token=sms_conversation_token("alice"),
+            )
+            minted = _mint(conn, config, "sms")
+            _finish(conn, minted.task_id)
+            sms = minted.room_token
+        cookies = await _login(client)
+        resp = await self._delete(client, cookies, sms)
+        assert resp.status_code == 409
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, old) is not None
+            assert db.get_room(conn, sms) is not None
+
+    def test_both_busy_counts_see_the_alias(self, db_path, tmp_path):
+        """The delete runs two guards, the caller's own tasks and every
+        member's; each has to see a task on the alias on its own."""
+        config = _config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="still going", user_id="alice", source_type="sms",
+                conversation_token=sms_conversation_token("alice"),
+            )
+            minted = _mint(conn, config, "sms")
+            _finish(conn, minted.task_id)
+            assert db.count_active_room_tasks(conn, minted.room_token) == 1
+            assert db.count_active_web_tasks(conn, minted.room_token, "alice") == 1
+            assert db.count_active_web_tasks(conn, minted.room_token, "bob") == 0
+
+    async def test_a_finished_history_is_deleted_and_its_alias_stays_dead(
+        self, client, db_path, tmp_path,
+    ):
+        """The existing behaviour, kept: a completed alias history goes with
+        the room. And the alias is a tombstone afterwards, so the room the
+        next text mints cannot reach anything left under the old token."""
+        config = _config(db_path, tmp_path)
+        hash_token = sms_conversation_token("alice")
+        with db.get_db(db_path) as conn:
+            old = db.create_task(
+                conn, prompt="long ago", user_id="alice", source_type="sms",
+                conversation_token=hash_token,
+            )
+            _finish(conn, old)
+            minted = _mint(conn, config, "sms")
+            _finish(conn, minted.task_id)
+            sms = minted.room_token
+        cookies = await _login(client)
+        resp = await self._delete(client, cookies, sms)
+        assert resp.status_code == 200
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, old) is None
+            assert db.get_room(conn, sms) is None
+            again = _mint(conn, config, "sms", text="hello again").room_token
+            assert again != sms
+            assert db.room_ref_tokens(conn, again, include_surface_refs=False) == [again]
+            # The hash names the deleted room still, and so names no room.
+            assert db._canonical_room_token(conn, hash_token, cross_surface=False) == hash_token

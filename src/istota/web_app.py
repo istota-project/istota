@@ -6115,6 +6115,19 @@ def _chat_add_member(
         # second member would read answers given at that member's full reach.
         if reg.side_of:
             return 409, {"error": "a side room is private to its member"}
+        # A private phone thread has one reader. A second member makes it
+        # shared, and a shared phone room is answered, recorded into and
+        # backfilled by nothing (`routing.private_phone_room` refuses it).
+        # A WhatsApp group room is not a private thread and takes members.
+        from .transport.routing import phone_transcript_surface
+        phone = phone_transcript_surface(conn, handle.token)
+        if phone is not None:
+            label = _PHONE_LABELS.get(phone, phone)
+            return 409, {
+                "error": f"This room is the transcript of a {label} "
+                         "conversation and has one reader; members cannot be added.",
+                "read_only": True,
+            }
         if reg.user_id != username:
             return 403, {"error": "only the room's creator can add members"}
         if target not in _config.users:

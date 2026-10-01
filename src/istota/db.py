@@ -4284,11 +4284,18 @@ def count_active_web_tasks(
     Counts every source_type, not just ``web``: a foreign task routed into the
     room (e.g. an email reply with ``conversation_token`` set to the room token)
     will also write to it via WebTransport.deliver, so deletion must wait on it
-    too."""
+    too.
+
+    Counts the room's permanent aliases too (`_room_ref_tokens` without
+    surface refs): a phone room's pre-room tasks carry its hash token, and the
+    delete removes them, so an unfinished one there blocks it the same way."""
+    refs = _room_ref_tokens(conn, token, include_surface_refs=False)
+    marks = ", ".join("?" for _ in refs)
     row = conn.execute(
-        "SELECT COUNT(*) FROM tasks WHERE conversation_token = ? AND user_id = ? "
+        f"SELECT COUNT(*) FROM tasks WHERE conversation_token IN ({marks}) "
+        "AND user_id = ? "
         "AND status IN ('pending', 'locked', 'running', 'pending_confirmation')",
-        (token, user_id),
+        (*refs, user_id),
     ).fetchone()
     return int(row[0]) if row else 0
 
@@ -4302,12 +4309,14 @@ def count_active_room_tasks(conn: sqlite3.Connection, token: str) -> int:
     by the caller the way the delete guard does would refuse nothing in exactly
     the shared-room case that needs the guard most. A member leaving waits on
     their own tasks only; the creator's delete, which destroys the room for
-    everyone, waits on this.
+    everyone, waits on this. Aliases included, as in `count_active_web_tasks`.
     """
+    refs = _room_ref_tokens(conn, token, include_surface_refs=False)
+    marks = ", ".join("?" for _ in refs)
     row = conn.execute(
-        "SELECT COUNT(*) FROM tasks WHERE conversation_token = ? "
+        f"SELECT COUNT(*) FROM tasks WHERE conversation_token IN ({marks}) "
         "AND status IN ('pending', 'locked', 'running', 'pending_confirmation')",
-        (token,),
+        refs,
     ).fetchone()
     return int(row[0]) if row else 0
 
