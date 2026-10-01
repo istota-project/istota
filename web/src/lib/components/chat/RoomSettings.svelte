@@ -477,8 +477,8 @@
       <span>Connected to</span>
       <p class="caption phone-binding">
         {#if room.read_only}
-          {phoneLabel} — this room is the transcript of your {phoneLabel} conversation. It is read-only
-          here; reply by {phoneLabel}.
+          {phoneLabel} — this room is the transcript of a {phoneLabel} conversation. It is read-only here;
+          reply by {phoneLabel}.
         {:else}
           {phoneLabel} — this room is a {phoneLabel} group.
         {/if}

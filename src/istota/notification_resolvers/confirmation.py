@@ -162,6 +162,24 @@ class ConfirmationResolver:
         if task.status != HELD_STATUS:
             return None
 
+        # A phone task's question was asked by text and is answered by text;
+        # both endpoints refuse it from web (room-surface-model Stage 24), so
+        # buttons here would never work.
+        from ..transport.routing import phone_transcript_surface
+
+        phone = (
+            phone_transcript_surface(conn, task.conversation_token)
+            if task.conversation_token else None
+        )
+        if phone is not None:
+            label = "SMS" if phone == "sms" else "WhatsApp"
+            return NotificationView(
+                title=confirmations.describe(conn, task),
+                body=f"Reply by {label} to answer this question.",
+                severity=row.severity,
+                actions=(),
+            )
+
         return NotificationView(
             title=confirmations.describe(conn, task),
             body="Open the private conversation to review this relay question." if task.whatsapp_confirmation_request_id else body_for(task.confirmation_prompt),

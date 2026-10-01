@@ -10145,7 +10145,9 @@ async def chat_discard_draft(
     return {"status": "discarded", "draft_id": draft_id}
 
 
-def _chat_cancel_task(task_id: int, actor_user_id: str | None = None) -> None:
+def _chat_cancel_task(task_id: int, actor_user_id: str | None = None) -> str | None:
+    """Cancel or decline. Returns the phone surface when the decline is
+    refused because the question belongs to a read-only phone room."""
     from . import confirmations, db
     with db.get_db(_config.db_path) as conn:
         row = conn.execute(
@@ -10170,15 +10172,12 @@ def _chat_cancel_task(task_id: int, actor_user_id: str | None = None) -> None:
             if task is not None and task.conversation_token:
                 from .transport.routing import phone_transcript_surface
 
-                if phone_transcript_surface(conn, task.conversation_token):
-                    from fastapi import HTTPException
-                    raise HTTPException(
-                        status_code=409,
-                        detail="answer this question by text; the room is read-only here",
-                    )
+                surface = phone_transcript_surface(conn, task.conversation_token)
+                if surface:
+                    return surface
             if task is not None:
                 confirmations.decline(conn, task, by="web")
-            return
+            return None
         conn.execute(
             "UPDATE tasks SET cancel_requested = 1 WHERE id = ?", (task_id,)
         )
@@ -10217,7 +10216,9 @@ async def chat_cancel_task(
     _csrf: None = Depends(_verify_origin),
 ):
     await _authorize_task_access(task_id, user)
-    await asyncio.to_thread(_chat_cancel_task, task_id, user["username"])
+    phone = await asyncio.to_thread(_chat_cancel_task, task_id, user["username"])
+    if phone is not None:
+        return _read_only_refusal(phone)
     return {"status": "cancelling"}
 
 

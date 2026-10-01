@@ -265,3 +265,67 @@ class TestTheTextedTurn:
         assert [(m["text"], m.get("via"), m.get("origin")) for m in rows] == [
             ("texted in", "sms", None),
         ]
+
+
+class TestThePinnedDefaultAndRelays:
+    def test_a_relay_never_lands_in_a_pinned_phone_room(self, db_path, tmp_path):
+        from istota import relay_destinations, user_profiles
+        from istota.whatsapp_requests import RequestError
+
+        config = _config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            sms = _mint(conn, config, "sms").room_token
+            db.ensure_web_chat_handle(conn, "alice", sms, "SMS")
+        user_profiles.ensure_profile(db_path, "alice", display_name="Alice")
+        user_profiles.update_profile(db_path, "alice", default_room=sms)
+        with db.get_db(db_path) as conn:
+            # The pin is the user's choice and still answers the lookup...
+            assert db.default_web_room(conn, "alice").token == sms
+            # ...but a question delivered there could never be answered.
+            with pytest.raises(RequestError) as e:
+                relay_destinations._room(conn, config, "alice")
+            assert str(e.value) == "recipient_has_no_private_room"
+
+
+class TestTheBellItem:
+    def test_a_phone_question_has_no_buttons(self, db_path, tmp_path):
+        from istota.notification_resolvers import confirmation
+        from istota.notification_sources import NotificationRow
+
+        config = _config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            task_id = _mint(conn, config, "sms", text="delete it").task_id
+            db.set_task_confirmation(conn, task_id, "Sure?")
+            row = NotificationRow(
+                id=1, user_id="alice", source=confirmation.SOURCE,
+                dedup_key=confirmation.dedup_key(task_id), object_type="task",
+                object_id=str(task_id), severity="action_needed", actionable=True,
+                title="Sure?", body="",
+            )
+            view = confirmation.RESOLVER.resolve(config, conn, row)
+        assert view is not None
+        assert view.actions == ()
+        assert "Reply by SMS" in view.body
+
+
+@web_only
+class TestAPreMintTask:
+    async def test_a_task_on_the_hash_token_is_refused_too(self, client, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="old question", user_id="alice", source_type="sms",
+                conversation_token=sms_conversation_token("alice"),
+            )
+            db.set_task_confirmation(conn, task_id, "Sure?")
+            _mint(conn, config, "sms")
+        cookies = await _login(client)
+        resp = await client.post(
+            f"/istota/api/chat/tasks/{task_id}/confirm", cookies=cookies, headers=ORIGIN,
+        )
+        assert resp.status_code == 409
+        decline = await client.post(
+            f"/istota/api/chat/tasks/{task_id}/cancel", cookies=cookies, headers=ORIGIN,
+        )
+        assert decline.status_code == 409
+        assert decline.json()["read_only"] is True

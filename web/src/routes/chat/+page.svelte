@@ -1361,8 +1361,9 @@
                belongs on the phone, and a web send would answer in web while
                the thread it started in heard nothing. -->
           <p class="readonly-notice" role="note">
-            This is the transcript of your {readOnlyPhone} conversation. Reply by {readOnlyPhone}
-            to continue it.
+            This room is the transcript of a {readOnlyPhone} conversation and is read-only here. Reply
+            by
+            {readOnlyPhone} to continue it.
           </p>
         {:else}
           <Composer

@@ -1048,7 +1048,11 @@ def phone_transcript_surface(conn, room_token) -> str | None:
 
     if not room_token:
         return None
-    room = db.get_room(conn, room_token)
+    # A task created before the mint still carries the hash token, which the
+    # room keeps as a permanent alias.
+    room = db.get_room(
+        conn, db._canonical_room_token(conn, room_token, cross_surface=False),
+    )
     if room is None:
         return None
     for binding in db.list_room_bindings(conn, room.token):

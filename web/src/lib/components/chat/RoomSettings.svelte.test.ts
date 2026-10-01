@@ -654,7 +654,7 @@ describe('a phone room (room-surface-model Stage 24)', () => {
   it('shows the binding read-only and offers no Talk promote', () => {
     mount(room({ origin: 'sms', phone_surface: 'sms', read_only: true, name: 'SMS' }));
     expect(screen.getByText('Connected to')).toBeTruthy();
-    expect(screen.getByText(/transcript of your SMS conversation/)).toBeTruthy();
+    expect(screen.getByText(/transcript of an? SMS conversation/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: PROMOTE_LABEL })).toBeNull();
     expect(screen.queryByText('Nextcloud Talk')).toBeNull();
   });
