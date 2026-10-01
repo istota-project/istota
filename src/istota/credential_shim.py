@@ -249,6 +249,26 @@ def fetch_credential(
     return value
 
 
+def fetch_entry(
+    name: str, mode: str, *, credential_fd: str | None = None,
+) -> tuple[dict[str, str], list[str]]:
+    """Every field of one vault entry, for one fetch: ``(fields, bound_hosts)``.
+
+    ``fields`` maps ``password``, ``username``, ``url`` and each custom field
+    to its value, holding only the fields the entry has. Same transport and
+    error surface as ``fetch_credential``.
+    """
+    reply = _request({"type": "vault_entry", "name": name, "mode": mode},
+                     credential_fd=credential_fd)
+    fields = reply.get("fields")
+    hosts = reply.get("bound_hosts", [])
+    if (not isinstance(fields, dict) or not fields
+            or not all(isinstance(k, str) and isinstance(v, str) for k, v in fields.items())
+            or not isinstance(hosts, list) or not all(isinstance(h, str) for h in hosts)):
+        raise ProxyError("the credential proxy answered unparseably")
+    return fields, hosts
+
+
 def _cmd_list() -> int:
     reply = _request({"type": "vault_list"})
     names = reply.get("names")

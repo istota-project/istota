@@ -21,11 +21,13 @@ took, which matters here for the same reason it matters there (a dest recurs
 across sibling verbs), and a second copy of that walk is the duplication the
 walk itself was written to avoid.
 
-**Two forms, because the argument's value is not always just a name.**
+**Three forms, because the argument's value is not always just a name.**
 `NAME` is the whole value; `PAIR` is `LABEL=NAME`, where the label is the
 caller's own (a CSS selector, a header name) and only the right-hand side is
-resolved. A form that neither expresses is a missing form rather than a special
-case in a handler.
+resolved; `ENTRY` names a whole vault entry and resolves to a `SecretEntry`
+holding every field of it (password, username, URL, custom fields) for one
+fetch. A form that none of them expresses is a missing form rather than a
+special case in a handler.
 
 **A resolved value is boxed.** `SecretValue` renders `SecretValue(<name>)` from
 `__repr__`, `__str__` and `__format__`, and only `reveal()` returns the
@@ -43,7 +45,8 @@ on stderr and exit 2, which the model reads as a malformed call rather than as
 a boundary.
 
 **Every request spends from the task attempt's fetch budget**, which
-`SkillProxy` owns (`[security] vault_fetch_limit_per_task`). Nothing here
+`SkillProxy` owns (`[security] vault_fetch_limit_per_task`). An `ENTRY` is one
+request however many fields the entry has (ISSUE-583). Nothing here
 caches or de-duplicates: three `--fill-credential` flags are three requests, by
 §4b's own arithmetic, and a resolver that quietly collapsed two identical names
 would make the cap mean something other than what it says. Resolution stops at
@@ -74,7 +77,7 @@ import logging
 import os
 from collections.abc import Sequence
 
-from istota.credential_shim import ProxyError, fetch_credential
+from istota.credential_shim import ProxyError, fetch_credential, fetch_entry
 
 from ._hostpath import actions_on_path, stamped as _stamped_by
 
@@ -84,8 +87,10 @@ log = logging.getLogger(__name__)
 NAME = "name"
 #: `LABEL=NAME`: the label is the caller's, the name is resolved.
 PAIR = "pair"
+#: The whole value is a vault entry name, resolved to every field of it.
+ENTRY = "entry"
 
-FORMS = (NAME, PAIR)
+FORMS = (NAME, PAIR, ENTRY)
 
 #: Attribute set on the argparse action, holding the form. Named rather than
 #: inlined so the coverage walk and this module cannot disagree on the spelling.
@@ -163,6 +168,46 @@ class CredentialPair:
         return f"CredentialPair({self.label}, {self.value!r})"
 
 
+class SecretEntry:
+    """A resolved vault entry: each field boxed, the whole rendering as its name.
+
+    ``fields`` maps ``password``, ``username``, ``url`` and each custom field
+    to a `SecretValue`, holding only the fields the entry has; the three
+    standard ones are also attributes, ``None`` where the entry has none.
+    ``bound_hosts`` belongs to the entry, since every field shares its binding.
+    """
+
+    __slots__ = ("name", "fields", "bound_hosts")
+
+    def __init__(self, name: str, fields: dict[str, SecretValue], bound_hosts=()) -> None:
+        self.name = name
+        self.fields = dict(fields)
+        self.bound_hosts = tuple(bound_hosts)
+
+    @property
+    def password(self) -> SecretValue | None:
+        return self.fields.get("password")
+
+    @property
+    def username(self) -> SecretValue | None:
+        return self.fields.get("username")
+
+    @property
+    def url(self) -> SecretValue | None:
+        return self.fields.get("url")
+
+    def __repr__(self) -> str:
+        return f"SecretEntry({self.name})"
+
+    __str__ = __repr__
+
+    def __format__(self, spec: str) -> str:
+        return format(repr(self), spec)
+
+    def __reduce__(self):
+        raise TypeError("a SecretEntry may not be serialized")
+
+
 def credential_ref(
     parser: argparse.ArgumentParser, *names: str, form: str = NAME, **kwargs,
 ) -> argparse.Action:
@@ -227,11 +272,27 @@ def _resolve_name(name: str, operation: str) -> tuple[SecretValue | None, str | 
         return None, f"{operation} refused: {exc}"
 
 
+def _resolve_entry(name: str, operation: str) -> tuple[SecretEntry | None, str | None]:
+    """One entry name to a `SecretEntry`, or the refusal to report. One fetch."""
+    if not name:
+        return None, f"Empty credential name: {operation} refused."
+    try:
+        fields, hosts = fetch_entry(
+            name, MODE, credential_fd=os.environ.get("ISTOTA_CRED_FD"),
+        )
+    except ProxyError as exc:
+        return None, f"{operation} refused: {exc}"
+    boxed = {key: SecretValue(f"{name}.{key}", value) for key, value in fields.items()}
+    return SecretEntry(name, boxed, hosts), None
+
+
 def _resolve_one(
     value: object, form: str, operation: str,
 ) -> tuple[object | None, str | None]:
     """One stamped element under one form."""
     raw = "" if value is None else str(value).strip()
+    if form == ENTRY:
+        return _resolve_entry(raw, operation)
     if form == PAIR:
         # The **last** `=`, not the first. A credential name cannot contain one
         # — `secrets_vault.VAULT_NAME_RE` is `[a-z][a-z0-9_]{0,63}` — while a
@@ -314,7 +375,9 @@ __all__: Sequence[str] = (
     "NAME",
     "PAIR",
     "STAMP",
+    "ENTRY",
     "CredentialPair",
+    "SecretEntry",
     "SecretValue",
     "credential_ref",
     "resolve_parsed",
