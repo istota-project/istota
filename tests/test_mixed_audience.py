@@ -434,6 +434,32 @@ class TestFilesWithoutMemory:
         assert str(base) not in masks and "/usr" not in masks
         assert str(base / "memories") not in masks
 
+    def test_the_bot_directory_is_a_mountpoint_so_it_cannot_be_renamed(self, config):
+        """rename(2) refuses only a dentry that is itself a mountpoint. Without
+        a mount of its own, the bot directory (parent of the masked config/
+        and playbooks/) could be renamed away and config/USER.md recreated
+        outside the mask (Stage 16's open question). A self-bind makes it one;
+        it must precede the masks, which bwrap applies last."""
+        self._memory_dirs(config)
+        bot = str((config.workspace_path / "Users" / "alice" / config.bot_dir_name).resolve())
+        seen = _run(config, _room(config, shared=True, grants=("files",)))
+        argv = seen["argv"]
+        self_binds = [i for i, tok in enumerate(argv)
+                      if tok == "--bind" and argv[i + 1] == bot and argv[i + 2] == bot]
+        assert self_binds, "no self-bind of the bot directory"
+        workspace = argv.index(_user_dir(config))
+        first_mask = argv.index("--tmpfs", workspace)
+        assert workspace < self_binds[0] < first_mask
+        # `memories/` sits directly under the workspace bind and is a mask
+        # itself, so its parent needs no bind of its own.
+        assert _user_dir(config) not in [argv[i + 1] for i in self_binds]
+
+    def test_control_both_granted_binds_no_bot_directory(self, config):
+        self._memory_dirs(config)
+        bot = str((config.workspace_path / "Users" / "alice" / config.bot_dir_name).resolve())
+        seen = _run(config, _room(config, shared=True, grants=("files", "memory")))
+        assert bot not in _binds(seen["argv"])
+
     def test_control_both_granted_masks_nothing_of_the_workspace(self, config):
         dirs = self._memory_dirs(config)
         seen = _run(config, _room(config, shared=True, grants=("files", "memory")))

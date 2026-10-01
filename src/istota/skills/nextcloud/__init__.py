@@ -107,7 +107,7 @@ def _scoped(config: Config, path: str, *, whole_tree: bool = False) -> str:
 
 
 def _refuse_withheld_path(path: str, user_id: str, *, whole_tree: bool) -> None:
-    from istota.skill_host_paths import memory_dir_parts, withheld_from_env
+    from istota.skill_host_paths import withheld_from_env
 
     withheld = withheld_from_env()
     if "files" in withheld:
@@ -115,11 +115,7 @@ def _refuse_withheld_path(path: str, user_id: str, *, whole_tree: bool) -> None:
             "This room withholds your files, so no file path is reachable from "
             "this task."
         )
-    if "memory" not in withheld or not user_id:
-        return
-    root = workspace_root(user_id)
-    for parts in memory_dir_parts(os.environ.get("ISTOTA_BOT_DIR_NAME", "")):
-        denied = posixpath.join(root, *parts)
+    for denied in _withheld_memory_dirs(user_id):
         inside = path == denied or path.startswith(denied + "/")
         contains = whole_tree and (path == "/" or denied.startswith(path.rstrip("/") + "/"))
         if inside or contains:
@@ -127,6 +123,35 @@ def _refuse_withheld_path(path: str, user_id: str, *, whole_tree: bool) -> None:
                 f"Refusing {path}: this room withholds your memory, and the path "
                 "is in it."
             )
+
+
+def _withheld_memory_dirs(user_id: str) -> list[str]:
+    """The caller's memory directories as Nextcloud paths, when the room
+    withholds memory; empty otherwise."""
+    from istota.skill_host_paths import memory_dir_parts, withheld_from_env
+
+    if "memory" not in withheld_from_env() or not user_id:
+        return []
+    root = workspace_root(user_id)
+    return [
+        posixpath.join(root, *parts)
+        for parts in memory_dir_parts(os.environ.get("ISTOTA_BOT_DIR_NAME", ""))
+    ]
+
+
+def _drop_withheld_entries(entries: list) -> list:
+    """A listing or search result without anything inside withheld memory.
+
+    The directories themselves stay, as in the sandbox, where they are empty
+    mountpoints: a name can say as much as the file (a playbook's title).
+    """
+    denied = _withheld_memory_dirs(_caller())
+    if not denied:
+        return entries
+    return [
+        e for e in entries
+        if not any(str(e.get("path", "")).startswith(d + "/") for d in denied)
+    ]
 
 
 def _default_expire_days() -> int:
@@ -411,7 +436,7 @@ def cmd_files_stat(args):
 def cmd_files_list(args):
     config = _config_from_env()
     path = _scoped(config, args.path)
-    entries = dav_mod.list_dir(config, path, depth=args.depth)
+    entries = _drop_withheld_entries(dav_mod.list_dir(config, path, depth=args.depth))
     return {"path": path, "count": len(entries), "entries": entries}
 
 
@@ -427,6 +452,7 @@ def cmd_files_search(args):
         modified_since=args.modified_since,
         limit=args.limit,
     )
+    results = _drop_withheld_entries(results)
     return {"scope": scope, "count": len(results), "results": results}
 
 

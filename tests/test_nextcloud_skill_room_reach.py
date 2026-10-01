@@ -174,6 +174,39 @@ class TestTheWebdavVerbs:
                 assert code == 1 and out["reason"] == "files_withheld", argv
         assert dav.mock_calls == []
 
+    LISTING = [
+        {"path": "/Users/alice/notes.md"},
+        {"path": "/Users/alice/memories"},
+        {"path": "/Users/alice/memories/2026-09-30.md"},
+        {"path": "/Users/alice/istota/config"},
+        {"path": "/Users/alice/istota/config/USER.md"},
+        {"path": "/Users/alice/istota/playbooks/plan.md"},
+        {"path": "/Users/alice/istota/scripts/run.sh"},
+    ]
+    KEPT = ["/Users/alice/notes.md", "/Users/alice/memories",
+            "/Users/alice/istota/config", "/Users/alice/istota/scripts/run.sh"]
+
+    def test_a_deep_listing_shows_no_names_inside_withheld_memory(self, capsys, monkeypatch):
+        """The sandbox shows the memory directories as empty mountpoints, so a
+        listing shows the directories and nothing inside them."""
+        monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", "memory")
+        with patch("istota.skills.nextcloud.dav_mod.list_dir", return_value=list(self.LISTING)):
+            out, _code, _ = _run(capsys, ["files", "list", "/Users/alice", "--depth", "3"])
+        assert [e["path"] for e in out["entries"]] == self.KEPT
+        assert out["count"] == len(self.KEPT)
+
+    def test_a_search_shows_no_names_inside_withheld_memory(self, capsys, monkeypatch):
+        monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", "memory")
+        with patch("istota.skills.nextcloud.dav_mod.search", return_value=list(self.LISTING)):
+            out, _code, _ = _run(capsys, ["files", "search", "--scope", "/Users/alice", "--name", "*.md"])
+        assert [e["path"] for e in out["results"]] == self.KEPT
+        assert out["count"] == len(self.KEPT)
+
+    def test_control_memory_granted_lists_everything(self, capsys):
+        with patch("istota.skills.nextcloud.dav_mod.list_dir", return_value=list(self.LISTING)):
+            out, _code, _ = _run(capsys, ["files", "list", "/Users/alice", "--depth", "3"])
+        assert len(out["entries"]) == len(self.LISTING)
+
     def test_a_private_room_reaches_everything(self, capsys):
         with patch("istota.skills.nextcloud.dav_mod.stat", return_value={"ok": 1}):
             out, _code, _ = _run(capsys, ["files", "stat", "/Users/alice/istota/config/USER.md"])

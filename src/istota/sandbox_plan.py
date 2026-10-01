@@ -56,6 +56,10 @@ Mode = Literal["ro", "rw", "tmpfs", "symlink", "flag"]
 #: at the emission site in :func:`build_mount_plan`.
 EXTRA_RO_BIND = "extra_ro_bind"
 
+#: A memory mask's parent bound onto itself, so it is a mountpoint and
+#: rename(2) refuses it (see `build_mount_plan`).
+MEMORY_PARENT_BIND = "memory_parent_self_bind"
+
 #: The `/etc` entries every profile binds read-only. Module scope because
 #: `config_sandbox_bound_roots` has to name the same set from outside
 #: `build_mount_plan`, and a second copy of it there is a refusal that silently
@@ -1018,6 +1022,19 @@ def build_mount_plan(
     # path *absent*: the CLI then exits at `--append-system-prompt-file` and a
     # `Read` of a prepared attachment gets ENOENT. Fail-closed either way,
     # which is why the message names both rather than picking one.
+    # `files` without `memory`: the workspace is bound, and the memory inside
+    # it is masked, so the two scopes are granted independently. rename(2)
+    # refuses only a dentry that is itself a mountpoint, so each mask's parent
+    # below the workspace (the bot directory) is self-bound: otherwise it could
+    # be renamed away and `config/USER.md` recreated outside the mask. Ahead of
+    # the extra binds, which stay last.
+    withheld_memory: list[Path] = []
+    if user_dir is not None and "files" not in withheld_scopes and "memory" in withheld_scopes:
+        withheld_memory = memory_masks(config, user_dir)
+        for parent in dict.fromkeys(m.parent for m in withheld_memory):
+            if parent != user_dir and is_within(parent, user_dir):
+                _rw(parent, MEMORY_PARENT_BIND, user_data=True)
+
     for path in (extra_ro_binds or []):
         _ro(path, EXTRA_RO_BIND)
 
@@ -1032,10 +1049,7 @@ def build_mount_plan(
     # that is not a bind, and `mask_protected_paths` adds it from the config.
     protected = executor.mask_protected_paths(config, plan_mounts=tuple(mounts))
     masks, refused = plan_masks(config, protected)
-    # `files` without `memory`: the workspace is bound, and the memory inside
-    # it is masked, so the two scopes are granted independently.
-    if user_dir is not None and "files" not in withheld_scopes and "memory" in withheld_scopes:
-        masks.extend(memory_masks(config, user_dir))
+    masks.extend(withheld_memory)
 
     return MountPlan(
         mounts=tuple(mounts),
