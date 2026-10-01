@@ -1473,6 +1473,12 @@ class CredentialBrokerConfig:
     scan_max_bytes: int = 1048576
     leaf_validity_hours: int = 24
 
+    @property
+    def reveal_enforced(self) -> bool:
+        # Without the broker there are no placeholders, so refusing public
+        # reads would only break git, the forge CLIs and `run`.
+        return self.enabled and self.enforce_reveal
+
 
 @dataclass
 class SecurityConfig:
@@ -4317,6 +4323,8 @@ def load_config(config_path: Path | None = None) -> Config:
     _warn_ro_paths_over_control_tree(config)
     if config.security.credential_broker.enabled and not config.security.sandbox_enabled:
         logger.warning("Credential broker enabled without sandboxing: values are not contained")
+    if config.security.credential_broker.enforce_reveal and not config.security.credential_broker.enabled:
+        logger.warning("[security.credential_broker] enforce_reveal has no effect while enabled = false")
 
     config.admin_users = load_admin_users()
 

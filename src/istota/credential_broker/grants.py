@@ -152,8 +152,12 @@ def ensure_credential_grants(conn, task_id, user_id, *, withheld_scopes=frozense
         (task_id, user_id))}
 
 
-def check_credential_grant(conn, task_id, user_id, name, host, header, *, config=None):
-    """Return a refusal reason, or None. Read live policy and binding on every use."""
+def check_credential_use(conn, task_id, user_id, name):
+    """The grant half of a live check: snapshot, revision and scope, no host.
+
+    The private skill channel asks only this, because the host a skill hands
+    the value to is the skill's own check (the browser fill's origin).
+    """
     if not conn.in_transaction:
         conn.execute("BEGIN")
     task, scheduled = _task_context(conn, task_id, user_id)
@@ -167,6 +171,15 @@ def check_credential_grant(conn, task_id, user_id, name, host, header, *, config
         return "credential_changed"
     if not _in_scope(grant, task, scheduled):
         return "credential_not_granted"
+    return None
+
+
+def check_credential_grant(conn, task_id, user_id, name, host, header, *, config=None):
+    """Return a refusal reason, or None. Read live policy and binding on every use."""
+    reason = check_credential_use(conn, task_id, user_id, name)
+    if reason:
+        return reason
+    grant = get_grant(conn, user_id, name)
     binding = get_binding(conn, user_id, name)
     if binding and binding["source"] == "config":
         if config is None or not config.developer.enabled or not config.is_admin(user_id):

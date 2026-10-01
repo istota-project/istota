@@ -535,7 +535,7 @@ features = []
 
 # [security.credential_broker]
 # enabled = false                 # opt-in header substitution for snapshotted bound hosts
-# enforce_reveal = false          # audit public value reads; true refuses non-revealable values
+# enforce_reveal = false          # audit public value reads; true refuses non-revealable values (needs enabled)
 # scan_max_bytes = 1048576         # request scan and response scrub limit
 # leaf_validity_hours = 24         # positive lifetime for per-host TLS certificates
 # Enable enforcement after a week with no would_refuse credential_reveal events.
