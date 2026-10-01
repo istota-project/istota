@@ -8,7 +8,7 @@ import sqlite3
 from ... import commands, confirmations, db, room_veto
 from ...config import Config
 from ...user_profiles import is_e164, short_fingerprint
-from ..ingest import record_inbound
+from ..ingest import record_phone_turn
 from . import sms_conversation_token
 from ._types import SmsEventResult
 from .outbound import (
@@ -85,23 +85,11 @@ def record_sms_turn(
     reply_to_content=None,
 ):
     """Record an accepted SMS turn and its permanent pre-room identity."""
-    surface_ref = sms_conversation_token(user_id)
-    result = record_inbound(
-        conn, config, surface="sms", surface_ref=surface_ref, user_id=user_id,
-        text=text, source_type="sms", channel_name="SMS",
-        output_target="sms", mirror_to_room=False, queue="foreground",
+    return record_phone_turn(
+        conn, config, surface="sms", surface_ref=sms_conversation_token(user_id),
+        user_id=user_id, text=text, channel_name="SMS", record_only=record_only,
         external_id=external_id, reply_to_content=reply_to_content,
-        is_command=text.startswith("!"), record_only=record_only,
     )
-    if result.message_id is not None:
-        # A deleted room's alias stays a tombstone even if its phone binding
-        # is reused. New texts use the new binding, never retarget old history.
-        conn.execute(
-            "INSERT INTO room_token_migration (old_token, new_token, migrated_at) "
-            "VALUES (?, ?, datetime('now')) ON CONFLICT(old_token) DO NOTHING",
-            (surface_ref, result.room_token),
-        )
-    return result
 
 
 def handle_provider_event(

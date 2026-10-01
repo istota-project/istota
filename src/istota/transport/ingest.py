@@ -919,6 +919,28 @@ def record_inbound(
     return InboundResult(room_token, task_id, message_id, "created")
 
 
+def record_phone_turn(
+    conn, config, *, surface, surface_ref, user_id, text, channel_name,
+    record_only=False, external_id=None, reply_to_content=None, attachments=None,
+):
+    """Record an accepted private phone turn and its permanent pre-room alias."""
+    result = record_inbound(
+        conn, config, surface=surface, surface_ref=surface_ref, user_id=user_id,
+        text=text, source_type=surface, channel_name=channel_name,
+        output_target=surface, mirror_to_room=False, queue="foreground",
+        external_id=external_id, reply_to_content=reply_to_content,
+        attachments=attachments, is_command=text.startswith("!"), record_only=record_only,
+    )
+    if result.message_id is not None:
+        # Reusing a deleted room's binding must never retarget its history.
+        conn.execute(
+            "INSERT INTO room_token_migration (old_token, new_token, migrated_at) "
+            "VALUES (?, ?, datetime('now')) ON CONFLICT(old_token) DO NOTHING",
+            (surface_ref, result.room_token),
+        )
+    return result
+
+
 def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
     """Create a task from a normalized inbound message via `record_inbound`.
 

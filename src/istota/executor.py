@@ -6103,19 +6103,28 @@ def room_identity_line(
         def _lookup(c):
             tok = canonical_room_token(c, task.conversation_token)
             if not tok:
-                return None, None, None
+                return None, None, None, None
             found = db.get_room(c, tok)
             if found is None:
-                return None, None, None
+                return None, None, None, None
             binding = db.get_room_binding(c, tok, "talk")
-            return tok, found, (binding.surface_ref if binding else None)
+            phone = db.get_room_binding(c, tok, "whatsapp")
+            return tok, found, (binding.surface_ref if binding else None), phone
 
         with db.get_db_if_present(config.db_path, conn) as c:
             if c is None:
                 return ""
-            token, room, talk_ref = _lookup(c)
+            token, room, talk_ref, phone = _lookup(c)
         if room is None:
             return ""
+        origin = room.origin
+        if origin == "whatsapp" and phone is not None:
+            from .transport.whatsapp import whatsapp_conversation_token
+
+            # The owner's exact private ref is a one-to-one chat, not a group,
+            # and reads like an SMS room (the exception `is_group_task` makes).
+            if phone.surface_ref == whatsapp_conversation_token(task.user_id):
+                origin = "web"
         # "Talk", never "Nextcloud Talk": `tests/test_storage_identity.py`
         # requires the assembled prompt to carry no "Nextcloud" literal on the
         # storage-neutral backend, and a local-backend deployment can hold
@@ -6123,11 +6132,11 @@ def room_identity_line(
         where = {
             "talk": "Talk", "whatsapp": "a WhatsApp group",
             "email": "an email thread",
-        }.get(room.origin, "web chat")
-        if talk_ref and room.origin not in ("talk", "whatsapp", "email"):
+        }.get(origin, "web chat")
+        if talk_ref and origin not in ("talk", "whatsapp", "email"):
             where = "web chat, also open in Talk"
         descriptor = _header_scalar(
-            room_target_descriptor(token, room.origin, talk_ref)
+            room_target_descriptor(token, origin, talk_ref)
         )
         safe_token = _header_scalar(token)
         closing = (
@@ -6145,12 +6154,12 @@ def room_identity_line(
                 "you are already in."
             )
         )
-        if room.origin in ("whatsapp", "email"):
+        if origin in ("whatsapp", "email"):
             # A group or a thread is answered only from its own turns
             # (multiplayer D6): a scheduled job's leg into it reaches nobody on
             # it, so naming a descriptor here would promise a post that never
             # appears.
-            what = "group" if room.origin == "whatsapp" else "thread"
+            what = "group" if origin == "whatsapp" else "thread"
             return (
                 f"\nRoom: this conversation is a registered room on {where}. "
                 f"A scheduled job or a reminder cannot post into the {what}. "

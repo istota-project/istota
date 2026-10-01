@@ -65,6 +65,9 @@ def test_quote_preserves_raw_text_and_cannot_approve_another_task(setup):
         assert db.get_task(conn, other).confirmed_at is None
         task = db.get_task(conn, result.task_id)
         assert task.user_id == 'bob' and task.prompt == '  YES\n'
+        assert db.get_room(conn, task.conversation_token).name == 'WhatsApp'
+        assert db._canonical_room_token(conn, whatsapp_conversation_token('bob'), cross_surface=False) == task.conversation_token
+        assert conn.execute('SELECT count(*) FROM messages WHERE room_token=? AND role="user"', (task.conversation_token,)).fetchone()[0] == 1
         assert conn.execute('SELECT task_id FROM processed_whatsapp').fetchone()[0] == task.id
 
 
@@ -139,7 +142,7 @@ def test_early_quote_survives_restart_without_confirmation_parsing(setup, fallba
 def test_answer_and_dedup_roll_back_if_recipient_ingest_fails(setup):
     config = setup[0]
     relay = question(setup)
-    with patch('istota.transport.ingest.ingest_message', side_effect=RuntimeError('ingest failed')):
+    with patch('istota.transport.whatsapp.webhook.record_whatsapp_turn', side_effect=RuntimeError('ingest failed')):
         with pytest.raises(RuntimeError):
             receive(config, event(config))
     with db.get_db(config.db_path) as conn:
@@ -264,7 +267,7 @@ def test_candidate_reconciliation_rolls_back_task_answer_and_delete(setup):
     assert receive(config, event(config)).disposition == 'relay_candidate'
     with db.get_db(config.db_path) as conn:
         conn.execute("UPDATE relay_reply_candidates SET expires_at=datetime('now','-1 second')")
-    with patch('istota.transport.ingest.ingest_message', side_effect=RuntimeError('ingest failed')):
+    with patch('istota.transport.whatsapp.webhook.record_whatsapp_turn', side_effect=RuntimeError('ingest failed')):
         with pytest.raises(RuntimeError):
             relays.reconcile_reply_candidates(config)
     with db.get_db(config.db_path) as conn:

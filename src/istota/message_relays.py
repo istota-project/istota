@@ -234,16 +234,12 @@ def private_origin(conn, config, *, actor_user_id: str, surface: str,
             raise RequestError("unsupported_origin")
         return {"surface": surface, "channel": talk.surface_ref if surface == "talk" else room.token,
                 "room_token": room.token, "talk_ref": talk.surface_ref if talk else None}
-    if surface == "whatsapp" and conversation_token == whatsapp_conversation_token(actor_user_id):
-        binding = db.get_whatsapp_binding(conn, actor_user_id)
-        if config.whatsapp.enabled and binding and binding.provider == config.whatsapp.provider:
-            return {"surface": surface, "channel": conversation_token,
-                    "binding": binding_fingerprint(config.whatsapp.provider, binding)}
-    if surface == "sms":
+    if surface in ("sms", "whatsapp"):
         from . import room_policy
 
-        surface_ref = sms_conversation_token(actor_user_id)
-        bound = db.resolve_room_token(conn, "sms", surface_ref)
+        surface_ref = (sms_conversation_token(actor_user_id) if surface == "sms"
+                       else whatsapp_conversation_token(actor_user_id))
+        bound = db.resolve_room_token(conn, surface, surface_ref)
         canonical = bool(bound) and conversation_token == bound
         if not canonical and conversation_token != surface_ref:
             raise RequestError("unsupported_origin")
@@ -262,13 +258,20 @@ def private_origin(conn, config, *, actor_user_id: str, surface: str,
         ).fetchone():
             # A deleted room's old descriptor cannot become a new phone origin.
             raise RequestError("unsupported_origin")
-        number = config.sms_phone_number_for(actor_user_id)
-        if config.sms.enabled and number:
-            origin = {"surface": surface, "channel": surface_ref,
-                      "binding": text_hash(number)}
-            if canonical:
-                origin["room_token"] = bound
-            return origin
+        if surface == "sms":
+            number = config.sms_phone_number_for(actor_user_id)
+            if not config.sms.enabled or not number:
+                raise RequestError("unsupported_origin")
+            fingerprint = text_hash(number)
+        else:
+            binding = db.get_whatsapp_binding(conn, actor_user_id)
+            if not (config.whatsapp.enabled and binding and binding.provider == config.whatsapp.provider):
+                raise RequestError("unsupported_origin")
+            fingerprint = binding_fingerprint(config.whatsapp.provider, binding)
+        origin = {"surface": surface, "channel": surface_ref, "binding": fingerprint}
+        if canonical:
+            origin["room_token"] = bound
+        return origin
     raise RequestError("unsupported_origin")
 
 
@@ -593,14 +596,12 @@ def create_recipient_task(conn, config, relay, *, surface: str, actor_user_id: s
             addressed_to_bot=True,
         ))
     elif surface == "whatsapp":
-        from .transport.whatsapp import whatsapp_conversation_token
+        from .transport.whatsapp.webhook import record_whatsapp_turn
 
-        task_id = ingest_message(conn, config, IncomingMessage(
-            user_id=actor_user_id, text=text, source_type="whatsapp", surface="whatsapp",
-            channel_token=whatsapp_conversation_token(actor_user_id), output_target="whatsapp",
-            attachments=attachments or [], mirror_to_room=False, queue="foreground",
+        task_id = record_whatsapp_turn(
+            conn, config, actor_user_id, text, attachments=attachments or [],
             reply_to_content=context,
-        ))
+        ).task_id
     elif surface == "sms":
         from .transport.sms.webhook import record_sms_turn
 

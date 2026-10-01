@@ -23,12 +23,10 @@ timeout and then raises (`.claude/rules/notifications.md`). A database failure
 rolls back and answers 503, so Meta retries; a complete or wholly duplicate
 batch answers an empty 200.
 
-**A direct chat touches no room.** No registration, no binding, no
-membership, no canonical `messages` row, no mirror. A direct WhatsApp chat is
-its own external conversation, and `ingest_message` reaches the non-room branch
-because the surface owns no rooms and `mirror_to_room` is False. A *group* is
-the exception and lives in `groups.py`: its JID is a room binding (multiplayer
-D6), reached only for a Baileys event carrying a group context.
+**Accepted private turns own a canonical room.** The room, native binding,
+membership, transcript and permanent pre-room alias share the batch transaction.
+A group has its own path in `groups.py`, reached only for a Baileys event
+carrying group context.
 """
 
 from __future__ import annotations
@@ -41,11 +39,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
-from ... import commands, confirmations, db
+from ... import commands, confirmations, db, room_veto
 from ...config import Config
 from ...http_headers import header_value
-from .._types import IncomingMessage
-from ..ingest import ingest_message
+from ..ingest import record_phone_turn
 from . import (
     bsuid_fingerprint,
     identity as identity_rules,
@@ -719,10 +716,35 @@ def _own_parked_confirmation(conn, user_id: str, token: str):
     id WhatsApp does not have, so this is Path B alone. `!confirm <id> yes|no`
     stays the explicit route to any other surface's question.
     """
-    task = db.get_pending_confirmation(conn, token)
-    if task is None or task.user_id != user_id:
+    if not _confirmation_tokens(conn, token):
+        return None
+    task = db.get_pending_confirmation(conn, token, user_id=user_id)
+    if task is None or task.source_type != "whatsapp":
         return None
     return task
+
+
+def _confirmation_tokens(conn, token: str) -> list[str]:
+    """Only this live room's history, never a deleted room's old phone alias."""
+    if conn.execute(
+        "SELECT 1 FROM room_token_migration WHERE old_token=?", (token,),
+    ).fetchone() and db.get_room(
+        conn, db._canonical_room_token(conn, token, cross_surface=False),
+    ) is None:
+        return []
+    return db._room_ref_tokens(conn, token, include_surface_refs=False)
+
+
+def record_whatsapp_turn(
+    conn, config, user_id, text, *, record_only=False, external_id=None,
+    reply_to_content=None, attachments=None,
+):
+    """Record a private accepted turn; groups keep their own inbound path."""
+    return record_phone_turn(
+        conn, config, surface="whatsapp", surface_ref=whatsapp_conversation_token(user_id),
+        user_id=user_id, text=text, channel_name="WhatsApp", record_only=record_only,
+        external_id=external_id, reply_to_content=reply_to_content, attachments=attachments,
+    )
 
 
 def _parse_callback(callback_data: str) -> tuple[int, str] | None:
@@ -957,6 +979,7 @@ def _dispatch_inbound(
     conn, config: Config, event: InboundWhatsAppEvent, user_id: str, binding,
 ) -> WhatsAppEventResult:
     token = whatsapp_conversation_token(user_id)
+    token = db.resolve_room_token(conn, "whatsapp", token) or token
     opted_out = binding is not None and binding.opted_out_at is not None
 
     if event.message_type in ("reaction", "edited", "revoked"):
@@ -965,6 +988,8 @@ def _dispatch_inbound(
         return WhatsAppEventResult(event.message_type, user_id=user_id)
 
     if event.callback_data is not None:
+        if room_veto.is_vetoed(conn, token):
+            return WhatsAppEventResult("vetoed", user_id=user_id)
         return _handle_callback(conn, config, event, user_id, token)
 
     if event.message_type not in _TEXT_TYPES and event.media is None:
@@ -1003,6 +1028,9 @@ def _dispatch_inbound(
             response_logical_key=f"help:{event.message_id}",
         )
 
+    if room_veto.is_vetoed(conn, token):
+        return WhatsAppEventResult("vetoed", user_id=user_id)
+
     from ...message_relays import match_whatsapp_reply
 
     relay_result = match_whatsapp_reply(conn, config, actor_user_id=user_id, event=event)
@@ -1019,6 +1047,7 @@ def _dispatch_inbound(
     if answer is not None:
         parked = _own_parked_confirmation(conn, user_id, token)
         if parked is not None:
+            record_whatsapp_turn(conn, config, user_id, text, record_only=True)
             response = confirmations.apply_answer(
                 conn, parked, answer, config, by="whatsapp",
             )
@@ -1046,8 +1075,9 @@ def _dispatch_inbound(
         return WhatsAppEventResult("opted_out", user_id=user_id)
 
     if text.startswith("!"):
+        turn = record_whatsapp_turn(conn, config, user_id, text, record_only=True)
         return WhatsAppEventResult(
-            "command", user_id=user_id, command_text=text,
+            "command", user_id=user_id, command_text=text, conversation_token=turn.room_token,
             response_logical_key=f"command:{event.message_id}",
         )
 
@@ -1073,18 +1103,12 @@ def _dispatch_inbound(
     attachments = (
         [event.media.staged_path] if event.media is not None else []
     )
-    confirmations.cancel_for_conversation(conn, token, user_id, by="whatsapp")
-    task_id = ingest_message(
-        conn, config,
-        IncomingMessage(
-            user_id=user_id, text=text or MEDIA_ONLY_PROMPT,
-            source_type="whatsapp",
-            surface="whatsapp", channel_token=token, output_target="whatsapp",
-            attachments=attachments,
-            mirror_to_room=False, queue="foreground",
-        ),
+    turn = record_whatsapp_turn(
+        conn, config, user_id, text or MEDIA_ONLY_PROMPT,
+        external_id=event.message_id, attachments=attachments,
     )
-    return WhatsAppEventResult("task", user_id=user_id, task_id=task_id)
+    confirmations.cancel_for_conversation(conn, turn.room_token, user_id, by="whatsapp")
+    return WhatsAppEventResult("task", user_id=user_id, task_id=turn.task_id)
 
 
 def _handle_callback(
@@ -1104,13 +1128,15 @@ def _handle_callback(
     if (
         task is None
         or task.user_id != user_id
-        or task.conversation_token != token
+        or task.source_type != "whatsapp"
+        or task.conversation_token not in _confirmation_tokens(conn, token)
         or task.status != "pending_confirmation"
     ):
         return WhatsAppEventResult("callback_unmatched", user_id=user_id)
     answer = confirmations.parse_answer(choice)
     if answer is None:  # pragma: no cover - `_parse_callback` bounds the choice
         return WhatsAppEventResult("callback_unmatched", user_id=user_id)
+    record_whatsapp_turn(conn, config, user_id, choice, record_only=True)
     response = confirmations.apply_answer(conn, task, answer, config, by="whatsapp")
     return WhatsAppEventResult(
         "confirmation_answer", user_id=user_id, response_text=response,

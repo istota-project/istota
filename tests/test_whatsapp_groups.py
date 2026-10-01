@@ -575,3 +575,79 @@ class TestTheClassifierReachesTheGroup:
             decision = classify_group_event(group, _message("plumber?", message_id="C3"))
 
         assert decision is not None and decision.speak
+
+
+# ---------------------------------------------------------------------------
+# A private chat's minted room beside a group room (room-surface-model Stage 20)
+# ---------------------------------------------------------------------------
+
+
+def _direct(text, *, sender=ALICE_JID, message_id="D1"):
+    return proto.inbound_event({
+        "message_id": message_id, "jid": sender, "group": False,
+        "sender_jid": "", "sender_lid": "", "mentions_bot": False,
+        "message_type": "text", "text": text, "username": "Alice",
+        "reply_to_message_id": None,
+        "timestamp": int(datetime.now(timezone.utc).timestamp()),
+    })
+
+
+class TestAPrivateRoomBesideAGroup:
+    def test_each_turn_keeps_its_own_room_and_destination(self, group, sent):
+        from istota.transport.whatsapp import whatsapp_conversation_token
+
+        (private,) = _apply(group, _direct("check the backup"))
+        (in_group,) = _apply(group, _message("Istota, when is the dinner?"))
+        (again,) = _apply(group, _direct("and the logs", message_id="D2"))
+        private_task = _task(group, private.task_id)
+        group_task = _task(group, in_group.task_id)
+        private_room = private_task.conversation_token
+
+        assert db.is_canonical_room_token(private_room)
+        assert private_room != _room(group)
+        assert group_task.conversation_token == _room(group)
+        assert _task(group, again.task_id).conversation_token == private_room
+        with db.get_db(group.db_path) as conn:
+            assert db.get_room_binding(conn, private_room, "whatsapp").surface_ref == (
+                whatsapp_conversation_token("alice")
+            )
+            assert db.get_room_binding(conn, _room(group), "whatsapp").surface_ref == GROUP
+            assert db.list_room_members(conn, private_room) == ["alice"]
+            assert set(db.list_room_members(conn, _room(group))) == {"alice", "bob"}
+            group_rows = conn.execute(
+                "SELECT count(*) FROM messages WHERE room_token = ?", (_room(group),),
+            ).fetchone()[0]
+            private_rows = conn.execute(
+                "SELECT body FROM messages WHERE room_token = ? ORDER BY id", (private_room,),
+            ).fetchall()
+        assert group_rows == 1
+        assert [r[0] for r in private_rows] == ["check the backup", "and the logs"]
+
+        assert outbound.is_group_task(group, private_task) is False
+        assert outbound.is_group_task(group, group_task) is True
+        asyncio.run(WhatsAppTransport(group).deliver(private_room, "Done.", task=private_task))
+        asyncio.run(WhatsAppTransport(group).deliver(_room(group), "At seven.", task=group_task))
+        assert [request.to for request in sent] == [ALICE_JID, GROUP]
+
+    def test_a_group_turn_mints_no_private_room(self, group):
+        (result,) = _apply(group, _message("Istota, when is the dinner?"))
+
+        assert result.disposition == "task"
+        assert _rows(group, "SELECT count(*) AS n FROM rooms")[0]["n"] == 1
+        assert _rows(group, "SELECT count(*) AS n FROM room_token_migration")[0]["n"] == 0
+
+    def test_the_prompt_calls_the_private_room_web_chat_not_a_group(self, group):
+        from istota.executor import room_identity_line
+
+        (private,) = _apply(group, _direct("check the backup"))
+        (in_group,) = _apply(group, _message("Istota, when is the dinner?"))
+        private_line = room_identity_line(
+            group, _task(group, private.task_id), rooms_cli_available=True,
+        )
+        group_line = room_identity_line(
+            group, _task(group, in_group.task_id), rooms_cli_available=True,
+        )
+
+        assert "registered room on web chat" in private_line
+        assert "group" not in private_line
+        assert "a WhatsApp group" in group_line
