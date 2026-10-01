@@ -13,7 +13,12 @@ import pytest
 
 from istota.skill_proxy import SkillProxy
 from istota.skills._credref import _resolve_name
-from tests.test_vault_credential_fetch import VAULT, request, sock_path as sock_path
+from tests import test_vault_credential_fetch as _vault_fetch
+from tests.test_vault_credential_fetch import VAULT, request
+
+# Shared fixture, bound by assignment so the parameters using it are not
+# read as redefinitions of an unused import.
+sock_path = _vault_fetch.sock_path
 
 
 @pytest.fixture

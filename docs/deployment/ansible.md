@@ -327,6 +327,35 @@ When adding new fields to the config system:
 
 ## Signing in without Nextcloud
 
-Set `istota_web_auth: ["email"]`, configure `istota_hostname`, vault a persistent `istota_web_secret_key`, and configure SMTP for password resets and email sign-in links. The role defaults to `["nextcloud"]`. Use `["nextcloud", "email"]` while attaching identities to existing users, then select `["email"]` when every user can sign in that way. See [email login setup](../features/web-interface.md#email-login) for bootstrap and recovery commands.
+Set `istota_web_auth: ["email"]`, configure `istota_hostname`, vault a persistent `istota_web_secret_key`, and configure SMTP for password resets and email sign-in links. The role defaults to `["nextcloud", "email"]`. Keep both methods while attaching identities to existing users, then select `["email"]` when every user can sign in that way. See [email login setup](../features/web-interface.md#email-login) for bootstrap and recovery commands.
 
 The direct uvicorn unit refuses `["none"]` even though it binds loopback: nginx publishes that backend. No-auth is supported only by `istota serve` on loopback, without a public proxy. The role excludes both email token paths from nginx access logs and disables uvicorn access logs. Apply the same exclusion to any outer proxy.
+
+Set `istota_web_trusted_proxy_hops: 1` when a single nginx proxy connects directly to the backend and the backend is reachable exclusively through that trusted proxy. For a longer trusted proxy chain, count hops from the backend outwards. The default is `0`, which skips IP-based authentication throttling and keeps per-email limits. A public hostname with that default produces the `web.auth.proxy_ip` warning; setting the hostname does not establish which proxies are trusted.
+
+The role writes these email-login settings under `[web]`:
+
+| Ansible variable | Default | Meaning |
+| --- | --- | --- |
+| `istota_web_auth_enrol_ttl_hours` | `168` | Password-setup link lifetime in hours |
+| `istota_web_auth_reset_ttl_hours` | `1` | Password-reset link lifetime in hours |
+| `istota_web_auth_login_link_ttl_minutes` | `15` | Email sign-in link lifetime in minutes |
+| `istota_web_auth_min_password_length` | `12` | Minimum password length |
+| `istota_web_auth_throttle_window_seconds` | `900` | Verification budget window in seconds |
+| `istota_web_auth_throttle_max_email` | `10` | Verification attempts per email in the window |
+| `istota_web_auth_throttle_max_ip` | `30` | Verification attempts per trusted client IP in the window |
+| `istota_web_auth_mail_link_max_email` | `3` | Mail-link requests per email per hour, across link purposes |
+| `istota_web_trusted_proxy_hops` | `0` | Trusted hops in the forwarded client-address chain |
+
+## Credential controls
+
+These variables preserve the application's defaults and let inventory override the vault limits and optional HTTP credential broker. The broker needs effective sandboxing and the network proxy for credential containment. Reveal enforcement is a separate switch; inspect credential-reveal audits before enabling it. See [credential isolation](security.md) for the runtime boundaries.
+
+| Ansible variable | Default | Meaning |
+| --- | --- | --- |
+| `istota_security_vault_fetch_limit_per_task` | `10` | Fetch requests per task attempt; `0` is unlimited |
+| `istota_security_vault_writes_per_task` | `3` | Write requests per task attempt; `0` disables writes |
+| `istota_security_credential_broker_enabled` | `false` | Enable HTTP credential substitution |
+| `istota_security_credential_broker_enforce_reveal` | `false` | Refuse public reads of non-revealable credentials |
+| `istota_security_credential_broker_scan_max_bytes` | `1048576` | Positive byte limit for request scans and response scrubbing |
+| `istota_security_credential_broker_leaf_validity_hours` | `24` | Positive lifetime of per-host TLS certificates in hours |

@@ -126,7 +126,7 @@ describe('the settings page re-resolving the identity', () => {
     getMe.mockResolvedValue(person());
 
     render(SettingsInLayout);
-    await screen.findByText('Appearance');
+    await screen.findByText('Identity');
 
     // One for the layout's gate, one for the page's own refresh. The point is
     // that the refresh is the *same* request the page used to make privately —

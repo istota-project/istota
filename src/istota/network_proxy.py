@@ -3,7 +3,8 @@
 Runs in the host network namespace, listens on a Unix socket.
 Inside the bwrap sandbox (--unshare-net), a TCP-to-Unix bridge
 forwards connections from 127.0.0.1:PORT to this socket.
-Only HTTPS CONNECT requests to allowlisted host:port pairs are tunneled.
+HTTPS CONNECT requests to allowlisted host:port pairs are tunneled. With the
+credential broker enabled, bound HTTP destinations use its grant-checked parser.
 """
 
 import logging
@@ -212,6 +213,8 @@ class NetworkProxy:
                     port = 443
 
                 self._handle_connect(client, host, port)
+            elif self.broker is not None:
+                self._handle_http(client, parts[1], data)
             else:
                 client.sendall(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
 
@@ -222,6 +225,26 @@ class NetworkProxy:
                 client.close()
             except OSError:
                 pass
+
+    def _handle_http(self, client, url, data):
+        from urllib.parse import urlsplit
+        from .credential_broker.bindings import credential_host
+        from .credential_broker.intercept import _requests
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme != "http" or parsed.fragment:
+                raise ValueError("expected HTTP URL")
+            target = credential_host(url, allow_http=True)
+            host = parsed.hostname
+            port = parsed.port or 80
+            authority = f"[{host}]" if ":" in host else host
+            if f"{authority}:{port}" not in self.allowed_hosts or not self.broker.covers(target):
+                client.sendall(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
+                return
+        except ValueError:
+            client.sendall(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+            return
+        _requests(self.broker, client, host, port, target, plain_http=True, initial_data=data)
 
     def _handle_connect(
         self, client: socket.socket, host: str, port: int,

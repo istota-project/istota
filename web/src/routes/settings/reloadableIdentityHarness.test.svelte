@@ -12,7 +12,7 @@
 
      Not collected as a test: vitest picks up `*.test.ts` only, so this is
      compiled solely by the test that imports it. */
-  import { untrack, type Component } from 'svelte';
+  import { untrack, type Component, type Snippet } from 'svelte';
   import type { User } from '$lib/api';
   import { setCurrentUser } from '$lib/userContext';
 
@@ -27,9 +27,12 @@
     onReload?: () => User | null;
     onExpireSession?: () => void;
     component: Component<Record<string, never>>;
+    /** A route layout to mount around the page, for a page that reads the
+     * layout's context (the settings sections read `getUserSettings()`). */
+    layout?: Component<{ children: Snippet }>;
   }
 
-  let { user, onReload, onExpireSession, component: Page }: Props = $props();
+  let { user, onReload, onExpireSession, component: Page, layout: Layout }: Props = $props();
 
   /* Seeded from the prop and owned from then on — `reload()` is what replaces
      it, the way the root layout replaces the record it publishes. `untrack`
@@ -53,4 +56,8 @@
   });
 </script>
 
-<Page />
+{#if Layout}
+  <Layout><Page /></Layout>
+{:else}
+  <Page />
+{/if}

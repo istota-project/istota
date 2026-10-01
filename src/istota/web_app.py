@@ -1409,7 +1409,7 @@ async def login_link_request(request: Request):
 # somebody's login flow. A fixed table cannot be talked into an absolute URL, a
 # protocol-relative one, or a traversal.
 _POST_LOGIN_TARGETS = {
-    "settings": "/istota/settings",
+    "settings": "/istota/settings/connections",
 }
 _DEFAULT_POST_LOGIN_TARGET = "/istota/"
 
@@ -1644,7 +1644,7 @@ async def google_connect(request: Request):
             "Google connect declined for user %s: nothing selected within the "
             "instance scope ceiling", user["username"],
         )
-        return RedirectResponse(url="/istota/settings?google=no_scopes", status_code=302)
+        return RedirectResponse(url="/istota/settings/connections?google=no_scopes", status_code=302)
 
     # ``access_type=offline`` is what makes Google issue a refresh token at
     # all, and ``prompt=consent`` is what makes it issue one *again* on a
@@ -1674,7 +1674,7 @@ async def google_callback(request: Request):
         token = await _oauth.google.authorize_access_token(request)
     except Exception as e:
         logger.error("Google OAuth callback failed: %s", e)
-        return RedirectResponse(url="/istota/settings?google=error", status_code=302)
+        return RedirectResponse(url="/istota/settings/connections?google=error", status_code=302)
 
     access_token = token.get("access_token", "")
     refresh_token = token.get("refresh_token", "")
@@ -1684,7 +1684,7 @@ async def google_callback(request: Request):
     if not access_token or not refresh_token:
         logger.error("Google OAuth: missing tokens (access=%s, refresh=%s)",
                       bool(access_token), bool(refresh_token))
-        return RedirectResponse(url="/istota/settings?google=error", status_code=302)
+        return RedirectResponse(url="/istota/settings/connections?google=error", status_code=302)
 
     import json
     expiry = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
@@ -1703,7 +1703,7 @@ async def google_callback(request: Request):
     except _UnauthorizedException:
         return RedirectResponse(url="/istota/login", status_code=302)
     logger.info("Google account connected for user %s", user["username"])
-    return RedirectResponse(url="/istota/settings?google=connected", status_code=302)
+    return RedirectResponse(url="/istota/settings/connections?google=connected", status_code=302)
 
 
 # ============================================================================
@@ -11421,7 +11421,7 @@ def _credential_settings(username: str, action="list", name="", payload=None):
                  for room in db.list_member_rooms(conn, username)]
         if action == "save":
             payload = payload or {}
-            allowed = {"scope_mode", "methods", "allow_scheduled", "rooms"}
+            allowed = {"scope_mode", "methods", "allow_scheduled", "rooms", "allow_http"}
             if payload.keys() - allowed:
                 raise HTTPException(status_code=400, detail="unknown credential grant field")
             requested_rooms = payload.get("rooms", [])
@@ -11434,13 +11434,12 @@ def _credential_settings(username: str, action="list", name="", payload=None):
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return {"ok": True, "grant": grant}
-        names = {row[0] for row in conn.execute(
-            "SELECT key FROM secrets WHERE user_id=? AND service='vault_entries'", (username,))}
+        names = set(bindings.credential_groups(conn, username))
         names.update(row[0] for row in conn.execute(
             "SELECT name FROM credential_bindings WHERE user_id=? AND source='config'", (username,)))
         credentials = []
         for credential_name in sorted(names):
-            binding = bindings.get_binding(conn, username, credential_name) or {
+            binding = bindings.get_entry_binding(conn, username, credential_name) or {
                 "hosts": [], "headers": [], "revealable": False, "source": "vault"}
             credentials.append({"name": credential_name, **binding,
                                 "grant": grants.get_grant(conn, username, credential_name)})
@@ -11474,6 +11473,23 @@ async def settings_credential_revoke(
     name: str, user: dict = Depends(_require_api_auth), _csrf: None = Depends(_verify_origin),
 ) -> dict:
     return await asyncio.to_thread(_credential_settings, user["username"], "delete", name)
+
+
+@api_router.delete("/settings/credentials/{name}/value")
+async def settings_credential_delete(
+    name: str, user: dict = Depends(_require_api_auth), _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Remove the user's stored vault value, binding and grant together."""
+    from . import secrets_store
+
+    if _config is None or not _config.db_path:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    if name.startswith("forge."):
+        raise HTTPException(status_code=400, detail="Deployment credentials are managed in configuration")
+    deleted = await asyncio.to_thread(
+        secrets_store.delete_secret, _config.db_path, user["username"], "vault_entries", name, all_fields=True,
+    )
+    return {"ok": True, "deleted": deleted}
 
 
 def _vault_settings_payload(username: str) -> dict:

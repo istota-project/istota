@@ -594,19 +594,22 @@ def build_task_runtime(
         env.pop("GITLAB_TOKEN", None)
         env.pop("GITHUB_TOKEN", None)
 
-    # On the caller's connection when it holds one: a second connection's
-    # BEGIN IMMEDIATE would wait out the busy timeout on the caller's lock.
-    from . import db
-    if db.database_present(config.db_path):
-        with db.get_db_if_present(config.db_path, conn) as grant_conn:
-            from .credential_broker.bindings import sync_forge_bindings
-            from .credential_broker.grants import ensure_credential_grants
-            if not grant_conn.in_transaction:
-                grant_conn.execute("BEGIN IMMEDIATE")
-            sync_forge_bindings(grant_conn, task.user_id, config.developer, available_names=available_forge_names)
+    if config.db_path and Path(config.db_path).is_file():
+        from . import db
+        from .credential_broker.bindings import sync_forge_bindings
+        from .credential_broker.grants import ensure_credential_grants
+        # A caller holding a write transaction (execute_task_interactive) would
+        # deadlock a second connection's BEGIN IMMEDIATE, so join it instead.
+        with db.get_db_if_present(config.db_path, conn) as c:
+            began = not c.in_transaction
+            if began:
+                c.execute("BEGIN IMMEDIATE")
+            sync_forge_bindings(c, task.user_id, config.developer, available_names=available_forge_names)
             ensure_credential_grants(
-                grant_conn, task.id, task.user_id, withheld_scopes=withheld_scopes,
+                c, task.id, task.user_id, withheld_scopes=withheld_scopes,
             )
+            if began and c is conn:
+                c.commit()
 
     # PATH entries contributed by setup_env hooks — today the developer
     # skill's .developer dir, so the model can type `gh` and reach the

@@ -341,7 +341,7 @@ class TestGarminIsUnchanged:
     """The source served one service; adding a second must not move the first."""
 
     def test_garmin_keeps_its_settings_link(self):
-        assert connected_service.RECONNECT_HREFS["garmin"] == "/settings"
+        assert connected_service.RECONNECT_HREFS["garmin"] == "/settings/connections"
 
     def test_garmin_keeps_its_label(self):
         assert connected_service.label_for("garmin") == "Garmin Connect"

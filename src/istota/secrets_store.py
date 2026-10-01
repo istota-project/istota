@@ -266,19 +266,30 @@ def get_secret(
         return plaintext
 
 
-def delete_secret(db_path: Path, user_id: str, service: str, key: str) -> bool:
+def delete_secret(db_path: Path, user_id: str, service: str, key: str, *, all_fields=False) -> bool:
     """Delete a stored secret. Returns True if a row was removed."""
     with _connect(db_path) as conn:
-        cur = conn.execute(
-            "DELETE FROM secrets WHERE user_id = ? AND service = ? AND key = ?",
-            (user_id, service, key),
-        )
-        if service == "vault_entries":
-            from .credential_broker.grants import delete_grant
-            delete_grant(conn, user_id, key)
-            conn.execute("DELETE FROM credential_bindings WHERE user_id=? AND name=?",
-                         (user_id, key))
-        return cur.rowcount > 0
+        from .credential_broker.bindings import credential_groups, credential_name
+        from .credential_broker.grants import delete_grant
+        from . import db
+        keys = [key]
+        if service == "vault_entries" and all_fields:
+            keys = credential_groups(conn, user_id).get(credential_name(conn, user_id, key), [key])
+        deleted = False
+        for member in keys:
+            owner = credential_name(conn, user_id, member) if service == "vault_entries" else member
+            cur = conn.execute(
+                "DELETE FROM secrets WHERE user_id=? AND service=? AND key=?",
+                (user_id, service, member),
+            )
+            deleted |= cur.rowcount > 0
+            if service == "vault_entries":
+                if all_fields or not credential_groups(conn, user_id).get(owner):
+                    delete_grant(conn, user_id, member)
+                conn.execute("DELETE FROM credential_bindings WHERE user_id=? AND name=?",
+                             (user_id, member))
+                db.kv_delete(conn, user_id, "_credential_fields", member)
+        return deleted
 
 
 def secret_exists(db_path: Path, user_id: str, service: str, key: str) -> bool:

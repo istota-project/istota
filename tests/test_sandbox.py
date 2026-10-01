@@ -1016,6 +1016,8 @@ class TestNetworkProxyBwrapIntegration:
         shell_cmd = after_sep[2]
         assert "HTTPS_PROXY=" in shell_cmd
         assert "HTTP_PROXY=" in shell_cmd
+        assert "http_proxy=" in shell_cmd
+        assert "no_proxy=" in shell_cmd
         assert "NO_PROXY=" in shell_cmd
         assert "net-bridge" in shell_cmd
         # The backgrounded bridge must not share the prompt pipe on stdin.

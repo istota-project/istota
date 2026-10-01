@@ -8,7 +8,7 @@
 
      Not collected as a test: vitest picks up `*.test.ts` only, so this is
      compiled solely by the tests that import it. */
-  import type { Component } from 'svelte';
+  import type { Component, Snippet } from 'svelte';
   import type { User } from '$lib/api';
   import { setCurrentUser } from '$lib/userContext';
 
@@ -19,9 +19,12 @@
     /** Observe session expiry in a caller-boundary test. */
     onExpireSession?: () => void;
     component: Component<Record<string, never>>;
+    /** A route layout to mount around the page, for a page that reads the
+     * layout's context (the settings sections read `getUserSettings()`). */
+    layout?: Component<{ children: Snippet }>;
   }
 
-  let { user, live = true, onExpireSession, component: Page }: Props = $props();
+  let { user, live = true, onExpireSession, component: Page, layout: Layout }: Props = $props();
 
   // A getter, so a test can drive the prop and the page sees the new record —
   // the reactivity the real layout relies on when it upgrades a cached identity
@@ -38,4 +41,8 @@
   });
 </script>
 
-<Page />
+{#if Layout}
+  <Layout><Page /></Layout>
+{:else}
+  <Page />
+{/if}

@@ -110,7 +110,7 @@ What it holds is **shared credentials**: a flat namespace of name-to-value pairs
 
 Two halves, both deliberate, and neither happens by accident.
 
-**Put the file in the folder.** Every user gets a `vault` folder inside their own bot directory, made for them whether or not they use it — `istota/vault/` on a default deployment, since that directory is named from `bot_name` lowercased. Copy a `.kdbx` there. Settings, Connected services lists what it found: one file is read on sight, and with several there the card asks which. What is stored is that **filename**, not a path, so there is nothing to spell wrongly and nowhere else for it to point. Deleting or renaming the chosen file brings the question back rather than leaving Istota reading nothing.
+**Put the file in the folder.** Every user gets a `vault` folder inside their own bot directory, made for them whether or not they use it — `istota/vault/` on a default deployment, since that directory is named from `bot_name` lowercased. Copy a `.kdbx` there. Settings, Credentials lists what it found: one file is read on sight, and with several there the card asks which. What is stored is that **filename**, not a path, so there is nothing to spell wrongly and nowhere else for it to point. Deleting or renaming the chosen file brings the question back rather than leaving Istota reading nothing.
 
 **Generate the passphrase**, from the same card or from a host shell. A file with no passphrase behind it is not a vault and nothing reads it, which is why the card says "Not set up" until both halves are there. Turning a vault off is removing either one.
 
@@ -151,7 +151,9 @@ with `ISTOTA_SCHEDULER_VAULT_SYNC_INTERVAL` for the cadence.
 
 ### Credential bindings
 
-A vault entry's HTTPS URL binds all its credential names to that host and port. Add exact `host[:port]` names in the comma-separated custom field `istota_hosts` for other destinations. Wildcards and plain HTTP are refused. Invalid host metadata leaves the entry unbound. Custom fields beginning with `istota_` are reserved metadata and never become credential names.
+A vault entry's URL field accepts an HTTPS URL or a bare `host[:port]`, such as `portal.example.com`. A bare host is treated as HTTPS for credential binding; the saved URL value is unchanged. All credential names from the entry share that host and port. Add exact `host[:port]` names in the comma-separated custom field `istota_hosts` for other destinations. Wildcards and explicit plain HTTP URLs are refused. Invalid host metadata leaves the entry unbound. Custom fields beginning with `istota_` are reserved metadata and never become credential names.
+
+In Settings → Credentials, the row menu can delete a stored vault credential, including an unbound one. Deletion removes that name's stored value, binding and grant. It leaves the KeePassXC file and the entry's other credential names alone. A later vault import can restore the credential, without its old grant; an unchanged file is skipped until a forced sync or daemon restart. Deployment credentials are managed through configuration and have no delete action here.
 
 `istota_headers` sets the comma-separated allowed authentication headers; the default is `Authorization`, `PRIVATE-TOKEN`, `X-API-Key` and `X-Auth-Token`. `Proxy-Authorization` is never allowed. The `istota:reveal` tag permits public value reads when reveal enforcement is enabled. Grants govern placeholder use; the reveal tag is a separate exception for commands that must hold the value.
 
@@ -161,7 +163,7 @@ Browser credential fills require a bound HTTPS origin now. An unbound entry or a
 
 ### The passphrase
 
-The passphrase is a per-user secret like any other, stored in the `secrets` table under the `vault` service. It is set once, either from the vault card in Settings, Connected services — **Generate a new passphrase** — or from a host shell:
+The passphrase is a per-user secret like any other, stored in the `secrets` table under the `vault` service. It is set once, either from the vault card in Settings, Credentials — **Generate a new passphrase** — or from a host shell:
 
 ```bash
 istota secret ensure -u alice --service vault --key passphrase --generate
@@ -243,9 +245,9 @@ A task holding the socket can still read a value deliberately (`istota-credentia
 
 ### What the settings UI does
 
-The "Connected services" heading carries a status line for a user who has a vault: where the file is read from, how many shared credentials Istota holds and what they are called, how many were created under `generated/`, when it was last applied, and the error class when it is failing. It also says when the last read was unscoped.
+The vault card under Settings → Credentials carries a status line for a user who has a vault: where the file is read from, how many shared credentials Istota holds and what they are called, how many were created under `generated/`, when it was last applied, and the error class when it is failing. It also says when the last read was unscoped.
 
-Under it is the card that sets the vault up: the folder to put the file in, the files found there, and the passphrase. It renders for a user who has no vault at all, which is who it is for. What it does not offer is a path of any kind — see [turning it on](#turning-it-on) — and the file half is withheld for a vault a `vault_path` already names, which it says instead. The passphrase half renders either way: it is a credential the user owns rather than a setting an operator made.
+The same card sets the vault up: the folder to put the file in, the files found there, and the passphrase. It renders for a user who has no vault at all, which is who it is for. What it does not offer is a path of any kind — see [turning it on](#turning-it-on) — and the file half is withheld for a vault a `vault_path` already names, which it says instead. The passphrase half renders either way: it is a credential the user owns rather than a setting an operator made.
 
 The credential-name list is the feedback this feature exists to give. A name in it is a credential Istota holds; a name you expected and cannot see is a group you misspelled or an entry with a warning in the log. Names only — no value reaches that page — and only that user's own.
 
@@ -384,7 +386,7 @@ The broker is off by default. Set `[security.credential_broker] enabled = true` 
 curl -H 'Authorization: Bearer {{cred:portal_token}}' https://portal.example/api
 ```
 
-Bind a vault entry using its HTTPS URL or `istota_hosts`, and grant access in Settings. Grants limit rooms, methods and scheduled use. Each task keeps its original grant snapshot across retries; revoking or changing a grant refuses its next use. Default methods exclude DELETE. The broker decodes Basic authentication before substituting a placeholder password, so clients can build the Basic header themselves.
+Bind a vault entry using an HTTPS URL, a bare host in its URL field, or `istota_hosts`, and grant access in Settings. Grants limit rooms, methods and scheduled use. Each task keeps its original grant snapshot across retries; revoking or changing a grant refuses its next use. Default methods exclude DELETE. The broker decodes Basic authentication before substituting a placeholder password, so clients can build the Basic header themselves.
 
 Only a host bound to a credential in the task snapshot is intercepted. Every other connection keeps its original TLS session and carries placeholders as literal text. On an intercepted connection, SNI and Host must match the CONNECT host. IP-literal destinations may omit SNI, as standard TLS clients do. A placeholder in a disallowed header or URL is refused. A placeholder in the first `scan_max_bytes` of a request body is refused before forwarding; later body bytes stream unchanged and are never substituted. The default cap is 1 MiB.
 

@@ -68,7 +68,8 @@ vi.mock('$lib/platform/native', () => ({
   onKeyboardGeometry: vi.fn(() => () => {}),
 }));
 
-import Page from './+page.svelte';
+import Page from './delivery/+page.svelte';
+import SettingsLayout from './+layout.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 
 const person: User = {
@@ -89,13 +90,13 @@ const person: User = {
   },
 };
 
-const renderPage = () => render(Harness, { component: Page, user: person });
+const renderPage = () => render(Harness, { component: Page, layout: SettingsLayout, user: person });
 
 /** The bits-ui trigger renders as a button carrying the control's aria-label. */
 const control = (label: string) => screen.queryByRole('button', { name: label });
 
 async function settled() {
-  await waitFor(() => expect(screen.getByText('Appearance')).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText('Send alerts to')).toBeInTheDocument());
 }
 
 beforeEach(() => {

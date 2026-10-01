@@ -59,6 +59,7 @@ vi.mock('$lib/platform/native', () => ({
 }));
 
 import Page from './+page.svelte';
+import SettingsLayout from './+layout.svelte';
 import Harness from './reloadableIdentityHarness.test.svelte';
 import type { User } from '$lib/api';
 
@@ -112,6 +113,7 @@ function renderPage(user: User) {
   served = user;
   return render(Harness, {
     component: Page,
+    layout: SettingsLayout,
     user,
     onReload: () => {
       reloads += 1;

@@ -89,7 +89,7 @@ def cmd_send(args: argparse.Namespace) -> int:
             "status": "error",
             "error": (
                 "ntfy not configured for this user (no topic). "
-                "Set a default at /istota/settings → Connected services → ntfy, "
+                "Set a default at /istota/settings/connections → ntfy, "
                 "or pass --topic."
             ),
         })

@@ -5,7 +5,7 @@ summaries and the location module imports GPS tracks, both off one shared
 token blob in the framework ``secrets`` table (``service="garmin"``, keyed
 on ``user_id``). Its *auth* surface therefore lives here — not under the
 health router — so a user who has opted out of the health module can still
-connect Garmin (for location) via Settings → Connected services.
+connect Garmin (for location) via Settings → Connections.
 
 What stays health-owned: ``/garmin/sync`` (daily-summary sync into the
 health ``stats`` table) remains on the health router — it is a health

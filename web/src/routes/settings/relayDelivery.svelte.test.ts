@@ -67,7 +67,8 @@ vi.mock('$lib/platform/native', () => ({
   onKeyboardGeometry: vi.fn(() => () => {}),
 }));
 
-import Page from './+page.svelte';
+import Page from './delivery/+page.svelte';
+import SettingsLayout from './+layout.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 
 const person: User = {
@@ -91,8 +92,8 @@ const person: User = {
 const LABEL = 'Questions from other users';
 
 async function mount() {
-  render(Harness, { component: Page, user: person });
-  await waitFor(() => expect(screen.getByText('Appearance')).toBeInTheDocument());
+  render(Harness, { component: Page, layout: SettingsLayout, user: person });
+  await waitFor(() => expect(screen.getByText('Send alerts to')).toBeInTheDocument());
 }
 
 async function open() {

@@ -693,8 +693,8 @@ istota_browser_cdp_failure_window: 900  # seconds; a failure older than this no 
 # When enabled, one container per entry in istota_devbox_users is brought up
 # via docker-compose. The skill CLI reaches it over the exec transport, on the
 # per-user socket the same role provisions; no Docker socket is bound into a
-# sandbox any more. `istota_devbox_docker_cli` is for `reset` alone, which
-# recreates a container and runs host-side.
+# sandbox any more. The host Docker CLI handles resets and authenticates
+# credential-proxy clients against their container identity.
 istota_devbox_enabled: false
 istota_devbox_image: "istota-devbox:latest"
 istota_devbox_container_prefix: "devbox-"
@@ -854,6 +854,20 @@ istota_whatsapp_verify_token: ""
 istota_web_enabled: true
 istota_web_auth: ["nextcloud", "email"]
 istota_web_port: 8766
+
+# Native email login: link lifetimes and password policy.
+istota_web_auth_enrol_ttl_hours: 168
+istota_web_auth_reset_ttl_hours: 1
+istota_web_auth_login_link_ttl_minutes: 15
+istota_web_auth_min_password_length: 12
+# Verification budgets use this window (seconds).
+istota_web_auth_throttle_window_seconds: 900
+istota_web_auth_throttle_max_email: 10
+istota_web_auth_throttle_max_ip: 30
+istota_web_auth_mail_link_max_email: 3  # requests per email per hour, across link purposes
+# 0 skips IP throttling. Set 1 for a single nginx proxy only when the backend
+# is reachable exclusively through that proxy; count from the backend outwards.
+istota_web_trusted_proxy_hops: 0
 
 # Restart behaviour, both backstops: the SSE streams observe SIGTERM and end
 # themselves, so a restart normally reaches neither deadline. The graceful
@@ -1180,6 +1194,16 @@ istota_configure_rclone: true
 # Security hardening
 istota_security_sandbox_enabled: true  # bwrap filesystem isolation per user
 istota_security_allow_unsandboxed_multi_user_vaults: false
+# Per task attempt: 0 allows unlimited fetches, but disables vault writes.
+istota_security_vault_fetch_limit_per_task: 10
+istota_security_vault_writes_per_task: 3
+# Opt-in HTTP credential substitution. Containment requires effective
+# sandboxing and the network proxy; enabling this alone does not provide it.
+istota_security_credential_broker_enabled: false
+# Independent reveal enforcement; enable after checking credential-reveal audits.
+istota_security_credential_broker_enforce_reveal: false
+istota_security_credential_broker_scan_max_bytes: 1048576  # positive request/response scan cap
+istota_security_credential_broker_leaf_validity_hours: 24  # positive per-host TLS certificate lifetime
 # Required wherever sandbox_enabled is true. The databases are masked out of
 # the sandbox, so a skill CLI that can't reach the proxy has nothing to read.
 istota_security_skill_proxy_enabled: true  # proxy skill CLI calls via Unix socket (credential isolation)

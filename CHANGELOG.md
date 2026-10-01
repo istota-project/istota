@@ -103,6 +103,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Upgrade note:** the Baileys sidecar and the daemon gained the `group_roster` and `leave_group` frames and three inbound fields. They are additive and the protocol version is unchanged, but group support needs both sides updated; restart the sidecar with the daemon.
 
+- User settings is split into sections with a sidebar: Account, Preferences, Delivery, Credentials and Connections, instead of one long page. An unsaved edit survives switching sections and is still covered by the Save button, and links from notifications and the Google connect flow open the relevant section.
+
+- Credentials in Settings are now a compact list with one row per credential showing its hosts, where it comes from and what its grant allows, with Edit grant and Revoke grant in each row's menu. Revoking a grant now asks for confirmation first.
+
 - The Security card now sits directly below Identity in Settings and uses the same field, description and button styles as the other settings cards.
 
 - Admin Users now uses the same user cells as Status, with one action menu per row and a table that fits the available width. Add user and Attach email open dialogs with local error feedback; web-access help is collapsed above the list.
@@ -126,6 +130,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `browse interact --click` and `--fill` now drive the page the way the coordinate flags already did: the pointer travels to the element and presses it, and a value is typed key by key rather than inserted whole. A filled field used to receive no keystroke at all — the value simply appeared, which is exactly what a login form behind bot detection is watching for — and a click arrived with no movement behind it. Measured on the shipped container, the same fill went from no key events to ten, and a click from one pointer movement to fifteen along an approach path. Selectors, results and error codes are unchanged, each action now reports which element it matched, and the older method is still there as an automatic fallback when the typed path cannot run.
 
 ### Fixed
+
+- Credential settings now groups a vault entry’s password, username, URL and custom fields under one grant. Deleting a credential removes all its imported fields. HTTP vault URLs keep their destination and can be used through the credential broker after enabling the explicit HTTP override in the grant popup; HTTPS remains the default requirement.
+
+- Vault credentials with a bare hostname in KeePassXC's URL field no longer appear as unbound. They bind to that host for HTTPS use without changing the saved URL.
+
+- The credential grant editor now uses the shared form styling and a Cancel/Save footer. The credential menu also lets you delete stale stored vault credentials; entries still in KeePassXC can return on a later import, without their old grants.
+
+- A task with no database row, such as one run by a direct caller, no longer fails with `credential task owner mismatch`. It now gets an empty credential grant snapshot. The snapshot now joins a write transaction the caller already holds instead of waiting on it. `h11`, which the credential broker imports directly, is now a declared dependency.
+
+- Ansible deployments can now configure trusted proxy hops, email-login limits and link lifetimes, vault request limits, and the optional credential broker. These controls were missing from the role, so inventory could not override the application's defaults. The new role defaults preserve existing behavior.
 
 - Immediate task execution from the command line no longer holds a database transaction across credential admission. It reserves the task before starting and reports liveness during execution, so the scheduler cannot also claim it.
 

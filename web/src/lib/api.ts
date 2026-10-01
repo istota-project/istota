@@ -4413,6 +4413,7 @@ export interface CredentialGrant {
   methods: string[];
   rooms: string[];
   allow_scheduled: boolean;
+  allow_http?: boolean;
   policy_revision?: number;
 }
 export interface CredentialGrantsSettings {
@@ -4443,6 +4444,9 @@ export function saveCredentialGrant(
 }
 export function revokeCredentialGrant(name: string): Promise<{ ok: boolean }> {
   return apiFetch(`/settings/credentials/${encodeURIComponent(name)}`, { method: 'DELETE' });
+}
+export function deleteCredential(name: string): Promise<{ ok: boolean; deleted: boolean }> {
+  return apiFetch(`/settings/credentials/${encodeURIComponent(name)}/value`, { method: 'DELETE' });
 }
 export function grantExistingCredentials(): Promise<{ ok: boolean; count: number }> {
   return apiFetch('/settings/credentials/grant-existing', { method: 'POST' });

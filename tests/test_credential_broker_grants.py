@@ -242,3 +242,19 @@ def test_a_shared_rooms_withheld_scopes_keep_vault_grants_out(database, withheld
         ) == expected
         if not expected:
             assert check(conn, identifier) == "credential_not_granted"
+
+
+def test_a_task_with_no_row_is_granted_nothing(database):
+    with db.get_db(database) as conn:
+        grants.put_grant(conn, "alice", "portal")
+    with db.get_db(database) as conn:
+        assert grants.ensure_credential_grants(conn, 9999, "alice") == {}
+        assert conn.execute("SELECT COUNT(*) FROM credential_task_grants").fetchone()[0] == 0
+
+
+def test_a_row_owned_by_another_user_still_raises(database):
+    with db.get_db(database) as conn:
+        first = task(conn)
+    with db.get_db(database) as conn:
+        with pytest.raises(ValueError, match="owner mismatch"):
+            grants.ensure_credential_grants(conn, first, "mallory")

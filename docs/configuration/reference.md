@@ -617,7 +617,7 @@ istota secret ensure --user alice --service ntfy --key server_url --value https:
 istota secret ensure --user alice --service ntfy --key token --value tk_…
 ```
 
-Or via the web UI at `/istota/settings` (Connected services → ntfy push). Priority is hardcoded to `3` (the ntfy default).
+Or via the web UI at `/istota/settings/connections` (ntfy push). Priority is hardcoded to `3` (the ntfy default).
 
 What it IS: a one-way push channel (bot → device) used by heartbeat alerts and scheduled-job output (`output_target = "ntfy"`). What it ISN'T: two-way (no replies), a Talk replacement, operator-shared infrastructure, or required.
 

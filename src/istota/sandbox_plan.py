@@ -1231,7 +1231,8 @@ def render_bwrap_argv(
             f"exec env "
             f"HTTPS_PROXY=http://127.0.0.1:{BRIDGE_PORT} "
             f"HTTP_PROXY=http://127.0.0.1:{BRIDGE_PORT} "
-            f'NO_PROXY= {trust_env}"$@"'
+            f"http_proxy=http://127.0.0.1:{BRIDGE_PORT} "
+            f'NO_PROXY= no_proxy= {trust_env}"$@"'
         )
         args.extend(["/bin/sh", "-c", shell_cmd, "sh"] + cmd)
     else:

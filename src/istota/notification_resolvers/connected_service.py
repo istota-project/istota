@@ -82,18 +82,18 @@ SEVERITY = "warning"
 # to the remedy. `/reconnect` is the auth route that runs the flow and comes back
 # with the session intact (ISSUE-333).
 RECONNECT_HREFS: dict[str, str] = {
-    "garmin": "/settings",
+    "garmin": "/settings/connections",
     "nextcloud": "/reconnect",
-    # The vault's own status sits on the "Connected services" heading of that
-    # page, which is where a user can see the resolved path, the owned services
-    # and the failing class. There is nothing to reconnect *to*, which is what
-    # the action label below says instead.
-    "vault": "/settings",
+    # The vault card on the Credentials section is where a user can see the
+    # resolved path, the shared credentials and the failing class. There is
+    # nothing to reconnect *to*, which is what the action label below says
+    # instead.
+    "vault": "/settings/credentials",
 }
 
 # Retained as the fallback for a service with no entry above, and because it is
 # the spelling the original single-service version of this module exported.
-RECONNECT_HREF = "/settings"
+RECONNECT_HREF = "/settings/connections"
 
 # The allowlist that stands in for `int()` here. Keys are the `object_id` values
 # this source may carry; the value is what the user calls the service.
@@ -148,15 +148,15 @@ _DEFAULT_CONSEQUENCE = (
 # The closing sentence, per service — the remedy differs, so the instruction has
 # to as well.
 _REMEDY: dict[str, str] = {
-    "garmin": "Reconnect under Settings → Connected services.",
+    "garmin": "Reconnect under Settings → Connections.",
     "nextcloud": "Reconnect to restore both — it takes one round trip and keeps you signed in.",
     # Generic on purpose: the class-specific instruction travels as `reason`,
     # because this table holds one static string per *service* and the vault
     # fails eight distinguishable ways. See `secrets_vault.NOTIFICATION_REASONS`.
-    "vault": "The vault's status is under Settings → Connected services.",
+    "vault": "The vault's status is under Settings → Credentials.",
 }
 
-_DEFAULT_REMEDY = "Reconnect under Settings → Connected services."
+_DEFAULT_REMEDY = "Reconnect under Settings → Connections."
 
 # `notification_store._STALE_SWEEP_BUSY_TIMEOUT_MS`, for the same reason: see
 # :func:`close_for_service`.

@@ -1704,7 +1704,7 @@ def _process_deferred_garmin_import(
         send_notification(
             config, task.user_id,
             "🗺️ Garmin track import couldn't run — Garmin isn't connected. "
-            "Connect it in Settings → Connected services.",
+            "Connect it in Settings → Connections.",
             purpose="alert",
         )
         path.unlink(missing_ok=True)

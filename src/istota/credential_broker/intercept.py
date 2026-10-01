@@ -7,6 +7,8 @@ scan. TLS and HTTP failures use fixed reasons, never parser exception text.
 """
 
 import base64
+from contextlib import nullcontext
+from urllib.parse import urlsplit
 import ipaddress
 from dataclasses import dataclass
 import logging
@@ -18,7 +20,7 @@ import h11
 
 from .. import db, secrets_store
 from . import ca
-from .bindings import get_binding, https_host
+from .bindings import get_entry_binding, https_host, credential_host
 from .grants import check_credential_grant
 
 logger = logging.getLogger("istota.credential_broker")
@@ -44,7 +46,7 @@ class Broker:
                 "SELECT name FROM credential_task_grants WHERE task_id=? AND user_id=?",
                 (self.task_id, self.user_id),
             ):
-                binding = get_binding(conn, self.user_id, row[0])
+                binding = get_entry_binding(conn, self.user_id, row[0])
                 if binding and host in binding["hosts"]:
                     return True
         return False
@@ -150,13 +152,14 @@ def _headers(broker, request, host):
     return headers, replacements, names
 
 
-def _validate(request, host):
+def _validate(request, host, *, plain_http=False):
     headers = dict(request.headers)
     try:
         authority = headers[b"host"].decode("ascii")
         if any(char in authority for char in "/?#@"):
             raise ValueError("invalid authority")
-        actual = https_host("https://" + authority)
+        actual = credential_host(("http://" if plain_http else "https://") + authority,
+                                 allow_http=plain_http)
     except (ValueError, UnicodeError, KeyError):
         raise Refused("host_mismatch") from None
     if actual != host:
@@ -222,8 +225,10 @@ def _audit(broker, names, target, method, status, request_limited, response_limi
                     status, request_limited, response_limited)
 
 
-def _requests(broker, tls, host, port, target):
+def _requests(broker, tls, host, port, target, *, plain_http=False, initial_data=b""):
     downstream = h11.Connection(h11.SERVER, max_incomplete_event_size=65536)
+    if initial_data:
+        downstream.receive_data(initial_data)
     cap = broker.config.security.credential_broker.scan_max_bytes
     response_started = False
     sent_names = set()
@@ -242,7 +247,19 @@ def _requests(broker, tls, host, port, target):
             if not isinstance(request, h11.Request):
                 raise Refused("invalid_framing")
             method = request.method
-            _validate(request, target)
+            if plain_http:
+                url = request.target.decode("ascii")
+                parsed = urlsplit(url)
+                if parsed.scheme != "http" or parsed.fragment or credential_host(url, allow_http=True) != target:
+                    raise Refused("host_mismatch")
+                if b"{{cred:" in request.target:
+                    raise Refused("credential_in_url")
+                path = parsed.path or "/"
+                if parsed.query:
+                    path += "?" + parsed.query
+                request = h11.Request(method=request.method, target=path.encode("ascii"),
+                                     headers=request.headers)
+            _validate(request, target, plain_http=plain_http)
             # Validate headers before sending 100 Continue or reading the body.
             headers, replacements, names = _headers(broker, request, target)
             if downstream.they_are_waiting_for_100_continue:
@@ -253,9 +270,10 @@ def _requests(broker, tls, host, port, target):
             # Recheck after a potentially slow upload prefix, before using values.
             headers, replacements, names = _headers(broker, request, target)
             with socket.create_connection((host, port), timeout=10) as raw:
-                with ca.upstream_context().wrap_socket(raw, server_hostname=host) as upstream:
+                with (nullcontext(raw) if plain_http else
+                      ca.upstream_context().wrap_socket(raw, server_hostname=host)) as upstream:
                     upstream.settimeout(30)
-                    if upstream.selected_alpn_protocol() not in (None, "http/1.1"):
+                    if not plain_http and upstream.selected_alpn_protocol() not in (None, "http/1.1"):
                         raise Refused("upstream_requires_h2")
                     outbound = h11.Connection(h11.CLIENT, max_incomplete_event_size=65536)
                     headers = [(k, v) for k, v in headers if k not in (b"expect", b"accept-encoding")]
