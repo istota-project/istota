@@ -1149,8 +1149,10 @@ def build_daemon_sandbox(
         conversation_token="",
     )
     try:
-        with db.get_db(config.db_path) as conn:
-            user_resources = db.get_user_resources(conn, user_id)
+        with db.get_db_if_exists(config.db_path) as conn:
+            user_resources = (
+                db.get_user_resources(conn, user_id) if conn is not None else []
+            )
     except Exception as e:  # noqa: BLE001 — a missing DB costs binds, not the wrap
         logger.debug(
             "daemon_sandbox_resources_unavailable user_id=%r error=%s", user_id, e
@@ -5067,7 +5069,9 @@ def _front_stage_cutoff(
         return db.AudienceCutoff()
     if conn is not None:
         return db.front_stage_cutoff(conn, task.conversation_token)
-    with db.get_db(config.db_path) as temp_conn:
+    with db.get_db_if_exists(config.db_path) as temp_conn:
+        if temp_conn is None:
+            return db.AudienceCutoff()
         return db.front_stage_cutoff(temp_conn, task.conversation_token)
 
 
@@ -5128,8 +5132,10 @@ def _ensure_reply_parent_in_history(
     if conn is not None:
         parent_task, parent_sender = _lookup(conn)
     else:
-        with db.get_db(config.db_path) as temp_conn:
-            parent_task, parent_sender = _lookup(temp_conn)
+        with db.get_db_if_exists(config.db_path) as temp_conn:
+            parent_task, parent_sender = (
+                _lookup(temp_conn) if temp_conn is not None else (None, None)
+            )
 
     # A parent from before an epoch the room's audience did not share stays
     # out of context; the citation the replier chose to show is still quoted
@@ -5295,8 +5301,11 @@ def _build_talk_api_context(
     if conn is not None:
         raw_messages = db.get_cached_talk_messages(conn, task.conversation_token, limit=limit)
     else:
-        with db.get_db(config.db_path) as temp_conn:
-            raw_messages = db.get_cached_talk_messages(temp_conn, task.conversation_token, limit=limit)
+        with db.get_db_if_exists(config.db_path) as temp_conn:
+            raw_messages = (
+                db.get_cached_talk_messages(temp_conn, task.conversation_token, limit=limit)
+                if temp_conn is not None else []
+            )
 
     talk_floor = _front_stage_cutoff(task, conn, config).talk_message_id
     if talk_floor:
@@ -5325,8 +5334,9 @@ def _build_talk_api_context(
         if conn is not None:
             task_metadata = db.get_task_metadata_for_context(conn, task_ids)
         else:
-            with db.get_db(config.db_path) as temp_conn:
-                task_metadata = db.get_task_metadata_for_context(temp_conn, task_ids)
+            with db.get_db_if_exists(config.db_path) as temp_conn:
+                if temp_conn is not None:
+                    task_metadata = db.get_task_metadata_for_context(temp_conn, task_ids)
 
     # Build filtered TalkMessage list
     talk_messages = build_talk_context(
@@ -5427,14 +5437,16 @@ def _build_db_context(
             after=cutoff,
         )
     else:
-        with db.get_db(config.db_path) as temp_conn:
-            history = db.get_conversation_history(
-                temp_conn, task.conversation_token, exclude_task_id=task.id,
-                limit=config.conversation.lookback_count,
-                exclude_source_types=_exclude_types,
-                user_email_addresses=own_email_addresses,
-                after=cutoff,
-            )
+        history = []
+        with db.get_db_if_exists(config.db_path) as temp_conn:
+            if temp_conn is not None:
+                history = db.get_conversation_history(
+                    temp_conn, task.conversation_token, exclude_task_id=task.id,
+                    limit=config.conversation.lookback_count,
+                    exclude_source_types=_exclude_types,
+                    user_email_addresses=own_email_addresses,
+                    after=cutoff,
+                )
 
     # Inject recent scheduled/briefing tasks in the same channel — these are
     # deliberately re-surfaced (cron/briefing output the user may reference)
@@ -5453,14 +5465,16 @@ def _build_db_context(
             after=cutoff,
         )
     else:
-        with db.get_db(config.db_path) as temp_conn:
-            prev_tasks = db.get_previous_tasks(
-                temp_conn, task.conversation_token, exclude_task_id=task.id,
-                limit=config.conversation.previous_tasks_count,
-                exclude_source_types=_prev_exclude,
-                user_email_addresses=own_email_addresses,
-                after=cutoff,
-            )
+        prev_tasks = []
+        with db.get_db_if_exists(config.db_path) as temp_conn:
+            if temp_conn is not None:
+                prev_tasks = db.get_previous_tasks(
+                    temp_conn, task.conversation_token, exclude_task_id=task.id,
+                    limit=config.conversation.previous_tasks_count,
+                    exclude_source_types=_prev_exclude,
+                    user_email_addresses=own_email_addresses,
+                    after=cutoff,
+                )
 
     if prev_tasks:
         history_ids = {msg.id for msg in history}
@@ -5653,7 +5667,9 @@ def _recall_memories(
                 recency_half_life_days=config.memory_search.recency_half_life_days,
             )
         else:
-            with db.get_db(config.db_path) as temp_conn:
+            with db.get_db_if_exists(config.db_path) as temp_conn:
+                if temp_conn is None:
+                    return None
                 results = search(
                     temp_conn, task.user_id, prompt,
                     limit=config.memory_search.auto_recall_limit,
@@ -5702,8 +5718,8 @@ def _drop_pre_cutoff_turns(config: Config, conn, task: db.Task, results: list) -
         if conn is not None:
             hidden = _hidden(conn)
         else:
-            with db.get_db(config.db_path) as temp_conn:
-                hidden = _hidden(temp_conn)
+            with db.get_db_if_exists(config.db_path) as temp_conn:
+                hidden = _hidden(temp_conn) if temp_conn is not None else set()
     except Exception:
         # The cutoff cannot be read, so which chunks are safe cannot be
         # known: recall nothing of the conversation index rather than guess.
@@ -5748,7 +5764,9 @@ def _recall_playbooks(
                 source_types=["playbook"],
             )
         else:
-            with db.get_db(config.db_path) as temp_conn:
+            with db.get_db_if_exists(config.db_path) as temp_conn:
+                if temp_conn is None:
+                    return None
                 results = search(
                     temp_conn, task.user_id, prompt,
                     limit=config.playbooks.recall_limit,
@@ -6009,11 +6027,11 @@ def _side_room_prompt(
 
         if conn is not None:
             side, block = _read(conn)
-        elif config.db_path and Path(config.db_path).exists():
-            with db.get_db(config.db_path) as own:
-                side, block = _read(own)
         else:
-            return "", ""
+            with db.get_db_if_exists(config.db_path) as own:
+                if own is None:
+                    return "", ""
+                side, block = _read(own)
     except Exception as exc:
         logger.warning("side room prompt for task %s failed: %s", task.id, exc)
         return "", ""
@@ -6047,11 +6065,11 @@ def _backstage_prompt(config: Config, task: "db.Task", conn) -> str:
 
         if conn is not None:
             side = backstage_room(conn, task)
-        elif config.db_path and Path(config.db_path).exists():
-            with db.get_db(config.db_path) as own:
-                side = backstage_room(own, task)
         else:
-            return ""
+            with db.get_db_if_exists(config.db_path) as own:
+                if own is None:
+                    return ""
+                side = backstage_room(own, task)
         notes = read_channel_memory(config, side.token) if side is not None else None
     except Exception as exc:
         logger.warning("backstage notes for task %s failed: %s", task.id, exc)
@@ -6096,7 +6114,8 @@ def room_identity_line(
     mistake, and its test passed for the wrong reason.
 
     Opens its own connection when handed none, the way every other optional-conn
-    reader here does. ``execute_task``'s ``conn`` parameter defaults to None and
+    reader here does, through ``db.get_db_if_exists`` so a missing database is
+    read as no room rather than created (ISSUE-570). ``execute_task``'s ``conn`` parameter defaults to None and
     only the scheduler passes one, so a `conn is None` early return would leave
     the line missing from every entry point but that — silently, which is
     exactly what the first cut did: the two golden cases came back
@@ -6145,7 +6164,9 @@ def room_identity_line(
         if conn is not None:
             token, room, talk_ref = _lookup(conn)
         else:
-            with db.get_db(config.db_path) as temp_conn:
+            with db.get_db_if_exists(config.db_path) as temp_conn:
+                if temp_conn is None:
+                    return ""
                 token, room, talk_ref = _lookup(temp_conn)
         if room is None:
             return ""
@@ -6258,11 +6279,9 @@ def room_card(
 
         if conn is not None:
             readers = _read(conn)
-        elif config.db_path and Path(config.db_path).exists():
-            with db.get_db(config.db_path) as own:
-                readers = _read(own)
         else:
-            readers = None
+            with db.get_db_if_exists(config.db_path) as own:
+                readers = _read(own) if own is not None else None
     except Exception as exc:
         logger.warning("room card for task %s failed: %s", task.id, exc)
         readers = None
@@ -7170,11 +7189,17 @@ You have access to:
     if task.source_type in ("whatsapp", "web", "talk", "sms"):
         from .message_relays import recipient_context
 
-        if conn is not None:
-            relay_context = recipient_context(conn, actor_user_id=task.user_id, task_id=task.id)
-        elif config.db_path.exists():
-            with db.get_db(config.db_path) as relay_conn:
-                relay_context = recipient_context(relay_conn, actor_user_id=task.user_id, task_id=task.id)
+        try:
+            if conn is not None:
+                relay_context = recipient_context(conn, actor_user_id=task.user_id, task_id=task.id)
+            else:
+                with db.get_db_if_exists(config.db_path) as relay_conn:
+                    if relay_conn is not None:
+                        relay_context = recipient_context(
+                            relay_conn, actor_user_id=task.user_id, task_id=task.id,
+                        )
+        except Exception as exc:  # noqa: BLE001 — no relay context, not no task
+            logger.warning("relay context for task %s failed: %s", task.id, exc)
 
     user_blocks = [
         memory_section,
@@ -7261,7 +7286,7 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
 
     try:
         ensure_initialised(ctx, app_config=config)
-        with db.get_db(config.db_path) as conn:
+        with db.get_db_if_exists(config.db_path) as conn:
             assembled = assemble_briefing_input(
                 ctx, task.briefing_name, config, conn=conn,
             )
@@ -7357,11 +7382,11 @@ def _task_withheld_scopes(
     if conn is not None:
         withheld = room_scopes.withheld_for_task(
             conn, task, policy=policy, skill_index=skill_index)
-    elif not Path(config.db_path).exists():
-        return frozenset()
     else:
         try:
-            with db.get_db(config.db_path) as temp_conn:
+            with db.get_db_if_exists(config.db_path) as temp_conn:
+                if temp_conn is None:
+                    return frozenset()
                 withheld = room_scopes.withheld_for_task(
                     temp_conn, task, policy=policy, skill_index=skill_index)
         except Exception as exc:  # noqa: BLE001 — an unopenable DB restricts
@@ -7395,9 +7420,9 @@ def _resolve_task_groups(
     try:
         if conn is not None:
             return room_scopes.task_group_ids(conn, task)
-        if not Path(config.db_path).exists():
-            return []
-        with db.get_db(config.db_path) as g_conn:
+        with db.get_db_if_exists(config.db_path) as g_conn:
+            if g_conn is None:
+                return []
             return room_scopes.task_group_ids(g_conn, task)
     except Exception as exc:  # noqa: BLE001 — unreadable means no group
         logger.warning(
@@ -7429,10 +7454,8 @@ def _channel_memory_is_shared(config: Config, task: db.Task, conn) -> bool:
     try:
         if conn is not None:
             return _read(conn)
-        if config.db_path and Path(config.db_path).exists():
-            with db.get_db(config.db_path) as own:
-                return _read(own)
-        return False
+        with db.get_db_if_exists(config.db_path) as own:
+            return _read(own) if own is not None else False
     except Exception as exc:  # noqa: BLE001 — fail toward the fence
         logger.warning("channel memory sharing for task %s unknown: %s", task.id, exc)
         return True
@@ -7456,8 +7479,11 @@ def _load_group_memory(
         if conn is not None:
             groups = [db.get_group(conn, g) for g in group_ids]
         else:
-            with db.get_db(config.db_path) as g_conn:
-                groups = [db.get_group(g_conn, g) for g in group_ids]
+            with db.get_db_if_exists(config.db_path) as g_conn:
+                groups = (
+                    [db.get_group(g_conn, g) for g in group_ids]
+                    if g_conn is not None else []
+                )
         names = {g["group_id"]: g["display_name"] for g in groups if g}
     except Exception:  # noqa: BLE001 — a heading falls back to the id
         pass
@@ -7740,8 +7766,10 @@ def execute_task(
             if conn is not None:
                 sticky_skills = _get_sticky(conn)
             else:
-                with db.get_db(config.db_path) as temp_conn:
-                    sticky_skills = _get_sticky(temp_conn)
+                with db.get_db_if_exists(config.db_path) as temp_conn:
+                    sticky_skills = (
+                        _get_sticky(temp_conn) if temp_conn is not None else set()
+                    )
             if sticky_skills:
                 logger.debug("Sticky skills from conversation: %s", ", ".join(sorted(sticky_skills)))
         except Exception:
@@ -7804,8 +7832,9 @@ def execute_task(
             if conn is not None:
                 _save_skills(conn)
             else:
-                with db.get_db(config.db_path) as temp_conn:
-                    _save_skills(temp_conn)
+                with db.get_db_if_exists(config.db_path) as temp_conn:
+                    if temp_conn is not None:
+                        _save_skills(temp_conn)
             logger.debug("Saved %d selected skills for task %d", len(selected_skills), task.id)
         except Exception:
             logger.warning("Failed to save selected_skills for task %d", task.id, exc_info=True)
@@ -7909,8 +7938,13 @@ def execute_task(
             if conn is not None:
                 stored_fingerprint = _check_fingerprint(conn)
             else:
-                with db.get_db(config.db_path) as fp_conn:
-                    stored_fingerprint = _check_fingerprint(fp_conn)
+                with db.get_db_if_exists(config.db_path) as fp_conn:
+                    # No database, no record of what was shown: the same
+                    # answer the read failing gives, so no changelog.
+                    stored_fingerprint = (
+                        _check_fingerprint(fp_conn) if fp_conn is not None
+                        else current_fingerprint
+                    )
             if stored_fingerprint != current_fingerprint:
                 skills_changelog = load_skills_changelog(config.skills_dir, bundled_dir=_bundled_dir)
                 if skills_changelog:
@@ -8069,15 +8103,16 @@ def execute_task(
                     if kg_facts:
                         knowledge_facts_text = format_facts_for_prompt(kg_facts)
             else:
-                with db.get_db(config.db_path) as _kg_conn:
-                    ensure_table(_kg_conn)
-                    kg_facts = get_current_facts(_kg_conn, task.user_id)
-                    if kg_facts:
-                        kg_facts = select_relevant_facts(
-                            kg_facts, retrieval_query, task.user_id, max_facts=max_kf,
-                        )
+                with db.get_db_if_exists(config.db_path) as _kg_conn:
+                    if _kg_conn is not None:
+                        ensure_table(_kg_conn)
+                        kg_facts = get_current_facts(_kg_conn, task.user_id)
                         if kg_facts:
-                            knowledge_facts_text = format_facts_for_prompt(kg_facts)
+                            kg_facts = select_relevant_facts(
+                                kg_facts, retrieval_query, task.user_id, max_facts=max_kf,
+                            )
+                            if kg_facts:
+                                knowledge_facts_text = format_facts_for_prompt(kg_facts)
         except Exception:
             pass  # Graceful degradation
 

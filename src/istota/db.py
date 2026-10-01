@@ -1274,6 +1274,25 @@ def get_db(
         yield conn
 
 
+@contextmanager
+def get_db_if_exists(
+    db_path: Path | str | None,
+) -> Iterator[sqlite3.Connection | None]:
+    """`get_db` for an optional reader: yields None when no database is there.
+
+    `sqlite3.connect` creates a missing file, and `Config.db_path` defaults to
+    the relative `data/istota.db`, so a reader that only means to look would
+    otherwise leave an empty database in whatever directory it ran from, and
+    every later reader there would hit "no such table" (ISSUE-570). The caller
+    treats None as "nothing to read".
+    """
+    if not db_path or not Path(db_path).is_file():
+        yield None
+        return
+    with get_db(Path(db_path)) as conn:
+        yield conn
+
+
 def find_task_by_talk_message_id(
     conn: sqlite3.Connection, talk_message_id: int, conversation_token: str | None,
 ) -> int | None:

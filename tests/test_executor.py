@@ -4845,3 +4845,36 @@ class TestTheControlDirectoryIsGuardedOnEveryShape:
         assert not any(
             Path(req.result_file).is_relative_to(root) for root in denied
         ), f"the result file {req.result_file} was denied: {denied}"
+
+
+class TestAnOptionalReadNeverCreatesTheDatabase:
+    """ISSUE-570: prompt assembly with no database must not make one.
+
+    `Config.db_path` defaults to the relative `data/istota.db`, and each
+    optional reader that opened its own connection reached `sqlite3.connect`,
+    which creates the file whenever the directory exists. The reader then found
+    no table and returned nothing, so the run that made the file passed, and
+    every later test in that working directory read a different prompt.
+    """
+
+    @pytest.mark.parametrize("source_type", ["talk", "web", "email"])
+    def test_a_dry_run_from_a_bare_config_leaves_no_database(
+        self, tmp_path, monkeypatch, source_type,
+    ):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir()
+        config = Config()
+        config.temp_dir = tmp_path / "tmp"
+        assert not config.db_path.is_absolute()
+        task = db.Task(
+            id=7, status="running", source_type=source_type, user_id="alice",
+            prompt="hello there", conversation_token="room1",
+        )
+
+        success, result, _a, _t = executor.execute_task(
+            task, config, [], dry_run=True,
+        )
+
+        assert success, result
+        assert not (tmp_path / "data" / "istota.db").exists()
+        assert list((tmp_path / "data").iterdir()) == []
