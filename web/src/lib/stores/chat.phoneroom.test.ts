@@ -195,6 +195,27 @@ describe('chat store — phone rooms', () => {
     s.teardown();
   });
 
+  it('carries a group flag through the room stream (ISSUE-585)', async () => {
+    // The group wording and a group's confirmation buttons read `phone_group`;
+    // a key the frame merge omits reads as absent, so it has to follow frames.
+    const es = installFakeEventSource();
+    const group = { ...room(1), origin: 'whatsapp', phone_surface: 'whatsapp' as const };
+    api.getChatRooms.mockResolvedValue({ rooms: [{ ...group, phone_group: true }] });
+    const s = await freshSession();
+    await s.init();
+    expect(get(s.rooms)[0].phone_group).toBe(true);
+    const frame = (phone_group: boolean) => ({
+      action: 'upsert',
+      room: { ...group, name: 'Family', phone_group },
+    });
+    es.current!.emit('room', frame(true));
+    expect(get(s.rooms)[0].phone_group).toBe(true);
+    expect(get(s.rooms)[0].name).toBe('Family');
+    es.current!.emit('room', frame(false));
+    expect(get(s.rooms)[0].phone_group).toBe(false);
+    s.teardown();
+  });
+
   it('carries the texted surface and the read-only flag', async () => {
     installFakeEventSource();
     const s = await freshSession();

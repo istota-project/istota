@@ -178,13 +178,15 @@
   let composerH = $state(0);
 
   const activeRoom = $derived($rooms.find((r) => r.id === $activeRoomId) ?? null);
-  // The open room is the transcript of the user's own SMS or WhatsApp thread:
-  // read here, answered by text. The label is what the notice and the
-  // confirmation card name. The server refuses a send either way; hiding the
-  // composer is the courtesy, not the gate.
+  // The open room is bound to SMS or WhatsApp: read here, written on the
+  // phone. The label is what the notice and the confirmation card name. The
+  // server refuses a send either way; hiding the composer is the courtesy, not
+  // the gate. A WhatsApp group's parked questions are still answered here, so
+  // only a private thread's card says to answer by text.
   const readOnlyPhone = $derived(
     activeRoom?.read_only ? (activeRoom.phone_surface === 'whatsapp' ? 'WhatsApp' : 'SMS') : null,
   );
+  const readOnlyGroup = $derived(!!readOnlyPhone && !!activeRoom?.phone_group);
   const isTalkRoom = (room: { origin?: string | null; talk_token?: string | null }) =>
     room.origin === 'talk' || !!room.talk_token;
   // One wording for the sidebar row and the header, so the two never disagree
@@ -1372,7 +1374,7 @@
                 aggregate={inViewMode}
                 active={message.cid === activeCid}
                 touch={pointerIsTouch}
-                answerByText={inViewMode ? null : readOnlyPhone}
+                answerByText={inViewMode || readOnlyGroup ? null : readOnlyPhone}
                 mentions={mentionTargets}
               />
             {/each}
@@ -1434,11 +1436,17 @@
         {#if readOnlyPhone}
           <!-- A phone room is read-only here (decided 2026-10-01): the turn
                belongs on the phone, and a web send would answer in web while
-               the thread it started in heard nothing. -->
+               the thread it started in heard nothing. A group too (ISSUE-585):
+               nothing from a web turn reaches the group. -->
           <p class="readonly-notice" role="note">
-            This room is the transcript of a {readOnlyPhone} conversation and is read-only here. Reply
-            by
-            {readOnlyPhone} to continue it.
+            {#if readOnlyGroup}
+              This room is a {readOnlyPhone} group and is read-only here. Write in the group on
+              {readOnlyPhone} to take part.
+            {:else}
+              This room is the transcript of a {readOnlyPhone} conversation and is read-only here. Reply
+              by
+              {readOnlyPhone} to continue it.
+            {/if}
           </p>
         {:else}
           <Composer

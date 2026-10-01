@@ -5388,19 +5388,20 @@ def _render_pairing_qr() -> tuple[bytes, int] | None:
 
 
 def _room_phone_fields(reg, binding) -> dict:
-    """``phone_surface`` and ``read_only`` for one listed room.
+    """``phone_surface``, ``read_only`` and ``phone_group`` for one listed room.
 
-    ``phone_surface`` badges any room bound to SMS or WhatsApp, a WhatsApp
-    group included. ``read_only`` is the narrower private-thread test, the
-    same one the send route refuses on (`routing.phone_transcript_surface`),
+    Any room bound to SMS or WhatsApp is read-only, a WhatsApp group included
+    (ISSUE-585), the same test the send route refuses on (`routing.phone_room`),
     answered here from the binding already in hand rather than per room.
+    ``phone_group`` tells the client which wording to use, and that a group's
+    parked questions and members are still managed from web.
     """
     from .transport.routing import private_phone_ref
 
     if binding is None:
-        return {"phone_surface": None, "read_only": False}
+        return {"phone_surface": None, "read_only": False, "phone_group": False}
     private = binding.surface_ref == private_phone_ref(binding.surface, reg.user_id)
-    return {"phone_surface": binding.surface, "read_only": private}
+    return {"phone_surface": binding.surface, "read_only": True, "phone_group": not private}
 
 
 def _room_to_dict(room) -> dict:
@@ -5601,18 +5602,18 @@ def _chat_owned_room(username: str, room_id: int):
     return room
 
 
-def _phone_transcript_surface(room_token: str) -> str | None:
-    """`routing.phone_transcript_surface` over its own connection.
+def _phone_room(room_token: str):
+    """`routing.phone_room` over its own connection.
 
-    The server half of the read-only phone room (decided 2026-10-01): the
-    client renders no composer there, and a client that sends anyway is
-    refused here, since a hidden composer is not a gate.
+    The server half of the read-only phone room (decided 2026-10-01, groups
+    since ISSUE-585): the client renders no composer there, and a client that
+    sends anyway is refused here, since a hidden composer is not a gate.
     """
     from . import db
-    from .transport.routing import phone_transcript_surface
+    from .transport.routing import phone_room
 
     with db.get_db(_config.db_path) as conn:
-        return phone_transcript_surface(conn, room_token)
+        return phone_room(conn, room_token)
 
 
 def _task_phone_transcript_surface(task_id: int) -> str | None:
@@ -5630,16 +5631,16 @@ def _task_phone_transcript_surface(task_id: int) -> str | None:
 _PHONE_LABELS = {"sms": "SMS", "whatsapp": "WhatsApp"}
 
 
-def _read_only_refusal(surface: str) -> JSONResponse:
+def _read_only_refusal(surface: str, *, group: bool = False) -> JSONResponse:
     label = _PHONE_LABELS.get(surface, surface)
-    return JSONResponse(
-        {
-            "error": f"This room is the transcript of your {label} conversation "
-                     f"and is read-only here. Reply by {label} instead.",
-            "read_only": True,
-        },
-        status_code=409,
-    )
+    if group:
+        error = (f"This room is a {label} group and is read-only here; a message "
+                 f"sent from here would reach nobody in the group. Write in the "
+                 f"group on {label} instead.")
+    else:
+        error = (f"This room is the transcript of your {label} conversation "
+                 f"and is read-only here. Reply by {label} instead.")
+    return JSONResponse({"error": error, "read_only": True}, status_code=409)
 
 
 def _chat_answer_confirmation(
@@ -9530,9 +9531,9 @@ async def chat_send_message(
         return JSONResponse({"error": "room is archived"}, status_code=409)
     # Ahead of everything else, `!commands` and confirmation answers included:
     # a phone room is answered by text, and web only reads it.
-    phone = await asyncio.to_thread(_phone_transcript_surface, room.token)
+    phone = await asyncio.to_thread(_phone_room, room.token)
     if phone is not None:
-        return _read_only_refusal(phone)
+        return _read_only_refusal(phone.surface, group=phone.group)
 
     data = await request.json()
     raw_text = data.get("text") if isinstance(data.get("text"), str) else ""

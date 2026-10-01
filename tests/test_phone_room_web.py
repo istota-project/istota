@@ -4,8 +4,9 @@ A private SMS or WhatsApp conversation is a room web can read and cannot write
 into (decided 2026-10-01). What this file holds the server to:
 
 - the listing badges a phone-bound room and says which ones are read-only;
-- a web send into a private phone room is refused by the server, since a
-  hidden composer is not a gate, while a WhatsApp group room keeps its composer;
+- a web send into a phone room is refused by the server, since a hidden
+  composer is not a gate. That includes a WhatsApp group room (ISSUE-585): a
+  web turn there reaches nobody in the group, so it has no composer either;
 - a phone task's parked question is answered by text, not from web;
 - a texted turn carries its surface on the history payload;
 - the implicit default web room is never a phone room.
@@ -18,7 +19,7 @@ import pytest
 from istota import db
 from istota.config import Config, SiteConfig, UserConfig, WebConfig
 from istota.transport.ingest import record_phone_turn
-from istota.transport.routing import phone_transcript_surface
+from istota.transport.routing import phone_room, phone_transcript_surface
 from istota.transport.sms import sms_conversation_token
 from istota.transport.whatsapp import whatsapp_conversation_token
 
@@ -116,6 +117,21 @@ class TestThePredicate:
             assert phone_transcript_surface(conn, web) is None
             assert phone_transcript_surface(conn, "rm_nothing") is None
 
+    def test_phone_room_names_every_phone_binding_and_which_are_groups(
+        self, db_path, tmp_path,
+    ):
+        config = _config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            sms = _mint(conn, config, "sms").room_token
+            wa = _mint(conn, config, "whatsapp").room_token
+            group = _group_room(conn)
+            web = db.create_web_chat_room(conn, "alice", "general").token
+            assert phone_room(conn, sms) == ("sms", False)
+            assert phone_room(conn, wa) == ("whatsapp", False)
+            assert phone_room(conn, group) == ("whatsapp", True)
+            assert phone_room(conn, web) is None
+            assert phone_room(conn, "rm_nothing") is None
+
     def test_another_member_does_not_make_the_thread_writable(self, db_path, tmp_path):
         config = _config(db_path, tmp_path)
         with db.get_db(db_path) as conn:
@@ -164,9 +180,12 @@ class TestTheListing:
         assert (rooms[wa]["phone_surface"], rooms[wa]["read_only"]) == ("whatsapp", True)
         assert rooms[wa]["name"] == "WhatsApp"
         assert (rooms[group]["phone_surface"], rooms[group]["read_only"]) == (
-            "whatsapp", False,
+            "whatsapp", True,
         )
         assert (rooms[web]["phone_surface"], rooms[web]["read_only"]) == (None, False)
+        assert [rooms[t]["phone_group"] for t in (sms, wa, group, web)] == [
+            False, False, True, False,
+        ]
 
 
 @web_only
@@ -192,20 +211,38 @@ class TestTheSendRefusal:
                 "SELECT body FROM messages WHERE room_token = ?", (sms,),
             )] == ["first text"]
 
-    async def test_a_group_room_and_a_web_room_still_take_a_send(
+    async def test_a_web_send_into_a_group_room_is_refused(
         self, client, db_path, tmp_path,
     ):
+        """ISSUE-585: a web turn in a group room reaches nobody in the group,
+        neither the words nor an answer, so the server refuses it."""
         with db.get_db(db_path) as conn:
             group = _group_room(conn)
+        cookies = await _login(client)
+        room_id = (await _rooms(client, cookies))[group]["id"]
+        resp = await client.post(
+            f"/istota/api/chat/rooms/{room_id}/messages",
+            json={"text": "hello"}, cookies=cookies, headers=ORIGIN,
+        )
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["read_only"] is True
+        assert "WhatsApp group" in body["error"]
+        with db.get_db(db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE conversation_token = ?", (group,),
+            ).fetchone()[0] == 0
+
+    async def test_a_web_room_still_takes_a_send(self, client, db_path, tmp_path):
+        with db.get_db(db_path) as conn:
             web = db.create_web_chat_room(conn, "alice", "general").token
         cookies = await _login(client)
         rooms = await _rooms(client, cookies)
-        for token in (group, web):
-            resp = await client.post(
-                f"/istota/api/chat/rooms/{rooms[token]['id']}/messages",
-                json={"text": "hello"}, cookies=cookies, headers=ORIGIN,
-            )
-            assert resp.status_code == 200, resp.text
+        resp = await client.post(
+            f"/istota/api/chat/rooms/{rooms[web]['id']}/messages",
+            json={"text": "hello"}, cookies=cookies, headers=ORIGIN,
+        )
+        assert resp.status_code == 200, resp.text
 
 
 @web_only
@@ -233,6 +270,43 @@ class TestTheParkedQuestion:
         assert decline.status_code == 409
         with db.get_db(db_path) as conn:
             assert db.get_task(conn, task_id).status == "pending_confirmation"
+
+    async def test_a_group_task_is_still_confirmed_from_web(
+        self, client, db_path, tmp_path,
+    ):
+        """The control: a group room is read-only for sends (ISSUE-585), but its
+        parked question is not a private thread's, so the confirm gate is the
+        narrower private-thread test and web still answers it."""
+        with db.get_db(db_path) as conn:
+            group = _group_room(conn)
+            task_id = db.create_task(
+                conn, prompt="post the plan", user_id="alice",
+                source_type="whatsapp", conversation_token=group,
+            )
+            db.set_task_confirmation(conn, task_id, "Sure?")
+        cookies = await _login(client)
+        resp = await client.post(
+            f"/istota/api/chat/tasks/{task_id}/confirm", cookies=cookies, headers=ORIGIN,
+        )
+        assert resp.status_code == 200, resp.text
+
+    async def test_a_group_task_is_still_declined_from_web(
+        self, client, db_path, tmp_path,
+    ):
+        with db.get_db(db_path) as conn:
+            group = _group_room(conn)
+            task_id = db.create_task(
+                conn, prompt="post the plan", user_id="alice",
+                source_type="whatsapp", conversation_token=group,
+            )
+            db.set_task_confirmation(conn, task_id, "Sure?")
+        cookies = await _login(client)
+        resp = await client.post(
+            f"/istota/api/chat/tasks/{task_id}/cancel", cookies=cookies, headers=ORIGIN,
+        )
+        assert resp.status_code == 200, resp.text
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, task_id).status != "pending_confirmation"
 
     async def test_stopping_a_running_phone_task_is_still_allowed(
         self, client, db_path, tmp_path,

@@ -1625,6 +1625,7 @@ function createSession(): ChatSession {
           side_of: fresh.side_of ?? null,
           phone_surface: fresh.phone_surface ?? null,
           read_only: fresh.read_only ?? false,
+          phone_group: fresh.phone_group ?? false,
           shared: fresh.shared,
           policy: fresh.policy ?? null,
           off: fresh.off ?? null,
@@ -2202,6 +2203,7 @@ function createSession(): ChatSession {
         // The snapshot sends both on every room, so the frame is authoritative.
         phone_surface: fresh.phone_surface ?? null,
         read_only: fresh.read_only ?? false,
+        phone_group: fresh.phone_group ?? false,
       };
       // Same invalidation the local save does, for a brain changed on another
       // surface: `!brain` on Talk, or this user's other device. The frame is
