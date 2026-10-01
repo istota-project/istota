@@ -135,6 +135,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The nightly sleep cycle no longer holds the database write lock while it waits on a model call. It inserted knowledge facts and then ran USER.md curation on the same open transaction, so for about a minute every other writer failed with `database is locked`, including the web credentials page, which then showed nothing.
+
 - The credential vault card counts each credential once instead of counting its password, username and other fields separately. The credentials card description now wraps at the same width as the vault card.
 
 - Credential settings now groups a vault entry’s password, username, URL and custom fields under one grant. Deleting a credential removes all its imported fields. HTTP vault URLs keep their destination and can be used through the credential broker after enabling the explicit HTTP override in the grant popup; HTTPS remains the default requirement.

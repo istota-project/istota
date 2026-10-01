@@ -6244,9 +6244,8 @@ def _run_sleep_cycles(config: Config) -> None:
     thread rather than two concurrent brain-calling passes.
 
     Each half opens its own short-lived connection instead of borrowing the
-    loop-owned one they used to share. Nothing inside the sleep cycle commits
-    mid-pass, so one connection spanning both halves would hold a single write
-    transaction for the whole nightly run; two shorten that window, and the
+    loop-owned one they used to share. The sleep cycle commits before each
+    brain call, so neither holds the write lock across a model call; the
     caller thread has no connection to lend anyway.
 
     Each half is independently guarded so a failure in the per-user pass still
