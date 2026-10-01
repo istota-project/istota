@@ -92,8 +92,9 @@ def _poll(config, *, sender, to=(BOT,), cc=(), message_id, references=None,
         return poll_emails(config)
 
 
-def _room_token():
-    return threads.thread_room_token(ROOT)
+def _room_token(config):
+    with db.get_db(config.db_path) as conn:
+        return db.resolve_room_token(conn, "email", ROOT)
 
 
 def _rows(db_path, sql, params=()):
@@ -116,7 +117,8 @@ class TestAThreadBecomesARoom:
     def test_two_humans_besides_the_bot_make_a_room(self, config, db_path):
         task_ids = _start_thread(config)
 
-        token = _room_token()
+        token = _room_token(config)
+        assert db.is_canonical_room_token(token)
         with db.get_db(db_path) as conn:
             room = db.get_room(conn, token)
             assert room is not None and room.origin == "email"
@@ -138,12 +140,12 @@ class TestAThreadBecomesARoom:
     def test_the_first_roster_is_the_epoch_baseline(self, config, db_path):
         _start_thread(config)
         assert _rows(db_path, "SELECT epoch, reason FROM room_epochs WHERE room_token=?",
-                     (_room_token(),)) == [{"epoch": 0, "reason": "baseline:email"}]
+                     (_room_token(config),)) == [{"epoch": 0, "reason": "baseline:email"}]
 
     def test_the_policy_holds_guest_replies(self, config, db_path):
         _start_thread(config)
         with db.get_db(db_path) as conn:
-            policy = room_policy.ensure_policy(conn, _room_token())
+            policy = room_policy.ensure_policy(conn, _room_token(config))
         assert policy.guest_reply == "held"
         assert policy.host_user_id == HOST
 
@@ -153,7 +155,7 @@ class TestAThreadBecomesARoom:
         assert _rows(db_path, "SELECT token FROM rooms") == []
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_ids[0])
-        assert task.conversation_token != _room_token()
+        assert task.conversation_token != _room_token(config)
         assert not task.is_group_chat
 
     def test_a_stranger_cannot_mint_a_room_for_the_host(self, config, db_path):
@@ -179,7 +181,7 @@ class TestTurnsInTheRoom:
 
         assert task_ids == []
         rows = _rows(db_path, "SELECT author_label, author_user_id, task_id FROM messages "
-                     "WHERE room_token=? AND role='user' ORDER BY id", (_room_token(),))
+                     "WHERE room_token=? AND role='user' ORDER BY id", (_room_token(config),))
         assert rows[-1] == {"author_label": ALICE, "author_user_id": None, "task_id": None}
 
     def test_a_guest_addressing_the_bot_runs_as_the_host(self, config, db_path):
@@ -206,7 +208,7 @@ class TestTurnsInTheRoom:
 
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_ids[0])
-            assert not db.is_room_member(conn, _room_token(), "dan")
+            assert not db.is_room_member(conn, _room_token(config), "dan")
         assert task.user_id == HOST
         assert task.guest_participant_id is not None
 
@@ -217,7 +219,7 @@ class TestTurnsInTheRoom:
               message_id="<a2@ext.example>", references=ROOT)
 
         epochs = _rows(db_path, "SELECT person FROM room_epochs "
-                       "WHERE room_token=? AND epoch > 0", (_room_token(),))
+                       "WHERE room_token=? AND epoch > 0", (_room_token(config),))
         assert epochs == [{"person": f"email:{DAVE}"}]
 
     def test_the_room_is_found_from_any_id_in_the_chain(self, config, db_path):
@@ -277,7 +279,7 @@ class TestTheReplyIsAReplyAll:
         assert kwargs["references"] == f"{ROOT} <a2@ext.example> <c3@test.com>"
         sent = _rows(db_path, "SELECT to_addr, conversation_token FROM sent_emails")
         assert sent == [{"to_addr": f"{HOST_ADDR}, {ALICE}",
-                         "conversation_token": _room_token()}]
+                         "conversation_token": _room_token(config)}]
 
     @pytest.mark.asyncio
     async def test_an_untrusted_recipient_holds_the_whole_reply(self, config, db_path):
@@ -297,7 +299,7 @@ class TestTheReplyIsAReplyAll:
         assert len(drafts) == 1
         assert json.loads(drafts[0]["to_addrs"]) == [HOST_ADDR]
         assert json.loads(drafts[0]["cc_addrs"]) == [ALICE, BOB]
-        assert drafts[0]["room_token"] == _room_token()
+        assert drafts[0]["room_token"] == _room_token(config)
 
     @pytest.mark.asyncio
     async def test_a_single_correspondent_reply_is_unchanged(self, config, db_path):
@@ -354,7 +356,7 @@ class TestTheSideRoomsEmailView:
         _start_thread(config)
         with patch("istota.side_rooms._send_private_mail") as send:
             ok = await side_rooms.push_to_email_view(
-                config, user_id=HOST, parent_token=_room_token(),
+                config, user_id=HOST, parent_token=_room_token(config),
                 body="You are free after 7.", reference_id="r1",
             )
 
@@ -482,7 +484,7 @@ class TestHeldPostsAndWhispers:
 
         _start_thread(config)
         with db.get_db(db_path) as conn:
-            side = db.ensure_side_room(conn, _room_token(), HOST)
+            side = db.ensure_side_room(conn, _room_token(config), HOST)
             ident = db.create_task(conn, user_id=HOST, source_type="web",
                                    prompt="post it", conversation_token=side.token)
             conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
@@ -563,7 +565,7 @@ class TestAHeldMailStaysOutOfTheRoom:
         with db.get_db(db_path) as conn:
             assert [db.get_task(conn, t).status for t in first + second] == [
                 "pending_confirmation", "pending_confirmation"]
-            assert not threads.is_present(conn, _room_token(), outsider)
+            assert not threads.is_present(conn, _room_token(config), outsider)
 
     def test_a_held_body_is_not_in_the_rooms_transcript(self, config, db_path):
         _start_thread(config)
@@ -571,7 +573,7 @@ class TestAHeldMailStaysOutOfTheRoom:
               message_id="<m1@elsewhere.example>", references=ROOT, body="EVIL-BODY")
 
         rows = _rows(db_path, "SELECT body FROM messages WHERE room_token=?",
-                     (_room_token(),))
+                     (_room_token(config),))
         assert not any("EVIL-BODY" in r["body"] for r in rows)
 
 
@@ -604,7 +606,7 @@ class TestTheChainFindsTheRoom:
 
         assert len(_rows(db_path, "SELECT token FROM rooms WHERE origin='email'")) == 1
         rows = _rows(db_path, "SELECT author_label FROM messages WHERE room_token=? "
-                     "AND role='user' ORDER BY id", (_room_token(),))
+                     "AND role='user' ORDER BY id", (_room_token(config),))
         assert rows[-1]["author_label"] == BOB
 
 
@@ -613,14 +615,14 @@ class TestTheChainFindsTheRoom:
         with db.get_db(db_path) as conn:
             db.record_sent_email(
                 conn, user_id=HOST, message_id="<bot-out@test.com>", to_addr=ALICE,
-                subject="Re: Dinner plans", conversation_token=_room_token(),
+                subject="Re: Dinner plans", conversation_token=_room_token(config),
             )
         _poll(config, sender=ALICE, to=(HOST_ADDR, BOB), cc=(BOT,),
               message_id="<a5@ext.example>", references="<bot-out@test.com>")
 
         assert len(_rows(db_path, "SELECT token FROM rooms WHERE origin='email'")) == 1
         rows = _rows(db_path, "SELECT author_label FROM messages WHERE room_token=? "
-                     "AND role='user' ORDER BY id", (_room_token(),))
+                     "AND role='user' ORDER BY id", (_room_token(config),))
         assert rows[-1]["author_label"] == ALICE
 
 
@@ -665,7 +667,7 @@ class TestAQuestionInAThreadRoomParks:
 
         with db.get_db(db_path) as conn:
             assert db.get_task(conn, task_ids[0]).status == "pending_confirmation"
-            side = db.get_side_room(conn, _room_token(), HOST)
+            side = db.get_side_room(conn, _room_token(config), HOST)
             assert side is not None
             assert db.get_messages(conn, side.token)
         mock_post_email.assert_not_called()

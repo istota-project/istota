@@ -3586,12 +3586,6 @@ def _row_to_web_chat_room(row: sqlite3.Row) -> WebChatRoom:
     )
 
 
-def _new_web_chat_token(user_id: str) -> str:
-    """Per-room channel token. The ``web-`` prefix is informational, not a
-    security boundary — handlers always derive ``user_id`` from the session."""
-    return f"web-{user_id}-{uuid.uuid4().hex[:12]}"
-
-
 def list_web_chat_rooms(
     conn: sqlite3.Connection, user_id: str, include_archived: bool = False,
 ) -> list[WebChatRoom]:
@@ -3643,14 +3637,13 @@ def create_web_chat_room(
     self-referential `web` binding, so newly-created web rooms appear in the
     cross-surface room list without waiting for the one-time migration.
     """
-    token = _new_web_chat_token(user_id)
     display = name.strip() or "general"
+    token = register_room(conn, None, user_id, origin="web", name=display).token
     row = conn.execute(
         "INSERT INTO web_chat_rooms (user_id, token, name) VALUES (?, ?, ?) "
         "RETURNING *",
         (user_id, token, display),
     ).fetchone()
-    register_room(conn, token, user_id, origin="web", name=display)
     add_room_binding(conn, token, "web", token)
     return _row_to_web_chat_room(row)
 
@@ -4460,19 +4453,23 @@ def is_canonical_room_token(token: object) -> bool:
 
 def register_room(
     conn: sqlite3.Connection,
-    token: str,
+    token: str | None,
     user_id: str,
     *,
     origin: str,
     name: str | None = None,
 ) -> Room:
-    """Idempotently register a room. If a row already exists for `token` it is
+    """Mint a room when `token` is None; explicit tokens support legacy imports.
+
+    Idempotently register a room. If a row already exists for `token` it is
     returned unchanged (name/origin are not overwritten — first writer wins).
 
     The registering user is recorded as a member either way: `rooms.user_id` is
     only the creator/origin owner, but visibility is resolved through
     `room_members` (ISSUE-134), so a second participant registering against an
     existing room still becomes a member."""
+    if token is None:
+        token = mint_room_token()
     conn.execute(
         "INSERT OR IGNORE INTO rooms (token, user_id, name, origin) "
         "VALUES (?, ?, ?, ?)",
@@ -5163,7 +5160,7 @@ def ensure_side_room(
         if list_room_members(conn, existing.token) != [user_id]:
             raise ValueError("side_room_not_private")
         return existing
-    token = _new_web_chat_token(user_id)
+    token = mint_room_token()
     name = f"re: {room_display_name(parent, None) or 'room'}"[:80]
     conn.execute(
         "INSERT OR IGNORE INTO rooms (token, user_id, name, origin, side_of, side_for_user) "
@@ -5217,7 +5214,7 @@ def set_room_archived(conn: sqlite3.Connection, token: str, archived: bool) -> N
 def archive_orphaned_talk_rooms(
     conn: sqlite3.Connection, live_tokens: set[str],
 ) -> int:
-    """Archive Talk-origin registry rooms whose token is no longer among the
+    """Archive Talk-origin registry rooms whose Talk ref is no longer among the
     bot's live Talk conversations (`live_tokens`) — i.e. the conversation was
     deleted in Nextcloud, or the bot was removed from it. Without this a deleted
     Talk room keeps surfacing in the web room list forever, because its registry
@@ -5231,11 +5228,14 @@ def archive_orphaned_talk_rooms(
     `list_conversations` (not a partial/failed fetch) — an empty set here means
     the bot is genuinely in zero Talk rooms and archives all of them."""
     rows = conn.execute(
-        "SELECT token FROM rooms WHERE origin = 'talk' AND archived = 0"
+        "SELECT r.token, COALESCE(b.surface_ref, r.token) AS talk_ref "
+        "FROM rooms r LEFT JOIN room_bindings b "
+        "ON b.room_token = r.token AND b.surface = 'talk' "
+        "WHERE r.origin = 'talk' AND r.archived = 0"
     ).fetchall()
     archived = 0
     for row in rows:
-        if row["token"] not in live_tokens:
+        if row["talk_ref"] not in live_tokens:
             conn.execute(
                 "UPDATE rooms SET archived = 1 WHERE token = ?", (row["token"],)
             )
@@ -5470,8 +5470,8 @@ def resolve_room_token(
     conn: sqlite3.Connection, surface: str, surface_ref: str,
 ) -> str | None:
     """Find the canonical room token for a surface's native reference, or None
-    if no binding exists (origin-surface case: caller treats surface_ref as the
-    canonical token)."""
+    if no binding exists. New member rooms mint an identity before binding
+    this reference; private guest threads keep their own identifiers."""
     row = conn.execute(
         "SELECT room_token FROM room_bindings WHERE surface = ? AND surface_ref = ?",
         (surface, surface_ref),

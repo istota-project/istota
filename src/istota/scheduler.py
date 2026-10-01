@@ -7019,7 +7019,7 @@ def _confirmation_notice_token(task_info: dict) -> str | None:
     token = task_info.get("conversation_token")
     if not token:
         return None
-    if token.startswith(("web-", "repl-")):
+    if db.is_canonical_room_token(token) or token.startswith(("web-", "repl-")):
         return None
     if is_synthetic_email_thread_token(token):
         return None

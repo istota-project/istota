@@ -48,7 +48,7 @@ class TestDefaultRoomToken:
     def test_provisions_and_returns_general(self, tmp_path):
         config = _config(tmp_path)
         token = default_web_room_token(config, "alice")
-        assert token and token.startswith("web-alice-")
+        assert token and db.is_canonical_room_token(token)
         with db.get_db(config.db_path) as conn:
             rooms = db.list_web_chat_rooms(conn, "alice")
         assert [r.name for r in rooms] == ["general"]
@@ -154,7 +154,7 @@ class TestResolveTarget:
     def test_resolves_default_room(self, tmp_path):
         config = _config(tmp_path)
         token = WebTransport(config).resolve_target(_task("alice"))
-        assert token and token.startswith("web-alice-")
+        assert token and db.is_canonical_room_token(token)
 
 
 class TestEdit:

@@ -9,7 +9,6 @@ side by side and diffed, rather than compared against a hand list that would
 drift the moment either producer gained a write.
 """
 
-import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,18 +18,6 @@ from istota.config import Config, NextcloudConfig
 from istota.transport.ingest import record_inbound
 
 from .support.rooms import RoomShape, plain_talk_room, promoted_room
-
-def web_token_re(user_id: str) -> re.Pattern:
-    """What `db._new_web_chat_token` produces for this user.
-
-    Built per user rather than written once with `[^-]+`, because a Nextcloud
-    account name may contain a hyphen and that pattern would reject a perfectly
-    real token. Asserted against a freshly minted one below, so a change to the
-    product's format turns this red instead of leaving the builder quietly
-    generating a shape nothing mints any more.
-    """
-    return re.compile(rf"^web-{re.escape(user_id)}-[0-9a-f]{{12}}$")
-
 
 @pytest.fixture
 def db_path(tmp_path):
@@ -46,10 +33,10 @@ def conn(db_path):
 
 
 class TestPlainTalkRoom:
-    def test_canonical_token_is_the_talk_ref(self, conn):
+    def test_canonical_token_is_separate_from_the_talk_ref(self, conn):
         room = plain_talk_room(conn, "alice")
-        assert room.canonical == room.talk_ref
-        assert room.diverges is False
+        assert room.canonical != room.talk_ref
+        assert room.diverges is True
         assert room.origin == "talk"
 
     def test_writes_registry_binding_and_membership(self, conn):
@@ -127,9 +114,8 @@ class TestGeneratedDefaults:
         talk_refs = [s.talk_ref for s in shapes]
         assert len(set(canonicals)) == len(canonicals)
         assert len(set(talk_refs)) == len(talk_refs)
-        # A plain room's two tokens are the same string by design, so 10 plain
-        # rooms contribute 10 and 10 promoted ones contribute 20.
-        assert len({t for s in shapes for t in (s.canonical, s.talk_ref)}) == 30
+        # Every new room contributes a canonical identity and a Talk ref.
+        assert len({t for s in shapes for t in (s.canonical, s.talk_ref)}) == 40
         assert len(db.list_member_rooms(conn, "alice")) == 20
 
     @pytest.mark.parametrize("user_id", ["alice", "alice-smith"])
@@ -138,9 +124,8 @@ class TestGeneratedDefaults:
     ):
         real = db.create_web_chat_room(conn, user_id, "Ideas").token
         built = promoted_room(conn, user_id).canonical
-        pattern = web_token_re(user_id)
-        assert pattern.match(real), real
-        assert pattern.match(built), built
+        assert db.is_canonical_room_token(real)
+        assert db.is_canonical_room_token(built)
 
     def test_a_repeated_canonical_token_is_refused(self, conn):
         room = plain_talk_room(conn, "alice", token="cpzpcfx2")
@@ -244,10 +229,14 @@ class TestPinnedAgainstTheProducers:
                 user_id="alice", text="hi", channel_name=name,
             )
             token, task_id = _inbound.room_token, _inbound.task_id
-        assert token == "cpzpcfx2" and task_id is not None  # the room branch ran
+        assert db.is_canonical_room_token(token) and task_id is not None
 
-        with db.get_db(built) as conn:
-            plain_talk_room(conn, "alice", token="cpzpcfx2", name=name)
+        with (
+            db.get_db(built) as conn,
+            patch("istota.db.mint_room_token", return_value=token),
+            patch("tests.support.rooms._new_talk_ref", return_value="cpzpcfx2"),
+        ):
+            plain_talk_room(conn, "alice", name=name)
 
         with db.get_db(produced) as a, db.get_db(built) as b:
             assert _room_model(b) == _room_model(a)

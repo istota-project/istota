@@ -326,11 +326,14 @@ def origin_descriptor(task: "db.Task", conn=None) -> str | None:
     """
     from ..email_support import is_synthetic_email_thread_token
     from .registry import _surface_for_source_type
+    from ..db import is_canonical_room_token
 
     surface = _surface_for_source_type(task.source_type)
     room = _room_descriptor(conn, surface, task)
     if room is not None:
         return room
+    if is_canonical_room_token(task.conversation_token) and not task.talk_delivery_token:
+        return f"room:{task.conversation_token}"
     if surface == "web":
         tok = task.conversation_token
         return f"web:{tok}" if tok else "web"
@@ -758,9 +761,8 @@ def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
        the only rung that knows about a binding added after the task was
        created. Reached whenever the column is NULL, which is every talk- and
        web-sourced task.
-    2. **``conversation_token`` itself**, when the task has one and is not
-       email-sourced — the Talk-source case, where the token *is* the room, and
-       the case of a DM with no registered room.
+    2. **A legacy surface token**, never a minted room identity. An
+       unregistered Talk DM can still deliver by its native address.
     3. **The user's resolved notification channel** (alerts → briefing → DM),
        for an email task whose token is a synthetic thread hash naming no Talk
        room at all. Posting to that hash silently no-ops.
@@ -774,6 +776,7 @@ def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
     as ``None``, preserving the pre-existing silent no-op at delivery instead of
     trading it for a different failure mode.
     """
+    from ..db import is_canonical_room_token
     from ..email_support import is_synthetic_email_thread_token
 
     if task.talk_delivery_token:
@@ -782,6 +785,8 @@ def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
     if room_talk:
         return room_talk
     token = task.conversation_token
+    if is_canonical_room_token(token):
+        return None
     if not token or task.source_type != "email":
         return token
     if not is_synthetic_email_thread_token(token):

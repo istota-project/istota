@@ -36,17 +36,17 @@ class TestRecordInboundTalk:
                 user_id="alice", text="hi", channel_name="#istota",
             )
             token, task_id = _inbound.room_token, _inbound.task_id
-        assert token == "cpzpcfx2"
+        assert db.is_canonical_room_token(token)
         with db.get_db(db_path) as conn:
-            room = db.get_room(conn, "cpzpcfx2")
+            room = db.get_room(conn, token)
             assert room is not None
             assert room.origin == "talk"
             assert room.name == "#istota"
-            assert db.resolve_room_token(conn, "talk", "cpzpcfx2") == "cpzpcfx2"
+            assert db.resolve_room_token(conn, "talk", "cpzpcfx2") == token
             # user message stored
-            msgs = db.get_messages(conn, "cpzpcfx2")
+            msgs = db.get_messages(conn, token)
             assert [(m.role, m.body, m.task_id) for m in msgs] == [("user", "hi", task_id)]
-            assert db.get_task(conn, task_id).conversation_token == "cpzpcfx2"
+            assert db.get_task(conn, task_id).conversation_token == token
 
     def test_known_room_not_duplicated(self, config, db_path):
         with db.get_db(db_path) as conn:
@@ -77,7 +77,7 @@ class TestRecordInboundTalk:
             _, second = _inbound.room_token, _inbound.task_id
         assert first == second  # create_task dedups
         with db.get_db(db_path) as conn:
-            msgs = db.get_messages(conn, "room1")
+            msgs = db.get_messages(conn, _inbound.room_token)
         assert len(msgs) == 1  # user message not duplicated
 
 
@@ -154,9 +154,9 @@ class TestIngestMessageStillWorks:
         with db.get_db(db_path) as conn:
             task_id = ingest_message(conn, config, msg)
         with db.get_db(db_path) as conn:
-            assert db.get_room(conn, "roomZ").name == "My Room"
-            assert [m.body for m in db.get_messages(conn, "roomZ")] == ["hello"]
-            assert db.get_task(conn, task_id).conversation_token == "roomZ"
+            assert db.get_room(conn, db.resolve_room_token(conn, "talk", "roomZ")).name == "My Room"
+            assert [m.body for m in db.get_messages(conn, db.resolve_room_token(conn, "talk", "roomZ"))] == ["hello"]
+            assert db.get_task(conn, task_id).conversation_token == db.resolve_room_token(conn, "talk", "roomZ")
 
     def test_email_ingest_unchanged(self, config, db_path):
         msg = IncomingMessage(

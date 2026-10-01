@@ -88,7 +88,7 @@ class TestTalkEventSubscriber:
     def test_tool_start_edits_ack(self, mock_run, tmp_path, fake_talk, room):
         sub = TalkEventSubscriber(
             _make_config(tmp_path), _make_task(conversation_token=room.canonical),
-            ack_msg_id=100,
+            ack_msg_id=100, target_token=room.talk_ref,
         )
         sub.on_event(_ev("tool_start", {
             "tool_name": "Read", "description": "📄 Reading x.txt", "tool_call_id": "t1",
@@ -111,7 +111,7 @@ class TestTalkEventSubscriber:
     def test_tool_end_annotates_with_duration(self, mock_run, tmp_path, fake_talk, room):
         sub = TalkEventSubscriber(
             _make_config(tmp_path), _make_task(conversation_token=room.canonical),
-            ack_msg_id=100,
+            ack_msg_id=100, target_token=room.talk_ref,
         )
         sub.on_event(_ev("tool_start", {"description": "📄 Reading x.txt"}, seq=1))
         sub.on_event(_ev("tool_end", {
@@ -125,7 +125,7 @@ class TestTalkEventSubscriber:
     def test_tool_end_failure_marks_cross(self, mock_run, tmp_path, fake_talk, room):
         sub = TalkEventSubscriber(
             _make_config(tmp_path), _make_task(conversation_token=room.canonical),
-            ack_msg_id=100,
+            ack_msg_id=100, target_token=room.talk_ref,
         )
         sub.on_event(_ev("tool_start", {"description": "⚙️ build"}, seq=1))
         sub.on_event(_ev("tool_end", {
@@ -137,7 +137,7 @@ class TestTalkEventSubscriber:
     def test_no_ack_msg_id_means_no_edits(self, mock_run, tmp_path, fake_talk, room):
         sub = TalkEventSubscriber(
             _make_config(tmp_path), _make_task(conversation_token=room.canonical),
-            ack_msg_id=None,
+            ack_msg_id=None, target_token=room.talk_ref,
         )
         sub.on_event(_ev("tool_start", {"description": "📄 Reading x.txt"}))
         sub.on_event(_ev("error", {"message": "boom"}, seq=2))
@@ -151,7 +151,7 @@ class TestTalkEventSubscriber:
     def test_progress_text_posts_then_edits(self, mock_run, tmp_path, fake_talk, room):
         sub = TalkEventSubscriber(
             _make_config(tmp_path), _make_task(conversation_token=room.canonical),
-            ack_msg_id=100,
+            ack_msg_id=100, target_token=room.talk_ref,
         )
         sub.on_event(_ev("progress_text", {"text": "Working on it"}, seq=1))
         assert [(c.method, c.token) for c in fake_talk.calls] == [
@@ -173,7 +173,7 @@ class TestTalkEventSubscriber:
     def test_result_edits_ack_with_done_summary(self, mock_run, tmp_path, fake_talk, room):
         sub = TalkEventSubscriber(
             _make_config(tmp_path), _make_task(conversation_token=room.canonical),
-            ack_msg_id=100,
+            ack_msg_id=100, target_token=room.talk_ref,
         )
         sub.on_event(_ev("tool_start", {"description": "📄 Reading a"}, seq=1))
         sub.on_event(_ev("tool_start", {"description": "📄 Reading b"}, seq=2))
@@ -187,7 +187,7 @@ class TestTalkEventSubscriber:
     def test_result_summary_singular_and_zero(self, mock_run, tmp_path, fake_talk, room):
         sub = TalkEventSubscriber(
             _make_config(tmp_path), _make_task(conversation_token=room.canonical),
-            ack_msg_id=100,
+            ack_msg_id=100, target_token=room.talk_ref,
         )
         sub.on_event(_ev("result", {"text": "done"}, seq=1))
         body = _edits(fake_talk)[-1]
@@ -198,7 +198,7 @@ class TestTalkEventSubscriber:
     def test_error_edits_ack_with_failed_summary(self, mock_run, tmp_path, fake_talk, room):
         sub = TalkEventSubscriber(
             _make_config(tmp_path), _make_task(conversation_token=room.canonical),
-            ack_msg_id=100,
+            ack_msg_id=100, target_token=room.talk_ref,
         )
         sub.on_event(_ev("error", {"message": "Something broke"}))
         assert "❌ Failed" in _edits(fake_talk)[-1]
@@ -207,7 +207,7 @@ class TestTalkEventSubscriber:
     def test_cancelled_edits_ack(self, mock_run, tmp_path, fake_talk, room):
         sub = TalkEventSubscriber(
             _make_config(tmp_path), _make_task(conversation_token=room.canonical),
-            ack_msg_id=100,
+            ack_msg_id=100, target_token=room.talk_ref,
         )
         sub.on_event(_ev("cancelled", {}))
         assert "Cancelled" in _edits(fake_talk)[-1]
@@ -220,7 +220,7 @@ class TestTalkEventSubscriber:
         sub = TalkEventSubscriber(
             _make_config(tmp_path),
             _make_task(conversation_token=room.canonical, guest_participant_id=7),
-            ack_msg_id=100,
+            ack_msg_id=100, target_token=room.talk_ref,
         )
         sub.on_event(_ev("confirmation", {"prompt": "proposal"}))
         assert [(c.method, c.token) for c in fake_talk.calls] == [
@@ -236,7 +236,7 @@ class TestTalkEventSubscriber:
         sub = TalkEventSubscriber(
             _make_config(tmp_path),
             _make_task(conversation_token=room.canonical, guest_participant_id=7),
-            ack_msg_id=100,
+            ack_msg_id=100, target_token=room.talk_ref,
         )
         sub.on_event(_ev("cancelled", {}))
         assert [c.method for c in fake_talk.calls] == ["delete_message"]
@@ -246,7 +246,7 @@ class TestTalkEventSubscriber:
     def test_a_members_held_turn_keeps_its_ack(self, mock_run, tmp_path, fake_talk, room):
         sub = TalkEventSubscriber(
             _make_config(tmp_path), _make_task(conversation_token=room.canonical),
-            ack_msg_id=100,
+            ack_msg_id=100, target_token=room.talk_ref,
         )
         sub.on_event(_ev("confirmation", {"prompt": "go ahead?"}))
         assert "Awaiting confirmation" in _edits(fake_talk)[-1]
@@ -258,7 +258,7 @@ class TestTalkEventSubscriber:
         sub = TalkEventSubscriber(
             _make_config(tmp_path),
             _make_task(conversation_token=room.canonical, guest_participant_id=7),
-            ack_msg_id=100,
+            ack_msg_id=100, target_token=room.talk_ref,
         )
         sub.on_event(_ev("progress_text", {"text": "Drafting a reply to Max"}))
         sub.on_event(_ev("tool_start", {"description": "Checking Alice's calendar"}, seq=2))
@@ -270,7 +270,7 @@ class TestTalkEventSubscriber:
     def test_edit_exception_swallowed(self, mock_run, tmp_path, room):
         sub = TalkEventSubscriber(
             _make_config(tmp_path), _make_task(conversation_token=room.canonical),
-            ack_msg_id=100,
+            ack_msg_id=100, target_token=room.talk_ref,
         )
         # Must not raise. No assertion on `fake_talk` here: `run_coro` is the
         # thing raising, so the coroutine is built and never awaited and
@@ -282,7 +282,7 @@ class TestTalkEventSubscriber:
     def test_on_finish_is_noop(self, mock_run, tmp_path, fake_talk, room):
         sub = TalkEventSubscriber(
             _make_config(tmp_path), _make_task(conversation_token=room.canonical),
-            ack_msg_id=100,
+            ack_msg_id=100, target_token=room.talk_ref,
         )
         sub.on_finish()  # no result delivery here — scheduler owns that
         assert fake_talk.calls == []

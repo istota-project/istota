@@ -98,7 +98,7 @@ def thread_message_ids(email) -> list[str]:
 
 
 def thread_room_token(root: str) -> str:
-    """The canonical token a thread's room is registered under.
+    """The legacy canonical token, retained for migration tooling.
 
     A digest, never the id: the token reaches task rows, logs and the prompt
     header, and a Message-ID can carry a hostname or a local part.
@@ -224,15 +224,14 @@ def resolve_thread(
     if not (ours or any(address in owned for address, _ in people)):
         return None
     root = ids[0]
-    token = thread_room_token(root)
-    if db.get_room(conn, token) is not None:
+    if find_thread_room(conn, config, email) is not None:
         # The thread's room exists but the caller could not use it (its host is
         # no longer configured): never re-found it with this message's people.
         return None
-    db.register_room(
-        conn, token, owner_user_id, origin=SURFACE,
+    token = db.register_room(
+        conn, None, owner_user_id, origin=SURFACE,
         name=_room_name(getattr(email, "subject", None)),
-    )
+    ).token
     db.add_room_binding(conn, token, SURFACE, root)
     # The people on the first message are who the thread was written for.
     _sync(conn, config, token, people, acknowledged=True)

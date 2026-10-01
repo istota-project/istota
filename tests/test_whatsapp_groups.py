@@ -27,7 +27,6 @@ from istota.transport.routing import resolve_delivery_plan
 from istota.transport.whatsapp import WhatsAppTransport, outbound
 from istota.transport.whatsapp import baileys_protocol as proto
 from istota.transport.whatsapp._types import WhatsAppSendResult
-from istota.transport.whatsapp.groups import group_room_token
 from istota.transport.whatsapp.providers._types import (
     WhatsAppProviderAdapter,
     WhatsAppProviderCaps,
@@ -42,7 +41,9 @@ ALICE_JID = "15551234567@s.whatsapp.net"
 BOB_JID = "15557654321@s.whatsapp.net"
 GUEST_JID = "15559990000@s.whatsapp.net"
 GUEST_LID = "277009032835160@lid"
-ROOM = group_room_token(GROUP)
+def _room(config):
+    with db.get_db(config.db_path) as conn:
+        return db.resolve_room_token(conn, "whatsapp", GROUP)
 
 CAPS = WhatsAppProviderCaps(
     metered=False, has_service_window=False,
@@ -138,16 +139,16 @@ class TestTheRosterRegistersTheRoom:
 
         assert result.disposition == "group_registered"
         with db.get_db(config.db_path) as conn:
-            room = db.get_room(conn, ROOM)
+            room = db.get_room(conn, _room(config))
             assert room.user_id == "bob" and room.origin == "whatsapp"
             assert room.name == "Family"
-            assert db.resolve_room_token(conn, "whatsapp", GROUP) == ROOM
-            assert sorted(db.list_room_members(conn, ROOM)) == ["alice", "bob"]
-            assert room_policy.ensure_policy(conn, ROOM).host_user_id == "bob"
-            assert room_policy.get_policy(conn, ROOM).guest_reply == "held"
+            assert db.resolve_room_token(conn, "whatsapp", GROUP) == _room(config)
+            assert sorted(db.list_room_members(conn, _room(config))) == ["alice", "bob"]
+            assert room_policy.ensure_policy(conn, _room(config)).host_user_id == "bob"
+            assert room_policy.get_policy(conn, _room(config)).guest_reply == "held"
         kinds = {r["surface_ref"]: r["kind"] for r in _rows(
             config, "SELECT surface_ref, kind FROM room_participants "
-            "WHERE room_token=? AND left_at IS NULL", (ROOM,))}
+            "WHERE room_token=? AND left_at IS NULL", (_room(config),))}
         assert kinds == {ALICE_JID: "principal", BOB_JID: "principal",
                          GUEST_JID: "guest"}
 
@@ -158,13 +159,13 @@ class TestTheRosterRegistersTheRoom:
         _apply(config, _roster([ALICE_JID, GUEST_JID]))
 
         epochs = _rows(config, "SELECT epoch, reason FROM room_epochs WHERE room_token=?",
-                       (ROOM,))
+                       (_room(config),))
         assert epochs == [{"epoch": 0, "reason": "baseline:whatsapp"}]
 
     def test_with_no_adder_the_first_principal_hosts(self, config):
         _apply(config, _roster([GUEST_JID, ALICE_JID, BOB_JID], added_by=GUEST_JID))
 
-        assert _rows(config, "SELECT user_id FROM rooms WHERE token=?", (ROOM,)) == [
+        assert _rows(config, "SELECT user_id FROM rooms WHERE token=?", (_room(config),)) == [
             {"user_id": "alice"}]
 
     def test_a_group_with_no_istota_user_is_not_registered(self, config):
@@ -192,17 +193,17 @@ class TestALaterRoster:
         _apply(config, _roster([ALICE_JID, BOB_JID, GUEST_JID]))
 
         epochs = _rows(config, "SELECT person FROM room_epochs "
-                       "WHERE room_token=? AND epoch > 0", (ROOM,))
+                       "WHERE room_token=? AND epoch > 0", (_room(config),))
         assert epochs == [{"person": f"whatsapp:{GUEST_JID}"}]
         with db.get_db(config.db_path) as conn:
-            assert db.front_stage_cutoff(conn, ROOM)
+            assert db.front_stage_cutoff(conn, _room(config))
 
     def test_somebody_off_the_roster_has_left(self, config):
         _apply(config, _roster([ALICE_JID, BOB_JID, GUEST_JID]))
         _apply(config, _roster([ALICE_JID, BOB_JID]))
 
         (row,) = _rows(config, "SELECT left_at FROM room_participants "
-                       "WHERE room_token=? AND surface_ref=?", (ROOM, GUEST_JID))
+                       "WHERE room_token=? AND surface_ref=?", (_room(config), GUEST_JID))
         assert row["left_at"] is not None
 
     def test_a_number_that_appears_upgrades_the_lid_row_and_its_epoch(self, config):
@@ -213,20 +214,20 @@ class TestALaterRoster:
         _apply(config, _roster([ALICE_JID, BOB_JID, {"jid": GUEST_JID, "lid": GUEST_LID}]))
 
         present = _rows(config, "SELECT surface_ref FROM room_participants "
-                        "WHERE room_token=? AND left_at IS NULL ORDER BY id", (ROOM,))
+                        "WHERE room_token=? AND left_at IS NULL ORDER BY id", (_room(config),))
         assert [r["surface_ref"] for r in present] == [ALICE_JID, BOB_JID, GUEST_JID]
         epochs = _rows(config, "SELECT person FROM room_epochs "
-                       "WHERE room_token=? AND epoch > 0", (ROOM,))
+                       "WHERE room_token=? AND epoch > 0", (_room(config),))
         assert epochs == [{"person": f"whatsapp:{GUEST_JID}"}]
         with db.get_db(config.db_path) as conn:
-            assert db.front_stage_cutoff(conn, ROOM)
+            assert db.front_stage_cutoff(conn, _room(config))
 
     def test_the_bot_removed_archives_the_room(self, config):
         _apply(config, _roster([ALICE_JID, BOB_JID]))
         (result,) = _apply(config, _roster([], bot_present=False))
 
         assert result.disposition == "group_left"
-        assert _rows(config, "SELECT archived FROM rooms WHERE token=?", (ROOM,)) == [
+        assert _rows(config, "SELECT archived FROM rooms WHERE token=?", (_room(config),)) == [
             {"archived": 1}]
 
 
@@ -239,8 +240,8 @@ class TestTheHostLeaving:
         assert result.disposition == "host_left"
         assert result.leave_group_jid == GROUP
         with db.get_db(config.db_path) as conn:
-            assert room_policy.get_policy(conn, ROOM).host_user_id is None
-            assert db.get_room(conn, ROOM).archived
+            assert room_policy.get_policy(conn, _room(config)).host_user_id is None
+            assert db.get_room(conn, _room(config)).archived
 
     def test_a_host_listed_by_lid_alone_has_not_left(self, config):
         """A LID-only entry could be anyone, the host included, and a wrong
@@ -265,7 +266,7 @@ class TestTheHostLeaving:
         (again,) = _apply(config, _roster([ALICE_JID, GUEST_JID]))
 
         assert again.leave_group_jid == GROUP
-        assert _rows(config, "SELECT archived FROM rooms WHERE token=?", (ROOM,)) == [
+        assert _rows(config, "SELECT archived FROM rooms WHERE token=?", (_room(config),)) == [
             {"archived": 1}]
 
     def test_the_bot_re_added_revives_the_room(self, config):
@@ -273,7 +274,7 @@ class TestTheHostLeaving:
         _apply(config, _roster([], bot_present=False))
         _apply(config, _roster([ALICE_JID, BOB_JID]))
 
-        assert _rows(config, "SELECT archived FROM rooms WHERE token=?", (ROOM,)) == [
+        assert _rows(config, "SELECT archived FROM rooms WHERE token=?", (_room(config),)) == [
             {"archived": 0}]
 
     def test_a_member_who_leaves_the_group_leaves_the_room(self, config):
@@ -283,11 +284,11 @@ class TestTheHostLeaving:
         _apply(config, _roster([ALICE_JID, GUEST_JID]))
 
         with db.get_db(config.db_path) as conn:
-            assert db.list_room_members(conn, ROOM) == ["alice"]
+            assert db.list_room_members(conn, _room(config)) == ["alice"]
             ident = db.create_task(conn, user_id="bob", source_type="web",
-                                   prompt="post it", conversation_token=ROOM)
+                                   prompt="post it", conversation_token=_room(config))
             with pytest.raises(ValueError):
-                db.ensure_side_room(conn, ROOM, "bob")
+                db.ensure_side_room(conn, _room(config), "bob")
             del ident
 
     def test_another_member_leaving_is_not_the_hosts_departure(self, config):
@@ -318,10 +319,10 @@ class TestATurnInTheGroup:
         task = _task(group, result.task_id)
         assert task.user_id == "alice"
         assert task.source_type == "whatsapp"
-        assert task.conversation_token == ROOM
+        assert task.conversation_token == _room(group)
         assert task.is_group_chat
         (row,) = _rows(group, "SELECT author_user_id, task_id FROM messages "
-                       "WHERE room_token=?", (ROOM,))
+                       "WHERE room_token=?", (_room(group),))
         assert row == {"author_user_id": "alice", "task_id": result.task_id}
 
     def test_an_unaddressed_turn_is_recorded_and_not_answered(self, group):
@@ -329,7 +330,7 @@ class TestATurnInTheGroup:
 
         assert result.disposition == "group_recorded"
         assert result.task_id is None
-        assert len(_rows(group, "SELECT * FROM messages WHERE room_token=?", (ROOM,))) == 1
+        assert len(_rows(group, "SELECT * FROM messages WHERE room_token=?", (_room(group),))) == 1
         assert _rows(group, "SELECT * FROM tasks") == []
 
     def test_a_mention_addresses_the_bot(self, group):
@@ -360,7 +361,7 @@ class TestATurnInTheGroup:
         assert task.user_id == "alice"
         assert task.guest_participant_id is not None
         (row,) = _rows(group, "SELECT author_user_id, author_label FROM messages "
-                       "WHERE room_token=?", (ROOM,))
+                       "WHERE room_token=?", (_room(group),))
         assert row == {"author_user_id": None, "author_label": "Max"}
         (participant,) = _rows(group, "SELECT kind FROM room_participants "
                                "WHERE id=?", (task.guest_participant_id,))
@@ -378,7 +379,7 @@ class TestATurnInTheGroup:
 
         assert result.disposition == "command"
         assert result.user_id == "alice"
-        assert result.conversation_token == ROOM
+        assert result.conversation_token == _room(group)
 
     def test_a_redelivered_message_is_a_duplicate(self, group):
         _apply(group, _message("Istota hello"))
@@ -418,8 +419,8 @@ class TestTheAnswerGoesToTheGroup:
         task = _task(group, result.task_id)
         plan = resolve_delivery_plan(group, task, make_registry(group))
 
-        assert [(d.surface, d.channel) for d in plan] == [("whatsapp", ROOM)]
-        asyncio.run(WhatsAppTransport(group).deliver(ROOM, "At seven.", task=task))
+        assert [(d.surface, d.channel) for d in plan] == [("whatsapp", _room(group))]
+        asyncio.run(WhatsAppTransport(group).deliver(_room(group), "At seven.", task=task))
         (request,) = sent
         assert request.to == GROUP
         assert request.text == "At seven."
@@ -428,7 +429,7 @@ class TestTheAnswerGoesToTheGroup:
         """D4: the web view of a group is its principals' backstage."""
         with db.get_db(group.db_path) as conn:
             ident = db.create_task(conn, user_id="alice", source_type="web",
-                                   prompt="hi", conversation_token=ROOM,
+                                   prompt="hi", conversation_token=_room(group),
                                    output_target="room")
             task = db.get_task(conn, ident)
         plan = resolve_delivery_plan(group, task, make_registry(group))
@@ -452,9 +453,9 @@ class TestTheAnswerGoesToTheGroup:
         (result,) = _apply(group, _message("Istota, when is the dinner?"))
         task = _task(group, result.task_id)
         with db.get_db(group.db_path) as conn:
-            db.set_room_archived(conn, ROOM, True)
+            db.set_room_archived(conn, _room(group), True)
 
-        asyncio.run(WhatsAppTransport(group).deliver(ROOM, "At seven.", task=task))
+        asyncio.run(WhatsAppTransport(group).deliver(_room(group), "At seven.", task=task))
         assert sent == []
         assert WhatsAppTransport(group).resolve_target(task) is None
 
@@ -478,7 +479,7 @@ class TestTheSideRoomsWhatsAppView:
         assert route.whatsapp_bound and route.side_token is not None
 
         delivered = asyncio.run(side_rooms.push_to_whatsapp_view(
-            group, user_id="alice", parent_token=ROOM,
+            group, user_id="alice", parent_token=_room(group),
             body=side_rooms.whatsapp_confirmation_body("Book it?", result.task_id),
             reference_id=f"istota:task:{result.task_id}:confirmation",
         ))
@@ -498,7 +499,7 @@ class TestTheSideRoomsWhatsAppView:
     def test_a_whisper_reaches_the_members_own_chat_headed_with_the_room(self, group, sent):
         with db.get_db(group.db_path) as conn:
             ident = db.create_task(conn, user_id="alice", source_type="whatsapp",
-                                   prompt="hi", conversation_token=ROOM)
+                                   prompt="hi", conversation_token=_room(group))
             conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
             side_rooms.enqueue_whisper(conn, group, actor_user_id="alice",
                                        task_id=ident, request_key="w1",
@@ -514,7 +515,7 @@ class TestTheSideRoomsWhatsAppView:
         """The held `room post` (and with it every `guest_reply = held`
         proposal) lands in the group once approved."""
         with db.get_db(group.db_path) as conn:
-            side = db.ensure_side_room(conn, ROOM, "alice")
+            side = db.ensure_side_room(conn, _room(group), "alice")
             ident = db.create_task(conn, user_id="alice", source_type="web",
                                    prompt="post it", conversation_token=side.token)
             conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))

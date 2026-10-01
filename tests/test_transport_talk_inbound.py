@@ -756,12 +756,14 @@ class TestPollRoomRegistration:
             await poll_talk_conversations(config)
 
         with db.get_db(config.db_path) as conn:
-            room = db.get_room(conn, "grp")
+            token = db.resolve_room_token(conn, "talk", "grp")
+            assert db.is_canonical_room_token(token)
+            room = db.get_room(conn, token)
             assert room is not None and room.origin == "talk"
             assert room.name == "#sysadmin"
-            assert sorted(db.list_room_members(conn, "grp")) == ["alice", "bob"]
-            assert {r.token for r in db.list_member_rooms(conn, "alice")} == {"grp"}
-            assert {r.token for r in db.list_member_rooms(conn, "bob")} == {"grp"}
+            assert sorted(db.list_room_members(conn, token)) == ["alice", "bob"]
+            assert {r.token for r in db.list_member_rooms(conn, "alice")} == {token}
+            assert {r.token for r in db.list_member_rooms(conn, "bob")} == {token}
 
     @pytest.mark.asyncio
     async def test_changelog_room_not_registered(self, make_config):
@@ -800,9 +802,11 @@ class TestPollRoomRegistration:
             await poll_talk_conversations(config)
 
         with db.get_db(config.db_path) as conn:
-            room = db.get_room(conn, "dmtok")
+            token = db.resolve_room_token(conn, "talk", "dmtok")
+            assert db.is_canonical_room_token(token)
+            room = db.get_room(conn, token)
             assert room is not None and room.origin == "talk"
-            assert db.list_room_members(conn, "dmtok") == ["alice"]
+            assert db.list_room_members(conn, token) == ["alice"]
 
     @pytest.mark.asyncio
     async def test_hidden_existing_room_not_resurfaced_by_poll(self, make_config):
@@ -1021,7 +1025,7 @@ class TestPollTalkConversations:
             assert task.user_id == "alice"
             assert task.source_type == "talk"
             assert task.prompt == "Check my calendar"
-            assert task.conversation_token == "room1"
+            assert db.is_canonical_room_token(task.conversation_token)
             assert task.talk_message_id == 101
 
     @pytest.mark.asyncio
@@ -2121,11 +2125,13 @@ class TestCancelPendingConfirmationsOnNewMessage:
         """When a user sends a new message, pending confirmations are cancelled."""
         config = make_config()
 
-        # Create a pending confirmation task in room1
+        # The task uses the room identity; polling still receives the Talk ref.
         with db.get_db(config.db_path) as conn:
+            room = db.register_room(conn, None, "alice", origin="talk")
+            db.add_room_binding(conn, room.token, "talk", "room1")
             task_id = db.create_task(
                 conn, prompt="Draft email", user_id="alice",
-                source_type="talk", conversation_token="room1",
+                source_type="talk", conversation_token=room.token,
             )
             db.set_task_confirmation(conn, task_id, "Should I send this?")
 
@@ -2229,7 +2235,7 @@ class TestPollUnderPersistentRuntime:
                 tasks = db.list_tasks(conn, user_id="alice")
             assert len(tasks) == 1
             assert tasks[0].prompt == "Check my calendar"
-            assert tasks[0].conversation_token == "room1"
+            assert db.is_canonical_room_token(tasks[0].conversation_token)
             assert tasks[0].talk_message_id == 101
         finally:
             reset_talk_client()

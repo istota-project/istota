@@ -499,7 +499,7 @@ class TestOnWhatsApp:
         (result,) = self._apply(wa, _wa_message("!zorg off", sender=GUEST_JID))
 
         assert result.disposition == "room_veto"
-        assert result.group_post_room == WA_ROOM
+        assert result.group_post_room == _wa_room(wa)
         assert "!zorg on" in result.response_text
         (later,) = self._apply(wa, _wa_message("hello @zorg", sender=ALICE_JID,
                                                 message_id="M2", mentions_bot=True))
@@ -541,7 +541,7 @@ class TestOnWhatsApp:
         self._apply(wa, _wa_roster([], bot_present=False))
         self._apply(wa, _wa_roster([ALICE_JID, GUEST_JID]))
         with db.get_db(wa.db_path) as conn:
-            assert room_veto.is_vetoed(conn, WA_ROOM)
+            assert room_veto.is_vetoed(conn, _wa_room(wa))
         (later,) = self._apply(wa, _wa_message("@zorg hi", sender=ALICE_JID,
                                                 message_id="M3", mentions_bot=True))
         assert later.disposition == "group_vetoed"
@@ -550,7 +550,7 @@ class TestOnWhatsApp:
                                              message_id="M4"))
         assert on.disposition == "room_veto"
         with db.get_db(wa.db_path) as conn:
-            assert not room_veto.is_vetoed(conn, WA_ROOM)
+            assert not room_veto.is_vetoed(conn, _wa_room(wa))
 
 
 WA_GROUP = "120363000000000001@g.us"
@@ -558,12 +558,9 @@ ALICE_JID = "15551234567@s.whatsapp.net"
 GUEST_JID = "15559990000@s.whatsapp.net"
 
 
-def _wa_room():
-    from istota.transport.whatsapp.groups import group_room_token
-    return group_room_token(WA_GROUP)
-
-
-WA_ROOM = _wa_room()
+def _wa_room(wa):
+    with db.get_db(wa.db_path) as conn:
+        return db.resolve_room_token(conn, "whatsapp", WA_GROUP)
 
 
 def _wa_roster(members, *, added_by="", bot_present=True):
@@ -648,9 +645,9 @@ def _mail(config, *, sender, to=(BOT_ADDR,), cc=(), message_id, references=None,
         return poll_emails(config)
 
 
-def _thread_room():
-    from istota.transport.email import threads
-    return threads.thread_room_token(ROOT)
+def _thread_room(config):
+    with db.get_db(config.db_path) as conn:
+        return db.resolve_room_token(conn, "email", ROOT)
 
 
 def _start_thread(config):
@@ -666,7 +663,7 @@ class TestOnEmail:
                      message_id="<a2@ext.example>", references=ROOT,
                      body="!zorg off\n\n> earlier text") == []
         with db.get_db(config.db_path) as conn:
-            assert room_veto.is_vetoed(conn, _thread_room())
+            assert room_veto.is_vetoed(conn, _thread_room(config))
             rows_before = _count(conn, "SELECT COUNT(*) FROM messages WHERE role='user'")
 
         assert _mail(config, sender=BOB_ADDR, cc=(HOST_ADDR, ALICE_ADDR),
@@ -687,7 +684,7 @@ class TestOnEmail:
         _mail(config, sender=HOST_ADDR, to=(BOT_ADDR, ALICE_ADDR), cc=(BOB_ADDR,),
               message_id="<c3@test.com>", references=ROOT, body="!zorg on")
         with db.get_db(config.db_path) as conn:
-            assert room_veto.is_vetoed(conn, _thread_room())
+            assert room_veto.is_vetoed(conn, _thread_room(config))
 
     def _guest_off(self, config):
         _start_thread(config)
@@ -718,7 +715,7 @@ class TestOnEmail:
               authentication_results="mx.test; spf=pass; dmarc=pass header.from=ext.example")
         assert self._vetoer_agreed(config)
         with db.get_db(config.db_path) as conn:
-            assert room_veto.is_vetoed(conn, _thread_room())
+            assert room_veto.is_vetoed(conn, _thread_room(config))
 
 
 # ---------------------------------------------------------------------------

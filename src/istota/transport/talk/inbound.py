@@ -448,7 +448,7 @@ def _reconcile_webmirror_stamp(
             return
         canonical_token = (
             db.resolve_room_token(conn, "talk", conversation_token)
-            or conversation_token
+            or db._canonical_room_token(conn, conversation_token, cross_surface=False)
         )
         if db.stamp_webmirror_echo(
             conn, canonical_token, int(mirrored), str(talk_id), actor_id,
@@ -529,7 +529,7 @@ def _plan_room_pass(
         # origin='talk' row.
         canonical = (
             db.resolve_room_token(conn, "talk", conversation_token)
-            or conversation_token
+            or db._canonical_room_token(conn, conversation_token, cross_surface=False)
         )
         # Only a genuinely new room needs the participant fetch. Type 4 is the
         # "Talk updates" changelog room, which shouldn't surface in web chat.
@@ -674,6 +674,11 @@ def _apply_room_pass(
         if plan.cursor_init_failed:
             continue
 
+        # A binding may have appeared while the network fetch was in flight.
+        plan.canonical = (
+            db.resolve_room_token(conn, "talk", plan.token)
+            or db._canonical_room_token(conn, plan.token, cross_surface=False)
+        )
         existing_room = db.get_room(conn, plan.canonical)
         if existing_room is not None:
             # Backfill the registry title from Talk's displayName (migrated
@@ -707,10 +712,10 @@ def _apply_room_pass(
                 plan.conv, plan.participants, config,
             )
             if member_ids:
-                db.register_room(
-                    conn, plan.canonical, member_ids[0],
+                plan.canonical = db.register_room(
+                    conn, None, member_ids[0],
                     origin="talk", name=plan.display_name,
-                )
+                ).token
                 db.add_room_binding(conn, plan.canonical, "talk", plan.token)
                 # Founders, not joiners: the room is registered the first
                 # time it is seen, so everyone on its roster now — guests
@@ -1491,7 +1496,10 @@ def _sync_talk_roster(
     its first roster taken as its baseline too (`audience_baseline_pending`):
     nothing recorded anybody joining it before then.
     """
-    room_token = db.resolve_room_token(conn, "talk", conversation_token) or conversation_token
+    room_token = (
+        db.resolve_room_token(conn, "talk", conversation_token)
+        or db._canonical_room_token(conn, conversation_token, cross_surface=False)
+    )
     if db.get_room(conn, room_token) is None:
         return
     baseline = baseline or db.audience_baseline_pending(conn, room_token, "talk")
@@ -1766,21 +1774,19 @@ async def _process_poll_results(
                 # rather than only in `record_inbound`, because a `!command`, a
                 # confirmation answer and a `!model` usage reply are consumed
                 # below without reaching it.
-                if is_user:
-                    room_token = (
-                        db.resolve_room_token(conn, "talk", conversation_token)
-                        or conversation_token
-                    )
-                    if db.get_room(conn, room_token) is not None:
-                        db.note_member_turn(conn, room_token, actor_id)
+                room_token = (
+                    db.resolve_room_token(conn, "talk", conversation_token)
+                    or db._canonical_room_token(conn, conversation_token, cross_surface=False)
+                )
+                if is_user and db.get_room(conn, room_token) is not None:
+                    db.note_member_turn(conn, room_token, actor_id)
 
                 # The veto is the one command a guest is heard on (D2, D8),
                 # so it is answered ahead of every engagement gate.
                 if veto_verb is not None:
                     outcome = room_veto.apply(
                         conn, config,
-                        room_token=db.resolve_room_token(conn, "talk", conversation_token)
-                        or conversation_token,
+                        room_token=room_token,
                         author=author, verb=veto_verb,
                     )
                     if outcome is not None:
@@ -1840,8 +1846,7 @@ async def _process_poll_results(
                         make_brain(brain_for_room(
                             config,
                             conn,
-                            db.resolve_room_token(conn, "talk", conversation_token)
-                            or conversation_token,
+                            room_token,
                             "talk",
                         )),
                         has_attachments=bool(attachments),
@@ -1898,17 +1903,13 @@ async def _process_poll_results(
                 if engaged and reply_to_talk_id is not None:
                     from ... import message_relays
 
-                    room_token = (
-                        db.resolve_room_token(conn, "talk", conversation_token)
-                        or conversation_token
-                    )
                     relay = message_relays.relay_for_room_reply(
                         conn, actor_user_id=actor_id, room_token=room_token,
                         talk_id=reply_to_talk_id,
                     )
                     if relay is not None:
                         confirmations.cancel_for_conversation(
-                            conn, conversation_token, actor_id, by="talk",
+                            conn, room_token, actor_id, by="talk",
                         )
                         _outcome, task_id = message_relays.accept_room_reply(
                             conn, config, actor_user_id=actor_id, relay_id=relay["id"],
@@ -1966,7 +1967,7 @@ async def _process_poll_results(
                 # Cancel any pending confirmations in this conversation —
                 # the user has moved on by sending a new message
                 cancelled = engaged and confirmations.cancel_for_conversation(
-                    conn, conversation_token, actor_id, by="talk",
+                    conn, room_token, actor_id, by="talk",
                 )
                 if cancelled:
                     logger.info(
@@ -2038,7 +2039,7 @@ async def handle_confirmation_reply(
     # and falls to Path C, which with a second question open answers neither.
     room_token = (
         db.resolve_room_token(conn, "talk", conversation_token)
-        or conversation_token
+        or db._canonical_room_token(conn, conversation_token, cross_surface=False)
     )
 
     res = confirmations.resolve(
