@@ -9,12 +9,14 @@ vi.mock('$lib/api', async (importOriginal) => ({
   saveCredentialGrant: vi.fn(),
   grantExistingCredentials: vi.fn(),
   revokeCredentialGrant: vi.fn(),
+  deleteCredential: vi.fn(),
 }));
 import {
   getCredentialGrants,
   saveCredentialGrant,
   grantExistingCredentials,
   revokeCredentialGrant,
+  deleteCredential,
 } from '$lib/api';
 afterEach(() => {
   cleanup();
@@ -119,6 +121,64 @@ it('offers no grant edit for an unbound credential', async () => {
   await fireEvent.keyDown(screen.getByLabelText('Actions for portal'), { key: 'Enter' });
   const edit = await screen.findByText('Edit grant');
   expect(edit.hasAttribute('data-disabled')).toBe(true);
+});
+
+it('cancels grant edits without saving', async () => {
+  vi.mocked(getCredentialGrants).mockResolvedValue(settings());
+  render(CredentialGrantsCard);
+  await screen.findByText('portal.example');
+  await chooseAction('portal', 'Edit grant');
+  const dialog = screen.getByRole('dialog', { name: 'Edit grant' });
+  expect(within(dialog).getByText('portal')).toBeTruthy();
+  await fireEvent.click(within(dialog).getByRole('checkbox', { name: 'DELETE' }));
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(saveCredentialGrant).not.toHaveBeenCalled();
+  await chooseAction('portal', 'Edit grant');
+  expect(screen.getByRole('checkbox', { name: 'DELETE' })).not.toBeChecked();
+});
+
+it('confirms deletion of an unbound credential and refreshes the list', async () => {
+  vi.mocked(getCredentialGrants).mockResolvedValue(
+    settings({ credentials: [portal({ hosts: [] })] }),
+  );
+  vi.mocked(deleteCredential).mockResolvedValue({ ok: true, deleted: true });
+  render(CredentialGrantsCard);
+  await screen.findByText('Unbound');
+  await chooseAction('portal', 'Delete credential');
+  const dialog = screen.getByRole('dialog', { name: 'Delete credential' });
+  expect(dialog.textContent).toContain('KeePassXC');
+  expect(deleteCredential).not.toHaveBeenCalled();
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+  expect(deleteCredential).not.toHaveBeenCalled();
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  await chooseAction('portal', 'Delete credential');
+  vi.mocked(getCredentialGrants).mockResolvedValue(settings({ credentials: [] }));
+  await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete' }));
+  await waitFor(() => expect(deleteCredential).toHaveBeenCalledWith('portal'));
+  await screen.findByText('No credentials have been stored.');
+});
+
+it('keeps a credential visible if deletion fails', async () => {
+  vi.mocked(getCredentialGrants).mockResolvedValue(settings());
+  vi.mocked(deleteCredential).mockRejectedValueOnce(new Error('Could not delete credential'));
+  render(CredentialGrantsCard);
+  await screen.findByText('portal.example');
+  await chooseAction('portal', 'Delete credential');
+  await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete' }));
+  await screen.findByRole('alert');
+  expect(row('portal')).toBeTruthy();
+});
+
+it('does not offer deletion of a deployment credential', async () => {
+  vi.mocked(getCredentialGrants).mockResolvedValue(
+    settings({ credentials: [portal({ name: 'forge.github', source: 'config' })] }),
+  );
+  render(CredentialGrantsCard);
+  await screen.findByText('portal.example');
+  await fireEvent.keyDown(screen.getByLabelText('Actions for forge.github'), { key: 'Enter' });
+  await screen.findByText('Edit grant');
+  expect(screen.queryByText('Delete credential')).toBeNull();
 });
 
 it('asks before revoking a grant', async () => {

@@ -6,6 +6,20 @@ from istota import db, secrets_store, secrets_vault
 from tests.test_secrets_vault import _new_db, _read
 
 
+@pytest.mark.parametrize("url,host", [
+    ("portal.example.com", "portal.example.com"),
+    ("Portal.Example.com:443", "portal.example.com"),
+    ("portal.example.com:8443", "portal.example.com:8443"),
+    ("[2001:db8::1]", "[2001:db8::1]"),
+])
+def test_vault_bare_authority_binds_for_https(url, host):
+    from istota.credential_broker.bindings import https_host, parse_binding
+    assert parse_binding(url, {}, [])["hosts"] == [host]
+    assert parse_binding(url, {}, [], source="config")["hosts"] == []
+    with pytest.raises(ValueError):
+        https_host(url)
+
+
 def test_vault_metadata_is_not_a_credential(tmp_path):
     kp, path = _new_db(tmp_path)
     entry = kp.add_entry(kp.root_group, "portal", "alice", "fixture-password",
@@ -27,6 +41,14 @@ def test_vault_metadata_is_not_a_credential(tmp_path):
 
 @pytest.mark.parametrize("url,hosts", [
     ("http://portal.example.com", ""),
+    ("http:portal.example.com", ""),
+    ("//portal.example.com", ""),
+    ("portal.example.com/path", ""),
+    ("user@portal.example.com", ""),
+    ("*.example.com", ""),
+    ("portal.example.com:invalid", ""),
+    ("portal.example.com\\evil", ""),
+    ("portal.example.com\n", ""),
     ("https://portal.example.com", "*.example.com"),
     ("https://portal.example.com", "evil.example/path"),
     ("https://portal.example.com", "user@evil.example"),

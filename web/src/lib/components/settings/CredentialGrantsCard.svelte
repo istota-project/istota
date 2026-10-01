@@ -5,11 +5,20 @@
     getCredentialGrants,
     saveCredentialGrant,
     revokeCredentialGrant,
+    deleteCredential,
     grantExistingCredentials,
     type CredentialGrant,
     type CredentialGrantsSettings,
   } from '$lib/api';
-  import { Badge, Button, ConfirmDialog, KebabMenu, Modal, Select } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    ConfirmDialog,
+    Field,
+    KebabMenu,
+    Modal,
+    Select,
+  } from '$lib/components/ui';
   import type { KebabItem } from '$lib/components/ui/KebabMenu.svelte';
   import SettingsCard from './SettingsCard.svelte';
 
@@ -28,6 +37,7 @@
   let omittedRooms = $state(false);
   let confirmExisting = $state(false);
   let confirmRevoke: string | null = $state(null);
+  let confirmDelete: string | null = $state(null);
   const defaultMethods = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH'];
   const allMethods = [...defaultMethods, 'DELETE', 'OPTIONS'];
 
@@ -86,6 +96,12 @@
     if (name) return mutate(() => revokeCredentialGrant(name));
   }
 
+  function remove() {
+    const name = confirmDelete;
+    confirmDelete = null;
+    if (name) return mutate(() => deleteCredential(name));
+  }
+
   function sourceLabel(c: Credential): string {
     return c.source === 'config' ? 'Deployment configuration' : 'Password vault';
   }
@@ -112,6 +128,13 @@
         danger: true,
         disabled: busy,
         onSelect: () => (confirmRevoke = c.name),
+      });
+    if (c.source === 'vault')
+      items.push({
+        label: 'Delete credential',
+        danger: true,
+        disabled: busy,
+        onSelect: () => (confirmDelete = c.name),
       });
     return items;
   }
@@ -149,7 +172,8 @@
                 <span class="cred-hosts">{credential.hosts.join(', ')}</span>
               {:else}
                 <span class="cred-unbound">
-                  Set an HTTPS URL or <code>istota_hosts</code> in KeePassXC before using it.
+                  Set a hostname, an HTTPS URL, or <code>istota_hosts</code> in KeePassXC before using
+                  it.
                 </span>
               {/if}
               <!-- Written without template whitespace so the line reads
@@ -175,40 +199,69 @@
   {/if}
 </SettingsCard>
 
-<Modal bind:open={editorOpen} title={`Grant for ${editing}`}>
+<Modal bind:open={editorOpen} title="Edit grant">
   <div class="grant-fields">
-    <label
-      >Room scope
+    <code class="grant-name">{editing}</code>
+    <Field label="Room scope" labelled={false}>
       <Select
         bind:value={scope}
+        ariaLabel="Room scope"
+        fullWidth
         options={[
           { value: 'all', label: 'All rooms' },
           { value: 'rooms', label: 'Selected rooms' },
         ]}
       />
-    </label>
-    {#if omittedRooms}<p class="hint">
+    </Field>
+    {#if omittedRooms}<p class="caption">
         Unavailable rooms have been removed from this selection.
       </p>{/if}
     {#if scope === 'rooms'}
-      {#each data?.rooms ?? [] as room}
-        <label><input type="checkbox" bind:group={rooms} value={room.token} /> {room.name}</label>
-      {/each}
-      {#if !data?.rooms.length}<p class="hint">
-          No rooms available. This grant will allow no tasks.
-        </p>{/if}
+      <fieldset class="grant-options">
+        <legend>Rooms</legend>
+        <div class="room-options">
+          {#each data?.rooms ?? [] as room}
+            <Field label={room.name} checkbox>
+              <input type="checkbox" bind:group={rooms} value={room.token} />
+            </Field>
+          {/each}
+        </div>
+        {#if !data?.rooms.length}<p class="caption">
+            No rooms available. This grant will allow no tasks.
+          </p>{/if}
+      </fieldset>
     {/if}
-    <fieldset>
+    <fieldset class="grant-options">
       <legend>Allowed HTTP methods</legend>
-      {#each allMethods as method}
-        <label><input type="checkbox" bind:group={methods} value={method} /> {method}</label>
-      {/each}
+      <div class="method-options">
+        {#each allMethods as method}
+          <Field label={method} checkbox>
+            <input type="checkbox" bind:group={methods} value={method} />
+          </Field>
+        {/each}
+      </div>
     </fieldset>
-    <label><input type="checkbox" bind:checked={scheduled} /> Allow scheduled tasks</label>
+    <Field label="Allow scheduled tasks" checkbox>
+      <input type="checkbox" bind:checked={scheduled} />
+    </Field>
     {#if error}<p class="banner error" role="alert">{error}</p>{/if}
-    <Button onclick={save} loading={busy} disabled={!methods.length}>Save grant</Button>
   </div>
+  {#snippet footer()}
+    <Button variant="ghost" onclick={() => (editorOpen = false)} disabled={busy}>Cancel</Button>
+    <Button variant="primary" onclick={save} loading={busy} disabled={!methods.length}>
+      Save grant
+    </Button>
+  {/snippet}
 </Modal>
+<ConfirmDialog
+  open={confirmDelete !== null}
+  title="Delete credential"
+  message="Are you sure you want to delete {confirmDelete} and its grant? This removes the stored copy only. If it is still in KeePassXC, a later vault import can restore it without its grant."
+  confirmLabel="Delete"
+  confirmDisabled={busy}
+  onConfirm={remove}
+  onCancel={() => (confirmDelete = null)}
+/>
 <ConfirmDialog
   bind:open={confirmExisting}
   title="Grant current credentials"
@@ -322,9 +375,40 @@
     flex-direction: column;
     gap: var(--space-3);
   }
-  fieldset {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-3);
+  .grant-name {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+  }
+
+  .grant-options {
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .grant-options legend {
+    padding: 0;
+    margin-bottom: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+  }
+
+  .method-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(6rem, 1fr));
+    gap: var(--space-2);
+  }
+
+  .room-options {
+    display: grid;
+    gap: var(--space-2);
+    overflow-wrap: anywhere;
+  }
+
+  .grant-fields .caption {
+    margin: 0;
   }
 </style>
