@@ -56,6 +56,14 @@ A group is in that set when the task's user is a current member and everyone who
 
 This is deliberately stricter than "recall it but do not repeat it". In a room with a non-member, the bot does not have the group's material at all.
 
+### Linking a room to a group
+
+A room can be linked to one group. A linked room carries that group's material and no other group's, so a family room whose members also share a book club loads only `family`. The link narrows the rule above and never widens it: the linked group still loads only on a member's turn, while everyone in the room is a member of it and no guest or other bot is present. When that does not hold, the room loads no group at all rather than falling back to the others.
+
+The room's host sets the link, and only to a group the host belongs to. In a private room that is the room's one member. Use `!room group <id>` in the room, `!room group none` to remove it, or `!room group` to see the current link; on the web, the Group field in the room settings does the same. A side room has no link of its own. Linking to a group you are not in, or one that does not exist, gets the same refusal, so the command does not reveal which groups exist.
+
+A link to a group that is later archived, or that the room's members leave, stays on the room and loads nothing until it applies again.
+
 Room grants (what a host lets the bot read in a shared room) do not affect any of this. A grant is consent to disclose the granter's own data; group material follows only the audience rule above.
 
 ## How the model sees it
@@ -85,4 +93,4 @@ Any member can write a group's store, and any member's task could have been stee
 - An approval queue, or any automatic extraction into a group store.
 - A per-fact audience. The charter is the audience.
 - Sharing `Groups/<id>/` with members' own Nextcloud accounts, so it would appear in their Files app.
-- Group-scoped knowledge graph facts, and group-owned rooms.
+- Group-scoped knowledge graph facts, and group-owned rooms. A room can be linked to a group, but it still belongs to the people in it.

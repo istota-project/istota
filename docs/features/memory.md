@@ -32,13 +32,13 @@ USER.md is also indexed into `memory_chunks` with `source_type = "user_memory"`.
 
 ### Layer 2 — Channel memory (CHANNEL.md)
 
-Per-conversation memory at `/Channels/{conversation_token}/CHANNEL.md`. Loaded into the prompt when `conversation_token` is set. Holds shared context for group conversations: decisions, agreements, project status. Written through the same `memory` skill and refreshed by the channel sleep cycle.
+Per-conversation memory at `/Channels/{conversation_token}/CHANNEL.md`. Loaded into the prompt when `conversation_token` is set. Holds shared context for group conversations: decisions, agreements, project status. Written through the same `memory` skill and refreshed by the channel sleep cycle. In a room more than one person reads, the file reaches the model inside untrusted-content markers, since everyone in the room can write it; a private room's notes are loaded as they are.
 
 CHANNEL.md is indexed under `source_type = "channel_memory_durable"` — a separate type from the dated `channel_memory` files, so it survives retention pruning the way USER.md does.
 
 ### Group memory (GROUP.md)
 
-Memory shared by the members of a [group](groups.md), at `/Groups/{group_id}/GROUP.md`. Loaded as `## Group memory` for the groups the task may carry: all of the user's groups in a conversation with the bot alone, and in a shared room only those whose members include everyone present. Written through the same `memory` skill with `--group <id>`, only when a member asks, and never by the sleep cycle. The file reaches the model inside untrusted-content markers, since any member can write it. Not indexed for search.
+Memory shared by the members of a [group](groups.md), at `/Groups/{group_id}/GROUP.md`. Loaded as `## Group memory` for the groups the task may carry: all of the user's groups in a conversation with the bot alone, and in a shared room only those whose members include everyone present. A room linked to a group carries that group alone, under the same rule. Written through the same `memory` skill with `--group <id>`, only when a member asks, and never by the sleep cycle. The file reaches the model inside untrusted-content markers, since any member can write it. Not indexed for search.
 
 ### Per-skill overlays
 
