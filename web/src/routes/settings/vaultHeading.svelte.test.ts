@@ -27,14 +27,13 @@
  * the form leads with a Generate button and holds a typed value to the same
  * floor the CLI applies.
  *
- * It sits on the heading rather than in the card list below it because it is
- * not a connected service: it is the *source* those credentials come from, and
- * it is the referent the disabled-field sentence on each managed card needs —
- * which has to be visible from every card that shows one.
+ * The card sits below the credentials list: the file is one source for the
+ * store the list shows, so the line says whether the sync works and carries no
+ * count of its own.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
-import { render, cleanup, screen, waitFor } from '@testing-library/svelte';
+import { render, cleanup, screen, waitFor, fireEvent } from '@testing-library/svelte';
 import type { ServiceCard as ServiceCardData, VaultStatus } from '$lib/api';
 import { formatRelative } from '$lib/dateFormat';
 
@@ -200,59 +199,75 @@ describe('a user with no credential vault', () => {
     expect(heading()).toBeNull();
     expect(screen.getByRole('heading', { name: 'Credentials' })).toBeTruthy();
   });
+
+  it('sees one sentence and a Set up button, and no password field', async () => {
+    api.getVaultStatus.mockResolvedValue({ configured: false, editable: true, files: [] });
+    await mount();
+    const card = await screen.findByTestId('vault-card');
+    expect(words(card)).toBe(
+      'Keep credentials in a KeePassXC file instead? Istota can sync them from a file in your files.',
+    );
+    expect(screen.getByRole('button', { name: 'Set up' })).toBeTruthy();
+    expect(screen.queryByLabelText(/^master password/i)).toBeNull();
+  });
 });
 
+function words(el: HTMLElement): string {
+  return (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+}
+
 describe('a user whose vault is working', () => {
-  it('renders no name list when there are none', async () => {
-    // The control for both above: each would pass against a heading that had
-    // stopped rendering the list, since `findByTestId` is the only thing
-    // asserting it exists.
-    api.getVaultStatus.mockResolvedValue(configured({ entry_count: 0, entry_names: [] }));
-    await mount();
-    await findHeading();
-
-    expect(screen.queryByTestId('vault-entry-names')).toBeNull();
-  });
-
-  it('names the shared count and the last sync, and not the path', async () => {
-    // It used to name the connected services the vault overwrote. It
-    // overwrites none of them now, so the sentence is about the namespace the
-    // file *is* the authority for — and the payload carries no `owned` list,
-    // because the server no longer produces one.
-    api.getVaultStatus.mockResolvedValue(configured());
+  it('shows one line naming the file and when it was updated, and no count', async () => {
+    api.getVaultStatus.mockResolvedValue(configured({ entry_count: 2, generated_count: 3 }));
     await mount();
 
     const line = await findHeading();
-    expect(line.textContent).toContain('2 shared credentials');
-    expect(line.textContent).not.toContain('karakeep');
-    // Deliberately NOT the path: the card's file section names the file, and
-    // this block repeating it was the redundancy that got it removed.
-    expect(line.textContent).not.toContain('/mnt/shared/Users/alice/config/vault.kdbx');
-    // A relative reading, which is what the question "is it keeping up" wants.
-    // The exact words are `formatRelative`'s; what this pins is that the value
-    // went through it.
-    expect(line.textContent).toContain(RENDERED_SYNC);
+    expect(words(line)).toBe(`Syncing vault.kdbx · updated ${RENDERED_SYNC}.`);
     // Not the raw wire value: it is UTC to millisecond precision and belongs to
     // nobody reading this page.
     expect(line.textContent).not.toContain(SYNC_AT);
-    // Read-and-never-written is the property a user has to know before they go
-    // looking for a Save button that does not exist. It is stated once, in the
-    // card's description — the status block's own copy of it went with the
-    // path sentence it was attached to.
-    expect(document.body.textContent).toMatch(/never writes to it/i);
+    // The list carries the count; this card carries none.
+    const card = screen.getByTestId('vault-card');
+    expect(card.textContent).not.toMatch(/\b[23]\b/);
+    expect(card.textContent).not.toMatch(/shared credential/i);
+    // Istota writes to the file now, so the old promise is gone.
+    expect(document.body.textContent).not.toMatch(/never writes to it/i);
+    expect(words(card)).toContain('adds the ones tasks create to its generated group');
+    expect(screen.getByTestId('vault-pill').textContent?.trim()).toBe('Working');
+  });
+
+  it('keeps the setup panel closed until Manage is pressed', async () => {
+    api.getVaultStatus.mockResolvedValue(configured());
+    await mount();
+    await findHeading();
+
+    expect(screen.queryByLabelText(/^master password/i)).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Manage' }));
+    expect(screen.getByLabelText(/^master password/i)).toBeTruthy();
   });
 
   it('shows no passphrase and no credential value', async () => {
-    // There is nothing in the payload that could carry one — the endpoint is
-    // asserted on separately for that — so this is the renderer's half: it must
-    // not invent a field, and the whole line is swept rather than named fields.
     api.getVaultStatus.mockResolvedValue(configured());
     await mount();
     const line = await findHeading();
     expect(line.textContent).not.toMatch(/passphrase/i);
   });
 
-  it('reports a failing vault with the class-specific sentence', async () => {
+  it('says so when a configured vault has never synced', async () => {
+    // Distinct from a failure: nothing is wrong, the pass has simply not run yet.
+    api.getVaultStatus.mockResolvedValue(
+      configured({ last_success_at: '', last_sync_at: '', last_outcome: '' }),
+    );
+    await mount();
+
+    const line = await findHeading();
+    expect(words(line)).toContain('nothing applied yet');
+    expect(line.textContent).not.toContain('Not working');
+  });
+});
+
+describe('a user whose vault has a problem', () => {
+  it('says what is wrong and opens the setup panel', async () => {
     api.getVaultStatus.mockResolvedValue(
       configured({
         last_outcome: 'VaultLocked',
@@ -263,20 +278,16 @@ describe('a user whose vault is working', () => {
     await mount();
 
     const line = await findHeading();
-    expect(line.textContent).toContain('Not working');
-    expect(line.textContent).toContain('does not match the file');
-    // The failing sentence takes the slot the sync time would have had.
-    expect(line.textContent).not.toContain('last applied');
+    expect(words(line)).toContain('Not working: the stored passphrase does not match the file');
+    expect(line.textContent).not.toContain('updated');
+    expect(screen.getByTestId('vault-pill').textContent?.trim()).toBe('Needs attention');
+    expect(await screen.findByTestId('vault-panel')).toBeTruthy();
+    expect(screen.getByLabelText(/^master password/i)).toBeTruthy();
   });
 
-  it('prefers a live path refusal over an older recorded failure', async () => {
-    // The two say different things: `outcome` is what this request found and
-    // `last_outcome` is what some earlier cycle in another process settled. A
-    // refused path is true now and outranks a cycle that ran before the
-    // operator introduced it.
-    // The precedence itself is the server's — `problem` arrives already
-    // resolved — so what this pins is that the renderer uses that field and
-    // does not re-derive a verdict from the two it sits beside.
+  it('prefers the server verdict over the two fields beside it', async () => {
+    // The precedence between a live finding and a recorded one is the server's:
+    // `problem` arrives already resolved.
     api.getVaultStatus.mockResolvedValue(
       configured({
         outcome: 'VaultPathRefused',
@@ -289,101 +300,64 @@ describe('a user whose vault is working', () => {
     await mount();
 
     const line = await findHeading();
-    // Substring rather than the whole sentence: the reason is rendered as a
-    // text node inside the markup's own line wrapping, so it carries newlines.
     expect(line.textContent).toContain('the configured vault_path');
     expect(line.textContent).not.toContain('does not match the file');
-  });
-
-  it('says so when a configured vault has never synced', async () => {
-    // Distinct from a failure: nothing is wrong, the pass has simply not run
-    // yet. Rendering "Last synced " with nothing after it would be the worse
-    // answer of the two.
-    api.getVaultStatus.mockResolvedValue(
-      configured({ last_success_at: '', last_sync_at: '', last_outcome: '' }),
-    );
-    await mount();
-
-    const line = await findHeading();
-    expect(line.textContent).toContain('Nothing has been applied');
-    expect(line.textContent).not.toContain('Not working');
-  });
-
-  it('says so when nothing has been shared from it yet', async () => {
-    // A file in the folder with a passphrase behind it and no entries under
-    // the narrowing is a usable state, not a fault. A line claiming istota
-    // holds credentials from it would be the wrong sentence.
-    api.getVaultStatus.mockResolvedValue(configured({ entry_count: 0 }));
-    await mount();
-
-    const line = await findHeading();
-    expect(line.textContent).toMatch(/nothing has been shared/i);
-  });
-
-  it('renders the singular for one shared credential', async () => {
-    api.getVaultStatus.mockResolvedValue(configured({ entry_count: 1 }));
-    await mount();
-
-    const line = await findHeading();
-    expect(line.textContent).toContain('1 shared credential from this file');
-  });
-
-  it('shows the generated group count', async () => {
-    api.getVaultStatus.mockResolvedValue(configured({ generated_count: 1 }));
-    await mount();
-
-    expect((await findHeading()).textContent).toContain('1 credential in generated/');
   });
 });
 
 describe('the scope notice', () => {
   it('says the whole file is shared when the last read was unscoped', async () => {
-    // A file with no top-level `istota` group is read in full. That is how it
-    // is meant to work for a file put in the vault folder *for* istota, and it
-    // is also what "I copied my everyday password database in" looks like — so
-    // the card says which it did and how many credentials that came to, within
-    // one sync interval rather than never.
     api.getVaultStatus.mockResolvedValue(configured({ unscoped: true, entry_count: 412 }));
     await mount();
 
-    const line = await findHeading();
-    expect(line.textContent).toContain('no top-level');
-    expect(line.textContent).toContain('412 credentials');
-    expect(screen.getByTestId('vault-unscoped')).toBeTruthy();
+    await findHeading();
+    expect(words(screen.getByTestId('vault-unscoped'))).toBe(
+      'This file has no top-level istota group, so every entry in it is shared with your tasks. To share only some, move them into a group named istota.',
+    );
   });
 
   it('says nothing about scope on an ordinary scoped vault', async () => {
-    // The control. Without it the notice could be rendering for everyone, and a
-    // warning every user reads past is a warning nobody reads.
     api.getVaultStatus.mockResolvedValue(configured({ unscoped: false, entry_count: 3 }));
     await mount();
-
-    const line = await findHeading();
-    expect(line.textContent).not.toContain('no top-level');
+    await findHeading();
     expect(screen.queryByTestId('vault-unscoped')).toBeNull();
   });
 
   it('says nothing about scope before a cycle has read the file', async () => {
-    // `unscoped` comes off the durable sync record, so it is absent until a
-    // cycle has run. An absent field reads as "not yet known" rather than as
-    // the reassuring answer or the alarming one.
     api.getVaultStatus.mockResolvedValue(configured({ unscoped: undefined }));
     await mount();
-
     const line = await findHeading();
     expect(screen.queryByTestId('vault-unscoped')).toBeNull();
-    // The block still renders — the point is that it says nothing about scope,
-    // not that it is absent. Asserted on a sentence it always carries; the
-    // "Credential vault:" label it used to look for was dropped as a
-    // restatement of the card title it now sits inside.
-    expect(line.textContent).toMatch(/shared credentials from this file/i);
+    expect(words(line)).toContain('Syncing vault.kdbx');
+  });
+});
+
+describe('name conflicts', () => {
+  it('says how many entries were skipped, without promising the next sync', async () => {
+    api.getVaultStatus.mockResolvedValue(configured({ name_conflicts: 2 }));
+    await mount();
+    await findHeading();
+    const line = words(screen.getByTestId('vault-conflicts'));
+    expect(line).toContain(
+      '2 entries in the file were skipped because a credential with the same name was added in Istota. Rename one of them',
+    );
+    // An unchanged file is not re-read, so only a change to it brings the entry in.
+    expect(line).toContain('the next time the file changes');
   });
 
-  it('renders the singular for one shared credential', async () => {
-    api.getVaultStatus.mockResolvedValue(configured({ unscoped: true, entry_count: 1 }));
+  it('uses the singular for one', async () => {
+    api.getVaultStatus.mockResolvedValue(configured({ name_conflicts: 1 }));
     await mount();
+    await findHeading();
+    expect(words(screen.getByTestId('vault-conflicts'))).toContain(
+      '1 entry in the file was skipped',
+    );
+  });
 
-    const line = await findHeading();
-    expect(line.textContent).toContain('1 credential in it');
+  it('says nothing when there are none', async () => {
+    api.getVaultStatus.mockResolvedValue(configured({ name_conflicts: 0 }));
+    await mount();
+    await findHeading();
+    expect(screen.queryByTestId('vault-conflicts')).toBeNull();
   });
 });
