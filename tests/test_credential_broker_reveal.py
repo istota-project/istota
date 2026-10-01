@@ -11,6 +11,7 @@ import pytest
 
 from istota import db, secrets_store
 from istota.config import Config
+from istota.credential_broker import grants
 from istota.credential_broker.bindings import parse_binding
 from istota.skill_proxy import SkillProxy
 from tests import test_skill_credential_fd as _credential_fd
@@ -29,6 +30,7 @@ def config(tmp_path, monkeypatch):
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
     config = Config(db_path=tmp_path / "data.db")
     db.init_db(config.db_path)
+    config.security.credential_broker.enabled = True
     config.security.credential_broker.enforce_reveal = True
     for name, value in VAULT.items():
         secrets_store.upsert_secret(
@@ -135,6 +137,94 @@ def test_manifest_env_and_raw_client_cannot_bypass(config, sock_path, caplog, en
     assert "fixture-manifest-value" not in caplog.text
 
 
+def granted_task(config, *, room="room-a", grant_rooms=None, scheduled=False):
+    """A task row for alice with its grant snapshot frozen, as task setup does."""
+    with db.get_db(config.db_path) as conn:
+        if grant_rooms is not None:
+            grants.put_grant(conn, "alice", "github_pat", scope_mode="rooms", rooms=grant_rooms)
+        task_id = db.create_task(conn, user_id="alice", prompt="test", source_type="talk",
+                                 conversation_token=room,
+                                 scheduled_job_id=1 if scheduled else None)
+    with db.get_db(config.db_path) as conn:
+        grants.ensure_credential_grants(conn, task_id, "alice")
+    return task_id
+
+
+PRIVATE_SKILL = """
+    import argparse, sys
+    from istota.skills._cli import parse_and_resolve
+    from istota.skills._credref import credential_ref
+    parser = argparse.ArgumentParser()
+    credential_ref(parser, "--secret")
+    args = parse_and_resolve(parser, ["--secret", "github_pat"])
+    print("resolved" if args.secret.reveal() else "empty")
+"""
+
+
+@pytest.mark.parametrize("case", ["no_grant", "other_room", "scheduled"])
+def test_private_skill_needs_the_tasks_grant(config, sock_path, skill_program, case):
+    skill_program(PRIVATE_SKILL)
+    if case == "no_grant":
+        task_id = granted_task(config)
+    elif case == "other_room":
+        task_id = granted_task(config, grant_rooms=["room-b"])
+    else:
+        task_id = granted_task(config, grant_rooms=["room-a"], scheduled=True)
+    with start_proxy(sock_path, config=config, user_id="alice", task_id=task_id):
+        response = request(sock_path, {"skill": "probe", "args": []})
+    assert response["returncode"] != 0
+    assert "resolved" not in response["stdout"]
+    assert "credential_not_granted" in response["stdout"] + response["stderr"]
+    assert VAULT["github_pat"] not in json.dumps(response)
+
+
+def test_private_skill_sees_a_grant_narrowed_after_admission(config, sock_path, skill_program):
+    skill_program(PRIVATE_SKILL)
+    task_id = granted_task(config, grant_rooms=["room-a"])
+    with db.get_db(config.db_path) as conn:
+        grants.put_grant(conn, "alice", "github_pat", scope_mode="rooms", rooms=["room-b"])
+    with start_proxy(sock_path, config=config, user_id="alice", task_id=task_id):
+        response = request(sock_path, {"skill": "probe", "args": []})
+    assert response["returncode"] != 0
+    assert "credential_changed" in response["stdout"] + response["stderr"]
+
+
+def test_private_skill_may_fill_an_entry_this_attempt_created(config, sock_path, skill_program):
+    skill_program(PRIVATE_SKILL)
+    with start_proxy(sock_path, config=config, user_id="alice",
+                     task_id=granted_task(config)) as server:
+        server._created_names.add("github_pat")
+        response = request(sock_path, {"skill": "probe", "args": []})
+    assert response["returncode"] == 0, response["stderr"]
+    assert response["stdout"].strip() == "resolved"
+
+
+def test_private_skill_resolves_with_a_room_grant(config, sock_path, skill_program):
+    skill_program(PRIVATE_SKILL)
+    task_id = granted_task(config, grant_rooms=["room-a"])
+    with start_proxy(sock_path, config=config, user_id="alice", task_id=task_id):
+        response = request(sock_path, {"skill": "probe", "args": []})
+    assert response["returncode"] == 0, response["stderr"]
+    assert response["stdout"].strip() == "resolved"
+
+
+def test_grants_do_not_apply_to_skills_while_the_broker_is_off(config, sock_path, skill_program):
+    config.security.credential_broker.enabled = False
+    skill_program(PRIVATE_SKILL)
+    with start_proxy(sock_path, config=config, user_id="alice", task_id=granted_task(config)):
+        response = request(sock_path, {"skill": "probe", "args": []})
+    assert response["returncode"] == 0, response["stderr"]
+
+
+def test_enforce_reveal_without_the_broker_only_audits(config, sock_path, caplog):
+    config.security.credential_broker.enabled = False
+    assert not config.security.credential_broker.reveal_enforced
+    with proxy(sock_path, config=config, user_id="alice"):
+        reply = request(sock_path, {"type": "vault_credential", "name": "github_pat"})
+    assert reply == {"value": VAULT["github_pat"]}
+    assert "action=would_refuse" in caplog.text
+
+
 def test_real_private_skill_resolves_under_enforcement(config, sock_path, skill_program, caplog):
     skill_program("""
         import argparse, hashlib, json
@@ -148,7 +238,8 @@ def test_real_private_skill_resolves_under_enforcement(config, sock_path, skill_
         print(json.dumps({"digest": hashlib.sha256(args.secret.reveal().encode()).hexdigest(),
                           "hosts": args.secret.bound_hosts}))
     """)
-    with start_proxy(sock_path, config=config, user_id="alice") as server:
+    with start_proxy(sock_path, config=config, user_id="alice",
+                     task_id=granted_task(config, grant_rooms=["room-a"])) as server:
         server.credential_env["NC_PASS"] = "fixture-manifest-value"
         response = request(sock_path, {"skill": "probe", "args": []})
         assert response["returncode"] == 0, response["stderr"]

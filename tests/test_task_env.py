@@ -964,6 +964,31 @@ def test_broker_strips_forge_tokens_without_requiring_skill_proxy(tmp_path, runt
         assert "GITLAB_TOKEN" not in runtime.proxy_ctx.base_env
 
 
+def test_a_task_without_the_forge_token_keeps_the_users_forge_binding(tmp_path, runtime_inputs):
+    """Bindings are per user; a shared-room task with `developer` withheld has
+    no token in its env and must not delete the row other tasks read."""
+    from istota.config import CredentialBrokerConfig
+    from istota import db
+    from istota.credential_broker.bindings import get_binding
+    config = _config(tmp_path, credential_broker=CredentialBrokerConfig(enabled=True))
+    config.security.network.enabled = False
+    config.developer.enabled = True
+    config.developer.gitlab_token = "fixture-forge-password"
+    runtime_inputs["skill_index"] = {}
+    db.init_db(config.db_path)
+    with db.get_db(config.db_path) as conn:
+        task_id = db.create_task(conn, user_id="testuser", prompt="test", source_type="talk",
+                                 conversation_token="room-a")
+        runtime_inputs["task"] = db.get_task(conn, task_id)
+    task_env.build_task_runtime(config, **runtime_inputs)
+    with db.get_db(config.db_path) as conn:
+        assert get_binding(conn, "testuser", "forge.gitlab") is not None
+    config.admin_users = {"someone-else"}
+    task_env.build_task_runtime(config, **runtime_inputs)
+    with db.get_db(config.db_path) as conn:
+        assert get_binding(conn, "testuser", "forge.gitlab") is None
+
+
 class TestTheGrantSnapshotJoinsTheCallersTransaction:
     """`execute_task_interactive` holds a write transaction across the run; a
     second connection's BEGIN IMMEDIATE there waited 30s and failed the task."""

@@ -354,6 +354,10 @@ class SkillProxy:
         #
         # Locked because `unix_server` runs one thread per connection.
         self._vault_fetches = 0
+        # Names this attempt created with vault_create. They have no grant by
+        # design (later tasks start narrow), but the task that made one may
+        # fill it, which is the documented create-then-sign-up flow.
+        self._created_names: set[str] = set()
         self._vault_fetch_lock = threading.Lock()
         # The processes whose descendants this proxy serves (ISSUE-550): the
         # brain's child, reported through `on_pid`, and each skill subprocess
@@ -897,6 +901,7 @@ class SkillProxy:
         self.vault_credentials.update({
             write.name: password, write.username_name: username, write.url_name: url,
         })
+        self._created_names.update((write.name, write.username_name, write.url_name))
         confirmation_readable = False
         if signup_address:
             try:
@@ -924,11 +929,24 @@ class SkillProxy:
             "confirmation_readable": confirmation_readable,
         })
 
+    def _skill_grant_refusal(self, name: str) -> str | None:
+        """Live grant check for the private skill channel; fails closed."""
+        if not self.user_id or not self.task_id:
+            return "credential_not_granted"
+        from . import db
+        from .credential_broker.grants import check_credential_use
+        try:
+            with db.get_db(self.config.db_path) as database:
+                return check_credential_use(database, int(self.task_id), self.user_id, name)
+        except Exception:
+            logger.warning("skill grant check failed task_id=%s", self.task_id, exc_info=True)
+            return "credential_not_granted"
+
     def _refuse_brokered_credential(
         self, conn: socket.socket, name: str, request_type: str, mode: str,
     ) -> bool:
         """Audit a public value read, or refuse it when reveal enforcement is on."""
-        enforce = bool(self.config and self.config.security.credential_broker.enforce_reveal)
+        enforce = bool(self.config and self.config.security.credential_broker.reveal_enforced)
         label = label_for_display(name)
         logger.warning(
             "credential_reveal task_id=%s type=%s name=%s mode=%s "
@@ -1002,12 +1020,29 @@ class SkillProxy:
             return
 
         live_reply = None
+        if (trusted_skill and self.config is not None
+                and self.config.security.credential_broker.enabled
+                and name not in self._created_names):
+            # With the broker on, the private skill channel honours the task's
+            # grant as interception does, or a skill fill would skip room scope
+            # and allow_scheduled. Public reads are governed by reveal policy.
+            reason = self._skill_grant_refusal(name)
+            if reason:
+                logger.warning(
+                    "proxy_rejected task_id=%s type=vault_credential name=%s "
+                    "mode=%s reason=%s", self.task_id, label, mode, reason,
+                )
+                self._send_response(conn, {
+                    "error": f"Credential {label!r} is not granted to this task ({reason})",
+                    "reason": reason, "name": label,
+                })
+                return
         if not trusted_skill:
             revealable = False
             if self.config is not None and self.user_id:
                 from . import db, secrets_store
                 from .credential_broker.bindings import get_binding
-                enforce = self.config.security.credential_broker.enforce_reveal
+                enforce = self.config.security.credential_broker.reveal_enforced
                 with db.get_db(self.config.db_path) as database:
                     if enforce:
                         # Permission must describe the value returned by this

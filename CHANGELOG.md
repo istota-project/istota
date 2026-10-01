@@ -263,6 +263,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- With the credential broker enabled, a host-side skill such as `browse interact --fill-credential` now honours the credential's grant: it needs an entry granted to the task when it started, so an ungranted entry, a room the grant does not cover, or a scheduled task without scheduled use is refused. A task may still fill an entry it created itself with `istota-credential new`. Before, grants bound only the proxy's header substitution.
+
+- `enforce_reveal` now takes effect only with the credential broker enabled, and the daemon warns at startup when it is set without it. Enforcement without the broker refused every git and `gh`/`glab` call.
+
+- A task in a shared room with the developer skill withheld no longer removes your forge bindings, which made your other running tasks fail to authenticate to the forge.
+
 - The Nextcloud skill no longer lets a task post into, rename, describe, invite into, leave or delete a Talk conversation that someone other than the task's user reads, except a post into the room the task was asked in. Before, a private task could post into a group room directly and skip the held `room post`. `talk invite` and `talk create --invite` from a task invite only the caller.
 
 - With your memory withheld in a shared room, the Nextcloud skill's WebDAV verbs refuse your `USER.md`, dated memories and playbooks, `files list` and `files search` leave their names out, and the sandbox masks them even when your files are shared. A task cannot rename the bot directory to get around the masks.
