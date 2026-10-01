@@ -6121,45 +6121,6 @@ def _chat_claim_host(username: str, room_id: int) -> tuple[int, dict]:
     return 200, payload
 
 
-def _chat_room_grants(
-    username: str, room_id: int, scopes: list[str] | None = None,
-) -> tuple[int, dict]:
-    """The caller's own grants in a room; with ``scopes``, replaced by them first.
-
-    A grant is consent to disclose one's own data to the room (speech-gate B3),
-    so it takes no user id: the writer is the caller, always. Every name is
-    checked before anything is written, so a refused body changes nothing.
-    """
-    from . import db, room_scopes
-    from .skills._loader import load_skill_index
-
-    index = load_skill_index(_config.skills_dir, bundled_dir=_config.bundled_skills_dir)
-    names = room_scopes.scope_names(index)
-    with db.get_db(_config.db_path) as conn:
-        found = _chat_member_room(conn, username, room_id)
-        if found is None:
-            return 404, {"error": "room not found"}
-        _handle, reg = found
-        if reg.side_of:
-            return 409, {"error": "a side room is private to its member"}
-        if scopes is not None:
-            unknown = sorted(set(scopes) - set(names))
-            if unknown:
-                return 400, {"error": f"unknown scope: {', '.join(unknown)}"}
-            room_scopes.revoke_scopes(conn, reg.token, username)
-            room_scopes.grant_scopes(
-                conn, reg.token, username, [n for n in names if n in scopes],
-            )
-        granted = room_scopes.granted_scopes(conn, reg.token, username)
-        state = room_scopes.grant_state(
-            conn, reg.token, policy=_config.rooms.shared_room_data_policy,
-        )
-    return 200, {
-        "scopes": [{"name": n, "granted": n in granted} for n in names],
-        "state": state,
-    }
-
-
 def _chat_room_group(
     username: str, room_id: int, group_id=_UNSET,
 ) -> tuple[int, dict]:
@@ -8820,37 +8781,6 @@ async def chat_claim_room_host(
 ):
     status, payload = await asyncio.to_thread(
         _chat_claim_host, user["username"], room_id,
-    )
-    return JSONResponse(payload, status_code=status)
-
-
-@api_router.get("/chat/rooms/{room_id}/grants")
-async def chat_room_grants(
-    room_id: int,
-    user: dict = Depends(_require_api_auth),
-):
-    status, payload = await asyncio.to_thread(
-        _chat_room_grants, user["username"], room_id,
-    )
-    return JSONResponse(payload, status_code=status)
-
-
-@api_router.put("/chat/rooms/{room_id}/grants")
-async def chat_put_room_grants(
-    room_id: int,
-    request: Request,
-    user: dict = Depends(_require_api_auth),
-    _csrf: None = Depends(_verify_origin),
-):
-    try:
-        data = await request.json()
-    except ValueError:
-        data = None
-    scopes = data.get("scopes") if isinstance(data, dict) else None
-    if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
-        return JSONResponse({"error": "scopes: a list of names is required"}, status_code=400)
-    status, payload = await asyncio.to_thread(
-        _chat_room_grants, user["username"], room_id, scopes,
     )
     return JSONResponse(payload, status_code=status)
 

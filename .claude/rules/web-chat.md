@@ -199,7 +199,7 @@ A web room can hold several members (multiplayer Stages 8, 17). Surface-neutral 
 
 **Membership.** `GET /chat/users` (id and display name only). `GET /chat/rooms/{id}/members` (members, `can_manage`, `message_count`). `POST` takes `{user_id, acknowledge_history: true}` (literally `true`). `DELETE /chat/rooms/{id}/members/{user_id}`. Order: 404 non-member, 409 Talk-backed (`_is_talk_backed`), 403 non-creator, 400 bad user or flag. Only the creator manages; members may leave; the creator cannot (409); a target with a live task is 409. Removal deletes the member's handle (routes authorize on it). Adding clears the dismissal and upserts a `principal` participant (`db.add_web_room_member`). A co-member's delete leaves; archive is per-user; the creator's delete waits on any member's task and deletes every member's tasks.
 
-**Grants, host, group.** `GET`/`PUT /chat/rooms/{id}/grants` replace the caller's own scopes, validate first, 409 for a side room; state from `room_scopes.grant_state`. `POST .../host` is `room_policy.claim_host`. `GET`/`PUT .../group` via `room_policy.group_link_refusal` (`RoomGroupLink.svelte`).
+**Host, group.** The grants endpoints and `RoomShareScopes.svelte` are gone (ISSUE-576). `POST .../host` is `room_policy.claim_host`. `GET`/`PUT .../group` via `room_policy.group_link_refusal` (`RoomGroupLink.svelte`).
 
 **Listing state.** `shared` (`db.room_is_shared`), `policy` (`{host, is_host, guest_reply, settings_refusal}`), `side_of`, `off` (`room_veto.switched_off` via `web_app._room_off`; shown as a banner). Reading `policy` may record a lost host (D14). Name, model, effort, brain and promote are the host's (`room_policy.settings_refusal`, 403); colour and hide are per member. `guest_reply` via `room_policy.guest_reply_refusal`.
 
@@ -209,4 +209,4 @@ A web room can hold several members (multiplayer Stages 8, 17). Surface-neutral 
 
 **Settings refuse a shared room.** Routes, briefing token, `alerts_channel`, `log_channel`, `default_room` via `_refuse_shared_destination`; unchanged values are not re-judged; pickers disable shared options but keep a current pin.
 
-**Dev mock.** `web/vite-mock-api.ts` serves the membership, grants, host and group endpoints and `shared`/`policy`/`off`, seeded with a carol/dave room and a guest-switched-off Talk room.
+**Dev mock.** `web/vite-mock-api.ts` serves the membership, host and group endpoints and `shared`/`policy`/`off`, seeded with a carol/dave room and a guest-switched-off Talk room.

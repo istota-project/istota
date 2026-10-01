@@ -114,8 +114,8 @@ def _in_scope(grant, task, scheduled):
 
 
 def _withheld(binding, withheld_scopes):
-    # A shared room's withheld scopes keep the sender's credentials out of the
-    # task (multiplayer Stage 9): a vault entry whenever anything is withheld,
+    # A guest's turn withholds every scope, which keeps the host's credentials
+    # out of the task (multiplayer D2): a vault entry whenever anything is withheld,
     # as the skill proxy's vault map is emptied, and a deployment forge token
     # when the developer skill that declares it is.
     if not withheld_scopes:

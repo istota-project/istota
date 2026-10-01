@@ -314,31 +314,19 @@ def _index():
 
 
 class TestEmissaryReach:
-    @pytest.mark.parametrize("policy", ["restrict", "off"])
-    def test_a_guest_task_reaches_nothing_the_host_granted(self, config, policy):
+    def test_a_guest_task_reaches_nothing_and_a_members_turn_everything(self, config):
         from istota.executor import _task_withheld_scopes
-        config.rooms.shared_room_data_policy = policy
         with db.get_db(config.db_path) as conn:
             _group(conn)
-            conn.execute("INSERT INTO room_data_grants (room_token, user_id, scope) "
-                         "VALUES ('grp', 'alice', 'calendar')")
             guest = db.get_task(conn, _guest_turn(conn, config).task_id)
             own = db.get_task(conn, _member_turn(conn, config, "alice", "my day?").task_id)
             withheld = _task_withheld_scopes(config, conn, guest, _index())
             mixed = _task_withheld_scopes(config, conn, own, _index())
-            # The guest leaves; the host's next turn is read by members only.
-            conn.execute("UPDATE room_participants SET left_at = datetime('now') "
-                         "WHERE kind = 'guest'")
-            later = db.get_task(conn, _member_turn(conn, config, "alice", "and now?").task_id)
-            granted = _task_withheld_scopes(config, conn, later, _index())
         assert {"calendar", "files", "memory"} <= withheld
         assert "room" not in withheld
-        # The host's own turn while the guest reads the room: grants are
-        # ignored under a mixed audience (multiplayer Stage 13). `off` switches
-        # the disclosure gate off for members' turns, mixed or not.
-        assert ("calendar" in mixed) == (policy != "off")
-        # Control: with the guest gone, the host's turn reaches what they granted.
-        assert "calendar" not in granted
+        # The host's own turn while the guest reads the room runs at full
+        # reach (ISSUE-576): the guest's presence is the host's choice.
+        assert mixed == frozenset()
 
     def test_a_guest_task_never_counts_as_a_clean_turn(self, config):
         from istota.whatsapp_requests import _clean_turn

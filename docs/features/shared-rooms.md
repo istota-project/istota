@@ -54,34 +54,24 @@ The bot also stops after three of its own replies in a row with no member speaki
 
 ## What a task can reach
 
-A shared room is read by everyone in it, so an answer there is a disclosure to all of them. Istota controls this by what the task can reach, not by asking the model to be careful.
+A turn runs with its sender's reach. When you ask the bot something in a shared room, it can use everything it can use in your private room: your calendar, email, files, health data and the rest. Asking in a room you know others read is the decision that the answer can be read there, so there is nothing to switch on first. If the answer should stay private, ask in your private room, or ask the bot to answer you privately: it asks your question again in your side room (`istota-skill room answer-privately`) and tells the room it has answered you there.
 
-Your private data comes in **scopes**: each skill that reads something of yours (calendar, email, health, location, and so on) is one, and two more cover your files and your memory:
+This holds with a guest in the room too. Having the guest there, and asking in front of them, is your choice. The room card tells the bot that a guest is reading.
 
-- `files` is your Nextcloud workspace. Without it, the folder is not mounted into the task's sandbox at all.
-- `memory` is your `USER.md`, dated memories, playbooks and remembered facts. It is separate from `files`: with `files` shared and `memory` not, the memory folders are hidden inside the workspace.
+One thing is left out. In a shared room the bot does not load your personal memory into the prompt: `USER.md`, dated memories, recalled memories, remembered facts and playbooks. Those reach a private prompt without you asking for them, so a question about lunch could otherwise come back with something from your health notes. The memory files are still there, so "what did I note about X" works when you ask for it.
 
-In a shared room every scope is withheld until **you** share it there:
+Two kinds of task run with less:
 
-```
-!room share                # list what you share here and what is withheld
-!room share calendar       # share one scope, for your own turns, in this room
-!room unshare calendar     # take it back
-!room share all            # share everything
-!room share none           # share nothing
-```
+- **A guest's turn** runs as the room's host and reaches nothing of the host's: no workspace, no private skill, no memory. Only skills that read nothing personal (the room's own tools, untrusted-input handling) and the room's `CHANNEL.md` are available.
+- **A task nobody asked in the room** is restricted the same way, since its answer lands in the room with no member asking there: a scheduled job, a briefing or a subtask whose conversation is a shared room, or an outside correspondent's reply to an email the bot sent from that room.
 
-The same toggles are under the room's settings on the web. A share is yours alone: it applies only to your own turns, nobody can share on your behalf, and it covers only this room. Skills that read nothing personal (the room's own tools, untrusted-input handling) are always available, and so is the room's own `CHANNEL.md`.
+Other participants' messages in the conversation history are shown to the model as content from someone else, not as instructions, so a co-member cannot use the transcript to steer your turn.
 
-**While a guest is present, shares are ignored.** Every scope is withheld from a member's turn too, because the answer would reach the guest. If you need something private while a guest is present, the bot can answer it in your side room instead (`istota-skill room answer-privately`); it tells the room it has answered you privately.
-
-`[rooms] shared_room_data_policy = "off"` switches the share rule off for members, so a member's turn in a shared room reaches everything a private one does. A guest's turn stays withheld under either setting. See [`[rooms]`](../configuration/reference.md#rooms).
-
-On a deployment with no bubblewrap sandbox (the shipped Docker stack, macOS, the standalone install), withheld scopes are removed from the prompt, the skill list and the environment, but the task's own tools can still read the files on disk. `istota doctor` warns about this. See [security](../deployment/security.md).
+On a deployment with no bubblewrap sandbox (the shipped Docker stack, macOS, the standalone install), what a guest's turn loses is removed from the prompt, the skill list and the environment, but the task's own tools can still read the host's files on disk. `istota doctor` warns about this. See [security](../deployment/security.md).
 
 ## What the bot is told
 
-In a shared room the system prompt carries a short room card: who reads the room (members by user id, guests by count), whom the bot is acting for and who hosts, whose persona is in use, what is withheld from this turn and how to share it, and that `CHANNEL.md` is read by everyone. It never contains anybody's display name, since that is text the person chose.
+In a shared room the system prompt carries a short room card: who reads the room (members by user id, guests by count), whom the bot is acting for and who hosts, whose persona is in use, what this turn can reach (and on a guest's turn, what is withheld), and that `CHANNEL.md` is read by everyone. It never contains anybody's display name, since that is text the person chose.
 
 The persona is always that of the person the task acts for: the host's on the host's turns and on guests' turns, each other member's own on theirs.
 
@@ -114,8 +104,6 @@ Personal memory is not extracted from shared rooms: what is said in front of mor
 
 | Command | Who | What it does |
 |---|---|---|
-| `!room share [<scope>\|all\|none]` | any member | Show or change what you share in this room |
-| `!room unshare <scope>\|all` | any member | Withdraw a share |
 | `!room host` | any member | Take over a room that has lost its host |
 | `!room guests [off\|held\|direct]` | host to change | Show or set how guests are answered |
 | `!room group [<id>\|none]` | host to change | Show or set the room's [group](groups.md#linking-a-room-to-a-group) link |

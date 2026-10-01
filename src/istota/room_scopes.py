@@ -1,43 +1,44 @@
-"""What a task in a shared room may reach: the scope vocabulary and the grants.
+"""What a task in a shared room may reach, and the room-scoped answers beside it.
 
-A room more than one human reads is an egress channel, so a task there reaches
-only what its sender has granted in that room (`room_data_grants`). A scope is a
-skill whose manifest says ``shared_room: private`` (the default), or one of the
-two synthetic scopes that are not skills:
+A turn runs with its sender's reach (ISSUE-576). A member's turn in a shared
+room reaches everything it would in their private room: asking in a room they
+know others read is the decision that the answer may be read there, so there is
+no per-room grant to make first. A guest's turn (emissary mode, multiplayer D2)
+runs as the room's host at room-safe reach: the guest has no data of their own
+and the host asked nothing, so every scope is withheld. So does a task nobody
+asked in the room, such as a cron job whose conversation is a shared room. A scope is a skill
+whose manifest says ``shared_room: private`` (the default), or one of the two
+synthetic scopes that are not skills:
 
-- ``files``: the sender's workspace, ``{mount}/Users/{user_id}``, and their
-  per-resource mounts, which the sandbox binds only with this grant.
+- ``files``: the workspace, ``{mount}/Users/{user_id}``, and the per-resource
+  mounts, which the sandbox binds only when this is not withheld.
 - ``memory``: ``USER.md``, dated memories, recalled memories, playbooks,
   knowledge-graph facts and per-skill overlays.
 
 A ``shared_room: safe`` skill is never a scope, and the room's own
-``CHANNEL.md`` is shared by construction. A grant is consent to disclose to
-the room's members, so while a guest is present (the ``mixed`` audience, D3)
-every grant is ignored and every scope is withheld; what needs one is answered
-in the principal's side room instead (`side_rooms.queue_side_answer`). What is withheld is enforced by what
-the task can reach, at the seams ``execute_task`` and ``task_env`` apply it to;
-nothing here asks the model to keep anything to itself.
+``CHANNEL.md`` is shared by construction. What is withheld is enforced by what
+the task can reach, at the seams ``execute_task`` and ``task_env`` apply it to.
 
-Every read here fails toward withholding: a grant that cannot be read is no
-grant, and a room whose audience cannot be read is treated as shared.
+What a member's turn in a shared room loses is the *ambient* part of their
+memory, which reaches the prompt without being asked for (`ambient_memory_off`):
+the memory skill stays, so a member who asks for a note gets it.
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 
 from . import db
 
 logger = logging.getLogger(__name__)
 
 SYNTHETIC_SCOPES = ("files", "memory")
-POLICY_OFF = "off"
 
 
 def scope_names(skill_index: Mapping[str, object]) -> list[str]:
-    """Every scope a sender could grant: private skills, then the two synthetic."""
+    """Every scope: private skills, then the two synthetic."""
     private = sorted(
         name for name, meta in skill_index.items()
         if getattr(meta, "shared_room", "private") != "safe"
@@ -46,179 +47,105 @@ def scope_names(skill_index: Mapping[str, object]) -> list[str]:
     return [*private, *SYNTHETIC_SCOPES]
 
 
-def granted_scopes(
-    conn: sqlite3.Connection, room_token: str, user_id: str,
-) -> frozenset[str]:
-    """What ``user_id`` has granted in ``room_token``. Empty on any error."""
-    try:
-        rows = conn.execute(
-            "SELECT scope FROM room_data_grants WHERE room_token = ? AND user_id = ?",
-            (room_token, user_id),
-        ).fetchall()
-    except Exception as exc:
-        logger.warning(
-            "room_scopes: could not read grants for %s in %s: %s",
-            user_id, room_token, exc,
-        )
-        return frozenset()
-    return frozenset(row[0] for row in rows)
-
-
-def withheld_scopes(
-    skill_index: Mapping[str, object], granted: frozenset[str],
-) -> frozenset[str]:
-    """The scopes not granted."""
-    return frozenset(scope_names(skill_index)) - granted
-
-
-def grant_scopes(
-    conn: sqlite3.Connection, room_token: str, user_id: str, scopes: Iterable[str],
-) -> None:
-    """Record ``user_id``'s own grant of each scope in ``room_token``.
-
-    The one writer. It takes no second user: a grant is the caller's consent,
-    and nobody grants on another member's behalf. Callers validate the names
-    against `scope_names` first.
-    """
-    conn.executemany(
-        "INSERT OR IGNORE INTO room_data_grants (room_token, user_id, scope) "
-        "VALUES (?, ?, ?)",
-        [(room_token, user_id, scope) for scope in scopes],
-    )
-
-
-def revoke_scopes(
-    conn: sqlite3.Connection, room_token: str, user_id: str,
-    scopes: Iterable[str] | None = None,
-) -> None:
-    """Withdraw ``user_id``'s grants in ``room_token``: the named ones, or all."""
-    if scopes is None:
-        conn.execute(
-            "DELETE FROM room_data_grants WHERE room_token = ? AND user_id = ?",
-            (room_token, user_id),
-        )
-        return
-    conn.executemany(
-        "DELETE FROM room_data_grants WHERE room_token = ? AND user_id = ? AND scope = ?",
-        [(room_token, user_id, scope) for scope in scopes],
-    )
-
-
-def is_scope_granted(
-    conn: sqlite3.Connection, room_token: str, user_id: str, scope: str,
-) -> bool:
-    return scope in granted_scopes(conn, room_token, user_id)
-
-
-GRANTS_ACTIVE = "active"
-GRANTS_POLICY_OFF = "policy_off"
-GRANTS_GUESTS_PRESENT = "guests_present"
-GRANTS_PRIVATE = "private"
-
-
-def grant_state(conn: sqlite3.Connection, room_token: str, *, policy: str) -> str:
-    """Whether a member's grants in this room decide anything right now.
-
-    ``policy_off``: the disclosure gate is off and nothing is withheld from a
-    member's turn. ``guests_present``: a guest reads the room, so every grant is
-    ignored (D3). ``private``: one human reads it, so a grant applies once
-    somebody joins. ``active``: grants are what a member's turn may reach.
-    `!room share` and the web grants pane both word their answer from this.
-    """
-    from . import room_policy
-
-    if policy == POLICY_OFF:
-        return GRANTS_POLICY_OFF
-    if room_policy.audience_class(conn, room_token) == room_policy.MIXED:
-        return GRANTS_GUESTS_PRESENT
-    if not db.room_is_shared(conn, room_token):
-        return GRANTS_PRIVATE
-    return GRANTS_ACTIVE
-
-
-def task_withheld_scopes(
-    conn: sqlite3.Connection,
-    *,
-    policy: str,
-    conversation_token: str,
-    user_id: str,
-    skill_index: Mapping[str, object],
-    assume_shared: bool = False,
-    assume_mixed: bool = False,
-) -> frozenset[str]:
-    """The scopes a task in this conversation may not reach; empty when none.
-
-    Empty for a policy of exactly ``"off"``, for a task with no conversation,
-    and for a room one human reads. The conversation token is mapped to its
-    canonical room first, since a task can carry a surface's ref (an email
-    continuation on a promoted room carries the Talk token) and grants are kept
-    against the room.
-
-    ``assume_shared`` is the task's own ``is_group_chat``: ingest set it from
-    the surface's roster, which can say "group" on a turn where
-    ``room_is_shared`` cannot yet (a Talk group's first turn, a batch whose
-    roster fetch failed). Either signal restricts.
-
-    ``assume_mixed`` is the audience stored with the turn. A guest present when
-    the turn was written, or present now, makes it ``mixed`` and withholds
-    every scope whatever was granted: the answer may be read by the guest who
-    was there, and is read by whoever is there now.
-    """
-    if policy == POLICY_OFF or not conversation_token:
-        return frozenset()
-    from . import room_policy
-
-    try:
-        room_token = conversation_token
-        if db.get_room(conn, room_token) is None:
-            room_token = db.find_room_token_by_ref(conn, room_token) or room_token
-        shared = assume_shared or db.room_is_shared(conn, room_token)
-        mixed = assume_mixed or room_policy.audience_class(
-            conn, room_token, is_group_chat=assume_shared,
-        ) == room_policy.MIXED
-    except Exception as exc:
-        logger.warning(
-            "room_scopes: could not read the audience of %s, withholding every "
-            "scope: %s", conversation_token, exc,
-        )
-        return withheld_scopes(skill_index, frozenset())
-    if mixed:
-        return withheld_scopes(skill_index, frozenset())
-    if not shared:
-        return frozenset()
-    return withheld_scopes(skill_index, granted_scopes(conn, room_token, user_id))
+def all_scopes(skill_index: Mapping[str, object]) -> frozenset[str]:
+    """Every scope, which is what a restricted task withholds."""
+    return frozenset(scope_names(skill_index))
 
 
 def withheld_for_task(
     conn: sqlite3.Connection | None,
     task: "db.Task",
     *,
-    policy: str,
     skill_index: Mapping[str, object],
 ) -> frozenset[str]:
     """What one task may not reach, from its own row. The one derivation the
     executor's reach seams and the `skills` CLI's guard both read.
 
-    A guest's turn (emissary mode, multiplayer D2) withholds every scope,
-    whatever the host granted and whatever the disclosure policy says: a grant
-    is consent to disclose when the host asks, and ``off`` switches the grant
-    gate, not who a guest may speak for. Otherwise the room's answer for the
-    task's own user, conversation, group flag and stored audience, which needs
-    ``conn``; a guest's turn is answered from the row and reads none.
+    Every scope on a guest's turn. Every scope, too, on a task in a room more
+    than one human reads that no member asked there: one with no origin
+    surface (a cron job, a briefing, a subtask, a CLI task), or one whose
+    stored turn was written by somebody who is not the task's user (an outside
+    correspondent's email continuing the room's thread). Such a task's answer
+    lands in the room with no member asking, so the consent a member's turn
+    carries does not reach it. Nothing otherwise: a member's turn runs at full
+    reach in every room (ISSUE-576).
+
+    ``conn`` is ``None`` for a database that does not exist, which holds no
+    room. Any error reading the room withholds every scope.
     """
+    from .surfaces import origin_surface_for_source_type
+
     if task.guest_participant_id is not None:
-        return withheld_scopes(skill_index, frozenset())
-    if policy == POLICY_OFF or not task.conversation_token:
+        return all_scopes(skill_index)
+    if not task.conversation_token:
         return frozenset()
-    return task_withheld_scopes(
-        conn,
-        policy=policy,
-        conversation_token=task.conversation_token,
-        user_id=task.user_id,
-        skill_index=skill_index,
-        assume_shared=bool(task.is_group_chat),
-        assume_mixed=task.audience == "mixed",
-    )
+    member_surface = origin_surface_for_source_type(task.source_type) is not None
+    if not member_surface and (task.is_group_chat or task.audience == "mixed"):
+        return all_scopes(skill_index)
+    if conn is None:
+        return frozenset()
+    try:
+        token = canonical_token(conn, task.conversation_token)
+        if token is None or not (
+            db.room_is_shared(conn, token) or task.is_group_chat
+            or task.audience == "mixed"
+        ):
+            return frozenset()
+        if not member_surface or _written_by_someone_else(conn, task):
+            return all_scopes(skill_index)
+    except Exception as exc:
+        logger.warning(
+            "room_scopes: could not read the room %s, withholding every "
+            "scope: %s", task.conversation_token, exc,
+        )
+        return all_scopes(skill_index)
+    return frozenset()
+
+
+def _written_by_someone_else(conn: sqlite3.Connection, task: "db.Task") -> bool:
+    """Whether the stored turn this task answers names an author other than
+    the task's user. A row with neither column set predates attribution and is
+    read as the user's, as every history reader reads it."""
+    row = conn.execute(
+        "SELECT author_user_id, author_label FROM messages "
+        "WHERE task_id = ? AND role = 'user' ORDER BY id LIMIT 1",
+        (task.id,),
+    ).fetchone()
+    if row is None:
+        return False
+    author_user_id, author_label = row[0], row[1]
+    if author_user_id is None:
+        return bool(author_label)
+    return author_user_id != task.user_id
+
+
+def ambient_memory_off(conn: sqlite3.Connection | None, task: "db.Task") -> bool:
+    """Whether this task's prompt leaves out the sender's ambient memory.
+
+    True in a room more than one human reads now: a guest's turn, a turn whose
+    stored audience is ``mixed``, a surface roster saying "group", or a
+    registered room with more than one member. `USER.md`, dated and recalled
+    memories, knowledge-graph facts and playbooks reach the prompt without the
+    member asking for them, so a question about lunch could come back carrying
+    a health note; that is the one thing asking in the room did not consent to.
+    A fixed rule, not a setting. Fails toward leaving the memory out: a room
+    whose audience cannot be read counts as shared.
+    """
+    if task.guest_participant_id is not None or task.audience == "mixed":
+        return True
+    if task.is_group_chat:
+        return True
+    if not task.conversation_token or conn is None:
+        return False
+    try:
+        token = canonical_token(conn, task.conversation_token)
+        return token is not None and db.room_is_shared(conn, token)
+    except Exception as exc:
+        logger.warning(
+            "room_scopes: could not read the audience of %s, leaving ambient "
+            "memory out: %s", task.conversation_token, exc,
+        )
+        return True
 
 
 def canonical_token(conn, token: str | None) -> str | None:
@@ -296,10 +223,9 @@ def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
     set. Recognised by deriving the token, never by its prefix, so another
     user's push token is still an unknown room.
 
-    Independent of the room's grants. A grant is the sender's consent to
-    disclose their own data and never reaches group material; the audience
-    rule here is the only gate, and no grant widens it. Raises on a database
-    error; the caller treats that as the empty set.
+    The audience rule here is the only gate on group material; a member's
+    full reach in a shared room is their own data and never widens it. Raises
+    on a database error; the caller treats that as the empty set.
     """
     if task.guest_participant_id is not None or task.audience == "mixed":
         return []

@@ -415,7 +415,9 @@ class TestExecutorPlumbing:
             source_type="email", conversation_token="room1", status="running",
         )
         context, _ = _build_db_context(task, config, conn)
-        assert f"External sender <{STRANGER}>: q" in context
+        # Labelled as the stranger, and fenced as someone else's words
+        # (ISSUE-576), since the task's own user is the one it was routed to.
+        assert f"External sender <{STRANGER}>: [UNTRUSTED ROOM PARTICIPANT MESSAGE" in context
         assert "alice: q" not in context
 
     def test_db_context_keeps_the_users_own_mail(self, tmp_path, conn):

@@ -272,111 +272,20 @@ class TestGuestReplyThroughThePatch:
 # ---------------------------------------------------------------------------
 
 
-class TestTheGrantsEndpoints:
-    async def test_nothing_is_granted_until_the_member_grants_it(self, client, db_path):
+class TestTheGrantsEndpointsAreGone:
+    """ISSUE-576: there is nothing to grant, so the routes are not served."""
+
+    async def test_neither_verb_is_served(self, client, db_path):
         room = _shared_room(db_path)
         cookies = await _login(client, "alice")
         room_id = (await _listed(client, cookies, room.token))["id"]
-        resp = await client.get(f"/istota/api/chat/rooms/{room_id}/grants", cookies=cookies)
-        assert resp.status_code == 200
-        body = resp.json()
-        names = [s["name"] for s in body["scopes"]]
-        assert "files" in names and "memory" in names
-        assert not any(s["granted"] for s in body["scopes"])
-        assert body["state"] == "active"
-
-    async def test_a_put_replaces_the_callers_grants_and_nobody_elses(self, client, db_path):
-        room = _shared_room(db_path)
-        with db.get_db(db_path) as conn:
-            conn.execute(
-                "INSERT INTO room_data_grants (room_token, user_id, scope) "
-                "VALUES (?, 'bob', 'memory')", (room.token,),
-            )
-        cookies = await _login(client, "alice")
-        room_id = (await _listed(client, cookies, room.token))["id"]
-        url = f"/istota/api/chat/rooms/{room_id}/grants"
-        first = await client.put(url, json={"scopes": ["files", "memory"]},
-                                 cookies=cookies, headers=ORIGIN)
-        assert first.status_code == 200
-        second = await client.put(url, json={"scopes": ["files"]},
-                                  cookies=cookies, headers=ORIGIN)
-        assert second.status_code == 200
-        granted = {s["name"] for s in second.json()["scopes"] if s["granted"]}
-        assert granted == {"files"}
-        with db.get_db(db_path) as conn:
-            rows = conn.execute(
-                "SELECT user_id, scope FROM room_data_grants WHERE room_token = ? "
-                "ORDER BY user_id, scope", (room.token,),
-            ).fetchall()
-        assert [tuple(r) for r in rows] == [("alice", "files"), ("bob", "memory")]
-
-    async def test_an_unknown_scope_changes_nothing(self, client, db_path):
-        room = _shared_room(db_path)
-        cookies = await _login(client, "alice")
-        room_id = (await _listed(client, cookies, room.token))["id"]
-        resp = await client.put(f"/istota/api/chat/rooms/{room_id}/grants",
-                                json={"scopes": ["files", "everything"]},
-                                cookies=cookies, headers=ORIGIN)
-        assert resp.status_code == 400
-        with db.get_db(db_path) as conn:
-            assert conn.execute("SELECT COUNT(*) FROM room_data_grants").fetchone()[0] == 0
-
-    async def test_the_body_takes_no_user(self, client, db_path):
-        room = _shared_room(db_path)
-        cookies = await _login(client, "alice")
-        room_id = (await _listed(client, cookies, room.token))["id"]
-        resp = await client.put(f"/istota/api/chat/rooms/{room_id}/grants",
-                                json={"scopes": ["files"], "user_id": "bob"},
-                                cookies=cookies, headers=ORIGIN)
-        assert resp.status_code == 200
-        with db.get_db(db_path) as conn:
-            assert conn.execute(
-                "SELECT user_id FROM room_data_grants"
-            ).fetchall()[0][0] == "alice"
-
-    async def test_a_private_room_says_the_grant_waits_for_someone_to_join(
-        self, client, db_path,
-    ):
-        room = _private_room(db_path)
-        cookies = await _login(client, "alice")
-        room_id = (await _listed(client, cookies, room.token))["id"]
-        resp = await client.get(f"/istota/api/chat/rooms/{room_id}/grants", cookies=cookies)
-        assert resp.json()["state"] == "private"
-
-    async def test_a_guest_makes_every_grant_inert(self, client, db_path):
-        room = _shared_room(db_path)
-        with db.get_db(db_path) as conn:
-            db.upsert_room_participant(conn, room_token=room.token, surface="talk",
-                                       surface_ref="guest/abc", kind="guest")
-        cookies = await _login(client, "alice")
-        room_id = (await _listed(client, cookies, room.token))["id"]
-        resp = await client.get(f"/istota/api/chat/rooms/{room_id}/grants", cookies=cookies)
-        assert resp.json()["state"] == "guests_present"
-
-    async def test_a_side_room_has_nothing_to_share(self, client, db_path):
-        room = _shared_room(db_path)
-        with db.get_db(db_path) as conn:
-            side = db.ensure_side_room(conn, room.token, "alice")
-        cookies = await _login(client, "alice")
-        room_id = (await _listed(client, cookies, side.token))["id"]
-        get = await client.get(f"/istota/api/chat/rooms/{room_id}/grants", cookies=cookies)
-        assert get.status_code == 409
-        put = await client.put(f"/istota/api/chat/rooms/{room_id}/grants",
-                               json={"scopes": ["files"]}, cookies=cookies, headers=ORIGIN)
-        assert put.status_code == 409
-
-    async def test_a_non_member_is_not_found(self, client, db_path):
-        room = _shared_room(db_path)
-        alice = await _login(client, "alice")
-        room_id = (await _listed(client, alice, room.token))["id"]
-        carol = await _login(client, "carol")
-        resp = await client.get(f"/istota/api/chat/rooms/{room_id}/grants", cookies=carol)
-        assert resp.status_code == 404
-
-
-# ---------------------------------------------------------------------------
-# The members listing counts what an add discloses
-# ---------------------------------------------------------------------------
+        got = await client.get(f"/istota/api/chat/rooms/{room_id}/grants", cookies=cookies)
+        put = await client.put(
+            f"/istota/api/chat/rooms/{room_id}/grants", cookies=cookies,
+            json={"scopes": ["files"]},
+        )
+        assert got.status_code in (404, 405)
+        assert put.status_code in (403, 404, 405)
 
 
 class TestTheMembersListingCountsTheHistory:

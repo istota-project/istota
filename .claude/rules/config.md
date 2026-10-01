@@ -140,7 +140,7 @@ Sweep (ISSUE-317): `sandbox_cache_sweep_enabled`, `sandbox_cache_max_gb` (10/use
 
 ## Rooms and speech gate
 
-`[speech_gate] mode` (`mention`): an unknown mode fails closed (rung `failed`); DMs and addressed turns are answered before it is read. `[rooms] shared_room_data_policy` (`restrict`) disables disclosure only on exactly `"off"`; guests are withheld every scope regardless. Wired in `render-config.sh` + compose (`ISTOTA_SPEECH_GATE_*`, `ISTOTA_ROOMS_SHARED_ROOM_DATA_POLICY`) and Ansible. See transport.md "Multiplayer rooms".
+`[speech_gate] mode` (`mention`): an unknown mode fails closed (rung `failed`); DMs and addressed turns are answered before it is read. `[rooms]` is retired (in `_RETIRED`): `shared_room_data_policy` went with the grants (ISSUE-576) and a config still setting it gets a warning. Wired in `render-config.sh` + compose (`ISTOTA_SPEECH_GATE_*`) and Ansible. See transport.md "Multiplayer rooms".
 
 ## Brain
 
