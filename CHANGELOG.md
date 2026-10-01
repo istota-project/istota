@@ -9,17 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- The first accepted SMS creates a room named SMS. Later texts keep the same room and its custom name, while older text history remains available.
+- Your SMS conversation and your one-to-one WhatsApp chat now each have a room. The first text you send creates a room named SMS or WhatsApp, and your texts, the answers, confirmation exchanges, the replies to `!commands` you text, and scheduled jobs and alerts sent to your phone (including ones whose send was blocked) are all recorded in it. A WhatsApp group keeps its own room, and its people's messages now show in its web view, as Talk group messages already did.
 
-- The first accepted private WhatsApp message creates a room named WhatsApp, in the same way. WhatsApp groups keep their own rooms, and the private chat is no longer described to the assistant as a group. A reminder or scheduled job asked for from either phone room is now sent to the phone, not only written to the read-only web transcript.
+  **Upgrade note:** the first start after the upgrade adds a unique index on `room_bindings (surface, surface_ref)`, and refuses to start with `ambiguous room bindings` if two rooms already share one binding. Resolve the duplicate rows by hand and start again; nothing is chosen for you. A new scheduler gate, `phone-room-backfill`, runs every minute and records its progress in the reserved `_room_backfill` key-value namespace.
 
-- Scheduled jobs and alerts sent to you by SMS or WhatsApp now also appear in that phone's room once the room exists, as does an answer whose send was blocked (a closed WhatsApp window, an opt-out), so it can be read in web chat rather than being lost. Nothing is written for a user who has never texted in, and a room another person reads never receives these.
+- An SMS or WhatsApp room is read-only in web chat. It is marked with a phone or chat-bubble icon, has no composer, and a question waiting for confirmation says to reply by text; the server refuses a message, a confirmation or a decline sent to it from web chat with a 409. Your own texts show as yours, with a "Sent by SMS" or "Sent by WhatsApp" line, and the room is never chosen as your default web room or as the room a relay question is sent to.
 
-- Private SMS and WhatsApp turns now enter the room transcript. Room-wide delivery skips phone bindings, so a reply from another surface does not trigger an implicit phone send.
-
-- Your own texts now show in the web view of an SMS or WhatsApp room, beside the answers, and answering a confirmation by text (a bare yes, a button, or `!confirm`) leaves the answer and its acknowledgement in that room, as does the reply to any other `!command` you text, written once even if the message arrives twice. A command sent from a WhatsApp group, `!confirm` included, still leaves its reply in neither the group nor your private room. The people's messages in a WhatsApp group room now show in its web view too, as they already did for Talk groups.
-
-- An SMS or WhatsApp room now also shows the conversation from before it existed: the scheduler copies your earlier texts and their answers into the room within a minute of your first text, once any answer still in progress has finished. The assistant also recalls memories from those earlier texts in the room. A room you delete and that is created again by a later text starts empty, and does not recall the deleted room's memories.
+- A phone room also shows the conversation from before it existed: within a minute of your first text the scheduler copies your earlier texts and their answers into it, and the assistant recalls memories from them there. A reminder or scheduled job you ask for by text is sent to your phone and recorded in the room, and nothing written into the room is ever texted unless it was sent to the phone on purpose. A room you delete and that a later text creates again starts empty and does not recall the deleted room's memories.
 
 - Server deployments now migrate existing room identities during a brief offline window, preserving room history, channel memories and old links. Standalone updates require stopping the local server first; Docker upgrades have an explicit offline migration step.
 
