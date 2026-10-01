@@ -1051,9 +1051,7 @@ def _dispatch_inbound(
             response = confirmations.apply_answer(
                 conn, parked, answer, config, by="whatsapp",
             )
-            confirmations.record_ack(
-                conn, turn.room_token, ack=response, origin_surface="whatsapp",
-            )
+            _ack_in_private_room(conn, user_id, turn.room_token, response)
             return WhatsAppEventResult(
                 "confirmation_answer", user_id=user_id, response_text=response,
                 response_logical_key=f"confirmation-answer:{event.message_id}",
@@ -1114,6 +1112,14 @@ def _dispatch_inbound(
     return WhatsAppEventResult("task", user_id=user_id, task_id=turn.task_id)
 
 
+def _ack_in_private_room(conn, user_id, room_token, ack):
+    """Put a confirmation answer's ack beside the answer, in the private room only."""
+    from ..routing import is_private_phone_room
+
+    if is_private_phone_room(conn, "whatsapp", user_id, room_token):
+        confirmations.record_ack(conn, room_token, ack=ack, origin_surface="whatsapp")
+
+
 def _handle_callback(
     conn, config: Config, event: InboundWhatsAppEvent, user_id: str, token: str,
 ) -> WhatsAppEventResult:
@@ -1141,7 +1147,7 @@ def _handle_callback(
         return WhatsAppEventResult("callback_unmatched", user_id=user_id)
     turn = record_whatsapp_turn(conn, config, user_id, choice, record_only=True)
     response = confirmations.apply_answer(conn, task, answer, config, by="whatsapp")
-    confirmations.record_ack(conn, turn.room_token, ack=response, origin_surface="whatsapp")
+    _ack_in_private_room(conn, user_id, turn.room_token, response)
     return WhatsAppEventResult(
         "confirmation_answer", user_id=user_id, response_text=response,
         response_logical_key=f"confirmation-answer:{event.message_id}",

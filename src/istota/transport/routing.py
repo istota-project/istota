@@ -1005,6 +1005,18 @@ def private_phone_room(
     return token
 
 
+def is_private_phone_room(conn, surface: str, user_id: str, room_token) -> bool:
+    """Whether ``room_token`` is this user's own SMS or WhatsApp room.
+
+    The one test for "the phone webhook has already stored this turn here":
+    both webhooks record every accepted private turn, a typed ``!command`` and
+    a confirmation answer included, before acting on it, while a WhatsApp
+    group's command records nothing. A writer that would add the same turn
+    again asks this first.
+    """
+    return bool(room_token) and room_token == private_phone_room(conn, surface, user_id)
+
+
 def transcript_room_for_task(conn, config: "Config", task: "db.Task") -> str | None:
     """The transcript room for a task that already exists.
 

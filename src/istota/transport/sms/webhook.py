@@ -206,9 +206,7 @@ def handle_provider_event(
             response = confirmations.apply_answer(
                 conn, parked, answer, config, by="sms",
             )
-            confirmations.record_ack(
-                conn, turn.room_token, ack=response, origin_surface="sms",
-            )
+            _ack_in_private_room(conn, user_id, turn.room_token, response)
             _set_disposition(conn, event, "confirmation_answer")
             return SmsEventResult(
                 "confirmation_answer", user_id=user_id, response_text=response,
@@ -233,6 +231,14 @@ def handle_provider_event(
     task_id = turn.task_id
     _set_disposition(conn, event, "task", task_id)
     return SmsEventResult("task", user_id=user_id, task_id=task_id)
+
+
+def _ack_in_private_room(conn, user_id, room_token, ack):
+    """Put a confirmation answer's ack beside the answer, in the private room only."""
+    from ..routing import is_private_phone_room
+
+    if is_private_phone_room(conn, "sms", user_id, room_token):
+        confirmations.record_ack(conn, room_token, ack=ack, origin_surface="sms")
 
 
 async def deliver_event_response(

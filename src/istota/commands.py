@@ -889,7 +889,8 @@ _TRANSCRIPT_SURFACES = db.TRANSCRIPT_SURFACES
 
 # The two members of that tuple whose inbound path records a `!command` as a
 # user turn before dispatching it (`transport.ingest.record_phone_turn` with
-# `record_only=True`), so the exchange below writes only its ack.
+# `record_only=True`), in the user's own phone room only, so a writer here must
+# not store the same turn again (`routing.is_private_phone_room`).
 _PHONE_SURFACES = ("sms", "whatsapp")
 
 
@@ -932,9 +933,9 @@ def _record_confirm_exchange(ctx: CommandContext, reply: str) -> "CommandResult"
         # only in the user's own phone room. A WhatsApp group's command answers
         # in the private chat precisely so the group never reads it, so a
         # command from any other room records nothing, as before.
-        from .transport.routing import private_phone_room
+        from .transport.routing import is_private_phone_room
 
-        if room_token != private_phone_room(ctx.conn, ctx.surface, ctx.user_id):
+        if not is_private_phone_room(ctx.conn, ctx.surface, ctx.user_id, room_token):
             ctx.conn.commit()
             return CommandResult(handled=True, text=reply)
         user_msg_id = None
@@ -1059,7 +1060,14 @@ async def cmd_steer(ctx: CommandContext):
     # The ownership question, unlike `_record_confirm_exchange`'s gate a few
     # hundred lines up: this write needs a room the surface owns to write into,
     # so email — a `guest` — is out, and was before the predicate had a name.
-    if is_room_member(ctx.surface):
+    # In a private phone room the webhook has already stored `!steer <note>`
+    # as the turn, so a second row would show the steer twice.
+    phone_turn_recorded = False
+    if ctx.surface in _PHONE_SURFACES:
+        from .transport.routing import is_private_phone_room
+
+        phone_turn_recorded = is_private_phone_room(conn, ctx.surface, user_id, room_token)
+    if is_room_member(ctx.surface) and not phone_turn_recorded:
         try:
             if db.get_room(conn, room_token) is not None:
                 msg_id = db.add_message(

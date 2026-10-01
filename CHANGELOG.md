@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Private SMS and WhatsApp turns now enter the room transcript. Room-wide delivery skips phone bindings, so a reply from another surface does not trigger an implicit phone send.
 
-- Your own texts now show in the web view of an SMS or WhatsApp room, beside the answers, and answering a confirmation by text (a bare yes, a button, or `!confirm`) leaves the answer and its acknowledgement in that room. A `!confirm` sent from a WhatsApp group still leaves nothing in the group.
+- Your own texts now show in the web view of an SMS or WhatsApp room, beside the answers, and answering a confirmation by text (a bare yes, a button, or `!confirm`) leaves the answer and its acknowledgement in that room. A `!confirm` sent from a WhatsApp group still leaves nothing in the group. The people's messages in a WhatsApp group room now show in its web view too, as they already did for Talk groups.
 
 - Server deployments now migrate existing room identities during a brief offline window, preserving room history, channel memories and old links. Standalone updates require stopping the local server first; Docker upgrades have an explicit offline migration step.
 

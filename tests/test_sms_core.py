@@ -1846,6 +1846,25 @@ class TestSmsRoomMint:
             assert rendered[2][0] == 'system'
             assert rendered[2][1].startswith(f'Confirmed #{first.task_id}')
 
+    def test_steer_is_recorded_once(self, tmp_path):
+        # The webhook stores `!steer <note>` as the turn; the command must not
+        # store the note again beside it.
+        config = _config(tmp_path)
+        config = replace(config, brain=replace(config.brain, kind='native'))
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (first.task_id,))
+        providers = _providers(_adapter(lambda _req: SmsSendResult('opaque', 'accepted', 1)))
+        command = '!steer focus on the logs'
+        asyncio.run(_handle(config, providers, _inbound(text=command, provider_message_id='steer', provider_event_id='event-steer')))
+        with db.get_db(config.db_path) as conn:
+            assert db.count_pending_steers(conn, first.task_id) == 1
+            assert self._rendered(conn, token) == [
+                ('user', 'check the backup'), ('user', command),
+            ]
+
     def test_racing_first_texts_share_one_room(self, tmp_path):
         config = _config(tmp_path)
         barrier = threading.Barrier(2)
