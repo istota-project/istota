@@ -12,6 +12,7 @@ mistake and goes green. These name each conditional family, so a layer that
 crosses the boundary fails by name.
 """
 
+import json
 import re
 from unittest.mock import patch
 
@@ -717,6 +718,31 @@ class TestWhatTheBrainIsHanded:
         assert system_artifact.exists()
         assert system_artifact.resolve() == req.composed_system_prompt_path
 
+    def test_the_cli_settings_reach_the_brain_by_path(self, tmp_path):
+        """The CLI settings document is written beside the system half and
+        named on the request, so `--settings` carries a file the task cannot
+        rewrite rather than whatever the host or the repository says."""
+        from istota.brain.claude_code import (
+            build_claude_cli_flags,
+            cli_settings_document,
+        )
+
+        config, task, req = self._run(tmp_path)
+
+        path = req.cli_settings_path
+        assert path is not None
+        assert path.is_absolute()
+        assert path == (
+            executor.get_task_control_dir(config, task.user_id, task.id)
+            / "cli_settings.json"
+        )
+        assert json.loads(path.read_text(encoding="utf-8")) == (
+            cli_settings_document()
+        )
+        flags = build_claude_cli_flags(req)
+        assert flags[flags.index("--settings") + 1] == str(path)
+        assert flags[flags.index("--setting-sources") + 1] == "user"
+
     def test_neither_artifact_is_left_in_the_model_s_own_directory(
         self, tmp_path,
     ):
@@ -893,7 +919,9 @@ class TestWhatTheBrainIsHanded:
             write=True,
         )
 
-    @pytest.mark.parametrize("name", ["prompt.txt", "system_prompt.txt"])
+    @pytest.mark.parametrize(
+        "name", ["prompt.txt", "system_prompt.txt", "cli_settings.json"],
+    )
     def test_a_planted_symlink_fails_the_write_rather_than_following_it(
         self, tmp_path, name,
     ):

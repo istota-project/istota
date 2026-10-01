@@ -878,7 +878,23 @@ def _is_root() -> bool:
 # purpose (the warning is operator-facing, not per-request).
 _WARNED_UNSUPPORTED_FLAGS: set[str] = set()
 
-_NO_ATTRIBUTION_SETTINGS = json.dumps({"attribution": {"commit": "", "pr": ""}})
+CLI_SETTINGS_FILENAME = "cli_settings.json"
+
+
+def cli_settings_document() -> dict:
+    """The settings every `claude` run of ours carries, built here and only here.
+
+    Passed as `--settings`, which outranks the user source the CLI still reads
+    (`--setting-sources user`): the host's `~/.claude/settings.json` under the
+    headless brain, the session `CLAUDE_CONFIG_DIR` under tmux. The executor
+    writes it into the task control directory; a direct caller with no control
+    directory gets the same document inline.
+
+    `attribution` is blanked because the CLI's own prompt otherwise tells the
+    model to sign commits and PRs, which the `commit` skill forbids, and the
+    harness instruction won.
+    """
+    return {"attribution": {"commit": "", "pr": ""}}
 
 
 def advisor_active(
@@ -967,10 +983,18 @@ def build_claude_cli_flags(
             return
         flags.extend([flag, *values])
 
-    # The CLI's own prompt tells the model to sign commits and PRs, which the
-    # `commit` skill forbids; a skill sentence loses to it, the setting does not.
-    if req.allowed_tools:
-        _add("--settings", _NO_ATTRIBUTION_SETTINGS)
+    # `user` alone: the CLI's cwd is the per-user temp dir, which every task of
+    # that user can write (the shared temp root when unsandboxed), so a planted
+    # `.claude/settings.json`, `.mcp.json` or CLAUDE.md there would reach every
+    # later task. The cost is that `istota repl` in a repo no longer auto-loads
+    # that repo's CLAUDE.md.
+    _add("--setting-sources", "user")
+    # No `exists()` gate: a set path is required input, and the CLI fails a
+    # missing one with `Settings file not found` rather than running without it.
+    if req.cli_settings_path is not None:
+        _add("--settings", str(req.cli_settings_path))
+    elif req.allowed_tools:
+        _add("--settings", json.dumps(cli_settings_document()))
     if req.model:
         _add("--model", req.model)
     if req.effort:

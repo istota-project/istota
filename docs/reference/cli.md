@@ -401,7 +401,7 @@ every other verb in this CLI. See [Money](../features/money.md#transaction-rules
 istota repl [-u USER] [-t TOKEN] [--workspace cwd|standard|PATH] [--model ALIAS] [--effort LEVEL]
 ```
 
-A streamed, full-stack terminal assistant. Each line becomes a `source_type="repl"` task with `output_target="stream"`, run inline (no daemon needed); `task_events` stream back to the terminal. `--workspace` selects the working directory: `cwd` (default), `standard` (the per-user temp dir the daemon sandboxes), or an explicit path.
+A streamed, full-stack terminal assistant. Each line becomes a `source_type="repl"` task with `output_target="stream"`, run inline (no daemon needed); `task_events` stream back to the terminal. `--workspace` selects the working directory: `cwd` (default), `standard` (the per-user temp dir the daemon sandboxes), or an explicit path. On the Claude Code brains a repository's own `CLAUDE.md` and `.claude/` settings in that directory are not loaded; ask for the file to be read if you want its conventions applied.
 
 ### Local single-user install
 
