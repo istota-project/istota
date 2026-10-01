@@ -47,6 +47,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The Security card now sits directly below Identity in Settings and uses the same field, description and button styles as the other settings cards.
+
+- Admin Users now uses the same user cells as Status, with one action menu per row and a table that fits the available width. Add user and Attach email open dialogs with local error feedback; web-access help is collapsed above the list.
+
+- Sign-in now shows one email method at a time, with a choice between password and email link. Switching methods keeps the entered address, and password recovery sits beside the password label.
+
 - Ansible deployments now enable email login alongside Nextcloud login by default. Users still need a configured email login identity to sign in by email.
 
 - Ansible deployments that use the tmux brain now expect Claude CLI 2.1.280. The version check warns if the installed CLI differs.
@@ -67,6 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Immediate task execution from the command line no longer holds a database transaction across credential admission. It reserves the task before starting and reports liveness during execution, so the scheduler cannot also claim it.
 
+- Assembling a task prompt with the default configuration no longer creates an empty `data/istota.db` in the working directory. The room lookup in the prompt header now skips a database file that does not exist instead of opening it, which created it (ISSUE-570).
+- Browser requests from `istota-skill browse` and `markets finviz` no longer create a `data/` directory in the current directory when `ISTOTA_DB_PATH` is unset, which is the case with the skill proxy off. They now take the browser admission lock beside the database the config file names, the same lock the daemon uses, and refuse when no config file names an absolute database path. Before, they locked a file under `data/` that no other caller shared (ISSUE-572).
+- A web, Talk, WhatsApp or SMS task no longer fails outright when the relay lookup for its prompt cannot read the database, for example a database file with no relay table. The task runs without the relay question attached, and the failure is logged as a warning (ISSUE-573).
+- `istota task --dry-run` with no framework database no longer creates one in the working directory. The conversation, memory, skill and relay lookups it makes now skip a database that does not exist, and a briefing prompt, which needs the database, fails the task instead (ISSUE-571).
 - The version on `/admin`, `istota --version`, the Nextcloud status file and native session logs now includes the running commit when istota runs from a git checkout, such as `0.42.0+a1b2c3d`, unless the checkout is exactly on that release's tag. Before, an Ansible host on an untagged commit of `main` reported the previous release. Docker images and the standalone install have no checkout and still show the plain version. The sign-in and other pages shown before login no longer show a version at all.
 - `istota-skill relay list` and `relay status` now work from a private room bound to Talk. They check the room's Talk participants before showing any relay content, and on a deployment that keeps the Nextcloud app password in its environment file the skill process never received that password, so every check failed. The proxy now hands the relay skill the app password, and a participant list that cannot be fetched is reported as `audience_unavailable` rather than as a room that is not private.
 - Tasks can no longer request another user’s forge credentials directly from their devbox credential socket. The proxy now checks that the caller belongs to that user’s running container and refuses access when it cannot verify the container.

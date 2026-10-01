@@ -26,6 +26,7 @@ _needs = pytest.mark.skipif(
 if _has_web_deps and _has_money:
     from httpx import ASGITransport, AsyncClient
 
+from istota import db
 from istota.config import (
     Config,
     SiteConfig,
@@ -54,6 +55,9 @@ def _istota_config(tmp_path, *, with_money: bool = False) -> Config:
         # testable.
         "bob": UserConfig(display_name="Bob", disabled_modules=["money"]),
     }
+    # The OAuth callback reads the native-login identity table and refuses
+    # sign-in when it cannot, so the framework database has to exist.
+    db.init_db(tmp_path / "istota.db")
     return Config(
         db_path=tmp_path / "istota.db",
         workspace_path=tmp_path / "mount",

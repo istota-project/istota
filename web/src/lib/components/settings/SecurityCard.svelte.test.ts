@@ -17,8 +17,9 @@ it('requires the current password and ends the session after a successful change
   const onSignedOut = vi.fn();
   vi.mocked(changePassword).mockResolvedValue({ signed_out: true });
   render(SecurityCard, { auth, onSignedOut });
-  expect(screen.getByText(/signs you out of every session/i)).toBeTruthy();
-  expect(screen.getByText(auth.email)).toBeTruthy();
+  expect(screen.getByText(/signs you out of every session/i)).toHaveClass('hint');
+  expect(screen.getByLabelText('Login email')).toHaveValue(auth.email);
+  expect(screen.getByLabelText('Login email')).toHaveAttribute('readonly');
   await fireEvent.input(screen.getByLabelText('Current password'), {
     target: { value: 'old passphrase' },
   });
@@ -39,7 +40,9 @@ it('shows passwordless users their login email and the reset-page action', () =>
   expect(screen.getByRole('link', { name: 'Set a password' }).getAttribute('href')).toBe(
     '/istota/auth/reset',
   );
-  expect(screen.getByText(auth.email)).toBeTruthy();
+  expect(screen.getByLabelText('Login email')).toHaveValue(auth.email);
+  expect(screen.getByText(/You sign in with an email link/)).toHaveClass('hint');
+  expect(screen.getByRole('link', { name: 'Set a password' }).parentElement).toHaveClass('actions');
 });
 
 it('does not show the card for a Nextcloud session', () => {

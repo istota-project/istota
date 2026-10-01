@@ -86,6 +86,24 @@ async def test_login_choices(client, configured, methods):
     assert page.headers["referrer-policy"] == "no-referrer"
 
 
+async def test_email_login_groups_password_and_link_as_alternatives(client):
+    page = await client.get("/istota/login")
+    choices = re.search(r'<fieldset class="email-login">(.*?)</fieldset>', page.text, re.S)
+    assert choices is not None
+    assert '<legend class="visually-hidden">Sign in with email</legend>' in choices[1]
+    radios = re.findall(r'<input[^>]*type="radio"[^>]*>', choices[1])
+    assert len(radios) == 2
+    assert all('name="email-method"' in radio for radio in radios)
+    assert 'id="email-password" checked' in radios[0]
+    assert 'id="email-link"' in radios[1] and "checked" not in radios[1]
+    password = re.search(r'<div class="email-panel password-panel">(.*?)</form>', choices[1], re.S)
+    link = re.search(r'<div class="email-panel link-panel">(.*?)</form>', choices[1], re.S)
+    assert password and 'action="/istota/login/email"' in password[1]
+    assert link and 'action="/istota/auth/login-link/request"' in link[1]
+    assert 'href="/istota/auth/reset"' in password[1]
+    assert csrf(page) != csrf(page, "/istota/auth/login-link/request")
+
+
 async def test_email_login_uses_live_profile_and_rotates_session(client, configured):
     configured._config.users = {"bob": UserConfig()}
     set_session(client, configured, {"planted": "old"})

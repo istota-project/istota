@@ -456,7 +456,7 @@ class TestTheFetchCap:
             assert value not in json.dumps(envelope)
 
     def test_two_stamped_fills_fit_under_a_limit_of_two(
-        self, sock_path, monkeypatch, capsys,
+        self, sock_path, monkeypatch, capsys, tmp_path,
     ):
         """The control for the case above: the same call one flag shorter
         succeeds, so the refusal is the budget rather than the mechanism."""
@@ -466,6 +466,7 @@ class TestTheFetchCap:
 
         monkeypatch.setenv("ISTOTA_SKILL_PROXY_SOCK", str(sock_path))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(tmp_path / "istota.db"))
         response = MagicMock()
         response.json.return_value = {
             "status": "ok", "session_id": "s1", "actions": [], "user_scope": "alice",

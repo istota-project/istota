@@ -43,8 +43,11 @@ PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake image data"
 
 
 @pytest.fixture(autouse=True)
-def browser_identity(monkeypatch):
+def browser_identity(monkeypatch, tmp_path):
+    # The task env a skill CLI runs in: its user, and the framework database
+    # whose directory holds the browser admission lock.
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    monkeypatch.setenv("ISTOTA_DB_PATH", str(tmp_path / "db" / "istota.db"))
     monkeypatch.setattr("istota.skills.browse._shared_profile_warned", False)
 
 

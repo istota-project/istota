@@ -1276,6 +1276,37 @@ def get_db(
         yield conn
 
 
+def database_present(db_path: "Path | str | None") -> bool:
+    """Whether `db_path` names an existing database file.
+
+    `sqlite3.connect` creates a missing file, and `Config.db_path` defaults to
+    the relative `data/istota.db`, so opening one to find out leaves a stray
+    database in the cwd (ISSUE-570, ISSUE-571).
+    """
+    return bool(db_path) and Path(db_path).is_file()
+
+
+@contextmanager
+def get_db_if_present(
+    db_path: "Path | str | None", conn: "sqlite3.Connection | None" = None,
+) -> Iterator["sqlite3.Connection | None"]:
+    """The caller's connection, else one on an existing database, else None.
+
+    For the optional reads and writes that open the framework database only
+    when no connection was passed: a missing database means there is nothing
+    to read, and nowhere a write could matter, since a real task's row lives
+    in that database. Each caller skips on None.
+    """
+    if conn is not None:
+        yield conn
+        return
+    if not database_present(db_path):
+        yield None
+        return
+    with get_db(Path(db_path)) as opened:
+        yield opened
+
+
 def create_task(
     conn: sqlite3.Connection,
     prompt: str = "",

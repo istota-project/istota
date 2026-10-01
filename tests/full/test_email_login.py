@@ -15,7 +15,7 @@ import pytest
 from testbed.services import mail
 from testbed.stack import CONTAINER_CONFIG
 
-pytestmark = [pytest.mark.full, pytest.mark.profile("full")]
+pytestmark = pytest.mark.full
 
 
 def _form_fields(page: str, action: str) -> dict[str, str]:
@@ -41,6 +41,7 @@ def _delivered_link(service, since: int, recipient: str) -> str:
     pytest.fail("No sign-in email delivered to the recipient over Maddy IMAP")
 
 
+@pytest.mark.profile("full")
 def test_delivered_sign_in_link_and_password_login(stack):
     # Distinct recipient plus an IMAP watermark exclude background mail and
     # messages left by another scenario on the session-scoped full stack.

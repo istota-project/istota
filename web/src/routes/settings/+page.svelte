@@ -867,7 +867,11 @@
           <input type="checkbox" bind:checked={profile.timezone_follow_location} />
         </SettingsField>
       </SettingsCard>
+    {/if}
 
+    <SecurityCard auth={identity.user.auth} onSignedOut={identity.expireSession} />
+
+    {#if profile}
       <SettingsCard
         title="Appearance"
         description="Stored in this browser and applied immediately — no Save needed."
@@ -1394,7 +1398,6 @@
     {/if}
 
     <CredentialGrantsCard onSignedOut={identity.expireSession} />
-    <SecurityCard auth={identity.user.auth} onSignedOut={identity.expireSession} />
 
     {#if ncToken}
       {@const nc = ncToken}

@@ -148,7 +148,9 @@ def cmd_task(args):
     # this codebase's marker for a task with no row behind it (the heartbeat
     # builds one the same way).
     if args.dry_run:
-        with db.get_db(config.db_path) as conn:
+        # Nothing behind includes the database: with none present the prompt is
+        # assembled without the reads that need it (ISSUE-571).
+        with db.get_db_if_present(config.db_path) as conn:
             task = db.Task(
                 id=0,
                 status="pending",
@@ -157,7 +159,9 @@ def cmd_task(args):
                 prompt=prompt,
                 conversation_token=args.conversation_token,
             )
-            user_resources = db.get_user_resources(conn, args.user)
+            user_resources = (
+                db.get_user_resources(conn, args.user) if conn is not None else []
+            )
             _success, result, _actions, _trace = execute_task(
                 task,
                 config,
