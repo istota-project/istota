@@ -75,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A task with no database row, such as one run by a direct caller, no longer fails with `credential task owner mismatch`. It now gets an empty credential grant snapshot. The snapshot now joins a write transaction the caller already holds instead of waiting on it. `h11`, which the credential broker imports directly, is now a declared dependency.
 - Ansible deployments can now configure trusted proxy hops, email-login limits and link lifetimes, vault request limits, and the optional credential broker. These controls were missing from the role, so inventory could not override the application's defaults. The new role defaults preserve existing behavior.
 
 - Immediate task execution from the command line no longer holds a database transaction across credential admission. It reserves the task before starting and reports liveness during execution, so the scheduler cannot also claim it.

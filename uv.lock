@@ -1426,6 +1426,7 @@ source = { editable = "." }
 dependencies = [
     { name = "croniter" },
     { name = "cryptography" },
+    { name = "h11" },
     { name = "httpx" },
     { name = "pillow" },
     { name = "pillow-heif" },
@@ -1618,6 +1619,7 @@ requires-dist = [
     { name = "feedparser", marker = "extra == 'feeds'", specifier = ">=6.0.0" },
     { name = "garminconnect", marker = "python_full_version >= '3.12' and extra == 'garmin'", specifier = ">=0.3.3" },
     { name = "geopy", marker = "extra == 'location'", specifier = ">=2.4" },
+    { name = "h11", specifier = ">=0.16.0" },
     { name = "httpx", specifier = ">=0.26.0" },
     { name = "icalendar", marker = "extra == 'calendar'", specifier = ">=5.0.0" },
     { name = "imap-tools", marker = "extra == 'email'", specifier = ">=1.0.0" },

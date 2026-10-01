@@ -459,8 +459,10 @@ class TestNoSecondCopy:
     def test_the_proxies_no_longer_declare_one(self):
         if not SRC.is_dir():
             pytest.skip(f"no source tree at {SRC}; nothing to scan")
+        # The accept loop needs a selector, so its absence is the pin. A bare
+        # `socketpair` is not: skill_proxy hands each skill invocation one as
+        # its private credential channel (`_serve_credential_channel`).
         for name in ("network_proxy.py", "skill_proxy.py"):
             text = (SRC / name).read_text(encoding="utf-8")
-            assert "socketpair" not in text, name
             assert "DefaultSelector" not in text, name
             assert "UnixSocketServer" in text, name

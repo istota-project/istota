@@ -7407,6 +7407,7 @@ def execute_task(
             user_resources=user_resources,
             user_config=user_config,
             discovered_calendars=discovered_calendars,
+            conn=conn,
         )
         env = _runtime.env
         _proxy_ctx = _runtime.proxy_ctx
@@ -7931,7 +7932,7 @@ def execute_task_interactive(
         user_resources = db.get_user_resources(conn, user_id)
 
         # Execute (config resources are merged internally by execute_task)
-        success, result, actions, trace = execute_task(task, config, user_resources)
+        success, result, actions, trace = execute_task(task, config, user_resources, conn=conn)
 
         # Update task status
         if success:

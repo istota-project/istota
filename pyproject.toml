@@ -7,6 +7,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.26.0",
+    # The credential broker's interceptor parses HTTP/1.1 with it directly;
+    # httpx's own dependency on it is not a declaration.
+    "h11>=0.16.0",
     "requests>=2.32.0",
     "croniter>=2.0.0",
     "tomli>=2.0.0",

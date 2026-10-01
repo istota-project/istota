@@ -962,3 +962,24 @@ def test_broker_strips_forge_tokens_without_requiring_skill_proxy(tmp_path, runt
     assert "GITLAB_TOKEN" not in runtime.env
     if runtime.proxy_ctx:
         assert "GITLAB_TOKEN" not in runtime.proxy_ctx.base_env
+
+
+class TestTheGrantSnapshotJoinsTheCallersTransaction:
+    """`execute_task_interactive` holds a write transaction across the run; a
+    second connection's BEGIN IMMEDIATE there waited 30s and failed the task."""
+
+    def test_the_snapshot_is_taken_on_the_callers_connection(self, tmp_path, runtime_inputs):
+        from istota import db
+
+        config = _config(tmp_path)
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(conn, prompt="p", user_id="testuser", source_type="cli")
+            assert conn.in_transaction
+            runtime_inputs["task"] = db.get_task(conn, task_id)
+            task_env.build_task_runtime(config, conn=conn, **runtime_inputs)
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute(
+                "SELECT credential_grants_initialized FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+        assert row[0] == 1

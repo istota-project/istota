@@ -1,7 +1,7 @@
 """User grants and immutable task admission snapshots. No values are returned.
 
-Callers own commit/rollback. Snapshot admission starts BEGIN IMMEDIATE on a fresh
-connection; other writes share that transaction. Live checks must run in the
+Callers own commit/rollback. Snapshot admission runs under BEGIN IMMEDIATE, or
+inside a write transaction the caller already holds; other writes share it. Live checks must run in the
 same transaction as the caller's credential lookup before substitution.
 """
 
@@ -112,9 +112,15 @@ def _in_scope(grant, task, scheduled):
 
 
 def ensure_credential_grants(conn, task_id, user_id):
-    """Freeze the maximum set once, even when it is empty. Caller commits."""
+    """Freeze the maximum set once, even when it is empty. Caller commits.
+
+    A task id with no row (a direct caller that never inserted one) freezes
+    nothing and is granted nothing; a row owned by another user still raises.
+    """
     if not conn.in_transaction:
         conn.execute("BEGIN IMMEDIATE")
+    if conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone() is None:
+        return {}
     task, scheduled = _task_context(conn, task_id, user_id)
     if not task["credential_grants_initialized"]:
         for row in conn.execute("SELECT name FROM credential_grants WHERE user_id=?", (user_id,)):
