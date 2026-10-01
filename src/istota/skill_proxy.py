@@ -1001,14 +1001,31 @@ class SkillProxy:
             })
             return
 
+        live_reply = None
         if not trusted_skill:
             revealable = False
             if self.config is not None and self.user_id:
-                from . import db
+                from . import db, secrets_store
                 from .credential_broker.bindings import get_binding
+                enforce = self.config.security.credential_broker.enforce_reveal
                 with db.get_db(self.config.db_path) as database:
+                    if enforce:
+                        # Permission must describe the value returned by this
+                        # read, including during a concurrent vault rotation.
+                        database.execute("BEGIN IMMEDIATE")
                     metadata = get_binding(database, self.user_id, name)
-                revealable = bool(metadata and metadata["revealable"])
+                    revealable = bool(metadata and metadata["revealable"])
+                    if enforce and revealable:
+                        live_reply = secrets_store.get_secret(
+                            self.config.db_path, self.user_id, "vault_entries", name,
+                            binding=True, connection=database,
+                        )
+                        if live_reply is None:
+                            self._send_response(conn, {
+                                "error": "Credential no longer available",
+                                "reason": "vault_credential_not_present",
+                            })
+                            return
             if not revealable and self._refuse_brokered_credential(
                 conn, name, "vault_credential", mode,
             ):
@@ -1024,8 +1041,8 @@ class SkillProxy:
             "vault_credential task_id=%s name=%s mode=%s count=%d",
             self.task_id, label, mode, count,
         )
-        reply = {"value": self.vault_credentials[name]}
-        if request.get("binding") is True:
+        reply = live_reply if live_reply is not None else {"value": self.vault_credentials[name]}
+        if request.get("binding") is True and live_reply is None:
             reply["bound_hosts"] = []
             if self.config is not None and self.user_id:
                 from . import secrets_store
@@ -1037,6 +1054,8 @@ class SkillProxy:
                                                "reason": "vault_credential_not_present"})
                     return
                 reply = live
+        if request.get("binding") is not True:
+            reply.pop("bound_hosts", None)
         self._send_response(conn, reply)
 
     @staticmethod

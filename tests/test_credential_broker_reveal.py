@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+import threading
 
 import pytest
 
@@ -177,3 +178,61 @@ def test_reveal_audit_flattens_names(config, sock_path, caplog):
         assert "\n" not in record.getMessage()
         assert "fixture-value" not in record.getMessage()
         assert len(record.getMessage()) < 300
+
+
+def test_reveal_permission_applies_to_live_value_after_rotation(config, sock_path):
+    with proxy(sock_path, config=config, user_id="alice"):
+        secrets_store.set_secret(
+            config.db_path, "alice", "vault_entries", "github_pat", "fixture-new-revealable",
+            binding=parse_binding("https://portal.example", {}, ["istota:reveal"]),
+        )
+        reply = request(sock_path, {"type": "vault_credential", "name": "github_pat"})
+    assert reply == {"value": "fixture-new-revealable"}
+
+
+def test_reveal_permission_and_live_value_share_transaction(config, sock_path, monkeypatch):
+    set_reveal(config, True)
+    read = secrets_store.get_secret
+    rotated = threading.Event()
+    writers = []
+    failures = []
+
+    def rotate():
+        try:
+            secrets_store.set_secret(
+                config.db_path, "alice", "vault_entries", "github_pat", "fixture-new-brokered",
+                binding=parse_binding("https://portal.example", {}, []),
+            )
+        except Exception as exc:
+            failures.append(exc)
+        finally:
+            rotated.set()
+
+    def read_during_sync(*args, **kwargs):
+        # Schedule a real concurrent vault write at the store boundary. The
+        # permission read must hold its transaction until this value is read.
+        writer = threading.Thread(target=rotate)
+        writers.append(writer)
+        writer.start()
+        rotated.wait(0.2)
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(secrets_store, "get_secret", read_during_sync)
+    with proxy(sock_path, config=config, user_id="alice"):
+        payload = {"type": "vault_credential", "name": "github_pat", "binding": True}
+        reply = request(sock_path, payload)
+        for writer in writers:
+            writer.join(timeout=5)
+            assert not writer.is_alive()
+        assert rotated.is_set() and not failures
+        assert reply["value"] == VAULT["github_pat"]
+        assert request(sock_path, payload)["reason"] == "credential_brokered"
+
+
+def test_revealable_metadata_cannot_release_an_unavailable_value(config, sock_path, monkeypatch):
+    set_reveal(config, True)
+    monkeypatch.delenv("ISTOTA_SECRET_KEY")
+    with proxy(sock_path, config=config, user_id="alice"):
+        reply = request(sock_path, {"type": "vault_credential", "name": "github_pat"})
+    assert reply["reason"] == "vault_credential_not_present"
+    assert "value" not in reply
