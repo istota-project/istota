@@ -2436,7 +2436,7 @@ class TestDerivedSandboxCacheDir:
     def test_the_never_raises_contract_covers_the_branch_selection(
         self, sandbox_config, tmp_path,
     ):
-        """`build_bwrap_cmd` reaches this per Bash call under NativeBrain, so an
+        """`build_bwrap_cmd` reaches this once per task attempt under NativeBrain, so an
         exception here fails the task rather than falling open to the RAM cache.
         The branch selection touches paths, and `get_user_repos_dir` guards only
         `OSError` — `Path.resolve()` raises `ValueError` on an embedded null

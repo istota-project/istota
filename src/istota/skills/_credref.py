@@ -12,10 +12,9 @@ the case the mechanism was designed around.
 things against different authorities: a host path is checked against a root
 list this process derives from its own environment, and a credential name is
 looked up in the user's `vault_entries` namespace, which only the daemon holds
-and which this process reaches through its private inherited fd. Older
-callers without that fd still use the proxy socket until reveal enforcement
-lands. They
-share a shape — a stamp on the argument, read back at the parse — and nothing
+and which this process reaches through its private inherited fd. Callers
+without that fd use the public proxy socket and are subject to the reveal
+policy (`CredentialBrokerConfig.reveal_enforced`). They share a shape — a stamp on the argument, read back at the parse — and nothing
 else, so a credential is not a seventh `_hostpath` mode. What they do share is
 the parser walk: `actions_on_path` descends the verbs an invocation actually
 took, which matters here for the same reason it matters there (a dest recurs

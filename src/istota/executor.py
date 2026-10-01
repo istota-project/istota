@@ -4472,8 +4472,8 @@ def resolve_sandbox_cache_dir(
     derivation exists to avoid, failing silently.
 
     Never raises. Every rejection falls open to the pre-ISSUE-305 behaviour,
-    because both callers run on the task path — for NativeBrain, per Bash call —
-    and the alternative to failing open is a config typo that fails every task.
+    because both callers run on the task path — for NativeBrain, once per task
+    attempt, when it spawns the tool server — and the alternative to failing open is a config typo that fails every task.
     """
     def _refuse(message: str) -> None:
         # Called from `build_bwrap_cmd` and from `execute_task`, on every task,
@@ -4485,7 +4485,8 @@ def resolve_sandbox_cache_dir(
 
     # Inside the `try`, deliberately, and this is not a style choice. The
     # never-raises contract is what both callers rest on, and one of them is
-    # `build_bwrap_cmd` under NativeBrain, which reaches this per Bash call. The
+    # `build_bwrap_cmd` under NativeBrain, which reaches this once per task
+    # attempt, so a raise here fails the attempt before any tool runs. The
     # branch selection touches paths: `get_user_repos_dir` guards only `OSError`
     # while `Path.resolve()` raises `ValueError` on an embedded null byte and
     # `Path(root) / user_id` raises `TypeError` on a non-str user id. The
