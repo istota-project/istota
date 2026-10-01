@@ -176,21 +176,25 @@ def upsert_secret(
 
 def set_secret(
     db_path: Path, user_id: str, service: str, key: str, value: str,
-    *, binding: dict | None = None,
+    *, binding: dict | None = None, connection=None,
 ) -> None:
     """Encrypt and upsert a secret.
 
     Empty value deletes the row (UI sends ``""`` to clear). Idempotent.
     Bumps ``updated_at`` on overwrite.
+
+    ``connection`` writes on the caller's connection, inside the caller's
+    transaction: nothing is opened and nothing is committed here, so the value
+    lands or rolls back with whatever else the caller wrote.
     """
     if not value:
-        delete_secret(db_path, user_id, service, key)
+        delete_secret(db_path, user_id, service, key, connection=connection)
         return
 
     fernet = _get_fernet()
     token = fernet.encrypt(value.encode("utf-8"))
 
-    with _connect(db_path) as conn:
+    with (nullcontext(connection) if connection is not None else _connect(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO secrets (user_id, service, key, encrypted_value, created_at, updated_at)
@@ -266,9 +270,14 @@ def get_secret(
         return plaintext
 
 
-def delete_secret(db_path: Path, user_id: str, service: str, key: str, *, all_fields=False) -> bool:
-    """Delete a stored secret. Returns True if a row was removed."""
-    with _connect(db_path) as conn:
+def delete_secret(
+    db_path: Path, user_id: str, service: str, key: str, *, all_fields=False, connection=None,
+) -> bool:
+    """Delete a stored secret. Returns True if a row was removed.
+
+    ``connection`` has :func:`set_secret`'s meaning.
+    """
+    with (nullcontext(connection) if connection is not None else _connect(db_path)) as conn:
         from .credential_broker.bindings import credential_groups, credential_name
         from .credential_broker.grants import delete_grant
         from . import db

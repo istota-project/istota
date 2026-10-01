@@ -11,6 +11,8 @@
     configured: boolean;
     value: string;
     disabled?: boolean;
+    /** A refusal about this value, rendered under the field. */
+    error?: string;
     onValueChange: (next: string) => void;
     onRequestClear?: () => void;
   }
@@ -22,6 +24,7 @@
     configured,
     value,
     disabled = false,
+    error,
     onValueChange,
     onRequestClear,
   }: Props = $props();
@@ -43,12 +46,13 @@
   no button there is nothing to steal the association, and clicking the caption
   should focus the input as it does in every other field.
 -->
-<Field {label} {hint} labelled={!showClear}>
+<Field {label} {hint} {error} labelled={!showClear}>
   <div class="secret-row">
     <Input
       {type}
       {value}
       {disabled}
+      invalid={!!error}
       autocomplete="new-password"
       placeholder={configured ? '•••• stored — enter to replace' : 'Enter value'}
       aria-label={showClear ? label : undefined}

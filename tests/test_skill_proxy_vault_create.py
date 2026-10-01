@@ -267,3 +267,64 @@ def test_multi_user_vault_create_requires_opt_in(tmp_path, monkeypatch, sock):
         reply = _request(sock, {"type": "vault_create", "slug": "acme"})
     assert reply["reason"] == "vault_isolation_required"
     assert "allow_unsandboxed_multi_user_vaults" in reply["error"]
+
+
+@pytest.mark.parametrize("taken", ["generated_acme", "generated_acme_url"])
+def test_a_name_held_by_a_local_credential_is_refused_before_the_file(
+    tmp_path, monkeypatch, sock, taken,
+):
+    """`create_entry`'s collision check reads the file; a local credential
+    lives only in the store, so the proxy asks the store first."""
+    from istota.credential_broker.bindings import parse_binding
+
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+    path = tmp_path / "vault.kdbx"
+    create_database(str(path), password="test-passphrase")
+    before = path.read_bytes()
+    config = Config(
+        db_path=tmp_path / "daemon" / "test.db",
+        workspace_path=tmp_path / "workspace",
+        users={"alice": UserConfig(vault_path=str(path), email_addresses=["alice@example.com"])},
+    )
+    config.db_path.parent.mkdir()
+    db.init_db(config.db_path)
+    secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
+    secrets_store.set_secret(
+        config.db_path, "alice", secrets_vault.VAULT_ENTRY_SERVICE, taken, "typed-in-istota",
+        binding=parse_binding("acme.example", {}, [], source="local"),
+    )
+
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
+        reply = _request(sock, {"type": "vault_create", "slug": "acme"})
+
+    assert reply["reason"] == "VaultWriteRefused"
+    assert "already exists" in reply["error"] and taken in reply["error"]
+    assert path.read_bytes() == before
+    assert secrets_store.get_secret(
+        config.db_path, "alice", secrets_vault.VAULT_ENTRY_SERVICE, taken,
+    ) == "typed-in-istota"
+
+
+def test_a_vault_sourced_name_is_left_to_the_files_own_check(tmp_path, monkeypatch, sock):
+    """The store-side check is about `local` rows only: a stored `vault` row
+    the file no longer holds is the sweep's to remove, not a reason to refuse."""
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+    path = tmp_path / "vault.kdbx"
+    create_database(str(path), password="test-passphrase")
+    config = Config(
+        db_path=tmp_path / "daemon" / "test.db",
+        workspace_path=tmp_path / "workspace",
+        users={"alice": UserConfig(vault_path=str(path), email_addresses=["alice@example.com"])},
+    )
+    config.db_path.parent.mkdir()
+    db.init_db(config.db_path)
+    secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
+    secrets_store.set_secret(
+        config.db_path, "alice", secrets_vault.VAULT_ENTRY_SERVICE, "generated_acme", "stale",
+    )
+    monkeypatch.setattr("istota.notification_store.deliver_pending", lambda *_: None)
+
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
+        reply = _request(sock, {"type": "vault_create", "slug": "acme"})
+
+    assert reply.get("name") == "generated_acme"

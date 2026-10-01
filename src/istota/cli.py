@@ -1103,6 +1103,13 @@ def _cmd_secret_vault_new(config, args) -> None:
         sys.exit(1)
     location = resolution.location
     try:
+        taken = secrets_vault.local_name_conflict(
+            config.db_path, args.user, secrets_vault.generated_entry_names(args.slug),
+        )
+        if taken:
+            raise secrets_vault.VaultWriteRefused(
+                f"credential name already exists: {secrets_vault._label(taken)}"
+            )
         passphrase = secrets_vault._resolve_passphrase(config.db_path, args.user)
         data, digest = secrets_vault.read_vault_bytes(location.path, dir_fd=location.dir_fd)
         secrets_vault.parse_vault(data, passphrase)

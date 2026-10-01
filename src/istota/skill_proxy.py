@@ -832,6 +832,13 @@ class SkillProxy:
                 refuse("vault_not_configured", "Credential vault cannot be opened")
                 return
             try:
+                taken = secrets_vault.local_name_conflict(
+                    config.db_path, user_id, secrets_vault.generated_entry_names(slug),
+                )
+                if taken:
+                    raise secrets_vault.VaultWriteRefused(
+                        f"credential name already exists: {secrets_vault._label(taken)}"
+                    )
                 passphrase = secrets_vault._resolve_passphrase(config.db_path, user_id)
                 for attempt in range(2):
                     data, digest = secrets_vault.read_vault_bytes(

@@ -189,9 +189,25 @@ function configured(over: Partial<VaultStatus> = {}): VaultStatus {
   };
 }
 
-async function mount() {
+/** The card's toggle: "Set up" before there is a vault, "Manage" after. */
+async function panelToggle(): Promise<HTMLElement> {
+  return screen.findByRole('button', { name: /^(set up|manage)$/i });
+}
+
+/**
+ * Mount the page and, by default, open the setup panel, which is closed until
+ * asked for (or until the sync has a problem). Most cases here are about what
+ * is inside it.
+ */
+async function mount({ open = true }: { open?: boolean } = {}) {
   render(Harness, { component: Page, layout: SettingsLayout, user: person });
   await waitFor(() => expect(api.getVaultStatus).toHaveBeenCalled());
+  const toggle = await panelToggle();
+  // A sync with a problem opens the panel by itself; a click would close it.
+  if (open && !screen.queryByTestId('vault-panel')) {
+    await fireEvent.click(toggle);
+    await screen.findByTestId('vault-panel');
+  }
 }
 
 beforeEach(() => {
@@ -204,11 +220,28 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('a user with no vault yet', () => {
-  it('is offered the form, which is the case the heading is silent for', async () => {
+  it('sees one sentence and Set up, with the form folded away', async () => {
+    api.getVaultStatus.mockResolvedValue(unconfigured());
+    await mount({ open: false });
+
+    const card = screen.getByTestId('vault-card');
+    expect(words(card)).toBe(
+      'Keep credentials in a KeePassXC file instead? Istota can sync them from a file in your files.',
+    );
+    expect(await panelToggle()).toHaveTextContent('Set up');
+    expect(screen.queryByLabelText(/^master password/i)).toBeNull();
+    expect(screen.queryByTestId('vault-status')).toBeNull();
+    expect(screen.queryByTestId('vault-pill')).toBeNull();
+  });
+
+  it('is offered the form as two steps once Set up is pressed', async () => {
     api.getVaultStatus.mockResolvedValue(unconfigured());
     await mount();
 
-    expect(screen.getByTestId('vault-form')).toBeTruthy();
+    const panel = screen.getByTestId('vault-panel');
+    expect(words(panel)).toContain('1. Master password');
+    expect(words(panel)).toContain('2. File');
+    expect(passwordField()).toBeTruthy();
     // The control that says this test is about the split rather than about the
     // form merely existing.
     expect(screen.queryByTestId('vault-status')).toBeNull();
@@ -271,7 +304,7 @@ describe('the file in the folder', () => {
     await mount();
 
     expect(control('Vault file')).toBeTruthy();
-    expect(words(screen.getByTestId('vault-form'))).toMatch(/more than one file/i);
+    expect(words(screen.getByTestId('vault-card'))).toMatch(/more than one file/i);
   });
 
   it('stores the name when one is chosen', async () => {
@@ -315,8 +348,8 @@ describe('a vault whose file is set in configuration', () => {
     );
     await mount();
 
-    const form = screen.getByTestId('vault-form');
-    expect(words(form)).toMatch(/set outside this page/i);
+    const form = screen.getByTestId('vault-card');
+    expect(words(form)).toMatch(/your administrator sets this file/i);
     // Not disabled controls with no explanation: the file controls are absent,
     // so there is nothing to wonder about.
     expect(control('Vault file')).toBeNull();
@@ -362,6 +395,20 @@ describe('the passphrase', () => {
     expect(words(shown)).toContain('MINTED-VALUE-123');
     expect(words(shown)).toMatch(/will not be shown again/i);
     expect(api.setVaultPassphrase).toHaveBeenCalledWith({ generate: true, replace: false });
+  });
+
+  it('copies a generated one with the Copy button', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    api.getVaultStatus.mockResolvedValue(unconfigured());
+    api.setVaultPassphrase.mockResolvedValue({ ok: true, generated: 'MINTED-VALUE-123' });
+    await mount();
+
+    await fireEvent.click(button(/generate/i)!);
+    await screen.findByTestId('vault-minted');
+    await fireEvent.click(button(/^copy$/i)!);
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('MINTED-VALUE-123'));
   });
 
   it('generates straight away when there is nothing to destroy', async () => {
@@ -435,7 +482,7 @@ describe('the passphrase', () => {
     expect(screen.queryByTestId('vault-minted')).toBeNull();
     // And the field is cleared, so it is not sitting in the DOM either.
     expect(input.value).toBe('');
-    expect(screen.getByTestId('vault-form').textContent).not.toContain(
+    expect(screen.getByTestId('vault-card').textContent).not.toContain(
       'correct-horse-battery-staple',
     );
   });
@@ -466,7 +513,7 @@ describe('the passphrase', () => {
     // asserting on the card's text would pass only while the sentence was
     // inline, which is what it stopped being.
     await fireEvent.click(screen.getByLabelText('About Master password'));
-    expect(words(document.body)).toMatch(/cannot be shown to you again/i);
+    expect(words(document.body)).toMatch(/cannot show it again/i);
   });
 
   it('reports a refusal from the floor the CLI applies', async () => {

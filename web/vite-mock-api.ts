@@ -35,8 +35,229 @@ const mockVault: Record<string, unknown> = {
   entry_count: 0,
   entry_names: [],
   entry_names_truncated: false,
+  generated_count: 0,
+  name_conflicts: 0,
   problem: '',
 };
+
+/**
+ * The dev server's credential list, mutated by the credential routes below.
+ * One row per source, so every badge and kebab variant renders. Values are
+ * never held here, matching the server, which never returns one.
+ */
+type MockGrant = {
+  scope_mode: 'all' | 'rooms';
+  rooms: string[];
+  allow_scheduled: boolean;
+  allow_http: boolean;
+};
+type MockCredential = {
+  name: string;
+  source: 'local' | 'vault' | 'config';
+  hosts: string[];
+  headers: string[];
+  revealable: boolean;
+  grant: MockGrant | null;
+  url?: string;
+  extra_hosts?: string;
+  username_set?: boolean;
+};
+// The server's `bindings.DEFAULT_HEADERS`, applied when no headers are named.
+const MOCK_DEFAULT_HEADERS = ['authorization', 'private-token', 'x-api-key', 'x-auth-token'];
+// "Allow all existing" is one-time on the server (a KV flag), not "some row is ungranted".
+let mockGrantedExisting = false;
+const mockCredentials: MockCredential[] = [
+  {
+    name: 'openrouter_key',
+    source: 'local',
+    hosts: ['openrouter.ai'],
+    headers: MOCK_DEFAULT_HEADERS,
+    revealable: false,
+    grant: { scope_mode: 'all', rooms: [], allow_scheduled: false, allow_http: false },
+    url: 'openrouter.ai',
+    extra_hosts: '',
+    username_set: false,
+  },
+  {
+    name: 'portal',
+    source: 'vault',
+    hosts: ['portal.example.com'],
+    headers: MOCK_DEFAULT_HEADERS,
+    revealable: false,
+    grant: null,
+  },
+  {
+    name: 'forge.github',
+    source: 'config',
+    hosts: ['github.com', 'api.github.com'],
+    headers: MOCK_DEFAULT_HEADERS,
+    revealable: false,
+    grant: null,
+  },
+];
+const MOCK_CREDENTIAL_NAME = /^[a-z][a-z0-9]*(_[a-z0-9]+)*$/;
+
+function mockCredentialHosts(url: string, extra: string): string[] {
+  const hosts = [url, ...extra.split(',')]
+    .map((h) =>
+      h
+        .trim()
+        .replace(/^https?:\/\//, '')
+        .replace(/\/.*$/, ''),
+    )
+    .filter(Boolean);
+  return [...new Set(hosts)];
+}
+
+function mockCredentialRoutes(url: string, method: string, body: any): unknown | undefined {
+  const base = '/istota/api/settings/credentials';
+  if (url === base && method === 'GET') {
+    return {
+      credentials: mockCredentials,
+      rooms: [{ token: 'mock-room', name: 'Personal' }],
+      grant_existing_available: !mockGrantedExisting,
+      sandboxed: true,
+      can_add: true,
+      add_blocked_reason: '',
+      broker_enabled: false,
+    };
+  }
+  if (url === base && method === 'POST') {
+    const b = (body ?? {}) as Record<string, any>;
+    const name = typeof b.name === 'string' ? b.name : '';
+    if (!MOCK_CREDENTIAL_NAME.test(name) || name.startsWith('generated_')) {
+      return {
+        __status: 400,
+        detail: 'use lowercase letters, digits and single underscores, starting with a letter',
+        field: 'name',
+      };
+    }
+    if (mockCredentials.some((c) => c.name === name)) {
+      return { __status: 400, detail: `a credential named ${name} already exists`, field: 'name' };
+    }
+    if (typeof b.value !== 'string' || !b.value.trim()) {
+      return { __status: 400, detail: 'value is required', field: 'value' };
+    }
+    if (b.value !== b.value.trim()) {
+      return {
+        __status: 400,
+        detail: 'value cannot start or end with whitespace',
+        field: 'value',
+      };
+    }
+    const hosts = mockCredentialHosts(b.url ?? '', b.extra_hosts ?? '');
+    if (b.access && hosts.length === 0) {
+      return {
+        __status: 400,
+        detail: 'a credential needs a site before it can be granted',
+        field: 'access',
+      };
+    }
+    const grant: MockGrant | null = b.access
+      ? {
+          scope_mode: b.access.scope_mode ?? 'all',
+          rooms: b.access.rooms ?? [],
+          allow_scheduled: !!b.access.allow_scheduled,
+          allow_http: !!b.access.allow_http,
+        }
+      : null;
+    mockCredentials.push({
+      name,
+      source: 'local',
+      hosts,
+      headers: MOCK_DEFAULT_HEADERS,
+      revealable: !!b.revealable,
+      grant,
+      url: b.url ?? '',
+      extra_hosts: b.extra_hosts ?? '',
+      username_set: !!b.username,
+    });
+    mockCredentials.sort((a, c) => a.name.localeCompare(c.name));
+    return {
+      ok: true,
+      name,
+      username_name: b.username ? `${name}_username` : null,
+      url_name: b.url ? `${name}_url` : null,
+      grant,
+    };
+  }
+  const local = url.match(/^\/istota\/api\/settings\/credentials\/([^/]+)\/local$/);
+  if (local && method === 'PATCH') {
+    const row = mockCredentials.find((c) => c.name === decodeURIComponent(local[1]));
+    if (!row || row.source !== 'local') {
+      return {
+        __status: 400,
+        detail:
+          'no credential added in Istota has this name; one from KeePassXC or the deployment is edited there',
+        field: 'name',
+      };
+    }
+    const b = (body ?? {}) as Record<string, any>;
+    const hosts = mockCredentialHosts(b.url ?? '', b.extra_hosts ?? '');
+    if (!hosts.length && row.grant) {
+      return {
+        __status: 400,
+        detail: 'this credential has access settings; remove its access first, or keep a site',
+        field: 'url',
+      };
+    }
+    row.hosts = hosts;
+    row.url = b.url ?? '';
+    row.extra_hosts = b.extra_hosts ?? '';
+    row.revealable = !!b.revealable;
+    if (b.username === '') row.username_set = false;
+    else if (typeof b.username === 'string') row.username_set = true;
+    return {
+      ok: true,
+      name: row.name,
+      username_name: row.username_set ? `${row.name}_username` : null,
+      url_name: row.url ? `${row.name}_url` : null,
+      grant: row.grant,
+    };
+  }
+  if (url === `${base}/grant-existing` && method === 'POST') {
+    let count = 0;
+    for (const row of mockCredentials) {
+      if (row.grant === null && row.hosts.length) {
+        row.grant = { scope_mode: 'all', rooms: [], allow_scheduled: false, allow_http: false };
+        count += 1;
+      }
+    }
+    mockGrantedExisting = true;
+    return { ok: true, count };
+  }
+  const value = url.match(/^\/istota\/api\/settings\/credentials\/([^/]+)\/value$/);
+  if (value && method === 'DELETE') {
+    const name = decodeURIComponent(value[1]);
+    if (name.startsWith('forge.')) {
+      return { __status: 400, detail: 'Deployment credentials are managed in configuration' };
+    }
+    const at = mockCredentials.findIndex((c) => c.name === name);
+    if (at >= 0) mockCredentials.splice(at, 1);
+    return { ok: true, deleted: at >= 0 };
+  }
+  const grant = url.match(/^\/istota\/api\/settings\/credentials\/([^/]+)$/);
+  if (grant) {
+    const row = mockCredentials.find((c) => c.name === decodeURIComponent(grant[1]));
+    if (!row) return { __status: 404, detail: 'not found' };
+    if (method === 'PUT') {
+      if (!row.hosts.length) return { __status: 400, detail: 'credential is not bound' };
+      const b = (body ?? {}) as Partial<MockGrant>;
+      row.grant = {
+        scope_mode: b.scope_mode ?? 'all',
+        rooms: b.rooms ?? [],
+        allow_scheduled: !!b.allow_scheduled,
+        allow_http: !!b.allow_http,
+      };
+      return { ok: true, grant: row.grant };
+    }
+    if (method === 'DELETE') {
+      row.grant = null;
+      return { ok: true };
+    }
+  }
+  return undefined;
+}
 
 interface MockReq {
   url: string;
@@ -3966,6 +4187,10 @@ const handlers: MockHandler[] = [
     // see the configured shape.
     if (url === '/istota/api/settings/vault' && method === 'GET') {
       return { ...mockVault };
+    }
+    if (url.startsWith('/istota/api/settings/credentials')) {
+      const answer = mockCredentialRoutes(url, method, body);
+      if (answer !== undefined) return answer;
     }
     if (url === '/istota/api/settings/vault' && method === 'PUT') {
       const b = body as { vault_file?: string };
