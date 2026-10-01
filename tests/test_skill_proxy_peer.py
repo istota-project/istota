@@ -320,6 +320,7 @@ class TestTheRootIsRegistered:
     def test_the_executor_hands_the_brains_pid_to_the_proxy(self, tmp_path, skill_enabled):
         from unittest.mock import MagicMock, patch
 
+        from istota import db
         from istota.executor import execute_task
         from istota.network_proxy import NetworkProxy
 
@@ -332,6 +333,8 @@ class TestTheRootIsRegistered:
         )
 
         config = _make_config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(conn, prompt="test prompt", user_id="testuser")
         config.security.skill_proxy_enabled = skill_enabled
         config.security.network.enabled = True
         config.security.sandbox_enabled = True
@@ -363,7 +366,7 @@ class TestTheRootIsRegistered:
                 brain.resolve_model_name.side_effect = lambda m: m or "model"
                 brain.supports_steering = False
                 make_brain.return_value = brain
-                execute_task(_make_task(id=81), config, [])
+                execute_task(_make_task(id=task_id), config, [])
 
         # The suite's default root (this process) is registered at
         # construction through the same method, so look for the brain's pid.

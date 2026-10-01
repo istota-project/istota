@@ -624,8 +624,13 @@ first, so the var routes as a credential and the `proxy_only` flag is inert. The
 **A skill CLI can also take a credential the manifest never named**, out of the
 user's own shared namespace: `skills/_credref.credential_ref(parser, …)` is
 `add_argument` with a stamp, and `skills/_cli.parse_and_resolve` resolves every
-stamped value over the proxy before dispatch, exactly as it resolves a host-path
-stamp beside it. The handler receives a `SecretValue` whose `repr`, `str` and
+stamped value before dispatch, exactly as it resolves a host-path stamp beside
+it. Proxy-spawned CLIs read through their per-invocation `ISTOTA_CRED_FD`
+socketpair, with the same fetch budget and live binding lookup. Callers without
+an fd retain the model-socket path until reveal enforcement lands; an invalid
+or closed fd refuses without fallback. The skills package marks the inherited
+fd close-on-exec before loading any skill, so external programs it runs do not
+inherit credential access. The handler receives a `SecretValue` whose `repr`, `str` and
 f-string carry no part of the plaintext and whose `reveal()` does; a name the
 namespace does not hold is refused before the handler runs, with
 `reason="vault_credential_refused"`. `browse interact --fill-credential` is the

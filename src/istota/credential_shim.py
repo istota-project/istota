@@ -166,7 +166,10 @@ class ProxyError(Exception):
     """
 
 
-def _request(payload: dict, *, timeout: int = SOCKET_TIMEOUT_SECONDS) -> dict:
+def _request(
+    payload: dict, *, timeout: int = SOCKET_TIMEOUT_SECONDS,
+    credential_fd: str | None = None,
+) -> dict:
     """One JSON line to the proxy, one JSON line back.
 
     Raises ``ProxyError`` for anything that is not a well-formed reply. The
@@ -174,13 +177,22 @@ def _request(payload: dict, *, timeout: int = SOCKET_TIMEOUT_SECONDS) -> dict:
     a response was lost.
     """
     sock_path = os.environ.get("ISTOTA_SKILL_PROXY_SOCK", "")
-    if not sock_path:
+    if credential_fd is None and not sock_path:
         raise ProxyError("ISTOTA_SKILL_PROXY_SOCK is not set")
 
-    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    conn.settimeout(timeout)
+    # Duplicate the invocation's endpoint: closing this request must leave it
+    # usable for the next stamped argument. Never fall back after an fd error.
     try:
-        conn.connect(sock_path)
+        if credential_fd is None:
+            conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        else:
+            conn = socket.fromfd(int(credential_fd), socket.AF_UNIX, socket.SOCK_STREAM)
+    except (OSError, ValueError, OverflowError) as exc:
+        raise ProxyError("the private credential channel is unavailable") from exc
+    try:
+        conn.settimeout(timeout)
+        if credential_fd is None:
+            conn.connect(sock_path)
         conn.sendall(json.dumps(payload).encode("utf-8") + b"\n")
         chunks = []
         while True:
@@ -213,7 +225,7 @@ def _request(payload: dict, *, timeout: int = SOCKET_TIMEOUT_SECONDS) -> dict:
 
 
 def fetch_credential(
-    name: str, mode: str, *, binding: bool = False,
+    name: str, mode: str, *, binding: bool = False, credential_fd: str | None = None,
 ) -> str | tuple[str, list[str]]:
     """One shared credential, by name, under a declared mode.
 
@@ -223,7 +235,9 @@ def fetch_credential(
 
     **Public because it has a second caller inside the package**:
     ``skills/_credref`` resolves a stamped argument through this same request,
-    with ``mode="skill"``. That is a *host-side* caller rather than a copy of
+    with ``mode="skill"`` and an explicit private ``credential_fd`` when
+    spawned by the proxy. The model-facing shim never selects that fd from
+    its environment. That is a *host-side* caller rather than a copy of
     this program — the shim runs in the sandbox with no istota package on its
     path, a skill CLI runs outside it with the package — and the two speaking
     one client is the point. Raises ``ProxyError``, which is the whole error
@@ -232,7 +246,7 @@ def fetch_credential(
     request = {"type": "vault_credential", "name": name, "mode": mode}
     if binding:
         request["binding"] = True
-    reply = _request(request)
+    reply = _request(request, credential_fd=credential_fd)
     value = reply.get("value")
     if not isinstance(value, str):
         raise ProxyError(f"no value for {name!r}")

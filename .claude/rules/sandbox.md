@@ -125,3 +125,10 @@ Leaves have exact DNS or IP SANs, default to 24 hours, and stay in a bounded in-
 
 
 `credential_broker/intercept.py` handles only hosts bound to a credential in the task snapshot. Other CONNECT traffic remains raw TLS. The h11 loop checks live grants and bindings on every request, replaces placeholders only in allowed authentication headers, and decodes Basic authentication before replacement. It refuses placeholders in URLs and the bounded request-body prefix. Small responses and response headers are scrubbed for substituted bytes; large responses stream unscanned. Encoded request bodies, encoded authenticated responses, trailers and upgrades are refused. Fixed refusal reasons and substitution audit metadata never contain values. The broker is off by default; this stage does not remove legacy credential fetch paths.
+
+
+## Private skill credential channel
+
+Each skill invocation gets its own socketpair through `ISTOTA_CRED_FD` and `pass_fds`. The model process never receives that endpoint. The skills package marks it close-on-exec before loading skill code. `_credref` keeps resolution at the parser, before handler dispatch, and uses the existing credential protocol over a duplicate of the inherited endpoint for each name. The proxy accepts only credential reads there, supplies trusted skill provenance itself, and charges the same attempt-wide fetch budget as the model-facing socket. Values and bindings still come from the existing live lookup.
+
+The invocation closes and shuts down both endpoints and joins its reader on success, timeout, or spawn failure, even if a duplicate endpoint remains open. An invalid private fd refuses without trying the model socket. Callers with no fd retain the socket path for compatibility; reveal enforcement and its audit rollout are a later stage.

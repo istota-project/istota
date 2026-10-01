@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Iterable
+from contextlib import contextmanager
 from pathlib import Path
 
 from istota import peer_process, skill_client
@@ -626,8 +627,8 @@ class SkillProxy:
                 merged_env.update(self.credential_env)
 
             try:
-                # A skill CLI can connect back — a stamped credential argument
-                # is resolved that way — and it descends from the daemon rather
+                # Legacy skill callers can still connect back for other proxy
+                # operations, and they descend from the daemon rather
                 # than from the task's brain, so it is registered here for as
                 # long as it runs and revoked after, so a reused pid inherits
                 # nothing. The reader is joined before the revoke, so a late
@@ -643,7 +644,9 @@ class SkillProxy:
                     self.authorize_pid(pid)
 
                 try:
-                    with peer_process.reporting_pid(_register) as preexec:
+                    with self._credential_channel(skill_timeout) as credential_fd, \
+                            peer_process.reporting_pid(_register) as preexec:
+                        merged_env["ISTOTA_CRED_FD"] = str(credential_fd)
                         result = subprocess.run(
                             cmd,
                             env=merged_env,
@@ -651,6 +654,7 @@ class SkillProxy:
                             text=True,
                             timeout=skill_timeout,
                             preexec_fn=preexec,
+                            pass_fds=(credential_fd,),
                         )
                 finally:
                     for pid in spawned:
@@ -678,6 +682,64 @@ class SkillProxy:
         finally:
             try:
                 conn.close()
+            except OSError:
+                pass
+
+    @contextmanager
+    def _credential_channel(self, timeout: int):
+        """A private endpoint owned by one skill invocation, never a task."""
+        server, child = socket.socketpair()
+        server.settimeout(timeout + CONNECTION_SLACK_SECONDS)
+        worker = threading.Thread(
+            target=self._serve_credential_channel, args=(server,), daemon=True,
+            name="skill-credential-fd",
+        )
+        try:
+            worker.start()
+            yield child.fileno()
+        finally:
+            # Shutdown wakes the reader even if the skill leaked a duplicate.
+            # Join before returning the skill result, on failures and timeouts too.
+            try:
+                server.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            child.close()
+            if worker.ident is not None:
+                worker.join()
+            server.close()
+
+    def _serve_credential_channel(self, conn: socket.socket) -> None:
+        """Only credential reads, with server-owned skill provenance."""
+        try:
+            with conn.makefile("rb") as reader:
+                while True:
+                    # Requests contain a name, not values. Bound malformed input
+                    # and retain framing when several requests arrive together.
+                    line = reader.readline(65537)
+                    if not line:
+                        return
+                    if len(line) > 65536 or not line.endswith(b"\n"):
+                        return
+                    try:
+                        request = json.loads(line)
+                    except (ValueError, UnicodeError):
+                        return
+                    if not isinstance(request, dict) or request.get("type") != "vault_credential":
+                        self._send_response(conn, {
+                            "error": "Private channel accepts credential reads only",
+                            "reason": "invalid_credential_request",
+                        })
+                        return
+                    self._serve_vault_credential(conn, request, trusted_skill=True)
+        except OSError:
+            # The owning invocation closed, timed out, or stopped reading.
+            pass
+        except Exception:
+            logger.warning("Private credential channel failed task_id=%s", self.task_id)
+        finally:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
 
@@ -858,7 +920,9 @@ class SkillProxy:
             "confirmation_readable": confirmation_readable,
         })
 
-    def _serve_vault_credential(self, conn: socket.socket, request: dict) -> None:
+    def _serve_vault_credential(
+        self, conn: socket.socket, request: dict, *, trusted_skill: bool = False,
+    ) -> None:
         """One shared credential, by name, under the per-attempt cap.
 
         Order is load-bearing: charge, then the limit, then presence. A refusal
@@ -873,7 +937,9 @@ class SkillProxy:
         # charge and past the log line. The outer handler then answers nothing
         # at all, so a malformed request would be the one shape that is neither
         # counted against the cap nor recorded in the audit trail.
-        mode = str(request.get("mode", ""))
+        # Only the private endpoint supplies this flag. A request's mode is
+        # still just an audit label on the model-facing socket.
+        mode = "skill" if trusted_skill else str(request.get("mode", ""))
         if mode not in VAULT_MODES:
             mode = VAULT_MODE_DEFAULT
         # Bounded and flattened before it reaches a log line. The name came off
