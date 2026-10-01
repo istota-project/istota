@@ -151,7 +151,9 @@ with `ISTOTA_SCHEDULER_VAULT_SYNC_INTERVAL` for the cadence.
 
 ### Credential bindings
 
-A vault entry's HTTPS URL binds all its credential names to that host and port. Add exact `host[:port]` names in the comma-separated custom field `istota_hosts` for other destinations. Wildcards and plain HTTP are refused. Invalid host metadata leaves the entry unbound. Custom fields beginning with `istota_` are reserved metadata and never become credential names.
+A vault entry's URL field accepts an HTTPS URL or a bare `host[:port]`, such as `portal.example.com`. A bare host is treated as HTTPS for credential binding; the saved URL value is unchanged. All credential names from the entry share that host and port. Add exact `host[:port]` names in the comma-separated custom field `istota_hosts` for other destinations. Wildcards and explicit plain HTTP URLs are refused. Invalid host metadata leaves the entry unbound. Custom fields beginning with `istota_` are reserved metadata and never become credential names.
+
+In Settings → Credentials, the row menu can delete a stored vault credential, including an unbound one. Deletion removes that name's stored value, binding and grant. It leaves the KeePassXC file and the entry's other credential names alone. A later vault import can restore the credential, without its old grant; an unchanged file is skipped until a forced sync or daemon restart. Deployment credentials are managed through configuration and have no delete action here.
 
 `istota_headers` sets the comma-separated allowed authentication headers; the default is `Authorization`, `PRIVATE-TOKEN`, `X-API-Key` and `X-Auth-Token`. `Proxy-Authorization` is never allowed. The `istota:reveal` tag permits public value reads when reveal enforcement is enabled. Grants govern placeholder use; the reveal tag is a separate exception for commands that must hold the value.
 
@@ -384,7 +386,7 @@ The broker is off by default. Set `[security.credential_broker] enabled = true` 
 curl -H 'Authorization: Bearer {{cred:portal_token}}' https://portal.example/api
 ```
 
-Bind a vault entry using its HTTPS URL or `istota_hosts`, and grant access in Settings. Grants limit rooms, methods and scheduled use. Each task keeps its original grant snapshot across retries; revoking or changing a grant refuses its next use. Default methods exclude DELETE. The broker decodes Basic authentication before substituting a placeholder password, so clients can build the Basic header themselves.
+Bind a vault entry using an HTTPS URL, a bare host in its URL field, or `istota_hosts`, and grant access in Settings. Grants limit rooms, methods and scheduled use. Each task keeps its original grant snapshot across retries; revoking or changing a grant refuses its next use. Default methods exclude DELETE. The broker decodes Basic authentication before substituting a placeholder password, so clients can build the Basic header themselves.
 
 Only a host bound to a credential in the task snapshot is intercepted. Every other connection keeps its original TLS session and carries placeholders as literal text. On an intercepted connection, SNI and Host must match the CONNECT host. IP-literal destinations may omit SNI, as standard TLS clients do. A placeholder in a disallowed header or URL is refused. A placeholder in the first `scan_max_bytes` of a request body is refused before forwarding; later body bytes stream unchanged and are never substituted. The default cap is 1 MiB.
 

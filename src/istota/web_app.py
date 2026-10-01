@@ -10797,6 +10797,23 @@ async def settings_credential_revoke(
     return await asyncio.to_thread(_credential_settings, user["username"], "delete", name)
 
 
+@api_router.delete("/settings/credentials/{name}/value")
+async def settings_credential_delete(
+    name: str, user: dict = Depends(_require_api_auth), _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Remove the user's stored vault value, binding and grant together."""
+    from . import secrets_store
+
+    if _config is None or not _config.db_path:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    if name.startswith("forge."):
+        raise HTTPException(status_code=400, detail="Deployment credentials are managed in configuration")
+    deleted = await asyncio.to_thread(
+        secrets_store.delete_secret, _config.db_path, user["username"], "vault_entries", name,
+    )
+    return {"ok": True, "deleted": deleted}
+
+
 def _vault_settings_payload(username: str) -> dict:
     """The credential vault's status and the folder's listing, for the card.
 

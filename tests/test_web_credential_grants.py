@@ -51,11 +51,75 @@ async def test_grant_mutations_require_csrf(signed_client):
 
 
 async def test_credentials_require_login(client):  # noqa: F811 -- imported fixture
-    for method, suffix in [("get", ""), ("put", "/portal"), ("delete", "/portal"), ("post", "/grant-existing")]:
+    for method, suffix in [("get", ""), ("put", "/portal"), ("delete", "/portal"),
+                           ("delete", "/portal/value"), ("post", "/grant-existing")]:
         kwargs = {"json": {}} if method == "put" else {}
         response = await getattr(client, method)("/istota/api/settings/credentials" + suffix,
                                                 headers={"Origin": "https://example.com"}, **kwargs)
         assert response.status_code == 401
+
+
+async def test_vault_bare_domain_sync_delete_and_resync(signed_client, config, tmp_path):  # noqa: F811
+    from istota import secrets_vault
+    from istota.credential_broker.bindings import get_binding
+    from istota.credential_broker.grants import get_grant
+    from tests.test_secrets_vault import _new_db, _read
+
+    kp, path = _new_db(tmp_path)
+    kp.add_entry(kp.root_group, "portal", "alice", "fixture-password", url="portal.example.com")
+    kp.save()
+    read, _ = _read(path)
+    secrets_vault.apply_vault(config.db_path, "alice", read)
+    secrets_vault.apply_vault(config.db_path, "bob", read)
+    base = "/istota/api/settings/credentials"
+    origin = {"Origin": "https://example.com"}
+    entries = (await signed_client.get(base)).json()["credentials"]
+    assert {entry["name"] for entry in entries} == {"portal", "portal_username", "portal_url"}
+    assert all(entry["hosts"] == ["portal.example.com"] for entry in entries)
+    assert secrets_store.get_secret(config.db_path, "alice", "vault_entries", "portal_url") == "portal.example.com"
+    assert (await signed_client.put(base + "/portal", json={}, headers=origin)).status_code == 200
+
+    response = await signed_client.delete(base + "/portal/value", headers=origin)
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "deleted": True}
+    assert secrets_store.get_secret(config.db_path, "alice", "vault_entries", "portal") is None
+    assert secrets_store.get_secret(config.db_path, "bob", "vault_entries", "portal") == "fixture-password"
+    with db.get_db(config.db_path) as conn:
+        assert get_binding(conn, "alice", "portal") is None
+        assert get_grant(conn, "alice", "portal") is None
+    entries = (await signed_client.get(base)).json()["credentials"]
+    assert {entry["name"] for entry in entries} == {"portal_username", "portal_url"}
+
+    secrets_vault.apply_vault(config.db_path, "alice", read)
+    entries = (await signed_client.get(base)).json()["credentials"]
+    restored = next(entry for entry in entries if entry["name"] == "portal")
+    assert restored["hosts"] == ["portal.example.com"]
+    assert restored["grant"] is None
+
+
+async def test_delete_unbound_credential_requires_csrf(signed_client, config):  # noqa: F811
+    secrets_store.upsert_secret(config.db_path, "alice", "vault_entries", "stale", "fixture-password")
+    url = "/istota/api/settings/credentials/stale/value"
+    assert (await signed_client.delete(url)).status_code == 403
+    assert secrets_store.secret_exists(config.db_path, "alice", "vault_entries", "stale")
+    response = await signed_client.delete(url, headers={"Origin": "https://example.com"})
+    assert response.status_code == 200
+    assert response.json()["deleted"] is True
+    assert not secrets_store.secret_exists(config.db_path, "alice", "vault_entries", "stale")
+
+
+async def test_delete_cannot_remove_deployment_credentials(signed_client, config):  # noqa: F811
+    from istota.credential_broker.bindings import get_binding
+    config.developer.enabled = True
+    config.developer.github_token = "fixture-token"
+    base = "/istota/api/settings/credentials"
+    await signed_client.get(base)
+    response = await signed_client.delete(base + "/forge.github/value",
+                                          headers={"Origin": "https://example.com"})
+    assert response.status_code == 400
+    assert config.developer.github_token == "fixture-token"
+    with db.get_db(config.db_path) as conn:
+        assert get_binding(conn, "alice", "forge.github") is not None
 
 
 async def test_rooms_and_forge_identity_are_checked(signed_client, config):  # noqa: F811 -- imported fixture

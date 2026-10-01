@@ -37,6 +37,10 @@ def parse_binding(url, attributes, tags, *, source="vault"):
     hosts = set()
     try:
         if url:
+            # KeePass URL fields may hold a bare authority. Only vault input
+            # gets this shorthand; actual request URLs still require HTTPS.
+            if source == "vault" and isinstance(url, str) and not any(c in url for c in "/?#@"):
+                url = "https://" + url
             hosts.add(https_host(url))
         for value in (attributes.get("istota_hosts") or "").split(","):
             value = value.strip()
