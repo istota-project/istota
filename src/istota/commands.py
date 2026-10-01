@@ -905,6 +905,11 @@ def _record_confirm_exchange(ctx: CommandContext, reply: str) -> "CommandResult"
     and the ambiguity listing deliberately do not record: neither decides
     anything.
 
+    SMS and WhatsApp are the exception. Their webhook stores the typed command
+    as a turn before dispatch, and writes whatever this returns beside it after
+    the send, usage errors included, best-effort like every phone command reply.
+    The durable record there is the stored turn and the task's own state.
+
     The message ids ride back on `result_data` under the same
     `confirmation_answered` kind the bare-answer path uses, because the web
     client stamps them onto the rows it has already drawn. Without that, the
