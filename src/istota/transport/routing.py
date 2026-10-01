@@ -525,6 +525,7 @@ def canonical_room_token(conn, token: str, surface: str = "") -> str | None:
 
 def room_target_descriptor(
     token: str, origin: str, talk_ref: str | None = None,
+    phone_surface: str | None = None,
 ) -> str:
     """The ``output_target`` a *scheduled* job should carry to deliver into this
     room — the string `istota-skill rooms list` hands the model and the
@@ -558,8 +559,17 @@ def room_target_descriptor(
       the web half is the ISSUE-400 shape: correct on the surface the author was
       looking at, invisible to everyone reading the room from the other one.
 
+    - the reader's own **private phone room** is the bare surface, ``sms`` or
+      ``whatsapp``: its web view is read-only, so a reminder asked for by text
+      has to be sent by text. The bare destination resolves the user's own
+      binding and the push is recorded in the room. ``phone_surface`` comes
+      from :func:`private_phone_rooms`, the one decision the prompt header and
+      `istota-skill rooms list` both read.
+
     Pure — the caller supplies the binding it already read.
     """
+    if phone_surface:
+        return phone_surface
     if origin == "talk":
         return f"talk:{token}"
     descriptor = f"web:{token}"
@@ -1015,6 +1025,24 @@ def is_private_phone_room(conn, surface: str, user_id: str, room_token) -> bool:
     again asks this first.
     """
     return bool(room_token) and room_token == private_phone_room(conn, surface, user_id)
+
+
+def private_phone_rooms(conn, user_id: str) -> dict[str, str]:
+    """``{room token: surface}`` for ``user_id``'s own SMS and WhatsApp rooms.
+
+    What a reader is told to schedule into such a room by
+    (:func:`room_target_descriptor`'s ``phone_surface``). One decision for the
+    prompt header and `istota-skill rooms list`, so the two cannot name
+    different targets for the same room. At most two entries.
+    """
+    found: dict[str, str] = {}
+    if not user_id:
+        return found
+    for surface in ("sms", "whatsapp"):
+        token = private_phone_room(conn, surface, user_id)
+        if token:
+            found[token] = surface
+    return found
 
 
 def private_phone_ref(surface: str, user_id: str) -> str | None:

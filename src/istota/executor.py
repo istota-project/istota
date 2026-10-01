@@ -6115,7 +6115,7 @@ def room_identity_line(
         return ""
     try:
         from .transport.routing import (
-            canonical_room_token, private_phone_room, room_target_descriptor,
+            canonical_room_token, private_phone_rooms, room_target_descriptor,
         )
 
         def _lookup(c):
@@ -6128,10 +6128,7 @@ def room_identity_line(
             binding = db.get_room_binding(c, tok, "talk")
             # The owner's own private phone thread, by the exact ref
             # `is_group_task` also excepts: a WhatsApp group is not one.
-            phone_surface = None
-            for surface in ("sms", "whatsapp"):
-                if private_phone_room(c, surface, task.user_id) == tok:
-                    phone_surface = surface
+            phone_surface = private_phone_rooms(c, task.user_id).get(tok)
             return tok, found, (binding.surface_ref if binding else None), phone_surface
 
         with db.get_db_if_present(config.db_path, conn) as c:
@@ -6152,7 +6149,7 @@ def room_identity_line(
         if talk_ref and origin not in ("talk", "whatsapp", "email"):
             where = "web chat, also open in Talk"
         descriptor = _header_scalar(
-            room_target_descriptor(token, origin, talk_ref)
+            room_target_descriptor(token, origin, talk_ref, phone_surface)
         )
         safe_token = _header_scalar(token)
         closing = (
@@ -6179,7 +6176,7 @@ def room_identity_line(
                 f"\nRoom: this conversation is a registered room on {label}, "
                 "readable but not writable in web chat. To deliver into it from "
                 "a scheduled job or a reminder, write "
-                f'target = "{phone_surface}" and room = "{safe_token}"; that '
+                f'target = "{descriptor}" and room = "{safe_token}"; that '
                 "sends it to the user's phone and records it here. " + closing
             )
         if origin in ("whatsapp", "email"):
