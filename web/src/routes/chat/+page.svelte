@@ -2,6 +2,7 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { page } from '$app/state';
+  import { describeRoomOff } from '$lib/roomOff';
   import { Plus, MessageSquare, Cloud, ChevronDown, Circle, Star, CheckCheck } from 'lucide-svelte';
   import {
     AppShell,
@@ -165,6 +166,8 @@
 
   // A room whose host left answers nobody until a member claims it (D14).
   const hostLost = $derived(!!activeRoom?.policy && activeRoom.policy.host === null);
+  // A room anyone in it switched off records and answers nothing (D8).
+  const roomOff = $derived(activeRoom?.off ?? null);
   let claiming = $state(false);
   async function claimHost() {
     if (!activeRoom || claiming) return;
@@ -1151,6 +1154,15 @@
           <Button size="sm" loading={claiming} loadingLabel="Claiming…" onclick={claimHost}>
             Claim this room
           </Button>
+        </NoticeBanner>
+      </div>
+    {/if}
+    {#if roomOff && !inViewMode}
+      <div class="room-notice">
+        <NoticeBanner title="This room is switched off" variant="warn" collapsed={false}>
+          <p>
+            {describeRoomOff(roomOff)} Nothing said here is recorded or answered. {roomOff.way_back}
+          </p>
         </NoticeBanner>
       </div>
     {/if}

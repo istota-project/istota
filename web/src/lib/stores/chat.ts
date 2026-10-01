@@ -1597,6 +1597,7 @@ function createSession(): ChatSession {
           side_of: fresh.side_of ?? null,
           shared: fresh.shared,
           policy: fresh.policy ?? null,
+          off: fresh.off ?? null,
           unread_count: unreadFor(fresh),
           // Whichever stamp is newer. This response was built before it was
           // awaited, so a frame that landed in between is ahead of it — taking

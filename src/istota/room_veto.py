@@ -120,6 +120,37 @@ def is_vetoed(conn, room_token: str | None) -> bool:
     return row is not None and row["vetoed_at"] is not None
 
 
+def switched_off(conn, room_token: str | None) -> dict | None:
+    """When a room was switched off and by whom, or None while it is on.
+
+    ``vetoers`` are the rows of ``room_vetoes`` in the order they switched it
+    off, each with its user id or the guest's display name and whether they
+    have since agreed. Empty for a WhatsApp group the bot was removed from,
+    since the roster frame does not say who removed it.
+    """
+    if not room_token:
+        return None
+    row = conn.execute(
+        "SELECT vetoed_at FROM room_policy WHERE room_token = ?", (room_token,),
+    ).fetchone()
+    if row is None or row["vetoed_at"] is None:
+        return None
+    vetoers = [
+        {
+            "user_id": r["person"][2:] if r["person"].startswith("u:") else None,
+            "display_name": r["display_name"],
+            "agreed": r["agreed_at"] is not None,
+        }
+        for r in conn.execute(
+            "SELECT v.person, v.agreed_at, p.display_name FROM room_vetoes v "
+            "LEFT JOIN room_participants p ON p.id = v.participant_id "
+            "WHERE v.room_token = ? ORDER BY v.vetoed_at, v.rowid",
+            (room_token,),
+        )
+    ]
+    return {"at": row["vetoed_at"], "vetoers": vetoers}
+
+
 def is_vetoed_ref(conn, surface: str, surface_ref: str) -> bool:
     """`is_vetoed` for a surface's own ref (a Talk token, a group JID)."""
     token = db.resolve_room_token(conn, surface, surface_ref) or surface_ref
@@ -158,7 +189,7 @@ def _cancel_queued(conn, room_token: str) -> None:
         db.log_task(conn, row["id"], "info", "Cancelled: the room was switched off")
 
 
-def _way_back(config) -> str:
+def way_back(config) -> str:
     word = command_word(config)
     return (
         f"To switch it back on, a member of the room sends `!{word} on`, and "
@@ -225,11 +256,11 @@ def _switch_off(conn, config, policy, person: str, participant_id, reference: st
     if policy.vetoed_at is not None:
         return VetoOutcome(
             "already_off",
-            f"{_bot(config)} is already switched off in this room. {_way_back(config)}",
+            f"{_bot(config)} is already switched off in this room. {way_back(config)}",
             reference,
         )
     text = (f"{_bot(config)} is now switched off in this room and records "
-            f"nothing here. {_way_back(config)}")
+            f"nothing here. {way_back(config)}")
     _write_notice(conn, token, text, reference)
     logger.info("room %s switched off", token)
     return VetoOutcome(OFF, text, reference)

@@ -5270,22 +5270,51 @@ def _room_sharing(conn, reg, username: str) -> dict:
     """
     from . import db, room_policy
 
+    off = _room_off(conn, reg)
     if reg is None or not db.room_is_shared(conn, reg.token):
-        return {"shared": False, "policy": None}
+        return {"shared": False, "policy": None, "off": off}
     if reg.side_of:
-        return {"shared": True, "policy": None}
+        return {"shared": True, "policy": None, "off": off}
     refusal = room_policy.settings_refusal(conn, reg.token, username)
     policy = room_policy.get_policy(conn, reg.token)
     if policy is None:
-        return {"shared": True, "policy": None}
+        return {"shared": True, "policy": None, "off": off}
     return {
         "shared": True,
+        "off": off,
         "policy": {
             "host": policy.host_user_id,
             "is_host": policy.host_user_id == username,
             "guest_reply": policy.guest_reply,
             "settings_refusal": refusal,
         },
+    }
+
+
+def _room_off(conn, reg) -> dict | None:
+    """``off`` on the listing: when the room was switched off (D8) and by whom.
+
+    Independent of ``shared``: a room stays off after its vetoers leave, which
+    is when it may have become private. A guest is named by the display name
+    they chose; the members of the room are the ones reading it.
+    """
+    from . import room_veto
+
+    state = room_veto.switched_off(conn, reg.token if reg is not None else None)
+    if state is None:
+        return None
+    return {
+        "at": _iso_utc(state["at"]),
+        "by": [
+            {
+                "name": (_display_name_for(v["user_id"]) if v["user_id"]
+                         else (v["display_name"] or "a guest")),
+                "guest": v["user_id"] is None,
+                "agreed": v["agreed"],
+            }
+            for v in state["vetoers"]
+        ],
+        "way_back": room_veto.way_back(_config),
     }
 
 

@@ -2740,6 +2740,19 @@ export interface ChatRoom {
   /** The policy of a shared room; null for a room one human reads and for a
    * side room. */
   policy?: RoomPolicyView | null;
+  /** Set while the room is switched off (multiplayer D8): nothing in it is
+   * recorded or answered. null while it is on. */
+  off?: RoomOffView | null;
+}
+
+export interface RoomOffView {
+  at: string;
+  /** Everyone who switched it off, in order; empty when the bot was removed
+   * from a WhatsApp group, which does not say by whom. `agreed` is a vetoer
+   * who has since asked for it back on. */
+  by: { name: string; guest: boolean; agreed: boolean }[];
+  /** The server's own sentence saying how to switch it back on. */
+  way_back: string;
 }
 
 /** How guests' turns are answered (multiplayer D11). */

@@ -146,6 +146,55 @@ class TestTheListingCarriesThePolicy:
         assert "!room host" in listed["policy"]["settings_refusal"]
 
 
+class TestTheListingSaysTheRoomIsOff:
+    """Stage 20 left a switched-off room visible only as a 409 on send."""
+
+    def _switch_off(self, db_path, token, person, *, participant=None, agreed=False):
+        with db.get_db(db_path) as conn:
+            room_policy.ensure_policy(conn, token)
+            pid = None
+            if participant is not None:
+                pid = db.upsert_room_participant(
+                    conn, room_token=token, surface="talk", surface_ref=participant,
+                    kind="guest", display_name="Max Guest",
+                )
+            conn.execute(
+                "INSERT INTO room_vetoes (room_token, person, participant_id, agreed_at) "
+                "VALUES (?, ?, ?, CASE WHEN ? THEN datetime('now') END)",
+                (token, person, pid, agreed),
+            )
+            conn.execute("UPDATE room_policy SET vetoed_at = datetime('now') "
+                         "WHERE room_token = ?", (token,))
+
+    async def test_a_room_that_is_on_says_nothing(self, client, db_path):
+        room = _shared_room(db_path)
+        cookies = await _login(client, "alice")
+        assert (await _listed(client, cookies, room.token))["off"] is None
+
+    async def test_an_off_room_names_who_switched_it_off(self, client, db_path):
+        room = _shared_room(db_path)
+        self._switch_off(db_path, room.token, "u:bob")
+        self._switch_off(db_path, room.token, "talk:guests/max",
+                         participant="guests/max", agreed=True)
+        cookies = await _login(client, "alice")
+        off = (await _listed(client, cookies, room.token))["off"]
+        assert off["at"]
+        assert off["by"] == [
+            {"name": "Bob", "guest": False, "agreed": False},
+            {"name": "Max Guest", "guest": True, "agreed": True},
+        ]
+        assert "!istota on" in off["way_back"]
+
+    async def test_a_bot_removed_from_its_group_has_nobody_to_name(self, client, db_path):
+        room = _shared_room(db_path)
+        with db.get_db(db_path) as conn:
+            room_policy.ensure_policy(conn, room.token)
+            conn.execute("UPDATE room_policy SET vetoed_at = datetime('now') "
+                         "WHERE room_token = ?", (room.token,))
+        cookies = await _login(client, "bob")
+        assert (await _listed(client, cookies, room.token))["off"]["by"] == []
+
+
 class TestClaimingTheHost:
     async def test_a_member_claims_a_hostless_room(self, client, db_path):
         room = _shared_room(db_path)

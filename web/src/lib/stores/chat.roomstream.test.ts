@@ -334,6 +334,25 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  it('a room list refresh carries a room being switched off, and back on', async () => {
+    api.getChatRooms.mockResolvedValueOnce({ rooms: [{ ...room(1), off: null }] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    const off = {
+      at: '2026-09-30T10:00:00Z',
+      by: [{ name: 'Max', guest: true, agreed: false }],
+      way_back: 'To switch it back on, …',
+    };
+    api.getChatRooms.mockResolvedValueOnce({ rooms: [{ ...room(1), off }] });
+    await s.refreshRooms();
+    expect(get(s.rooms)[0].off?.by[0].name).toBe('Max');
+    api.getChatRooms.mockResolvedValueOnce({ rooms: [{ ...room(1), off: null }] });
+    await s.refreshRooms();
+    expect(get(s.rooms)[0].off).toBeNull();
+    s.teardown();
+  });
+
   it('carries the server’s not-deletable mark onto the row', async () => {
     vi.useFakeTimers();
     api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
