@@ -1953,7 +1953,7 @@ class TestPrivateRoomIsolation:
         ):
             assert forbidden not in source
 
-    def test_ingest_is_told_not_to_mirror(self, tmp_path, monkeypatch):
+    def test_a_private_turn_takes_the_room_path_on_its_own_ref(self, tmp_path, monkeypatch):
         from istota.transport import ingest
         config = _config(tmp_path)
         _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
@@ -1965,7 +1965,7 @@ class TestPrivateRoomIsolation:
         monkeypatch.setattr(ingest, "record_inbound", spy)
         _handle(config, _text_payload())
         assert len(seen) == 1
-        assert seen[0]["mirror_to_room"] is False
+        assert seen[0]["surface_ref"] == whatsapp_conversation_token("alice")
         assert seen[0]["surface"] == "whatsapp"
         assert seen[0]["source_type"] == "whatsapp"
         assert seen[0]["queue"] == "foreground"
