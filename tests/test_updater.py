@@ -368,16 +368,17 @@ class TestCheckoutFlow:
         assert init_cmds, "expected a fresh `istota init` subprocess"
         assert init_cmds[0][0] == "istota"
         assert "-c" in init_cmds[0]  # config path threaded through
+        assert "--relocate-rooms" in init_cmds[0]
 
-    def test_daemon_running_prints_restart_nudge(self, tmp_path, capsys):
+    def test_daemon_running_refuses_before_changing_checkout(self, tmp_path):
         cfg = _standalone_config(tmp_path)
         src = _make_source(tmp_path)
         rec = _write_record(tmp_path, src)
         run = FakeRun(head="old", remote="new")
         kwargs, _, _ = _run_kwargs(daemon_running=lambda: True)
-        rc = updater.run_update(cfg, record_path=rec, run=run, **kwargs)
-        assert rc == 0
-        assert "restart" in capsys.readouterr().out.lower()
+        with pytest.raises(updater.UpdateError, match="Stop istota serve"):
+            updater.run_update(cfg, record_path=rec, run=run, **kwargs)
+        assert run.calls == []
 
 
 # ---------------------------------------------------------------------------

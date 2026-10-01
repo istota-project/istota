@@ -5301,7 +5301,10 @@ def _build_talk_api_context(
     raw_messages = []
     with db.get_db_if_present(config.db_path, conn) as c:
         if c is not None:
-            raw_messages = db.get_cached_talk_messages(c, task.conversation_token, limit=limit)
+            binding = db.get_room_binding(c, task.conversation_token, "talk")
+            talk_ref = binding.surface_ref if binding else task.conversation_token
+            if not db.is_canonical_room_token(talk_ref):
+                raw_messages = db.get_cached_talk_messages(c, talk_ref, limit=limit)
 
     talk_floor = _front_stage_cutoff(task, conn, config).talk_message_id
     if talk_floor:
@@ -5635,6 +5638,22 @@ def _recall_memories(
         with db.get_db_if_present(config.db_path, conn) as c:
             if c is None:
                 return None
+            if task.conversation_token:
+                # A room's permanent aliases are the same conversation under an
+                # older name: a phone thread's hash token from before its room
+                # was minted. Without surface refs, so a deleted room's
+                # tombstoned alias is not one and its memory stays out of the
+                # room that replaced it.
+                try:
+                    refs = db.room_ref_tokens(
+                        c, task.conversation_token, include_surface_refs=False,
+                    )
+                except Exception:
+                    logger.debug("Channel alias lookup failed for recall", exc_info=True)
+                    refs = []
+                for ref in refs:
+                    if f"channel:{ref}" not in include_ids:
+                        include_ids.append(f"channel:{ref}")
             results = search(
                 c, task.user_id, prompt,
                 limit=config.memory_search.auto_recall_limit,
@@ -6098,24 +6117,30 @@ def room_identity_line(
     if not task.conversation_token or not config.db_path:
         return ""
     try:
-        from .transport.routing import canonical_room_token, room_target_descriptor
+        from .transport.routing import (
+            canonical_room_token, private_phone_rooms, room_target_descriptor,
+        )
 
         def _lookup(c):
             tok = canonical_room_token(c, task.conversation_token)
             if not tok:
-                return None, None, None
+                return None, None, None, None
             found = db.get_room(c, tok)
             if found is None:
-                return None, None, None
+                return None, None, None, None
             binding = db.get_room_binding(c, tok, "talk")
-            return tok, found, (binding.surface_ref if binding else None)
+            # The owner's own private phone thread, by the exact ref
+            # `is_group_task` also excepts: a WhatsApp group is not one.
+            phone_surface = private_phone_rooms(c, task.user_id).get(tok)
+            return tok, found, (binding.surface_ref if binding else None), phone_surface
 
         with db.get_db_if_present(config.db_path, conn) as c:
             if c is None:
                 return ""
-            token, room, talk_ref = _lookup(c)
+            token, room, talk_ref, phone_surface = _lookup(c)
         if room is None:
             return ""
+        origin = room.origin
         # "Talk", never "Nextcloud Talk": `tests/test_storage_identity.py`
         # requires the assembled prompt to carry no "Nextcloud" literal on the
         # storage-neutral backend, and a local-backend deployment can hold
@@ -6123,11 +6148,11 @@ def room_identity_line(
         where = {
             "talk": "Talk", "whatsapp": "a WhatsApp group",
             "email": "an email thread",
-        }.get(room.origin, "web chat")
-        if talk_ref and room.origin not in ("talk", "whatsapp", "email"):
+        }.get(origin, "web chat")
+        if talk_ref and origin not in ("talk", "whatsapp", "email"):
             where = "web chat, also open in Talk"
         descriptor = _header_scalar(
-            room_target_descriptor(token, room.origin, talk_ref)
+            room_target_descriptor(token, origin, talk_ref, phone_surface)
         )
         safe_token = _header_scalar(token)
         closing = (
@@ -6145,12 +6170,24 @@ def room_identity_line(
                 "you are already in."
             )
         )
-        if room.origin in ("whatsapp", "email"):
+        if phone_surface is not None:
+            # The web view of a phone room is read-only, so a reminder asked
+            # for by text has to be sent by text; the bare surface resolves the
+            # user's own binding, and the push is recorded in this room.
+            label = "SMS" if phone_surface == "sms" else "WhatsApp"
+            return (
+                f"\nRoom: this conversation is a registered room on {label}, "
+                "readable but not writable in web chat. To deliver into it from "
+                "a scheduled job or a reminder, write "
+                f'target = "{descriptor}" and room = "{safe_token}"; that '
+                "sends it to the user's phone and records it here. " + closing
+            )
+        if origin in ("whatsapp", "email"):
             # A group or a thread is answered only from its own turns
             # (multiplayer D6): a scheduled job's leg into it reaches nobody on
             # it, so naming a descriptor here would promise a post that never
             # appears.
-            what = "group" if room.origin == "whatsapp" else "thread"
+            what = "group" if origin == "whatsapp" else "thread"
             return (
                 f"\nRoom: this conversation is a registered room on {where}. "
                 f"A scheduled job or a reminder cannot post into the {what}. "

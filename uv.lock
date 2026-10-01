@@ -1433,6 +1433,7 @@ dependencies = [
     { name = "requests" },
     { name = "segno" },
     { name = "tomli" },
+    { name = "tomli-w" },
 ]
 
 [package.optional-dependencies]
@@ -1462,7 +1463,6 @@ all = [
     { name = "starlette" },
     { name = "telnyx", extra = ["webhooks"] },
     { name = "timezonefinder" },
-    { name = "tomli-w" },
     { name = "torch", version = "2.10.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
     { name = "torch", version = "2.10.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
     { name = "twilio" },
@@ -1525,7 +1525,6 @@ money = [
     { name = "beancount" },
     { name = "beanquery" },
     { name = "click" },
-    { name = "tomli-w" },
     { name = "weasyprint" },
     { name = "yfinance" },
 ]
@@ -1558,7 +1557,6 @@ test = [
     { name = "starlette" },
     { name = "telnyx", extra = ["webhooks"] },
     { name = "timezonefinder" },
-    { name = "tomli-w" },
     { name = "twilio" },
     { name = "uvicorn" },
     { name = "weasyprint" },
@@ -1674,7 +1672,7 @@ requires-dist = [
     { name = "telnyx", extras = ["webhooks"], marker = "extra == 'sms'", specifier = ">=4.178.0" },
     { name = "timezonefinder", marker = "extra == 'location'", specifier = ">=6.5" },
     { name = "tomli", specifier = ">=2.0.0" },
-    { name = "tomli-w", marker = "extra == 'money'", specifier = ">=1.0.0" },
+    { name = "tomli-w", specifier = ">=1.0.0" },
     { name = "torch", marker = "extra == 'memory-search'", specifier = ">=2.0.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "twilio", marker = "extra == 'sms'", specifier = ">=9.11.1" },
     { name = "uvicorn", marker = "extra == 'location'", specifier = ">=0.20.0" },

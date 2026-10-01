@@ -16,13 +16,16 @@
     /** A Talk-backed room takes its membership from Talk, which the server
      *  enforces; this only lets the pane say so instead of offering nothing. */
     talkBound?: boolean;
+    /** "SMS" or "WhatsApp" for a private phone room, which has one reader and
+     *  takes no members; the server refuses an add there. */
+    phoneLabel?: string | null;
     /** Membership changed: the room's sharing state may have too. */
     onChanged?: () => void;
     /** The viewer left the room, which is no longer theirs to show. */
     onLeft?: () => void;
   }
 
-  let { roomId, userId, talkBound = false, onChanged, onLeft }: Props = $props();
+  let { roomId, userId, talkBound = false, phoneLabel = null, onChanged, onLeft }: Props = $props();
 
   let data = $state<RoomMembers | null>(null);
   let directory = $state<DirectoryUser[]>([]);
@@ -38,7 +41,7 @@
       const members = await getRoomMembers(forRoom);
       if (forRoom !== roomId) return;
       data = members;
-      if (members.can_manage) {
+      if (members.can_manage && !phoneLabel) {
         const { users } = await getChatUsers();
         if (forRoom === roomId) directory = users;
       }
@@ -128,6 +131,10 @@
     </ul>
     {#if talkBound}
       <p class="caption">Membership of a room on Nextcloud Talk is changed in Talk.</p>
+    {:else if phoneLabel}
+      <p class="caption">
+        This {phoneLabel} transcript has one reader, so no one else can be added.
+      </p>
     {:else if data.can_manage}
       <div class="add-row">
         <Select

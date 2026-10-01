@@ -32,7 +32,7 @@ class SmsTransport:
         surface_class="push",
         user_routable=True,
         room_view=None,
-        inbound_room_role=None,
+        inbound_room_role="member",
         user_turn_mirror=None,
     )
 

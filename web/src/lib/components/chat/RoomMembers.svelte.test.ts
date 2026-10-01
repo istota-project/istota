@@ -128,4 +128,13 @@ describe('RoomMembers', () => {
     await fireEvent.click(button('Remove'));
     expect(await screen.findByText('member has a task in progress')).toBeTruthy();
   });
+
+  it('offers no add control in a private phone room', async () => {
+    getRoomMembers.mockResolvedValue(listing());
+    render(RoomMembers, { roomId: 1, userId: 'alice', phoneLabel: 'SMS' });
+    await screen.findByText('Alice');
+    expect(screen.getByText(/SMS transcript has one reader/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Member to add' })).toBeNull();
+    expect(getChatUsers).not.toHaveBeenCalled();
+  });
 });

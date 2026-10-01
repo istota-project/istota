@@ -46,8 +46,12 @@ def _stored_preference(conn: sqlite3.Connection, config, recipient_user_id: str)
 def _room(conn, config, recipient_user_id: str) -> dict:
     handle = db.default_web_room(conn, recipient_user_id)
     room = db.get_room(conn, handle.token) if handle is not None else None
+    # A phone room is a read-only transcript in web: a question delivered there
+    # could only be answered by a web send, which the server refuses. A pinned
+    # default can still name one, so the default-room exclusion is not enough.
     if (room is None or room.archived
-            or db.list_room_members(conn, room.token) != [recipient_user_id]):
+            or db.list_room_members(conn, room.token) != [recipient_user_id]
+            or db.room_has_phone_binding(conn, room.token)):
         raise RequestError("recipient_has_no_private_room")
     talk = db.get_room_binding(conn, room.token, "talk")
     name = label_text(handle.name or room.name or "")

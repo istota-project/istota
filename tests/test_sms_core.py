@@ -131,14 +131,14 @@ class TestSmsIdentityAndRouting:
         assert "twilio" not in first
         assert "1555" not in first
 
-    def test_sms_is_non_room_and_bare_route_only(self, tmp_path):
+    def test_sms_is_a_room_member_and_bare_route_only(self, tmp_path):
         config = _config(tmp_path)
         adapter = _adapter(lambda _req: SmsSendResult("opaque-1", "accepted", 1))
         transport = SmsTransport(config, providers=_providers(adapter))
 
         assert transport.capabilities.room_view is None
-        assert transport.capabilities.inbound_room_role is None
-        assert surfaces.room_role("sms") is None
+        assert transport.capabilities.inbound_room_role == "member"
+        assert surfaces.room_role("sms") == "member"
         assert parse_output_target("both") == [Destination("talk"), Destination("email")]
         assert parse_output_target("all") == [
             Destination("talk"), Destination("email"), Destination("ntfy")
@@ -172,7 +172,7 @@ class TestSmsIdentityAndRouting:
 
 
 class TestInboundDomainHandling:
-    def test_ordinary_message_creates_one_task_and_no_room_rows(self, tmp_path):
+    def test_ordinary_message_creates_one_task_and_room_rows(self, tmp_path):
         config = _config(tmp_path)
         providers = _providers(_adapter(lambda _req: SmsSendResult("opaque", "accepted", 1)))
 
@@ -184,10 +184,11 @@ class TestInboundDomainHandling:
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, first.task_id)
             assert task.source_type == "sms"
-            assert task.conversation_token == sms_conversation_token("alice")
+            assert task.conversation_token == db.resolve_room_token(conn, "sms", sms_conversation_token("alice"))
+            assert db.is_canonical_room_token(task.conversation_token)
             assert task.output_target == "sms"
-            assert conn.execute("SELECT count(*) FROM rooms").fetchone()[0] == 0
-            assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+            assert conn.execute("SELECT count(*) FROM rooms").fetchone()[0] == 1
+            assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 1
             assert conn.execute("SELECT count(*) FROM processed_sms").fetchone()[0] == 1
 
     @pytest.mark.parametrize(
@@ -248,7 +249,7 @@ class TestInboundDomainHandling:
         with db.get_db(config.db_path) as conn:
             assert conn.execute("SELECT count(*) FROM sms_opt_outs").fetchone()[0] == 0
 
-    def test_bare_answer_and_command_use_sms_without_transcript_rows(self, tmp_path):
+    def test_bare_answer_and_command_record_turns_without_new_tasks(self, tmp_path):
         calls = []
 
         def send(req):
@@ -282,7 +283,8 @@ class TestInboundDomainHandling:
         assert "Available commands" in calls[1]
         with db.get_db(config.db_path) as conn:
             assert db.get_task(conn, held).status == "pending"
-            assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+            assert conn.execute("SELECT count(*) FROM messages WHERE body IN ('YES', '!help')").fetchone()[0] == 2
+            assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 1
 
     def test_inactive_provider_and_unknown_number_are_acknowledged_without_rows(
         self, tmp_path, caplog
@@ -720,6 +722,42 @@ class TestNotificationsAndIsolation:
                 ("notification:18", "accepted"),
             ]
 
+    @pytest.mark.parametrize("room_exists", [False, True])
+    def test_a_notification_lands_once_in_the_phone_room_when_it_exists(
+        self, tmp_path, monkeypatch, room_exists,
+    ):
+        calls = []
+        config = _config(tmp_path)
+        providers = _providers(_adapter(
+            lambda req: calls.append(req.text) or SmsSendResult("opaque", "accepted", 1)
+        ))
+        monkeypatch.setattr(
+            "istota.transport.sms.providers.registry.make_provider_registry",
+            lambda _config: providers,
+        )
+        token = None
+        if room_exists:
+            with db.get_db(config.db_path) as conn:
+                token = db.register_room(conn, None, "alice", origin="sms").token
+                db.add_room_binding(conn, token, "sms", sms_conversation_token("alice"))
+
+        for _ in range(2):
+            notifications.send_notification(
+                config, "alice", "Heartbeat\n\nDisk is full", surface="sms",
+                title="Heartbeat", reference_id="heartbeat:disk",
+            )
+
+        # The repeat costs nothing at the provider and nothing in the transcript.
+        assert calls == ["Heartbeat\n\nDisk is full"]
+        with db.get_db(config.db_path) as conn:
+            rows = [tuple(r) for r in conn.execute(
+                "SELECT room_token, role, title, body, origin_surface FROM messages"
+            )]
+            assert conn.execute("SELECT count(*) FROM rooms").fetchone()[0] == int(room_exists)
+        assert rows == (
+            [(token, "system", "Heartbeat", "Disk is full", "sms")] if room_exists else []
+        )
+
     def test_failure_alert_dispatches_off_the_persistent_runtime_loop(
         self, tmp_path, monkeypatch
     ):
@@ -758,7 +796,8 @@ class TestNotificationsAndIsolation:
 
 
 class TestSchedulerSmsDelivery:
-    def test_completed_task_delivers_once_through_sms_ledger(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("room_exists", [False, True])
+    def test_completed_task_delivers_once_through_sms_ledger(self, tmp_path, monkeypatch, room_exists):
         calls = []
 
         def send(req):
@@ -776,9 +815,13 @@ class TestSchedulerSmsDelivery:
             ),
         )
         with db.get_db(config.db_path) as conn:
+            token = sms_conversation_token("alice")
+            if room_exists:
+                token = db.register_room(conn, None, "alice", origin="sms").token
+                db.add_room_binding(conn, token, "sms", sms_conversation_token("alice"))
             task_id = db.create_task(
                 conn, prompt="check", user_id="alice", source_type="sms",
-                conversation_token=sms_conversation_token("alice"), output_target="sms",
+                conversation_token=token, output_target="sms",
             )
 
         from istota.scheduler import process_one_task
@@ -786,8 +829,93 @@ class TestSchedulerSmsDelivery:
         assert calls == ["Finished the check."]
         with db.get_db(config.db_path) as conn:
             assert db.get_task(conn, task_id).status == "completed"
+            turns = conn.execute(
+                "SELECT room_token, body FROM messages WHERE role = 'assistant' AND task_id = ?",
+                (task_id,),
+            ).fetchall()
+            assert [tuple(row) for row in turns] == ([(token, "Finished the check.")] if room_exists else [])
             row = conn.execute("SELECT * FROM sent_sms").fetchone()
             assert row["logical_key"] == f"task-result:{task_id}"
+
+    @staticmethod
+    def _run(tmp_path, monkeypatch, *, source_type, room, answer="Nightly summary.",
+             extra_member=None, opted_out=False):
+        """One SMS-planned task through `process_one_task`, optionally in a minted room."""
+        calls = []
+        config = _config(tmp_path)
+        providers = _providers(_adapter(
+            lambda req: calls.append(req.text) or SmsSendResult("opaque", "accepted", 1)
+        ))
+        monkeypatch.setattr(
+            "istota.transport.sms.providers.registry.make_provider_registry",
+            lambda _config: providers,
+        )
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task",
+            lambda *_args, **_kwargs: (True, answer, None, None),
+        )
+        token = None
+        with db.get_db(config.db_path) as conn:
+            if room:
+                token = db.register_room(conn, None, "alice", origin="sms").token
+                db.add_room_binding(conn, token, "sms", sms_conversation_token("alice"))
+                if extra_member:
+                    db.add_room_member(conn, token, extra_member)
+            if opted_out:
+                conn.execute(
+                    "INSERT INTO sms_opt_outs VALUES (?, datetime('now'), datetime('now'))",
+                    (USER_NUMBER,),
+                )
+            task_id = db.create_task(
+                conn, prompt="run", user_id="alice", source_type=source_type,
+                conversation_token=token if source_type == "sms" else None,
+                output_target="sms",
+            )
+        from istota.scheduler import process_one_task
+        assert process_one_task(config) == (task_id, True)
+        with db.get_db(config.db_path) as conn:
+            rows = [tuple(r) for r in conn.execute(
+                "SELECT room_token, role, body FROM messages WHERE task_id = ? "
+                "AND role != 'user' ORDER BY id", (task_id,),
+            )]
+            rooms = conn.execute("SELECT count(*) FROM rooms").fetchone()[0]
+        return calls, rows, rooms, token
+
+    @pytest.mark.parametrize("room_exists", [False, True])
+    def test_an_explicit_push_lands_in_the_phone_room_only_when_it_exists(
+        self, tmp_path, monkeypatch, room_exists,
+    ):
+        calls, rows, rooms, token = self._run(
+            tmp_path, monkeypatch, source_type="scheduled", room=room_exists,
+        )
+        # The send is unchanged either way; a miss writes nothing and mints nothing.
+        assert calls == ["Nightly summary."]
+        assert rows == ([(token, "assistant", "Nightly summary.")] if room_exists else [])
+        assert rooms == int(room_exists)
+
+    def test_an_explicit_push_never_lands_in_a_room_another_human_reads(
+        self, tmp_path, monkeypatch,
+    ):
+        calls, rows, _rooms, _token = self._run(
+            tmp_path, monkeypatch, source_type="scheduled", room=True,
+            extra_member="bob",
+        )
+        assert calls == ["Nightly summary."]
+        assert rows == []
+
+    @pytest.mark.parametrize("source_type", ["sms", "scheduled"])
+    def test_a_blocked_send_still_writes_its_one_row(
+        self, tmp_path, monkeypatch, source_type,
+    ):
+        calls, rows, _rooms, token = self._run(
+            tmp_path, monkeypatch, source_type=source_type, room=True,
+            opted_out=True,
+        )
+        assert calls == []
+        assert rows == [(token, "assistant", "Nightly summary.")]
+        config_db = tmp_path / "istota.db"
+        with db.get_db(config_db) as conn:
+            assert [r["status"] for r in conn.execute("SELECT status FROM sent_sms")] == ["blocked_opt_out"]
 
     def test_sms_confirmation_parks_and_includes_answer_instruction(
         self, tmp_path, monkeypatch
@@ -1618,3 +1746,395 @@ class TestAnSmsStatusThatOvertakesTheIdWrite:
             assert row["status"] == "failed", f"attempt {attempt}"
             assert row["error_code"] == "30006", f"attempt {attempt}"
             assert _parked(config) == [], f"attempt {attempt}"
+
+
+class TestSmsRoomMint:
+    def test_first_text_maps_history_and_later_text_preserves_name(self, tmp_path):
+        config = _config(tmp_path)
+        old = sms_conversation_token('alice')
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            assert db.is_canonical_room_token(token)
+            assert db.get_room(conn, token).name == 'SMS'
+            assert db._canonical_room_token(conn, old, cross_surface=False) == token
+            assert db.is_room_member(conn, token, 'alice')
+            db.rename_room(conn, token, 'My texts')
+        with db.get_db(config.db_path) as conn:
+            second = handle_provider_event(conn, config, _inbound(provider_message_id='second', provider_event_id='event-second'))
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, second.task_id).conversation_token == token
+            assert db.get_room(conn, token).name == 'My texts'
+            for table, count in [('rooms', 1), ('messages', 2), ('room_token_migration', 1)]:
+                assert conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == count
+
+    def test_pre_room_texts_are_backfilled_behind_the_first_minted_text(self, tmp_path):
+        """Stage 23 through the webhook: history on the hash token from before
+        the room existed lands in the room's transcript on the next pass."""
+        from istota import scheduler
+        config = _config(tmp_path)
+        old = sms_conversation_token('alice')
+        with db.get_db(config.db_path) as conn:
+            earlier = db.create_task(conn, prompt='what is on friday', user_id='alice',
+                                     source_type='sms', conversation_token=old)
+            conn.execute("UPDATE tasks SET status='completed', result='The dentist at 3.', "
+                         "created_at='2026-09-01 10:00:00' WHERE id=?", (earlier,))
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+            token = db.get_task(conn, first.task_id).conversation_token
+        assert scheduler.backfill_phone_rooms(config) == 2
+        with db.get_db(config.db_path) as conn:
+            rows = [(r['role'], r['body']) for r in conn.execute(
+                'SELECT role, body FROM messages WHERE room_token = ? '
+                'ORDER BY created_at, id', (token,))]
+        assert rows == [('user', 'what is on friday'), ('assistant', 'The dentist at 3.'),
+                        ('user', 'check the backup')]
+
+    def test_command_mints_and_dispatches_on_canonical_token(self, tmp_path, monkeypatch):
+        config = _config(tmp_path)
+        calls = []
+        async def dispatch(config, user, token, text, **kwargs):
+            calls.append(token)
+            from types import SimpleNamespace
+            return SimpleNamespace(text='')
+        monkeypatch.setattr('istota.commands.dispatch', dispatch)
+        providers = _providers(_adapter(lambda _req: SmsSendResult('opaque', 'accepted', 1)))
+        result = asyncio.run(_handle(config, providers, _inbound(text='!help')))
+        with db.get_db(config.db_path) as conn:
+            token = db.resolve_room_token(conn, 'sms', sms_conversation_token('alice'))
+            assert db.is_canonical_room_token(token)
+            assert calls == [token]
+            assert result.disposition == 'command'
+            assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 0
+            assert conn.execute('SELECT body FROM messages').fetchone()[0] == '!help'
+
+    @pytest.mark.parametrize('legacy', [False, True])
+    def test_confirmation_follows_only_own_alias(self, tmp_path, legacy):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            held = db.create_task(conn, prompt='delete it', user_id='alice', source_type='sms',
+                                  conversation_token=sms_conversation_token('alice') if legacy else token)
+            db.set_task_confirmation(conn, held, 'Delete?')
+        with db.get_db(config.db_path) as conn:
+            result = handle_provider_event(conn, config, _inbound(text='yes', provider_message_id='answer', provider_event_id='event-answer'))
+            assert result.disposition == 'confirmation_answer'
+            assert db.get_task(conn, held).status == 'pending'
+            assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 2
+
+    @staticmethod
+    def _rendered(conn, token):
+        # What the web transcript shows: the shared filter, nothing else.
+        return [
+            (r['role'], r['body']) for r in conn.execute(
+                f'SELECT m.role, m.body FROM messages m WHERE m.room_token = ? '
+                f'AND ({db.TRANSCRIPT_SURFACE_FILTER} OR m.role = \'system\') ORDER BY m.id',
+                (token,),
+            )
+        ]
+
+    def test_typed_answer_joins_the_transcript_with_its_ack(self, tmp_path):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            db.set_task_confirmation(conn, first.task_id, 'Delete?')
+        with db.get_db(config.db_path) as conn:
+            result = handle_provider_event(conn, config, _inbound(text='yes', provider_message_id='answer', provider_event_id='event-answer'))
+            assert result.disposition == 'confirmation_answer'
+            assert self._rendered(conn, token) == [
+                ('user', 'check the backup'), ('user', 'yes'), ('system', result.response_text),
+            ]
+
+    def test_confirm_command_records_its_ack_and_no_second_answer(self, tmp_path):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            db.set_task_confirmation(conn, first.task_id, 'Delete?')
+        providers = _providers(_adapter(lambda _req: SmsSendResult('opaque', 'accepted', 1)))
+        command = f'!confirm {first.task_id}'
+        asyncio.run(_handle(config, providers, _inbound(text=command, provider_message_id='cmd', provider_event_id='event-cmd')))
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, first.task_id).status == 'pending'
+            rendered = self._rendered(conn, token)
+            assert rendered[:2] == [('user', 'check the backup'), ('user', command)]
+            assert len(rendered) == 3
+            assert rendered[2][0] == 'system'
+            assert rendered[2][1].startswith(f'Confirmed #{first.task_id}')
+
+    def test_steer_is_recorded_once(self, tmp_path):
+        # The webhook stores `!steer <note>` as the turn; the command must not
+        # store the note again beside it.
+        config = _config(tmp_path)
+        config = replace(config, brain=replace(config.brain, kind='native'))
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (first.task_id,))
+        providers = _providers(_adapter(lambda _req: SmsSendResult('opaque', 'accepted', 1)))
+        command = '!steer focus on the logs'
+        asyncio.run(_handle(config, providers, _inbound(text=command, provider_message_id='steer', provider_event_id='event-steer')))
+        with db.get_db(config.db_path) as conn:
+            assert db.count_pending_steers(conn, first.task_id) == 1
+            rendered = self._rendered(conn, token)
+            # The note is not stored a second time; the steer's reply is.
+            assert rendered[:2] == [('user', 'check the backup'), ('user', command)]
+            assert [role for role, _ in rendered[2:]] == ['system']
+
+    @staticmethod
+    def _stub_dispatch(monkeypatch, reply):
+        async def dispatch(config, user, token, text, **kwargs):
+            from types import SimpleNamespace
+            return SimpleNamespace(text=reply)
+        monkeypatch.setattr('istota.commands.dispatch', dispatch)
+
+    def test_a_command_reply_joins_the_transcript_after_the_send(self, tmp_path, monkeypatch):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+            token = db.get_task(conn, first.task_id).conversation_token
+        self._stub_dispatch(monkeypatch, 'Nothing is running.')
+        sent = []
+        def send(request):
+            # The row is written after the send, never ahead of it.
+            with db.get_db(config.db_path) as conn:
+                sent.append(conn.execute(
+                    "SELECT count(*) FROM messages WHERE role='system'").fetchone()[0])
+            return SmsSendResult('opaque', 'accepted', 1)
+        providers = _providers(_adapter(send))
+        asyncio.run(_handle(config, providers, _inbound(
+            text='!status', provider_message_id='cmd', provider_event_id='event-cmd')))
+        assert sent == [0]
+        with db.get_db(config.db_path) as conn:
+            assert self._rendered(conn, token) == [
+                ('user', 'check the backup'), ('user', '!status'),
+                ('system', 'Nothing is running.'),
+            ]
+
+    def test_a_redelivered_command_writes_no_second_reply(self, tmp_path, monkeypatch):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+            token = db.get_task(conn, first.task_id).conversation_token
+        self._stub_dispatch(monkeypatch, 'Nothing is running.')
+        providers = _providers(_adapter(lambda _req: SmsSendResult('opaque', 'accepted', 1)))
+        command = _inbound(text='!status', provider_message_id='cmd', provider_event_id='event-cmd')
+        result = asyncio.run(_handle(config, providers, command))
+        again = asyncio.run(_handle(config, providers, command))
+        assert again.disposition == 'duplicate'
+        # A retried response run for the same committed result.
+        asyncio.run(deliver_event_response(config, providers, result))
+        with db.get_db(config.db_path) as conn:
+            assert [r for r in self._rendered(conn, token) if r[0] == 'system'] == [
+                ('system', 'Nothing is running.'),
+            ]
+
+    def test_a_command_with_no_reply_writes_nothing(self, tmp_path, monkeypatch):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+            token = db.get_task(conn, first.task_id).conversation_token
+        self._stub_dispatch(monkeypatch, '')
+        providers = _providers(_adapter(lambda _req: SmsSendResult('opaque', 'accepted', 1)))
+        asyncio.run(_handle(config, providers, _inbound(
+            text='!status', provider_message_id='cmd', provider_event_id='event-cmd')))
+        with db.get_db(config.db_path) as conn:
+            assert self._rendered(conn, token) == [
+                ('user', 'check the backup'), ('user', '!status'),
+            ]
+
+    def test_racing_first_texts_share_one_room(self, tmp_path):
+        config = _config(tmp_path)
+        barrier = threading.Barrier(2)
+        def inbound(index):
+            with db.get_db(config.db_path) as conn:
+                barrier.wait(timeout=5)
+                return handle_provider_event(conn, config, _inbound(provider_message_id=f'race-{index}', provider_event_id=f'event-race-{index}'))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(inbound, range(2)))
+        with db.get_db(config.db_path) as conn:
+            assert len({db.get_task(conn, r.task_id).conversation_token for r in results}) == 1
+            for table, count in [('rooms', 1), ('messages', 2), ('room_token_migration', 1)]:
+                assert conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == count
+
+    def test_task_failure_rolls_back_claim_and_mint(self, tmp_path, monkeypatch):
+        config = _config(tmp_path)
+        def fail(*args, **kwargs):
+            raise RuntimeError('injected task failure')
+        monkeypatch.setattr(db, 'create_task', fail)
+        with pytest.raises(RuntimeError, match='injected'):
+            with db.get_db(config.db_path) as conn:
+                handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            for table in ('rooms', 'room_bindings', 'room_members', 'messages', 'room_token_migration', 'processed_sms'):
+                assert conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == 0
+
+    def test_sleep_enumeration_uses_room_once_and_keeps_old_history(self, tmp_path):
+        config = _config(tmp_path)
+        old = sms_conversation_token('alice')
+        with db.get_db(config.db_path) as conn:
+            historic = db.create_task(conn, prompt='old text', user_id='alice', source_type='sms', conversation_token=old)
+            conn.execute("UPDATE tasks SET status='completed', result='Done', completed_at=datetime('now') WHERE id=?", (historic,))
+            db.set_channel_sleep_cycle_last_run(conn, old, historic)
+        with db.get_db(config.db_path) as conn:
+            result = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, result.task_id).conversation_token
+            conn.execute("UPDATE tasks SET status='completed', result='Done', completed_at=datetime('now') WHERE id=?", (result.task_id,))
+            assert db.get_active_channel_tokens(conn, '2000-01-01') == [token]
+            assert [t.id for t in db.get_completed_channel_tasks_since(conn, token, '2000-01-01')] == [historic, result.task_id]
+            assert db.get_task(conn, historic).conversation_token == old
+
+    def test_recreated_binding_does_not_retarget_history_or_approval(self, tmp_path):
+        config = _config(tmp_path)
+        old = sms_conversation_token('alice')
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            original = db.get_task(conn, first.task_id).conversation_token
+            # Delete through the actual room seam, then leave an old-token
+            # parked task as an orphan a retry must never approve.
+            room = db.ensure_web_chat_handle(conn, 'alice', original, 'SMS')
+            assert db.delete_web_chat_room(conn, room.id, 'alice')
+            held = db.create_task(conn, prompt='old request', user_id='alice', source_type='sms', conversation_token=old)
+            db.set_task_confirmation(conn, held, 'Old question?')
+        with db.get_db(config.db_path) as conn:
+            result = handle_provider_event(conn, config, _inbound(text='yes', provider_message_id='new', provider_event_id='event-new'))
+            assert result.disposition == 'task'
+            current = db.get_task(conn, result.task_id).conversation_token
+            assert current != original
+            assert db.resolve_room_token(conn, 'sms', old) == current
+            assert db._canonical_room_token(conn, old, cross_surface=False) == old
+            assert db._room_ref_tokens(conn, current, include_surface_refs=False) == [current]
+            assert db.get_task(conn, held).status == 'pending_confirmation'
+            assert conn.execute('SELECT new_token FROM room_token_migration WHERE old_token=?', (old,)).fetchone()[0] == original
+
+    def test_new_text_cancels_legacy_and_current_questions_and_notifications(self, tmp_path):
+        from istota import notification_store
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            held_ids = []
+            for ref in (sms_conversation_token('alice'), token):
+                held = db.create_task(conn, prompt='delete it', user_id='alice', source_type='sms', conversation_token=ref)
+                db.set_task_confirmation(conn, held, 'Delete?')
+                confirmation_source.write(conn, 'alice', task_id=held, title='Delete?', room_token=token)
+                held_ids.append(held)
+        with db.get_db(config.db_path) as conn:
+            handle_provider_event(conn, config, _inbound(text='new request', provider_message_id='new', provider_event_id='event-new'))
+            assert all(db.get_task(conn, task).status == 'cancelled' for task in held_ids)
+            assert notification_store.list_open(config, conn, 'alice') == ([], 0)
+
+    @pytest.mark.parametrize('changes', [
+        {'from_number': '+15559876543'}, {'opt_out_action': 'stop'},
+        {'text': ''}, {'media_count': 1}, {'provider': 'telnyx'},
+    ])
+    def test_rejected_or_non_dispatch_text_does_not_mint(self, tmp_path, changes):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            handle_provider_event(conn, config, _inbound(**changes))
+        with db.get_db(config.db_path) as conn:
+            assert conn.execute('SELECT count(*) FROM rooms').fetchone()[0] == 0
+            assert conn.execute('SELECT count(*) FROM room_token_migration').fetchone()[0] == 0
+
+    def test_vetoed_room_does_not_accept_confirmation_or_command(self, tmp_path):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            db.set_task_confirmation(conn, first.task_id, 'Question?')
+            conn.execute("INSERT INTO room_policy (room_token, vetoed_at) VALUES (?, datetime('now'))", (token,))
+        for index, text in enumerate(('yes', '!help', 'new request')):
+            with db.get_db(config.db_path) as conn:
+                result = handle_provider_event(conn, config, _inbound(text=text, provider_message_id=f'veto-{index}', provider_event_id=f'event-veto-{index}'))
+                assert result.disposition == 'vetoed'
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, first.task_id).status == 'pending_confirmation'
+            assert conn.execute('SELECT count(*) FROM messages').fetchone()[0] == 1
+
+    def test_canonical_sms_command_can_manage_relays(self, tmp_path):
+        from istota import message_relays
+        config = _config(tmp_path)
+        sent = []
+        providers = _providers(_adapter(
+            lambda req: sent.append(req.text) or SmsSendResult('relay-list', 'accepted', 1)
+        ))
+        asyncio.run(_handle(config, providers, _inbound(text='!relay list')))
+        assert sent == ['No relays.']
+        with db.get_db(config.db_path) as conn:
+            token = db.resolve_room_token(conn, 'sms', sms_conversation_token('alice'))
+            origin = message_relays.private_origin(
+                conn, config, actor_user_id='alice', surface='sms', conversation_token=token,
+            )
+            message_relays.validate_origin(conn, config, actor_user_id='alice', origin=origin)
+            assert origin['room_token'] == token
+            assert origin['channel'] == sms_conversation_token('alice')
+
+    @pytest.mark.parametrize('change', ['shared', 'guest', 'archived', 'deleted', 'foreign'])
+    def test_canonical_sms_relay_origin_requires_own_live_private_room(self, tmp_path, change):
+        from istota import message_relays
+        from istota.whatsapp_requests import RequestError
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            result = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, result.task_id).conversation_token
+            if change == 'shared':
+                db.add_room_member(conn, token, 'bob')
+            elif change == 'guest':
+                db.upsert_room_participant(conn, room_token=token, surface='web', surface_ref='guest', kind='guest')
+            elif change == 'archived':
+                db.set_room_archived(conn, token, True)
+            elif change == 'deleted':
+                room = db.ensure_web_chat_handle(conn, 'alice', token, 'SMS')
+                db.delete_web_chat_room(conn, room.id, 'alice')
+            else:
+                token = db.register_room(conn, None, 'bob', origin='sms').token
+            with pytest.raises(RequestError, match='unsupported_origin'):
+                message_relays.private_origin(conn, config, actor_user_id='alice', surface='sms', conversation_token=token)
+
+    def test_relay_origin_survives_mint_but_not_delete_and_recreate(self, tmp_path):
+        from istota import message_relays
+        from istota.whatsapp_requests import RequestError
+        config = _config(tmp_path)
+        ref = sms_conversation_token('alice')
+        with db.get_db(config.db_path) as conn:
+            legacy = message_relays.private_origin(
+                conn, config, actor_user_id='alice', surface='sms', conversation_token=ref,
+            )
+            assert 'room_token' not in legacy
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            message_relays.validate_origin(conn, config, actor_user_id='alice', origin=legacy)
+            token = db.get_task(conn, first.task_id).conversation_token
+            current = message_relays.private_origin(
+                conn, config, actor_user_id='alice', surface='sms', conversation_token=token,
+            )
+            room = db.ensure_web_chat_handle(conn, 'alice', token, 'SMS')
+            assert db.delete_web_chat_room(conn, room.id, 'alice')
+            for origin in (legacy, current):
+                with pytest.raises(RequestError, match='unsupported_origin'):
+                    message_relays.validate_origin(conn, config, actor_user_id='alice', origin=origin)
+        with db.get_db(config.db_path) as conn:
+            second = handle_provider_event(conn, config, _inbound(provider_message_id='new', provider_event_id='event-new'))
+        with db.get_db(config.db_path) as conn:
+            new_token = db.get_task(conn, second.task_id).conversation_token
+            assert new_token != token
+            fresh = message_relays.private_origin(
+                conn, config, actor_user_id='alice', surface='sms', conversation_token=new_token,
+            )
+            message_relays.validate_origin(conn, config, actor_user_id='alice', origin=fresh)
+            for origin in (legacy, current):
+                with pytest.raises(RequestError, match='unsupported_origin'):
+                    message_relays.validate_origin(conn, config, actor_user_id='alice', origin=origin)

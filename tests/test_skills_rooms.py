@@ -245,3 +245,61 @@ class TestTheParser:
 
     def test_include_archived_defaults_off(self):
         assert build_parser().parse_args(["list"]).include_archived is False
+
+
+class TestAPhoneRoom:
+    """A private SMS or WhatsApp room is scheduled into by its phone surface,
+    the target the prompt header names: its web view is read-only, so a
+    reminder asked for by text has to be sent by text. Both read the same
+    decision, `routing.private_phone_rooms`."""
+
+    def _phone_room(self, db_path, surface, user_id="alice"):
+        from istota.transport.sms import sms_conversation_token
+        from istota.transport.whatsapp import whatsapp_conversation_token
+
+        ref = (sms_conversation_token if surface == "sms"
+               else whatsapp_conversation_token)(user_id)
+        with db.get_db(db_path) as conn:
+            token = db.register_room(
+                conn, None, user_id, origin=surface, name=surface.upper(),
+            ).token
+            db.add_room_binding(conn, token, surface, ref)
+        return token
+
+    def test_a_private_phone_room_targets_its_surface(self, capsys, db_path):
+        sms = self._phone_room(db_path, "sms")
+        wa = self._phone_room(db_path, "whatsapp")
+        out, code = _run(capsys, ["list"])
+        assert code == 0
+        rows = _by_token(out)
+        assert rows[sms]["target"] == "sms"
+        assert rows[wa]["target"] == "whatsapp"
+
+    def test_the_header_and_the_listing_agree(self, capsys, db_path):
+        from istota.config import Config
+        from istota.executor import room_identity_line
+
+        sms = self._phone_room(db_path, "sms")
+        out, _ = _run(capsys, ["list"])
+        target = _by_token(out)[sms]["target"]
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="hi", user_id="alice", source_type="sms",
+                conversation_token=sms,
+            )
+            task = db.get_task(conn, task_id)
+        line = room_identity_line(
+            Config(db_path=db_path), task, rooms_cli_available=True,
+        )
+        assert f'target = "{target}"' in line
+
+    def test_a_group_room_keeps_the_web_descriptor(self, capsys, db_path):
+        """The control: a WhatsApp group is bound by its JID, not the owner's
+        private thread, so it is not a phone room."""
+        with db.get_db(db_path) as conn:
+            group = db.register_room(
+                conn, None, "alice", origin="whatsapp", name="Family",
+            ).token
+            db.add_room_binding(conn, group, "whatsapp", "120363000000000001@g.us")
+        out, _ = _run(capsys, ["list"])
+        assert _by_token(out)[group]["target"] == f"web:{group}"

@@ -141,6 +141,26 @@ class TestThePostAsUserMirror:
     """ISSUE-400's shape in the web process: the turn goes to the room's Talk
     ref, and the double refuses the canonical token it used to be given."""
 
+    @pytest.mark.parametrize("mode", [None, "attributed"])
+    async def test_only_as_user_mode_posts_with_author_credentials(
+        self, fake_talk_web, web_app_module, db_path, room, monkeypatch, mode,
+    ):
+        from dataclasses import replace
+        from istota import surfaces
+
+        monkeypatch.setitem(surfaces.SURFACES, "talk", replace(
+            surfaces.SURFACES["talk"], user_turn_mirror=mode,
+        ))
+        _store(db_path, "live-at")
+        message_id = _user_turn(db_path, room.canonical, task_id=7)
+
+        await web_app_module._mirror_web_turn_as_user(
+            "alice", room.canonical, "hello from web", 7,
+        )
+
+        assert fake_talk_web.calls == []
+        assert _stamp(db_path, message_id) is None
+
     async def test_it_posts_to_the_talk_ref_and_stamps_the_turn(
         self, fake_talk_web, web_app_module, db_path, room,
     ):

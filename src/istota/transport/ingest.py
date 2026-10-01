@@ -508,6 +508,8 @@ def record_inbound(
     # never rooms. The caller has already registered the room; this turn then
     # takes the room-surface path.
     room_container: bool = False,
+    # Commands and consumed confirmation answers are turns without new tasks.
+    record_only: bool = False,
 ) -> InboundResult:
     """Resolve → echo-check → store user message → ask the gate → create task.
 
@@ -529,9 +531,9 @@ def record_inbound(
     """
     source_type = source_type or surface
 
-    # 1. Resolve canonical room token. With no binding, the surface_ref *is* the
-    #    canonical token (origin-surface case).
-    room_token = db.resolve_room_token(conn, surface, surface_ref) or surface_ref
+    # A private email/phone thread keeps its surface identity. A member
+    # surface owns a room, whose identity is minted separately from its ref.
+    room_token = db.resolve_room_token(conn, surface, surface_ref)
     # Does this surface *own* rooms — register an unknown token, bind it, add
     # membership, rename from the surface? `surfaces.SURFACES` answers it;
     # `room_role == "member"` is talk and web, and email's `guest` is what keeps
@@ -541,12 +543,24 @@ def record_inbound(
     # diverge (the scheduler's confirmation mirror gate).
     room_surface = (
         is_room_member_for(surface, room_container=room_container)
-        and bool(room_token)
+        and bool(surface_ref)
     )
     # A turn with an istota user behind it. Only such a turn can register a
     # room, join or un-hide one, or create a task; anyone else is recorded into
     # a room that already exists, or not at all.
     user_author = author is None or bool(author.user_id)
+    if room_surface:
+        room_token = (
+            room_token or db._canonical_room_token(conn, surface_ref, cross_surface=False)
+        )
+        if db.get_room(conn, room_token) is None:
+            if not user_author:
+                return InboundResult(room_token, None, None, "dropped")
+            room_token = db.register_room(
+                conn, None, user_id, origin=surface, name=channel_name,
+            ).token
+    else:
+        room_token = room_token or surface_ref
     if not user_author and not room_surface:
         return InboundResult(room_token, None, None, "dropped")
     # A room somebody switched off records nothing (multiplayer D12): no row,
@@ -637,20 +651,10 @@ def record_inbound(
     model_namespace: str | None = None
 
     if room_surface:
-        # Lazy room registration on first sight (a Talk room the bot joined, a
-        # web room created elsewhere). First writer wins on origin + name.
+        # Registration above minted an identity on first sight. Existing
+        # rooms keep the first writer's origin and name.
         existing = db.get_room(conn, room_token)
-        if existing is None:
-            if not user_author:
-                logger.info(
-                    "Not recording a %s turn by a non-user in unregistered room %s",
-                    surface, room_token,
-                )
-                return InboundResult(room_token, None, None, "dropped")
-            db.register_room(
-                conn, room_token, user_id, origin=surface, name=channel_name,
-            )
-        elif surface == "talk" and existing.origin == "talk":
+        if surface == "talk" and existing.origin == "talk":
             # Talk-side rename flows back to the registry on the next poll. Only
             # for Talk-origin rooms — a web-origin room's user-set name wins.
             if channel_name and channel_name != existing.name:
@@ -877,6 +881,9 @@ def record_inbound(
         guest_participant_id = participant_id
         task_prompt = guest_prompt(participants.guest_label(author), task_user, text)
 
+    if record_only:
+        return InboundResult(room_token, None, message_id, "recorded")
+
     # 5. Create the task and stamp the stored row with it.
     task_id = db.create_task(
         conn,
@@ -910,6 +917,28 @@ def record_inbound(
             "UPDATE messages SET task_id = ? WHERE id = ?", (task_id, message_id),
         )
     return InboundResult(room_token, task_id, message_id, "created")
+
+
+def record_phone_turn(
+    conn, config, *, surface, surface_ref, user_id, text, channel_name,
+    record_only=False, external_id=None, reply_to_content=None, attachments=None,
+):
+    """Record an accepted private phone turn and its permanent pre-room alias."""
+    result = record_inbound(
+        conn, config, surface=surface, surface_ref=surface_ref, user_id=user_id,
+        text=text, source_type=surface, channel_name=channel_name,
+        output_target=surface, mirror_to_room=False, queue="foreground",
+        external_id=external_id, reply_to_content=reply_to_content,
+        attachments=attachments, is_command=text.startswith("!"), record_only=record_only,
+    )
+    if result.message_id is not None:
+        # Reusing a deleted room's binding must never retarget its history.
+        conn.execute(
+            "INSERT INTO room_token_migration (old_token, new_token, migrated_at) "
+            "VALUES (?, ?, datetime('now')) ON CONFLICT(old_token) DO NOTHING",
+            (surface_ref, result.room_token),
+        )
+    return result
 
 
 def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:

@@ -183,3 +183,24 @@ class TestWhatTheGuardMustNotRefuse:
             out, code = _run(capsys, ["talk", "create", "--name", "#weekly"])
         run.assert_called_once()
         assert code == 0
+
+
+class TestAPhoneRoom:
+    """The third reader of `room_target_descriptor`: a private SMS room named
+    "SMS" refuses a same-named create and points at the phone surface, the
+    target the prompt header and `rooms list` name for it."""
+
+    def test_the_refusal_targets_the_phone_surface(self, capsys, db_path):
+        from istota.transport.sms import sms_conversation_token
+
+        with db.get_db(db_path) as conn:
+            token = db.register_room(conn, None, "alice", origin="sms", name="SMS").token
+            db.add_room_binding(conn, token, "sms", sms_conversation_token("alice"))
+        with patch("istota.skills.nextcloud._talk_run") as run:
+            out, code = _run(capsys, [
+                "talk", "create", "--name", "SMS", "--type", "group",
+            ])
+        run.assert_not_called()
+        assert code == 1
+        assert out["reason"] == "room_exists"
+        assert out["target"] == "sms"

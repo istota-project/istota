@@ -8,4 +8,4 @@ Interactive first-run installer (`istota setup`) for the local single-user shape
 
 ## updater.py
 
-`istota update` — self-update for the standalone install: reads install.json provenance, git fetch/reset the recorded checkout (stable channel = latest release tag, main channel = branch tip), `uv tool install --reinstall`, fresh-code migrations. Refuses on the server shape
+`istota update` — self-update for the standalone install: reads install.json provenance, git fetch/reset the recorded checkout (stable channel = latest release tag, main channel = branch tip), `uv tool install --reinstall`, fresh-code migrations. Refuses on the server shape and while the scheduler/serve process holds its lock. Stop separate web and webhook processes too. The fresh CLI runs `init --relocate-rooms` before the operator restarts the local server; room or workspace refusals fail the update and leave it retryable.

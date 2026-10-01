@@ -45,7 +45,9 @@ def test_the_server_auto_update_migrates_before_it_restarts_anything():
     """
     script = UPDATE_SCRIPT.read_text()
 
-    migrate_at = script.find("init_db(Path(")
+    assert 'scripts/relocate-rooms.sh' in script
+    script = (REPO / 'scripts/relocate-rooms.sh').read_text()
+    migrate_at = script.find("init --relocate-rooms")
     restart_at = script.find("systemctl restart")
 
     assert migrate_at != -1, "the auto-update script no longer runs migrations"

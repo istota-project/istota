@@ -462,6 +462,11 @@ def load_cron_document(config, user_id: str) -> "CronDocument | None":
     if content is None or not content:
         return None
 
+    return parse_cron_document(content, config, user_id)
+
+
+def parse_cron_document(content: str, config, user_id: str) -> "CronDocument | None":
+    """Parse already-read bytes with the same hold guard as the scheduler."""
     opener = _TOML_FENCE_OPEN_RE.search(content)
     if opener is None:
         if _BACKTICK_RUN_RE.search(content):
@@ -878,6 +883,8 @@ def _write_cron_md(
     user_id: str,
     jobs: list[CronJob],
     doc: "CronDocument | None" = None,
+    *,
+    externalize_prompts: bool = True,
 ) -> bool:
     """Write CRON.md, externalizing inline multiline prompts first.
 
@@ -936,7 +943,8 @@ def _write_cron_md(
     from .storage import resolve_user_config_dir, write_regular_file  # noqa: PLC0415
 
     try:
-        _externalize_multiline_prompts(config, user_id, jobs)
+        if externalize_prompts:
+            _externalize_multiline_prompts(config, user_id, jobs)
     except OSError as e:
         logger.warning(
             "cron_md_write_refused user=%s reason=prompt_externalize errno=%s",

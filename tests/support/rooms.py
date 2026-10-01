@@ -1,12 +1,8 @@
 """The two shapes a room can have, built the way the product builds them.
 
-A room borrows its canonical identity from the surface it was created on, so on
-an ordinary Talk room `rooms.token` and the `talk` binding's `surface_ref` are
-the same string. On a *promoted* room — created on web, later bound to Talk —
-they differ, and that divergence is the only thing separating a call that
-resolves the binding from one that hands the canonical token to the Talk API and
-gets a 404 (ISSUE-400). Every delivery test in the tree used to build the first
-shape, so no test could tell the two calls apart.
+New rooms have minted canonical identities on both origins. Talk refs remain
+external addresses. Explicit tokens let older tests seed legacy rooms; defaults
+exercise current producers and always diverge from their Talk bindings.
 
 Both builders **reproduce** what the real producers write rather than inventing
 a scheme of their own:
@@ -80,20 +76,19 @@ def plain_talk_room(
     token: str | None = None,
     name: str | None = None,
 ) -> RoomShape:
-    """An ordinary Talk room: the canonical token *is* the Talk ref.
-
-    Today's shape, and the one every existing delivery test builds by hand.
-    """
-    token = token if token is not None else _new_talk_ref()
+    """A newly minted Talk room, or a legacy room when `token` is explicit."""
+    explicit_legacy = token is not None
+    token = token if explicit_legacy else _new_talk_ref()
     # Unnormalized on purpose: `record_inbound` hands `channel_name` to
     # `register_room` exactly as Talk reported it. `promoted_room` below
     # normalizes because *its* producer does.
     name = name if name is not None else f"#{token}"
     _refuse_collision(conn, token, talk_ref=token)
 
-    db.register_room(conn, token, user_id, origin="talk", name=name)
-    db.add_room_binding(conn, token, "talk", token)
-    return RoomShape(canonical=token, talk_ref=token, origin="talk", name=name)
+    canonical = token if explicit_legacy else None
+    canonical = db.register_room(conn, canonical, user_id, origin="talk", name=name).token
+    db.add_room_binding(conn, canonical, "talk", token)
+    return RoomShape(canonical=canonical, talk_ref=token, origin="talk", name=name)
 
 
 def promoted_room(
@@ -106,12 +101,10 @@ def promoted_room(
 ) -> RoomShape:
     """A web room later bound to Talk: canonical and Talk ref differ.
 
-    The generated canonical carries the `web-{user_id}-` prefix a real one has,
-    because a caller reading a failure needs to recognise which token it is
-    looking at.
+    The generated canonical has the minted format the web producer uses.
     """
     suffix = uuid.uuid4().hex[:12]
-    canonical = canonical if canonical is not None else f"web-{user_id}-{suffix}"
+    canonical = canonical if canonical is not None else db.mint_room_token()
     talk_ref = talk_ref if talk_ref is not None else _new_talk_ref()
     name = name if name is not None else f"room-{suffix[:6]}"
     # `db.create_web_chat_room` normalizes once and writes the same string to

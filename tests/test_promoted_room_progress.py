@@ -83,14 +83,7 @@ def promoted(config):
 
 @pytest.fixture
 def plain(config):
-    """An ordinary Talk room: the canonical token *is* the Talk ref.
-
-    Assertions using this shape do not distinguish a resolved binding from the
-    fallback, because both produce the same string — that is what makes it the
-    old-behaviour guard rather than the regression case. `promoted` is the shape
-    that tells the two apart, so `plain` is never the only shape in a test that
-    is about routing.
-    """
+    """A Talk-origin room with a minted identity and a separate Talk ref."""
     with db.get_db(config.db_path) as conn:
         return plain_talk_room(conn, "testuser")
 
@@ -147,9 +140,10 @@ class TestTheAck:
     path for real and asserts the room `send_message` was addressed with.
     """
 
+    @pytest.mark.parametrize("builder", [plain_talk_room, promoted_room])
     @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_the_ack_reaches_the_talk_api_on_the_bound_room(
-        self, mock_run, config, fake_talk, promoted,
+        self, mock_run, config, fake_talk, builder,
     ):
         """The seam case, and the reason the other four are not enough.
 
@@ -160,6 +154,8 @@ class TestTheAck:
         scheduler handing down the canonical token is refused by the double and
         `send_message` never appears against `talk_ref` at all.
         """
+        with db.get_db(config.db_path) as conn:
+            promoted = builder(conn, "testuser")
         _queue_talk_task(config, promoted.canonical)
         with patch(
             "istota.scheduler.execute_task", return_value=(True, "done", None, None),
@@ -191,8 +187,7 @@ class TestTheAck:
     def test_an_ordinary_talk_room_still_gets_its_own_token(
         self, mock_post, mock_run_coro, config, plain,
     ):
-        """The common path, where canonical token and Talk ref are the same
-        string. It worked by accident before; it must still work on purpose."""
+        """A Talk-origin room resolves its native ref from the binding too."""
         task_id = _queue_talk_task(config, plain.canonical)
         with patch(
             "istota.scheduler.execute_task", return_value=(True, "done", None, None),
@@ -317,7 +312,7 @@ class TestEditTargetToken:
     ):
         """Callers that never had a room to resolve keep the old behaviour."""
         ok = await edit_talk_message(
-            config, _talk_task(plain.canonical), 42, "Updated",
+            config, _talk_task(plain.talk_ref), 42, "Updated",
         )
         assert ok is True
         assert _addressed(fake_talk) == [("edit_message", plain.talk_ref)]
@@ -423,7 +418,7 @@ class TestSubscriberRouting:
         """A caller with no room to resolve keeps the old destination — stated
         as the room the API was addressed with, not as an absent keyword."""
         sub = TalkEventSubscriber(
-            config, _talk_task(plain.canonical), ack_msg_id=100,
+            config, _talk_task(plain.talk_ref), ack_msg_id=100,
         )
         sub.on_event(_ev("tool_start", {"description": "Reading x.txt"}))
         assert _addressed(fake_talk) == [("edit_message", plain.talk_ref)]

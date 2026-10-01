@@ -226,6 +226,9 @@ const SEND_PENDING_GRACE_MS = 400;
 // verdict on the request itself, so a retry of the same payload is futile.
 // (429 arrives classified as `rate_limit` and never reaches this set.)
 const TRANSIENT_4XX = new Set([408, 425, 429]);
+// The `created_at` shape `web_app._iso_utc` emits; a client-minted stamp
+// carries milliseconds and never matches.
+const SERVER_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 
 // The cross-room aggregate views, in sidebar order. Also the validator for the
 // persisted selection — anything else falls back to room mode.
@@ -595,6 +598,31 @@ function createSession(): ChatSession {
     const next = arr.slice();
     next.splice(at, 0, row);
     return next;
+  }
+
+  /**
+   * Where a streamed row goes: under everything, as `appendAboveClientOnly`
+   * puts it, unless it is older than a server row already on screen. The
+   * phone-room backfill writes a room's earlier history with new ids and old
+   * stamps, so a room open during the pass would otherwise show that history
+   * below the conversation it came before, until a reload sorted it. Only
+   * server-stamped rows are compared (`_iso_utc` writes second-precision
+   * `…Z`), so a client clock never decides an order.
+   */
+  function insertStreamedRow(arr: ChatMessage[], row: ChatMessage): ChatMessage[] {
+    const ts = row.createdAt;
+    if (ts && SERVER_STAMP.test(ts)) {
+      const at = arr.findIndex(
+        (m) =>
+          m.msgId != null && !!m.createdAt && SERVER_STAMP.test(m.createdAt) && m.createdAt > ts,
+      );
+      if (at !== -1) {
+        const next = arr.slice();
+        next.splice(at, 0, row);
+        return next;
+      }
+    }
+    return appendAboveClientOnly(arr, row);
   }
 
   /** Move whatever client-only rows are on screen into the holding map. */
@@ -1595,6 +1623,8 @@ function createSession(): ChatSession {
           // A host leaving, a member added, a guest arriving: the hostless
           // notice and the settings lock read these, so they follow the poll.
           side_of: fresh.side_of ?? null,
+          phone_surface: fresh.phone_surface ?? null,
+          read_only: fresh.read_only ?? false,
           shared: fresh.shared,
           policy: fresh.policy ?? null,
           off: fresh.off ?? null,
@@ -1961,7 +1991,7 @@ function createSession(): ChatSession {
       if (seenNotifIds.has(row.notif_id)) return;
       seenNotifIds.add(row.notif_id);
     }
-    messages.update((arr) => appendAboveClientOnly(arr, buildHistoryMessage(row)));
+    messages.update((arr) => insertStreamedRow(arr, buildHistoryMessage(row)));
     if (row.role === 'user' && typeof row.task_id === 'number' && unsettled(row.status)) {
       pickUpStreamedTask(row.task_id, row.status);
     }
@@ -2169,6 +2199,9 @@ function createSession(): ChatSession {
         // from this list is not merely stale — it is erased on the next frame,
         // which a rename in a busy room produces (ISSUE-433).
         color: fresh.color ?? null,
+        // The snapshot sends both on every room, so the frame is authoritative.
+        phone_surface: fresh.phone_surface ?? null,
+        read_only: fresh.read_only ?? false,
       };
       // Same invalidation the local save does, for a brain changed on another
       // surface: `!brain` on Talk, or this user's other device. The frame is
@@ -2676,6 +2709,7 @@ function createSession(): ChatSession {
       // stream mark the same turns as external.
       origin: typeof m.origin === 'string' && m.origin ? m.origin : undefined,
       subject: typeof m.subject === 'string' && m.subject ? m.subject : undefined,
+      via: typeof m.via === 'string' && m.via ? m.via : undefined,
       deletable: m.deletable === false ? false : undefined,
       // Persisted server-side, so the chip survives leaving the room and
       // coming back (the composer's names are long gone by then).

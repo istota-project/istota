@@ -12,10 +12,8 @@ drive `handle_whatsapp_batch` on an open connection, the way the SMS suite
 drives `handle_provider_event`, because the disposition ladder is database
 behaviour rather than HTTP behaviour.
 
-Two things every case here holds, and they are the reason the surface exists in
-this shape at all: no room, binding, membership or canonical `messages` row is
-ever written, and no authenticated identifier — phone number, BSUID, send id,
-message body — reaches a log line.
+Private inbound turns now own canonical room rows. Authenticated identifiers,
+phone numbers, BSUIDs, send ids and message bodies must still stay out of logs.
 """
 
 from __future__ import annotations
@@ -46,6 +44,7 @@ from istota.transport.whatsapp.webhook import (
     STOP_REPLY,
     UNSUPPORTED_REPLY,
     WhatsAppWebhookError,
+    deliver_event_responses,
     handle_whatsapp_batch,
     normalize_payload,
     parse_webhook,
@@ -546,7 +545,7 @@ class TestTheSignedPostRoute:
         real_ingest = None
         from istota.transport.whatsapp import webhook as webhook_module
 
-        real_ingest = webhook_module.ingest_message
+        real_ingest = webhook_module.record_whatsapp_turn
         calls = {"n": 0}
 
         def fail_on_second(*args, **kwargs):
@@ -555,7 +554,7 @@ class TestTheSignedPostRoute:
                 raise sqlite3.OperationalError("disk I/O error")
             return real_ingest(*args, **kwargs)
 
-        monkeypatch.setattr(webhook_module, "ingest_message", fail_on_second)
+        monkeypatch.setattr(webhook_module, "record_whatsapp_turn", fail_on_second)
 
         response = client.post(
             "/webhooks/whatsapp", content=raw, headers=_post_headers(raw),
@@ -565,7 +564,9 @@ class TestTheSignedPostRoute:
         # The first message's claim, its task and the binding touch all went
         # with the rollback: a partially applied batch that answered 200 would
         # never be retried and the second message would be lost for good.
-        assert _counts(config, "processed_whatsapp", "tasks") == [0, 0]
+        assert _counts(config, "processed_whatsapp", "tasks", "rooms", "room_bindings", "room_members", "messages", "room_token_migration") == [0] * 7
+        with db.get_db(config.db_path) as conn:
+            assert db.get_whatsapp_binding(conn, "alice").bsuid == ""
 
     def test_the_route_never_logs_the_body_the_number_or_the_bsuid(
         self, tmp_path, monkeypatch, caplog,
@@ -1435,8 +1436,8 @@ class TestTheServiceWindowClock:
 
 
 class TestInboundDispositions:
-    def test_an_ordinary_message_creates_one_task_and_no_room_rows(self, tmp_path):
-        """The whole non-room claim, held on rows rather than on a flag."""
+    def test_an_ordinary_message_creates_one_task_and_room_rows(self, tmp_path):
+        """Membership reaches the real inbound transaction and canonical store."""
         config = _config(tmp_path)
         _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
 
@@ -1446,13 +1447,14 @@ class TestInboundDispositions:
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, results[0].task_id)
             assert task.source_type == "whatsapp"
-            assert task.conversation_token == whatsapp_conversation_token("alice")
+            assert task.conversation_token == db.resolve_room_token(conn, "whatsapp", whatsapp_conversation_token("alice"))
+            assert db.is_canonical_room_token(task.conversation_token)
             assert task.output_target == "whatsapp"
             assert task.prompt == "check the backup"
             for table in ("rooms", "room_bindings", "room_members", "messages"):
                 assert conn.execute(
                     f"SELECT count(*) FROM {table}"
-                ).fetchone()[0] == 0, f"{table} must stay empty for WhatsApp"
+                ).fetchone()[0] == 1, f"{table} must hold the inbound room turn"
             row = conn.execute("SELECT * FROM processed_whatsapp").fetchone()
         assert row["disposition"] == "task"
         assert row["task_id"] == results[0].task_id
@@ -1810,7 +1812,7 @@ class TestInboundDispositions:
         assert results[0].response_text
         with db.get_db(config.db_path) as conn:
             assert db.get_task(conn, held).status == "pending"
-            assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+            assert conn.execute("SELECT body FROM messages").fetchone()[0] == "yes"
 
     def test_a_button_callback_naming_another_users_confirmation_is_refused(
         self, tmp_path,
@@ -1907,7 +1909,7 @@ class TestInboundDispositions:
 # ---------------------------------------------------------------------------
 
 
-class TestTheSurfaceStaysOutsideTheRoomModel:
+class TestPrivateRoomIsolation:
     def test_the_conversation_token_carries_no_meta_identifier(self):
         token = whatsapp_conversation_token("alice")
 
@@ -1952,32 +1954,22 @@ class TestTheSurfaceStaysOutsideTheRoomModel:
         ):
             assert forbidden not in source
 
-    def test_ingest_is_told_not_to_mirror(self, tmp_path):
+    def test_a_private_turn_takes_the_room_path_on_its_own_ref(self, tmp_path, monkeypatch):
+        from istota.transport import ingest
         config = _config(tmp_path)
         _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
-        seen: list = []
-
-        from istota.transport.whatsapp import webhook as webhook_module
-
-        real = webhook_module.ingest_message
-
-        def spy(conn, cfg, msg):
-            seen.append(msg)
-            return real(conn, cfg, msg)
-
-        original = webhook_module.ingest_message
-        webhook_module.ingest_message = spy
-        try:
-            _handle(config, _text_payload())
-        finally:
-            webhook_module.ingest_message = original
-
+        seen = []
+        real = ingest.record_inbound
+        def spy(*args, **kwargs):
+            seen.append(kwargs)
+            return real(*args, **kwargs)
+        monkeypatch.setattr(ingest, "record_inbound", spy)
+        _handle(config, _text_payload())
         assert len(seen) == 1
-        assert seen[0].mirror_to_room is False
-        assert seen[0].surface == "whatsapp"
-        assert seen[0].source_type == "whatsapp"
-        assert seen[0].queue == "foreground"
-        assert seen[0].is_group_chat is False
+        assert seen[0]["surface_ref"] == whatsapp_conversation_token("alice")
+        assert seen[0]["surface"] == "whatsapp"
+        assert seen[0]["source_type"] == "whatsapp"
+        assert seen[0]["queue"] == "foreground"
 
 
 # ---------------------------------------------------------------------------
@@ -2289,3 +2281,379 @@ class TestTheCopyMustHaveBeenMadeForThisUser:
         assert _dispositions(results) == ["media_failed"]
         assert _counts(config, "tasks") == [0]
         assert "media_misattached" in _istota_log(caplog)
+
+
+class TestWhatsAppRoomMint:
+    def test_first_text_maps_history_and_later_text_preserves_name(self, tmp_path):
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        first = _handle(config, _text_payload())[0]
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            assert db.is_canonical_room_token(token)
+            assert db.get_room(conn, token).name == "WhatsApp"
+            assert db._canonical_room_token(conn, whatsapp_conversation_token("alice"), cross_surface=False) == token
+            assert db.list_room_members(conn, token) == ["alice"]
+            db.rename_room(conn, token, "My messages")
+        second = _handle(config, _text_payload(message_id="second"))[0]
+        assert _handle(config, _text_payload(message_id="second"))[0].disposition == "duplicate"
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, second.task_id).conversation_token == token
+            assert db.get_room(conn, token).name == "My messages"
+        assert _counts(config, "rooms", "room_bindings", "room_members", "messages", "room_token_migration") == [1, 1, 1, 2, 1]
+
+    def test_command_records_and_dispatches_on_canonical_token(self, tmp_path, monkeypatch):
+        import asyncio
+        from types import SimpleNamespace
+        from istota.transport.whatsapp.webhook import resolve_event_response
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        calls = []
+        async def dispatch(config, user, token, text, **kwargs):
+            calls.append(token)
+            return SimpleNamespace(text="")
+        monkeypatch.setattr("istota.commands.dispatch", dispatch)
+        result = _handle(config, _text_payload(text="!help"))[0]
+        asyncio.run(resolve_event_response(config, result))
+        with db.get_db(config.db_path) as conn:
+            token = db.resolve_room_token(conn, "whatsapp", whatsapp_conversation_token("alice"))
+            assert db.is_canonical_room_token(token)
+            assert calls == [token]
+            assert conn.execute("SELECT body FROM messages").fetchone()[0] == "!help"
+        assert _counts(config, "tasks", "room_token_migration") == [0, 1]
+
+    @pytest.mark.parametrize("legacy", [False, True])
+    @pytest.mark.parametrize("button", [False, True])
+    def test_confirmation_records_and_follows_own_alias(self, tmp_path, legacy, button):
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        if not legacy:
+            first = _handle(config, _text_payload())[0]
+        with db.get_db(config.db_path) as conn:
+            token = whatsapp_conversation_token("alice") if legacy else db.get_task(conn, first.task_id).conversation_token
+            held = db.create_task(conn, prompt="delete it", user_id="alice", source_type="whatsapp", conversation_token=token)
+            db.set_task_confirmation(conn, held, "Delete?")
+        msg = _button_message(payload=f"confirm:{held}:yes") if button else _text_message(message_id="answer", text="yes")
+        result = _handle(config, _payload(_value(contacts=[_contact()], messages=[msg])))[0]
+        assert result.disposition == "confirmation_answer"
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, held).status == "pending"
+            current = db.resolve_room_token(conn, "whatsapp", whatsapp_conversation_token("alice"))
+            assert db.is_canonical_room_token(current)
+            assert db._canonical_room_token(conn, token, cross_surface=False) == current
+            assert conn.execute("SELECT count(*) FROM messages WHERE room_token=? AND body='yes'", (current,)).fetchone()[0] == 1
+        assert _counts(config, "tasks", "room_token_migration") == [1 if legacy else 2, 1]
+
+    @staticmethod
+    def _rendered(conn, token):
+        # What the web transcript shows: the shared filter, nothing else.
+        return [
+            (r["role"], r["body"]) for r in conn.execute(
+                "SELECT m.role, m.body FROM messages m WHERE m.room_token = ? "
+                f"AND ({db.TRANSCRIPT_SURFACE_FILTER} OR m.role = 'system') ORDER BY m.id",
+                (token,),
+            )
+        ]
+
+    @pytest.mark.parametrize("button", [False, True])
+    def test_answer_joins_the_transcript_with_its_ack(self, tmp_path, button):
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        first = _handle(config, _text_payload())[0]
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            db.set_task_confirmation(conn, first.task_id, "Delete?")
+        msg = (
+            _button_message(payload=f"confirm:{first.task_id}:yes") if button
+            else _text_message(message_id="answer", text="yes")
+        )
+        result = _handle(config, _payload(_value(contacts=[_contact()], messages=[msg])))[0]
+        assert result.disposition == "confirmation_answer"
+        with db.get_db(config.db_path) as conn:
+            assert self._rendered(conn, token) == [
+                ("user", "check the backup"), ("user", "yes"), ("system", result.response_text),
+            ]
+
+    def test_confirm_command_records_its_ack_and_no_second_answer(self, tmp_path, monkeypatch):
+        import asyncio
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        first = _handle(config, _text_payload())[0]
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            db.set_task_confirmation(conn, first.task_id, "Delete?")
+        command = f"!confirm {first.task_id}"
+        result = _handle(config, _text_payload(message_id="cmd", text=command))[0]
+        assert result.disposition == "command"
+        sent = self._capture_sends(monkeypatch)
+        asyncio.run(deliver_event_responses(config, [result]))
+        (reply,) = sent
+        assert reply.startswith(f"Confirmed #{first.task_id}")
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, first.task_id).status == "pending"
+            assert self._rendered(conn, token) == [
+                ("user", "check the backup"), ("user", command), ("system", reply),
+            ]
+
+    @staticmethod
+    def _capture_sends(monkeypatch):
+        sent = []
+
+        async def deliver(config, *, logical_key, user_id, text, **kwargs):
+            sent.append(text)
+
+        monkeypatch.setattr("istota.transport.whatsapp.outbound.deliver_whatsapp", deliver)
+        return sent
+
+    @staticmethod
+    def _stub_dispatch(monkeypatch, reply):
+        from types import SimpleNamespace
+
+        async def dispatch(config, user, token, text, **kwargs):
+            return SimpleNamespace(text=reply)
+
+        monkeypatch.setattr("istota.commands.dispatch", dispatch)
+
+    def test_a_command_reply_joins_the_transcript_after_the_send(self, tmp_path, monkeypatch):
+        import asyncio
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        first = _handle(config, _text_payload())[0]
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+        self._stub_dispatch(monkeypatch, "Nothing is running.")
+        seen = []
+
+        async def deliver(config, *, logical_key, user_id, text, **kwargs):
+            with db.get_db(config.db_path) as conn:
+                seen.append(conn.execute(
+                    "SELECT count(*) FROM messages WHERE role='system'").fetchone()[0])
+
+        monkeypatch.setattr("istota.transport.whatsapp.outbound.deliver_whatsapp", deliver)
+        result = _handle(config, _text_payload(message_id="cmd", text="!status"))[0]
+        asyncio.run(deliver_event_responses(config, [result]))
+        assert seen == [0]
+        with db.get_db(config.db_path) as conn:
+            assert self._rendered(conn, token) == [
+                ("user", "check the backup"), ("user", "!status"),
+                ("system", "Nothing is running."),
+            ]
+
+    def test_a_redelivered_command_writes_no_second_reply(self, tmp_path, monkeypatch):
+        import asyncio
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        first = _handle(config, _text_payload())[0]
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+        self._stub_dispatch(monkeypatch, "Nothing is running.")
+        sent = self._capture_sends(monkeypatch)
+        result = _handle(config, _text_payload(message_id="cmd", text="!status"))[0]
+        asyncio.run(deliver_event_responses(config, [result]))
+        again = _handle(config, _text_payload(message_id="cmd", text="!status"))[0]
+        assert again.disposition == "duplicate"
+        asyncio.run(deliver_event_responses(config, [again]))
+        # A retried response run for the same committed result.
+        asyncio.run(deliver_event_responses(config, [result]))
+        assert len(sent) == 2
+        with db.get_db(config.db_path) as conn:
+            assert [r for r in self._rendered(conn, token) if r[0] == "system"] == [
+                ("system", "Nothing is running."),
+            ]
+
+    def test_confirm_command_from_a_group_records_nothing_in_the_group(self, tmp_path):
+        # A group's `!confirm` answers in the private chat so the group never
+        # reads it; widening the transcript tuple must not put it in the room.
+        import asyncio
+        from istota import commands
+        config = _config(tmp_path)
+        group_jid = "120363000000000001@g.us"
+        with db.get_db(config.db_path) as conn:
+            group = db.register_room(conn, None, "alice", origin="whatsapp", name="Family").token
+            db.add_room_binding(conn, group, "whatsapp", group_jid)
+            held = db.create_task(conn, prompt="delete it", user_id="alice", source_type="whatsapp", conversation_token=group)
+            db.set_task_confirmation(conn, held, "Delete?")
+        reply = asyncio.run(commands.dispatch(
+            config, "alice", group, f"!confirm {held}", surface="whatsapp",
+        ))
+        assert reply.text.startswith(f"Confirmed #{held}")
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, held).status == "pending"
+            # `approve` itself releases the held turn's own row; neither half of
+            # the exchange may join it.
+            exchange = conn.execute(
+                "SELECT count(*) FROM messages WHERE room_token=? "
+                "AND (role='system' OR body LIKE '!confirm%')", (group,),
+            ).fetchone()[0]
+            assert exchange == 0
+
+    def test_racing_first_texts_share_one_room(self, tmp_path):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        barrier = Barrier(2)
+        def inbound(index):
+            with db.get_db(config.db_path) as conn:
+                barrier.wait(timeout=5)
+                return _handle(config, _text_payload(message_id=f"race-{index}"), conn=conn)[0]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(inbound, range(2)))
+        with db.get_db(config.db_path) as conn:
+            assert len({db.get_task(conn, r.task_id).conversation_token for r in results}) == 1
+        assert _counts(config, "rooms", "room_bindings", "room_members", "messages", "room_token_migration") == [1, 1, 1, 2, 1]
+
+    @pytest.mark.parametrize("button", [False, True])
+    def test_deleted_alias_never_approves_or_retargets(self, tmp_path, button):
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        first = _handle(config, _text_payload())[0]
+        old = whatsapp_conversation_token("alice")
+        with db.get_db(config.db_path) as conn:
+            original = db.get_task(conn, first.task_id).conversation_token
+            room = db.ensure_web_chat_handle(conn, "alice", original, "WhatsApp")
+            assert db.delete_web_chat_room(conn, room.id, "alice")
+            held = db.create_task(conn, prompt="old request", user_id="alice", source_type="whatsapp", conversation_token=old)
+            db.set_task_confirmation(conn, held, "Old question?")
+        msg = _button_message(payload=f"confirm:{held}:yes") if button else _text_message(message_id="answer", text="yes")
+        result = _handle(config, _payload(_value(contacts=[_contact()], messages=[msg])))[0]
+        assert result.disposition == ("callback_unmatched" if button else "task")
+        _handle(config, _text_payload(message_id="recreate"))
+        with db.get_db(config.db_path) as conn:
+            current = db.resolve_room_token(conn, "whatsapp", old)
+            assert current != original
+            assert db._room_ref_tokens(conn, current, include_surface_refs=False) == [current]
+            assert db.get_task(conn, held).status == "pending_confirmation"
+            assert conn.execute("SELECT new_token FROM room_token_migration WHERE old_token=?", (old,)).fetchone()[0] == original
+
+    @pytest.mark.parametrize("text", ["STOP", "START", "HELP", "", "   "])
+    def test_non_dispatch_text_does_not_mint(self, tmp_path, text):
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        _handle(config, _text_payload(text=text))
+        assert _counts(config, "rooms", "room_token_migration", "messages") == [0, 0, 0]
+
+    def test_unknown_sender_and_outbound_only_do_not_mint(self, tmp_path):
+        config = _config(tmp_path)
+        _handle(config, _text_payload())
+        assert _counts(config, "rooms", "room_token_migration") == [0, 0]
+        _bind(config, bsuid=USER_BSUID)
+        _handle(config, _payload(_value(statuses=[{"id": "outbound", "status": "delivered", "timestamp": "1700000000", "recipient_id": USER_BSUID}])))
+        assert _counts(config, "rooms", "room_token_migration") == [0, 0]
+
+    def test_new_request_cancels_current_and_legacy_questions(self, tmp_path):
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        first = _handle(config, _text_payload())[0]
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            ids = []
+            for ref in (token, whatsapp_conversation_token("alice")):
+                held = db.create_task(conn, prompt="delete it", user_id="alice", source_type="whatsapp", conversation_token=ref)
+                db.set_task_confirmation(conn, held, "Delete?")
+                ids.append(held)
+        _handle(config, _text_payload(message_id="new"))
+        with db.get_db(config.db_path) as conn:
+            assert all(db.get_task(conn, ident).status == "cancelled" for ident in ids)
+
+    def test_veto_blocks_commands_and_confirmation_buttons(self, tmp_path):
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        first = _handle(config, _text_payload())[0]
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            db.set_task_confirmation(conn, first.task_id, "Question?")
+            conn.execute("INSERT INTO room_policy (room_token, vetoed_at) VALUES (?, datetime('now'))", (token,))
+        for msg in (_text_message(message_id="command", text="!help"), _text_message(message_id="answer", text="yes"), _button_message(payload=f"confirm:{first.task_id}:yes")):
+            assert _handle(config, _payload(_value(contacts=[_contact()], messages=[msg])))[0].disposition == "vetoed"
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, first.task_id).status == "pending_confirmation"
+        assert _counts(config, "messages") == [1]
+
+
+    @pytest.mark.parametrize("source,user,ref", [
+        ("email", "alice", "own"), ("whatsapp", "bob", "own"),
+        ("whatsapp", "alice", "foreign"),
+    ])
+    def test_callback_refuses_foreign_source_user_and_room(self, tmp_path, source, user, ref):
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        first = _handle(config, _text_payload())[0]
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token if ref == "own" else "other-room"
+            held = db.create_task(conn, prompt="question", user_id=user, source_type=source, conversation_token=token)
+            db.set_task_confirmation(conn, held, "Question?")
+        result = _handle(config, _payload(_value(contacts=[_contact()], messages=[_button_message(payload=f"confirm:{held}:yes")])))[0]
+        assert result.disposition == "callback_unmatched"
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, held).status == "pending_confirmation"
+        assert _counts(config, "messages") == [1]
+
+    def test_identity_reset_and_recycled_number_keep_user_rooms_separate(self, tmp_path):
+        config = _config(tmp_path)
+        config.users["bob"] = UserConfig()
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+        first = _handle(config, _text_payload())[0]
+        with db.get_db(config.db_path) as conn:
+            db.reset_whatsapp_identity(conn, "alice")
+        reset = _handle(config, _text_payload(message_id="reset"))[0]
+        with db.get_db(config.db_path) as conn:
+            db.set_whatsapp_binding(conn, "alice", bootstrap_phone_number="+15550001111", bsuid=USER_BSUID)
+            db.set_whatsapp_binding(conn, "bob", bootstrap_phone_number=USER_NUMBER)
+        recycled = _handle(config, _text_payload(message_id="recycled", sender=OTHER_BSUID, contact=_contact(bsuid=OTHER_BSUID)))[0]
+        with db.get_db(config.db_path) as conn:
+            original = db.get_task(conn, first.task_id)
+            assert db.get_task(conn, reset.task_id).conversation_token == original.conversation_token
+            other = db.get_task(conn, recycled.task_id)
+            assert other.user_id == "bob"
+            assert other.conversation_token != original.conversation_token
+            assert db.list_room_members(conn, other.conversation_token) == ["bob"]
+
+    def test_canonical_relay_command_and_descriptor_lifecycle(self, tmp_path):
+        import asyncio
+        from istota import message_relays
+        from istota.whatsapp_requests import RequestError
+        from istota.transport.whatsapp.webhook import resolve_event_response
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID, send_id=USER_BSUID)
+        ref = whatsapp_conversation_token("alice")
+        with db.get_db(config.db_path) as conn:
+            legacy = message_relays.private_origin(conn, config, actor_user_id="alice", surface="whatsapp", conversation_token=ref)
+            assert "room_token" not in legacy
+        result = _handle(config, _text_payload(text="!relay list"))[0]
+        assert asyncio.run(resolve_event_response(config, result)) == "No relays."
+        with db.get_db(config.db_path) as conn:
+            message_relays.validate_origin(conn, config, actor_user_id="alice", origin=legacy)
+            token = db.resolve_room_token(conn, "whatsapp", ref)
+            current = message_relays.private_origin(conn, config, actor_user_id="alice", surface="whatsapp", conversation_token=token)
+            assert current["room_token"] == token and current["channel"] == ref
+            room = db.ensure_web_chat_handle(conn, "alice", token, "WhatsApp")
+            assert db.delete_web_chat_room(conn, room.id, "alice")
+        _handle(config, _text_payload(message_id="recreated"))
+        with db.get_db(config.db_path) as conn:
+            for origin in (legacy, current):
+                with pytest.raises(RequestError, match="unsupported_origin"):
+                    message_relays.validate_origin(conn, config, actor_user_id="alice", origin=origin)
+            token = db.resolve_room_token(conn, "whatsapp", ref)
+            current = message_relays.private_origin(conn, config, actor_user_id="alice", surface="whatsapp", conversation_token=token)
+            message_relays.validate_origin(conn, config, actor_user_id="alice", origin=current)
+
+    @pytest.mark.parametrize("change", ["shared", "guest", "archived", "foreign"])
+    def test_relay_origin_requires_own_live_private_binding(self, tmp_path, change):
+        from istota import message_relays
+        from istota.whatsapp_requests import RequestError
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        first = _handle(config, _text_payload())[0]
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            if change == "shared":
+                db.add_room_member(conn, token, "bob")
+            elif change == "guest":
+                db.upsert_room_participant(conn, room_token=token, surface="web", surface_ref="guest", kind="guest")
+            elif change == "archived":
+                db.set_room_archived(conn, token, True)
+            else:
+                token = db.register_room(conn, None, "bob", origin="whatsapp").token
+            with pytest.raises(RequestError, match="unsupported_origin"):
+                message_relays.private_origin(conn, config, actor_user_id="alice", surface="whatsapp", conversation_token=token)

@@ -1314,9 +1314,17 @@ def is_group_task(config: Config, task) -> bool:
         return False
     if not config.db_path or not Path(config.db_path).exists():
         return False
+    from . import whatsapp_conversation_token
+
     with db.get_db(config.db_path) as conn:
         room = db.get_room(conn, task.conversation_token)
-    return room is not None and room.origin == "whatsapp"
+        if room is None or room.origin != "whatsapp":
+            return False
+        binding = db.get_room_binding(conn, room.token, "whatsapp")
+        # Only the task owner's exact private ref proves this is not a group.
+        # An archived or unbound group must still refuse a private-chat fallback.
+        private_ref = whatsapp_conversation_token(task.user_id)
+        return binding is None or binding.surface_ref != private_ref
 
 
 def current_destination(

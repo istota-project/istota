@@ -288,7 +288,7 @@ class TestRecordingAuthors:
                 "SELECT author_participant_id FROM messages WHERE id = ?",
                 (result.message_id,),
             ).fetchone()
-            people = _participants(conn, "web-1")
+            people = _participants(conn, result.room_token)
         assert result.outcome == "created"
         assert people == [{
             "surface": "web", "surface_ref": "alice", "user_id": "alice",

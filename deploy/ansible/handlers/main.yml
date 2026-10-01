@@ -5,9 +5,9 @@
   when: not istota_web_only
 
 - name: "restart istota-scheduler"
-  systemd:
-    name: "{{ istota_namespace }}-scheduler"
-    state: restarted
+  command: >-
+    flock -w {{ istota_update_lock_wait }} /tmp/{{ istota_namespace }}-update.lock
+    systemctl restart {{ istota_namespace }}-scheduler
   when: not istota_web_only
 
 - name: "restart istota-browser"
@@ -61,15 +61,15 @@
 # guard a web-only run whose git checkout moved restarted the service twice:
 # once from the task, then again from this handler at end of play.
 - name: "restart istota-web"
-  systemd:
-    name: "{{ istota_namespace }}-web"
-    state: restarted
+  command: >-
+    flock -w {{ istota_update_lock_wait }} /tmp/{{ istota_namespace }}-update.lock
+    systemctl restart {{ istota_namespace }}-web
   when: (istota_web_enabled | default(false)) and not istota_web_only
 
 - name: "restart istota-webhooks"
-  systemd:
-    name: "{{ istota_namespace }}-webhooks"
-    state: restarted
+  command: >-
+    flock -w {{ istota_update_lock_wait }} /tmp/{{ istota_namespace }}-update.lock
+    systemctl restart {{ istota_namespace }}-webhooks
   when: istota_webhooks_enabled | bool
 
 # Restarting drops the WhatsApp link and the sidecar reconnects, keeping the

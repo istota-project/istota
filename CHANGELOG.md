@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Your SMS conversation and your one-to-one WhatsApp chat now each have a room. The first text you send creates a room named SMS or WhatsApp, and your texts, the answers, confirmation exchanges, the replies to `!commands` you text, and scheduled jobs and alerts sent to your phone (including ones whose send was blocked) are all recorded in it. A WhatsApp group keeps its own room, and its people's messages now show in its web view, as Talk group messages already did.
+
+  **Upgrade note:** the first start after the upgrade adds a unique index on `room_bindings (surface, surface_ref)`, and refuses to start with `ambiguous room bindings` if two rooms already share one binding. Resolve the duplicate rows by hand and start again; nothing is chosen for you. A new scheduler gate, `phone-room-backfill`, runs every minute and records its progress in the reserved `_room_backfill` key-value namespace.
+
+- An SMS or WhatsApp room is read-only in web chat. It is marked with a phone or chat-bubble icon, has no composer, and a question waiting for confirmation says to reply by text; the server refuses a message, a confirmation or a decline sent to it from web chat with a 409. Your own texts show as yours, with a "Sent by SMS" or "Sent on WhatsApp" line, and the room is never chosen automatically as your default web room or as the room a relay question is sent to. Web chat refuses to add another member to it, and refuses to delete it while a task from your earlier texts is still unfinished.
+
+- A phone room also shows the conversation from before it existed: within a minute of your first text the scheduler copies your earlier texts and their answers into it, and the assistant recalls memories from them there. A reminder or scheduled job you ask for by text is sent to your phone and recorded in the room, and nothing written into the room is ever texted unless it was sent to the phone on purpose. A room you delete and that a later text creates again starts empty and does not recall the deleted room's memories.
+
+- Server deployments now migrate existing room identities during a brief offline window, preserving room history, channel memories and old links. Standalone updates require stopping the local server first; Docker upgrades have an explicit offline migration step.
+
+- Room identity migration now carries channel memories and scheduled destinations to the new room names. Interrupted moves can resume, conflicting files are left for an operator to resolve, and schedule files are backed up before rewriting.
+
 - The web chat room list marks a shared room with a people icon, so a room that someone besides you reads is visible before you open it. For a shared Talk room, the icon's tooltip says it is also on Nextcloud Talk. The same icon follows the room name in the chat header, so it stays visible when the room list is closed.
 - In a shared web chat room, an `@name` mention of a room member or of the bot is highlighted in the message, and a mention of you stands out more than one of somebody else. Only members' user ids and the bot's name count, never a display name or any other `@word`, and an `@` inside code is left alone.
 - Typing `@` in a shared web chat room's composer suggests the room's members and the bot, filtered by user id or display name as you type, the way `!` suggests commands. Accepting one inserts a mention that renders highlighted.
@@ -69,6 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Istota can scroll the panel you point at rather than the page behind it. `browse interact --scroll down --scroll-at 700,500` turns the wheel at a point read off a screenshot, which is what reaches a chat log, a code viewer, a results list inside a modal or a PDF viewer — the widgets a page-level scroll cannot move, and exactly the ones the look-and-click loop exists for. `--scroll-zoom` holds ctrl while the wheel turns, so a map zooms in and out at the point you name. A scroll at a point keeps the position you wrote it in among the clicks and fills around it.
 
 ### Changed
+
+- New rooms use independent room IDs in their links and memory folders. Talk delivery uses the bound conversation address, including for rooms first opened in Talk.
 
 - Email sign-in now sends a 6-digit code instead of a link, and the code works only in the browser or app that asked for it. On iOS the link opened in Safari, so the istota app never got the session; you now type the code into the app, and Mail can fill it in for you. Each code allows five tries, and wrong codes are capped at 20 per address per day. The admin "Send sign-in link" action is gone, and `istota auth login-link` is replaced by `istota auth sign-in-code <user>`, which prints a fresh code for the user's pending sign-in when mail is down. Password setup and reset links are unchanged. **Upgrade note:** `[web] auth_login_link_ttl_minutes` is now `auth_sign_in_code_ttl_minutes` (default 10); the old key is still read and logs a warning, but the Ansible variable `istota_web_auth_login_link_ttl_minutes` is ignored, so rename it to `istota_web_auth_sign_in_code_ttl_minutes` if you set it. (ISSUE-574)
 - A room colour now only tints the room's row in the web chat sidebar. The dot it also added beside the room name is gone.

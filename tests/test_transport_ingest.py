@@ -49,7 +49,10 @@ class TestIngestMessage:
         assert task.prompt == "do the thing"
         assert task.user_id == "alice"
         assert task.source_type == "talk"
-        assert task.conversation_token == "room42"
+        with db.get_db(db_path) as conn:
+            assert task.conversation_token == db.resolve_room_token(conn, "talk", "room42")
+        assert db.is_canonical_room_token(task.conversation_token)
+        assert task.conversation_token != "room42"
         assert task.talk_delivery_token == "deliver42"
         assert task.talk_message_id == 1001
         assert task.reply_to_talk_id == 999

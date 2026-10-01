@@ -32,6 +32,7 @@ def config(db_path):
 
 
 def _user_rows(conn, token):
+    token = db._canonical_room_token(conn, token)
     return conn.execute(
         "SELECT id, task_id, body FROM messages "
         "WHERE room_token = ? AND role = 'user' ORDER BY id",
@@ -40,6 +41,7 @@ def _user_rows(conn, token):
 
 
 def _decisions(conn, token):
+    token = db._canonical_room_token(conn, token)
     return conn.execute(
         "SELECT message_id, spoke, rung FROM speech_gate_decisions "
         "WHERE room_token = ? ORDER BY id",
@@ -69,7 +71,7 @@ class TestRecordThenDecide:
             )
         assert isinstance(result, InboundResult)
         assert result.outcome == "created"
-        assert result.room_token == "dm"
+        assert db.is_canonical_room_token(result.room_token)
         assert result.task_id is not None
         with db.get_db(db_path) as conn:
             rows = _user_rows(conn, "dm")
@@ -158,10 +160,10 @@ class TestRecordThenDecide:
                                  addressed_to_bot=True)
             db.update_task_status(conn, spoken.task_id, "completed", result="Booked.")
             db.add_message(
-                conn, "grp", role="assistant", body="Booked.",
+                conn, spoken.room_token, role="assistant", body="Booked.",
                 origin_surface="talk", task_id=spoken.task_id,
             )
-            history = db.get_conversation_history(conn, "grp")
+            history = db.get_conversation_history(conn, spoken.room_token)
         assert [(m.prompt, m.result, m.user_id) for m in history] == [
             ("did you book the flights?", None, "alice"),
             ("not yet", None, "bob"),
@@ -275,4 +277,4 @@ class TestIngestMessage:
         )
         with db.get_db(db_path) as conn:
             task_id = ingest_message(conn, config, msg)
-            assert db.get_task(conn, task_id).conversation_token == "roomZ"
+            assert db.get_task(conn, task_id).conversation_token == db.resolve_room_token(conn, "talk", "roomZ")

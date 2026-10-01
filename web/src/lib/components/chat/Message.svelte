@@ -1,5 +1,16 @@
 <script lang="ts">
-  import { Copy, Star, Trash2, Reply, Mail, Info, Pencil, X } from 'lucide-svelte';
+  import {
+    Copy,
+    Star,
+    Trash2,
+    Reply,
+    Mail,
+    Info,
+    Pencil,
+    X,
+    Smartphone,
+    MessageCircle,
+  } from 'lucide-svelte';
   import { chatFileUrl, type ExternalTurnDisplay } from '$lib/api';
   import { copyText } from '$lib/clipboard';
   import { renderMarkdown } from '$lib/markdown';
@@ -46,6 +57,7 @@
     aggregate = false,
     active = false,
     touch = false,
+    answerByText = null,
     mentions = [],
   }: {
     message: ChatMessage;
@@ -144,6 +156,10 @@
     // with a trackpad reports hover, and a tap there still strands a synthesized
     // :hover. This mutes the hover reveal for as long as touch is what's in use.
     touch?: boolean;
+    // Set to the surface's label in a read-only phone room: a parked question
+    // there was asked by text and is answered by text, so the card shows that
+    // instead of buttons. The server refuses the answer from web either way.
+    answerByText?: string | null;
     // Who may be `@`-mentioned where this row is shown: the room's members by
     // user id and the bot's name, the viewer's own entry marked `self`. Empty
     // (the default) styles nothing, which is what the aggregate views get,
@@ -218,6 +234,18 @@
   // unfamiliar origin reads as "External message" instead of asserting an email
   // that never arrived.
   const isEmailOrigin = $derived(message.origin === 'email');
+  // A turn texted in rather than typed here. The writer's own words, so it gets
+  // a provenance line with the surface's icon and none of the external
+  // treatment above, which exists to withhold a stranger's body.
+  const viaLabel = $derived(
+    !isUser || isExternal
+      ? ''
+      : message.via === 'sms'
+        ? 'Sent by SMS'
+        : message.via === 'whatsapp'
+          ? 'Sent on WhatsApp'
+          : '',
+  );
   const externalLabel = $derived(isEmailOrigin ? 'External email' : 'External message');
   // `hidden` withholds the body and nothing else. The row stays, because a bot
   // answer with no question above it was the defect the inbound mirror exists to
@@ -821,6 +849,16 @@
             {/if}
           </div>
         {:else if message.text}
+          {#if viaLabel}
+            <div class="via-mark">
+              <span class="via-icon" aria-hidden="true">
+                {#if message.via === 'sms'}<Smartphone size={13} />{:else}<MessageCircle
+                    size={13}
+                  />{/if}
+              </span>
+              <span>{viaLabel}</span>
+            </div>
+          {/if}
           <!-- The text carries `pre-wrap`, so it needs its own element: with
                the whitespace rule on the wrapper, the newlines and indentation
                around a sibling button would render as leading and trailing
@@ -985,6 +1023,7 @@
           onReject={() => onReject(message.cid, message.taskId!)}
           {botName}
           {botAvatar}
+          {answerByText}
         />
       {/if}
 
@@ -1568,6 +1607,18 @@
     display: inline-flex;
     align-self: center;
     color: var(--text-muted);
+  }
+  /* A texted turn's provenance: one muted line above the bubble, with no
+	   tint, since nothing about the turn is in doubt. */
+  .via-mark {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+  .via-icon {
+    display: inline-flex;
   }
   .external-label {
     flex: 0 0 auto;

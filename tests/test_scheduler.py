@@ -682,7 +682,7 @@ class TestTalkTargetForDelivery:
         task = self._task(source_type="talk", conversation_token="rm_late")
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "rm_late", "alice", origin="web")
-        assert _talk_target_for_delivery(config, task) == "rm_late"
+        assert _talk_target_for_delivery(config, task) is None
         with db.get_db(config.db_path) as conn:
             db.add_room_binding(conn, "rm_late", "talk", "PromotedRoom")
         assert _talk_target_for_delivery(config, task) == "PromotedRoom"
@@ -7965,7 +7965,7 @@ class TestPostResultToTalk:
         task = self._make_task(room.canonical, is_group_chat=False, talk_message_id=42)
 
         result = await post_result_to_talk(
-            config, task, "Hello there", use_reply_threading=True,
+            config, task, "Hello there", use_reply_threading=True, target_token=room.talk_ref,
         )
 
         assert [(c.method, c.token, c.args) for c in fake_talk.calls] == [
@@ -7984,7 +7984,7 @@ class TestPostResultToTalk:
         )
 
         result = await post_result_to_talk(
-            config, task, "Sure thing", use_reply_threading=True,
+            config, task, "Sure thing", use_reply_threading=True, target_token=room.talk_ref,
         )
 
         assert [(c.method, c.token, c.args) for c in fake_talk.calls] == [
@@ -8009,7 +8009,7 @@ class TestPostResultToTalk:
             return_value=["Part 1", "Part 2"],
         ):
             await post_result_to_talk(
-                config, task, "Long message", use_reply_threading=True,
+                config, task, "Long message", use_reply_threading=True, target_token=room.talk_ref,
             )
 
         # Both parts land in the same room, in order; only the first threads.
@@ -8033,7 +8033,7 @@ class TestPostResultToTalk:
             room.canonical, is_group_chat=True, talk_message_id=None, user_id="dave",
         )
 
-        await post_result_to_talk(config, task, "Response", use_reply_threading=True)
+        await post_result_to_talk(config, task, "Response", use_reply_threading=True, target_token=room.talk_ref)
 
         assert [(c.token, c.args) for c in fake_talk.calls] == [
             (room.talk_ref, {
@@ -8051,7 +8051,7 @@ class TestPostResultToTalk:
         )
 
         # Default use_reply_threading=False (progress/ack messages)
-        await post_result_to_talk(config, task, "Working on it...")
+        await post_result_to_talk(config, task, "Working on it...", target_token=room.talk_ref)
 
         assert [(c.token, c.args) for c in fake_talk.calls] == [
             (room.talk_ref, {
@@ -8068,7 +8068,7 @@ class TestPostResultToTalk:
         task = self._make_task(room.canonical, is_group_chat=False, talk_message_id=42)
 
         await post_result_to_talk(
-            config, task, "Result", reference_id="istota:task:1:result",
+            config, task, "Result", target_token=room.talk_ref, reference_id="istota:task:1:result",
         )
 
         assert [(c.token, c.args) for c in fake_talk.calls] == [

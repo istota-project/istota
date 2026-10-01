@@ -24,7 +24,13 @@ from typing import TYPE_CHECKING
 # The static room-model table. A stdlib-only leaf that imports nothing, so a
 # module-level import here costs nothing and introduces no cycle — unlike
 # `db`, which this module deliberately imports per function.
-from ..surfaces import is_room_member, origin_surface_for_source_type
+from ..surfaces import (
+    UserTurnMirror as UserTurnMirrorMode,
+    is_room_member,
+    origin_surface_for_source_type,
+    room_view,
+    user_turn_mirror,
+)
 
 if TYPE_CHECKING:
     from .. import db
@@ -76,6 +82,53 @@ class Destination:
     channel: str | None = None
     kind: str = "push"
     mirror: bool = False
+
+
+@dataclass(frozen=True)
+class UserTurnMirror:
+    """A bound external view that needs a copy of a non-native user turn.
+
+    ``surface_ref`` is the destination's address, never the canonical room
+    token. ``mode`` describes authorship, not content policy: callers must
+    still choose content by origin. In particular, email reposts carry sender
+    and subject only, never the wrapped untrusted body. ``as_user`` degrades
+    to an attributed repost when no author credential is available.
+    """
+
+    surface: str
+    surface_ref: str
+    mode: UserTurnMirrorMode
+
+
+def plan_user_turn_mirrors(
+    conn, config: "Config", room_token: str, origin_surface: str,
+) -> list[UserTurnMirror]:
+    """Plan user-turn copies from static facts and one binding lookup.
+
+    Config does not gate the room model: a disabled transport still has its
+    declared role, and its caller handles post failures. Missing, archived or
+    unbound rooms have no targets. A DB failure must not fail the original send.
+    """
+    from .. import db
+
+    try:
+        room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
+        room = db.get_room(conn, room_token)
+        if room is None or room.archived:
+            return []
+        mirrors = []
+        for binding in db.list_room_bindings(conn, room_token):
+            if binding.surface == origin_surface:
+                continue
+            if room_view(binding.surface) != "external":
+                continue
+            mode = user_turn_mirror(binding.surface)
+            if mode is not None:
+                mirrors.append(UserTurnMirror(binding.surface, binding.surface_ref, mode))
+        return mirrors
+    except Exception as e:
+        logger.warning("user-turn mirror planning failed for room %s: %s", room_token, e)
+        return []
 
 
 def parse_output_target(
@@ -204,8 +257,11 @@ def _canonical_room_token(
 ) -> str | None:
     """The canonical room token a raw token names, or None if it names no room.
 
-    Three tries, narrowest first: the token already *is* a canonical token; it
+    Three live tries, narrowest first: the token already *is* a canonical token; it
     is this surface's ref for one; it is *some other* surface's ref for one.
+
+    A final permanent-mapping lookup forwards a migrated identity when the
+    live tries miss, including when cross-surface lookup is disabled.
 
     The third is not hypothetical. An email continuation's
     ``conversation_token`` is whatever the originating send recorded — on a
@@ -230,12 +286,10 @@ def _canonical_room_token(
     """
     from .. import db
 
-    if db.get_room(conn, token) is not None:
-        return token
-    scoped = db.resolve_room_token(conn, surface, token)
-    if scoped is not None or not cross_surface:
-        return scoped
-    return db.find_room_token_by_ref(conn, token)
+    token = db._canonical_room_token(
+        conn, token, surface=surface, cross_surface=cross_surface,
+    )
+    return token if db.get_room(conn, token) is not None else None
 
 
 def origin_descriptor(task: "db.Task", conn=None) -> str | None:
@@ -272,11 +326,14 @@ def origin_descriptor(task: "db.Task", conn=None) -> str | None:
     """
     from ..email_support import is_synthetic_email_thread_token
     from .registry import _surface_for_source_type
+    from ..db import is_canonical_room_token
 
     surface = _surface_for_source_type(task.source_type)
     room = _room_descriptor(conn, surface, task)
     if room is not None:
         return room
+    if is_canonical_room_token(task.conversation_token) and not task.talk_delivery_token:
+        return f"room:{task.conversation_token}"
     if surface == "web":
         tok = task.conversation_token
         return f"web:{tok}" if tok else "web"
@@ -346,7 +403,7 @@ def upgrade_legacy_origin(conn, origin: str) -> str | None:
         return None
     # A promoted room's per-surface ref is not its canonical token, so resolve
     # the binding before asking whether the room exists.
-    token = db.resolve_room_token(conn, surface, channel) or channel
+    token = db._canonical_room_token(conn, channel, surface=surface, cross_surface=False)
     room = db.get_room(conn, token)
     if room is None or getattr(room, "archived", 0):
         return None
@@ -468,6 +525,7 @@ def canonical_room_token(conn, token: str, surface: str = "") -> str | None:
 
 def room_target_descriptor(
     token: str, origin: str, talk_ref: str | None = None,
+    phone_surface: str | None = None,
 ) -> str:
     """The ``output_target`` a *scheduled* job should carry to deliver into this
     room — the string `istota-skill rooms list` hands the model and the
@@ -501,8 +559,17 @@ def room_target_descriptor(
       the web half is the ISSUE-400 shape: correct on the surface the author was
       looking at, invisible to everyone reading the room from the other one.
 
+    - the reader's own **private phone room** is the bare surface, ``sms`` or
+      ``whatsapp``: its web view is read-only, so a reminder asked for by text
+      has to be sent by text. The bare destination resolves the user's own
+      binding and the push is recorded in the room. ``phone_surface`` comes
+      from :func:`private_phone_rooms`, the one decision the prompt header,
+      `istota-skill rooms list` and the `talk create` refusal all read.
+
     Pure — the caller supplies the binding it already read.
     """
+    if phone_surface:
+        return phone_surface
     if origin == "talk":
         return f"talk:{token}"
     descriptor = f"web:{token}"
@@ -614,11 +681,9 @@ def _expand_room_destinations(
             # per-surface ref is not its canonical token, and looking bindings up
             # by the raw value is the mistake this whole spec is cleaning up. A
             # token that is already canonical resolves to itself.
-            canonical = token
-            if origin_surface is not None:
-                canonical = (
-                    db.resolve_room_token(conn, origin_surface, token) or token
-                )
+            canonical = db._canonical_room_token(
+                conn, token, surface=origin_surface or "", cross_surface=False,
+            )
             # A room that went away between the send and the reply mirrors
             # nowhere — the bot has left it, or it never was one. The origin
             # delivery still stands, which is what keeps a reply from being
@@ -658,6 +723,11 @@ def _expand_room_destinations(
                        getattr(task, "id", "?"), e)
         return dests
     for b in bindings:
+        # Static absence means this surface never shows the room transcript.
+        # A disabled Talk transport also has no *live* view, but retains its
+        # existing resolution/fallback path. Phone bindings must not imply sends.
+        if room_view(b.surface) is None:
+            continue
         # Both skips compensate for what an origin leg already delivered, so
         # neither applies to a task that has no origin leg. See above.
         if origin_surface is not None:
@@ -706,9 +776,8 @@ def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
        the only rung that knows about a binding added after the task was
        created. Reached whenever the column is NULL, which is every talk- and
        web-sourced task.
-    2. **``conversation_token`` itself**, when the task has one and is not
-       email-sourced — the Talk-source case, where the token *is* the room, and
-       the case of a DM with no registered room.
+    2. **A legacy surface token**, never a minted room identity. An
+       unregistered Talk DM can still deliver by its native address.
     3. **The user's resolved notification channel** (alerts → briefing → DM),
        for an email task whose token is a synthetic thread hash naming no Talk
        room at all. Posting to that hash silently no-ops.
@@ -722,6 +791,7 @@ def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
     as ``None``, preserving the pre-existing silent no-op at delivery instead of
     trading it for a different failure mode.
     """
+    from ..db import is_canonical_room_token
     from ..email_support import is_synthetic_email_thread_token
 
     if task.talk_delivery_token:
@@ -730,6 +800,8 @@ def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
     if room_talk:
         return room_talk
     token = task.conversation_token
+    if is_canonical_room_token(token):
+        return None
     if not token or task.source_type != "email":
         return token
     if not is_synthetic_email_thread_token(token):
@@ -789,11 +861,12 @@ def transcript_room(
     exchange splits across two rooms again — which is this issue, reintroduced
     one level down.
     """
-    from .. import db
 
     try:
-        if conversation_token and db.get_room(conn, conversation_token) is not None:
-            return conversation_token
+        if conversation_token:
+            canonical = _canonical_room_token(conn, "", conversation_token, cross_surface=False)
+            if canonical is not None:
+                return canonical
         if source_type != "email":
             return None
         for dest in parse_output_target(output_target):
@@ -904,9 +977,117 @@ def _room_for_destination(
     # dispatch deliberately: `surface == "room"` is a name in the destination
     # grammar rather than a surface, and a member check placed ahead of it
     # would drop every `room:<token>` descriptor (ISSUE-247).
-    if is_room_member(surface):
-        candidate = db.resolve_room_token(conn, surface, candidate) or candidate
-    return candidate if db.get_room(conn, candidate) is not None else None
+    return _canonical_room_token(
+        conn, surface if is_room_member(surface) else "", candidate, cross_surface=False,
+    )
+
+
+def private_phone_room(
+    conn, surface: str, user_id: str, channel: str | None = None,
+) -> str | None:
+    """The user's own SMS or WhatsApp room, if one was minted, else None.
+
+    The room a phone push lands in as a transcript row. Existence, never
+    creation: a push is the system talking, so a miss writes nothing and the
+    send goes ahead exactly as before. A room another human reads is refused
+    like any other personal delivery. ``channel`` is the planned destination; a
+    WhatsApp channel that is not the user's private chat (a group's room) has
+    no private transcript to land in. SMS has no such alternative, since its
+    send always resolves the user's own binding.
+    """
+    from .. import db
+    from .sms import sms_conversation_token
+    from .whatsapp import whatsapp_conversation_token
+
+    if surface == "sms":
+        surface_ref = sms_conversation_token(user_id)
+    elif surface == "whatsapp":
+        surface_ref = whatsapp_conversation_token(user_id)
+        if channel is not None and channel != surface_ref:
+            return None
+    else:
+        return None
+    token = db.resolve_room_token(conn, surface, surface_ref)
+    if not token or db.get_room(conn, token) is None:
+        return None
+    if user_id not in db.list_room_members(conn, token) or db.room_is_shared(conn, token):
+        return None
+    return token
+
+
+def is_private_phone_room(conn, surface: str, user_id: str, room_token) -> bool:
+    """Whether ``room_token`` is this user's own SMS or WhatsApp room.
+
+    The one test for "the phone webhook has already stored this turn here":
+    both webhooks record every accepted private turn, a typed ``!command`` and
+    a confirmation answer included, before acting on it, while a WhatsApp
+    group's command records nothing. A writer that would add the same turn
+    again asks this first.
+    """
+    return bool(room_token) and room_token == private_phone_room(conn, surface, user_id)
+
+
+def private_phone_rooms(conn, user_id: str) -> dict[str, str]:
+    """``{room token: surface}`` for ``user_id``'s own SMS and WhatsApp rooms.
+
+    What a reader is told to schedule into such a room by
+    (:func:`room_target_descriptor`'s ``phone_surface``). One decision for the
+    prompt header, `istota-skill rooms list` and the `talk create` refusal,
+    so they cannot name different targets for the same room. At most two entries.
+    """
+    found: dict[str, str] = {}
+    if not user_id:
+        return found
+    for surface in ("sms", "whatsapp"):
+        token = private_phone_room(conn, surface, user_id)
+        if token:
+            found[token] = surface
+    return found
+
+
+def private_phone_ref(surface: str, user_id: str) -> str | None:
+    """The ``surface_ref`` of ``user_id``'s own SMS or WhatsApp thread, else None."""
+    from .sms import sms_conversation_token
+    from .whatsapp import whatsapp_conversation_token
+
+    if not user_id:
+        return None
+    if surface == "sms":
+        return sms_conversation_token(user_id)
+    if surface == "whatsapp":
+        return whatsapp_conversation_token(user_id)
+    return None
+
+
+def phone_transcript_surface(conn, room_token) -> str | None:
+    """``'sms'`` or ``'whatsapp'`` when the room is a private phone thread's
+    transcript, else None.
+
+    The read-only test (decided 2026-10-01): web reads such a room and may not
+    write into it, so the send route refuses and the client renders no
+    composer. Asked of the room, not of a reader, so it answers the same for
+    every member: the binding's ref has to be the room creator's own private
+    thread token, the rule `whatsapp.outbound.is_group_task` uses. A WhatsApp
+    group room is bound by its group JID and keeps its composer. Unlike
+    `private_phone_room` this does not drop a room another member was added to;
+    adding a reader does not make a phone thread writable from web.
+    """
+    from .. import db
+
+    if not room_token:
+        return None
+    # A task created before the mint still carries the hash token, which the
+    # room keeps as a permanent alias.
+    room = db.get_room(
+        conn, db._canonical_room_token(conn, room_token, cross_surface=False),
+    )
+    if room is None:
+        return None
+    for binding in db.list_room_bindings(conn, room.token):
+        ref = private_phone_ref(binding.surface, room.user_id)
+        if ref is not None and binding.surface_ref == ref:
+            return binding.surface
+    return None
 
 
 def transcript_room_for_task(conn, config: "Config", task: "db.Task") -> str | None:
@@ -1240,11 +1421,7 @@ def refuse_shared_rooms(
                 return list(dests)
             own = None
             if conversation_token:
-                own = (
-                    conversation_token
-                    if db.get_room(conn, conversation_token) is not None
-                    else db.find_room_token_by_ref(conn, conversation_token)
-                )
+                own = canonical_room_token(conn, conversation_token)
             for d in legs:
                 room = _canonical_room_token(
                     conn, d.surface, d.channel, cross_surface=False,

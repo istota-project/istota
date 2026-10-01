@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from .atomic_write import write_text_atomic
 from .rclone_client import (
     rclone_cat,
+    rclone_cat_checked,
     rclone_mkdir,
     rclone_path_exists,
     rclone_rcat,
@@ -2447,6 +2448,34 @@ def ensure_channel_directories(config: "Config", conversation_token: str) -> boo
         return True
 
 
+def channel_memory_tokens(config: "Config", conversation_token: str) -> list[str]:
+    """Canonical name first, then live aliases, while the mount catches up.
+
+    A read-only open must not create a database on storage-only callers. A
+    deleted room's permanent mapping is a tombstone, never a fallback path.
+    """
+    import sqlite3
+    from contextlib import closing
+
+    from .sqlite_util import connect_read_only
+
+    validate_conversation_token(conversation_token)
+    try:
+        with closing(connect_read_only(config.db_path.resolve())) as conn:
+            from . import db
+            conn.row_factory = sqlite3.Row
+            canonical = db._canonical_room_token(conn, conversation_token, cross_surface=False)
+            if db.get_room(conn, canonical) is None and conn.execute(
+                "SELECT 1 FROM room_token_migration WHERE old_token=? OR new_token=?",
+                (conversation_token, conversation_token),
+            ).fetchone():
+                return []
+            tokens = db._room_ref_tokens(conn, canonical, include_surface_refs=False)
+        return [validate_conversation_token(t) for t in tokens]
+    except (sqlite3.Error, OSError, AttributeError):
+        return [conversation_token]
+
+
 def read_channel_memory(config: "Config", conversation_token: str) -> str | None:
     """
     Read the channel's memory file (mount-aware).
@@ -2468,30 +2497,34 @@ def read_channel_memory(config: "Config", conversation_token: str) -> str | None
     here would make the same bytes hash two ways and every save read as a
     conflict.
     """
-    if config.has_workspace:
-        channel_dir = _contained_channel_dir(config, conversation_token)
-        if channel_dir is None:
-            logger.warning(
-                "channel_memory_read_refused token=%s reason=outside_channel_root",
-                conversation_token,
-            )
-            return None
-        content, reason = read_regular_file(channel_dir / "CHANNEL.md")
-        if reason is not None:
-            logger.warning(
-                "channel_memory_read_refused token=%s reason=%s",
-                conversation_token, reason,
-            )
-            return None
-        if not content or not content.strip():
-            return None
-        return content
-    else:
-        memory_path = get_channel_memory_path(conversation_token)
-        content = _rclone_cat(config.rclone_remote, memory_path)
-        if content is None or not content.strip():
-            return None
-        return content
+    for token in channel_memory_tokens(config, conversation_token):
+        if config.has_workspace:
+            channel_dir = _contained_channel_dir(config, token)
+            if channel_dir is None:
+                logger.warning("channel_memory_read_refused token=%s reason=outside_channel_root", token)
+                return None
+            try:
+                (channel_dir / "CHANNEL.md").lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return None
+            content, reason = read_regular_file(channel_dir / "CHANNEL.md")
+            if reason is not None:
+                logger.warning("channel_memory_read_refused token=%s reason=%s", token, reason)
+                return None
+            # Only absence falls back. An intentionally empty canonical file
+            # must not revive notes somebody just cleared.
+            if content is None:
+                continue
+        else:
+            content, missing = rclone_cat_checked(config.rclone_remote, get_channel_memory_path(token))
+            if missing:
+                continue
+            if content is None:
+                return None
+        return content if content.strip() else None
+    return None
 
 
 def write_channel_memory(

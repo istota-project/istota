@@ -360,3 +360,38 @@ def test_sms_adapter_conformance_classifies_and_scrubs_failures(
     }[kind]
     assert "api-secret" not in outcome.safe_reason
     assert USER_NUMBER not in outcome.safe_reason
+
+
+def test_inbound_database_failure_rolls_back_mint_and_retry_creates_one_room(tmp_path, monkeypatch):
+    import sqlite3
+    from fastapi.testclient import TestClient
+    from istota import webhook_receiver as receiver
+    from istota.transport.sms.providers.registry import make_provider_registry
+
+    config = _config(tmp_path, 'twilio')
+    monkeypatch.setattr(receiver, '_config', config)
+    monkeypatch.setattr(receiver, '_sms_providers', make_provider_registry(config))
+    monkeypatch.setattr(receiver, 'reload_config', lambda: None)
+    monkeypatch.setattr(receiver.signal, 'signal', lambda *_args: None)
+    request = _twilio_request({
+        'AccountSid': 'AC-account', 'MessagingServiceSid': 'MG-service',
+        'MessageSid': TWILIO_MESSAGE_ID, 'From': USER_NUMBER, 'To': SERVICE_NUMBER,
+        'Body': 'check the backup', 'NumMedia': '0',
+    })
+    create_task = db.create_task
+    def fail(*args, **kwargs):
+        raise sqlite3.OperationalError('injected write failure')
+    with TestClient(receiver.app) as client:
+        monkeypatch.setattr(db, 'create_task', fail)
+        response = client.post('/webhooks/sms/twilio', content=request.raw_body, headers=request.headers)
+        assert response.status_code == 503
+        with db.get_db(config.db_path) as conn:
+            for table in ('rooms', 'room_bindings', 'room_members', 'messages', 'room_token_migration', 'processed_sms'):
+                assert conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == 0
+        monkeypatch.setattr(db, 'create_task', create_task)
+        for _ in range(2):
+            response = client.post('/webhooks/sms/twilio', content=request.raw_body, headers=request.headers)
+            assert response.status_code == 200
+    with db.get_db(config.db_path) as conn:
+        for table in ('rooms', 'room_bindings', 'room_members', 'messages', 'room_token_migration', 'processed_sms', 'tasks'):
+            assert conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == 1

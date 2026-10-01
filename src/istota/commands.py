@@ -887,6 +887,12 @@ async def cmd_confirm(ctx: CommandContext):
 # values rather than surface names — see the declaration in `db.py`.
 _TRANSCRIPT_SURFACES = db.TRANSCRIPT_SURFACES
 
+# The two members of that tuple whose inbound path records a `!command` as a
+# user turn before dispatching it (`transport.ingest.record_phone_turn` with
+# `record_only=True`), in the user's own phone room only, so a writer here must
+# not store the same turn again (`routing.is_private_phone_room`).
+_PHONE_SURFACES = ("sms", "whatsapp")
+
 
 def _record_confirm_exchange(ctx: CommandContext, reply: str) -> "CommandResult":
     """Commit the answer and leave it in the room transcript.
@@ -898,6 +904,11 @@ def _record_confirm_exchange(ctx: CommandContext, reply: str) -> "CommandResult"
     gone on the next reload. Usage errors ("nothing is waiting", an unknown id)
     and the ambiguity listing deliberately do not record: neither decides
     anything.
+
+    SMS and WhatsApp are the exception. Their webhook stores the typed command
+    as a turn before dispatch, and writes whatever this returns beside it after
+    the send, usage errors included, best-effort like every phone command reply.
+    The durable record there is the stored turn and the task's own state.
 
     The message ids ride back on `result_data` under the same
     `confirmation_answered` kind the bare-answer path uses, because the web
@@ -922,6 +933,13 @@ def _record_confirm_exchange(ctx: CommandContext, reply: str) -> "CommandResult"
         db.resolve_room_token(ctx.conn, ctx.surface, ctx.conversation_token)
         or ctx.conversation_token
     )
+    if ctx.surface in _PHONE_SURFACES:
+        # The webhook already stored the typed `!confirm` as a user turn, and
+        # writes this reply beside it after the send, as it does every phone
+        # command's reply (`notifications.mirror_phone_command_reply`). Writing
+        # it here too would put the ack in the transcript twice.
+        ctx.conn.commit()
+        return CommandResult(handled=True, text=reply)
     user_msg_id, system_msg_id = confirmations.record_exchange(
         ctx.conn, room_token,
         answer_text=f"!{ctx.invoked_as} {ctx.args}".strip(),
@@ -1039,7 +1057,14 @@ async def cmd_steer(ctx: CommandContext):
     # The ownership question, unlike `_record_confirm_exchange`'s gate a few
     # hundred lines up: this write needs a room the surface owns to write into,
     # so email — a `guest` — is out, and was before the predicate had a name.
-    if is_room_member(ctx.surface):
+    # In a private phone room the webhook has already stored `!steer <note>`
+    # as the turn, so a second row would show the steer twice.
+    phone_turn_recorded = False
+    if ctx.surface in _PHONE_SURFACES:
+        from .transport.routing import is_private_phone_room
+
+        phone_turn_recorded = is_private_phone_room(conn, ctx.surface, user_id, room_token)
+    if is_room_member(ctx.surface) and not phone_turn_recorded:
         try:
             if db.get_room(conn, room_token) is not None:
                 msg_id = db.add_message(
@@ -2114,7 +2139,7 @@ def _usage_age(seconds: float) -> str:
 @command("memory", "Show memory: `!memory user`, `!memory channel`, `!memory facts`")
 async def cmd_memory(ctx: CommandContext):
     config, conn = ctx.config, ctx.conn
-    user_id, conversation_token, args = ctx.user_id, ctx.conversation_token, ctx.args
+    user_id, args = ctx.user_id, ctx.args
     mount = config.workspace_path
     target = args.strip().lower()
 
@@ -2132,8 +2157,9 @@ async def cmd_memory(ctx: CommandContext):
         if mount is None:
             return "Nextcloud mount not configured -- cannot read memory files."
         from .storage import validate_conversation_token
-        validate_conversation_token(conversation_token)
-        mem_path = mount / "Channels" / conversation_token / "CHANNEL.md"
+        room_token = _room_token(ctx)
+        validate_conversation_token(room_token)
+        mem_path = mount / "Channels" / room_token / "CHANNEL.md"
         if mem_path.exists():
             content = mem_path.read_text()
             if content.strip():
@@ -2628,7 +2654,7 @@ def _format_history_text(
 @command("export", "Export conversation history to a file: `!export [markdown|text]`")
 async def cmd_export(ctx: CommandContext):
     config, conn = ctx.config, ctx.conn
-    user_id, conversation_token, args = ctx.user_id, ctx.conversation_token, ctx.args
+    user_id, conversation_token, args = ctx.user_id, _room_token(ctx), ctx.args
     mount = config.workspace_path
     if mount is None:
         return "Nextcloud mount not configured — cannot write export file."
@@ -3328,8 +3354,14 @@ async def _resolve_room_names(
     return names
 
 
-def _build_message_link(config: Config, token: str, message_id: int) -> str:
-    """Build a Nextcloud Talk deep link to a specific message."""
+def _build_message_link(config: Config, token: str, message_id: int, conn=None) -> str | None:
+    """Build a Nextcloud Talk deep link using the bound native address."""
+    with db.get_db_if_present(config.db_path, conn) as c:
+        binding = db.get_room_binding(c, token, "talk") if c is not None else None
+    if binding:
+        token = binding.surface_ref
+    elif db.is_canonical_room_token(token):
+        return None
     base_url = config.nextcloud.url.rstrip("/")
     return f"{base_url}/call/{token}#message_{message_id}"
 
@@ -3368,7 +3400,7 @@ def _format_search_results(results: list[dict], query: str) -> str:
 
 
 def _build_search_data(
-    config: Config, query: str, results: list[dict], text: str,
+    config: Config, query: str, results: list[dict], text: str, conn=None,
 ) -> dict:
     """Build the structured `search_results` payload for rich stream surfaces.
 
@@ -3383,7 +3415,7 @@ def _build_search_data(
         talk_message_id = r.get("talk_message_id")
         talk_link = r.get("talk_link")
         if not talk_link and room_token and talk_message_id:
-            talk_link = _build_message_link(config, room_token, talk_message_id)
+            talk_link = _build_message_link(config, room_token, talk_message_id, conn)
         room_name = r.get("room_name") or None
         out.append({
             "source_type": r.get("source_type"),
@@ -3401,7 +3433,7 @@ def _build_search_data(
 @command("search", "Search conversation history: `!search <query>`, `!search --all <query>`, `!search --since DATE <query>`, `!search --memories <query>`")
 async def cmd_search(ctx: CommandContext):
     config, conn = ctx.config, ctx.conn
-    user_id, conversation_token, args = ctx.user_id, ctx.conversation_token, ctx.args
+    user_id, conversation_token, args = ctx.user_id, _room_token(ctx), ctx.args
     parsed = _parse_search_args(args)
     if not parsed.query:
         return (
@@ -3418,6 +3450,15 @@ async def cmd_search(ctx: CommandContext):
         talk_results: list[dict] = []
     else:
         talk_results = await _search_talk_api(config, parsed.query)
+
+    # Talk search returns native addresses; memory stores canonical identities.
+    for result in talk_results:
+        token = result.get("conversation_token")
+        if token:
+            result["conversation_token"] = db.resolve_room_token(conn, "talk", token) or token
+    scope = parsed.scope
+    if scope and scope != "all":
+        scope = db.resolve_room_token(conn, ctx.surface, scope) or db._canonical_room_token(conn, scope)
 
     def _assemble(mem_results: list[dict]) -> list[dict]:
         """Merge memory + Talk hits, apply the --since / room-scope filters, cap.
@@ -3442,15 +3483,15 @@ async def cmd_search(ctx: CommandContext):
         # memory rows (personal + current-channel memory) are never discarded in
         # the current-room view, and are excluded from a specific-room search
         # (they belong to the current room / the user, not the named room).
-        if parsed.scope is None:
+        if scope is None:
             merged = [
                 r for r in merged
                 if r.get("is_memory") or r.get("conversation_token") == conversation_token
             ]
-        elif parsed.scope != "all":
+        elif scope != "all":
             merged = [
                 r for r in merged
-                if not r.get("is_memory") and r.get("conversation_token") == parsed.scope
+                if not r.get("is_memory") and r.get("conversation_token") == scope
             ]
         return merged[:8]
 
@@ -3477,7 +3518,7 @@ async def cmd_search(ctx: CommandContext):
         # The plain-text message is the durable record; the empty structured
         # card lets a rich stream client render "no results" in place.
         text = f"No results for \"{parsed.query}\"."
-        ctx.result_data = _build_search_data(config, parsed.query, [], text)
+        ctx.result_data = _build_search_data(config, parsed.query, [], text, conn)
         return text
 
     # Resolve room display names for all unique tokens
@@ -3492,10 +3533,10 @@ async def cmd_search(ctx: CommandContext):
         # Deep links are a Talk concept — only build them on the Talk surface.
         msg_id = r.get("talk_message_id")
         if ctx.surface == "talk" and token and msg_id:
-            r["talk_link"] = _build_message_link(config, token, msg_id)
+            r["talk_link"] = _build_message_link(config, token, msg_id, conn)
 
     text = _format_search_results(all_results, parsed.query)
-    ctx.result_data = _build_search_data(config, parsed.query, all_results, text)
+    ctx.result_data = _build_search_data(config, parsed.query, all_results, text, conn)
     return text
 
 

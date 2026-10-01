@@ -98,6 +98,7 @@ def _append_blocking(
         return None
     try:
         with db.get_db(config.db_path) as conn:
+            token = db._canonical_room_token(conn, token, surface="web", cross_surface=False)
             room = db.get_room(conn, token)
             if room is None:
                 logger.warning(

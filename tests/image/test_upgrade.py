@@ -48,6 +48,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
+import tomllib
+
+import tomli_w
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -776,3 +780,105 @@ class TestTheOldDatabaseSurvives:
             "run left a source behind.\n"
             f"--- stderr ---\n{second.stderr}"
         )
+
+
+class TestRoomIdentityUpgrade:
+    def test_offline_room_upgrade_preserves_history_and_is_replayable(
+        self, volume_upgrade, istota_image, tmp_path,
+    ):
+        """Run the shipped offline command over retained pre-mint room data.
+
+        The workspace is local here; the DAV MOVE contract is exercised by the
+        full tier. No daemon or sibling web container runs during this window.
+        """
+        config_dir = tmp_path / "config"
+        shutil.copytree(volume_upgrade.config_dir, config_dir)
+        config_file = config_dir / "config.toml"
+        config = tomllib.loads(config_file.read_text())
+        config["workspace_path"] = "/mnt/shared"
+        config.pop("nextcloud_mount_path", None)
+        config["nextcloud"]["url"] = ""
+        config_file.write_text(tomli_w.dumps(config))
+        db_dir = tmp_path / "db"
+        path = upgrade.build_anchor_db(REPO, volume_upgrade.anchor.commit, db_dir / "istota.db")
+        with sqlite3.connect(path) as conn:
+            conn.execute("INSERT INTO rooms(token,user_id,origin,name) VALUES ('upgradetoken','upgradeuser','talk','Retained room')")
+            conn.execute("INSERT INTO room_bindings(room_token,surface,surface_ref) VALUES ('upgradetoken','talk','upgradetoken')")
+            conn.execute("INSERT INTO messages(room_token,role,body,origin_surface) VALUES ('upgradetoken','user','Retained history','talk')")
+        conn.close()
+        shared = tmp_path / "shared"
+        old = shared / "Channels" / "upgradetoken"
+        old.mkdir(parents=True)
+        (old / "CHANNEL.md").write_text("Retained memory")
+        (shared / "Users" / "upgradeuser" / "istota" / "config").mkdir(parents=True)
+
+        first = _docker_run(istota_image, config_dir, db_dir,
+                            ["-c", _istota("init", "--relocate-rooms")], shared_dir=shared)
+        assert first.returncode == 0, first.stdout + first.stderr
+        def state():
+            read = _docker_run(istota_image, config_dir, db_dir,
+                               ["-c", "python /seed/room_state.py"], mounts=[(SEED_DIR, "/seed")])
+            assert read.returncode == 0, read.stdout + read.stderr
+            return json.loads(read.stdout)
+
+        observed = state()
+        token = observed["token"]
+        assert token.startswith("rm_") and token != "upgradetoken", first.stdout
+        assert observed["binding"] == [token, "upgradetoken"]
+        assert observed["message"] == [token, "Retained history"]
+        assert observed["tasks"] == upgrade._SEED_TASKS
+        assert observed["mapping"] == token
+        assert (shared / "Channels" / token / "CHANNEL.md").read_text() == "Retained memory"
+        assert not old.exists()
+        second = _docker_run(istota_image, config_dir, db_dir,
+                             ["-c", _istota("init", "--relocate-rooms")], shared_dir=shared)
+        assert second.returncode == 0, second.stdout + second.stderr
+        assert state() == observed
+
+
+class TestRoomBindingUpgrade:
+    @pytest.mark.parametrize('ambiguous', [False, True])
+    def test_binding_reference_upgrade_guards_singleton(
+        self, volume_upgrade, istota_image, tmp_path, ambiguous,
+    ):
+        """The shipped init upgrades old bindings, or refuses before mutation."""
+        db_dir = tmp_path / 'db'
+        path = upgrade.build_anchor_db(REPO, volume_upgrade.anchor.commit, db_dir / 'istota.db')
+        with sqlite3.connect(path) as conn:
+            assert not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='idx_room_bindings_unique_ref'"
+            ).fetchone(), 'anchor already has the singleton constraint'
+            for token in ('binding-one', 'binding-two'):
+                conn.execute(
+                    "INSERT INTO rooms(token,user_id,origin,name) VALUES (?, 'upgradeuser', 'talk', 'Retained room')",
+                    (token,),
+                )
+                ref = 'same-ref' if ambiguous else token
+                conn.execute(
+                    "INSERT INTO room_bindings(room_token,surface,surface_ref) VALUES (?, 'talk', ?)",
+                    (token, ref),
+                )
+            conn.commit()
+        conn.close()
+        def state():
+            read = _docker_run(
+                istota_image, volume_upgrade.config_dir, db_dir,
+                ['-c', 'python /seed/binding_state.py'], mounts=[(SEED_DIR, '/seed')],
+            )
+            assert read.returncode == 0, read.stdout + read.stderr
+            return json.loads(read.stdout)
+
+        before = state()
+        result = _docker_run(
+            istota_image, volume_upgrade.config_dir, db_dir, ['-c', _istota('init')],
+        )
+        after = state()
+        if ambiguous:
+            assert result.returncode != 0, result.stdout + result.stderr
+            assert 'ambiguous room bindings' in result.stdout + result.stderr
+            assert after == before
+        else:
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert after['unique'], 'upgraded artifact has no unique binding reference index'
+            assert after['count'] == 2
+            assert after['refused'], 'upgraded artifact accepted a duplicate binding reference'

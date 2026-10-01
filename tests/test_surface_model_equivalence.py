@@ -295,7 +295,12 @@ class TestEveryConvertedSiteAnswersWhatItAnsweredBefore:
     @pytest.mark.parametrize("site", SITES, ids=_site_ids)
     @pytest.mark.parametrize("value", HASHABLE_DOMAIN)
     def test_the_two_spellings_agree(self, site, value):
-        assert site.literal(value) == site.predicate(value)
+        # Phase 6 deliberately widens membership for private phone rooms.
+        # The view gate stays equivalent; all other surface cases stay pinned.
+        expected = site.literal(value)
+        if value in ("sms", "whatsapp") and site.name != "scheduler confirmation mirror gate":
+            expected = not expected
+        assert expected == site.predicate(value)
 
     @pytest.mark.parametrize("site", SITES, ids=_site_ids)
     def test_the_predicate_returns_a_real_bool(self, site):
@@ -390,7 +395,9 @@ class TestTheConfirmWriteIsNotEquivalent:
     phase whose whole claim is that it changes nothing.
     """
 
-    def test_the_two_gates_differ_exactly_at_email(self):
+    def test_the_two_gates_differ_at_email_alone(self):
+        # The phone surfaces joined both sets: members since their rooms were
+        # minted, transcript surfaces since the confirm exchange widening.
         from istota.commands import _TRANSCRIPT_SURFACES
 
         differ = [

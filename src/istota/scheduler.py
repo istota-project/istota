@@ -166,6 +166,7 @@ from .surfaces import (
     origin_surface_for_source_type,
 )
 from .transport.registry import _surface_for_source_type
+from .transport.routing import private_phone_room
 from .storage import ensure_user_directories_v2
 
 # Deferred-op handlers were extracted to a sibling module; re-export the
@@ -692,6 +693,108 @@ def _store_room_turn(conn, task, room_token: str | None, body: str) -> int | Non
         conn, room_token, role="assistant", body=body,
         task_id=task.id, origin_surface=task.source_type,
     )
+
+
+# The reserved per-user KV namespace marking a phone room whose pre-room
+# history has been replayed. Keyed on the room token, so a room deleted and
+# minted again on the same binding is a new key and gets a pass of its own,
+# which finds nothing: its predecessor's alias is a tombstone.
+PHONE_ROOM_BACKFILL_NAMESPACE = "_room_backfill"
+_UNFINISHED_TASK_STATUSES = ("pending", "locked", "running", "pending_confirmation")
+
+
+def backfill_phone_rooms(config: Config) -> int:
+    """Replay each minted SMS or WhatsApp room's pre-room history into it.
+
+    room-surface-model §F: the transcript starts at the mint, and history from
+    before it lives on the per-user hash token the mint recorded as a permanent
+    alias. This is the scheduler-side half that folds it in, through
+    `db.backfill_room_messages_from_tasks` rather than a second converter, one
+    room per transaction so a failure costs that room's pass and nothing else.
+    The room stays usable either way; its transcript simply starts later.
+
+    The marker is written only once no task on an alias is still unfinished. A
+    task created on the hash token before the mint and completed after it has
+    no row from the delivery path, which resolves the room by the task's own
+    token; waiting for it here is what puts that answer in the transcript.
+
+    Returns rows written across every room.
+    """
+    try:
+        with db.get_db(config.db_path) as conn:
+            candidates = conn.execute(
+                "SELECT DISTINCT r.token, r.user_id, b.surface FROM rooms r "
+                "JOIN room_bindings b ON b.room_token = r.token "
+                "WHERE b.surface IN ('sms', 'whatsapp') "
+                "AND NOT EXISTS (SELECT 1 FROM istota_kv k "
+                "  WHERE k.user_id = r.user_id AND k.namespace = ? "
+                "  AND k.key = r.token)",
+                (PHONE_ROOM_BACKFILL_NAMESPACE,),
+            ).fetchall()
+    except Exception as e:
+        logger.warning("phone_room_backfill: candidate read failed: %s", e)
+        return 0
+    total = 0
+    for row in candidates:
+        try:
+            with db.get_db(config.db_path) as conn:
+                total += _backfill_phone_room(
+                    conn, row["token"], row["user_id"], row["surface"],
+                )
+        except Exception as e:
+            logger.warning(
+                "phone_room_backfill: room %s failed, retrying next pass: %s",
+                row["token"], e,
+            )
+    return total
+
+
+def _backfill_phone_room(conn, room_token: str, user_id: str, surface: str) -> int:
+    """One room's pass. Returns rows written; writes the marker when done.
+
+    Only the owner's own private phone room qualifies: a WhatsApp group carries
+    a `whatsapp` binding too, and a room another human reads is no private
+    transcript (`routing.private_phone_room`).
+    """
+    if private_phone_room(conn, surface, user_id) != room_token:
+        return 0
+    # Asked before the backfill reads, not after: a task completing between
+    # the two would be missed by the read and not seen as unfinished, and the
+    # marker would close the room on it for good. Asked first, anything not
+    # unfinished now is already completed and visible to the read below.
+    aliases = [
+        ref for ref in db.room_ref_tokens(conn, room_token, include_surface_refs=False)
+        if ref != room_token
+    ]
+    unfinished = None
+    if aliases:
+        marks = ", ".join("?" for _ in aliases)
+        states = ", ".join("?" for _ in _UNFINISHED_TASK_STATUSES)
+        unfinished = conn.execute(
+            f"SELECT 1 FROM tasks WHERE conversation_token IN ({marks}) "
+            f"AND user_id = ? AND status IN ({states}) LIMIT 1",
+            (*aliases, user_id, *_UNFINISHED_TASK_STATUSES),
+        ).fetchone()
+    before = db.room_max_message_id(conn, room_token)
+    caught_up = db.get_room_read_state(conn, room_token, "web", user_id) >= before > 0
+    inserted = db.backfill_room_messages_from_tasks(
+        conn, room_token, alias_owner=user_id,
+    )
+    if inserted and caught_up:
+        # The history was read on the phone; a reader who had seen everything
+        # in web is not shown it again as unread. One who had not keeps the
+        # backfilled rows as unread too: an id cursor cannot say "old rows
+        # read, newer rows not".
+        db.set_room_read_state(
+            conn, room_token, "web", db.room_max_message_id(conn, room_token), user_id,
+        )
+    if unfinished:
+        return inserted
+    db.kv_set(
+        conn, user_id, PHONE_ROOM_BACKFILL_NAMESPACE, room_token,
+        json.dumps({"rows": inserted}),
+    )
+    return inserted
 
 
 def _room_turn_belongs_here(
@@ -2962,6 +3065,11 @@ def process_one_task(
     # job mailing an external address — and stays task-only.
     with db.get_db(config.db_path) as _room_conn:
         transcript_token = transcript_room_for_task(_room_conn, config, task)
+        from .transport.routing import plan_user_turn_mirrors
+        user_turn_mirrors = (
+            plan_user_turn_mirrors(_room_conn, config, transcript_token, task.source_type)
+            if transcript_token else []
+        )
 
     # Split by whether the push target IS the exchange's own room. For a
     # canonical room view, a push at that room *is* the assistant row —
@@ -3093,6 +3201,13 @@ def process_one_task(
     _own_origin_web = plan_web and task.source_type == "web"
     _own_origin_sms = plan_sms and task.source_type == "sms"
     _own_origin_whatsapp = plan_whatsapp and task.source_type == "whatsapp"
+    # A WhatsApp group's turn has no private transcript: its answer belongs to
+    # the group's room, and when the group is archived or unbound the planned
+    # channel is None, which must not read as the user's own chat.
+    _whatsapp_group_turn = False
+    if plan_whatsapp and task.source_type == "whatsapp":
+        from .transport.whatsapp.outbound import is_group_task
+        _whatsapp_group_turn = is_group_task(config, task)
     # An email thread room's own task (multiplayer D6): its only leg is the
     # reply-all, which must never carry the question, and the room is shared,
     # so the question parks and goes to the principal's side room and its
@@ -3500,6 +3615,31 @@ def process_one_task(
                         ),
                     ):
                         _store_room_turn(conn, task, transcript_token, room_body)
+                    # A phone leg's own transcript row (room-surface-model §F):
+                    # a minted SMS or WhatsApp room is the readable copy of what
+                    # was texted. Written here, inside the transaction and ahead
+                    # of the send, so a blocked send (window closed, budget,
+                    # opt-out) still leaves it, and no network call runs under
+                    # the lock. An origin-path answer already has its row from
+                    # the conversational store above; `store_turn_message`
+                    # dedups on (room, role, task), so this adds none. A miss
+                    # writes nothing and the send goes ahead as before.
+                    for _phone_surface, _phone_planned in (
+                        ("sms", plan_sms), ("whatsapp", plan_whatsapp),
+                    ):
+                        if not _phone_planned:
+                            continue
+                        if _phone_surface == "whatsapp" and _whatsapp_group_turn:
+                            continue
+                        _phone_dest = next(
+                            d for d in plan if d.surface == _phone_surface
+                        )
+                        _phone_room = private_phone_room(
+                            conn, _phone_surface, task.user_id,
+                            _phone_dest.channel,
+                        )
+                        if _phone_room:
+                            _store_room_turn(conn, task, _phone_room, delivery_result)
                     if plan_talk and talk_token:
                         # `room_body`, not `delivery_result`: for an email task
                         # whose result *is* the `{"subject","body","format"}`
@@ -3980,10 +4120,17 @@ def process_one_task(
         # answering (ISSUE-247). What used to carry that on Talk was
         # `_notify_confirmed_email_result`'s `Email reply sent to <sender>`
         # prefix, and only for a gated task.
+        # Only repost to a planned binding that the result itself will reach.
+        # The planner chooses the address and authorship mode; content remains
+        # origin-specific, especially email's sender/subject-only policy.
+        _user_mirror = next(
+            (m for m in user_turn_mirrors
+             if m.surface == "talk" and m.surface_ref == talk_token), None,
+        )
         _repost = None
-        if _talk_is_mirror and task.source_type == "web" and task.prompt:
+        if _user_mirror and _talk_is_mirror and task.source_type == "web" and task.prompt:
             _repost = _format_mirror_user_repost(config, task)
-        elif task.source_type == "email" and transcript_token:
+        elif _user_mirror and task.source_type == "email":
             _repost = _format_email_user_repost(config, task, talk_token)
         if _repost:
             _user_posted = False
@@ -4001,7 +4148,7 @@ def process_one_task(
                 run_coro(post_result_to_talk(
                     config, task, _repost,
                     reference_id=f"istota:task:{task.id}:prompt",
-                    target_token=talk_token,
+                    target_token=_user_mirror.surface_ref,
                 ))
         response_msg_id = run_coro(post_result_to_talk(
             config, task, post_talk_message, use_reply_threading=True,
@@ -6991,7 +7138,7 @@ def _effective_processed_email_retention(sched: SchedulerConfig) -> int:
     return configured
 
 
-def _confirmation_notice_token(task_info: dict) -> str | None:
+def _confirmation_notice_token(task_info: dict, conn=None) -> str | None:
     """The Talk room an expiry notice may fall back to, or None.
 
     The old code passed ``conversation_token`` verbatim, which for an email gate
@@ -7006,7 +7153,11 @@ def _confirmation_notice_token(task_info: dict) -> str | None:
     token = task_info.get("conversation_token")
     if not token:
         return None
-    if token.startswith(("web-", "repl-")):
+    if conn is not None:
+        binding = db.get_room_binding(conn, token, "talk")
+        if binding:
+            return binding.surface_ref
+    if db.is_canonical_room_token(token) or token.startswith(("web-", "repl-")):
         return None
     if is_synthetic_email_thread_token(token):
         return None
@@ -7143,12 +7294,14 @@ def run_cleanup_checks(config: Config) -> None:
                 actionable=False,
                 params={"task_id": task_info["id"],
                         "source_type": task_info.get("source_type")},
-                room_token=_confirmation_notice_token(task_info),
+                room_token=(task_info["conversation_token"]
+                            if db.is_canonical_room_token(task_info.get("conversation_token"))
+                            else _confirmation_notice_token(task_info)),
             )
             expiry_notices.append((
                 task_info["user_id"],
                 notice,
-                _confirmation_notice_token(task_info),
+                _confirmation_notice_token(task_info, conn),
                 expired_row.notification_id if expired_row is not None else None,
             ))
 
@@ -7201,7 +7354,7 @@ def run_cleanup_checks(config: Config) -> None:
                     "A task you submitted was cancelled because it was pending too long "
                     "without being processed. Please try again or contact support if this "
                     "keeps happening.",
-                    task_info["conversation_token"],
+                    _confirmation_notice_token(task_info, conn),
                 ))
 
         # 4. Clean up old completed tasks
@@ -8631,6 +8784,9 @@ def build_interval_gates(
 
         run_coro(drain_room_notices(config))
 
+    def _phone_room_backfill(now: float) -> None:
+        backfill_phone_rooms(config)
+
     def _whatsapp_pairing(now: float) -> None:
         # Inline on the dispatch thread, deliberately: the poll's own cheap
         # read is what makes an every-tick gate affordable, and
@@ -8896,6 +9052,16 @@ def build_interval_gates(
             name="room-notices",
             run=_room_notices,
             fixed_interval=30,
+            background=True,
+        ),
+        # A minted SMS or WhatsApp room's history from before the mint
+        # (room-surface-model §F). Off the loop: a first pass over a long phone
+        # history is a write per turn. Once a room is marked done the pass is
+        # one indexed read.
+        IntervalGate(
+            name="phone-room-backfill",
+            run=_phone_room_backfill,
+            fixed_interval=60,
             background=True,
         ),
         IntervalGate(

@@ -98,7 +98,7 @@ def thread_message_ids(email) -> list[str]:
 
 
 def thread_room_token(root: str) -> str:
-    """The canonical token a thread's room is registered under.
+    """The legacy canonical token, retained for migration tooling.
 
     A digest, never the id: the token reaches task rows, logs and the prompt
     header, and a Message-ID can carry a hostname or a local part.
@@ -127,6 +127,7 @@ def find_thread_room(conn, config: "Config", email) -> ThreadRoom | None:
     """The room this message's thread already is, or None. Reads only."""
     for mid in thread_message_ids(email):
         token = db.resolve_room_token(conn, SURFACE, mid) or _token_by_stored_mail(conn, mid)
+        token = db._canonical_room_token(conn, token, cross_surface=False) if token else None
         room = db.get_room(conn, token) if token else None
         binding = db.get_room_binding(conn, token, SURFACE) if room else None
         if binding is None:
@@ -139,19 +140,18 @@ def find_thread_room(conn, config: "Config", email) -> ThreadRoom | None:
 
 def _token_by_stored_mail(conn, message_id: str) -> str | None:
     """The thread room a message id was stored under, by us or by the bot."""
-    row = conn.execute(
-        "SELECT thread_id FROM processed_emails WHERE message_id = ? "
-        "AND thread_id LIKE 'email-thread-%' ORDER BY id DESC LIMIT 1",
-        (message_id,),
-    ).fetchone()
-    if row is not None:
-        return row["thread_id"]
-    row = conn.execute(
-        "SELECT conversation_token FROM sent_emails WHERE message_id = ? "
-        "AND conversation_token LIKE 'email-thread-%' ORDER BY id DESC LIMIT 1",
-        (message_id,),
-    ).fetchone()
-    return row["conversation_token"] if row is not None else None
+    for table, column in (("processed_emails", "thread_id"),
+                          ("sent_emails", "conversation_token")):
+        for row in conn.execute(
+            f"SELECT {column} FROM {table} WHERE message_id = ? ORDER BY id DESC",
+            (message_id,),
+        ):
+            if not row[0]:
+                continue
+            token = db._canonical_room_token(conn, row[0], cross_surface=False)
+            if db.get_room_binding(conn, token, SURFACE) is not None:
+                return token
+    return None
 
 
 def is_present(conn, room_token: str, sender: str | None) -> bool:
@@ -224,15 +224,14 @@ def resolve_thread(
     if not (ours or any(address in owned for address, _ in people)):
         return None
     root = ids[0]
-    token = thread_room_token(root)
-    if db.get_room(conn, token) is not None:
+    if find_thread_room(conn, config, email) is not None:
         # The thread's room exists but the caller could not use it (its host is
         # no longer configured): never re-found it with this message's people.
         return None
-    db.register_room(
-        conn, token, owner_user_id, origin=SURFACE,
+    token = db.register_room(
+        conn, None, owner_user_id, origin=SURFACE,
         name=_room_name(getattr(email, "subject", None)),
-    )
+    ).token
     db.add_room_binding(conn, token, SURFACE, root)
     # The people on the first message are who the thread was written for.
     _sync(conn, config, token, people, acknowledged=True)

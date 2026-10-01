@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 
-from ... import commands, confirmations, db
+from ... import commands, confirmations, db, room_veto
 from ...config import Config
 from ...user_profiles import is_e164, short_fingerprint
-from .._types import IncomingMessage
-from ..ingest import ingest_message
+from ..ingest import record_phone_turn
 from . import sms_conversation_token
 from ._types import SmsEventResult
 from .outbound import (
@@ -69,10 +69,28 @@ def _own_parked_confirmation(conn, user_id: str, token: str):
     alone: a question parked in this SMS conversation. `!confirm <id> yes|no`
     stays as the explicit, deliberate route to any other surface's question.
     """
-    task = db.get_pending_confirmation(conn, token)
+    if conn.execute(
+        "SELECT 1 FROM room_token_migration WHERE old_token=?", (token,),
+    ).fetchone() and db.get_room(
+        conn, db._canonical_room_token(conn, token, cross_surface=False),
+    ) is None:
+        return None
+    task = db.get_pending_confirmation(conn, token, user_id=user_id)
     if task is None or task.user_id != user_id:
         return None
     return task
+
+
+def record_sms_turn(
+    conn, config, user_id, text, *, record_only=False, external_id=None,
+    reply_to_content=None,
+):
+    """Record an accepted SMS turn and its permanent pre-room identity."""
+    return record_phone_turn(
+        conn, config, surface="sms", surface_ref=sms_conversation_token(user_id),
+        user_id=user_id, text=text, channel_name="SMS", record_only=record_only,
+        external_id=external_id, reply_to_content=reply_to_content,
+    )
 
 
 def handle_provider_event(
@@ -155,6 +173,10 @@ def handle_provider_event(
     if not event.text.strip():
         _set_disposition(conn, event, "empty")
         return SmsEventResult("empty")
+    token = db.resolve_room_token(conn, "sms", token) or token
+    if room_veto.is_vetoed(conn, token):
+        _set_disposition(conn, event, "vetoed")
+        return SmsEventResult("vetoed")
     # Ahead of the bare-answer parse and the `!` command dispatch, which
     # refuses `reply` off a room: `!relay reply ID yes` answers the relay and
     # can never approve a parked task.
@@ -181,9 +203,11 @@ def handle_provider_event(
         # existed only for Path C's "any surface" fallthrough.
         parked = _own_parked_confirmation(conn, user_id, token)
         if parked is not None:
+            turn = record_sms_turn(conn, config, user_id, event.text.strip(), record_only=True)
             response = confirmations.apply_answer(
                 conn, parked, answer, config, by="sms",
             )
+            _ack_in_private_room(conn, user_id, turn.room_token, response)
             _set_disposition(conn, event, "confirmation_answer")
             return SmsEventResult(
                 "confirmation_answer", user_id=user_id, response_text=response,
@@ -193,23 +217,29 @@ def handle_provider_event(
                 preferred_from_number=event.to_number,
             )
     if event.text.startswith("!"):
+        turn = record_sms_turn(conn, config, user_id, event.text.strip(), record_only=True)
         _set_disposition(conn, event, "command")
         return SmsEventResult(
-            "command", user_id=user_id, command_text=event.text,
+            "command", user_id=user_id, command_text=event.text, room_token=turn.room_token,
             response_logical_key=f"command:{event.provider}:{event.provider_message_id}",
             preferred_from_number=event.to_number,
         )
-    confirmations.cancel_for_conversation(conn, token, user_id, by="sms")
-    task_id = ingest_message(
-        conn, config,
-        IncomingMessage(
-            user_id=user_id, text=event.text.strip(), source_type="sms",
-            surface="sms", channel_token=token, output_target="sms",
-            mirror_to_room=False, queue="foreground",
-        ),
+    turn = record_sms_turn(
+        conn, config, user_id, event.text.strip(),
+        external_id=f"{event.provider}:{event.provider_message_id}",
     )
+    confirmations.cancel_for_conversation(conn, turn.room_token, user_id, by="sms")
+    task_id = turn.task_id
     _set_disposition(conn, event, "task", task_id)
     return SmsEventResult("task", user_id=user_id, task_id=task_id)
+
+
+def _ack_in_private_room(conn, user_id, room_token, ack):
+    """Put a confirmation answer's ack beside the answer, in the private room only."""
+    from ..routing import is_private_phone_room
+
+    if is_private_phone_room(conn, "sms", user_id, room_token):
+        confirmations.record_ack(conn, room_token, ack=ack, origin_surface="sms")
 
 
 async def deliver_event_response(
@@ -245,14 +275,25 @@ async def deliver_event_response(
         # none — `!route` and its neighbours read it and would report that the
         # deployment has no surfaces at all.
         command = await commands.dispatch(
-            config, result.user_id, sms_conversation_token(result.user_id),
+            config, result.user_id, result.room_token or sms_conversation_token(result.user_id),
             result.command_text, surface="sms",
         )
         response = command.text or ""
     if not response or not result.response_logical_key or not result.user_id:
         return
-    await deliver_sms(
-        config, providers, logical_key=result.response_logical_key,
-        user_id=result.user_id, text=response,
-        preferred_from_number=result.preferred_from_number,
-    )
+    try:
+        await deliver_sms(
+            config, providers, logical_key=result.response_logical_key,
+            user_id=result.user_id, text=response,
+            preferred_from_number=result.preferred_from_number,
+        )
+    finally:
+        if result.command_text:
+            # The command is already a turn in the room; its reply joins it,
+            # after the send and whatever the send returned.
+            from ...notifications import mirror_phone_command_reply
+
+            await asyncio.to_thread(
+                mirror_phone_command_reply, config, "sms", result.user_id,
+                result.room_token, response, result.response_logical_key,
+            )
