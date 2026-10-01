@@ -13,6 +13,10 @@ beside USER.md. Two namespaces, both reserved:
   write that went through the ops engine) and ``lint_seen`` (the Phase-A lint
   dedup set).
 
+A group's `GROUP.md` writes go to the same `_memory_audit` namespace in that
+group's `group_kv` rather than in the writer's `istota_kv`
+(`write_group_audit_log`); the reserved prefix covers both tables.
+
 A write event is one of:
   - a nightly curator run (one entry batches all that night's ops)
   - a runtime CLI invocation (one entry per CLI call, typically one op)
@@ -113,29 +117,41 @@ def _with_conn(config: "Config", fn, *, default=None, what: str = "operation"):
 # ---------------------------------------------------------------------------
 
 
-def _next_audit_key(conn, user_id: str, ts: str) -> str:
-    """An unused key for `ts`, as `<ts>-<NNN>`.
+def _next_key(keys, ts: str) -> str:
+    """An unused key for `ts`, as `<ts>-<NNN>`, given the keys already at `ts`.
 
     Several entries can land in the same second — a nightly run emits
     `legacy_detected`, then `lint_candidate`, then `batch` — and the timestamp
     has one-second resolution, so the counter is what stops the second write
-    overwriting the first through `kv_set`'s upsert.
+    overwriting the first through the store's upsert.
 
     The maximum is taken by parsing rather than by `ORDER BY key DESC`: a
     counter past 999 would widen to four digits and sort below `999`
     lexically. Rows-per-second here is a handful, so the scan is free.
     """
     highest = -1
+    for key in keys:
+        try:
+            highest = max(highest, int(str(key).rsplit("-", 1)[1]))
+        except (IndexError, ValueError):
+            continue
+    return f"{ts}-{highest + 1:03d}"
+
+
+def _next_audit_key(conn, user_id: str, ts: str) -> str:
     cursor = conn.execute(
         "SELECT key FROM istota_kv WHERE user_id = ? AND namespace = ? AND key LIKE ?",
         (user_id, AUDIT_NAMESPACE, f"{ts}-%"),
     )
-    for row in cursor.fetchall():
-        try:
-            highest = max(highest, int(str(row["key"]).rsplit("-", 1)[1]))
-        except (IndexError, ValueError):
-            continue
-    return f"{ts}-{highest + 1:03d}"
+    return _next_key((row["key"] for row in cursor.fetchall()), ts)
+
+
+def _next_group_audit_key(conn, group_id: str, ts: str) -> str:
+    cursor = conn.execute(
+        "SELECT key FROM group_kv WHERE group_id = ? AND namespace = ? AND key LIKE ?",
+        (group_id, AUDIT_NAMESPACE, f"{ts}-%"),
+    )
+    return _next_key((row["key"] for row in cursor.fetchall()), ts)
 
 
 def write_audit_log(
@@ -190,6 +206,46 @@ def write_audit_log(
         )
 
     _with_conn(config, _write, what=f"audit write for {user_id}")
+
+
+def write_group_audit_log(
+    config: "Config",
+    group_id: str,
+    user_id: str,
+    *,
+    task_id: str | None,
+    applied: list[dict],
+    rejected: list[dict],
+) -> None:
+    """Append one runtime write to a group's own audit trail.
+
+    `GROUP.md` has several authors, so its provenance belongs to the group, not
+    to whichever member wrote: the entry goes to `group_kv` under the same
+    reserved `_memory_audit` namespace a user's trail uses, keyed the same way,
+    with `written_by` set to the writer. It is the file-side counterpart of
+    `group_kv.written_by`. Best-effort; never raises.
+    """
+    if not applied and not rejected:
+        return
+    entry = {
+        "ts": _utc_now(),
+        "group_id": group_id,
+        "user_id": user_id,
+        "task_id": task_id,
+        "source": "runtime",
+        "entry_kind": "batch",
+        "applied": applied,
+        "rejected": rejected,
+    }
+
+    def _write(conn):
+        key = _next_group_audit_key(conn, group_id, entry["ts"])
+        db.group_kv_set(
+            conn, group_id, AUDIT_NAMESPACE, key,
+            json.dumps(entry, ensure_ascii=False), user_id,
+        )
+
+    _with_conn(config, _write, what=f"group audit write for {group_id}")
 
 
 def read_audit_entries(
