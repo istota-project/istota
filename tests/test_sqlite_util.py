@@ -519,7 +519,7 @@ class TestConnectReadOnly:
 #: ``name -> (opener, expected pragmas)``. The openers each build the caller's
 #: own helper against a scratch file. Read the *columns*, counted over all
 #: fourteen converted callers (the twelve below plus the two bare ones in
-#: ``TestTheTwoBareCallers``): ``foreign_keys`` splits them 5/9, ``synchronous``
+#: ``TestTheBareCallers``): ``foreign_keys`` splits them 5/9, ``synchronous``
 #: 1/13, ``row_factory`` 12/2 and ``busy_timeout`` 12/2 — ``money.config_store``
 #: and ``money.cli`` are the two that wait five seconds. Nothing about
 #: ``open_db``'s defaults can move all four at once, which is what makes this a
@@ -626,10 +626,35 @@ class TestConnectWithoutCreate:
         assert list(tmp_path.iterdir()) == [path]
 
 
-class TestTheTwoBareCallers:
+class TestTheBareCallers:
     """`money/cli` and `money/routes` hand a live connection on rather than
-    wrapping a block, so they take `sqlite_util.connect` and close it
-    themselves. Measured the same way."""
+    wrapping a block, and `room_relocate` runs its own transactions, so they
+    take `sqlite_util.connect` and close it themselves. Measured the same way."""
+
+    def test_room_relocate_migration_open(self, tmp_path, monkeypatch):
+        from istota import room_relocate
+
+        path = tmp_path / "rooms.db"
+        sqlite3.connect(path).close()
+        seen = {}
+        real = sqlite_util.connect
+
+        def _measure(*args, **kwargs):
+            conn = real(*args, **kwargs)
+            seen.update(_pragmas(conn))
+            conn.close()
+            # Stop here: the migration itself is test_room_relocate's.
+            raise RuntimeError("measured")
+
+        monkeypatch.setattr(room_relocate.sqlite_util, "connect", _measure)
+        assert room_relocate.migrate_database(path) == room_relocate.EXIT_REFUSED
+        assert seen == {
+            "busy_timeout": 5000,
+            # Set by the migrator after the vector extension loads.
+            "foreign_keys": 0,
+            "synchronous": 2,
+            "row_factory": True,
+        }
 
     def test_money_routes_portfolio_conn(self, tmp_path):
         from istota.money import routes
