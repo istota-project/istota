@@ -5614,8 +5614,8 @@ def talk_refs_for_member(
 
 
 #: Surfaces whose binding makes a room the transcript of a phone thread
-#: (room-surface-model Phase 6). A private one is read-only in web; whether a
-#: binding is private is `transport.routing.phone_transcript_surface`'s test.
+#: (room-surface-model Phase 6). Any such room is read-only in web; whether a
+#: binding is private or a WhatsApp group is `transport.routing.phone_room`'s test.
 PHONE_ROOM_SURFACES = ("sms", "whatsapp")
 
 

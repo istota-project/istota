@@ -2799,10 +2799,14 @@ export interface ChatRoom {
   /** The phone surface this room is bound to, a WhatsApp group included; null
    * for every other room. What the sidebar badge and the settings line read. */
   phone_surface?: 'sms' | 'whatsapp' | null;
-  /** The room is the transcript of its creator's private phone thread: web
+  /** The room is bound to SMS or WhatsApp, a WhatsApp group included: web
    * reads it and the server refuses a send into it, so no composer. True for
    * every member, since adding a reader does not make the thread writable. */
   read_only?: boolean;
+  /** The phone binding is a WhatsApp group, not the creator's private thread.
+   * Its parked questions are answered from web and it takes members; only the
+   * composer is gone (ISSUE-585). */
+  phone_group?: boolean;
   /** More than one human reads this room, a Talk guest included. */
   shared?: boolean;
   /** The policy of a shared room; null for a room one human reads and for a

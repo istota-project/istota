@@ -198,7 +198,13 @@ describe('the phone room glyphs (ISSUE-584)', () => {
     setRooms([
       { name: 'SMS', origin: 'sms', phone_surface: 'sms', read_only: true },
       { name: 'WhatsApp', origin: 'whatsapp', phone_surface: 'whatsapp', read_only: true },
-      { name: 'Family', phone_surface: 'whatsapp', read_only: false, shared: true },
+      {
+        name: 'Family',
+        phone_surface: 'whatsapp',
+        read_only: true,
+        phone_group: true,
+        shared: true,
+      },
     ]);
     renderPage();
     await waitFor(() => expect(glyph('Family')).toBeTruthy());
@@ -220,7 +226,15 @@ describe('the phone room glyphs (ISSUE-584)', () => {
   });
 
   it('puts the same glyph in the header', async () => {
-    setRooms([{ name: 'Family', phone_surface: 'whatsapp', read_only: false, shared: true }]);
+    setRooms([
+      {
+        name: 'Family',
+        phone_surface: 'whatsapp',
+        read_only: true,
+        phone_group: true,
+        shared: true,
+      },
+    ]);
     renderPage();
     const mark = () => document.querySelector<HTMLElement>('.header .header-phone [data-whatsapp]');
     await waitFor(() => expect(mark()).toBeTruthy());

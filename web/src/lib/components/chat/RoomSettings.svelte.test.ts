@@ -658,9 +658,12 @@ describe('a phone room (room-surface-model Stage 24)', () => {
     expect(screen.queryByText('Nextcloud Talk')).toBeNull();
   });
 
-  it('names a WhatsApp group as a group', () => {
-    mount(room({ origin: 'whatsapp', phone_surface: 'whatsapp', read_only: false }));
-    expect(screen.getByText(/this room is a WhatsApp group/)).toBeTruthy();
+  it('names a WhatsApp group as a read-only group', () => {
+    mount(
+      room({ origin: 'whatsapp', phone_surface: 'whatsapp', read_only: true, phone_group: true }),
+    );
+    expect(screen.getByText(/this room is a WhatsApp group\. It is read-only here/)).toBeTruthy();
+    expect(screen.queryByText(/transcript of a WhatsApp conversation/)).toBeNull();
   });
 
   it('leaves an ordinary web room on the Talk line', () => {

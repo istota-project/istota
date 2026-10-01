@@ -440,7 +440,7 @@
         roomId={room.id}
         {userId}
         talkBound={onTalk}
-        phoneLabel={room.read_only ? phoneLabel : null}
+        phoneLabel={room.read_only && !room.phone_group ? phoneLabel : null}
         onChanged={onMembersChanged}
         {onLeft}
       />
@@ -471,11 +471,12 @@
     <div class="field">
       <span>Connected to</span>
       <p class="caption phone-binding">
-        {#if room.read_only}
+        {#if room.phone_group}
+          {phoneLabel} — this room is a {phoneLabel} group. It is read-only here; write in the group on
+          {phoneLabel}.
+        {:else}
           {phoneLabel} — this room is the transcript of a {phoneLabel} conversation. It is read-only here;
           reply by {phoneLabel}.
-        {:else}
-          {phoneLabel} — this room is a {phoneLabel} group.
         {/if}
       </p>
     </div>

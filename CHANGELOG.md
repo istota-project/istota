@@ -156,6 +156,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A WhatsApp group room in web chat no longer shows a composer that does nothing. A message sent there became a web task that reached nobody in the group, and an unaddressed one got no answer either. Group rooms are now read-only in web chat like your one-to-one SMS and WhatsApp rooms, and the server refuses a send; a group's waiting questions can still be answered from web chat (ISSUE-585).
 - The nightly sleep cycle no longer holds the database write lock while it waits on a model call. It inserted knowledge facts and then ran USER.md curation on the same open transaction, so for about a minute every other writer failed with `database is locked`, including the web credentials page, which then showed nothing.
 
 - The credential vault card counts each credential once instead of counting its password, username and other fields separately. The credentials card description now wraps at the same width as the vault card.

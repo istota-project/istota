@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 # The static room-model table. A stdlib-only leaf that imports nothing, so a
 # module-level import here costs nothing and introduces no cycle — unlike
@@ -1059,18 +1059,27 @@ def private_phone_ref(surface: str, user_id: str) -> str | None:
     return None
 
 
-def phone_transcript_surface(conn, room_token) -> str | None:
-    """``'sms'`` or ``'whatsapp'`` when the room is a private phone thread's
-    transcript, else None.
+class PhoneRoom(NamedTuple):
+    """A room bound to SMS or WhatsApp: which surface, and whether it is a
+    WhatsApp group rather than the creator's own private thread."""
 
-    The read-only test (decided 2026-10-01): web reads such a room and may not
-    write into it, so the send route refuses and the client renders no
-    composer. Asked of the room, not of a reader, so it answers the same for
-    every member: the binding's ref has to be the room creator's own private
-    thread token, the rule `whatsapp.outbound.is_group_task` uses. A WhatsApp
-    group room is bound by its group JID and keeps its composer. Unlike
-    `private_phone_room` this does not drop a room another member was added to;
-    adding a reader does not make a phone thread writable from web.
+    surface: str
+    group: bool
+
+
+def phone_room(conn, room_token) -> PhoneRoom | None:
+    """The room's SMS or WhatsApp binding, if it has one, else None.
+
+    Web's read-only test (decided 2026-10-01, widened to groups by ISSUE-585):
+    web reads a phone-bound room and may not write into it, so the send route
+    refuses and the client renders no composer. A private thread is answered
+    by text; a group room has no web turn that reaches the group, since only
+    the group's own turn sends to its JID (`whatsapp.outbound.is_group_task`),
+    so a web send there would be a side channel nobody in the group reads.
+
+    Asked of the room, not of a reader, so it answers the same for every
+    member. ``group`` is the private-thread test inverted: the binding's ref is
+    not the room creator's own private thread token. SMS has no groups.
     """
     from .. import db
 
@@ -1083,11 +1092,31 @@ def phone_transcript_surface(conn, room_token) -> str | None:
     )
     if room is None:
         return None
+    group = None
     for binding in db.list_room_bindings(conn, room.token):
-        ref = private_phone_ref(binding.surface, room.user_id)
-        if ref is not None and binding.surface_ref == ref:
-            return binding.surface
-    return None
+        if binding.surface not in db.PHONE_ROOM_SURFACES:
+            continue
+        if binding.surface_ref == private_phone_ref(binding.surface, room.user_id):
+            return PhoneRoom(binding.surface, False)
+        group = PhoneRoom(binding.surface, True)
+    return group
+
+
+def phone_transcript_surface(conn, room_token) -> str | None:
+    """``'sms'`` or ``'whatsapp'`` when the room is a private phone thread's
+    transcript, else None.
+
+    The narrower half of :func:`phone_room`: a private thread has one reader
+    and its parked questions are answered by text. A WhatsApp group room is
+    read-only in web too, but takes members and answers a parked question from
+    web, so it is None here. Unlike `private_phone_room` this does not drop a
+    room another member was added to; adding a reader does not make a phone
+    thread writable from web.
+    """
+    found = phone_room(conn, room_token)
+    if found is None or found.group:
+        return None
+    return found.surface
 
 
 def transcript_room_for_task(conn, config: "Config", task: "db.Task") -> str | None:
