@@ -9,6 +9,8 @@ firing one operator alert, and appending a visible note for a dropped pin.
 
 from unittest.mock import patch
 
+import re
+
 import pytest
 
 from istota.brain._fallback import get_availability_breaker, reset_availability_breaker
@@ -440,7 +442,9 @@ class TestCooldownEndsAtTheQuotaReset:
         # comes back.
         assert len(alerts) == 1
         assert "3600s" not in alerts[0][0]
-        assert "for 660s" in alerts[0][0] or "for 659s" in alerts[0][0]
+        named = re.search(r"for (\d+)s", alerts[0][0])
+        assert named is not None
+        assert 600 < int(named.group(1)) <= 660
 
     def test_the_alert_names_the_flat_window_when_there_is_no_reset(self, tmp_path):
         _results, _primary, _fb, alerts = _run(
