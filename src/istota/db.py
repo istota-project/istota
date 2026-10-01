@@ -1142,6 +1142,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_room_data_grants(conn)
     _migrate_side_rooms(conn)
     _migrate_room_policy(conn)
+    _migrate_room_veto(conn)
     _migrate_room_epochs(conn)
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
@@ -4211,6 +4212,7 @@ def delete_web_chat_room(
     conn.execute("DELETE FROM room_participants WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_data_grants WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_policy WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_vetoes WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_epochs WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM rooms WHERE token = ?", (token,))
     # Drop every participant's handle for the token, not just the requester's
@@ -4713,6 +4715,11 @@ def _canonical_room_token(conn: sqlite3.Connection, token: str) -> str:
     if get_room(conn, token) is not None:
         return token
     return find_room_token_by_ref(conn, token) or token
+
+
+def room_ref_tokens(conn: sqlite3.Connection, room_token: str) -> list[str]:
+    """`_room_ref_tokens`, for callers outside this module."""
+    return _room_ref_tokens(conn, room_token)
 
 
 def _room_ref_tokens(conn: sqlite3.Connection, room_token: str) -> list[str]:
@@ -7561,7 +7568,10 @@ CREATE TABLE IF NOT EXISTS room_policy (
     record_guests INTEGER NOT NULL DEFAULT 1,
     vetoed_by    INTEGER REFERENCES room_participants(id),
     max_bot_turns_without_human INTEGER NOT NULL DEFAULT 3,
-    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    vetoed_at    TEXT,
+    veto_on_by   TEXT,
+    announced_at TEXT
 )
 """
 
@@ -7578,6 +7588,39 @@ def _migrate_room_policy(conn: sqlite3.Connection) -> None:
     try:
         conn.execute(
             "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_policy_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+
+
+# Kept equal to schema.sql's copy by tests/test_room_veto.py.
+_ROOM_VETOES_DDL = """
+CREATE TABLE IF NOT EXISTS room_vetoes (
+    room_token     TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    person         TEXT NOT NULL,
+    participant_id INTEGER REFERENCES room_participants(id),
+    vetoed_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    agreed_at      TEXT,
+    PRIMARY KEY (room_token, person)
+)
+"""
+
+
+def _migrate_room_veto(conn: sqlite3.Connection) -> None:
+    """The participant veto and the announcement (multiplayer Stage 20).
+
+    Three `room_policy` columns and the `room_vetoes` table. Markered
+    (`room_veto_v1`), nothing backfilled: no room is off before somebody
+    switches it off, and a room with a guest that was never announced to is
+    owed its announcement.
+    """
+    _add_columns(conn, "room_policy", {
+        "vetoed_at": "TEXT", "veto_on_by": "TEXT", "announced_at": "TEXT",
+    })
+    conn.execute(_ROOM_VETOES_DDL)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_veto_v1')"
         )
     except sqlite3.OperationalError:
         return  # marker table not created yet (very early fresh install)

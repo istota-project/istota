@@ -177,6 +177,10 @@ class WhatsAppEventResult:
     conversation_token: str | None = None
     # D14: the host left this group, so the bridge leaves it after the commit.
     leave_group_jid: str | None = None
+    # A reply that goes into this group room rather than the sender's own
+    # chat (the veto's answer, multiplayer D8), on `group_post_owner`'s ledger.
+    group_post_room: str | None = None
+    group_post_owner: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1302,16 +1306,18 @@ async def deliver_event_responses(
         except Exception:
             logger.warning("whatsapp.outbound.response_failed", exc_info=True)
             continue
-        if not text or not result.response_logical_key or not result.user_id:
+        owner = result.group_post_owner if result.group_post_room else result.user_id
+        if not text or not result.response_logical_key or not owner:
             continue
         try:
             await deliver_whatsapp(
                 config,
                 logical_key=result.response_logical_key,
-                user_id=result.user_id,
+                user_id=owner,
                 text=text,
                 task_id=result.task_id,
                 ignore_opt_out=result.response_ignores_opt_out,
+                group_room=result.group_post_room,
             )
         except Exception:
             logger.warning("whatsapp.outbound.response_failed", exc_info=True)

@@ -3130,6 +3130,24 @@ def process_one_task(
     # releases the post and completes the task rather than re-running it
     # (`confirmations.approve`). A host who changed or left since the turn
     # gets nothing, and neither does the room.
+    # The room was switched off while this task ran (multiplayer D12): its
+    # answer is not recorded there and does not reach it.
+    if not dry_run:
+        from .room_veto import task_room_vetoed
+        with db.get_db(config.db_path) as conn:
+            vetoed = task_room_vetoed(conn, task)
+            if vetoed:
+                db.cancel_task(conn, task_id)
+                db.log_task(conn, task_id, "info",
+                            "Answer dropped: the room was switched off")
+        if vetoed:
+            logger.info("Task %d: its room was switched off; answer dropped", task_id)
+            if event_writer is not None:
+                event_writer.emit("cancelled")
+                event_writer.emit("done", {"stop_reason": "cancelled", "duration_seconds": 0})
+                event_writer.finish()
+            return (task_id, False)
+
     guest_route = None
     if success and task.guest_participant_id is not None and not dry_run:
         with db.get_db(config.db_path) as conn:
@@ -8608,6 +8626,11 @@ def build_interval_gates(
 
         run_coro(drain_requests(config))
 
+    def _room_announcements(now: float) -> None:
+        from .room_veto import drain_announcements
+
+        run_coro(drain_announcements(config))
+
     def _whatsapp_pairing(now: float) -> None:
         # Inline on the dispatch thread, deliberately: the poll's own cheap
         # read is what makes an every-tick gate affordable, and
@@ -8863,6 +8886,14 @@ def build_interval_gates(
             name="whatsapp-requests",
             run=_whatsapp_requests,
             fixed_interval=0,
+            background=True,
+        ),
+        # The bot announcing itself to a room's guests (multiplayer D8): one
+        # indexed read when nobody is owed it, a post when somebody is.
+        IntervalGate(
+            name="room-announcements",
+            run=_room_announcements,
+            fixed_interval=30,
             background=True,
         ),
         IntervalGate(

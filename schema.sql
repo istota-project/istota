@@ -1472,9 +1472,15 @@ CREATE TABLE IF NOT EXISTS room_data_grants (
 -- nullable for that reason, where the umbrella spec's sketch said NOT NULL.
 -- `guest_reply` defaults per surface at creation (Talk and web `direct`,
 -- WhatsApp and email `held`); the column default is the conservative one.
--- `vetoed_by` and `record_guests` are read from Stage 20 on. The FK cascade is
--- decorative (foreign_keys unset); room deletion hand-deletes from here.
--- Kept equal to `db._ROOM_POLICY_DDL` by tests/test_room_policy.py.
+-- The veto (Stage 20, D8/D12): `vetoed_at` set means the room is switched off
+-- and records nothing. `vetoed_by` is its first vetoer, NULL when the bot was
+-- switched off by being removed from a WhatsApp group; `veto_on_by` is the
+-- member who asked to switch it back on before every vetoer agreed; everyone
+-- who switched it off is in `room_vetoes`. `announced_at` is when the bot
+-- announced itself to the room's guests. `record_guests` is read by nothing:
+-- D12 makes "record nothing" the only answer while a room is off. The FK
+-- cascade is decorative (foreign_keys unset); room deletion hand-deletes from
+-- here. Kept equal to `db._ROOM_POLICY_DDL` by tests/test_room_policy.py.
 CREATE TABLE IF NOT EXISTS room_policy (
     room_token   TEXT PRIMARY KEY REFERENCES rooms(token) ON DELETE CASCADE,
     host_user_id TEXT,
@@ -1484,7 +1490,25 @@ CREATE TABLE IF NOT EXISTS room_policy (
     record_guests INTEGER NOT NULL DEFAULT 1,
     vetoed_by    INTEGER REFERENCES room_participants(id),
     max_bot_turns_without_human INTEGER NOT NULL DEFAULT 3,
-    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    vetoed_at    TEXT,
+    veto_on_by   TEXT,
+    announced_at TEXT
+);
+
+-- Everyone who switched the bot off in a room (Stage 20, D12), one row per
+-- person spelled as `db.audience_persons` spells them (`u:<user>` or
+-- `<surface>:<ref>`), so a vetoer who left and came back is still the same
+-- vetoer. `agreed_at` is their own `!<bot> on`. Emptied when the room is
+-- switched back on. Kept equal to `db._ROOM_VETOES_DDL` by
+-- tests/test_room_veto.py.
+CREATE TABLE IF NOT EXISTS room_vetoes (
+    room_token     TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    person         TEXT NOT NULL,
+    participant_id INTEGER REFERENCES room_participants(id),
+    vetoed_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    agreed_at      TEXT,
+    PRIMARY KEY (room_token, person)
 );
 
 -- Audience epochs (multiplayer Stage 14, D3). A row with `epoch > 0` records

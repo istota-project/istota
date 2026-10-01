@@ -35,7 +35,7 @@ import hashlib
 import logging
 from typing import TYPE_CHECKING
 
-from ... import confirmations, db, room_policy
+from ... import confirmations, db, room_policy, room_veto
 from .. import participants
 from .._types import ParticipantRef
 from ..ingest import record_inbound
@@ -214,9 +214,12 @@ def apply_roster(conn, config: "Config", roster: WhatsAppGroupRoster) -> "WhatsA
     token = db.resolve_room_token(conn, SURFACE, group_jid)
     room = db.get_room(conn, token) if token else None
     if not roster.bot_present:
-        # Removed from the group: nothing can be delivered there any more.
+        # Removed from the group: nothing can be delivered there any more,
+        # and removing the bot's number is the WhatsApp spelling of the veto
+        # (D8), so the room stays off after a re-add until it is switched on.
         if room is not None:
             db.set_room_archived(conn, room.token, True)
+            room_veto.switch_off_by_removal(conn, room.token)
         return WhatsAppEventResult("group_left")
     people: list[tuple[str, str, str | None, str | None]] = []
     seen: set[str] = set()
@@ -390,6 +393,30 @@ def handle_group_message(
         return result
 
     text = (event.text or "").strip()
+    # `!<bot> off|on` is heard from anyone in the group, and its answer goes
+    # into the group (multiplayer D8). A room switched off records nothing
+    # else (D12): the message is claimed, so it is never seen twice, and that
+    # is all.
+    verb = (
+        room_veto.parse_command(text, config.bot_name)
+        if event.message_type in _TEXT_TYPES else None
+    )
+    if verb is not None:
+        outcome = room_veto.apply(
+            conn, config, room_token=room.token, verb=verb,
+            author=ParticipantRef(
+                surface=SURFACE, surface_ref=ref, user_id=user_id,
+                display_name=event.from_user.username,
+            ),
+        )
+        if outcome is not None:
+            return done(WhatsAppEventResult(
+                "room_veto", user_id=user_id, response_text=outcome.text,
+                response_logical_key=outcome.reference,
+                group_post_room=room.token, group_post_owner=room.user_id,
+            ))
+    if room_veto.is_vetoed(conn, room.token):
+        return done(WhatsAppEventResult("group_vetoed", user_id=user_id))
     if event.message_type not in _TEXT_TYPES or not text:
         # Recorded as seen and answered by nothing: the direct-chat notice
         # would be read by the whole group.

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from imap_tools import AND, U
 
-from ... import confirmations, db
+from ... import confirmations, db, room_veto
 from ...config import CONFIRM_SENDER_MATCH_POLICIES, Config
 from ...email_ownership import (
     bot_addressed_in_to,
@@ -1942,6 +1942,41 @@ def poll_emails(config: Config) -> list[int]:
                         routing_method = "thread_room"
                     else:
                         thread_room = None
+
+                    # 0b. The veto (multiplayer D8, D12). `!<bot> off|on` as a
+                    #     mail's first line, from one of the thread's people,
+                    #     and a thread room switched off records nothing: no
+                    #     attachment fetched, no participant, no transcript row
+                    #     and no task. Only the ledger row that stops the mail
+                    #     being read again is written, with nothing of it. A
+                    #     From proves nothing, so a mail-borne `on` is a
+                    #     vetoer's agreement only (`authenticated=False`).
+                    if thread_room is not None:
+                        first_line = next(
+                            (line for line in (email.body or "").splitlines()
+                             if line.strip()), "",
+                        )
+                        verb = room_veto.parse_command(first_line, config.bot_name)
+                        room_off = room_veto.is_vetoed(conn, thread_room.token)
+                        heard = None
+                        if verb is not None and email_threads.is_present(
+                            conn, thread_room.token, envelope.sender,
+                        ):
+                            heard = room_veto.apply(
+                                conn, config, room_token=thread_room.token, verb=verb,
+                                author=email_threads.author_ref(
+                                    conn, config, thread_room.token, envelope.sender,
+                                ),
+                                authenticated=False,
+                            )
+                        if heard is not None or room_off:
+                            db.mark_email_processed(
+                                conn, email_id=envelope.id,
+                                sender_email=envelope.sender,
+                                routing_method="room_veto" if heard else "room_off",
+                                uidvalidity=uidvalidity,
+                            )
+                            continue
 
                     # 1. Check recipient plus-address
                     if not user_id:

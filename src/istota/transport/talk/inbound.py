@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ... import confirmations, db, speech_gate
+from ... import confirmations, db, room_veto, speech_gate
 from ...async_runtime import get_talk_client
 from ...config import Config
 from ...talk import TalkClient, clean_message_content
@@ -1420,6 +1420,21 @@ def _is_own_post(msg: dict, config: Config) -> bool:
     return not actor_id or actor_id == config.talk.bot_username
 
 
+def _veto_verb(msg: dict, config: Config) -> str | None:
+    """``off``/``on`` for a person's ``!<bot> off|on`` (multiplayer D8), else None.
+
+    Never for a system message, the bot's own post or a web-mirror echo: those
+    are nobody's veto, and the room's handling of them must not change.
+    """
+    if msg.get("messageType", "") == "system" or _is_own_post(msg, config):
+        return None
+    reference_id = msg.get("referenceId") or ""
+    if isinstance(reference_id, str) and reference_id.startswith(WEBMIRROR_REF_PREFIX):
+        return None
+    content = clean_message_content(msg, bot_username=config.talk.bot_username)
+    return room_veto.parse_command(content, config.bot_name)
+
+
 def _talk_ref(actor_type: str, actor_id: str) -> str:
     """A Talk actor as a participant ref: the bare id for a Nextcloud user,
     ``<actorType>/<id>`` for anything else, since ids are unique per type only.
@@ -1654,9 +1669,6 @@ async def _process_poll_results(
             if not messages:
                 continue
 
-            # Store all messages in cache (system, bot, user — context builder filters)
-            db.upsert_talk_messages(conn, conversation_token, messages)
-
             # Process messages in order (oldest first)
             for msg in messages:
                 message_id = msg.get("id")
@@ -1666,6 +1678,21 @@ async def _process_poll_results(
                 # Update poll state to this message
                 if message_id:
                     db.set_talk_poll_state(conn, conversation_token, message_id)
+
+                # `!<bot> off|on` (multiplayer D8), handled below once the
+                # author is known. A room switched off records nothing (D12):
+                # not the cache the context builder reads, not a turn, not a
+                # command, until the veto is lifted.
+                veto_verb = _veto_verb(msg, config)
+                if veto_verb is None and room_veto.is_vetoed_ref(
+                    conn, "talk", conversation_token,
+                ):
+                    continue
+                if veto_verb is None:
+                    # Every message is cached (system, bot, user — the
+                    # context builder filters), one at a time so a veto in
+                    # the middle of a batch stops what follows it.
+                    db.upsert_talk_messages(conn, conversation_token, [msg])
 
                 # Skip system messages
                 if message_type == "system":
@@ -1740,6 +1767,26 @@ async def _process_poll_results(
                     )
                     if db.get_room(conn, room_token) is not None:
                         db.note_member_turn(conn, room_token, actor_id)
+
+                # The veto is the one command a guest is heard on (D2, D8),
+                # so it is answered ahead of every engagement gate.
+                if veto_verb is not None:
+                    outcome = room_veto.apply(
+                        conn, config,
+                        room_token=db.resolve_room_token(conn, "talk", conversation_token)
+                        or conversation_token,
+                        author=author, verb=veto_verb,
+                    )
+                    if outcome is not None:
+                        try:
+                            await _await_in_txn(
+                                hold, client.send_message(conversation_token, outcome.text),
+                            )
+                        except Exception as e:
+                            logger.debug("Failed to post the veto reply: %s", e)
+                        continue
+                    # Not a veto here (a private room): an ordinary message.
+                    db.upsert_talk_messages(conn, conversation_token, [msg])
 
                 content = clean_message_content(
                     msg, bot_username=config.talk.bot_username,

@@ -518,12 +518,35 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
         if len(words) > _GUEST_QUOTE_CHARS:
             words = words[:_GUEST_QUOTE_CHARS].rstrip() + "…"
         bot = flatten(getattr(config, "bot_name", "") or "") or "the assistant"
+        recipients = ""
+        email_recipients = None
+        if destination.get("email_ref"):
+            # On an email thread the post is a mail to these exact people, and
+            # the host approving this preview approves that mail (D20): the
+            # outbound gate does not hold a send that matches it.
+            from .room_veto import with_email_notice
+            from .transport.email import threads as email_threads
+            from .transport.email.outbound import recipients_of
+
+            plan = email_threads.reply_all(conn, config, parent, task_id=task.id)
+            if plan is None:
+                raise RequestError("parent_unavailable")
+            email_recipients = recipients_of(plan)
+            reply = with_email_notice(conn, config, parent, reply)
+            recipients = (
+                f"To: {email_recipients['to']}\n"
+                f"Cc: {', '.join(email_recipients['cc']) or '(nobody)'}\n\n"
+            )
         preview = (
             f"{label} asked in {destination['label']}:\n{words}\n\n"
             f"Post this answer there as {bot}? Reply yes to post it exactly as "
             "written, or no to drop it. Only the message below is posted.\n\n"
-            f"Message:\n{reply}"
+            f"{recipients}Message:\n{reply}"
         )
+        stored_destination = {key: destination[key]
+                              for key in ("kind", "room_token", "talk_ref", "label")}
+        if email_recipients is not None:
+            stored_destination["email_recipients"] = email_recipients
         with write_transaction(conn):
             row = _store_request(
                 conn, actor_user_id=task.user_id, task_id=task.id,
@@ -532,8 +555,7 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
                 template_body=None, provider="room",
                 binding_fingerprint=destination["fingerprint"], preview=preview,
                 origin={"surface": "web", "room_token": side.token, "channel": side.token},
-                destination={key: destination[key]
-                             for key in ("kind", "room_token", "talk_ref", "label")},
+                destination=stored_destination,
             )
             db.set_task_confirmation(conn, task.id, row["preview"])
             associate_confirmation(conn, actor_user_id=task.user_id, task_id=task.id,
@@ -734,6 +756,12 @@ def _post_destination(conn, parent_token: str, user_id: str) -> dict:
     if (room is None or room.archived or room.side_of
             or not db.is_room_member(conn, parent_token, user_id)):
         raise RequestError("parent_unavailable")
+    from .room_veto import is_vetoed
+
+    if is_vetoed(conn, parent_token):
+        # Switched off (D12): nothing the bot says reaches the room, an
+        # approved post included, until it is switched back on.
+        raise RequestError("room_off")
     talk = db.get_room_binding(conn, parent_token, "talk")
     whatsapp = db.get_room_binding(conn, parent_token, "whatsapp")
     email = db.get_room_binding(conn, parent_token, "email")
@@ -829,6 +857,7 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                 return None
             whatsapp_group = False
             email_thread = False
+            email_recipients = None
             if row["queue_deadline"] is None or row["queue_deadline"] <= db.sql_datetime_now():
                 raise RequestError("queue_expired")
             user = row["requester_user_id"]
@@ -849,6 +878,10 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                 target, talk_ref, parent = current["room_token"], current["talk_ref"], current["room_token"]
                 whatsapp_group = bool(current.get("whatsapp_ref"))
                 email_thread = bool(current.get("email_ref"))
+                # Only a preview that showed them carries them (a guest
+                # proposal on an email thread), and the digest check above is
+                # what makes them the ones approved.
+                email_recipients = destination.get("email_recipients")
                 reference = "room-post:" + request_id
             else:
                 parent = destination.get("parent") or ""
@@ -868,7 +901,8 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
             return {"request_id": request_id, "kind": row["kind"], "user_id": user, "body": body,
                     "message_id": message_id, "talk_ref": talk_ref, "parent": parent,
                     "reference": reference, "whatsapp_group": whatsapp_group,
-                    "email_thread": email_thread, "task_id": row["origin_task_id"]}
+                    "email_thread": email_thread, "task_id": row["origin_task_id"],
+                    "email_recipients": email_recipients}
 
 
 def _mark_sent(conn, request_id: str) -> None:
@@ -950,7 +984,7 @@ async def deliver_request(config, row) -> None:
             try:
                 await deliver_thread_post(
                     config, task_id=int(claim["task_id"]), room_token=claim["parent"],
-                    body=claim["body"])
+                    body=claim["body"], approved_recipients=claim["email_recipients"])
             except Exception as exc:
                 logger.warning("room post %s: email reply-all failed: %s", claim["request_id"], exc)
     else:

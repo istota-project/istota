@@ -20,7 +20,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Sequence
 
-from .. import db, room_policy, speech_gate
+from .. import db, room_policy, room_veto, speech_gate
 from ..surfaces import is_room_member_for
 from ..untrusted import frame_untrusted
 from . import participants
@@ -358,6 +358,8 @@ def classify_ahead(
             room_token = (
                 db.resolve_room_token(conn, surface, surface_ref) or surface_ref
             )
+            if room_veto.is_vetoed(conn, room_token):
+                return None
             if not participants.is_multi_human(
                 conn, surface=surface, room_token=room_token,
                 is_group_chat=is_group_chat, room_container=room_container,
@@ -547,6 +549,11 @@ def record_inbound(
     user_author = author is None or bool(author.user_id)
     if not user_author and not room_surface:
         return InboundResult(room_token, None, None, "dropped")
+    # A room somebody switched off records nothing (multiplayer D12): no row,
+    # no participant, no gate decision, no task. Each surface stops ahead of
+    # this; this is the one place every one of them passes through.
+    if room_surface and room_veto.is_vetoed(conn, room_token):
+        return InboundResult(room_token, None, None, "dropped", "vetoed")
 
     # A non-room surface whose exchange belongs in a room (ISSUE-136): an email
     # threaded back into the web/Talk room it came from, or — since ISSUE-247 —

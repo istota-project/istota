@@ -52,6 +52,9 @@ class RoomPolicy:
     record_guests: bool
     vetoed_by: int | None
     max_bot_turns_without_human: int
+    vetoed_at: str | None = None
+    veto_on_by: str | None = None
+    announced_at: str | None = None
 
 
 def default_guest_reply(surface: object) -> str:
@@ -90,6 +93,9 @@ def _row_to_policy(row) -> RoomPolicy:
         record_guests=bool(row["record_guests"]),
         vetoed_by=row["vetoed_by"],
         max_bot_turns_without_human=int(row["max_bot_turns_without_human"]),
+        vetoed_at=row["vetoed_at"],
+        veto_on_by=row["veto_on_by"],
+        announced_at=row["announced_at"],
     )
 
 

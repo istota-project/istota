@@ -6858,6 +6858,26 @@ def _chat_relay_reply(username: str, token: str, reply_to_msg_id: int) -> bool:
         ) is not None
 
 
+def _chat_room_veto(username: str, token: str, verb: str):
+    """A web member's `!<bot> off|on`, in its own transaction; None when not a veto here."""
+    from . import db, room_veto
+    from .transport._types import ParticipantRef
+
+    with db.get_db(_config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        return room_veto.apply(
+            conn, _config, room_token=token, verb=verb,
+            author=ParticipantRef(surface="web", surface_ref=username, user_id=username),
+        )
+
+
+def _chat_room_off(token: str) -> bool:
+    from . import db, room_veto
+
+    with db.get_db(_config.db_path) as conn:
+        return room_veto.is_vetoed(conn, token)
+
+
 def _chat_create_web_task(
     username: str, token: str, text: str,
     attachments: list[str] | None = None,
@@ -7001,6 +7021,8 @@ def _chat_create_web_task(
             addressed_to_bot=addressed,
             classified=classified,
         )
+    if result.gate_reason == "vetoed":
+        return ("room_off", 0)
     # A replay of a turn that was recorded unanswered has no task either.
     if result.task_id is None and result.message_id is not None:
         return ("recorded", result.message_id)
@@ -8697,6 +8719,27 @@ async def chat_send_message(
     # An explicit `!model` prefix (any alias, incl. `default`) suppresses the
     # per-room model default so a per-message choice always wins.
     model_prefix_used = False
+
+    # `!<bot> off|on` (multiplayer D8) before anything else, and in a room
+    # switched off nothing else is taken (D12): no turn, no command, no
+    # confirmation answer. A member reading on web is a principal, so their
+    # `on` counts as one.
+    from . import room_veto
+
+    veto_verb = None if attachments else room_veto.parse_command(text, _config.bot_name)
+    if veto_verb is not None:
+        outcome = await asyncio.to_thread(_chat_room_veto, username, room.token, veto_verb)
+        if outcome is not None:
+            await room_veto.push_outcome(_config, room.token, outcome)
+            return {"task_id": None, "inline_result": outcome.text,
+                    "command_data": {"kind": "room_veto", "state": outcome.state}}
+    if await asyncio.to_thread(_chat_room_off, room.token):
+        return JSONResponse(
+            {"error": "This room is switched off and records nothing. A member "
+                      f"switches it back on with !{room_veto.command_word(_config)} on."},
+            status_code=409,
+        )
+
     if text.startswith("!"):
         from . import commands
         from .async_runtime import run_coro
@@ -8788,6 +8831,9 @@ async def chat_send_message(
             status_code=429,
             headers={"Retry-After": str(value)},
         )
+    if outcome == "room_off":
+        # Switched off between the check above and the write: the same refusal.
+        return JSONResponse({"error": "This room is switched off."}, status_code=409)
     if outcome == "reply_target_gone":
         # 404 for both "unknown id" and "a message in another room",
         # indistinguishable — the rule the star and delete endpoints already
