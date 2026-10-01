@@ -6214,7 +6214,14 @@ def initialize_room_read_state(
 # `guest`, which is a coincidence rather than a derivation — the room-ownership
 # question is `surfaces.is_room_member`, and reading that one here would stop
 # an email `!confirm` recording its exchange.
-TRANSCRIPT_SURFACES = ("web", "talk", "email")
+#
+# `sms` and `whatsapp` joined when their conversations became rooms (Phase 6
+# of the room-surface model): a texted turn is a real user turn in a room the
+# user can read in web, on the same durable-place grounds as email. For both,
+# the `source_type` a task carries and the surface name are the same string,
+# which `tests/test_surface_table_is_load_bearing.py` asserts rather than
+# assumes. The migration DELETE below spares both too; see the comment there.
+TRANSCRIPT_SURFACES = ("web", "talk", "email", "sms", "whatsapp")
 
 TRANSCRIPT_SURFACE_FILTER = (
     "(m.role = 'assistant' "
@@ -7428,9 +7435,11 @@ def _migrate_nonconversational_transcript_cleanup(conn: sqlite3.Connection) -> N
 
     This one-shot generalizes `_migrate_scheduled_transcript_cleanup` from
     scheduled-only to every non-conversational source type. Over rows whose
-    `origin_surface NOT IN ('web','talk','scheduled','email')` (scheduled is
-    owned by its own marker, conversational surfaces are real turns, and `email`
-    joined them at ISSUE-136 — see the comment on the statement itself), and
+    `origin_surface NOT IN ('web','talk','scheduled','email','sms','whatsapp')`
+    (scheduled is owned by its own marker, conversational surfaces are real
+    turns, `email` joined them at ISSUE-136 and the two phone surfaces when
+    their conversations became rooms — see the comment on the statement
+    itself), and
     never touching
     `role='system'` (the notification/log lane), it:
 
@@ -7481,10 +7490,19 @@ def _migrate_nonconversational_transcript_cleanup(conn: sqlite3.Connection) -> N
         # superset, not an equality, so a pinned string cannot express it and
         # interpolating the tuple would quietly drop the fourth value on the
         # next reader who assumed the two were the same list.
+        #
+        # `sms` and `whatsapp` are spared for the same reason as `email`, and
+        # widening this list cannot reclassify a row it already processed: the
+        # DELETE and the marker commit together, so a marked database never
+        # runs this again. On an unmarked one (a partial run, a restored
+        # snapshot) every `sms` or `whatsapp` user row is a real inbound turn —
+        # a WhatsApp group's, or a phone room's since those rooms were minted —
+        # and the narrower list would have swept them.
         conn.execute(
             "DELETE FROM messages "
             "WHERE role = 'user' "
-            "AND origin_surface NOT IN ('web', 'talk', 'scheduled', 'email')"
+            "AND origin_surface NOT IN "
+            "('web', 'talk', 'scheduled', 'email', 'sms', 'whatsapp')"
         )
         # Normalize briefing assistant bodies that were stored as raw JSON.
         briefing_rows = conn.execute(

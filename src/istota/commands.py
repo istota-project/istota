@@ -887,6 +887,11 @@ async def cmd_confirm(ctx: CommandContext):
 # values rather than surface names — see the declaration in `db.py`.
 _TRANSCRIPT_SURFACES = db.TRANSCRIPT_SURFACES
 
+# The two members of that tuple whose inbound path records a `!command` as a
+# user turn before dispatching it (`transport.ingest.record_phone_turn` with
+# `record_only=True`), so the exchange below writes only its ack.
+_PHONE_SURFACES = ("sms", "whatsapp")
+
 
 def _record_confirm_exchange(ctx: CommandContext, reply: str) -> "CommandResult":
     """Commit the answer and leave it in the room transcript.
@@ -922,11 +927,26 @@ def _record_confirm_exchange(ctx: CommandContext, reply: str) -> "CommandResult"
         db.resolve_room_token(ctx.conn, ctx.surface, ctx.conversation_token)
         or ctx.conversation_token
     )
-    user_msg_id, system_msg_id = confirmations.record_exchange(
-        ctx.conn, room_token,
-        answer_text=f"!{ctx.invoked_as} {ctx.args}".strip(),
-        ack=reply, origin_surface=ctx.surface, answered_by=ctx.user_id,
-    )
+    if ctx.surface in _PHONE_SURFACES:
+        # The webhook already stored the typed `!confirm` as a user turn, but
+        # only in the user's own phone room. A WhatsApp group's command answers
+        # in the private chat precisely so the group never reads it, so a
+        # command from any other room records nothing, as before.
+        from .transport.routing import private_phone_room
+
+        if room_token != private_phone_room(ctx.conn, ctx.surface, ctx.user_id):
+            ctx.conn.commit()
+            return CommandResult(handled=True, text=reply)
+        user_msg_id = None
+        system_msg_id = confirmations.record_ack(
+            ctx.conn, room_token, ack=reply, origin_surface=ctx.surface,
+        )
+    else:
+        user_msg_id, system_msg_id = confirmations.record_exchange(
+            ctx.conn, room_token,
+            answer_text=f"!{ctx.invoked_as} {ctx.args}".strip(),
+            ack=reply, origin_surface=ctx.surface, answered_by=ctx.user_id,
+        )
     ctx.conn.commit()
     return CommandResult(
         handled=True,

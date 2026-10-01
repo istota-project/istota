@@ -1047,9 +1047,12 @@ def _dispatch_inbound(
     if answer is not None:
         parked = _own_parked_confirmation(conn, user_id, token)
         if parked is not None:
-            record_whatsapp_turn(conn, config, user_id, text, record_only=True)
+            turn = record_whatsapp_turn(conn, config, user_id, text, record_only=True)
             response = confirmations.apply_answer(
                 conn, parked, answer, config, by="whatsapp",
+            )
+            confirmations.record_ack(
+                conn, turn.room_token, ack=response, origin_surface="whatsapp",
             )
             return WhatsAppEventResult(
                 "confirmation_answer", user_id=user_id, response_text=response,
@@ -1136,8 +1139,9 @@ def _handle_callback(
     answer = confirmations.parse_answer(choice)
     if answer is None:  # pragma: no cover - `_parse_callback` bounds the choice
         return WhatsAppEventResult("callback_unmatched", user_id=user_id)
-    record_whatsapp_turn(conn, config, user_id, choice, record_only=True)
+    turn = record_whatsapp_turn(conn, config, user_id, choice, record_only=True)
     response = confirmations.apply_answer(conn, task, answer, config, by="whatsapp")
+    confirmations.record_ack(conn, turn.room_token, ack=response, origin_surface="whatsapp")
     return WhatsAppEventResult(
         "confirmation_answer", user_id=user_id, response_text=response,
         response_logical_key=f"confirmation-answer:{event.message_id}",

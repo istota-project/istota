@@ -395,14 +395,16 @@ class TestTheConfirmWriteIsNotEquivalent:
     phase whose whole claim is that it changes nothing.
     """
 
-    def test_the_two_gates_differ_at_email_and_pending_phone_confirm_support(self):
+    def test_the_two_gates_differ_at_email_alone(self):
+        # The phone surfaces joined both sets: members since their rooms were
+        # minted, transcript surfaces since the confirm exchange widening.
         from istota.commands import _TRANSCRIPT_SURFACES
 
         differ = [
             v for v in SURFACE_NAMES
             if (v in _TRANSCRIPT_SURFACES) != is_room_member(v)
         ]
-        assert differ == ["email", "sms", "whatsapp"]
+        assert differ == ["email"]
 
     def test_email_may_write_a_user_row_and_does_not_own_rooms(self):
         from istota.commands import _TRANSCRIPT_SURFACES

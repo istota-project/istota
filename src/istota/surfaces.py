@@ -47,9 +47,10 @@ store holds email turns only from ISSUE-136 forward, so counting them would pin
 a room to the legacy path forever. Collapsing it into a reader here would be
 this module's own mistake committed one question further along. And
 ``db.TRANSCRIPT_SURFACE_FILTER`` asks which surfaces' user rows the transcript
-renders — ``('web', 'talk', 'email')``, a set whose domain is ``source_type``
-values rather than surface names, and which must track a migration DELETE
-holding a fourth value no surface table will ever have. Both stay literals.
+renders — ``('web', 'talk', 'email', 'sms', 'whatsapp')``, a set whose
+domain is ``source_type`` values rather than surface names, and which must
+track a migration DELETE holding one more value (``scheduled``) no surface
+table will ever have. Both stay literals.
 
 **The key space is registry surface names only.** ``room`` and ``stream`` are
 names in the *destination grammar* (``parse_output_target`` yields
@@ -166,11 +167,12 @@ SURFACES: dict[str, SurfaceRoomFacts] = {
     #
     # Two literals in `db.py` cover the same names for a different question, and
     # neither is derived from this row: `TRANSCRIPT_SURFACE_FILTER`'s
-    # `('web', 'talk', 'email')` asks which surfaces' user rows the transcript
-    # renders, and the DELETE in `_migrate_nonconversational_transcript_cleanup`
-    # has to stay in step with it. That question's domain is `source_type`
-    # values rather than surface names, so it stays where it is. The two sets
-    # being equal today is a coincidence, not a derivation.
+    # `('web', 'talk', 'email', 'sms', 'whatsapp')` asks which surfaces' user
+    # rows the transcript renders, and the DELETE in
+    # `_migrate_nonconversational_transcript_cleanup` has to stay in step with
+    # it. That question's domain is `source_type` values rather than surface
+    # names, so it stays where it is. The two sets being equal is a
+    # coincidence, not a derivation.
     "email": SurfaceRoomFacts(
         room_role="guest", room_view=None, user_turn_mirror=None,
     ),
@@ -231,7 +233,7 @@ def is_room_member(surface: object) -> bool:
 
     It is the wrong reader wherever the question is "may this surface put a
     ``role='user'`` row in a room at all", which admits email:
-    ``commands._TRANSCRIPT_SURFACES`` is ``("web", "talk", "email")`` and gates
+    ``commands._TRANSCRIPT_SURFACES`` admits ``email`` and gates
     ``_record_confirm_exchange``, so reading this predicate there would stop an
     email ``!confirm`` recording its exchange — and that row is a durable
     authorization record. The neighbouring ``!steer`` and ``!retry`` writes

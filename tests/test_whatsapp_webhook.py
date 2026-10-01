@@ -2343,6 +2343,84 @@ class TestWhatsAppRoomMint:
             assert conn.execute("SELECT count(*) FROM messages WHERE room_token=? AND body='yes'", (current,)).fetchone()[0] == 1
         assert _counts(config, "tasks", "room_token_migration") == [1 if legacy else 2, 1]
 
+    @staticmethod
+    def _rendered(conn, token):
+        # What the web transcript shows: the shared filter, nothing else.
+        return [
+            (r["role"], r["body"]) for r in conn.execute(
+                "SELECT m.role, m.body FROM messages m WHERE m.room_token = ? "
+                f"AND ({db.TRANSCRIPT_SURFACE_FILTER} OR m.role = 'system') ORDER BY m.id",
+                (token,),
+            )
+        ]
+
+    @pytest.mark.parametrize("button", [False, True])
+    def test_answer_joins_the_transcript_with_its_ack(self, tmp_path, button):
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        first = _handle(config, _text_payload())[0]
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            db.set_task_confirmation(conn, first.task_id, "Delete?")
+        msg = (
+            _button_message(payload=f"confirm:{first.task_id}:yes") if button
+            else _text_message(message_id="answer", text="yes")
+        )
+        result = _handle(config, _payload(_value(contacts=[_contact()], messages=[msg])))[0]
+        assert result.disposition == "confirmation_answer"
+        with db.get_db(config.db_path) as conn:
+            assert self._rendered(conn, token) == [
+                ("user", "check the backup"), ("user", "yes"), ("system", result.response_text),
+            ]
+
+    def test_confirm_command_records_its_ack_and_no_second_answer(self, tmp_path):
+        import asyncio
+        from istota import commands
+        config = _config(tmp_path)
+        _bind(config, bsuid=USER_BSUID)
+        first = _handle(config, _text_payload())[0]
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            db.set_task_confirmation(conn, first.task_id, "Delete?")
+        command = f"!confirm {first.task_id}"
+        result = _handle(config, _text_payload(message_id="cmd", text=command))[0]
+        assert result.disposition == "command"
+        reply = asyncio.run(commands.dispatch(
+            config, "alice", result.conversation_token, result.command_text, surface="whatsapp",
+        ))
+        assert reply.text.startswith(f"Confirmed #{first.task_id}")
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, first.task_id).status == "pending"
+            assert self._rendered(conn, token) == [
+                ("user", "check the backup"), ("user", command), ("system", reply.text),
+            ]
+
+    def test_confirm_command_from_a_group_records_nothing_in_the_group(self, tmp_path):
+        # A group's `!confirm` answers in the private chat so the group never
+        # reads it; widening the transcript tuple must not put it in the room.
+        import asyncio
+        from istota import commands
+        config = _config(tmp_path)
+        group_jid = "120363000000000001@g.us"
+        with db.get_db(config.db_path) as conn:
+            group = db.register_room(conn, None, "alice", origin="whatsapp", name="Family").token
+            db.add_room_binding(conn, group, "whatsapp", group_jid)
+            held = db.create_task(conn, prompt="delete it", user_id="alice", source_type="whatsapp", conversation_token=group)
+            db.set_task_confirmation(conn, held, "Delete?")
+        reply = asyncio.run(commands.dispatch(
+            config, "alice", group, f"!confirm {held}", surface="whatsapp",
+        ))
+        assert reply.text.startswith(f"Confirmed #{held}")
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, held).status == "pending"
+            # `approve` itself releases the held turn's own row; neither half of
+            # the exchange may join it.
+            exchange = conn.execute(
+                "SELECT count(*) FROM messages WHERE room_token=? "
+                "AND (role='system' OR body LIKE '!confirm%')", (group,),
+            ).fetchone()[0]
+            assert exchange == 0
+
     def test_racing_first_texts_share_one_room(self, tmp_path):
         from concurrent.futures import ThreadPoolExecutor
         from threading import Barrier

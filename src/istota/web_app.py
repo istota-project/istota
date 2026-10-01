@@ -7140,9 +7140,9 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
 
     **Where it came from.** `origin` needs two things to be true, and the second
     is the one that is easy to miss. The surface must be one the room does not
-    itself live on — `surfaces.is_room_member` is talk and web, and
-    `TRANSCRIPT_SURFACE_FILTER` renders a user row only for those two plus
-    `email`, so this resolves to `email` today. And the row must carry an
+    itself live on — `surfaces.is_room_member` is talk, web, sms and
+    whatsapp, and `TRANSCRIPT_SURFACE_FILTER` renders a user row only for
+    those plus `email`, so this resolves to `email` today. And the row must carry an
     `author_label`, which `transport.ingest.resolve_author` sets **iff the
     envelope sender was not one of the user's own addresses**. Surface alone is
     not enough: a user mailing their own plus-address writes an email-origin row

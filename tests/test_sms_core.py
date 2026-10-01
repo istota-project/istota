@@ -1803,6 +1803,49 @@ class TestSmsRoomMint:
             assert db.get_task(conn, held).status == 'pending'
             assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 2
 
+    @staticmethod
+    def _rendered(conn, token):
+        # What the web transcript shows: the shared filter, nothing else.
+        return [
+            (r['role'], r['body']) for r in conn.execute(
+                f'SELECT m.role, m.body FROM messages m WHERE m.room_token = ? '
+                f'AND ({db.TRANSCRIPT_SURFACE_FILTER} OR m.role = \'system\') ORDER BY m.id',
+                (token,),
+            )
+        ]
+
+    def test_typed_answer_joins_the_transcript_with_its_ack(self, tmp_path):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            db.set_task_confirmation(conn, first.task_id, 'Delete?')
+        with db.get_db(config.db_path) as conn:
+            result = handle_provider_event(conn, config, _inbound(text='yes', provider_message_id='answer', provider_event_id='event-answer'))
+            assert result.disposition == 'confirmation_answer'
+            assert self._rendered(conn, token) == [
+                ('user', 'check the backup'), ('user', 'yes'), ('system', result.response_text),
+            ]
+
+    def test_confirm_command_records_its_ack_and_no_second_answer(self, tmp_path):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, first.task_id).conversation_token
+            db.set_task_confirmation(conn, first.task_id, 'Delete?')
+        providers = _providers(_adapter(lambda _req: SmsSendResult('opaque', 'accepted', 1)))
+        command = f'!confirm {first.task_id}'
+        asyncio.run(_handle(config, providers, _inbound(text=command, provider_message_id='cmd', provider_event_id='event-cmd')))
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, first.task_id).status == 'pending'
+            rendered = self._rendered(conn, token)
+            assert rendered[:2] == [('user', 'check the backup'), ('user', command)]
+            assert len(rendered) == 3
+            assert rendered[2][0] == 'system'
+            assert rendered[2][1].startswith(f'Confirmed #{first.task_id}')
+
     def test_racing_first_texts_share_one_room(self, tmp_path):
         config = _config(tmp_path)
         barrier = threading.Barrier(2)

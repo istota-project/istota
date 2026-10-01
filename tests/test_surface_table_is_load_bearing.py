@@ -181,6 +181,14 @@ class TestTheSharedTranscriptTupleIsNotWidenedForOneConsumer:
         for name in db.TRANSCRIPT_SURFACES:
             assert surfaces.room_role(name) in ("member", "guest"), name
 
+    def test_every_member_is_its_own_source_type(self):
+        # The filter compares `origin_surface`, which holds a task's
+        # `source_type` on assistant rows and the surface on user rows. For
+        # each member the two strings have to be the same, or a stored row of
+        # that surface is filtered by a value it never carries.
+        for name in db.TRANSCRIPT_SURFACES:
+            assert surfaces.origin_surface_for_source_type(name) == name, name
+
     def test_it_is_a_superset_relation_with_the_migration_delete(self):
         # `_migrate_nonconversational_transcript_cleanup`'s DELETE spares this
         # set plus `scheduled`. The relation is asserted in prose at both ends

@@ -498,17 +498,44 @@ def record_exchange(
             origin_surface=origin_surface, client_msg_id=client_msg_id,
             author_user_id=answered_by,
         )
-        system_msg_id = db.add_message(
-            conn, room_token, role="system", body=ack,
-            origin_surface=origin_surface,
-        )
-        return (user_msg_id, system_msg_id)
     except Exception:
         logger.warning(
             "Failed to record the confirmation exchange in %r", room_token,
             exc_info=True,
         )
         return (None, None)
+    return (user_msg_id, record_ack(
+        conn, room_token, ack=ack, origin_surface=origin_surface,
+    ))
+
+
+def record_ack(
+    conn, room_token: str | None, *, ack: str, origin_surface: str,
+) -> int | None:
+    """Write only the ack half of a confirmation exchange.
+
+    For a surface whose inbound path has already stored the answer as an
+    ordinary user turn: the SMS and WhatsApp webhooks record every accepted
+    turn, a typed answer and a ``!confirm`` included, before anything acts on
+    it, so writing the answer again here would put it in the transcript twice.
+    Existence-only and best-effort, like :func:`record_exchange`. Returns the
+    row's ``messages.id``, or None.
+    """
+    if not room_token:
+        return None
+    try:
+        if db.get_room(conn, room_token) is None:
+            return None
+        return db.add_message(
+            conn, room_token, role="system", body=ack,
+            origin_surface=origin_surface,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to record the confirmation ack in %r", room_token,
+            exc_info=True,
+        )
+        return None
 
 
 def _room_holds_no_copy_of_this_exchange(conn, task: db.Task) -> bool:

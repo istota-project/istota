@@ -202,9 +202,12 @@ def handle_provider_event(
         # existed only for Path C's "any surface" fallthrough.
         parked = _own_parked_confirmation(conn, user_id, token)
         if parked is not None:
-            record_sms_turn(conn, config, user_id, event.text.strip(), record_only=True)
+            turn = record_sms_turn(conn, config, user_id, event.text.strip(), record_only=True)
             response = confirmations.apply_answer(
                 conn, parked, answer, config, by="sms",
+            )
+            confirmations.record_ack(
+                conn, turn.room_token, ack=response, origin_surface="sms",
             )
             _set_disposition(conn, event, "confirmation_answer")
             return SmsEventResult(
