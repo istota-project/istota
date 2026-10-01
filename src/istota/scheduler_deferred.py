@@ -603,6 +603,10 @@ def _process_deferred_kv_ops(
 
     count = 0
     with db.get_db(config.db_path) as conn:
+        # The set-ops read, then write. Without an explicit write lock the first
+        # op's read runs in autocommit, and two workers replaying onto one key
+        # (a group key is shared across users) could each lose the other's add.
+        conn.execute("BEGIN IMMEDIATE")
         for entry in data:
             # `_load_deferred_json` checks the outer list only, and the file is
             # model-authored, so a bare string in it reaches `.get` and raises

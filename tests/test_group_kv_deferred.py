@@ -102,6 +102,22 @@ class TestMemberOps:
         assert json.loads(row["value"]) == ["a", "b"]
         assert row["written_by"] == "bob"
 
+    def test_the_first_set_op_reads_under_the_write_lock(
+        self, setup, db_path, tmp_path, monkeypatch,
+    ):
+        # A read outside a transaction lets a second worker's write land
+        # between this read and its write, and one of the two adds is lost.
+        seen = []
+        real = db.group_kv_get
+        monkeypatch.setattr(
+            db, "group_kv_get",
+            lambda conn, *a: seen.append(conn.in_transaction) or real(conn, *a),
+        )
+        ops = [{"op": "set-add", "namespace": "ns", "key": "k",
+                "members": ["a"], "scope": "group:fam"}]
+        assert _apply(setup, "alice", ops, tmp_path) == 1
+        assert seen == [True]
+
     def test_per_user_set_ops_are_unchanged(self, setup, db_path, tmp_path):
         ops = [{"op": "set-add", "namespace": "ns", "key": "k", "members": ["a"]}]
         assert _apply(setup, "alice", ops, tmp_path) == 1

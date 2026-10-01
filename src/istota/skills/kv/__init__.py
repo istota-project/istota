@@ -225,7 +225,11 @@ def cmd_get(args):
             value = json.loads(result["value"])
         except json.JSONDecodeError:
             value = result["value"]
-        print(json.dumps({"status": "ok", "value": value}))
+        envelope = {"status": "ok", "value": value}
+        if _group(args) is not None:
+            # Another member may have written it; say who.
+            envelope["written_by"] = result.get("written_by")
+        print(json.dumps(envelope))
 
 
 def _resolve_set_value(args) -> str:

@@ -67,7 +67,7 @@ class TestMemberReads:
             db.kv_set(conn, "alice", "ns", "k", '"personal"')
         kv_main(["get", "ns", "k", "--group", "fam"])
         out = json.loads(capsys.readouterr().out)
-        assert out == {"status": "ok", "value": "group"}
+        assert out == {"status": "ok", "value": "group", "written_by": "bob"}
 
     def test_list_and_namespaces(self, env, capsys):
         with db.get_db(env) as conn:
