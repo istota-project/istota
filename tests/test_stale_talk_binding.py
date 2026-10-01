@@ -345,7 +345,11 @@ class TestRePromoteOverADeadBinding:
         for status_code in (403, 500, 502):
             with db.get_db(db_path) as conn:
                 room = db.create_web_chat_room(conn, "alice", f"Ideas{status_code}")
-                db.add_room_binding(conn, room.token, "talk", "live-tok")
+                # One Talk conversation binds one room (UNIQUE (surface,
+                # surface_ref)), so each room gets its own ref.
+                ref = f"live-tok-{status_code}"
+                db.add_room_binding(conn, room.token, "talk", ref)
+                assert db.get_room_binding(conn, room.token, "talk").surface_ref == ref
             fake = _talk_client(info_side_effect=_http_error(status_code))
             with patch("istota.talk.TalkClient", return_value=fake):
                 status, _ = await web_app._chat_promote_to_talk("alice", room.id)

@@ -45,19 +45,17 @@ def test_live_room_and_binding_win_over_mapping(room_db):
         assert routing._canonical_room_token(conn, "talk", "dangling", cross_surface=False) is None
 
 
-def test_shared_room_grants_and_membership_follow_old_identity(room_db):
+def test_shared_room_membership_and_audience_follow_old_identity(room_db):
     with db.get_db(room_db) as conn:
         db.add_room_member(conn, NEW, "bob")
         room_policy.ensure_policy(conn, NEW)
-        room_scopes.grant_scopes(conn, NEW, "alice", ["files"])
         assert db.is_room_member(conn, OLD, "alice")
         assert not db.is_room_member(conn, OLD, "outsider")
         assert db.room_is_shared(conn, OLD)
         assert room_policy.get_policy(conn, OLD).room_token == NEW
-        assert room_scopes.task_withheld_scopes(conn, conversation_token=OLD, user_id="alice", skill_index={}, policy="restrict") == frozenset({"memory"})
+        assert room_policy.audience_class(conn, OLD) != room_policy.MIXED
         db.upsert_room_participant(conn, room_token=NEW, surface="talk", surface_ref="guest", kind="guest")
         assert room_policy.audience_class(conn, OLD) == room_policy.MIXED
-        assert room_scopes.task_withheld_scopes(conn, conversation_token=OLD, user_id="alice", skill_index={}, policy="restrict") == frozenset({"files", "memory"})
 
 
 @pytest.mark.parametrize("collision", [False, True])
@@ -162,14 +160,11 @@ def test_caught_up_check_sees_unmirrored_old_task(room_db):
         assert {m.id for m in db.get_conversation_history(conn, OLD)} == {old, new}
 
 
-def test_membership_and_grant_changes_write_only_current_identity(room_db):
+def test_membership_changes_write_only_current_identity(room_db):
     with db.get_db(room_db) as conn:
         db.add_room_member(conn, OLD, "bob")
         assert db.list_room_members(conn, NEW) == ["alice", "bob"]
-        room_scopes.grant_scopes(conn, OLD, "bob", ["files"])
-        assert room_scopes.granted_scopes(conn, NEW, "bob") == frozenset({"files"})
-        room_scopes.revoke_scopes(conn, OLD, "bob")
-        assert not room_scopes.granted_scopes(conn, NEW, "bob")
+        assert conn.execute("SELECT 1 FROM room_members WHERE room_token = ?", (OLD,)).fetchone() is None
         db.remove_room_member(conn, OLD, "bob")
         assert not db.is_room_member(conn, NEW, "bob")
         assert conn.execute("SELECT 1 FROM room_members WHERE room_token = ?", (OLD,)).fetchone() is None

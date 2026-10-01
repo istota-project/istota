@@ -277,12 +277,21 @@ class TestTheTwoPathsProduceTheSameTask:
         trigger_ids = await self._via_trigger(trigger_config, _mention_msg())
 
         assert len(poll_ids) == 1 and len(trigger_ids) == 1
+        # Talk inbound mints a room identity on first sight, so each database
+        # holds its own `rm_` token; the Talk ref is what the two share.
         with db.get_db(poll_config.db_path) as conn:
             polled = db.get_task(conn, poll_ids[0])
-            polled_room = db.get_room(conn, "group1")
+            polled_token = db.resolve_room_token(conn, "talk", "group1")
+            polled_room = db.get_room(conn, polled_token)
         with db.get_db(trigger_path) as conn:
             triggered = db.get_task(conn, trigger_ids[0])
-            triggered_room = db.get_room(conn, "group1")
+            triggered_token = db.resolve_room_token(conn, "talk", "group1")
+            triggered_room = db.get_room(conn, triggered_token)
+
+        assert db.is_canonical_room_token(polled_token)
+        assert db.is_canonical_room_token(triggered_token)
+        assert polled.conversation_token == polled_token
+        assert triggered.conversation_token == triggered_token
 
         assert polled.prompt == "check my calendar"
         assert triggered.prompt == polled.prompt
@@ -356,10 +365,16 @@ class TestPayloadDirectIngestion:
                 row = dict(conn.execute(
                     "SELECT * FROM tasks WHERE id = ?", (task_id,),
                 ).fetchone())
+                room_token = db.resolve_room_token(conn, "talk", "group1")
             # Identity and wall-clock columns differ between any two runs and
-            # say nothing about the path that produced them.
+            # say nothing about the path that produced them. The room token is
+            # minted per database, so it is compared through the binding: the
+            # task must sit on the room the Talk ref resolves to.
             for column in ("id", "created_at", "updated_at"):
                 row.pop(column, None)
+            assert room_token is not None and db.is_canonical_room_token(room_token)
+            assert row["conversation_token"] == room_token
+            row["conversation_token"] = "<room bound to talk:group1>"
             return row
 
         assert _row(direct_config, direct[0]) == _row(fetched_config, fetched[0])

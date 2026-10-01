@@ -246,10 +246,22 @@ class TestAnsibleIntegration:
             if task.get("name") == "Relocate legacy database snapshots"
         )
         rendered = str(relocation)
-        assert "db_backup_relocate" in rendered
-        assert "state': 'stopped" in rendered
-        assert "state': 'started" in rendered
+        block = str(relocation["block"])
+        assert "db_backup_relocate" in block
+        assert "state': 'stopped" in block
         assert "_legacy_db_snapshot_dirs" in rendered
+        # The restart is in `always`, so a failed migrator still brings the
+        # scheduler back, and it takes the update flock every role path that
+        # reopens a room writer shares (rooms Stage 17).
+        restarts = [
+            " ".join(str(task.get("command", "")).split())
+            for task in relocation["always"]
+        ]
+        assert any(
+            "flock" in cmd and "-update.lock" in cmd
+            and cmd.endswith("systemctl start {{ istota_namespace }}-scheduler")
+            for cmd in restarts
+        ), restarts
 
         detection = next(
             task
