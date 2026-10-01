@@ -14,7 +14,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from . import db
+from . import db, sqlite_util
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -366,9 +366,16 @@ def migrate_database(db_path: Path, *, dry_run: bool = False, list_only: bool = 
     moved = 0
     failures = 0
     try:
-        mode = "ro" if dry_run or list_only else "rw"
-        conn = sqlite3.connect(Path(db_path).resolve().as_uri() + f"?mode={mode}", uri=True, timeout=5)
-        conn.row_factory = sqlite3.Row
+        path = Path(db_path).resolve()
+        if dry_run or list_only:
+            conn = sqlite_util.connect_read_only(path)
+            conn.row_factory = sqlite3.Row
+        else:
+            # timeout=5 is the busy timeout; foreign_keys is set below, after
+            # the vector extension loads.
+            conn = sqlite_util.connect(
+                path, timeout=5, busy_timeout_ms=None, foreign_keys=False, create=False,
+            )
         if conn.execute("SELECT 1 FROM sqlite_master WHERE name='memory_chunks_vec'").fetchone():
             from .memory.search import enable_vec_extension
             # The loader opens the installed package's extension, never a DB-

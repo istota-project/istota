@@ -2457,9 +2457,11 @@ def channel_memory_tokens(config: "Config", conversation_token: str) -> list[str
     import sqlite3
     from contextlib import closing
 
+    from .sqlite_util import connect_read_only
+
     validate_conversation_token(conversation_token)
     try:
-        with closing(sqlite3.connect(config.db_path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+        with closing(connect_read_only(config.db_path.resolve())) as conn:
             from . import db
             conn.row_factory = sqlite3.Row
             canonical = db._canonical_room_token(conn, conversation_token, cross_surface=False)

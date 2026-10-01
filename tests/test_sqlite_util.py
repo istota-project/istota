@@ -605,6 +605,27 @@ def test_the_matrix_covers_every_context_manager_caller():
     assert set(_openers()) == set(_EXPECTED)
 
 
+class TestConnectWithoutCreate:
+    """`create=False` is the migrator's open: writable, never a new file."""
+
+    def test_a_missing_database_raises_and_is_not_created(self, tmp_path):
+        path = tmp_path / "a?b#c.db"
+        with pytest.raises(sqlite3.OperationalError):
+            sqlite_util.connect(path, create=False)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_an_existing_database_opens_writable(self, tmp_path):
+        path = tmp_path / "a?b#c.db"
+        sqlite3.connect(path).close()
+        conn = sqlite_util.connect(path, create=False)
+        try:
+            conn.execute("CREATE TABLE t (x)")
+            conn.commit()
+        finally:
+            conn.close()
+        assert list(tmp_path.iterdir()) == [path]
+
+
 class TestTheTwoBareCallers:
     """`money/cli` and `money/routes` hand a live connection on rather than
     wrapping a block, so they take `sqlite_util.connect` and close it

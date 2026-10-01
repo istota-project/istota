@@ -48,19 +48,27 @@ def connect(
     busy_timeout_ms: int | None = 30_000,
     foreign_keys: bool = True,
     synchronous: str | None = None,
+    create: bool = True,
 ) -> sqlite3.Connection:
     """Open a connection and apply the requested pragmas. Caller closes it.
 
-    The bare form, for the two callers that hand a live connection back to
-    something else rather than wrapping a block: ``money/cli._get_db_conn`` and
-    ``money/routes._portfolio_conn``. Everything else wants :func:`open_db`.
+    The bare form, for callers that hand a live connection back to something
+    else or manage their own transactions rather than wrapping a block:
+    ``money/cli._get_db_conn``, ``money/routes._portfolio_conn`` and
+    ``room_relocate``'s migration. Everything else wants :func:`open_db`.
 
     ``busy_timeout_ms=None`` issues no ``PRAGMA busy_timeout``, which leaves the
     handler ``timeout`` already installed — see the module docstring.
     ``synchronous`` is a per-connection setting (unlike ``journal_mode``) and is
     passed as the literal SQLite keyword, e.g. ``"NORMAL"``.
+
+    ``create=False`` opens ``mode=rw`` so a missing database raises rather than
+    becoming a zero-byte file, for a migrator that must refuse a wrong path.
     """
-    conn = sqlite3.connect(str(path), timeout=timeout)
+    if create:
+        conn = sqlite3.connect(str(path), timeout=timeout)
+    else:
+        conn = sqlite3.connect(_uri(path, "rw"), uri=True, timeout=timeout)
     try:
         if busy_timeout_ms is not None:
             conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
@@ -75,6 +83,11 @@ def connect(
         conn.close()
         raise
     return conn
+
+
+def _uri(path: Path | str, mode: str) -> str:
+    """A ``file:`` URI with the path percent-encoded; see ISSUE-461 below."""
+    return "file:" + quote(os.fsencode(Path(path)), safe="/") + f"?mode={mode}"
 
 
 def _has_hot_journal(path: Path | str) -> bool:
@@ -110,8 +123,11 @@ def _has_hot_journal(path: Path | str) -> bool:
 def connect_read_only(path: Path | str) -> sqlite3.Connection:
     """Open ``path`` for reading without writing to it. Caller closes it.
 
-    ``doctor`` is the only caller, and what it needs is a connection
+    ``doctor`` is the first caller, and what it needs is a connection
     that does not change what it is inspecting and strands nothing beside it.
+    The room-identity readers (``storage.channel_memory_tokens``,
+    ``room_mount_reconcile`` and ``room_relocate``'s inspection modes) need the
+    same thing of the live framework database.
 
     **The mode is chosen per database, and neither mode is right for both
     shapes** (ISSUE-458). A database with a hot journal is opened ``mode=ro``; a
@@ -201,10 +217,7 @@ def connect_read_only(path: Path | str) -> sqlite3.Connection:
     name worked before and still does, since SQLite decodes ``%HH`` back.
     """
     mode = "ro" if _has_hot_journal(path) else "rw"
-    conn = sqlite3.connect(
-        "file:" + quote(os.fsencode(Path(path)), safe="/") + f"?mode={mode}",
-        uri=True,
-    )
+    conn = sqlite3.connect(_uri(path, mode), uri=True)
     if mode == "ro":
         return conn
     try:

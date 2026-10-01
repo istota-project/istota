@@ -21,6 +21,7 @@ from . import cron_loader, db, storage
 from .nextcloud import dav
 from .nextcloud._http import OcsError, dav_files_url, dav_request
 from .room_relocate import EXIT_OK, EXIT_PARTIAL, EXIT_REFUSED, _descriptor, _preflight, _refusal
+from .sqlite_util import connect_read_only
 from .toml_fence import BACKTICK_RUN_RE, FENCE_OPEN_RE, find_toml_block
 from .user_scope import is_scopable_user_id
 
@@ -257,7 +258,7 @@ def _rewrite_user(config, user: str, mapping: dict[str, str], *, dry_run: bool) 
 
 def reconcile(config, *, dry_run: bool = False) -> int:
     try:
-        with closing(sqlite3.connect(config.db_path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+        with closing(connect_read_only(config.db_path.resolve())) as conn:
             conn.row_factory = sqlite3.Row
             _preflight(conn)
             # A deleted room leaves an alias tombstone. Never resurrect its

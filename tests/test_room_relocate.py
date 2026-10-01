@@ -203,9 +203,10 @@ def test_ambiguous_binding_refuses_without_writes(database):
     assert snapshot(database) == before
 
 
-def test_missing_database_is_not_created(tmp_path):
+@pytest.mark.parametrize("mode", [{}, {"dry_run": True}, {"list_only": True}])
+def test_missing_database_is_not_created(tmp_path, mode):
     path = tmp_path / "absent.db"
-    assert room_relocate.migrate_database(path) == 1
+    assert room_relocate.migrate_database(path, **mode) == 1
     assert not path.exists()
 
 
