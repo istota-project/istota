@@ -259,7 +259,7 @@ fi
 log "Migrating room identities and reconciling workspace"
 bash "$REPO_DIR/scripts/relocate-rooms.sh" "$NAMESPACE" "$USER" \
     "${HOME_DIR}/.venv/bin/istota" "${REPO_DIR}/config/config.toml" \
-    "{{ istota_update_lock_wait | default(900) }}" --lock-held
+    "{{ istota_update_lock_wait | default(900) }}" "${HOME_DIR}/data/istota.db" --lock-held
 
 {% if istota_whatsapp_baileys_unit_wanted | default(false) %}
 # Restarted only when something under the sidecar's own directory moved, and

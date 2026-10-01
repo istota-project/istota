@@ -412,6 +412,24 @@ class TestRoomMigrationEnvironment:
 
         python = f'{converged_host.home}/.venv/bin/python'
         config_path = f'{converged_host.home}/istota/config/config.toml'
+        # The lean fixture has no workspace. Give this reapply a real local
+        # mount, without claiming to exercise FUSE or DAV (the full tier does).
+        workspace = '/srv/mount/nextcloud/content'
+        prepared = converged_host.exec(
+            f'mkdir -p {workspace} && mount -t tmpfs tmpfs {workspace} && chown istota:istota {workspace}'
+        )
+        assert prepared.returncode == 0, prepared.stdout + prepared.stderr
+        # Supply local storage in the fixture's rendered config, while keeping
+        # the role's rclone unit disabled. The relocation task stays unchanged.
+        local_storage = f'workspace_path = "{workspace}"\nnextcloud_mount_path = "{workspace}"\n'
+        prepare_config = f'''
+from pathlib import Path
+for target in ({config_path!r}, '/opt/istota-src/deploy/ansible/templates/config.toml.j2'):
+    config = Path(target)
+    config.write_text({local_storage!r} + config.read_text())
+'''
+        prepared = converged_host.exec(f'{python} -c {shlex.quote(prepare_config)}')
+        assert prepared.returncode == 0, prepared.stdout + prepared.stderr
         seed = f'''
 from pathlib import Path
 from istota import db
@@ -430,7 +448,6 @@ path.mkdir(parents=True)
         assert converged_host.unit_property('istota-scheduler', 'ActiveState') == 'active'
         result = converged_host.reapply_role()
         assert result.returncode == 0, result.stdout[-6000:] + result.stderr[-2000:]
-        assert 'migrated: deployment-room -> rm_' in result.stdout
         assert converged_host.unit_property('istota-scheduler', 'ActiveState') == 'active'
         check = f'''
 import json
@@ -439,7 +456,7 @@ from istota import db
 from istota.config import load_config
 config = load_config(Path({config_path!r}))
 with db.get_db(config.db_path) as conn:
-    token = conn.execute("SELECT new_token FROM room_token_migration WHERE old_token='deployment-room'").fetchone()[0]
+    token = conn.execute("SELECT token FROM rooms WHERE token='deployment-room' OR token=(SELECT new_token FROM room_token_migration WHERE old_token='deployment-room')").fetchone()[0]
     binding = tuple(conn.execute("SELECT room_token,surface_ref FROM room_bindings WHERE surface_ref='deployment-room'").fetchone())
     message = tuple(conn.execute("SELECT room_token,body FROM messages WHERE body='Retained deployment history'").fetchone())
 print(json.dumps([token, binding, message, (config.workspace_path / 'Channels' / token / 'CHANNEL.md').read_text()]))
@@ -447,7 +464,8 @@ print(json.dumps([token, binding, message, (config.workspace_path / 'Channels' /
         checked = converged_host.exec(f'{python} -c {shlex.quote(check)}', user='istota')
         assert checked.returncode == 0, checked.stdout + checked.stderr
         token, binding, message, memory = json.loads(checked.stdout)
-        assert token.startswith('rm_')
+        assert token.startswith('rm_'), f'room migration left the old identity: {token}'
+        assert 'migrated: deployment-room -> rm_' in result.stdout
         assert binding == [token, 'deployment-room']
         assert message == [token, 'Retained deployment history']
         assert memory == 'Retained deployment memory'

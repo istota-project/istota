@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Offline deployment window. Arguments: namespace, service user, istota binary,
-# config path, lock wait seconds, optional --lock-held (the update cron only).
+# config path, lock wait seconds, database path, optional --lock-held (cron only).
 set -euo pipefail
 namespace=$1
 service_user=$2
 istota_bin=$3
 config_path=$4
 lock_wait=$5
-if [ "${6:-}" != "--lock-held" ]; then
+db_path=$6
+if [ "${7:-}" != "--lock-held" ]; then
     exec 200>"/tmp/${namespace}-update.lock"
     flock -w "$lock_wait" 200
 fi
@@ -33,6 +34,16 @@ for suffix in scheduler web webhooks; do
         not-found) ;;
         *) echo "Cannot stop $unit: LoadState=$load_state" >&2; exit 1 ;;
     esac
+done
+
+# Root provisioning may leave SQLite sidecars owned by root. Repair ownership
+# only after every writer has stopped, so sidecars cannot vanish during chown.
+# An absent main database or a failed ownership change must stop migration.
+chown "$service_user:" "$db_path"
+for sidecar in "$db_path-wal" "$db_path-shm"; do
+    if [ -e "$sidecar" ]; then
+        chown "$service_user:" "$sidecar"
+    fi
 done
 
 result=0

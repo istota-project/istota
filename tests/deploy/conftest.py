@@ -40,7 +40,9 @@ a convenience:
 Everything else converges for real: the apt work, the user and group, the
 directory tree, the git clone, `uv sync --extra all`, the rendered
 `config.toml`, the tmpfiles snippets, logrotate, journald, the sandbox sysctl,
-and the systemd units.
+and the systemd units. The room-relocation reapply witness mounts a disposable
+local tmpfs workspace after first converge; Nextcloud stays disabled, so that
+case covers local relocation and service ordering, not DAV or rclone/FUSE.
 
 **Stated up front, so the tier is not read as covering the deploy end to end**:
 reboot ordering and the `Require`/`After` relationship between the app units
@@ -175,6 +177,12 @@ BREAKAGES = {
     # not a file. Named in this map so the script and the fixture cannot
     # disagree about which breakages exist.
     "sandbox": None,
+    # Leave initialization and every service operation intact, but remove only
+    # the room migration invocation. The retained-room assertion must go red.
+    "room-relocation": (
+        "sed -i 's|{{ istota_home }}/.venv/bin/istota {{ istota_repo_dir }}/config/config.toml|/bin/true {{ istota_repo_dir }}/config/config.toml|' "
+        f"{CONTAINER_DEPLOY_DIR}/ansible/tasks/main.yml"
+    ),
 }
 
 _XDIST_MESSAGE = (
@@ -543,6 +551,16 @@ def _bare_clone(destination: Path) -> str:
         ["git", "clone", "--bare", "--no-local", str(REPO), str(destination)],
         capture_output=True, text=True, check=True, timeout=600,
     )
+    expected = subprocess.run(
+        ["git", "-C", str(REPO), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    actual = subprocess.run(
+        ["git", "--git-dir", str(destination), "rev-parse", f"refs/heads/{branch}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert actual == expected, f"deploy clone {actual} differs from source HEAD {expected}"
+    print(f"deploy application artifact commit: {actual}")
     return branch
 
 

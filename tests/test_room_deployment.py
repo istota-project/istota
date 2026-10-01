@@ -142,7 +142,8 @@ def test_maintenance_window_shares_the_cron_lock(tmp_path):
     rig = Rig(tmp_path)
     rig.script()  # render the same wrapper the updater invokes
     command = ['bash', str(tmp_path / 'relocate-rooms.sh'), 'istota', 'istota',
-               str(rig.home / '.venv/bin/istota'), str(tmp_path / 'config.toml'), '0']
+               str(rig.home / '.venv/bin/istota'), str(tmp_path / 'config.toml'), '0',
+               str(rig.home / 'data/istota.db')]
     env = dict(os.environ, PATH=f'{rig.bin}:{rig.tools}')
     with (tmp_path / 'lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -212,11 +213,37 @@ def test_migration_uses_the_services_environment_file(tmp_path):
     assert '--wait --pipe --collect' in call
 
 
-def test_role_repairs_database_sidecar_ownership_before_migration():
+
+def test_ownership_repair_runs_inside_stopped_window(tmp_path):
+    rig = Rig(tmp_path)
+    rig.commit({'src/app.py': 'x = 2\n'})
+    data = rig.home / 'data'
+    data.mkdir(exist_ok=True)
+    for name in ('istota.db', 'istota.db-wal', 'istota.db-shm'):
+        (data / name).touch()
+    result = rig.run()
+    assert result.returncode == 0, result.stderr
+    calls = rig.calls()
+    owned = [calls.index(f'chown istota: {data / name}') for name in ('istota.db', 'istota.db-wal', 'istota.db-shm')]
+    stopped = [calls.index(f'systemctl stop istota-{unit}') for unit in ('scheduler', 'web', 'webhooks')]
+    migration = next(i for i, call in enumerate(calls) if 'init --relocate-rooms' in call)
+    assert max(stopped) < min(owned) <= max(owned) < migration
+
+
+def test_ownership_failure_restores_writers_without_migrating(tmp_path):
+    rig = Rig(tmp_path)
+    rig.commit({'src/app.py': 'x = 2\n'})
+    (rig.bin / 'chown').write_text('#!/bin/sh\ncase "$*" in *data/istota.db*) exit 1 ;; esac\n')
+    result = rig.run()
+    assert result.returncode != 0
+    assert not any('init --relocate-rooms' in call for call in rig.calls())
+    assert 'systemctl start istota-scheduler' in rig.calls()
+
+
+def test_room_maintenance_follows_legacy_database_work():
     tasks = yaml.safe_load((REPO / 'deploy/ansible/tasks/main.yml').read_text())
-    by_name = {task['name']: task for task in tasks if 'name' in task}
-    files = by_name['Find framework database and sidecars']
-    assert set(files['find']['patterns']) == {'istota.db', 'istota.db-wal', 'istota.db-shm'}
-    ownership = by_name['Set ownership of database']
-    assert ownership['loop'] == '{{ _framework_db_files.files }}'
-    assert tasks.index(ownership) < tasks.index(by_name['Relocate room identities offline'])
+    names = [task.get('name') for task in tasks]
+    room = names.index('Relocate room identities offline')
+    assert names.index('Migrate framework location data into per-user location.db files') < room
+    assert names.index('Relocate module DBs from mount to local disk') < room
+    assert room < names.index('Deploy istota-scheduler systemd service')

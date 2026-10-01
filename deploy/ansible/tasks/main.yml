@@ -2372,27 +2372,6 @@
   changed_when: false  # Idempotent - silently fails if column already exists
   when: not istota_web_only
 
-# Root-run provisioning commands can leave WAL/SHM sidecars behind. Owning
-# only the main file lets the daemon read it but SQLite refuses its writes.
-- name: Find framework database and sidecars
-  find:
-    paths: "{{ istota_home }}/data"
-    patterns: [istota.db, istota.db-wal, istota.db-shm]
-    recurse: false
-    file_type: file
-  register: _framework_db_files
-  when: not ansible_check_mode and not istota_web_only
-
-- name: Set ownership of database
-  file:
-    path: "{{ item.path }}"
-    owner: "{{ istota_user }}"
-    group: "{{ istota_group }}"
-  loop: "{{ _framework_db_files.files }}"
-  loop_control:
-    label: "{{ item.path }}"
-  when: not ansible_check_mode and not istota_web_only
-
 # The scheduler's dated snapshots used to live at a separate top-level mount
 # path. Move those directory trees into Backups/db/snapshots before the new
 # default starts writing there. The migrator refuses to merge two histories,
@@ -2442,29 +2421,6 @@
     - not istota_web_only
     - istota_use_nextcloud_mount | default(false) | bool
     - (_legacy_db_snapshot_dirs.matched | default(0)) > 0
-
-# One lock covers the complete offline window, including restoration on error.
-# The cron holds this same lock and calls the wrapper with --lock-held.
-- name: Relocate room identities offline
-  command: >-
-    bash {{ istota_repo_dir }}/scripts/relocate-rooms.sh
-    {{ istota_namespace }} {{ istota_user }}
-    {{ istota_home }}/.venv/bin/istota {{ istota_repo_dir }}/config/config.toml
-    {{ istota_update_lock_wait }}
-  args:
-    chdir: "{{ istota_repo_dir }}"
-  register: _room_relocate
-  changed_when: "'migrated: ' in (_room_relocate.stdout | default(''))"
-  when:
-    - not istota_web_only
-    - not ansible_check_mode
-
-- name: Show room identity relocation output
-  debug:
-    msg: "{{ _room_relocate.stdout_lines + _room_relocate.stderr_lines }}"
-  when:
-    - not istota_web_only
-    - not ansible_check_mode
 
 # One-time relocation: `developer.repos_dir` from one shared tree into per-user
 # subtrees, `{repos_dir}/{namespace}/` -> `{repos_dir}/{user_id}/{namespace}/`.
@@ -2814,6 +2770,31 @@
     - not istota_web_only
     - istota_use_nextcloud_mount | default(false) | bool
     - (_legacy_module_dbs.matched | default(0)) > 0
+
+# Run after all legacy DB probes/migrations: even a root SQLite reader can
+# recreate WAL sidecars after ownership has been repaired.
+# One lock covers the complete offline window, including restoration on error.
+# The cron holds this same lock and calls the wrapper with --lock-held.
+- name: Relocate room identities offline
+  command: >-
+    bash {{ istota_repo_dir }}/scripts/relocate-rooms.sh
+    {{ istota_namespace }} {{ istota_user }}
+    {{ istota_home }}/.venv/bin/istota {{ istota_repo_dir }}/config/config.toml
+    {{ istota_update_lock_wait }} {{ istota_home }}/data/istota.db
+  args:
+    chdir: "{{ istota_repo_dir }}"
+  register: _room_relocate
+  changed_when: "'migrated: ' in (_room_relocate.stdout | default(''))"
+  when:
+    - not istota_web_only
+    - not ansible_check_mode
+
+- name: Show room identity relocation output
+  debug:
+    msg: "{{ _room_relocate.stdout_lines + _room_relocate.stderr_lines }}"
+  when:
+    - not istota_web_only
+    - not ansible_check_mode
 
 - name: Deploy istota-scheduler systemd service
   template:
