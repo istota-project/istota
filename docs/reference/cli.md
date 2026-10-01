@@ -231,6 +231,25 @@ A value passed as a command argument is capped at 128 KiB by the kernel, not by 
 
 The two `--value-file` flags differ in scope, because the two commands run as different principals. `istota kv set --value-file` reads any path you can read: it runs in your shell, as you. `istota-skill kv set --value-file` runs host-side on behalf of a task, so its path must resolve under that task's deferred directory, its user's own workspace, or the conversation's channel directory — the same subtrees the sandbox binds. Outside a task neither of those roots exists, so the skill form refuses every path; use the operator form there.
 
+The skill form also takes `--group <id>` on every verb, set operations included, to reach a [group's](../features/groups.md) store. Values read that way come back fenced as untrusted content, and every refusal reads `not a member of group '<id>'`.
+
+### Groups
+
+Groups are created and managed only here. Every write records `operator` as its author; refusals exit 1 with the reason on stderr.
+
+```bash
+istota group create ID [--kind LABEL] [--name "Display Name"]   # Create, seed Groups/ID/GROUP.md
+istota group list [--all]                    # Current groups; --all includes archived
+istota group show ID                         # Display name, kind, members and membership history (JSON)
+istota group add-member ID USER [--role owner|member]   # USER must be a configured user
+istota group remove-member ID USER           # End a membership; the row is kept
+istota group archive ID                      # Stop loading and membership; rows stay readable
+istota group kv-get ID NAMESPACE KEY         # Read the group's KV store, with written_by
+istota group kv-list ID NAMESPACE            # List a namespace, e.g. _memory_audit
+```
+
+An id is lowercase letters, digits, `.`, `_` and `-`, 2 to 64 characters. There is no `delete`: membership is a history and an archived group's id is not reused. `--kind` is a display label and `--role` is recorded but read by nothing. See [groups](../features/groups.md).
+
 ### Web chat maintenance
 
 ```bash

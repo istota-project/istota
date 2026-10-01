@@ -26,7 +26,7 @@ Subsystems:
 - `location.md` — GPS pings, place detection, visits, Overland/Garmin ingest
 - `feeds.md` — native RSS/Atom/Tumblr/Are.na poller, per-user SQLite, image dedupe
 - `money.md` — quarterly tax estimator, portfolio snapshots, classifications
-- `memory.md` — USER.md/CHANNEL.md, per-skill overlays, knowledge graph, playbooks, sleep cycle
+- `memory.md` — USER.md/CHANNEL.md/GROUP.md, per-skill overlays, knowledge graph, playbooks, sleep cycle
 
 Boundaries and operations:
 
@@ -49,6 +49,7 @@ src/istota/
 ├── brain/                # Pluggable model invocation (Brain protocol)
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
 ├── skills/               # 37 self-contained skills (skill.md + optional CLI)
+│   └── _group_access.py  # The one gate for `kv --group` and `memory --group`: current member and in the task's resolved group set → memory.md
 ├── cli.py                # Local CLI (task, resource, briefing, secret, user, run, serve, setup, …)
 ├── serve.py              # Combined local launcher (`istota serve`): scheduler thread + uvicorn in one process
 ├── setup_wizard.py       # Interactive first-run installer (`istota setup`) → install.md
@@ -176,6 +177,7 @@ Admin user IDs in `/etc/istota/admins` (empty = all admin). Non-admins: scoped m
 /Users/{user_id}/{bot_name}/{config,exports,scripts,examples}/
 /Users/{user_id}/{inbox,memories,shared}/
 /Channels/{conversation_token}/{CHANNEL.md,memories/}
+/Groups/{group_id}/{GROUP.md,memories/}
 ```
 
 ### Scheduled Jobs (CRON.md)

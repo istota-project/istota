@@ -36,6 +36,10 @@ Per-conversation memory at `/Channels/{conversation_token}/CHANNEL.md`. Loaded i
 
 CHANNEL.md is indexed under `source_type = "channel_memory_durable"` — a separate type from the dated `channel_memory` files, so it survives retention pruning the way USER.md does.
 
+### Group memory (GROUP.md)
+
+Memory shared by the members of a [group](groups.md), at `/Groups/{group_id}/GROUP.md`. Loaded as `## Group memory` for the groups the task may carry: all of the user's groups in a conversation with the bot alone, and in a shared room only those whose members include everyone present. Written through the same `memory` skill with `--group <id>`, only when a member asks, and never by the sleep cycle. The file reaches the model inside untrusted-content markers, since any member can write it. Not indexed for search.
+
 ### Per-skill overlays
 
 Not a prompt section of its own, but a durable user-written store the search index carries. A behavioral rule scoped to one skill goes in `/Users/{user_id}/{bot_dir}/config/skills/<skill-name>.md`, appended to that skill's instructions whenever the skill loads. Written as a file, not through a CLI — it is a document the user authors, and often carries prose and code blocks rather than bullets. `istota-skill skills overlay <name>` prints one and `istota-skill skills overlays` inventories them, including whether each one actually loads.
@@ -233,7 +237,7 @@ Durable `user_memory` chunks (USER.md and any future durable channel-side type) 
 1. Recalled memories (removed first)
 2. Knowledge graph facts
 3. Dated memories
-4. User memory and channel memory are always preserved
+4. User memory, group memory and channel memory are always preserved
 
 ## Prompt order
 
@@ -241,11 +245,12 @@ The executor injects memory in this order (briefings get none of it):
 
 1. User memory (USER.md)
 2. Knowledge graph facts (current, non-expired, relevance-filtered)
-3. Channel memory (CHANNEL.md)
-4. Dated memories (last `auto_load_dated_days` days)
-5. Recalled memories (hybrid search results when `auto_recall` is on)
-6. Learned playbooks (`## Learned Playbooks`, when `[playbooks] enabled` is on)
-7. Confirmation context (only on confirmed tasks) — emitted after the conversation context, immediately before the request
+3. Group memory (GROUP.md, for the groups the task may carry)
+4. Channel memory (CHANNEL.md)
+5. Dated memories (last `auto_load_dated_days` days)
+6. Recalled memories (hybrid search results when `auto_recall` is on)
+7. Learned playbooks (`## Learned Playbooks`, when `[playbooks] enabled` is on)
+8. Confirmation context (only on confirmed tasks) — emitted after the conversation context, immediately before the request
 
 ## Configuration
 

@@ -13,6 +13,7 @@ Set for every task:
 | `ISTOTA_USER_ID` | Task's user ID |
 | `ISTOTA_DB_PATH` | Framework database path. Handed to skill CLIs via the proxy for every user; never present in the model's own environment |
 | `ISTOTA_CONVERSATION_TOKEN` | Talk room token (if set) |
+| `ISTOTA_TASK_GROUPS` | Comma-separated ids of the [groups](../features/groups.md) this task may carry, resolved once per task. `kv --group` and `memory --group` refuse any group not named here; absent means none. Handed to skill CLIs via the proxy; never present in the model's own environment |
 | `ISTOTA_DEFERRED_DIR` | Temp directory for deferred JSON writes |
 | `ISTOTA_SKILL_PROXY_SOCK` | Skill proxy socket path (if proxy enabled) |
 | `ISTOTA_SKILL_CLIENT_WAIT` | `security.skill_client_wait_seconds`, set alongside the socket when the proxy is enabled. The sandboxed `istota-skill` client cannot read a config, so this is how an operator's value reaches it; it falls back to 600 when unset. The proxy derives its own ceiling from the config field and never from this export, so a task rewriting its copy changes only its own patience |
