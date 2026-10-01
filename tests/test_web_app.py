@@ -176,6 +176,120 @@ class TestLoginRoute:
         mod._oauth.nextcloud.authorize_redirect.assert_called_once()
 
 
+# Runs the auth card's inline script under node against a stub DOM, one tap per
+# case, and reports whether the focused field was blurred or the tap cancelled.
+_KEYBOARD_DISMISS_HARNESS = r'''
+const source = process.argv[1];
+const cases = JSON.parse(process.argv[2]);
+const results = {};
+for (const c of cases) {
+  const handlers = {};
+  let blurred = false;
+  function el(tag, ancestors = [], control = null, type = 'text') {
+    return {
+      tagName: tag, type, isContentEditable: false,
+      blur() { if (document.activeElement === this) { blurred = true; document.activeElement = body; } },
+      closest(sel) {
+        const tags = sel.split(',').map(s => s.trim().replace(/\[.*\]$/, '').toUpperCase());
+        for (const t of [tag, ...ancestors]) if (tags.includes(t)) return {tagName: t, control};
+        return null;
+      },
+    };
+  }
+  const body = el('BODY');
+  const field = el('INPUT');
+  const targets = {
+    blank: el('DIV', ['MAIN']), card: el('P', ['MAIN']), other_field: el('INPUT'),
+    label: el('LABEL', [], el('INPUT')), tab_label: el('LABEL', [], el('INPUT', [], null, 'radio')),
+    link: el('A', ['P']), button_icon: el('SVG', ['BUTTON', 'FORM']), button: el('BUTTON', ['FORM']),
+  };
+  const window = {
+    matchMedia: q => ({matches: q === '(pointer: coarse)' && c.coarse}),
+    addEventListener: (type, fn) => { (handlers[type] ||= []).push(fn); },
+  };
+  const document = {activeElement: c.focused ? field : body};
+  new Function('window', 'document', source)(window, document);
+  let cancelled = false;
+  const fire = (type, x, y) => (handlers[type] || []).forEach(fn => fn({
+    type, target: targets[c.target], clientX: x, clientY: y,
+    preventDefault() { cancelled = true; },
+  }));
+  fire('pointerdown', 100, 100);
+  fire('pointerup', 100, 100 + (c.moved || 0));
+  results[c.name] = {blurred, cancelled};
+}
+console.log(JSON.stringify(results));
+'''
+
+
+@_needs_web_deps
+class TestAuthCardKeyboardDismiss:
+    """ISSUE-582: a tap off a field on an auth page puts the iOS keyboard away."""
+
+    def _run(self, cases):
+        import shutil
+        import subprocess
+
+        from istota import web_app
+
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("node is needed to execute the auth card's inline script")
+        result = subprocess.run(
+            [node, "-e", _KEYBOARD_DISMISS_HARNESS,
+             web_app._LOGIN_PAGE_KEYBOARD_SCRIPT, json.dumps(cases)],
+            capture_output=True, text=True, check=True,
+        )
+        return json.loads(result.stdout)
+
+    def test_every_auth_card_carries_the_dismiss_script(self):
+        from istota import web_app
+
+        pages = [
+            web_app._render_form_page("Bot", "Check your email", "<p>body</p>", ""),
+            web_app._render_login_error_page("Bot", "Headline", "detail", ""),
+            web_app._render_login_page("Bot", "", methods=["email"]),
+        ]
+        for html in pages:
+            assert web_app._LOGIN_PAGE_KEYBOARD_SCRIPT in html
+
+    def test_a_tap_on_blank_space_blurs_the_focused_field(self):
+        results = self._run([
+            {"name": "blank", "target": "blank", "focused": True, "coarse": True},
+            {"name": "card", "target": "card", "focused": True, "coarse": True},
+        ])
+        assert results["blank"]["blurred"] is True
+        assert results["card"]["blurred"] is True
+
+    def test_a_tab_label_is_not_a_field_and_still_blurs(self):
+        # The Password / Email code tabs label radios, so they move no text focus.
+        results = self._run([
+            {"name": "tab", "target": "tab_label", "focused": True, "coarse": True},
+        ])
+        assert results["tab"]["blurred"] is True
+
+    def test_the_first_tap_on_submit_is_left_to_submit(self):
+        # ISSUE-204: a focus change before the click arrives can make it miss.
+        results = self._run([
+            {"name": "button", "target": "button", "focused": True, "coarse": True},
+            {"name": "icon", "target": "button_icon", "focused": True, "coarse": True},
+            {"name": "link", "target": "link", "focused": True, "coarse": True},
+        ])
+        for name in ("button", "icon", "link"):
+            assert results[name] == {"blurred": False, "cancelled": False}
+
+    def test_fields_labels_and_drags_keep_the_keyboard(self):
+        results = self._run([
+            {"name": "other_field", "target": "other_field", "focused": True, "coarse": True},
+            {"name": "label", "target": "label", "focused": True, "coarse": True},
+            {"name": "drag", "target": "blank", "focused": True, "coarse": True, "moved": 40},
+            {"name": "fine_pointer", "target": "blank", "focused": True, "coarse": False},
+            {"name": "nothing_focused", "target": "blank", "focused": False, "coarse": True},
+        ])
+        for name, outcome in results.items():
+            assert outcome["blurred"] is False, name
+
+
 @_needs_web_deps
 class TestCallbackRoute:
     async def test_callback_valid_user_sets_session(self, client, app):
