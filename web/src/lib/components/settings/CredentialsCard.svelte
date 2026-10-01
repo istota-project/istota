@@ -209,11 +209,14 @@
               {/if}
             </div>
             <div class="cred-badges">
-              <Badge>{SOURCE_LABEL[credential.source] ?? credential.source}</Badge>
+              <span class="cred-source cred-source-{credential.source}">
+                <Badge size="sm">{SOURCE_LABEL[credential.source] ?? credential.source}</Badge>
+              </span>
               {#if credential.hosts.some( (host) => host.startsWith('http://') ) && !credential.grant?.allow_http}
-                <Badge variant="warn">HTTPS required</Badge>
+                <Badge size="sm" variant="warn">HTTPS required</Badge>
               {/if}
-              {#if credential.revealable}<Badge variant="info">Readable by tasks</Badge>{/if}
+              {#if credential.revealable}<Badge size="sm" variant="info">Readable by tasks</Badge
+                >{/if}
             </div>
             <KebabMenu items={menu(credential)} ariaLabel="Actions for {credential.name}" />
           </li>
@@ -341,6 +344,30 @@
     justify-content: flex-end;
     gap: var(--space-1);
   }
+
+  /* A categorical hue per source, reaching the child Badge through its
+     documented --badge-bg / --badge-fg hook. Istota takes the bot's identity
+     accent, as the admin badge does. design-lint-allow-begin: categorical
+     custom properties a child component reads. */
+  .cred-source {
+    display: inline-flex;
+  }
+
+  .cred-source-local {
+    --badge-bg: color-mix(in srgb, var(--accent-amber) 18%, transparent);
+    --badge-fg: var(--accent-amber);
+  }
+
+  .cred-source-vault {
+    --badge-bg: var(--status-success-bg);
+    --badge-fg: var(--status-success-fg);
+  }
+
+  .cred-source-config {
+    --badge-bg: var(--status-partial-bg);
+    --badge-fg: var(--status-partial-fg);
+  }
+  /* design-lint-allow-end */
 
   .add-blocked {
     margin: 0 0 var(--space-2);

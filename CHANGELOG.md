@@ -86,6 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The badges on the Credentials settings card are now the compact size the admin pages use, and a credential's source has its own colour: amber for Istota, green for KeePassXC and violet for Deployment.
 - WhatsApp rooms in web chat now carry a green WhatsApp glyph, a single speech bubble for your private WhatsApp chat and a pair of bubbles for a WhatsApp group, so the two read apart from the room list alone. A group shows its glyph instead of the generic people icon, the chat header shows the same glyph for SMS and WhatsApp rooms, and the "Sent on WhatsApp" line under a message uses it too.
 - New rooms use independent room IDs in their links and memory folders. Talk delivery uses the bound conversation address, including for rooms first opened in Talk.
 

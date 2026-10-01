@@ -5,10 +5,13 @@
 
   interface Props {
     variant?: Variant;
+    /** `sm` is the admin dashboard's compact chip (`.effort-chip`,
+     *  `.admin-badge`), for a badge sitting beside dense row text. */
+    size?: 'md' | 'sm';
     children: Snippet;
   }
 
-  let { variant = 'neutral', children }: Props = $props();
+  let { variant = 'neutral', size = 'md', children }: Props = $props();
 </script>
 
 <!--
@@ -23,7 +26,7 @@
   Custom properties rather than a class, because a page's scoped CSS cannot
   reach inside a child component to restyle it.
 -->
-<span class="badge badge-{variant}">{@render children()}</span>
+<span class="badge badge-{variant}" class:badge-sm={size === 'sm'}>{@render children()}</span>
 
 <style>
   .badge {
@@ -43,6 +46,13 @@
        outside, so they are deliberately absent from the token roster. */
     background: var(--badge-bg, var(--surface-badge));
     color: var(--badge-fg, var(--text-muted));
+  }
+
+  .badge-sm {
+    /* design-lint-allow: the admin dashboard's compact chip, below --space-1. */
+    padding: 0.05rem var(--space-2);
+    font-size: var(--text-2xs);
+    font-weight: 600;
   }
 
   .badge-danger {
