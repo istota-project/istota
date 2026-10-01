@@ -11955,8 +11955,9 @@ def _refuse_shared_destination(conn, room_token: str | None, what: str) -> None:
     Delivery refuses such a room for personal content (speech-gate B4,
     `routing.refuse_shared_rooms`), so a setting naming one would save and then
     deliver nothing. Refused at save instead, where the user can see why. A
-    stored pin that later becomes shared is not re-judged here; the picker marks
-    it and delivery drops it.
+    stored pin that later becomes shared is not re-judged, because every caller
+    skips a value identical to the stored one (the profile PUT and the briefing
+    upsert both); the picker marks it and delivery drops it.
     """
     from . import db
 
@@ -12433,7 +12434,7 @@ async def settings_briefings(user: dict = Depends(_require_api_auth)) -> dict:
 
 
 def _validate_briefing_payload(
-    payload: dict, *, name_required: bool, user_id: str,
+    payload: dict, *, name_required: bool, user_id: str, stored=None,
 ) -> dict:
     """Common shape check for POST/PUT briefing endpoints.
 
@@ -12469,9 +12470,14 @@ def _validate_briefing_payload(
     # Validate every leaf surface is known (rejects typos like "sms"); the
     # grammar stays permissive so legacy ``both`` / comma lists still parse,
     # while the UI offers only ``_registered_delivery_surfaces()``.
+    # ``stored`` is the briefing this upsert replaces, if any. A room value it
+    # already held is not re-judged, the rule `_coerce_profile_value` follows:
+    # a pin onto a room that became shared since must not stop the user
+    # disabling or rescheduling the briefing it sits on.
     try:
         _validate_descriptor_surfaces(output)
-        _validate_descriptor_rooms(output, user_id)
+        if stored is None or output != stored.output:
+            _validate_descriptor_rooms(output, user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -12487,7 +12493,8 @@ def _validate_briefing_payload(
     # descriptor's own `talk:<token>` leaf takes — otherwise a bare `talk`
     # output plus a token is the unguarded path around it.
     try:
-        _validate_talk_route_token(token, user_id)
+        if stored is None or token != stored.conversation_token:
+            _validate_talk_route_token(token, user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -12522,8 +12529,13 @@ async def settings_add_briefing(
     if _config is None:
         raise HTTPException(status_code=503, detail="config not loaded")
 
+    stored = None
+    if isinstance(payload, dict) and isinstance(payload.get("name"), str):
+        stored = await asyncio.to_thread(
+            _ub.get_briefing, _config.db_path, user["username"], payload["name"].strip(),
+        )
     cleaned = _validate_briefing_payload(
-        payload, name_required=True, user_id=user["username"],
+        payload, name_required=True, user_id=user["username"], stored=stored,
     )
     try:
         briefing, state = _ub.ensure_briefing(

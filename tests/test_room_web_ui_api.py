@@ -462,6 +462,45 @@ class TestSettingsRefuseASharedRoom:
         with pytest.raises(ValueError, match="shared"):
             mod._validate_default_room(room.token, "alice")
 
+    async def test_a_briefing_on_a_room_that_became_shared_can_still_be_edited(
+        self, client, db_path,
+    ):
+        """The pin was legitimate when saved; the room gaining a guest must
+        not stop the user disabling the briefing it sits on."""
+        from istota import user_briefings
+        ref = "talkref2"
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, ref, "alice", origin="talk", name="family")
+            db.add_room_binding(conn, ref, "talk", ref)
+        user_briefings.ensure_briefing(
+            db_path, user_id="alice", name="morning", cron="0 7 * * *", title="",
+            conversation_token=ref, output="talk", enabled=True,
+        )
+        with db.get_db(db_path) as conn:
+            db.upsert_room_participant(conn, room_token=ref, surface="talk",
+                                       surface_ref="alice", kind="principal", user_id="alice")
+            db.upsert_room_participant(conn, room_token=ref, surface="talk",
+                                       surface_ref="guest/max", kind="guest")
+        cookies = await _login(client, "alice")
+        body = {"name": "morning", "cron": "0 7 * * *", "output": "talk",
+                "conversation_token": ref}
+        kept = await client.post("/istota/api/settings/briefings",
+                                 json={**body, "enabled": False},
+                                 cookies=cookies, headers=ORIGIN)
+        assert kept.status_code == 200
+        other = "talkref3"
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, other, "alice", origin="talk", name="team")
+            db.add_room_binding(conn, other, "talk", other)
+            db.upsert_room_participant(conn, room_token=other, surface="talk",
+                                       surface_ref="alice", kind="principal", user_id="alice")
+            db.upsert_room_participant(conn, room_token=other, surface="talk",
+                                       surface_ref="guest/max", kind="guest")
+        moved = await client.post("/istota/api/settings/briefings",
+                                  json={**body, "conversation_token": other},
+                                  cookies=cookies, headers=ORIGIN)
+        assert moved.status_code == 400
+
     def test_the_web_picker_counts_a_talk_guest_as_sharing(self, db_path):
         import istota.web_app as mod
         ref = _talk_room_with_guest(db_path)

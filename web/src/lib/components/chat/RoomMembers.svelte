@@ -18,9 +18,11 @@
     talkBound?: boolean;
     /** Membership changed: the room's sharing state may have too. */
     onChanged?: () => void;
+    /** The viewer left the room, which is no longer theirs to show. */
+    onLeft?: () => void;
   }
 
-  let { roomId, userId, talkBound = false, onChanged }: Props = $props();
+  let { roomId, userId, talkBound = false, onChanged, onLeft }: Props = $props();
 
   let data = $state<RoomMembers | null>(null);
   let directory = $state<DirectoryUser[]>([]);
@@ -81,6 +83,20 @@
     }
   }
 
+  // Leaving ends the viewer's access, so there is no listing to reload.
+  async function leave() {
+    busy = true;
+    error = '';
+    try {
+      await removeRoomMember(roomId, userId!);
+      onLeft?.();
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'That didn’t work.';
+    } finally {
+      busy = false;
+    }
+  }
+
   function add() {
     const target = pick;
     confirmAdd = false;
@@ -101,7 +117,8 @@
               class="remove"
               type="button"
               disabled={busy}
-              onclick={() => run(() => removeRoomMember(roomId, m.user_id))}
+              onclick={() =>
+                m.user_id === userId ? leave() : run(() => removeRoomMember(roomId, m.user_id))}
             >
               {m.user_id === userId ? 'Leave' : 'Remove'}
             </button>

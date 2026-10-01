@@ -163,9 +163,7 @@
 
   const activeRoom = $derived($rooms.find((r) => r.id === $activeRoomId) ?? null);
 
-  // A shared room whose host left (multiplayer D14) answers nobody until a
-  // member claims it. The server used to record that silently; this is where a
-  // member sees it, and the claim is one tap rather than a command to learn.
+  // A room whose host left answers nobody until a member claims it (D14).
   const hostLost = $derived(!!activeRoom?.policy && activeRoom.policy.host === null);
   let claiming = $state(false);
   async function claimHost() {
@@ -178,10 +176,8 @@
     }
   }
 
-  // A side room sits under the shared room it belongs to (multiplayer D4),
-  // indented, rather than among the rooms by activity: it is that room's
-  // private companion, not a conversation of its own. One whose parent is not
-  // in the list (the member left it) stays where activity puts it.
+  // A side room sits under its parent (D4); one whose parent is not in the
+  // list stays where activity puts it.
   const sidebarRooms = $derived.by(() => {
     const tokens = new Set($rooms.map((r) => r.token));
     const sides = new Map<string, ChatRoom[]>();
@@ -899,6 +895,14 @@
     settingsRoom = null;
   }
 
+  // Left from the members pane. The server already removed the member and
+  // their handle, so the room delete answers "gone" and drops it locally.
+  async function leftRoom() {
+    const id = settingsRoom?.id;
+    settingsRoom = null;
+    if (id != null) await session.deleteRoom(id);
+  }
+
   // Membership changed in the settings modal: whether the room is shared, and
   // with it the policy the modal shows, comes from the listing.
   async function membersChanged() {
@@ -1348,6 +1352,7 @@
       onClose={() => (settingsRoom = null)}
       userId={userId ?? undefined}
       onMembersChanged={membersChanged}
+      onLeft={leftRoom}
     />
   {/if}
 

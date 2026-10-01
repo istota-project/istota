@@ -100,6 +100,19 @@ describe('RoomMembers', () => {
     expect(getChatUsers).not.toHaveBeenCalled();
   });
 
+  it('hands a leave to the page rather than reloading a room no longer theirs', async () => {
+    getRoomMembers.mockResolvedValue(listing({ members: [ALICE, BOB], can_manage: false }));
+    removeRoomMember.mockResolvedValue(undefined);
+    const onLeft = vi.fn();
+    render(RoomMembers, { roomId: 1, userId: 'bob', onLeft });
+    await screen.findByText('Bob');
+    getRoomMembers.mockClear();
+    await fireEvent.click(button('Leave'));
+    await waitFor(() => expect(onLeft).toHaveBeenCalled());
+    expect(removeRoomMember).toHaveBeenCalledWith(1, 'bob');
+    expect(getRoomMembers).not.toHaveBeenCalled();
+  });
+
   it('says a Talk room is managed in Talk, and offers no change', async () => {
     getRoomMembers.mockResolvedValue(listing({ members: [ALICE, BOB], can_manage: false }));
     render(RoomMembers, { roomId: 1, userId: 'bob', talkBound: true });

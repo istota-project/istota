@@ -61,21 +61,20 @@ class TalkEventSubscriber:
         if kind == "tool_start":
             desc = event.payload.get("description", "")
             self._descriptions.append(desc)
-            if self._ack_msg_id is not None and desc:
+            if self._ack_msg_id is not None and desc and not self._guest_turn:
                 elapsed = int(time.monotonic() - self._start_time)
                 self._edit_ack(f"`{desc} ({elapsed}s)`")
 
         elif kind == "tool_end":
             # NativeBrain only — annotate the ack with outcome + duration.
-            if self._ack_msg_id is not None and self._descriptions:
+            if self._ack_msg_id is not None and self._descriptions and not self._guest_turn:
                 mark = "✓" if event.payload.get("success") else "✗"
                 ms = event.payload.get("duration_ms", 0)
                 self._edit_ack(f"`{self._descriptions[-1]} {mark} ({ms}ms)`")
 
         elif kind == "progress_text":
-            # A guest's turn may end held for the host (multiplayer D4 item
-            # 2), so nothing the model wrote on the way to its answer reaches
-            # the room before the host has seen the answer.
+            # A guest's turn may end held for the host (D4 item 2): nothing the
+            # model writes, tool descriptions included, reaches the room first.
             if self._guest_turn:
                 return
             text = event.payload.get("text", "").strip()
@@ -92,10 +91,8 @@ class TalkEventSubscriber:
         elif kind == "result":
             self._edit_summary("✅ Done")
 
-        # A guest's turn that parks went to the host's side room as a proposal,
-        # and one that is cancelled had no host to propose it to. Either way
-        # the room is owed nothing, so the ack is taken down rather than left
-        # saying a confirmation is pending there or that something was stopped.
+        # A guest's held or cancelled turn owes the room nothing (its answer, if
+        # any, went to the host's side room), so its ack is taken down.
         elif kind == "confirmation":
             if self._guest_turn:
                 self._delete_ack()

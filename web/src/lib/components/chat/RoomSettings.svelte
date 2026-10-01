@@ -24,6 +24,8 @@
     userId?: string;
     /** Membership changed, so the room's sharing state may have. */
     onMembersChanged?: () => void;
+    /** The viewer left the room from the members pane. */
+    onLeft?: () => void;
   }
 
   let {
@@ -35,6 +37,7 @@
     onClose,
     userId,
     onMembersChanged,
+    onLeft,
   }: Props = $props();
 
   // In a shared room the name, model, effort, brain and the Talk conversation
@@ -428,7 +431,13 @@
   {#if !isSideRoom}
     <div class="field">
       <span>Members</span>
-      <RoomMembers roomId={room.id} {userId} talkBound={onTalk} onChanged={onMembersChanged} />
+      <RoomMembers
+        roomId={room.id}
+        {userId}
+        talkBound={onTalk}
+        onChanged={onMembersChanged}
+        {onLeft}
+      />
     </div>
 
     <div class="field">

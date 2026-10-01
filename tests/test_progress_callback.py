@@ -252,14 +252,19 @@ class TestTalkEventSubscriber:
         assert "Awaiting confirmation" in _edits(fake_talk)[-1]
 
     @patch("istota.consumers.talk.run_coro", side_effect=asyncio.run)
-    def test_a_guest_turn_posts_no_running_text(self, mock_run, tmp_path, fake_talk, room):
+    def test_a_guest_turn_shows_the_room_nothing_the_model_wrote(
+        self, mock_run, tmp_path, fake_talk, room,
+    ):
         sub = TalkEventSubscriber(
             _make_config(tmp_path),
             _make_task(conversation_token=room.canonical, guest_participant_id=7),
             ack_msg_id=100,
         )
         sub.on_event(_ev("progress_text", {"text": "Drafting a reply to Max"}))
+        sub.on_event(_ev("tool_start", {"description": "Checking Alice's calendar"}, seq=2))
+        sub.on_event(_ev("tool_end", {"success": True, "duration_ms": 5}, seq=3))
         assert fake_talk.calls == []
+        assert sub.descriptions == ["Checking Alice's calendar"]
 
     @patch("istota.consumers.talk.run_coro", side_effect=Exception("network"))
     def test_edit_exception_swallowed(self, mock_run, tmp_path, room):

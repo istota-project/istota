@@ -1592,6 +1592,11 @@ function createSession(): ChatSession {
           // reconnect and this reconciler is the only thing that would catch
           // it (ISSUE-433). `?? null` because the key is optional on the wire.
           color: fresh.color ?? null,
+          // A host leaving, a member added, a guest arriving: the hostless
+          // notice and the settings lock read these, so they follow the poll.
+          side_of: fresh.side_of ?? null,
+          shared: fresh.shared,
+          policy: fresh.policy ?? null,
           unread_count: unreadFor(fresh),
           // Whichever stamp is newer. This response was built before it was
           // awaited, so a frame that landed in between is ahead of it — taking
@@ -2039,12 +2044,8 @@ function createSession(): ChatSession {
   // Side-room rows already shown inline in their parent, by durable id.
   const ephemeralShown = new Set<number>();
 
-  // Something produced for the viewer alone in a shared room — a private
-  // answer, a whisper, a proposal — lands in their side room. While they are
-  // looking at the parent it is also shown there inline, as a bubble only they
-  // see (multiplayer D4): only they receive the side room's rows at all, so
-  // nothing here decides who may see it. Client-only, so a reload drops it and
-  // the side room keeps the durable copy.
+  // A side-room row, shown inline in the parent the viewer is reading (D4).
+  // Only they receive the side room's rows, so nothing here gates who sees it.
   function showInParent(room: ChatRoom, row: ChatRoomEvent) {
     if (row.role === 'user' || !room.side_of || get(view) !== 'room') return;
     const active = get(rooms).find((r) => r.id === get(activeRoomId));
@@ -3415,6 +3416,8 @@ function createSession(): ChatSession {
       notifyError(e instanceof Error ? e.message : 'Couldn’t claim this room.', {
         key: 'chat:claim-host',
       });
+      // A refusal usually means somebody else claimed it first.
+      await refreshRooms();
     }
   }
 

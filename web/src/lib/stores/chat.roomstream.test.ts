@@ -312,6 +312,28 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  it('a room list refresh carries a changed policy, so a lost host shows', async () => {
+    api.getChatRooms.mockResolvedValueOnce({
+      rooms: [{ ...room(1), shared: false, policy: null }],
+    });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    api.getChatRooms.mockResolvedValue({
+      rooms: [
+        {
+          ...room(1),
+          shared: true,
+          policy: { host: null, is_host: false, guest_reply: 'direct', settings_refusal: 'x' },
+        },
+      ],
+    });
+    await s.refreshRooms();
+    expect(get(s.rooms)[0].shared).toBe(true);
+    expect(get(s.rooms)[0].policy?.host).toBeNull();
+    s.teardown();
+  });
+
   it('carries the server’s not-deletable mark onto the row', async () => {
     vi.useFakeTimers();
     api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
