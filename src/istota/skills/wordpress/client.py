@@ -238,6 +238,11 @@ class WordPressClient:
             request = self._build(method, url, host, port, addresses[index], params, json)
             try:
                 response, body = self._send(request)
+            except WordPressError as exc:
+                # Too large to read: the server answered, so a write applied.
+                if not idempotent:
+                    raise self._outcome_unknown(method, route, exc.reason) from None
+                raise
             except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                 # Nothing reached the server, so trying the next checked
                 # address is safe whatever the method, and costs no retry.
@@ -270,7 +275,17 @@ class WordPressClient:
                 if not last:
                     attempt += 1
                     continue
-            return self._interpret(response, body), response.headers
+            try:
+                return self._interpret(response, body), response.headers
+            except WordPressError as exc:
+                # A 2xx is a write that applied. If its answer cannot be read
+                # (a PHP notice printed before the JSON), saying "bad_response"
+                # would invite a second send; the lookup is the way forward.
+                if not idempotent and 200 <= response.status_code < 300:
+                    raise self._outcome_unknown(
+                        method, route, f"HTTP {response.status_code}, {exc.reason}",
+                    ) from None
+                raise
 
     def get(self, route: str, *, params: dict | None = None, base: str | None = None):
         return self.request("GET", route, params=params, base=base)
@@ -279,7 +294,7 @@ class WordPressClient:
         return WordPressError(
             f"{method} {route} ended ambiguously ({cause}) after the request was "
             f"sent, so it may or may not have applied. It was not retried; look "
-            f"the item up before trying again.",
+            f"the item up before trying again, and do not repeat the write blind.",
             "outcome_unknown",
         )
 

@@ -32,10 +32,12 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 import shlex
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from istota.skill_host_paths import write_resolved
 
@@ -402,6 +404,9 @@ def check_create(args) -> None:
 
 def check_update(args) -> None:
     _check_fields(args)
+    if args.status == "future" and not args.date_field:
+        raise WordPressError("--status future needs --date: the time to publish at.",
+                             "validation_error")
     if not build_payload(args) and not args.term_names:
         raise WordPressError("Nothing to update: pass at least one field to change.",
                              "validation_error")
@@ -443,6 +448,19 @@ def _label(item: dict, type_slug: str, post_id: int) -> str:
     return f'"{fence(title)}" ({type_slug} #{post_id})'
 
 
+def _when(args) -> str:
+    """The date clause of a publish or schedule, so the user sees when it goes live.
+
+    WordPress publishes at once a post scheduled for a time already past, so
+    the clause says that rather than letting "future" read as "not yet".
+    """
+    if not args.date_field:
+        return ", now"
+    key, value = args.date_field
+    zone = " UTC" if key == "date_gmt" else " site time"
+    return f", dated {value}{zone} (at once if that time has passed)"
+
+
 def gate(args, ctx, actions: list[str]) -> None:
     """Refuse unless confirmed, naming every gated action of this call."""
     if not actions or args.confirmed:
@@ -469,10 +487,27 @@ def _find_by_slug(ctx, route: str, slug: str) -> dict | None:
     found, _ = ctx.client.get(
         route, params={"slug": slug, "status": "any", "context": "edit"}, base=ctx.base,
     )
+    wanted = {slug, wp_slug(slug)}
     for item in found or []:
-        if isinstance(item, dict) and item.get("slug") == slug:
+        if isinstance(item, dict) and item.get("slug") in wanted:
             return item
     return None
+
+
+def wp_slug(text: str) -> str:
+    """The slug WordPress stores for `text`, as ``sanitize_title`` makes it.
+
+    An approximation of core's rule (lowercase, non-ASCII percent-encoded,
+    anything else but letters, digits, ``_`` and ``-`` dropped, spaces and dots
+    to hyphens), good enough that ``--if-absent`` recognises its own earlier
+    post when the slug it was given was not already clean.
+    """
+    value = text.strip().lower()
+    value = "".join(c if ord(c) < 128 else quote(c, safe="").lower() for c in value)
+    value = value.replace(".", "-")
+    value = re.sub(r"[^%a-z0-9 _-]", "", value)
+    value = re.sub(r"\s+", "-", value)
+    return re.sub(r"-+", "-", value).strip("-")
 
 
 def resolve_terms(ctx, type_slug: str, term_names: dict[str, list[str]], *,
@@ -520,20 +555,22 @@ def create_terms(ctx, missing: dict[str, list[str]]) -> dict[str, list[int]]:
     for taxonomy, names in missing.items():
         route = taxonomy_route(ctx, taxonomy)
         for name in names:
+            hint = lookup(ctx, "terms", "list", "--taxonomy", taxonomy, "--search", name)
             try:
                 term, _ = ctx.client.request("POST", route, json={"name": name},
                                              base=ctx.base, idempotent=False)
+                term_id = term.get("id") if isinstance(term, dict) else None
+                if not isinstance(term_id, int):
+                    raise WordPressError(
+                        "The site accepted the term and returned no id; it was probably "
+                        "created. Look it up before trying again.",
+                        "outcome_unknown",
+                    )
             except WordPressError as exc:
-                if exc.reason == "outcome_unknown":
-                    exc.extra["lookup"] = (f"terms list --taxonomy {shlex.quote(taxonomy)} "
-                                           f"--search {shlex.quote(name)}")
+                _lookup_hint(exc, hint)
                 if created:
                     exc.extra["created_terms"] = created
                 raise
-            term_id = term.get("id") if isinstance(term, dict) else None
-            if not isinstance(term_id, int):
-                raise WordPressError("The site created a term and returned no id.",
-                                     "bad_response", created_terms=created)
             created.setdefault(taxonomy, []).append(term_id)
     return created
 
@@ -575,6 +612,9 @@ def readback(sent: dict, after: dict, term_fields: list[str]) -> dict:
             same = _same_moment(got, value)
         elif key in term_fields:
             same = isinstance(got, list) and sorted(got) == sorted(value)
+        elif key == "slug":
+            # Sanitising is not a change worth reporting; a suffix is.
+            same = got in (value, wp_slug(value))
         else:
             same = got == value
         if not same:
@@ -613,6 +653,18 @@ def _written(ctx, route: str, type_slug: str, post_id: int, written, payload: di
     }
 
 
+def lookup(ctx, *argv: str) -> str:
+    """The command that finds out whether an ambiguous write applied.
+
+    It names ``--site`` and ``--blog`` explicitly: run bare, it would search
+    the default site and find nothing, which reads as "send it again".
+    """
+    scope = ["--site", ctx.record.name]
+    if ctx.blog:
+        scope += ["--blog", ctx.blog]
+    return " ".join(shlex.quote(part) for part in (*argv, *scope))
+
+
 def _lookup_hint(exc: WordPressError, hint: str) -> None:
     if exc.reason == "outcome_unknown":
         exc.extra["lookup"] = hint
@@ -621,7 +673,11 @@ def _lookup_hint(exc: WordPressError, hint: str) -> None:
 def _post_id(item, verb: str) -> int:
     post_id = item.get("id") if isinstance(item, dict) else None
     if not isinstance(post_id, int):
-        raise WordPressError(f"The site answered the {verb} with no post id.", "bad_response")
+        raise WordPressError(
+            f"The site accepted the {verb} and returned no post id; it probably "
+            f"applied. Look it up before trying again.",
+            "outcome_unknown",
+        )
     return post_id
 
 
@@ -642,21 +698,20 @@ def cmd_create(args) -> dict:
     gate(args, ctx, _terms_actions(missing))
     created_terms = create_terms(ctx, missing)
     _apply_terms(ctx, payload, ids, created_terms)
+    if args.slug:
+        hint = lookup(ctx, "list", "--type", args.type, "--slug", args.slug, "--status", "any")
+    else:
+        hint = lookup(ctx, "list", "--type", args.type, "--search", args.title,
+                      "--status", "any")
     try:
         item, _ = ctx.client.request("POST", route, json=payload, base=ctx.base,
                                      idempotent=False)
+        post_id = _post_id(item, "create")
     except WordPressError as exc:
-        if args.slug:
-            hint = (f"list --type {shlex.quote(args.type)} --slug {shlex.quote(args.slug)} "
-                    f"--status any")
-        else:
-            hint = (f"list --type {shlex.quote(args.type)} --search "
-                    f"{shlex.quote(args.title)} --status any")
         _lookup_hint(exc, hint)
         if created_terms:
             exc.extra["created_terms"] = created_terms
         raise
-    post_id = _post_id(item, "create")
     out = {"status": "ok", **ctx.envelope(), "created": True,
            **_written(ctx, route, args.type, post_id, item, payload)}
     if created_terms:
@@ -674,10 +729,11 @@ def cmd_update(args) -> dict:
     actions = []
     status_now = current.get("status")
     if status_now in LIVE_STATUSES:
-        actions.append(f"change {label}, which is live ({status_now})")
+        fields = sorted(set(payload) | set(args.term_names))
+        actions.append(f"change {', '.join(fields)} of {label}, which is live ({status_now})")
     status_new = payload.get("status")
     if status_new in LIVE_STATUSES and status_new != status_now:
-        actions.append(f"make {label} {status_new}")
+        actions.append(f"make {label} {status_new}{_when(args)}")
     actions += _terms_actions(missing)
     gate(args, ctx, actions)
     created_terms = create_terms(ctx, missing)
@@ -701,12 +757,10 @@ def cmd_publish(args) -> dict:
     route = type_route(ctx, args.type)
     current = _current(ctx, route, args.id)
     payload: dict = {"status": "publish"}
-    when = ""
     if args.date_field:
         key, value = args.date_field
         payload[key] = value
-        when = f", dated {value}{' UTC' if key == 'date_gmt' else ''}"
-    gate(args, ctx, [f"publish {_label(current, args.type, args.id)}{when}"])
+    gate(args, ctx, [f"publish {_label(current, args.type, args.id)}{_when(args)}"])
     item, _ = ctx.client.request("POST", f"{route}/{args.id}", json=payload,
                                  base=ctx.base, idempotent=True)
     return {"status": "ok", **ctx.envelope(), "published": True,
@@ -732,7 +786,7 @@ def cmd_delete(args) -> dict:
                 f"--force --confirmed, after the user agrees.",
                 "request_refused", **exc.extra,
             ) from None
-        _lookup_hint(exc, f"get --id {args.id} --type {shlex.quote(args.type)}")
+        _lookup_hint(exc, lookup(ctx, "get", "--id", str(args.id), "--type", args.type))
         raise
     return {"status": "ok", **ctx.envelope(), "id": args.id, "type": args.type,
             "trashed": not args.force, "deleted": bool(args.force)}

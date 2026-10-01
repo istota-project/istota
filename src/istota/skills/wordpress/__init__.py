@@ -422,6 +422,11 @@ def _site_verb(handler, precheck=None):
         args.wp = _open_site(args)
         try:
             return handler(args)
+        except WordPressError as exc:
+            # Which site a refusal or an ambiguous write was about.
+            exc.extra.setdefault("site", args.wp.record.name)
+            exc.extra.setdefault("blog", args.wp.blog)
+            raise
         finally:
             args.wp.client.close()
 
