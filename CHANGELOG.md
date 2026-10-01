@@ -65,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Immediate task execution from the command line no longer holds a database transaction across credential admission. This avoids a database-lock failure before the task starts.
+- Immediate task execution from the command line no longer holds a database transaction across credential admission. It reserves the task before starting and reports liveness during execution, so the scheduler cannot also claim it.
 
 - The version on `/admin`, `istota --version`, the Nextcloud status file and native session logs now includes the running commit when istota runs from a git checkout, such as `0.42.0+a1b2c3d`, unless the checkout is exactly on that release's tag. Before, an Ansible host on an untagged commit of `main` reported the previous release. Docker images and the standalone install have no checkout and still show the plain version. The sign-in and other pages shown before login no longer show a version at all.
 - `istota-skill relay list` and `relay status` now work from a private room bound to Talk. They check the room's Talk participants before showing any relay content, and on a deployment that keeps the Nextcloud app password in its environment file the skill process never received that password, so every check failed. The proxy now hands the relay skill the app password, and a participant list that cannot be fetched is reported as `audience_unavailable` rather than as a room that is not private.

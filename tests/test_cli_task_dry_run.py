@@ -154,3 +154,47 @@ def test_immediate_execution_persists_result_without_caller_transaction(cli_env,
             cli.cmd_task(_Args(execute=True))
         assert exc.value.code == 1
     assert _task_rows(db_path)[0]["status"] == ("completed" if success else "failed")
+
+
+def test_immediate_task_cannot_be_claimed(cli_env, monkeypatch):
+    def execute(task, config, resources, **kwargs):
+        with db.get_db(config.db_path) as conn:
+            db.save_task_selected_skills(conn, task.id, ["developer"])
+        with db.get_db(config.db_path) as conn:
+            claimed = db.claim_task(conn, "scheduler", user_id=task.user_id)
+        assert claimed is None
+        assert task.status == "running"
+        return True, "ok", None, None
+
+    monkeypatch.setattr(cli, "execute_task", execute)
+    cli.cmd_task(_Args(execute=True))
+
+
+def test_immediate_task_heartbeat_prevents_stale_reclaim(cli_env, monkeypatch):
+    import time
+
+    config, _ = cli_env
+    config.scheduler.worker_heartbeat_seconds = 1
+
+    def execute(task, config, resources, **kwargs):
+        # Make the start old enough for fallback reclaim. A real heartbeat
+        # must refresh this stale value while the CLI's model call is active.
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE tasks SET started_at=datetime('now','-120 minutes'), "
+                         "last_heartbeat=datetime('now','-120 minutes') WHERE id=?", (task.id,))
+            stale = conn.execute("SELECT last_heartbeat FROM tasks WHERE id=?", (task.id,)).fetchone()[0]
+        deadline = time.monotonic() + 3
+        while True:
+            with db.get_db(config.db_path) as conn:
+                heartbeat = conn.execute("SELECT last_heartbeat FROM tasks WHERE id=?", (task.id,)).fetchone()[0]
+            if heartbeat != stale:
+                break
+            assert time.monotonic() < deadline, "CLI execution did not refresh its heartbeat"
+            time.sleep(.02)
+        with db.get_db(config.db_path) as conn:
+            assert db.claim_task(conn, "scheduler", user_id=task.user_id,
+                                 stuck_running_minutes=1, heartbeat_stuck_minutes=1) is None
+        return True, "ok", None, None
+
+    monkeypatch.setattr(cli, "execute_task", execute)
+    cli.cmd_task(_Args(execute=True))
