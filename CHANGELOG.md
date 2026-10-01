@@ -68,6 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Istota can scroll the panel you point at rather than the page behind it. `browse interact --scroll down --scroll-at 700,500` turns the wheel at a point read off a screenshot, which is what reaches a chat log, a code viewer, a results list inside a modal or a PDF viewer — the widgets a page-level scroll cannot move, and exactly the ones the look-and-click loop exists for. `--scroll-zoom` holds ctrl while the wheel turns, so a map zooms in and out at the point you name. A scroll at a point keeps the position you wrote it in among the clicks and fills around it.
 
+- You can add a credential in Settings, Credentials without a KeePassXC file: a name, the value, an optional username, the site it may be sent to, and which rooms may use it. Tasks can use it straight away, and you can replace its value, edit it or delete it from the same page. The value is sent once and never shown again.
+
 ### Changed
 
 - A room colour now only tints the room's row in the web chat sidebar. The dot it also added beside the room name is gone.
@@ -130,6 +132,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Upgrade note:** `--scroll-amount` is gone, because neither scroll is measured in pixels any more — a wheel tick is a distance the browser picks and a Page_Down is a viewport. Use `--scroll-clicks N` instead: wheel ticks with `--scroll-at`, Page_Down presses without one. A call that still passes `--scroll-amount` is refused by name and told what replaced it, so nothing scrolls the wrong distance quietly. This needs the rebuilt browser image; an older one answers `unknown` for a scroll at a point and says to rebuild.
 
 - `browse interact --click` and `--fill` now drive the page the way the coordinate flags already did: the pointer travels to the element and presses it, and a value is typed key by key rather than inserted whole. A filled field used to receive no keystroke at all — the value simply appeared, which is exactly what a login form behind bot detection is watching for — and a click arrived with no movement behind it. Measured on the shipped container, the same fill went from no key events to ten, and a click from one pointer movement to fifteen along an approach path. Selectors, results and error codes are unchanged, each action now reports which element it matched, and the older method is still there as an automatic fallback when the typed path cannot run.
+
+- The KeePassXC sync no longer deletes credentials it did not create. If a file entry has the same name as a credential you added in Istota, the entry is skipped and the KeePassXC card says so; rename the entry in KeePassXC or delete the Istota one, and the entry syncs the next time the file changes.
+- Settings, Credentials now lists every credential first, each with a badge saying where it came from (Istota, KeePassXC or Deployment). The KeePassXC card below it is one line when the sync works and a Set up button when you do not use it.
 
 ### Fixed
 

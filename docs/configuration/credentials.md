@@ -90,6 +90,50 @@ A special case: stored in their own `google_oauth_tokens` table (not in `secrets
 
 Users connect their Google account through the web dashboard at `/istota/` (the dashboard shows a Google Workspace card). See [Google Workspace](../features/google-workspace.md) for the full setup.
 
+## Shared credentials
+
+Shared credentials are named secrets a user's own tasks can use: an API key, a site login, a token. Istota keeps them in its own store, the `vault_entries` service in the `secrets` table, encrypted under `ISTOTA_SECRET_KEY` like every other stored secret. Tasks read the store and never a file, so a credential works the same way wherever it came from.
+
+There are three sources, and Settings → Credentials shows one badge per row naming it:
+
+| Badge | Source | Edited in |
+|---|---|---|
+| Istota | added on the settings page | the settings page |
+| KeePassXC | synced from the user's [credential vault](#credential-vault) | KeePassXC |
+| Deployment | the configured forge tokens, `forge.gitlab` and `forge.github` | configuration |
+
+The source decides what the row menu offers. Every row has "Edit access" and, once granted, "Revoke access". An Istota row adds "Edit" and "Delete"; a KeePassXC row adds "Remove stored copy". The list is the whole store, and the credential count appears once, beside the card title.
+
+On a deployment with several configured users and no effective sandbox, the store is withheld from tasks unless the operator opts in (see [credential vault](#credential-vault)). On that shape the Add button is disabled with the reason beside it, and the add, edit and delete routes all answer 403.
+
+### Adding a credential in Istota
+
+**Add credential** needs no KeePassXC file. It asks for:
+
+| Field | Rule |
+|---|---|
+| Name | What tasks use, typed exactly; it is never rewritten. Lowercase letters, digits and single underscores, starting with a letter, and short enough that `<name>_username` fits in 64 characters. Names starting with `generated_` (where tasks create credentials) or `forge.` are refused. The name and its `<name>_username` and `<name>_url` must not already be in use by any credential. Read-only once created. |
+| Value | Required. Refused when empty, when it has leading or trailing whitespace (refused rather than trimmed, since trimming changes a credential), or over 8 KiB. |
+| Username | Optional. Same rules as the value. Stored as `<name>_username`. |
+| Site | Optional. A bare `host[:port]` or a URL with nothing after the host. A path, query string, fragment or `user@` part is refused, because the site is shown back on the page and a token pasted into one would come back with it. `http://` is accepted, and the row shows "HTTPS required" until its access allows HTTP. Stored as `<name>_url`, and the credential is bound to that host. |
+| Access | Shown once a site is filled in, defaulting to all rooms, no scheduled use and no HTTP. A credential with no site cannot be granted. |
+
+Under **More options**: "Also used on" takes further comma-separated `host[:port]` names, "Headers" the allowed authentication headers, and "Tasks may read the value" marks it revealable. These are the same three settings `istota_hosts`, `istota_headers` and the `istota:reveal` tag give a KeePassXC entry ([credential bindings](#credential-bindings)), read by the same parser.
+
+The value crosses the network once, in the body of an authenticated, origin-checked request, and is never shown again. The write routes read the body themselves rather than through a declared model, so a bad request is a 400 naming the field and never echoing what was sent; a body over 64 KiB, or one with no declared length, is a 413. The log records the verb and the credential name.
+
+**Edit** is offered for Istota credentials only. Leave the value empty to keep it. Leave the username empty to keep it, or tick "Remove username". A site change takes effect on the next request, as a KeePassXC edit does. Clearing the site of a credential that has access is refused: remove its access first, or keep a site.
+
+**Delete** removes the value, username, URL, binding and access together. Nothing brings an Istota credential back.
+
+### When a KeePassXC entry has the same name
+
+The Istota credential wins. A sync skips the clashing name and logs it, and when the entry's own name is the one taken it skips the entry's username, URL and custom fields too, so none of them joins the Istota credential. The KeePassXC sync card says how many entries were affected. The file never overwrites a value typed into Istota, and the Istota credential keeps its access settings.
+
+To resolve it, rename the entry in KeePassXC or delete the Istota credential. The skipped entry is written by the next sync that reads the file, which is the next time the file changes, or `istota secret vault-sync`, which ignores the cached hash. The card's count stays until such a sync.
+
+A task's `istota-credential new` and a host shell's `istota secret vault-new` refuse a name whose credential names an Istota credential already holds, before anything is written to the file.
+
 ## Credential vault
 
 Vaults on a deployment with more than one configured user require a working sandbox. The count includes users without vaults: their tasks can still reach another user's credentials when every task runs as the same OS user. The CLI and settings page refuse to store a passphrase on that shape. Existing vaults stop syncing, and new tasks receive none of their cached credentials; stored rows and vault files remain intact. The settings card reports the refusal, and `istota doctor --only security.vault_isolation` reports it to the operator.
@@ -104,7 +148,7 @@ When a task needs a new site credential, it can run `istota-credential new acme 
 
 The default write budget is three requests per task attempt, including refusals. Set `[security] vault_writes_per_task = 0` to disable model-requested writes. Istota sends a notice for each credential it creates. A password manager that already has the database open may overwrite a new entry on its next save; check for the entry in the password manager after a task creates it.
 
-What it holds is **shared credentials**: a flat namespace of name-to-value pairs the user chooses, stored under the `vault_entries` service and readable by that user's own tasks by name. It does not provision the typed services above — those are edited in the settings page and nothing here overwrites them.
+What it writes is **[shared credentials](#shared-credentials)**: name-to-value pairs the user chooses, in the same `vault_entries` store as credentials added in Istota, readable by that user's own tasks by name. It does not provision the typed services above — those are edited in the settings page and nothing here overwrites them.
 
 ### Turning it on
 
@@ -153,13 +197,13 @@ with `ISTOTA_SCHEDULER_VAULT_SYNC_INTERVAL` for the cadence.
 
 A vault entry's URL field accepts an HTTPS URL or a bare `host[:port]`, such as `portal.example.com`. A bare host is treated as HTTPS for credential binding; the saved URL value is unchanged. All credential names from the entry share that host and port. Add exact `host[:port]` names in the comma-separated custom field `istota_hosts` for other destinations. Wildcards and explicit plain HTTP URLs are refused. Invalid host metadata leaves the entry unbound. Custom fields beginning with `istota_` are reserved metadata and never become credential names.
 
-In Settings → Credentials, the row menu can delete a stored vault credential, including an unbound one. Deletion removes that name's stored value, binding and grant. It leaves the KeePassXC file and the entry's other credential names alone. A later vault import can restore the credential, without its old grant; an unchanged file is skipped until a forced sync or daemon restart. Deployment credentials are managed through configuration and have no delete action here.
+In Settings → Credentials, "Remove stored copy" on a KeePassXC row deletes Istota's copy, including an unbound one. It removes the stored value, binding and grant of the entry's credential names, and leaves the KeePassXC file alone. If the entry is still in the file, a later sync brings it back without its old grant; an unchanged file is skipped until a forced sync or daemon restart. Deployment credentials are managed through configuration and have no delete action here.
 
 `istota_headers` sets the comma-separated allowed authentication headers; the default is `Authorization`, `PRIVATE-TOKEN`, `X-API-Key` and `X-Auth-Token`. `Proxy-Authorization` is never allowed. The `istota:reveal` tag permits public value reads when reveal enforcement is enabled. Grants govern placeholder use; the reveal tag is a separate exception for commands that must hold the value.
 
 `istota-credential list` shows bound hosts, whether an entry is revealable, and its grant status. Configured forge tokens appear as `forge.gitlab` and `forge.github` for tasks already authorized to use them. Their hosts come from the deployment's forge URLs; public GitHub also includes `api.github.com`.
 
-Browser credential fills require a bound HTTPS origin now. An unbound entry or a field on another origin returns `credential_origin_mismatch` before input. Add the correct URL in KeePassXC and let the vault sync before retrying. This requires a rebuilt browser image: older images are refused before receiving any credential action. Credential fills update the checked element and emit input/change events in one CDP evaluation, so navigation cannot redirect a keyboard fill into another page.
+Browser credential fills require a bound HTTPS origin now. An unbound entry or a field on another origin returns `credential_origin_mismatch` before input. Add the correct URL in KeePassXC and let the vault sync, or edit the site of a credential added in Istota, before retrying. This requires a rebuilt browser image: older images are refused before receiving any credential action. Credential fills update the checked element and emit input/change events in one CDP evaluation, so navigation cannot redirect a keyboard fill into another page.
 
 ### The passphrase
 
@@ -223,11 +267,11 @@ A name must start with a letter and be at most 64 characters after slugging. Val
 
 The daemon reads the file at start-up and every `scheduler.vault_sync_interval` seconds (300 by default; 0 turns both off). Each cycle hashes the file bytes, and stops there when nothing has changed — no unlock, no database write, no log line. `istota secret vault-sync [-u alice]` runs one by hand and ignores the cached hash.
 
-The file is the authority for the whole `vault_entries` namespace and for nothing else:
+The file is the authority for the credentials it produced and for nothing else:
 
-- Every name the file produces is written over whatever the table had.
-- **Every `vault_entries` row the file does not produce is deleted.** Deleting a credential through the vault means deleting the entry, and emptying the `istota` group revokes the whole namespace at once.
-- No other service is touched. A credential typed into the settings page is not something the vault can overwrite or delete, whatever it is called.
+- Every name the file produces is written over the copy an earlier sync stored, unless a [credential added in Istota](#when-a-keepassxc-entry-has-the-same-name) holds the name, in which case it is skipped.
+- **Every stored KeePassXC credential the file no longer produces is deleted.** Deleting a credential through the vault means deleting the entry, and emptying the `istota` group revokes every KeePassXC credential at once. A stored row with no binding counts as KeePassXC, since only the sync ever wrote one.
+- Credentials added in Istota and deployment credentials are never deleted or overwritten by a sync, and no other service is touched.
 
 A row whose stored value will not decrypt is held back from deletion rather than removed, and counted. `istota secret vault-sync` prints the count and names each deleted key, which is where a surprise gets noticed.
 
@@ -237,7 +281,7 @@ Every name in the namespace is fetchable by that user's own tasks, and this is t
 
 Three things bound that, and the first is the real one:
 
-- **The file is the consent boundary.** A credential is reachable because the user put it under `istota/` — or, on an unscoped file, because they pointed at that file. That is the same decision as typing the credential into the settings page, made in a different editor.
+- **The file is the consent boundary.** A credential is reachable because the user put it under `istota/` — or, on an unscoped file, because they pointed at that file. That is the same decision as adding the credential on the settings page, made in a different editor.
 - **A skill takes a name rather than a value.** `istota-skill browse interact --fill-credential` sends the value from the daemon to the browser container without it crossing into the sandbox at all. Where a skill covers the job, that is the path.
 - **Values stay out of the transcript unless the model puts them there.** Nothing is in the task's environment and the prompt carries no names and no values. `istota-credential run VAR=name -- <command>` hands the value to one child process and prints none of it.
 
@@ -245,11 +289,11 @@ A task holding the socket can still read a value deliberately (`istota-credentia
 
 ### What the settings UI does
 
-The vault card under Settings → Credentials carries a status line for a user who has a vault: where the file is read from, how many shared credentials Istota holds and what they are called, how many were created under `generated/`, when it was last applied, and the error class when it is failing. It also says when the last read was unscoped.
+The KeePassXC sync card sits below the credentials list under Settings → Credentials. For a user with no vault it is one sentence and a **Set up** button, which opens the setup in two steps: the master password, then the file. For a user with a vault it shows a pill, "Working" or "Needs attention", and one line: "Syncing `{file}` · updated {time}", or "Not working:" and the reason. **Manage** opens the same setup panel, which also shows the folder; it opens by itself when something is wrong. The card also says when the last read was unscoped, and how many entries were skipped because a credential added in Istota has the name. Counts of credentials are not on this card: the list above it is the whole store, and the generated count is in `istota secret vault-status`.
 
-The same card sets the vault up: the folder to put the file in, the files found there, and the passphrase. It renders for a user who has no vault at all, which is who it is for. What it does not offer is a path of any kind — see [turning it on](#turning-it-on) — and the file half is withheld for a vault a `vault_path` already names, which it says instead. The passphrase half renders either way: it is a credential the user owns rather than a setting an operator made.
+The setup panel offers the folder to put the file in, the files found there, and the passphrase. What it does not offer is a path of any kind (see [turning it on](#turning-it-on)), and the file step is withheld for a vault a `vault_path` already names, which it says instead. The passphrase step renders either way: it is a credential the user owns rather than a setting an operator made. A generated passphrase has a copy button.
 
-The credential-name list is the feedback this feature exists to give. A name in it is a credential Istota holds; a name you expected and cannot see is a group you misspelled or an entry with a warning in the log. Names only — no value reaches that page — and only that user's own.
+The credentials list is the feedback this feature exists to give. A row with the KeePassXC badge is a credential the sync wrote; a name you expected and cannot see is a group you misspelled, an entry with a warning in the log, or a name an Istota credential already holds. Names only, no value reaches that page, and only that user's own.
 
 **"Last applied" is not a health check, and a healthy vault shows an old stamp.** The record is written only by a cycle that did work, and a cycle over an unchanged file does none — so a vault nobody has edited for three weeks reports a three-week-old timestamp and is working perfectly.
 
@@ -386,7 +430,7 @@ The broker is off by default. Set `[security.credential_broker] enabled = true` 
 curl -H 'Authorization: Bearer {{cred:portal_token}}' https://portal.example/api
 ```
 
-Bind a vault entry using an HTTPS URL, a bare host in its URL field, or `istota_hosts`, and grant access in Settings. Grants limit rooms and scheduled use, for the proxy's substitution and for host-side skills alike. With the broker enabled, `browse interact --fill-credential` needs a bound entry whose grant covered the task when it started, so it is refused with `credential_not_granted` for an ungranted entry, in a room the grant does not cover, and in a scheduled task without scheduled use. The one exception is an entry the same task created with `istota-credential new`, which it may fill; later tasks need a grant for it like any other entry. Public value reads (`get`, `run`) are governed by reveal enforcement, not by grants. With the broker disabled, grants are not consulted. Every HTTP method is allowed on a bound host, including DELETE and WebDAV methods; saved method restrictions from older versions no longer apply. Each task keeps its original grant snapshot across retries; revoking or changing a grant refuses its next use. The broker decodes Basic authentication before substituting a placeholder password, so clients can build the Basic header themselves.
+Bind a credential with a site (a KeePassXC entry's URL field or `istota_hosts`, or the Site and "Also used on" fields of one added in Istota), and grant access in Settings. Grants limit rooms and scheduled use, for the proxy's substitution and for host-side skills alike. With the broker enabled, `browse interact --fill-credential` needs a bound entry whose grant covered the task when it started, so it is refused with `credential_not_granted` for an ungranted entry, in a room the grant does not cover, and in a scheduled task without scheduled use. The one exception is an entry the same task created with `istota-credential new`, which it may fill; later tasks need a grant for it like any other entry. Public value reads (`get`, `run`) are governed by reveal enforcement, not by grants. With the broker disabled, grants are not consulted. Every HTTP method is allowed on a bound host, including DELETE and WebDAV methods; saved method restrictions from older versions no longer apply. Each task keeps its original grant snapshot across retries; revoking or changing a grant refuses its next use. The broker decodes Basic authentication before substituting a placeholder password, so clients can build the Basic header themselves.
 
 Only a host bound to a credential in the task snapshot is intercepted. Every other connection keeps its original TLS session and carries placeholders as literal text. On an intercepted connection, SNI and Host must match the CONNECT host. IP-literal destinations may omit SNI, as standard TLS clients do. A placeholder in a disallowed header or URL is refused. A placeholder in the first `scan_max_bytes` of a request body is refused before forwarding; later body bytes stream unchanged and are never substituted. The default cap is 1 MiB.
 
