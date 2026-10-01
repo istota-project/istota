@@ -8,1641 +8,197 @@ paths:
 
 # Transport abstraction (`src/istota/transport/`)
 
-A uniform seam over Istota's messaging surfaces. Inbound, a `Transport`
-normalizes a surface's messages into `IncomingMessage`; `ingest_message` turns
-those into tasks. Outbound, `deliver` / `edit` push a task's result to a
-resolved channel. `TransportRegistry` holds the enabled transports and resolves
-one per task.
+A uniform seam over messaging surfaces. Inbound, a `Transport` normalizes messages into `IncomingMessage` and `ingest_message` makes tasks. Outbound, `deliver` / `edit` push a result to a resolved channel. `TransportRegistry` resolves one transport per task. Eight ship: Talk, Email, Sms, WhatsApp, Ntfy, IstotaFile, Repl, Web. **Matrix is the designed-for next consumer**: one `Transport` subclass plus a `make_registry` line.
 
-Eight concrete transports ship: `TalkTransport`, `EmailTransport`,
-`SmsTransport`, `WhatsAppTransport`, `NtfyTransport`, `IstotaFileTransport`,
-`ReplTransport`, and `WebTransport`.
-**Matrix is the designed-for next consumer** — adding one is a new `Transport`
-subclass plus a line in `make_registry`, not a patch across the scheduler, the
-consumers, and the notification dispatcher.
-
-Transports split into two `surface_class`es (`TransportCapabilities.surface_class`):
-- **push** (`talk`, `email`, `ntfy`, `istota_file`, future Matrix) — the daemon
-  actively delivers via `Transport.deliver()` to a resolved channel.
-- **stream** (`repl`, `web`) — an *interactive* task's own result is the
-  `task_events` log the client tails. The web chat surface uses
-  `source_type="web"` / `output_target="web"`; `web` is in
-  `routing._STREAM_SURFACES` so the planner short-circuits a web task's result
-  to a stream destination (no push) and the `/api/chat/*` SSE endpoint tails
-  `task_events`. `_STREAM_SURFACES` governs *that* short-circuit and nothing
-  else — the room fan-out asks `room_view` instead. `ReplTransport.deliver` is a genuine no-op (the terminal has no
-  persistent store). `WebTransport.deliver`, by contrast, is a real write
-  (ISSUE-121): web is a *user-routable* delivery surface, so alerts / the
-  verbose execution log / any notification routed to `web` append an unsolicited
-  system message to the user's room (a `role='system'` row in the canonical
-  `messages` store), rendered merged
-  into room history and surfaced live in an open room by an idle poll. The two
-  meanings of `web` — interactive stream vs. notification sink — don't collide:
-  the stream path never calls `deliver`, and `deliver` never runs for a
-  `source_type="web"` task's own result (the planner already routed it to
-  stream).
-
-`conversation_token` keeps its name and stays opaque at every consumer (it is
-the per-surface channel id); `source_type` stays the routing key. Neither was
-renamed. (Folding ntfy + istota_file into transports and adding the REPL
-stream surface superseded the original "ntfy/istota_file are side channels"
-design — see "Outbound delivery routing" below.)
+`surface_class`: **push** delivers via `deliver()`; **stream** (repl, web) means an interactive task's result is the `task_events` log (`routing._STREAM_SURFACES`, governing that alone). `ReplTransport.deliver` is a no-op; `WebTransport.deliver` appends a `role='system'` row for anything routed to `web` (ISSUE-121), never for a web task's own result. `conversation_token` stays the opaque per-surface channel id and `source_type` the routing key.
 
 ## Layout
-```
-transport/
-├── __init__.py   # re-exports + the public surface
-├── _types.py     # IncomingMessage, TransportCapabilities, DeliveryOptions, Transport protocol
-├── registry.py   # TransportRegistry, make_registry, _surface_for_source_type
-├── routing.py    # Destination, parse_output_target, resolve_delivery_plan, plan_has_surface
-├── ingest.py     # ingest_message(conn, config, msg) -> int
-├── talk/         # Nextcloud Talk surface (push)
-│   ├── __init__.py  # TalkTransport (seam: deliver/edit/resolve + poll entry)
-│   └── inbound.py   # poll_talk_conversations + filtering/dispatch + module caches
-├── email/        # IMAP/SMTP surface (push)
-│   ├── __init__.py  # EmailTransport (seam: poll/deliver/resolve)
-│   ├── inbound.py   # poll_emails + routing precedence + confirmation gate
-│   └── outbound.py  # deliver_email_result + structured-output parse + sent-email record
-├── sms/          # provider-neutral push surface; Twilio and Telnyx adapters
-├── whatsapp/     # Meta Cloud API push surface; BSUID identity, one-send ledger, cost controls
-├── ntfy/         # ntfy push surface (push) — NtfyTransport + send_ntfy_async (the single ntfy POST)
-├── istota_file/  # TASKS.md result write-back (push) — IstotaFileTransport
-├── repl/         # terminal REPL (stream) — ReplTransport (deliver is a no-op; outbound is task_events)
-└── web/          # web chat delivery surface (stream, user_routable) — WebTransport + default_web_room_token; deliver appends a role='system' messages row
-```
 
-Talk, email, SMS, and WhatsApp are subpackages because both directions live together. For Talk:
-`TalkTransport` (the seam) in `__init__.py`, the inbound poll body in
-`inbound.py`. For email: `EmailTransport` in `__init__.py`, the inbound poll
-body in `inbound.py`, the send body in `outbound.py`. The low-level clients stay
-shared and outside the seam — Talk's HTTP/OCS `TalkClient` in `istota.talk`,
-email's IMAP/SMTP client in `istota.skills.email`. SMS keeps its common inbound,
-outbound, ledger, and provider adapters together under `transport/sms/`; the
-full contract is in `.claude/rules/sms.md`. WhatsApp is the same shape one
-surface later — `_types`, `client`, `webhook`, `outbound` under
-`transport/whatsapp/` — and its contract is in `.claude/rules/whatsapp.md`.
-
-Email's genuinely-shared, non-transport plumbing (`get_email_config`,
-`is_synthetic_email_thread_token`, `normalize_subject`, `compute_thread_id`,
-`cleanup_old_emails`) lives in `istota.email_support` — used by both transport
-halves and by non-transport callers (the briefing skill, the notification
-dispatcher, the TASKS.md poller, the scheduler's delivery-routing / cleanup
-paths). It is the only email code outside `transport/email/`.
+`_types.py`, `registry.py`, `routing.py`, `ingest.py`, `participants.py`; subpackages `talk/`, `email/` (`inbound.py`, `outbound.py`, `threads.py`), `sms/` (`.claude/rules/sms.md`), `whatsapp/` (Cloud and Baileys, `.claude/rules/whatsapp.md`), `ntfy/` (`send_ntfy_async`, the single ntfy POST), `istota_file/`, `repl/`, `web/`. Low-level clients stay outside (`istota.talk.TalkClient`, `istota.skills.email`); shared non-transport email helpers are `istota.email_support`.
 
 ## Core types (`_types.py`)
 
-- **`IncomingMessage`** — a surface-normalized inbound message. Field→column
-  contract that `ingest_message` relies on: `channel_token` →
-  `Task.conversation_token`, `delivery_token` → `Task.talk_delivery_token`,
-  `platform_message_id` → `Task.talk_message_id`, `reply_to_message_id` →
-  `Task.reply_to_talk_id`; plus `user_id`, `text`, `source_type`, `surface`,
-  `attachments`, `is_group_chat`, `output_target`, `model`/`effort`, `raw`.
-  Multiplayer fields (see "Multiplayer rooms"): `author` (`ParticipantRef`),
-  `addressed_to_bot` (default False), `classified` (a speech-gate decision
-  computed before the transaction), `is_command`, `room_container`.
-  `sender_address` is the message's *own* sender when that differs from
-  `user_id` — today only email's envelope sender, which names who wrote the mail
-  rather than the istota user it was routed to. Raw and untrusted;
-  `record_inbound` sanitizes it through `db.external_email_sender` before it can
-  reach `messages.author_label`, so no reader ever sees a raw `From:`.
-  `queue` names the worker queue the resulting task lands on — a property of the
-  *surface's* latency contract, not of the message, which is why it defaults to
-  `foreground` and interactive surfaces never set it. Email passes
-  `[scheduler] email_task_queue` (default `background`), so a flood at the
-  public `bot+user@` address cannot take the slots a live chat turn needs
-  (ISSUE-250). It threads `IncomingMessage.queue` → `record_inbound(queue=…)` →
-  `db.create_task(queue=…)`.
-- **`TransportCapabilities`** (frozen) — `supports_edit`, `supports_threading`,
-  `supports_progress_ack`, `supports_typing`, `max_message_length`,
-  `surface_class` (`"push"` | `"stream"`), `user_routable` (default `True`),
-  and the three room fields: `room_view` (`"external"` | `"canonical"` |
-  `None`), `inbound_room_role` (`"member"` | `"guest"` | `None`) and
-  `user_turn_mirror` (`"as_user"` | `"attributed"` | `None`), all defaulting to
-  `None`. Those three are the room model and are set out together under "The
-  room model" below; the rest of this bullet is `room_view` and
-  `user_routable`, which are what the delivery paths read.
-  Drives capability-gated wiring in the scheduler instead of `source_type ==`
-  checks; the delivery planner reads `surface_class` to decide push-vs-stream.
-  `room_view` is the **second, orthogonal** routing axis and the one the room
-  fan-out reads: whether the surface is a view of a shared room, and if so where
-  that view's transcript is stored. `talk` → `"external"` (Nextcloud owns the
-  store, so a room fan-out must push), `web` → `"canonical"` (the store *is*
-  `messages`, so writing the row is the delivery and a push would double-post),
-  everything else → `None` (a delivery target, not a room view). The two axes
-  agree today only because web happens to be both the only stream room surface
-  and the only canonical-transcript one; `repl` is the counterexample that keeps
-  them separate (`"stream"`, no room view). See `_expand_room_destinations`.
-  `user_routable` marks a surface a user can deliberately point traffic at (a
-  briefing output, a default destination, an alert route). The self-routing
-  surfaces are `False` — `istota_file` only ever delivers back to the TASKS.md
-  line a task came from, and `repl`/stream is the inline terminal the daemon
-  never delivers to. `registry.routable_names()` filters on it, and the web UI
-  (`web_app._registered_delivery_surfaces`, the briefing `outputs` list)
-  offers only those; the grammar still validates the self-routing surfaces on
-  the wire (`_validate_descriptor_surfaces`), so programmatic / CLI descriptors
-  keep working — `user_routable` only governs what the UI *offers*.
-- **`DeliveryOptions`** (frozen) — optional per-delivery metadata passed
-  alongside `deliver(target, text, *, options=…)`: `title` / `priority` /
-  `tags` / `markdown`. `NtfyTransport.deliver` reads them; surfaces that don't
-  use them ignore them. A typed object rather than untyped `**extra`.
-  `markdown` asks the surface to render the body as markup rather than literal
-  text (ntfy: a `Markdown: yes` header). **Opt-in** — a plain-text body
-  routinely carries `*`, `_` and `#` a renderer would eat, so default-on would
-  silently rewrite every existing notification. The ntfy transport sets the
-  header outside the `encode_header_value` path: it is a fixed ASCII literal, so
-  the ASCII-only retry has nothing to flatten and must not downgrade the render
-  mode and deliver raw markup as prose.
-- **`Transport`** (`@runtime_checkable` Protocol) — `name`, `capabilities`, and
-  `async poll() -> list[IncomingMessage]`, `async deliver(target, text, *, task,
-  reply_to, reference_id, threaded) -> int | None`, `async edit(target,
-  message_id, text)`, `async download_attachment(remote_ref, local_path)`,
-  `resolve_target(task) -> str | None`.
-
-`deliver` is **task-aware**: the optional `task` kwarg is ignored by surfaces
-that don't need it; Talk uses it for group-chat reply-threading + @mention,
-email for the deferred-output / `ProcessedEmail` lookup. (The "task-aware
-deliver" decision — keeps the common `(target, text)` case clean without
-amputating email's needs.)
+- **`IncomingMessage`**: `channel_token` → `conversation_token`, `delivery_token` → `talk_delivery_token`, `platform_message_id` → `talk_message_id`, `reply_to_message_id` → `reply_to_talk_id`; multiplayer `author`, `addressed_to_bot`, `classified`, `is_command`, `room_container`. `sender_address` is untrusted, sanitized by `db.external_email_sender`. `queue` defaults `foreground`; email passes `[scheduler] email_task_queue` (default `background`) so a flood at `bot+user@` cannot take chat slots (ISSUE-250).
+- **`TransportCapabilities`** (frozen): edit, threading, progress-ack, typing, `max_message_length`, `surface_class`, `user_routable` (False for `istota_file`, `repl`; `registry.routable_names()` is what the UI offers, `_validate_descriptor_surfaces` still accepts the rest), and the three room fields.
+- **`DeliveryOptions`**: `title`, `priority`, `tags`, `markdown` (opt-in; ntfy's `Markdown: yes` bypasses `encode_header_value` so the ASCII retry cannot drop it).
+- **`Transport`** protocol: `poll`, `deliver(target, text, *, task, reply_to, reference_id, threaded) -> int | None` (task-aware), `edit`, `download_attachment`, `resolve_target`.
 
 ## Registry (`registry.py`)
 
-`make_registry(config)` does **no I/O on construction** (`TalkClient.__init__`
-only stores credentials), so callers without a registry in scope — notably
-`notifications.send_notification`, called from heartbeat / scheduled jobs — can
-build one on demand. Talk is registered when `talk.enabled`, email when
-`email.enabled`, SMS when `sms.enabled`, and WhatsApp when `whatsapp.enabled`; `ntfy`, `istota_file`, `repl`, and `web` are registered
-unconditionally (per-user / per-task gating happens in their `resolve_target` /
-`deliver`, not at construction).
-
-`_surface_for_source_type` (the *inbound* source_type → primary surface map):
-`email` → `"email"`; `sms` → `"sms"`; `whatsapp` → `"whatsapp"`; `repl` → `"repl"`; `web` → `"web"` (a stream surface with
-no push transport, so `for_task` resolves it to `None` — the `task_events` log
-is the delivery, exactly as for REPL); everything else (talk, briefing,
-scheduled, subtask, heartbeat, cli, istota_file, unknown) → `"talk"`, the
-existing default. `registry.for_task(task)` uses it to resolve the primary
-delivery transport (the one consumer, the progress-ack gate, already no-ops on
-`None`). Outbound fan-out (a task delivering to several surfaces) is the
-delivery planner's job, not this map — see below.
+`make_registry(config)` does no I/O, so `send_notification` can build one on demand. Talk, email, sms, whatsapp register on `enabled`; the rest always, gated per user later. `_surface_for_source_type` is the **delivery** map: email, sms, whatsapp, repl, web map to themselves (web resolves to no push transport); everything else → `talk`.
 
 ## The room model (`src/istota/surfaces.py`)
 
-A room is one conversation bound to several surfaces. Four questions decide what a surface may do with one, and each is answered in one named place. Three are fields on `TransportCapabilities`, restated per surface name in the `surfaces` leaf; the fourth is derived.
+A room is one conversation bound to several surfaces. Four questions:
 
-1. **Inbound room role** — what an arriving message does to the room registry. `member` registers the room, binds the surface and adds membership (talk, web). `guest` joins an existing room's transcript and never mints one (email; ISSUE-136's "existence, never creation" rule is exactly this value). `None` is never a room turn at all (ntfy, istota_file, repl, sms, whatsapp). Two containers are promoted per message rather than per surface: a multi-party email thread and a WhatsApp group are `member` through `IncomingMessage.room_container` and `surfaces.is_room_member_for` (see "Multiplayer rooms"), while the table keeps email `guest` and whatsapp `None`. `TransportCapabilities.inbound_room_role`, spelled `room_role` in the leaf, which has no outbound half to distinguish it from.
-2. **Where this surface's transcript lives** — `canonical` for a view rendered from the `messages` store we own (web), `external` for one whose store we do not own (Talk's is in Nextcloud), `None` for a surface that is not a room view (email, ntfy, istota_file, repl, sms, whatsapp). `TransportCapabilities.room_view`.
-3. **Assistant-turn fan-out** — derived from (2) and not a field. `_expand_room_destinations` pushes to an `external` view and skips a `canonical` one, because there the row *is* the delivery and a push double-posts.
-4. **How an external room view shows a turn it did not receive natively** — `as_user`, `attributed`, or `None`. `TransportCapabilities.user_turn_mirror`, a refinement of `room_view == "external"` rather than an independent axis: a surface that is not an external room view is never a fan-out target, so the field means nothing there. It does not carry the body policy — the shipped rule is keyed on the `(origin, destination)` pair, and an email-origin repost carries sender and subject and never the body. See the field's own docstring and the repost paragraph under "Unified Talk / web room sync".
+1. **Inbound room role** (`inbound_room_role`; `room_role` in the leaf): `member` registers, binds and adds membership (talk, web); `guest` joins an existing room's transcript, never mints one (email; ISSUE-136 "existence, never creation"); `None` is never a room turn. A multi-party email thread and a WhatsApp group are promoted per message via `IncomingMessage.room_container` and `surfaces.is_room_member_for`.
+2. **Where the transcript lives** (`room_view`): `canonical` (web, our `messages`), `external` (Talk), `None`. Answered by the **durable-place test**: a durable, addressable place a person reads the whole conversation, that we can write into. An email thread fails it.
+3. **Assistant fan-out**: derived; `_expand_room_destinations` pushes to `external`, skips `canonical` (the row is the delivery).
+4. **`user_turn_mirror`** (`as_user`, `attributed`, `None`): a refinement of `external`. It does not carry body policy: an email-origin repost carries sender and subject, never the body (the wrapped untrusted prompt).
 
-**The durable-place test** answers (2), and it is what makes email's `None` principled rather than a special case: is there a durable, addressable place a person opens to read the whole conversation, that we can write into? A Talk room, yes. An iMessage thread, yes. An email thread, no — it is reconstructed from messages scattered across mailboxes we cannot write into. A surface that fails this test is a delivery target, not a room view, however conversational it feels.
+Bidirectional sync is (1) and (2) both non-`None`, not a setting. The leaf is static, stdlib-only (`transport` imports `db`), never raises, takes `object`, and answers conservatively for anything unrecognised. Transports keep their own literals; `tests/test_surface_capability_agreement.py` and `tests/test_surface_facts.py` (`SurfaceRoomFacts`, no defaults) hold them in step.
 
-**Bidirectional sync is not a field**, because it is not a property a surface has. A surface is bidirectional for a room when (1) is not `None` and (2) is not `None`: talk and web both are, email satisfies (1) alone, ntfy neither, and sms and whatsapp are all-`None` by design — each is a direct external conversation rather than a second view of a room. A `sync = one-way | bidirectional` setting would let an operator ask for states no surface can implement, and the code to refuse those combinations is worse than deriving the answer.
+**Two readers of `room_view`.** `surfaces.room_view()` is a code fact; `routing._room_view()` asks about live transports and collapses "not a view" with "not resolvable", safe only for `_expand_room_destinations` and `is_canonical_room_view`. Elsewhere, with `talk.enabled = false`, `web_app._user_row_display` would render Talk turns as external.
 
-**The leaf is static, and imports nothing.** `surfaces.py` is stdlib-only for the same reason `usage_render.py` and `shell_exec.py` are: `transport` imports `db` at module level, so a table both sides read has to sit below them. Every reader takes `object` rather than `str`, because callers hand it values straight off database rows, and answers the conservative value — not a member, not a view, no mirror mode — for anything it does not recognise, including a non-`str`. Nothing there raises. The lookup is exact: `"Talk"` and `"talk "` answer as an unknown name would, which is the safe direction at six of the seven sites and not at the seventh (see `_user_row_display` below).
+**Two source-type maps.** `surfaces.origin_surface_for_source_type` answers origin: surface-named types pass through; briefing, cli, doctor, heartbeat, scheduled, subtask and `""` give `None`. The delivery map would flip seven of thirteen, and the negated confirmation gate would park cron and heartbeat tasks with nowhere to ask until `expire_stale_confirmations`.
 
-Each transport keeps its own literal declaration in `TransportCapabilities` rather than reading the leaf, because somebody adding a surface is looking at the transport class. `tests/test_surface_capability_agreement.py` holds the two in step, and `tests/test_surface_facts.py` requires every surface `make_registry` can produce to have a record — `SurfaceRoomFacts` takes no defaults, so a record cannot be half-filled. Adding a surface is filling in a record; nobody has to find the lists. Same arrangement as `sandbox_cache_sweeper` restating `executor`'s cache directory names.
+**Sites reading the leaf** (`tests/test_surface_model_equivalence.py`): `record_inbound` room gate; `routing._room_for_destination` (after the `surface == "room"` dispatch, else `room:` descriptors drop, ISSUE-247); `!steer` and `_record_retry_user_turn`; `web_app._user_row_display` (negated, raw column; the one site where "unknown" is unsafe); the scheduler's `store_turn_message` gate and confirmation mirror gate (`is_room_view`, negated).
 
-**Two readers of `room_view`, answering two questions, and both stay.** `surfaces.room_view()` says what role a surface plays — a fact about the code, the same on every deployment. `routing._room_view()` says whether a live transport for the surface exists on *this* deployment right now, and deliberately collapses "not a room view" with "not resolvable", which is safe for its two callers because both branch only on `"canonical"`. It has two callers inside `routing.py` — `_expand_room_destinations` and the public `is_canonical_room_view`, which the scheduler reads to tell a canonical-row delivery from a push — and nothing outside that delivery path may read it: `web_app._user_row_display` runs in the web process, and on a deployment with `talk.enabled = false` the config-gated answer would render every historic Talk turn as an external message; the scheduler's confirmation gate would start putting the prompt on the mirror Talk leg. Each docstring names the other. Whether `_room_view` should be rebased on the leaf is deliberately left open: analysis says it is a no-op for both callers, and "analysis says no-op" on a delivery path wants its own change with its own tier rather than a ride in somebody else's diff.
-
-**Two source-type mappings, and reaching for the wrong one is the mistake this section exists to prevent.** `registry._surface_for_source_type` (above) answers "where do I deliver this task's result" and maps everything that is not `email` / `repl` / `web` / `sms` / `whatsapp` to `"talk"`. `surfaces.origin_surface_for_source_type` answers "what surface did this task originate on": the seven source types that name a surface pass through (`email`, `istota_file`, `repl`, `sms`, `talk`, `web`, `whatsapp`), and the six that do not answer `None` (`briefing`, `cli`, `doctor`, `heartbeat`, `scheduled`, `subtask`), because a scheduled task originates on no surface at all. Both room predicates then answer False for it, which is what the literals at the two scheduler gates answered before the conversion. Asking the *delivery* map the origin question flips the answer from False to True for seven of the thirteen shipped `tasks.source_type` values — the six that name no surface, plus `istota_file` — and for the empty string as well, which matters because the confirmation gate reads `task.source_type or ""`. At that gate the predicate is read negated, so the flip would suppress the prompt on the mirror Talk leg for cron, briefing and heartbeat tasks, parking them with the question delivered nowhere until `expire_stale_confirmations` kills them two hours later. That is the failure the gate's own comment records fixing. (`playbook` is a `memory_chunks.source_type`, not a task one — no `create_task` call passes it — so there are thirteen task source types, not the twelve the spec enumerates.)
-
-**Where the leaf is read.** Seven sites, each converted from a hardcoded surface-name literal and each pinned by `tests/test_surface_model_equivalence.py`, which was written and run against the literals before anything moved:
-
-| Site | Question | Reads |
-|---|---|---|
-| `ingest.record_inbound` room gate | creates and owns rooms | `is_room_member(surface)` |
-| `routing._room_for_destination`, resolve-through-binding branch | appears in `room_bindings` | `is_room_member(surface)` |
-| `commands` `!steer` transcript write | owns a room to write into | `is_room_member(ctx.surface)` |
-| `commands._record_retry_user_turn` | owns a room to write into | `not is_room_member(surface)`, an early return |
-| `web_app._user_row_display` foreign marker | ownership, **negated** | `not is_room_member(origin_surface)` |
-| `scheduler` `store_turn_message` gate | owns a room to write into | `is_room_member(origin_surface_for_source_type(...))` |
-| `scheduler` confirmation mirror gate | has a view that shows the prompt | `is_room_view(origin_surface_for_source_type(...))` |
-
-The last two rows are the only place the view axis and the membership axis could diverge; they coincide for every surface that exists today and are kept apart anyway, since a read-only external view would answer them differently and the confirmation gate is read negated. `_room_for_destination` is the one whose *position* matters: the member check sits after the `surface == "room"` dispatch, because `room` is a name in the destination grammar rather than a surface, and a member check ahead of that dispatch drops every `room:<token>` descriptor (ISSUE-247). `_user_row_display` is the one site where "unknown surface" is not the safe answer, and it reads the column **raw** with no source-type mapping: `messages.origin_surface` stores `task.source_type` for assistant rows, so its domain is wider than surface names and mapping it would be a category error.
-
-**Four literals stay literals, each carrying a comment naming the question it asks.** The rule is that a site is converted only when its question matches a field exactly; over-unifying here would be the old muddle inverted.
-
-- `commands._record_confirm_exchange` gates on `db.TRANSCRIPT_SURFACES` (`("web", "talk", "email")`), which asks "may this surface deposit a `role='user'` row in a room at all" — member plus guest. Reading `is_room_member` there returns False for email and stops an email `!confirm` recording an exchange its own docstring calls a durable authorization record. Three `role='user'` writes in one file, two questions.
-- `db._CONVERSATIONAL_SOURCE_TYPES` asks whose history the store is guaranteed to hold. Its own comment says it: mirroring is not the criterion, completeness is, and email is excluded because of when a migration ran rather than because of what email is.
-- `db._migrate_nonconversational_transcript_cleanup`'s DELETE has to track `TRANSCRIPT_SURFACE_FILTER` and keeps a fourth value (`scheduled`) no surface table will ever hold, so the relation is a superset one that a built string cannot express.
-- `web_app._AUX_ROOM_SCOPE`'s `source_type IN ('web', 'talk')` SQL: the two arms of its `OR` are two ways of belonging to a room rather than two surface roles, and email — which `is_room_member` correctly excludes — is the whole point of the second arm.
-
-`db.TRANSCRIPT_SURFACES` is declared once and imported by `commands.py`, which used to carry a hand copy; it is deliberately not derived from `SURFACES`, since its domain is `source_type` values. Its members equalling the member-plus-guest set is a coincidence, and three assertions in `tests/test_surface_table_is_load_bearing.py` keep the coincidence from being read as a licence to widen it for a source-type reason.
-
-**One asymmetry is cemented rather than resolved.** An email `!confirm` records its exchange and an email `!retry` records no user turn. Converting the retry site preserved today's answer behind a predicate named for ownership, which is right for a change that claims to alter no behaviour, and the comment there says the asymmetry is deliberate-for-now and unexamined. It is a product question.
-
-**A name collision worth knowing before grepping.** `surfaces.is_room_member(surface)` asks whether a *surface* owns rooms. `db.is_room_member(conn, room_token, user_id)` asks whether a *user* belongs to one room. Different questions, same name, and both are called from `web_app.py`.
+**Four literals stay literals**, each commented: `commands._record_confirm_exchange` on `db.TRANSCRIPT_SURFACES` (member plus guest; `is_room_member` would stop an email `!confirm` recording its authorization), `db._CONVERSATIONAL_SOURCE_TYPES` (completeness), the cleanup migration's DELETE (tracks `TRANSCRIPT_SURFACE_FILTER` plus `scheduled`), `web_app._AUX_ROOM_SCOPE`. `tests/test_surface_table_is_load_bearing.py` stops `TRANSCRIPT_SURFACES` being widened by coincidence. Email `!confirm` records its exchange while email `!retry` does not: an open product question. Name collision: `surfaces.is_room_member(surface)` vs `db.is_room_member(conn, token, user_id)`.
 
 ## Multiplayer rooms
 
-A room can hold several humans on any surface: a Talk group, a web room with more than one member, a WhatsApp group on the Baileys adapter, an email thread with two or more humans besides the bot. One pipeline in core decides who is speaking, whose authority a turn carries, who will read the answer and what the task may reach. Surfaces only normalize. Every rule below is a no-op in a room with one human, which is what keeps the private-room prompt goldens byte-identical. The user-facing version is `docs/features/shared-rooms.md`; side rooms are `docs/features/side-rooms.md` and the veto `docs/features/room-veto.md`.
+A room can hold several humans: a Talk group, a multi-member web room, a Baileys WhatsApp group, an email thread with two or more humans besides the bot. One core pipeline decides speaker, authority, audience and reach; surfaces only normalize. Every rule is a no-op with one human (private goldens stay byte-identical). User docs: `docs/features/shared-rooms.md`, `side-rooms.md`, `room-veto.md`.
 
-**Record, then decide.** `ingest.record_inbound` stores the `role='user'` row first, with `task_id` NULL, then asks the speech gate, and creates the task (stamping the row) only on speak. It returns `InboundResult(room_token, task_id, message_id, outcome, gate_reason)`, where `outcome` is `created`, `recorded` (stored, gate declined), `dropped` (a known echo, or a non-user author in an unregistered room) or `replayed`. The dedup probe is `_prior_turn` (the surface-native id on a stored row, then `db.find_task_by_talk_message_id`), not `task_id`. Only a stored turn is gated: a surface that keeps no transcript for a message (a WhatsApp 1:1, SMS, email with no room) always gets its task. An unanswered turn has history id `0` and renders with no `Bot:` line (`ConversationMessage.result is None`); `!export` keeps a message-id cursor (`last_msg_id`) for it. On web a declined turn answers `{task_id: null, message_id, status: "recorded"}` and the client opens no stream.
+**Record, then decide.** `ingest.record_inbound` stores the user row (`task_id` NULL), asks the speech gate, and creates the task only on speak, returning `InboundResult` with `outcome` `created` / `recorded` / `dropped` / `replayed`. Dedup is `_prior_turn`. Only stored turns are gated; WhatsApp 1:1, SMS and roomless email always get a task. An unanswered turn has no `Bot:` line; `!export` uses a `last_msg_id` cursor. A declined web turn returns `task_id: null`, `status: "recorded"`.
 
-**The speech gate** is `speech_gate.should_speak`, rungs in order, first match wins: `agent_author`, `host_lost`, `guest_command`, `guest_reply_off`, `loop_cap` (all record only), `not_multi_human`, `addressed` (speak), then the mode: `mode_off` speaks, `mode_mention` records, `classifier` asks the model and fails closed (`failed`). The mode is `room_policy.effective_speech_mode`: the room's own `speech_mode`, else the deployment's, except that an email thread room defaults to `mention` on a classifier deployment. The classifier call never runs under a write lock. `ingest.classify_ahead` computes the decision on its own short read connection before the surface opens its transaction and hands it in as `IncomingMessage.classified`; the Talk poller runs it for a batch four at a time under one pass deadline, the WhatsApp bridge in `groups.classify_group_event`, email in `poll_emails` before the message's first write. Every decision is audited in `speech_gate_decisions` (no message body, pruned on the cleanup tick). `addressed_to_bot` is set per surface at the edge: Talk from `is_bot_mentioned`, web from `@name` (not followed by a word character or hyphen) or the name as the first word, WhatsApp from the sidecar's `mentions_bot`, a quote of a stored bot message or the name as the first word, email from the bot's address (or a plus address of it) in To. Cc means listening.
+**The speech gate**, `speech_gate.should_speak`, first match wins: `agent_author`, `host_lost`, `guest_command`, `guest_reply_off`, `loop_cap` (record), `not_multi_human`, `addressed` (speak), then mode: `mode_off` speaks, `mode_mention` records, `classifier` asks the model and fails closed. `room_policy.effective_speech_mode`: the room's, else the deployment's; an email thread room defaults to `mention` on a classifier deployment. The classifier never runs under a write lock: `ingest.classify_ahead` decides on its own read connection into `IncomingMessage.classified` (WhatsApp: `groups.classify_group_event`). Audited in `speech_gate_decisions` (no body). `addressed_to_bot`: Talk `is_bot_mentioned`; web `@name` not followed by a word char or hyphen, or the name first; WhatsApp `mentions_bot`, a quote of a stored bot message, or the name first; email the bot address (or plus address) in To. Cc means listening.
 
-**Participants, not members** (D1). `room_members` still means istota users who see the room in their sidebar. `room_participants` records every human and bot that wrote or is on a roster, with `kind` `principal` / `guest` / `agent`, `left_at` as history, and a partial unique index on `(room_token, surface, surface_ref) WHERE left_at IS NULL`. `messages.author_participant_id` names the author; a guest row has no `author_user_id` and a sanitized `author_label`. `IncomingMessage.author` is a `ParticipantRef` carrying identity only; `transport.participants.classify` decides the kind in core, because it depends on membership: a principal is a resolved user who is a member, an agent is a surface-reported bot or the bot itself, everyone else is a guest (an istota user who is not a member included). `db.room_is_shared` counts distinct present humans (one user on Talk and web is one person) and falls back to more than one member; `participants.is_multi_human` is the one predicate the gate and `classify_ahead` share. Presence is kept by the Talk roster sync (once per room per batch, agents never ended), the WhatsApp `group_roster` frame, email's thread union, and `remove_room_member` ending a web presence. `db.note_member_turn` is the one place a member's turn re-adds membership and un-hides a dismissed room, reached before Talk's `!command`, relay and confirmation branches consume a turn.
+**Participants, not members** (D1). `room_members` is sidebar membership; `room_participants` is everyone who wrote or is on a roster (`kind` principal / guest / agent, `left_at` history, unique on `(room_token, surface, surface_ref) WHERE left_at IS NULL`), named by `messages.author_participant_id`. `transport.participants.classify` decides kind in core because it depends on membership (a non-member istota user is a guest). `db.room_is_shared` counts distinct present humans; `participants.is_multi_human` is the one predicate gate and `classify_ahead` share. Presence: Talk roster sync, WhatsApp `group_roster`, email thread union, `remove_room_member`. `db.note_member_turn` is the one place a member's turn re-adds membership and un-hides, reached before Talk's `!command`, relay and confirmation branches.
 
-**Talk records every human turn.** The `config.users` filter moved from recording to authority: a Talk guest, a non-istota Nextcloud user and another bot are recorded (as guest or agent), and only the bot's own posts are skipped, since each is already the assistant row it was delivered from. Talk `surface_ref` is the bare actor id for a Nextcloud user and `<actorType>/<id>` otherwise. An unmentioned group turn only records; the six side effects between the old drop and ingest (`!model` usage, `!command`, relay answer, confirmation answer, the channel-gate notice, cancelling parked confirmations) stay behind `engaged = addressed or not is_multi_user`. The mention is stripped unconditionally, so in a DM a lone `@bot` cleans to empty and is skipped, `@bot !help` dispatches and `@bot yes` answers a parked confirmation. Talk no longer prefixes `[Room participants: …]`: the prompt and the stored row are the author's own text. A group reply is threaded to its trigger and carries an `@user` prefix only for a Talk-origin, non-guest task.
+**Talk records every human turn.** `config.users` decides authority, not recording; only the bot's own posts are skipped. An unmentioned group turn only records; the side effects (`!model`, `!command`, relay and confirmation answers, channel-gate notice, cancelling confirmations) stay behind `engaged = addressed or not is_multi_user`. The mention is always stripped. Group replies thread to the trigger, `@user` only for a Talk-origin non-guest task.
 
-**Principal and host** (D2, D14). A principal's turn runs as that principal. A guest's turn that speaks runs as the room's **host** (`room_policy`), with `tasks.guest_participant_id` set and the guest's text fenced (`frame_untrusted`, label `GUEST MESSAGE`) in `tasks.prompt`; the transcript row keeps the raw text. That is emissary mode: every scope withheld whatever the host granted, native WebSearch and WebFetch removed, deferred ops purged, its own `emissary-task-<id>` temp dir, never a relay clean turn, no personal or channel memory extraction, and any confirmation routed to the host's side room. The host is the web creator or the Talk room's first istota member, else the first present member; it is sticky, so a host found gone clears `host_user_id` and the room goes record-only until a principal runs `!room host` (WhatsApp: the bot leaves the group). Guest `!commands` are ignored (`is_command`, rung `guest_command`) except the veto. `room_policy.guest_reply` is `direct` on Talk and web, `held` on WhatsApp and email (D11); `held` turns a guest-triggered answer into a `room_post` proposal in the host's side room (`side_rooms.propose_guest_reply`). The loop cap counts assistant rows since the last istota-authored user row (default 3), so only guest turns are capped. `room_policy.speech_mode` and `max_bot_turns_without_human` are read and have no writer yet.
+**Principal and host** (D2, D14). A principal's turn runs as that principal. A guest's speaking turn runs as the room's host (`room_policy`), `tasks.guest_participant_id` set, text fenced (`frame_untrusted`, `GUEST MESSAGE`) in `tasks.prompt` (transcript stays raw). Emissary mode: all scopes withheld, native WebSearch/WebFetch removed, deferred ops purged, own `emissary-task-<id>` temp dir, no memory extraction, confirmations to the host's side room. The host is sticky; a departed host clears `host_user_id` and the room goes record-only until `!room host` (WhatsApp: bot leaves). Guest `!commands` ignored except the veto. `guest_reply` is `direct` on Talk and web, `held` on WhatsApp and email (D11); `held` makes a `room_post` proposal in the host's side room (`side_rooms.propose_guest_reply`). Loop cap: assistant rows since the last istota-authored user row (default 3). `room_policy.speech_mode` and `max_bot_turns_without_human` are read but have no writer yet.
 
-**Audience** (D3). `room_policy.audience_class` is `private`, `principals` or `mixed`, stored per task in `tasks.audience`. Under `mixed` (a guest present now, or the turn stored as mixed) every scope is withheld from front-stage output whatever was granted, and the card says why (`.claude/rules/prompts.md`). **Epochs**: `room_epochs` records a split when somebody joins a room somebody else already reads, with boundaries on `messages.id`, `tasks.id` and the cached Talk message id. `db.front_stage_cutoff` is the highest boundary of any epoch whose joiner is still present, and it bounds the messages-store history, the tasks fallback, re-surfaced tasks, the Talk-cache context, a forced reply parent, conversation recall, the classifier window and channel sleep-cycle extraction. A side room's parent transcript and `!export` are not front stage. A web add always acknowledges history (the endpoint requires it); a Talk join always splits; registration and pre-migration Talk rooms (`pending:talk` markers) take their first roster as the baseline. Epochs bound the transcript, never `CHANNEL.md` (D19).
+**Audience** (D3): `room_policy.audience_class` `private` / `principals` / `mixed`, stored in `tasks.audience`; under `mixed` every scope is withheld from front-stage output (`.claude/rules/prompts.md`). **Epochs**: `room_epochs` splits when someone joins a room others already read, boundaries on `messages.id`, `tasks.id`, cached Talk id. `db.front_stage_cutoff` (highest boundary of an epoch whose joiner is present) bounds every front-stage history, recall and extraction read; not a side room's parent transcript or `!export`. A Talk join always splits; a web add acknowledges history. Epochs never bound `CHANNEL.md` (D19).
 
-**WhatsApp groups and email threads are room containers** (D6, D10). Both surfaces keep `room_role` `None` / `guest` in `surfaces.SURFACES`, because a WhatsApp 1:1 and a single-correspondent email must stay outside the room model. `IncomingMessage.room_container` marks the one container, and `surfaces.is_room_member_for(surface, room_container=)` promotes it to `member` for `record_inbound`, `is_multi_human` and `classify_ahead`. A WhatsApp group's token is `whatsapp-group-<sha256[:24]>` of its JID (`.claude/rules/whatsapp.md`). An email thread room is minted when a thread has two or more humans besides the bot, the thread is the host's (their address on it, or it threads onto a mail of theirs) and the untrusted-sender gate let the mail through; its token is `email-thread-<sha256[:24]>` of the root Message-ID, bound as surface `email`, and later mail finds it through the root binding, `processed_emails.thread_id` or `sent_emails.conversation_token` (`transport/email/threads.py`). Routing gains a first rung, `thread_room`, sending a thread room's mail to its host. Only the host is a member at minting; another istota user on the thread is a guest until added on web. Participants are the union over the thread. A held mail is not admitted to the room at all. A thread room's answer is a reply-all to the latest admitted message's sender and other recipients (minus bot addresses), threaded to the triggering message, through `_hold_if_unapproved`, which now checks every recipient. **D20**: an approved guest proposal on an email thread is the outbound approval, so `deliver_thread_post` skips the gate only when the send's folded To and ordered Cc equal the approved `destination.email_recipients`.
+**Room containers** (D6, D10). WhatsApp group token `whatsapp-group-<sha256[:24]>` of the JID. An email thread room (`transport/email/threads.py`) is minted when the thread has two or more humans besides the bot, is the host's, and passed the untrusted-sender gate; token `email-thread-<sha256[:24]>` of the root Message-ID. Routing rung `thread_room` sends its mail to the host, the only member at minting; held mail is not admitted. The answer is a reply-all through `_hold_if_unapproved`, which checks every recipient. **D20**: an approved guest proposal is the outbound approval; `deliver_thread_post` skips the gate only when folded To and ordered Cc equal `destination.email_recipients`.
 
-**Delivery refuses a shared room for personal content** (SG 10). `routing.refuse_shared_rooms` drops a room-view leg (talk or web) whose canonical room is shared, for every purpose, logging one warning, and exempts only the room the task ran in, since its reach was gated there. Order in `resolve_delivery_plan`: `side_rooms.pin_plan`, then the refusal, then the reply-to-origin fallback. Notifications apply it per purpose, the log route too, and `send_notification(task_room=)` exempts the one conversational notice. `db._usable_as_delivery_default` and `db.configured_default_room` skip a shared room, so a `default_room` pin that becomes shared is dead and the heuristic answers. `record_inbound` refuses a mirror-only email turn into a shared or vetoed room (`withheld_from_room`). Briefings get no exemption.
+**Delivery refuses a shared room for personal content** (SG 10). `routing.refuse_shared_rooms` drops a talk or web leg whose canonical room is shared, for every purpose, exempting only the room the task ran in. Order in `resolve_delivery_plan`: `side_rooms.pin_plan`, refusal, reply-to-origin fallback. Notifications apply it per purpose including log; `send_notification(task_room=)` exempts the conversational notice. `db._usable_as_delivery_default` and `db.configured_default_room` skip shared rooms. `record_inbound` refuses a mirror-only email turn into a shared or vetoed room (`withheld_from_room`). Briefings get no exemption.
 
-**The veto** (D8, D12) is `room_veto.py`: any participant's `!<bot name> off` switches a shared room off and it records nothing until a member's `!<bot name> on` and every vetoer has agreed or left. Each surface routes it ahead of its guest-command filter. Removing the bot from a WhatsApp group is a veto with no vetoer row. Replies from a process that cannot post (the web app) are queued in `room_notices` and posted by the scheduler's `room-notices` gate, which also posts the one-time announcement to a room with a guest and a host. Details in `docs/features/room-veto.md`.
+**The veto** (D8, D12), `room_veto.py`: any participant's `!<bot name> off` stops recording until a member's `!<bot name> on` and every vetoer agreed or left; routed ahead of the guest-command filter. Removing the bot from a WhatsApp group is a veto with no vetoer row. The web app queues replies in `room_notices`; the scheduler's `room-notices` gate posts them and the one-time announcement.
 
 ## Inbound
 
-**Both surfaces self-create their tasks inside `poll`** — for the same class of
-reason: the `create_task` must share the surface's `db.get_db` transaction with
-the inbound side effects, so a create failure rolls the whole batch back and the
-messages are re-polled rather than silently lost.
+**Talk and email create tasks inside `poll`** so `create_task` shares the poll's `db.get_db` transaction with the cursor and side effects; a failure re-polls instead of losing messages (a split collect/ingest was reverted for that). `poll` returns `[]`. `ingest_message` maps onto `db.create_task` (duplicate Talk ids return the existing task). `record_inbound` stamps the surface id into `external_ids` (echo ledger, read-sync cap).
 
-- **Talk**: `transport.talk.inbound.poll_talk_conversations(config) -> list[int]` owns every
-  Talk-specific step (conversation listing + cache, the `lastMessage` gate and
-  its periodic full sweep, per-room long-poll,
-  system/own filtering (a guest, a non-istota user and another bot are
-  recorded, not filtered), the @mention test that keeps an unmentioned
-  group turn to a recorded row, `!model` prefix, `!command` dispatch,
-  confirmation-reply handling, the per-channel active-task gate, attachment
-  extraction, cancelling superseded confirmations) **and** calls `ingest_message`
-  in the same transaction as `set_talk_poll_state` / the command + confirmation
-  side effects. If `create_task` raised after the poll cursor advanced (separate
-  transactions), the messages would be lost forever (the dedup guard can't help —
-  they'd never be re-polled). `TalkTransport.poll` delegates to it and returns an
-  empty `IncomingMessage` list. (An earlier design split this into a
-  `collect → ingest` step across a transaction boundary; that introduced exactly
-  this message-loss window and was reverted.)
+### Talk poll
 
-  **The room pass no longer awaits with a connection open; the results block
-  still does** (ISSUE-406). The room pass is three phases — `_plan_room_pass`
-  reads the registry (and writes nothing, so under WAL it never becomes a
-  writer and blocks nobody), `_fetch_room_pass` asks Nextcloud with no
-  connection open, `_apply_room_pass` reopens and writes. That is the shape the
-  issue proposed, and it is available *here* and not to the results block, whose
-  atomicity note above forbids it.
+`transport.talk.inbound.poll_talk_conversations` owns listing, the `lastMessage` gate and full sweep, long-poll, filtering, the @mention test, `!model`, `!command`, confirmation replies, the active-task gate, attachments, and ingest.
 
-  **The write phase re-reads every condition it acts on**, which is the price of
-  the split rather than belt and braces: the lock is free while Nextcloud
-  answers, which is the fix, and that is exactly the window in which another
-  writer can register the room or advance its cursor. `register_room` /
-  `add_room_binding` / `add_room_member` are `INSERT OR IGNORE` and need
-  nothing, and `set_talk_poll_state` no longer rewinds a cursor — but the
-  re-read is still required, and now for the opposite reason. The seed is
-  `latest_id - 1`, taken from the server's newest message, so it is *ahead* of a
-  cursor another writer initialised from further back, and with the `MAX` guard
-  in place writing it would carry the room past every message in between and
-  drop them. The initialisation therefore fires only when the cursor is still
-  absent. Registration carries a second guard of a different kind: a room
-  the read phase found present and the write phase finds gone has no fetched
-  participant list, so it is left for the next cycle rather than registered with
-  no members. The fetch phase stays **sequential**, matching what the single
-  transaction did — running the round trips concurrently is a real latency win
-  and a separate change, since ISSUE-399 was about how many connections this
-  poller holds at once.
+- **The room pass awaits with no connection open** (ISSUE-406): `_plan_room_pass` reads, `_fetch_room_pass` fetches, `_apply_room_pass` writes and re-reads every condition (a cursor is initialised only if still absent; a vanished room is skipped). The results block still awaits Talk POSTs under its write lock; fixing that means hoisting awaits, not splitting the transaction.
+- **`db.set_talk_poll_state` uses `MAX`**, never rewinding, since the side effects below the cursor are not idempotent.
+- **Every `db.get_db` reachable from the runtime loop is behind one `asyncio.Lock` per loop** (`transport/talk/_db_lock.py`), bounded `busy_timeout_ms`: a synchronous writer inside an await of a lock-holding coroutine deadlocks the loop thread (a `threading.Lock` would too). Nothing else opens a connection on the loop thread; `WebTransport.deliver` uses `run_in_executor`.
+- **`talk_poll_txn`** (`_timed_poll_txn`, `_await_in_txn`) logs slow awaits and long holds.
+- Inbound caches are module-global and unlocked; a registry-driven inbound driver would race them first.
 
-  **Two hazards were closed ahead of a second inbound driver, and neither is
-  conditional on one arriving.** `db.set_talk_poll_state` advances with `MAX`
-  and can no longer move a cursor backwards: the cursor advances at the top of
-  the results loop *before* every filter, and below it sit `!command` dispatch,
-  the confirmation reply and its ack post, and `cancel_for_conversation` — none
-  idempotent and only `ingest_message` deduped, so a rewind re-runs that window
-  rather than being absorbed by it. Talk comment ids are global and monotonic
-  and no operation resets them, so there is no legitimate rewind to preserve.
-  And every `db.get_db` block in this package that is reachable from the runtime
-  loop is taken behind one `asyncio.Lock` per loop
-  (`transport/talk/_db_lock.py`) with a bounded `busy_timeout_ms` — the scope is
-  `transport/talk`, and the loop's other residents are covered by not opening a
-  connection on the loop thread at all (`WebTransport.deliver` hands its write
-  to `run_in_executor`, so it contends through SQLite from another thread). **That one is a deadlock rather than a race**: the results
-  block writes and then awaits Nextcloud five times with the WAL write lock
-  held, and `db.get_db` is synchronous `sqlite3` — a second writing coroutine
-  scheduled into one of those awaits blocks the loop thread itself, which is the
-  only thread that can resume the coroutine holding the lock. It must be an
-  `asyncio.Lock`; a `threading.Lock` there *is* the deadlock. The bound is what
-  keeps a writer outside the loop (the scheduler's threads) from stalling it for
-  `get_db`'s 30s default — the caller retries on the next cycle, which is safe
-  because the cursor advance and the task creation commit together.
+### Email poll
 
-  **What the measurement established before the fix**, and why the room half was
-  worth doing on it: the room loop's awaits recur rather than being
-  first-encounter work. `get_latest_message_id` persists a cursor only for a
-  room that has a message and the backfill caches only a non-empty history, so
-  an **empty group room** failed both guards on every cycle for ever and paid
-  two round trips of write-lock time each time; the participant fetch recurred
-  the same way for a room where `_istota_members_for_conversation` came back
-  empty. The comment at the cursor write records the same fact from the
-  `lastMessage` gate's side.
+`transport.email.inbound.poll_emails` owns IMAP, routing precedence (plus-address → sender → thread), attachments, prompt assembly and the gate, and ingests in the same transaction as the gate and `mark_email_processed`.
 
-  **The results block is unchanged and still holds four awaits the issue does
-  not name** — the `!model` usage reply, `dispatch_command`,
-  `handle_confirmation_reply` (which posts an ack) and the channel-gate notice,
-  each a Talk POST after `upsert_talk_messages` and `set_talk_poll_state` have
-  made the transaction a writer, and the last of those fires per message
-  whenever that room already has a foreground task running. Closing that one
-  means hoisting the awaits or moving the blocking work off the loop thread, not
-  splitting the transaction, and it still has no production numbers behind it.
-  `talk_poll_txn phase=results` is what would supply them.
+**Email confirmation gate.** One decision per email, before `ingest_message`, because it also sets `IncomingMessage.suppress_transcript_mirror` (the mirror commits in the task's transaction and `db.cancel_task` touches only `tasks`).
 
-  **`talk_poll_txn` is what says how much either costs.** `db.get_db`
-  commits at the end of the `with` and SQLite's deferred transaction begins at
-  the first write, so a write anywhere in either block takes a WAL write lock
-  held across every later await in it, and every other writer in the daemon
-  queues behind it for a round trip. `_timed_poll_txn` wraps each block and
-  `_await_in_txn` charges every await inside it — the five the results block
-  still holds, where the issue named one. The room pass keeps its
-  `_timed_poll_txn` with no `_await_in_txn` under it at all, which is the
-  readback for the split: `phase=rooms awaits=0` is what says the round trips
-  happened outside the lock. A line is emitted when at least one await passed
-  `_TXN_AWAIT_FLOOR_SECONDS` (the floor is **per await**, since
-  `_get_participants` is awaited once per message whether or not it reaches the
-  network, and a few hundred cache hits sum past any useful total) or the hold
-  passed `_TXN_HOLD_WARN_SECONDS`, which makes it a warning instead. INFO
-  otherwise, matching `scheduler_stats` and the host-pressure breadcrumb — at
-  DEBUG the whole sub-second population the measurement exists to collect is
-  dropped by `setup_logging`'s default level, so the instrument would ship
-  unable to measure. `phase=rooms` and `phase=results` are the two blocks. The
-  line is emitted at close, so the window it describes is the `held_ms` before
-  its own timestamp — which is what lets a hold be lined up against a
-  `ReadTimeout` record.
+- `plus_address` / `sender_match`: gated unless `is_trusted_email_sender(..., include_own_addresses=_own_address_claim_counts(config, auth_result))`. One rule for both, since `From: <user>` + `Cc: bot+<user>@` resolves as `plus_address` (ISSUE-227).
+- `thread_match` (ISSUE-234): gated unless `email_ownership.thread_reply_from_correspondent` finds the sender among the exact To addresses on the matched `sent_emails` row (a Message-ID is a bearer token; never domain, never the `References` chain), then the same trust call.
+- Residuals: Cc is not recorded; one approval plus a bot reply makes the sender a correspondent; `sent_emails` has no age bound; nothing gates the thread route on the DMARC verdict.
+- A gated thread reply sits under a real room token (`TestThreadMatchConfirmationGate`); it parks the foreground queue only under `email_task_queue = "foreground"`.
 
-  **The room half was fixed on the mechanism, and the production series does not
-  support it** — stated here because the opposite is the natural assumption
-  about a change with an issue number on it. Read on the deployment 8.5 hours
-  after the instrument shipped, `talk_poll_txn` had emitted **nothing**: no
-  transaction of either phase held an await past the 5ms floor or ran past the
-  1s warn threshold.
+**`confirm_sender_match`** (`off` | `verify` | `gate`; ISSUE-227, ISSUE-249 Gap 3) switches only the own-address trust branch. `_own_address_claim_counts`: `off` True, `gate` False, `verify` True only for `verdict == "pass"`, failing closed on `None`. `verify` needs `authserv_id` (refused at load, re-asserted locally). Default `off` declares the MTA enforces DMARC upstream; an unanswered hold auto-cancels. A self-claim prompt offers plain yes/no (`yes trust` would exempt the spoofer's identical address). A `verify` hold is always logged. With `authserv_id` blank, `_note_observed_authserv_id` logs the id only on a `pass`; canary alerts carry `_AUTHSERV_ID_ADVICE` naming no id, since a spoofer can trigger them. Alerts state policy, never the message's fate.
 
-  **The two phases are silent for different reasons, and only one of them is
-  the instrument having nothing to observe.** The rooms phase runs every cycle
-  and does no round trip at all, because every live room there is already
-  registered, cursored and cached — of the four `talk_poll_state` rows with no
-  cached history, three carry no Talk binding and the fourth is archived, so
-  the room loop visits none of them, and the empty-group-room case this change
-  was argued from has no instance on that deployment. The results phase *did*
-  run — seven rooms advanced their cursor after the restart — so it took its
-  write lock repeatedly and still reported nothing: `_get_participants` was a
-  warm cache hit under the 5ms floor every time, and the four expensive awaits
-  fire only on interactive traffic, of which there was none. For that phase,
-  under that traffic, the silence is the issue's "holds are milliseconds"
-  answer rather than a gap in the data.
+**Inbound volume budget** (ISSUE-250). Before `ingest_message`: `email_sender_rate_limit_messages` per `(user, sender)` then `email_rate_limit_messages` per user. Over budget is filed (`routing_method="throttled"`, no task), never dropped, which is why it is not in `ingest.py`. Past `_MAX_PROMPTS_PER_SENDER_WINDOW` (3) prompts collapse into the throttle notice; tasks stay addressable by `!confirm <id>`. The budget is in the DB, so a restart grants nothing.
 
-  So the case for the split is the mechanism plus the contention its own tests
-  reproduce, not a measured cost. The condition is latent rather than absent — a
-  room the bot is newly added to re-enters it — but anyone reasoning about
-  whether this was worth its risk should know the series was empty. The results
-  block keeps its awaits and its instrument, which is where a number would come
-  from if interactive traffic ever put one of the four on the wire.
-- **Email**: `transport.email.inbound.poll_emails(config) -> list[int]` owns
-  every email-specific step (IMAP listing, the plus-address → sender → thread
-  routing precedence, attachment download + Nextcloud upload, prompt assembly,
-  the untrusted-sender confirmation gate) **and**, like Talk, calls
-  `ingest_message` in the same `db.get_db` transaction as the confirmation gate /
-  `mark_email_processed`. It self-creates because the gate
-  (`set_task_confirmation` + the gate message) and the `processed_emails` linkage
-  both need the freshly created task id mid-loop. `EmailTransport.poll` delegates
-  to it and returns an empty list. The scheduler's email tick imports
-  `poll_emails` from `transport.email` and calls it directly.
+**The DMARC canary** (ISSUE-228). `_check_dmarc_canary` warns and alerts when a self-claim (`claims_to_be_user and routing_method in ("plus_address", "sender_match")`) lacks `dmarc=pass`. It never blocks (`dmarc_canary` is safe on by default), but `poll_emails` computes the `_AuthResult` and passes it in because `verify` decides on it. A detector of drift, not a control.
 
-  **Email confirmation gate.** One `needs_confirmation` decision per email,
-  resolved *before* `ingest_message` because it also sets
-  `IncomingMessage.suppress_transcript_mirror` — the mirror commits in the task's
-  transaction, so a gated turn must not publish attacker text into the room before
-  the user has answered (`db.cancel_task` on a decline touches only `tasks`). One
-  rule per routing method:
+- **`[email] authserv_id` decides which headers are read** (ISSUE-249): blank reads the top header; set, `_our_headers` keeps every matching one (non-pass wins) and a missing stamp is loud (`unstamped`). `dmarc_canary_warn_on_missing` covers our stamp with no verdict (`unevaluated`). Rejected headers are counted, never quoted.
+- **A pass is checked for alignment either way**: every `header.from` from `_dmarc_header_from` must pass `_domains_align` (exact or parent/child), else `misaligned`. Absent is quiet, unreadable loud. Limit: a property wholly inside a comment reads as absent. `dmarc=none` is a failure. Echoes truncate at `_ECHOED_VALUE_MAX`.
+- **The parser exists to stop the canary going quiet**: `_dmarc_result` anchors `dmarc=` to a methodspec, splits on `;` outside comments and quotes, lets any non-pass beat a pass, and reports an incomplete read (unbalanced delimiter, or `_DMARC_RAW` counting more tokens than attributed) as `malformed`, never `pass` or `None`; unknown tokens bucket to `other`.
+- Dedup is in-process `(user_id, sender.lower(), verdict)`, 24h, opened only on a delivered alert; the WARNING is never deduped. `_deliver_dmarc_alerts` runs after the batch outside every transaction (a web route opens a second connection).
 
-  - `plus_address` / `sender_match` — gated unless `is_trusted_email_sender`,
-    called with `include_own_addresses=_own_address_claim_counts(config,
-    auth_result)`, which is the whole of the three-state `confirm_sender_match`
-    (ISSUE-249 Gap 3). **One rule, both routes** — see below.
-  - `thread_match` — gated unless `email_ownership.thread_reply_from_correspondent`
-    says the envelope sender is one of the addresses the bot actually wrote to on
-    the matched `sent_emails` row, and then by the same `is_trusted_email_sender`
-    call as the other two routes. **One rule, all three routes** — see below.
+**Answering a gate is surface-agnostic** (ISSUE-241, ISSUE-243). `notifications.send_confirmation_prompt` resolves `alert` and returns `(delivered, talk_message_id)` (feeds `talk_response_id`, Path A), sent after the transaction (`_deliver_confirmation_prompts`). The prompt names its task id (`!confirm <id> [no|trust]`, `!yes` / `!no`). `istota.confirmations` holds the verbs, `parse_answer`, `resolve` and `apply_answer`; the web POST intercepts a bare answer before `_chat_create_web_task` (which cancels the room's pending confirmations). Held mail shows only in the notification inbox, never history (`.claude/rules/web-chat.md`). `confirmations.approve` writes the withheld user row into an existing room; a bare "yes" resolves only with one open question; `_dispatch`'s talk leg mirrors the prompt as a `role='system'` row (ISSUE-242); expiry notices route by `alert`. A gated email is still marked processed at ingest, or each poll re-ingests it.
 
-  **Why the thread route joined the gate (ISSUE-234).** It used to be exempt on
-  the argument that possession of a `Message-ID` we issued is the routing
-  evidence. That is sound about *which thread* and says nothing about *who*: the
-  id is a bearer token, not a secret, disclosed to everyone Cc'd, everyone the
-  thread is forwarded to (most clients preserve `References`), every relay and
-  backup in the path, and to a public archive if the bot ever mails a list. There
-  is no retention on `sent_emails`, so every id stays valid indefinitely, and one
-  leak bought a permanent bidirectional agent channel scoped to a user — the
-  reply goes to `processed_emails.sender_email`, i.e. to whoever wrote in, which
-  then mints them an id of their own. One piece of evidence was answering two
-  questions with different populations.
+**Email-reply origin routing.** `routing.origin_descriptor(task, conn)` stamps `sent_emails.origin_target`: `room:<canonical_token>` for a live room (via `_canonical_room_token`, cross-surface), else `web:`/`talk:`. `routing.upgrade_legacy_origin` upgrades at read time and is not merely transitional. The reply applies `Config.email_reply_routing_for(user_id)` (`origin+thread` default | `origin` | `thread`) to build `output_target` with the origin room as `conversation_token`. NULL `origin_target` falls back to `talk,email` plus the `talk_delivery_token` ladder, refusing `web-`/`repl-` tokens. A foreign reply into a web room goes through `WebTransport.deliver` and does not gate confirmations.
 
-  The second question now reads a second piece of evidence. The envelope sender
-  is weak on its own — unauthenticated, same as everywhere else on this path —
-  but it is the one the forwarded / leaked / hijacked case fails, and it costs
-  the ordinary emissary reply nothing, since that sender is the correspondent by
-  construction. Everything else about the route is unchanged: it still resolves
-  the user, still recovers `origin_target`, still runs the quiet-sender filter.
+**`room:<token>` from a scheduled job** (ISSUE-511). `_expand_room_destinations` skips bindings an origin leg covered only when `origin_surface_for_source_type` names a surface; asking the delivery map made a `scheduled` job deliver nowhere. `room` is in `cron_loader._KNOWN_TARGET_SURFACES`. `routing.room_target_descriptor` (`talk:<t>`, `web:<t>`, or `web:<t>,talk:<ref>` for promoted) is the recommended spelling, shared by `rooms list`, the `nextcloud talk create` refusal and the prompt's `Room:` line; `room:` re-expands by live bindings instead.
 
-  **Exact address, never the domain**, and compared against the matched row
-  alone. A domain match reads well and is wrong twice: the population a leaked id
-  reaches first is the correspondent's own colleagues and shared mailboxes, which
-  is exactly what it waves through, and a correspondent on a large provider would
-  extend the credential to every account there. Widening to every `sent_emails`
-  row in the `References` chain is the other tempting relaxation, and it lets a
-  sender who legitimately holds one thread's id add a leaked id from another and
-  inherit that thread's `conversation_token` and `origin_target` — the routing
-  payload being the thing worth stealing, the sender is checked against the row
-  that supplies it. A genuine third party on the thread therefore meets one
-  prompt, and `yes trust` settles it.
+**Mail the user sends themselves gets no room copy** (ISSUE-254, ISSUE-275). Per message, by `email_support.sender_claims_to_be_user` (not `not is_emissary_reply`). Thread routes drop the origin leg in both branches and set `mirror_to_room` off; plus/sender routes skip `routed_notification_room`, leaving `output_target` unset. The task keeps the origin room's context. With no room leg it is not `_confirmable_surface`, so a confirmation-shaped answer is mailed to the user rather than parking nowhere (deferred ops apply on completion). Residual: a spoofed `From:` also buys suppression.
 
-  Side effect worth knowing: `!trust` and `trusted_email_senders` now mean
-  something on this route, where the trust check was previously never consulted.
-  There is no matching distrust — the trust list is allow-only, so `!untrust`
-  removes a grant rather than adding a block, on this route as on the others.
+**`tasks.withheld_from_room`** (ISSUE-255): "there is a room, and this exchange is not part of it". Written by `record_inbound` with the mirror decision, only with a `transcript_token` (an email-only thread's hash names no room; flagging it would erase its only history). `suppress_transcript_mirror` (a hold) does not set it. Read by the history fallback, `get_previous_tasks`, the `channel:<token>` index, the channel sleep cycle, skill stickiness, and `confirmations._room_holds_no_copy_of_this_exchange` (stops the approval restore). Carried by `_create_retry_task` and deferred subtasks.
 
-  Four residuals, each considered and accepted rather than missed:
+**Failures with no channel.** A permanent or SMTP failure on an email-only plan alerts via `purpose="alert"`, carrying the answer (`email_transcript_body`). Gate: `task.withheld_from_room or email_from_the_user` (`scheduler._email_task_from_the_user`), never "plan is email-only", which would fire for external correspondents (`TestAPermanentFailureReachesTheUser`). Accepted: an alert route naming the origin room gets the body as a `role='system'` row.
 
-  - **`to_addr` is the To line only.** No writer records Cc — the skill's
-    `reply-all` sends to a Cc list and stores `orig.sender`, `outbound_drafts`
-    joins `to_addrs` while holding `cc_addrs` beside it — so a party the bot
-    genuinely wrote to on Cc reads as a third party and meets one prompt.
-    Recording the full recipient set is a schema change; the miss costs one
-    confirmation that `yes trust` settles.
-  - **Approving once makes the sender a correspondent.** `deliver_email_result`
-    replies to `processed_emails.sender_email` and `_record_sent_email` writes a
-    row naming it, so a plain `yes` plus a bot reply mints exactly the evidence
-    this predicate reads, and later mail from that address is ungated with no
-    trust row for `!untrust` to remove. Consistent with what the address now is
-    — the bot did write to it — but wider than the prompt's "process this
-    message" wording implies. Pre-existing in shape: the same `yes` had the same
-    effect when the whole route was ungated.
-  - **No age bound.** `sent_emails` still has no retention, so an address the
-    bot wrote to once stays a correspondent indefinitely — a recycled mailbox at
-    a former employer keeps the route. Bounding *who* was the fix; bounding *how
-    long* is the retention policy ISSUE-234 named as its pairing and this change
-    did not take.
-  - **The evidence is still an unauthenticated `From:`.** A spoofer who forges
-    the correspondent's address is past the gate, and the DMARC canary does not
-    watch this route — it is scoped to the self-claim, and `claims_to_be_user`
-    is structurally False here. Widening it would alert on every reply from a
-    domain that publishes no DMARC policy, i.e. on ordinary mail. ISSUE-249's
-    authserv-id scoping made the verdict trustworthy but left it a detector; a
-    gate that reads it is still unbuilt.
+**Who wrote a row.** `messages.author_user_id` or the pre-sanitized `author_label`, one or neither (owner); readers test the label first. Resolved at write time by `transport.ingest.resolve_author`, or `db.author_for_email_task` without a `Config` (pass `email_addresses`; the DB fallback misses TOML-only addresses). Every user-row writer sets it.
 
-  What this route now shares with a gated `sender_match` reply is that the held
-  task sits under a **real room token** (it inherits `sent_emails.
-  conversation_token`, not the synthetic thread hash), so
-  `cancel_pending_confirmations` discards it on the room's next message.
-  **It no longer parks that room's foreground queue**: `_CLAIM_CHANNEL_GATE_SQL`
-  gates only foreground tasks, and inbound mail moved to the background queue
-  under ISSUE-250 (`[scheduler] email_task_queue`). Under
-  `email_task_queue = "foreground"` the park is back, exactly as described here.
-  Losing it cuts both ways and both halves are consequences of that one change:
-  an unanswered gate no longer wedges its thread for the full
-  `confirmation_timeout_minutes`, and an email turn is no longer serialized
-  against a live Talk or web turn in the same room — they are on different
-  queues, so the per-room single-active rule does not see across them. Not introduced here — a gated `sender_match` reply that also
-  matched a thread has always landed there, which is the case `web_app`'s cancel
-  comment describes and the user-scoped notification inbox mitigates —
-  but this route widens who reaches it. Pinned by an assertion on
-  `conversation_token` in `TestThreadMatchConfirmationGate`.
-
-  **The inbound volume budget (ISSUE-250, consequence 1).** The gate answers
-  *who*; this answers *how much*. `bot+{user_id}@domain` is public by
-  construction — it is the `From:` on every mail the bot sends on a user's
-  behalf — so the set of parties holding a working ingest address is everyone
-  the user has ever corresponded with through the bot, plus anyone who saw one
-  of those messages. `thread_match` is ungated by design, so every external
-  contact holds a permanent ungated route. Nothing bounded how many of those
-  became paid model invocations.
-
-  Two counts, both in `poll_emails`, checked **after** owner resolution and the
-  quiet-sender filter and **before** `ingest_message`: `email_rate_limit_
-  messages` per user and the tighter `email_sender_rate_limit_messages` per
-  `(user, sender)` under it, over `email_rate_limit_window_seconds`. The sender
-  count is checked first so the log and the alert name the specific reason.
-  Placement is deliberate on both sides — quiet mail creates no task and must
-  not spend an allowance real mail needs, and an unrouted message has no budget
-  to charge.
-
-  **Over-budget mail is filed, not dropped**: `routing_method="throttled"`, no
-  task, the message left in the folder where `email from-senders` still reaches
-  it. This is the quiet-sender behaviour applied automatically, and it is the
-  same file-don't-drop shape as the `read_error` path. A budget that discarded
-  would recreate the silent mail loss the poll-cursor pass fixed, with a config
-  knob on it. The ISSUE-250 entry named `ingest.py` as where the budget "has to
-  bite" because that is where `create_task` is; that is the one place it cannot
-  go, because the budget is inseparable from what happens to the mail that
-  exceeds it and the shared ingest path has neither a ledger to write nor a
-  mailbox to leave it in.
-
-  **The prompts collapse too.** The gate turned a spam flood into a
-  *notification* flood — one undeduplicated prompt per held message, each
-  answerable alone, plus a `!confirm` backlog to clear by hand or wait out at
-  `confirmation_timeout_minutes`. Past `_MAX_PROMPTS_PER_SENDER_WINDOW` (3) per
-  `(user, sender)` per window the individual prompt is suppressed and the
-  sender's held mail is summarized in the same notice the throttle uses. The
-  **task is untouched**: still held, still withheld from the room, still
-  addressable by `!confirm <id>`. This is deliberately the cheap half — the full
-  version, one prompt resolving onto a *set* of task ids, needs `confirmations`
-  to answer several tasks at once and is its own change.
-
-  Two module dicts carry it, both in-process and unpersisted for the same reason
-  `_dmarc_alerted` is: `_throttle_alerted` (one alert per user per window) and
-  `_prompt_counts`. The DB carries the budget itself, so a restart cannot hand
-  an attacker a fresh allowance. One accepted consequence of sharing a window
-  between the two: a user already alerted about throttling in this window is not
-  alerted again when prompts start collapsing. One alert per window is the
-  contract, and the alternative is the flood.
-
-  **What `confirm_sender_match` actually switches (ISSUE-227).** It turns off the
-  *own-address branch* of the trust check — the branch that reads "the `From:`
-  names one of this user's addresses, therefore it is the user". SMTP `From:` is
-  unauthenticated, so that is a claim the sender makes about itself, and with the
-  flag on it stops counting as evidence. Everything else about the gate is
-  unchanged, which is why one keyword argument carries the whole feature.
-
-  The flag was unreachable before. `sender_match` is *defined* by the own-address
-  match, and the plain trust check returns True on its first branch for exactly
-  that set, so the gate evaluated `not True` on every reachable path and the
-  config surface advertised a control that did nothing. Excluding the branch is
-  what makes the question non-circular.
-
-  It applies to **both** sender-trust routes, not only the one ISSUE-227 names —
-  the issue named `sender_match` because that is where the dead branch was, not
-  because the exposure stops there. Routing resolves by recipient first, and the
-  plus-address is public (it is the `From:` on every mail the bot sends on the
-  user's behalf), so a spoofer who knows the address the gate is about also knows
-  how to route around a `sender_match`-only gate: `From: <user>` + `Cc:
-  bot+<user>@…` resolves as `plus_address`, where the own-address branch would
-  wave through the identical claim. Both reviewers of the fix found that bypass
-  independently; the single expression is the fix. An *external* sender's trust
-  answer is untouched by the flag — only the self-claim changes.
-
-  Default **off**, and the flag is best read as a *declaration about the inbound
-  mail path* rather than a safety switch. `false` asserts that something upstream
-  already authenticated the header — normally DMARC enforcement at the receiving
-  MTA, which rejects a forged `From:` at SMTP time so it never reaches
-  `poll_folder`; `true` says nothing does, so ask. Upstream is strictly the
-  better place: silent, no per-message cost, and not defeatable by a human
-  approving a prompt out of habit. This gate is the fallback for paths that can't,
-  and it is noisy by construction because nothing in a plain SMTP message
-  separates the user from someone claiming to be them. Two supporting reasons for
-  the default: the branch was dead since it shipped, so `false` is the behaviour
-  every deployment already has; and an unanswered confirmation is auto-cancelled
-  at `confirmation_timeout_minutes`, so defaulting it on would have silently
-  dropped inbound mail wherever Talk isn't watched. Ansible knob
-  `istota_email_confirm_sender_match`. What the default *assumes* about the mail
-  path — and the follow-up that detects the assumption breaking (ISSUE-228) — is
-  in `docs/features/email.md`.
-
-  **The prompt is route-aware.** `yes trust` writes the sending address into the
-  runtime trusted list, which on a self-claim would exempt the user's own address
-  — and therefore the spoofer, since the address is all either party presents.
-  Offering it as one of three equal options steers the user into disabling the
-  control on its first message, so a self-claim gets a plain yes/no and an
-  external sender keeps the shortcut. The affordance is hidden, not the verb:
-  `handle_confirmation_reply` still matches `yes trust` on the reply text with no
-  knowledge of which prompt variant was sent, so a user who types it anyway gets
-  it, alongside `!trust` and `trusted_email_senders`. All three stay reachable as
-  deliberate acts; the point is not to nudge.
-
-  **The gate reads the verdict under `verify` (ISSUE-249 Gap 3).** A signal the
-  sender cannot forge is what lets it distinguish the user from a spoofer and
-  stop asking about legitimate mail, and `[email] authserv_id` is what makes the
-  verdict trustworthy enough to act on. `_own_address_claim_counts(config,
-  auth_result)` is the whole policy and feeds `include_own_addresses`: `off`
-  returns True (the header is proof), `gate` returns False (it never is),
-  `verify` returns True only for `_AuthResult.verdict == "pass"`. **Fails
-  closed** — a `None` result, which is what the thread route passes since
-  `claims_to_be_user` is structurally False there, is held. `verify` is refused
-  at config load without `authserv_id`, because an unscoped verdict is read off
-  whichever header arrived on top and gating on a sender-written value reads as
-  protection while being none. `_own_address_claim_counts` re-asserts the
-  authserv-id itself rather than resting on that validator, so the guarantee is
-  local to the decision; `_sender_match_policy` is the reader and normalises case
-  and the legacy booleans for anything that builds an `EmailConfig` directly.
-
-  **Authserv-id discovery, and why it splits in two.** While `authserv_id` is
-  blank the poller helps the operator find it, but the value can only be read off
-  a header — so what it does depends on whether that header is credible.
-  `_note_observed_authserv_id` names the observed id **only on a `pass`**, where
-  the header authenticated the sender's domain and is therefore good evidence of
-  a real MTA, and only in the log, keyed on `user_id` alone. A canary alert
-  instead carries `_AUTHSERV_ID_ADVICE`, which names **no id at all**: a failing
-  verdict means the top header is the one in doubt, and a spoofer can raise that
-  alert on demand, so recommending the authserv-id off their own forged header
-  would let them nominate the id we then trust — silencing the canary and, under
-  `verify`, turning every forged message into a `pass`. Keying the dedup on the
-  observed id would also be an unbounded axis (attacker-chosen in exactly this
-  state, so one log line and one permanent entry per message), which is the flood
-  `_DMARC_RESULTS` buckets unregistered tokens to avoid. Neither half raises a
-  notification of its own, so a healthy path stays as quiet on the alert channel
-  as it was before, and both stop once the id is set.
-
-  **A `verify` hold always says why.** `_check_dmarc_canary`'s WARNING is the
-  usual explanation, but it sits behind `dmarc_canary` and, for an `unevaluated`
-  verdict, `dmarc_canary_warn_on_missing` — both of which the gate is
-  deliberately independent of. In either state every self-addressed message would
-  be held with nothing saying why, and an unanswered hold is cancelled at
-  `confirmation_timeout_minutes`, so the failure mode is mail quietly going
-  missing. `poll_emails` logs the hold separately, per message and undeduped.
-
-  **The canary alert describes the policy, never the message's fate.** What
-  actually happened is not knowable where the alert is composed: the hold is
-  decided much later and also turns on `is_trusted_email_sender`, and the
-  quiet-sender and rate-limit branches can drop the message before a task exists.
-  A draft that inferred the outcome from the policy string was wrong both ways —
-  it told a `gate` deployment nothing was blocked when everything is, and told a
-  `verify` deployment a trusted sender's message was held when it ran.
-
-  **The DMARC canary (ISSUE-228)** is the monitoring for the assumption the
-  `off` default encodes. `_check_dmarc_canary` in
-  `transport/email/inbound.py` warns — and alerts, `purpose="alert"` — when a
-  self-claim arrives without a `dmarc=pass` from the receiving MTA.
-  `_check_dmarc_canary` is still purely a *detector* and never blocks, holds or
-  reroutes, which is why `dmarc_canary` is safe on by default. **The verdict it
-  reports is no longer only a detector**, though: under `confirm_sender_match =
-  "verify"` the same `_AuthResult` decides whether the message runs (ISSUE-249
-  Gap 3). So the verdict is computed by the *caller* (`poll_emails`) and passed
-  in, rather than derived inside the canary behind the `dmarc_canary` switch —
-  the gate needs an answer whether or not the operator wants the warnings, and
-  one shared computation is what stops the two from disagreeing about one
-  message. Anything claiming the canary is "not a gate" should be read as being
-  about `dmarc_canary`, not about the verdict. It does not verify DKIM
-  in-process; if the MTA already rejects, re-implementing the check buys nothing.
-  An attacker who forges a header the check accepts silences it, which is
-  acceptable because the MTA is the boundary — it catches misconfiguration and
-  drift, and should never be described as a control. What `[email] authserv_id`
-  changes is which forgery works: unscoped, any sender-written top header does,
-  including in the drift case the canary is watching for; scoped, the forgery has
-  to name the operator's own MTA.
-
-  Three things about it that are load-bearing and easy to break:
-
-  - **Which headers are read is `[email] authserv_id`'s decision** (ISSUE-249).
-    `Email.authentication_results_all` carries every `Authentication-Results` in
-    wire order (`_header_all`) and `authentication_results_headers` is the
-    accessor; `authentication_results` stays the topmost, and the accessor falls
-    back to it for the several places that build an `Email` by hand. Blank
-    `authserv_id` reads element 0 alone, which is what the check always did:
-    each hop prepends, so while the MTA stamps, element 0 is its stamp. Set,
-    `_our_headers` keeps every header whose `_authserv_id` matches and discards
-    the rest, so a sender can neither quieten the check with an injected
-    `dmarc=pass` nor make it noisy with an injected `dmarc=fail`. Several stamps
-    of ours is legitimate (one header per method), so all matching headers are
-    read and the non-pass-wins rule applies across them as well as within one.
-    A quoted authserv-id reads as empty and matches nothing — the loud
-    direction, per the parser's standing rule.
-  - **"No stamp of ours" is loud on its own** when `authserv_id` is set
-    (`unstamped`), without `dmarc_canary_warn_on_missing`. Configuring the id is
-    the operator's assertion that their MTA stamps, so a message contradicting
-    it is a finding; the flag keeps its narrower meaning, our stamp present with
-    no DMARC verdict in it (`unevaluated`). Unscoped, absence stays
-    `unevaluated` and stays behind the flag, exactly as before. The alert counts
-    the headers it rejected and never quotes them — in that branch every header
-    present is one the sender wrote.
-  - **A pass is checked for alignment, and this rung runs whether or not
-    `authserv_id` is set** — so it is the one part of ISSUE-249 that changes
-    behaviour for a deployment on the default config. `_dmarc_header_from`
-    returns **every** `header.from` attributed to a DMARC methodspec in a header,
-    and the caller warns (`misaligned`) if *any* fails `_domains_align` against
-    `_address_domain(sender)`. Returning the first would put the check back on
-    first-match-wins, which is exactly the rule `_dmarc_result` was fixed to stop
-    using — a sender appending a second `header.from` naming the right domain
-    would mask the wrong one ahead of it.
-  - **Absent and unreadable are different answers, and only absent is quiet.**
-    `_dmarc_header_from` returns a second flag for "the property is there and no
-    domain came out of it" — a quoted value (`_split_methodspecs` blanks quoted
-    strings), a value the next methodspec's `;` truncated away, a bare root dot.
-    Each is an ambiguous read and resolves loudly, matching `_authserv_id`'s rule
-    in the same file; `_HEADER_FROM_PROPERTY` captures with `*` rather than `+`
-    so an empty value reaches that branch instead of looking like absence.
-    Genuine absence stays silent because many MTAs never emit the property.
-    Known limit: a property wholly inside a comment is blanked with nothing left
-    to notice and reads as absent.
-  - **Alignment is relaxed to a label boundary** (`_domains_align`): exact, or a
-    parent/child relationship either way. DMARC's own relaxed mode aligns on the
-    organizational domain and an MTA may record the domain it evaluated, so a
-    strict compare warns on every message from a subdomain sender — the noise
-    `dmarc_canary_warn_on_missing` is off by default to avoid. Deliberately not a
-    public-suffix lookup; both domains come from the same message, so what it
-    admits beyond a true org match is parent/child pairs, not unrelated
-    registrations under a shared suffix.
-  - **`dkim=`/`spf=` are alert detail only** (`_method_result`). They skip the
-    read-completeness cross-check because nothing load-bearing rests on them, and
-    they are truncated at `_ECHOED_VALUE_MAX` like every other header-derived
-    value reaching a log line or an alert — `[a-z]+` bounds the alphabet, not the
-    length, and the WARNING is emitted per message and never deduped.
-  - **Scoped to the self-claim on both routes**, gated on `claims_to_be_user and
-    routing_method in ("plus_address", "sender_match")` — the same set the
-    confirmation gate covers, for the same ISSUE-227 reason. Watching only
-    `sender_match` reopens that bypass: the plus-address is public, so `From:
-    <user>` + `Cc: bot+<user>@…` carries the identical claim on a route a
-    sender-match-only check never sees. `claims_to_be_user` is computed once
-    above both consumers.
-  - **`dmarc=none` is a failure, not an absence.** It means the domain publishes
-    no policy — the "DMARC record was edited away" drift case, which is the whole
-    point. Only a *missing* verdict (no header, or a header reporting other
-    methods) is the silent-by-default `unevaluated` class, behind
-    `dmarc_canary_warn_on_missing`.
-
-  The parser earns its length, and every rule in it closes a way to make the
-  canary go **quiet** — the only failure that matters, since a noisy canary is
-  merely annoying. `_dmarc_result` anchors `dmarc=` to the start of a methodspec
-  (so a `header.dmarc=` property does not match), splits on `;` only at paren
-  depth zero and outside quotes, and drops comment and quoted-string contents —
-  a reporting MTA echoes the envelope sender into the SPF comment and into
-  `smtp.mailfrom=`, so a bare `split(";")` lets the sender promote their own text
-  to the start of a segment. Comment nesting is depth-tracked because RFC 5322
-  comments nest and a `\([^)]*\)` strip stops at the first `)`. Three further
-  rules, each pinned by its own test:
-
-  - **Any non-pass beats a pass**, rather than first-match-wins, so an injected
-    `dmarc=pass` cannot mask the genuine `dmarc=fail` in the same header.
-  - **A read that looks incomplete yields `malformed`**, never `pass` and never
-    `None` — the two quiet answers. Incomplete means either the header ended
-    mid-quote/mid-comment, or `_DMARC_RAW` counts more `dmarc=` tokens in the raw
-    header than the parse attributed to methodspecs. **The count is the
-    load-bearing half**, and the reason dropping quoted and commented text is not
-    sufficient alone: an *unbalanced* delimiter is noticeable, but a sender who
-    plants a **matched pair** straddling the verdict hides it with nothing
-    unbalanced left to see — two stray quotes echoed into `header.d=` and
-    `smtp.mailfrom=` — and the answer would otherwise be `None` (silent by
-    default) or a `pass` appended after. That was a must-fix in the second review
-    round; the first round's unbalanced-only rule missed it.
-  - **An unregistered result token buckets to `other`.** It reaches the dedup
-    key, and where this canary matters most the sender chose it; left open it is
-    an unbounded key axis, i.e. one alert per message.
-
-  Consequence worth knowing before "fixing" it: a header carrying a `dmarc=` in a
-  `reason="…"` or a comment reports `malformed` and warns, even though no
-  legitimate verdict is in doubt. That is the count firing, and it is the
-  intended trade — the parser cannot tell an MTA that quoted the word from a
-  sender who planted it, so it declines to call the header clean.
-
-  Alert dedup is an in-process dict keyed `(user_id, sender.lower(), verdict)`
-  with a 24h window; the WARNING log is never deduped, so the per-message record
-  survives the throttle. Not persisted on purpose — a restart re-alerting is
-  harmless and it needs no schema. The window opens only on a *delivered* alert:
-  `send_notification` reports "no destination configured" by returning False
-  rather than raising, and stamping at decision time let one silent failure
-  swallow the next 24 hours. Delivery itself (`_deliver_dmarc_alerts`) runs
-  **after the whole batch**, outside every per-message transaction — an alert can
-  route to the web surface, which opens a second connection to the same DB and
-  would otherwise block on the poller's own lock until the busy timeout. Ansible knobs `istota_email_dmarc_canary` /
-  `istota_email_dmarc_canary_warn_on_missing`.
-
-  **Three pre-existing interactions the flag made reachable**, noted under
-  ISSUE-227 and swept with ISSUE-241: a gated task parks its room via
-  `_CLAIM_CHANNEL_GATE_SQL` and only the Talk poller called
-  `cancel_pending_confirmations`, so a gated turn in a *web* room froze it until
-  the timeout — `_chat_create_web_task` now cancels the room's own pending
-  confirmations on a new send, exactly as the Talk poller does, room-scoped so
-  an email gate under its synthetic thread token is untouched;
-  `suppress_transcript_mirror` was never undone on approval, so an approved mail
-  left an assistant row with no user row above it (the ISSUE-136 defect,
-  re-reached) — `confirmations.approve` writes the withheld user row when the
-  token is an existing room, existence-only for the same reason
-  `record_inbound`'s `mirror_only` is; and `get_pending_confirmation_for_user`
-  answers only the newest, so a bare "yes" during a burst landed on the wrong
-  email — Path C now fires only when exactly one question is open and otherwise
-  posts an addressable listing.
-
-  **Answering a gate is surface-agnostic (ISSUE-241).** The prompt goes out
-  through `notifications.send_confirmation_prompt`, which resolves the user's
-  `alert` routing purpose rather than hardwiring Talk — so a user who has
-  pointed alerts at web or ntfy is actually asked, while the ladder's Talk
-  fallback keeps an unconfigured deployment behaving as before. It returns
-  `(delivered, talk_message_id)`: the id still feeds `talk_response_id` (Path A
-  matches a *reply* against it) and the flag is what the undeliverable-prompt
-  WARNING keys on. The prompt names its own task id, because that id is the
-  *address* of the question — `!confirm <id>` / `!confirm <id> no` /
-  **The prompt is delivered after the poll transaction closes**
-  (`_deliver_confirmation_prompts`, beside `_deliver_dmarc_alerts` and for the
-  identical reason): routing by purpose means it can land on the *web* surface,
-  whose delivery opens a second connection to this database, and the message's
-  transaction is open from `create_task` onward — inline, the fix for "the web
-  user is never asked" would have become a busy-timeout stall per gated email
-  that still did not ask them. Since ISSUE-250 that transaction covers one
-  message rather than the batch, which shortens the window but does not remove
-  it. `talk_response_id` is written back
-  in its own short transaction afterwards; losing it costs Path A alone.
-  `run_cleanup_checks` buffers its expiry notices for the same reason.
-
-  `!confirm <id> trust` work from any surface with a composer
-  (`commands.cmd_confirm`, aliases `!yes` / `!no`), and the verbs themselves
-  live in `istota.confirmations` so the Talk poller, the command and the web
-  endpoints cannot drift. Web chat additionally gets the
-  notification inbox (`GET /notifications`, the bell in the app nav; formerly
-  `GET /chat/confirmations` and a banner above the transcript) — deliberately
-  not a widening of the room history query, since the aux gap-fill renders
-  `tasks.prompt`, i.e. the untrusted body the gate is holding back —
-  `_AUX_ROOM_SCOPE` reaches an email task only through its mirrored
-  `role='user'` row, and a gated turn has none. The card
-  carries the sender, subject and routing method off `processed_emails`
-  instead.
-
-  **ISSUE-243 moved the last Talk-private pieces in with the verbs**: the word
-  lists (`confirmations.parse_answer`) and the three-path lookup
-  (`confirmations.resolve`), plus the ack text (`apply_answer`,
-  `ambiguity_listing`). `handle_confirmation_reply` keeps only its Talk half —
-  read the reply's parent id, post the ack, record the exchange — and the web
-  POST intercepts a bare answer before `_chat_create_web_task`, which would
-  otherwise cancel the very question the answer approves. The ownership check
-  moved inside `resolve`, where it belonged: Path C already filters by user, so
-  it only ever mattered for A and B. Talk gained a `"Confirmed."` on a plain
-  approve, which it had never posted. Full reference in
-  `.claude/rules/web-chat.md`.
-
-  **The prompt is mirrored into the room's web transcript** (ISSUE-242).
-  `_dispatch`'s `talk` leg used to write nothing to `messages`, so a prompt
-  delivered to `talk:<token>` was invisible in the web view of that same room —
-  and for the confirmation prompt that is silent mail loss. It now writes a
-  `role='system'` row after a successful Talk post, gated on room existence and
-  stamped with the Talk message id (which is what makes the reply walk-back,
-  Path A, work on web). Best-effort: the Talk delivery has already happened.
-
-  **The expiry notice routes by purpose too.** `run_cleanup_checks` used to post
-  to the task's `conversation_token` verbatim, which for an email gate names no
-  room, so the user was never told their mail had been dropped. It now goes
-  through `purpose="alert"` with the token passed only when it really is a Talk
-  channel (`_confirmation_notice_token`), and names the sender and subject
-  (`_expired_confirmation_notice`) so the message can be found again in the
-  mailbox. **A gated email is still marked processed at ingest** — not deferring
-  that is deliberate: `processed_emails` is what stops the next poll from
-  re-ingesting the same message as a fresh task, so withholding the row turns
-  one unanswered question into one new task and one new prompt per poll cycle.
-  (The ledger is keyed `(uidvalidity, email_id)` since ISSUE-250, so the UID is
-  qualified now — but the poll cursor is an optimization, not a second
-  authority, and a reset cursor re-walks straight back into these rows.)
-  Making the expiry loud and specific is the recoverable version of the same
-  concern.
-
-  **`room:<token>` delivered nowhere from a scheduled job, and it was the two
-  source-type mappings above in the one place the confusion had a consequence
-  (ISSUE-511).** `_expand_room_destinations` starts from `_infer_default_plan` —
-  the task's own origin delivery — and then skips every binding that leg is
-  assumed to have covered. For `source_type = "scheduled"` the default plan is
-  empty and both skips fired anyway: the `talk` binding because
-  `registry._surface_for_source_type("scheduled")` answers `"talk"` and it
-  therefore read as the origin surface, the `web` binding because its
-  `room_view` is canonical and an origin leg was assumed to have written the
-  row. Rooms bind only `talk` and `web`, so the plan came out empty; `scheduled`
-  is not in `_INTERACTIVE_SOURCE_TYPES`, so there was no fallback; and nothing
-  reached the transcript either, since `_room_turn_belongs_here` fails both
-  rungs. The only signal was one load-time WARNING from
-  `cron_loader._validate_target`, about a surface it did not recognise rather
-  than about the delivery — a message that reads as a typo for a descriptor that
-  is real everywhere else. The origin *skip* was asking the delivery map while
-  the origin *delivery* it compensates for comes from a map that answers
-  nothing.
-
-  The expansion now asks `surfaces.origin_surface_for_source_type`, which
-  answers `None` for the six source types that name no surface, and reads that
-  as "no origin leg delivered anything": **both** skips are gated on there being
-  an origin surface at all, so every binding is emitted, the canonical one
-  included. Emitting the canonical leg is the half that looks optional and is
-  not — `_room_turn_belongs_here`'s first rung reads
-  `own_room_canonical_dests`, its second rung is the room already holding the
-  question, and a cron task deposits no `role='user'` row, so on a web-only room
-  that leg is the only thing that can produce an assistant turn. It produces a
-  turn rather than a `role='system'` note because the scheduler's own partition
-  recognises a canonical push aimed at the task's own room and writes the row
-  instead of pushing (ISSUE-164); on a Talk-bound room the same partition puts
-  it beside `_talk_lands_here`, so there is still one row and no note. The
-  origin-bearing source types are untouched — `email`, `talk`, `web`, `repl`,
-  `sms` and `whatsapp` answer the same under both maps — and `istota_file` is
-  the one that moves without becoming `None`, gaining the room's Talk mirror it
-  was wrongly skipping as its own origin leg. **The token is resolved through a
-  binding only when there is a surface to scope the lookup by**, because a ref
-  is unique only within its surface and an unscoped match on the delivery path
-  posts into another conversation; nothing is lost, since every shipped producer
-  of a `room:` descriptor emits a canonical token. `room` joined
-  `cron_loader._KNOWN_TARGET_SURFACES` in the same change: it was correctly
-  absent only while the warning was the sole signal the job was broken.
-
-  `routing.room_target_descriptor` stays the recommended spelling and its reason
-  changed with the fix. It is `talk:<token>` for a Talk-origin room,
-  `web:<token>` for a web one, `web:<token>,talk:<ref>` for a promoted one —
-  both legs, because the web leg writes the canonical row and pushes nothing to
-  Talk. `istota-skill rooms list`, the `nextcloud talk create` refusal and the
-  prompt header's `Room:` line all hand back that one string, so no surface
-  teaches the model a spelling another surface refuses. What it buys over
-  `room:<token>` is legibility rather than correctness: it names the surfaces
-  the job was written for, so a room later unbound from one of them shows it,
-  where `room:` narrows in silence. What `room:<token>` buys back is
-  re-expansion by *live* bindings, so a room promoted to Talk after the job was
-  written picks the new leg up unedited — which is the thing the surface-qualified
-  form structurally cannot do.
-  `routing.canonical_room_token` is `_canonical_room_token`'s cross-surface
-  reading made public for those callers: they are *describing* a room rather
-  than choosing a channel, so the ref collision the delivery path refuses costs
-  a wrong label here rather than an answer posted into the wrong conversation.
-
-  **Email-reply origin routing** — all of which is conditioned on the sender not
-  being the routed user themselves; see "The user's own thread reply gets no
-  origin copy" below. A thread-matched reply (recipient replies to a
-  mail we sent) routes back to the *conversation the original send came from*,
-  not unconditionally to Talk. At send time `routing.origin_descriptor(task,
-  conn)` stamps `sent_emails.origin_target`. **When the origin is a registered
-  live room the descriptor names the room** — `room:<canonical_token>` — rather
-  than one of its views: a room is one conversation bound to several surfaces,
-  and recording the leg the send happened to leave by throws away the fact that
-  it was a room, so the reply reaches that leg alone and the other view stays
-  blank. The room form re-expands by *live* bindings at delivery, so it also
-  picks up a binding added after the send (an "Also open in Talk" promote is
-  exactly that). The candidate token is `conversation_token`, else
-  `talk_delivery_token`, each resolved to canonical through
-  `routing._canonical_room_token` — which tries the token as canonical, then as
-  this surface's ref, then as *any* surface's ref, the last being the promoted-room
-  email continuation whose token belongs to Talk while its own surface owns no
-  bindings. Without a `conn`, or for a destination that is not a live room (a
-  Talk DM, a genuine email-only thread, an archived room), it falls back to the
-  surface-qualified `web:<token>` / `talk:<token>` form as before. Rows stamped
-  before the room form existed are upgraded at read time by
-  `routing.upgrade_legacy_origin` — **which is not merely transitional**: any
-  writer whose room is reachable from neither candidate token still stamps the
-  surface form, so check `_room_descriptor`'s coverage before assuming it has
-  become dead code. It replaced `room_fanout_descriptor`, which widened a
-  descriptor to the bare `room` and so could only ever name the room the task was
-  already sitting in. On the inbound
-  reply, `poll_emails` reads that descriptor and applies the per-user
-  `Config.email_reply_routing_for(user_id)` policy (`origin+thread` default |
-  `origin` | `thread`) to build `output_target` (e.g. `room:<token>,email`), with
-  `conversation_token` set to the origin room so the reply continues that
-  conversation. A NULL `origin_target` (pre-migration row, or a non-deliverable
-  origin) falls back to the exact legacy `talk,email` behavior + the
-  `talk_delivery_token` ladder — which now refuses `web-`/`repl-`-prefixed tokens
-  as Talk channels. A *foreign* reply routed into a web room is delivered via
-  `WebTransport.deliver` (`process_one_task`'s web-push branch); it does not gate
-  confirmations (only own-origin `source_type="web"` tasks do). Policy column lives
-  in `user_profiles.email_reply_routing`; set via `istota user ensure
-  --email-reply-routing`.
-
-  **Mail the user sends themselves gets no room copy (ISSUE-254, widened by
-  ISSUE-275).** The mirror above exists for mail the user did not write — an
-  external contact replying to mail we sent on their behalf, or a stranger's
-  first contact at `bot+<user>@` — where the room copy is the only way they learn
-  it arrived. Mail from their own address is not that: the answer goes back the
-  way the question came, so the room copy renders a conversation they are already
-  having a second time, and then charges it to that room's LLM context. On a
-  thread it is worse than redundant — each reply quotes the whole prior chain, so
-  the N-th message wrote roughly N copies of the conversation into the
-  transcript. The discriminator is **per-message, not per-user** — `email_reply_
-  routing = "thread"` would suppress the emissary case too — and it is
-  `email_support.sender_claims_to_be_user`, i.e. the envelope sender is one of the
-  routed user's own addresses. **Not** `not is_emissary_reply`, which is false for
-  a plus-address route as well: that is a third party writing to `bot+<user>@`,
-  and it keeps its mirror. ISSUE-254 additionally required a matched thread
-  (`sent_email_match`), and **ISSUE-275 dropped that conjunct**: it left the
-  ordinary case untouched — the user mailing their own bot, which is first
-  contact every time, and which therefore got the `room:<tok>,email` plan
-  ISSUE-247 built for strangers. Three legs now key on the answer. On the thread
-  routes, two — `output_target` drops the origin leg (in *both*
-  branches — the legacy NULL-`origin_target` one hardcodes `talk,email` and is
-  live for any send with no deliverable origin, not merely pre-migration rows),
-  and `IncomingMessage.mirror_to_room` turns off `record_inbound`'s mirror, which
-  would otherwise fire on rung 1 because the task inherits the origin room as its
-  `conversation_token`. On the `plus_address` / `sender_match` routes, the third:
-  the poller does not call `routed_notification_room` at all, leaving
-  `output_target` unset — the pre-ISSUE-247 shape, delivered by mail alone. There
-  the token is a thread hash rather than a room, so rung 1 misses and that leg is
-  the only thing that could have named one; `mirror_to_room` is set from the same
-  answer regardless, so the decision is stated rather than left resting on that
-  coincidence. That inheritance stays — the reply still continues that
-  conversation's *context*, it just does not write itself back into it. The answer
-  side needs no third change: `_room_turn_belongs_here` wants either a delivery
-  into the room or a question already in it, and neither holds. **It does change
-  one thing beyond the transcript**: with no room leg the task is no longer a
-  `_confirmable_surface`, so an answer matching `CONFIRMATION_PATTERN` completes
-  and is mailed rather than parking. Kept deliberately, and only defensible here
-  — the rule that an email task parks and asks in the room exists because the
-  room leg is the only surface that can carry the question (the email leg would
-  mail the principal's decision to an external correspondent), and parking with
-  no such leg delivers the question nowhere and dies at
-  `expire_stale_confirmations`, the failure `process_one_task`'s
-  `is_confirmation_request` comment records fixing. On a self-reply the email leg
-  goes to the *user*, so the question reaches the only person who can answer it,
-  on the surface they are reading. The cost, stated: deferred ops a park would
-  have held until the answer now apply on completion. The outbound email approval
-  gate is unaffected — it runs on the delivery leg, not on this park. On a
-  first-contact self-addressed mail the same follows: the email leg is the user's
-  own address, so the question reaches them there.
-
-  `tasks.withheld_from_room` stays **False** on the first-contact routes, and by
-  the column's own rule rather than an exemption — it means "there is a room, and
-  this exchange is deliberately not part of it", and with a thread hash for a
-  token and no room in the plan, nothing was resolved to be absent from. The same
-  rule already covered a genuine email-only thread. The approval path follows
-  from that without a special case: `_room_holds_no_copy_of_this_exchange` reads
-  False, `_restore_transcript_mirror` runs, and `transcript_room_for_task`
-  resolves no room, so it publishes nothing.
-
-  Residual: this rests on an unauthenticated `From:`, so a spoof also buys
-  *suppression*, and ISSUE-275 widens that reach from a thread reply to any
-  inbound mail. What it does not widen is who can use it quietly — a self-claim
-  on either gated route still meets the confirmation gate under
-  `confirm_sender_match`, and the canary still warns on a failing verdict. Same
-  forgery the confirmation gate already faces, which is what the ISSUE-228 canary
-  watches for and what ISSUE-249's authserv-id scoping made harder to hide; a new
-  consequence of it, not a new class.
-
-  **The decision is recorded on the task (ISSUE-255).** The task still carries
-  the origin room as its `conversation_token` — kept deliberately, so the reply
-  continues that conversation's context — so everything keyed on that *column*
-  rather than on the transcript once saw the exchange anyway, and the suppression
-  existed only for the length of one function call. `record_inbound` now writes
-  `tasks.withheld_from_room` from the same answer that turns off the mirror, and
-  six readers consult it. **`suppress_transcript_mirror` deliberately does not
-  set it** — that one is a hold on a turn that *does* belong in the room.
-
-  - `_conversation_history_from_tasks`, the fallback `get_conversation_history`
-    serves whenever `_messages_caught_up` is False (any room with no completed
-    talk/web task left in `tasks` — a mail-only room, or one whose last chat turn
-    aged past `task_retention_days`). The `messages` path needs no equivalent: a
-    withheld turn was never written there.
-  - `get_previous_tasks`, the re-surfacing path `executor._build_db_context` runs
-    on **every** task in the room with no caught-up gate above it — so this one
-    reached LLM context even for a room reading cleanly from `messages`, which
-    makes it the wider of the two history leaks rather than the narrower.
-  - `index_conversation`'s `channel:<token>` namespace, which `_recall_memories`
-    serves back to later tasks there. The per-user index is untouched: the
-    exchange is the user's own and belongs in their own recall.
-  - `get_completed_channel_tasks_since` and `get_active_channel_tokens`, the
-    channel sleep cycle's collector and its discovery query. `CHANNEL.md` is
-    durable and reaches every later prompt, and a room whose only recent traffic
-    was withheld is not an active channel.
-  - `confirmations._room_holds_no_copy_of_this_exchange`, now a column read
-    (below).
-  - `get_recent_conversation_skills`, the 30-minute skill-stickiness window. The
-    weakest reader — skill names, not content — swept for consistency rather than
-    for cost.
-
-  Two copy paths carry the column forward, and both are load-bearing rather than
-  tidy, because each inherits `conversation_token` from the task it copies:
-  `commands._create_retry_task` (a bare `!retry` in the origin room can land on a
-  withheld task, and this issue *raises* how often that happens, since the new
-  failure alert is what tells the user to retry) and the deferred-subtask handler
-  (pinned alongside the token it already pins, and not the JSON's to choose).
-
-  **`transcript_token` is required, and is the whole difference between the
-  column and `not mirror_to_room`.** The column says "there is a room, and this
-  exchange is deliberately not part of it". The poller sets
-  `mirror_to_room=False` for *every* self-addressed thread reply, including a
-  genuine email-only thread whose `conversation_token` is a synthetic hash naming
-  no room — flagging that one makes the readers above drop the thread's own prior
-  turns from its own history, which is the only history such a thread has, since
-  there is no `messages` store to fall back to. The consequence, stated: a
-  room-less self-reply thread keeps its pre-existing silence on both failure
-  paths. That is unchanged behaviour rather than a new gap — the issue's scope
-  was the exposure ISSUE-254 *widened*, i.e. a plan that became email-only by
-  default rather than by configuration.
-
-  **The two failure paths an email-only plan has no channel for.** Dropping the
-  origin leg leaves no Talk leg either, so `process_one_task`'s `plan_talk and
-  talk_token` branch — beside the standing rule never to email errors — told the
-  user nothing when their mailed request failed permanently, and an SMTP failure
-  left the composed answer only in `tasks.result`. Both predate ISSUE-254 (any
-  `email_reply_routing = "thread"` user had them); what changed is that an
-  email-only plan became the *default* outcome for a self-reply. Both now raise
-  through `purpose="alert"`, and the delivery-failure notice carries the answer
-  body itself, since the point is that the answer survives.
-
-  **The gate is "was the user themselves waiting for this answer", in two
-  spellings** — `task.withheld_from_room or email_from_the_user`. Deliberately
-  not "the plan is email-only", which is the tidier-looking gate that must not be
-  taken: an external correspondent's reply under `email_reply_routing = "thread"`
-  has the identical plan and the identical absent channel, and a stranger is
-  waiting for that answer, not the user. (A cron mailing a report is excluded
-  earlier still, by the `source_type in ("briefing", "scheduled")` arm above
-  both.) Two spellings because the poller can record the answer on the task in
-  only one of the two cases: `withheld_from_room` covers a self-addressed
-  *thread* reply, and reads False for self-addressed *first contact* — correctly,
-  by the column's own rule, since no room is resolved there. ISSUE-275 made first
-  contact the common case, which put the user mailing their own bot straight back
-  into the silence this branch exists to end, so `scheduler._email_task_from_the_
-  user` recovers the fact from the `processed_emails` row the poller already
-  writes, judged by the same `sender_claims_to_be_user` the ingest decision uses.
-  A reconstruction rather than a second column, and the same one
-  `confirmations._restore_transcript_mirror` makes; it never raises and answers
-  False when the ledger row has been pruned, so a lost lookup costs a notice
-  rather than a delivery. Both directions are pinned by
-  `tests/test_email_self_reply_residue.py::TestAPermanentFailureReachesTheUser`.
-  Both are buffered and sent after every DB transaction closes, for the reason
-  every other notification on this path is: routed by purpose, an alert can land
-  on `web`, whose delivery opens a second connection to the same database. The
-  delivery-failure body goes through `email_transcript_body` first: an email
-  task's `result` may *be* the `{"subject","body","format"}` envelope the send
-  path parses, and a notice promising the answer must not hand over a JSON blob
-  (the same unwrap the room transcript does, ISSUE-247).
-
-  **One accepted trade in the failure alerts.** `purpose="alert"` resolves
-  through the user's routing table, so if their `alert` route or legacy
-  `alerts_channel` names the origin room, the delivery-failure notice puts the
-  answer body into the room ISSUE-254 removed the exchange from. Accepted rather
-  than gated: it lands as a `role='system'` row, which
-  `_conversation_history_from_messages` excludes (it inner-joins user+assistant
-  pairs), so the quadratic context bill ISSUE-254 was actually about is not
-  reintroduced — only transcript visibility, on a failure, where the alternative
-  is the answer existing nowhere the user can reach. Suppressing the body when
-  the route happens to be that room would lose the answer in precisely the
-  configuration where it is most likely to be lost.
-
-  **`mirror_to_room` and `suppress_transcript_mirror` are not the same flag.**
-  The second is a *hold* — the turn belongs in the room and
-  `confirmations.approve` publishes it once answered. The first is permanent, with
-  no restore path. They co-occur only under `confirm_sender_match` (which stops
-  the own-address claim from counting as trust, so a self-addressed reply can
-  reach the gate at all), and there the restore must not hand back the copy the
-  suppression removed. `confirmations._room_holds_no_copy_of_this_exchange` is
-  what stops it, and since ISSUE-255 it is a plain read of
-  `withheld_from_room` — it used to reconstruct the answer from two observable
-  halves (the plan naming no room, *and* the sender being the user), which needed
-  a `Config` in scope and could only ever infer what the poller had already
-  concluded. Both halves were load-bearing in that form, because a self-addressed
-  *first contact* keeps its `room:<tok>,email` plan and its mirror; the column
-  says so directly instead.
-
-**Who wrote a row.** `messages` records the author on two nullable columns —
-`author_user_id` (an istota user) and `author_label` (an external sender,
-**pre-sanitized** through `db.external_email_sender`, so an addr-spec or the
-fixed `UNATTRIBUTED_SENDER` and never a raw header). Exactly one is set, or
-neither; readers test the label first, so a writer that wrongly set both breaks
-toward naming the stranger rather than toward crediting the account the mail was
-routed to. Both NULL means the room owner, which is what every pre-migration row
-falls back to. Resolved once at write time — `transport.ingest.resolve_author`
-where a `Config` is in scope, `db.author_for_email_task` for the two callers
-without one (the confirmation-approval mirror and the `messages_author_v1`
-backfill), and those callers should pass `Config.users[uid].email_addresses`
-when they can, because the DB-only fallback
-(`db.own_addresses_without_config`) cannot see addresses configured in TOML
-alone. Every `role='user'` writer sets it: `record_inbound`, `!steer`, `!retry`,
-and the confirmation exchange. This replaced a per-read recovery from
-`processed_emails` (ISSUE-226) that answered only for email; the columns also
-cover a co-member's ordinary turn in a shared room, which had no sender to
-recover and rendered as the reader's own words.
-
-`ingest_message` is the only shared inbound code; it maps an `IncomingMessage`
-straight onto `db.create_task` (the duplicate-Talk-message guard returns the
-existing id rather than inserting twice). **Both** surfaces route their creates
-through it — Talk inside its poll transaction, email inside its poll transaction
-— and it is the entry point a future driver-ingested surface (web chat) would
-use across its own boundary. `record_inbound` stamps the surface-native message
-id into the canonical user row's `external_ids` (Talk ids at ingest) — feeding
-both the echo ledger and the Talk→web read-sync cursor cap.
-
-**Per-room model/effort default.** Because `record_inbound` is the single
-inbound choke point, it is also where a room's standing model default is
-applied — uniformly across every surface. The default lives on the shared
-`rooms` registry (`rooms.model` / `rooms.effort`, canonical values), so a Talk
-message and a web message in the same room resolve the same default. After
-resolving the canonical room token, when the incoming `model` is None (no inline
-`!model` override — those are parsed upstream in the Talk poller / web POST),
-`record_inbound` fills `model`/`effort` from the registry room; the inline
-override wins as a unit (effort follows model). Set via the `!room` command
-(surface-agnostic, through `commands.dispatch`) or the web room-settings PATCH
-(`db.set_room_model_effort` / `db.set_room_effort`).
+**Per-room defaults.** `record_inbound` fills `model`/`effort` (inline `!model` wins as a unit) and `brain` from the room inside the `room_surface` guard, so email continuations, cron, heartbeat, briefing and skill tasks do not take them. New per-room defaults go in that block; hoisting `existing` out of the guard reverses ISSUE-136. Set via `!room` or the room-settings PATCH.
 
 ## Talk inbound over the signaling event stream (`[talk.signaling]`)
 
-Off by default. With `enabled = true` the daemon stops running `_talk_poll_loop` at all — one driver, never two — and Talk messages arrive over a WebSocket to Nextcloud's standalone signaling server (the HPB) instead of over a ten-second poll of every room. `signaling.py` is the wire protocol as a leaf module (it imports nothing from `istota`), `supervisor.py` owns everything the protocol deliberately does not: which rooms are watched, what a decoded event causes, and when either is re-decided.
+Off by default. Enabled, `_talk_poll_loop` does not run (one driver); messages arrive over the HPB WebSocket. `signaling.py` is the protocol leaf; `supervisor.py` decides rooms, effects and timing. No credential by design (the internal-client secret could join any room). Talk `internal` mode or no `websockets` refuses boot.
 
-**No credential, and that absence is the design.** istota authenticates as its own Nextcloud user, so the server URL, the hello token and the per-room Talk session id are all minted on demand by Talk from calls the bot account can already make. The protocol's other option is an *internal client* holding the signaling server's shared secret, which can join any room on the instance; that is why it is not used, and it is why there is no field here for an operator to fill in, no `_env_secret_overrides` entry and nothing for `admin_config_view` to redact.
-
-**`enabled = true` on a deployment that cannot do it refuses to boot.** Talk in `internal` signaling mode and the `websockets` library absent are both refusals, rather than a fallback to the poller: a daemon quietly polling while an operator believes push is live is worse than one that did not start.
-
-### The rules that make it safe
-
-**A watcher may only join a token the current reconciliation's `list_conversations` returned.** Never one from an event payload, never one from a database row. This is a rule rather than a consequence: `ParticipantService::joinRoom` self-enrols the caller in a group room that is listable to them, and in any public room, so `participants/active` on an arbitrary token is not guaranteed to fail — it can quietly make istota a participant. "istota never joins a room it was not already in" is a property this module maintains, and the way it maintains it is that the only source of tokens is the bot's own listing. `_may_watch` is checked twice, at the point a watcher starts and again at the point the POST is made, because those are different moments.
-
-**Room context is a required argument with no default anywhere on the path.** The results block reads `conv_types.get(token, 1)`, and 1 is a DM — which skips the @mention gate for the whole room. A `poll_one_conversation(config, token)` with no listing would ingest every message in every group room the bot sits in, from any configured user. So the supervisor holds a token to context map built from the same listing it builds the watcher set from, and a drain that cannot find context counts and returns rather than guessing. `tests/test_talk_trigger_path.py` exists because the poll-path version of that test passes whether or not the bug is present.
-
-**Cursor initialisation comes before a watcher, not after.** Catch-up reads forward from the room's cursor, so a NULL one means reading from zero, which ingests a room's history as new tasks. A room whose initialisation failed gets no watcher and is retried next pass.
-
-**The safety net is a comparison, not a sweep.** Each reconciliation compares every room's `lastMessage.id` against its stored cursor and fetches only the rooms behind. It is free, because the listing is fetched for the watcher set anyway, and on a working deployment it issues no fetches at all. A non-zero count is the one number that says the stream has silently stopped delivering while every socket still looks fine; `doctor` reads it as `rooms_behind`.
-
-### Trigger mode and payload-direct
-
-Default is **trigger mode**: an event means "fetch this room", and the payload is not read. A relayed message and a bare refresh are the same instruction, which is what makes this path unable to be wrong about message content. It reuses `_process_poll_results` byte for byte, so the filter chain, the confirmation handling, the cursor advance and the atomicity guarantee are the poller's own.
-
-`payload_direct = true` ingests the relayed message instead of refetching, removing the last request. It is separable because it is the only part that can be wrong about message *content* rather than about *timing*. Measured field-for-field identical to the fetched message on Nextcloud 34 / Talk 24.0.4, across four shapes (plain, an @mention carrying `messageParameters`, a reply carrying a `parent`, and one the bot posted), each compared against the OCS message read both as the bot and as the human. The relay carries one key OCS does not put in the body, `lastCommonRead`, which the chat endpoint returns as a response header; nothing reads it.
-
-Three things about that path are decisions rather than plumbing:
-
-- **A payload-less event in a burst forces the whole room's next drain to fetch.** Talk sends a bare refresh for a message with no visible rendering and for a system message outside the relay set, so such an event means there is a message only a fetch can see. Ingesting the burst from payloads alone would carry the cursor past it and nothing would ever read it — the `rooms_behind` net is measured in minutes, not a substitute.
-- **`id > cursor` is applied on the direct path and nowhere else.** A fetch passes the cursor to the *server*, so a message already processed never comes back. A payload arrived unasked, and one queued moments before a reconnect has already been ingested by the catch-up reading forward from the same cursor. `ingest_message` dedups on the Talk id, but `dispatch_command`, `handle_confirmation_reply` with its ack post and `confirmations.cancel_for_conversation` do not.
-- **Payloads are queued for the drain, never ingested from the watcher.** The drain's in-flight flag is the one serializer, and it is what `catch_up` defers to. Going straight to ingestion from a watcher would run the non-idempotent half of the results block concurrently with a reconnect's catch-up over the same messages.
-
-A failed drain preserves the room's dirty bit and drops the queued payload, forcing a fetch on the retry: the results block is one transaction, so a raise rolled the cursor back with it, and a fetch from that cursor reads everything the batch held plus anything the relay did not carry.
-
-### Coalescing, and the error contract that is part of it
-
-At most one fetch in flight per room; an event arriving during one sets a dirty bit and re-runs once on completion. Ten messages in a burst cost one or two fetches, not ten. The in-flight flag is cleared in a `finally` and the dirty bit is *preserved* on failure, so the next event re-runs rather than coalescing into a fetch that already died. Clearing in-flight only on success strands that room for the life of the process and nothing notices, because the socket is fine — so `stats()` carries how many rooms have been dirty longer than one `room_sync_interval` and `doctor` reads it as `stale_dirty`. A restored dirty bit deliberately does **not** re-wake the drain: an immediate retry of a transaction that just raised is a hot loop against Nextcloud.
-
-### Two failure modes worth knowing before touching this
-
-**A 404 from `participants/active` is fatal to its watcher, and that is a throttler decision** (ISSUE-414). Nextcloud answers 404 for a room deleted between reconciliation passes. Retrying it is not merely wasteful: `RoomController::joinRoom` carries `#[BruteForceProtection(action: 'talkRoomToken')]` and `SignalingController::getSettings` declares **the same action**, and the throttler keys on (IP, action) — so 404s on one dead room impose a pre-controller sleep on the settings fetch for *every* room, climbing to a 25-second cap and never coming back down, because `joinRoom` clears the delay only on a successful join. Measured on a live stack: the unannotated `/room` listing answered in 0.31s while the annotated settings call took 25.31s and the 404 took 50.32s. It stayed invisible through three investigations because `TalkClient.DEFAULT_TIMEOUT` is 15s, below the server's worst-case sleep, so the daemon could only ever render a bare `ReadTimeout:` with an empty message — and because Nextcloud 29+ keeps bruteforce attempts in the distributed cache rather than the database, so `occ security:bruteforce:attempts` reads zero by design. Only 404 is fatal; a 502 or a restart is the transient case the backoff exists for.
-
-**A watcher that has never connected is a different state from one that is reconnecting**, and before ISSUE-416 nothing could tell them apart. `RoomWatcher.ever_connected` is that fact; a watcher alive past `_NEVER_CONNECTED_SECONDS` without it is cancelled and replaced on the reconciliation cadence, and `doctor` reports those rooms separately from the merely disconnected. The same issue fixed `settings()` sharing a *failure* the way it already shared a success: it held the lock across the fetch but stamped the cache only on success, so N watchers each paid their own serial 15-second timeout on the path where sharing matters most.
-
-### What an always-present bot session changes
-
-istota holds an active Talk session in every watched room around the clock, which it never did before. It is present to the other participants and it never joins a call. Nothing in the ingest path reads Talk notifications, so the expected answer to "does this change what Nextcloud tells istota" is "nothing" — written down because it is a behaviour change to a surface this design otherwise does not touch. A second daemon pointed at the same Nextcloud opens its own sessions and receives every event; Talk allows several sessions per attendee, and duplicate ingestion is prevented by the cursor and the echo filter rather than by the transport.
-
-### Where the tests are
-
-`tests/test_talk_signaling.py` (the frames), `tests/test_talk_signaling_supervisor.py` (the watcher set, the queue, the payload rules, the shape `doctor` reads), `tests/test_talk_trigger_path.py` (the @mention gate on the trigger and direct paths, and the identical-row comparison), `tests/test_talk_signaling_runtime.py` (spawn and shutdown), and `tests/full/test_signaling_e2e.py` (the deployed chain against a real HPB and a real Nextcloud, on the `full` profile). The lean `signaling` profile carries the protocol edge cases.
-
-The end-to-end payload-direct assertion is **not** available on the shipped stack: `docker/docker-compose.yml` pins `nextcloud:30-apache`, whose Talk is 20.1.11, and that version's `notifyMessageSent` sends `{'refresh': true}` and nothing else. The comment relay is a Talk-side feature that arrived later, and it is independent of the signaling server advertising `chat-relay` — that advertisement says the server will forward a message if Talk sends one, not that Talk sends one. So on the tier every event is a bare refresh, trigger mode carries all of it, and the payload scenarios skip rather than assert. Bumping that image is a separate product decision with its own blast radius, which is why it has not been made here.
+- **A watcher joins only tokens the current `list_conversations` returned**, since `ParticipantService::joinRoom` self-enrols in listable rooms; `_may_watch` is checked at start and at the POST.
+- **Room context is required, no default**: `conv_types.get(token, 1)` means DM and skips the @mention gate (`tests/test_talk_trigger_path.py`). Cursor init comes before a watcher, or history is ingested.
+- **Safety net**: each reconciliation compares `lastMessage.id` with the cursor; `doctor` reads `rooms_behind`.
+- **Trigger mode** (default) fetches via `_process_poll_results`. `payload_direct = true` ingests the relayed message; a payload-less event forces a fetch, `id > cursor` applies on that path only, payloads queue for the drain (its in-flight flag is the one serializer, which `catch_up` defers to), and a failed drain forces a fetch.
+- **Coalescing**: one fetch in flight per room, a dirty bit re-runs once; in-flight clears in `finally`, the dirty bit survives failure without re-waking the drain. `doctor`: `stale_dirty`.
+- **404 from `participants/active` is fatal to its watcher** (ISSUE-414): `joinRoom` and `getSettings` share brute-force action `talkRoomToken` per IP, so retries throttle every room up to 25s, past `TalkClient.DEFAULT_TIMEOUT`.
+- **Never-connected is not reconnecting** (ISSUE-416): `RoomWatcher.ever_connected`, replaced after `_NEVER_CONNECTED_SECONDS`; `settings()` shares failures too.
+- Tests: `tests/test_talk_signaling*.py`, `tests/test_talk_trigger_path.py`, `tests/full/test_signaling_e2e.py`. Payload-direct skips end to end, since `nextcloud:30-apache` (Talk 20.1.11) sends only `{'refresh': true}`.
 
 ## Post-as-user mirroring + echo prevention (user-scoped OAuth)
 
-When `[web] token_storage = "encrypted"` and `ISTOTA_WEB_TOKEN_KEY` are set
-(web unit only — see `istota.web_tokens`), a web send into a Talk-bound room is
-posted to Talk *as the user* at ingest time by the web process
-(`web_app._mirror_web_turn_as_user`): a short-lived
-`TalkClient(config, bearer_token=…, timeout=5)` sends the prompt with
-`referenceId = WEBMIRROR_REF_PREFIX + <canonical message id>`
-(`transport.WEBMIRROR_REF_PREFIX = "istota:webmirror:"`, defined in
-`_types.py`), then stamps the returned Talk id onto the canonical user row.
-That stamp doubles as the scheduler's repost-suppression signal
-(`db.user_turn_has_external_id(task_id, "talk")` — the mirror branch skips
-`_format_mirror_user_repost` when present) and as the echo ledger entry.
-
-Echo prevention is two independent guards:
-1. **referenceId fast-path** (`transport/talk/inbound.py`): any polled message
-   whose `referenceId` starts with `WEBMIRROR_REF_PREFIX` is skipped before
-   dispatch — race-free even when the long-poll beats the stamp write, because
-   the marker travels inside the Talk message. The poll cursor still advances
-   and the `talk_messages` context cache still keeps the turn.
-2. **external-ids ledger** (`record_inbound`): `db.message_has_external_id`
-   with `exclude_origin=surface` — catches a referenceId-stripped echo, while a
-   row that *originated* on the inbound surface (a re-polled duplicate) is
-   excluded so it still reaches `create_task`'s duplicate dedup.
-
-Read-state sync rides the same token: web→Talk is an event-driven
-`mark_conversation_read` push (fire-and-forget, only on actual cursor advance,
-with one forced-refresh retry on 401 since ISSUE-333);
-Talk→web is a throttled per-user pull on the web rooms poll
-(`[web.chat] talk_read_sync_interval`, default 60s) that advances the web
-cursor of fully-read (`unreadMessages == 0`) Talk-bound rooms up to
-`db.room_max_talk_synced_message_id` — never past web-only system messages.
-Everything is web-process-only, feature-gated, and degrades to the legacy
-behaviour (attributed repost, web-only read state) on any failure.
+With `[web] token_storage = "encrypted"` and `ISTOTA_WEB_TOKEN_KEY`, `web_app._mirror_web_turn_as_user` posts a web send into a Talk-bound room as the user (`referenceId = WEBMIRROR_REF_PREFIX + <message id>`) and stamps the Talk id on the user row, suppressing the scheduler's repost (`db.user_turn_has_external_id`). Echo guards: the referenceId fast-path in the poller (race-free) and `db.message_has_external_id(..., exclude_origin=surface)` in `record_inbound` (same-origin re-polls still reach dedup). Talk→web read pull per `[web.chat] talk_read_sync_interval`, capped at `db.room_max_talk_synced_message_id`. All of it degrades to the attributed repost.
 
 ## Outbound
 
-- **`TalkTransport.deliver` / `.edit`** own Talk message construction. They no
-  longer build a `TalkClient` per call — they pull the process-global persistent
-  client via `async_runtime.get_talk_client(config)` (one pooled `httpx.AsyncClient`
-  reused across the daemon's lifetime; see `.claude/rules/scheduler.md`
-  "Persistent asyncio runtime"). `deliver` splits at `max_message_length`, posts
-  parts sequentially, and threads + @mentions the first part in group chats when
-  `threaded=True`. `scheduler.post_result_to_talk` and `edit_talk_message` are
-  thin shims over these (kept so the event consumers and `process_one_task` keep
-  their signatures); their sync call sites invoke them via `run_coro` so the
-  awaited methods run on the persistent loop. `notifications._send_talk` also
-  delegates to `TalkTransport.deliver`.
-- **A failed Talk post is retried, and only ever behind an idempotency
-  readback** (ISSUE-405). `deliver` posts each part up to `_POST_ATTEMPTS`
-  times with a short backoff and a wall-clock `_POST_DEADLINE_SECONDS`, and a
-  `None` return therefore means the attempts were spent and nothing was posted
-  — the value ISSUE-404's undelivered-result branch keys on, so a message the
-  readback finds already in the room comes back as its id rather than as
-  `None`. What made a retry unwritable before is that a `ReadTimeout` on a POST
-  is not evidence the message was *not* stored: Nextcloud may have accepted and
-  written it and merely been slow to answer, and a blind re-post then leaves a
-  duplicate in the user's room, which is worse than the silence it replaces. So
-  a re-post needs one of two permissions. Either the failure proves the request
-  never went out — `ConnectError` / `ConnectTimeout` / `PoolTimeout` and nothing
-  else, since a `ReadTimeout` and even a `WriteTimeout` had bytes on the wire —
-  or `_posted_message_id` fails to find the post in the room's recent history.
-  **The readback can only ever answer for a message that is one post.** A
-  `referenceId` names the whole answer rather than one part: `deliver` splits at
-  `max_message_length` and stamps every part with the same one, so a match
-  proves *some* part is in the room and never that all of them are. Reporting
-  success on that would turn a loud, recoverable failure into a silently
-  truncated answer — the user gets the first fraction of their reply and the
-  scheduler is told it was delivered — so a split send is refused a readback
-  outright and keeps the honest `None`. Requiring all N parts instead is not
-  available: with one key across N parts, "part three never landed" and "the
-  window returned three of five" are the same evidence.
-  **The readback matches on the actor as well as the `referenceId`**, and that
-  is the security half rather than belt and braces: `referenceId` is free text
-  on Talk's chat API and any participant can set it (the same property
-  `inbound._reconcile_webmirror_echo` guards against), so matching the
-  reference alone would let a room member suppress the bot's own answer by
-  claiming its key. For the same reason an actor *mismatch* is a decided answer
-  and never renders the question unanswerable — a member who could do that could
-  block delivery outright. The actor is compared against **both**
-  `talk.bot_username` and `nextcloud.username`, which are the same string on
-  every shipped deployment and are configured separately; matching one alone
-  would make the readback miss our own post where they differ and re-post it.
-  **An unanswerable question holds the message back** — a split send, no
-  reference id, no bot account name, a readback that itself failed, or a
-  history entry that is ours by reference and actor and whose id is not a
-  number — because giving up costs exactly the pre-fix behaviour while guessing
-  costs a duplicate. Retryable is the transport-level failures plus 5xx; a 404
-  or a 403 is an answer rather than a blip, and 429 is deliberately excluded
-  because retrying it correctly means honouring `Retry-After`. **`_is_transient`
-  and `_may_have_been_stored` are different questions and the second is what
-  gates the readback**: two failures are worth retrying and cannot have stored
-  anything (the connect class), and one is not worth retrying and can have
-  (`send_message` parses the body after `raise_for_status`, so a 2xx whose body
-  does not parse raises with the message already written). A caller that passes
-  no `reference_id` gets the connect-class retry alone, which is every
-  non-scheduler poster — the scheduler labels all four of its posts.
-- **`EmailTransport.deliver`** owns the send body via
-  `transport.email.outbound.deliver_email_result` — structured-output parsing
-  (deferred file preferred over inline JSON), thread-reply vs fresh-send routing,
-  and `record_sent_email` for emissary thread matching. `scheduler.post_result_to_email`
-  is a thin shim, mirroring `post_result_to_talk`. The shim calls the
-  bool-returning `deliver_email_result` directly (not `EmailTransport.deliver`)
-  because its scheduler callers check the success flag, which the
-  `Transport.deliver` protocol (`int | None`) discards for a surface with no
-  message-id concept.
+- **`TalkTransport.deliver` / `.edit`** use `async_runtime.get_talk_client(config)` (`.claude/rules/scheduler.md` "Persistent asyncio runtime"). `deliver` splits at `max_message_length` and threads the first part when `threaded=True`. `notifications._send_talk` delegates here.
+- **A failed Talk post is retried only behind an idempotency readback** (ISSUE-405), `None` meaning nothing posted (ISSUE-404). A timeout does not prove non-storage, so a re-post needs a connect-class failure or `_posted_message_id` not finding it, matched on `referenceId` and actor (`talk.bot_username` or `nextcloud.username`; any participant can set a `referenceId`). A split send gets no readback (one reference for all parts); anything unanswerable holds back. Retries: transport errors and 5xx, not 404/403/429. `_may_have_been_stored` gates the readback, not `_is_transient`.
+- **`EmailTransport.deliver`** uses `transport.email.outbound.deliver_email_result`; `scheduler.post_result_to_email` calls it directly for its success bool.
+- **`process_one_task`** gates the progress ack on `supports_progress_ack` and `source_type == "talk"`; the ack target is `_talk_target_for_delivery`, resolved once behind those guards (so it only redirects an ack that would have posted anyway) and carried on `TalkEventSubscriber.target_token`, never `conversation_token` (ISSUE-400).
+- **`LogChannelSubscriber`** sends the log to `notifications.effective_log_destinations` (`routing["log"]` > `log_channel` > off): live edits where `supports_edit`, else one summary from `scheduler._finalize_log_channel`.
 
 ### Briefing email bodies
 
-Briefing bodies are chat markdown, so email has always flattened them with
-`skills/briefing.strip_markdown` — which also destroys the article links the
-news sections carry. `transport/email/outbound._briefing_email_bodies(config,
-task, body, fmt)` is the single decision point: it maps a task to
-`(plain_body, html_body, content_type)` and all three send sites (the legacy
-unstructured-briefing branch, the reply-to-thread branch, the fresh-send branch)
-pass its output straight through.
-
-- Non-briefing task → `(body, None, fmt)`, i.e. today's behaviour untouched.
-- Briefing + `briefing_email_html` on (default) + `format == "plain"` →
-  `(strip_markdown(body), render_briefing_html(body) or None, "plain")`, sent
-  `multipart/alternative` so a mail client shows clickable links and a
-  plain-only client still gets readable text.
-- Briefing + on + `format == "html"` (the rare hand-authored case) → the HTML
-  passes through as the rich part and `_strip_html` derives the plain fallback.
-- Briefing + off → exactly the pre-feature single-part plain send.
-
-`html_body` of `None` means single-part, and `skills/email._set_body` treats an
-**empty** `html_body` as none supplied — which is what makes the renderer's
-failure signal (`render_briefing_html` returns `""` on any error) degrade to
-plain text rather than shipping an empty HTML part. See AGENTS.md "Briefings"
-for the renderer's grammar + safety rules.
-- **`process_one_task`** gates the progress-ack subscriber on
-  `transport.capabilities.supports_progress_ack` (resolved via the registry),
-  keeping the `source_type == "talk"` guard so only interactive Talk tasks get
-  an editable ack (briefings / scheduled / subtasks that also resolve to the
-  Talk surface do not). Where that ack is *posted* is
-  `_talk_target_for_delivery`, resolved once behind those guards and carried on
-  `TalkEventSubscriber.target_token` into every later edit — never
-  `conversation_token`, which is the room's canonical token (ISSUE-400). Once,
-  because the resolution reads the database and an edit fires per tool call;
-  behind the guards, so a briefing or email task never pays the query.
-  `conversation_token` stays in the guard on top of the resolution, so the
-  resolution can only redirect an ack that would have been posted anyway —
-  rung 0 returns `tasks.talk_delivery_token` absolutely, and no shipped path
-  writes that column on a talk-sourced row. Result + email delivery still call
-  the `post_result_to_*` shims (extensive introspection-test coverage depends on
-  the call shape).
-- **`LogChannelSubscriber`** delivers the verbose execution log to the user's
-  resolved log destinations via the registry (`notifications.effective_log_destinations`
-  — opt-in: `routing["log"]` > legacy `log_channel` > disabled). Delivery is
-  capability-keyed on `supports_edit`: edit-capable surfaces (Talk) get the live
-  in-place edited message stream; non-edit surfaces (email, ntfy) get a single
-  final-summary delivery from `scheduler._finalize_log_channel` instead of
-  per-tool spam. No longer Talk-only.
+`transport/email/outbound._briefing_email_bodies` returns `(plain, html, content_type)` for all three send sites. With `briefing_email_html` on, a briefing goes `multipart/alternative` (`strip_markdown` plus `render_briefing_html`, or `_strip_html` for an `html` body); off, single-part plain. `skills/email._set_body` treats an empty `html_body` as none, so render failure degrades to plain.
 
 ## Outbound delivery routing (`routing.py`)
 
-The single source of truth for "where does a task's result go". A **destination**
-is `surface[:channel]`; a task's `output_target` column is a comma-separated list
-of them.
+The single source of truth for where a result goes; `output_target` is a comma list of `surface[:channel]`.
 
-- **`parse_output_target(spec) -> list[Destination]`** (pure, no I/O) — splits
-  on commas, normalizes the legacy compound aliases (`both` → talk+email,
-  `all` → talk+email+ntfy), parses each `surface[:channel]` leaf, dedups. `None`
-  / empty / `"none"` (whole spec *or* a list leaf) → dropped. Surface validity
-  is **not** checked here.
-- **`resolve_delivery_plan(config, task, registry) -> list[Destination]`** —
-  turns a task into the ordered, deduplicated, channel-resolved destinations the
-  scheduler delivers to. Precedence: explicit `output_target` > reply-to-origin
-  (interactive source types: `talk` / `email` / `repl`) > source-type default >
-  drop. Each destination has its channel filled (Talk via
-  `talk_channel_for_task`) or is dropped with a WARNING (unregistered
-  surface, or a configured surface whose user-level channel resolves to `None`).
-  **Never raises** — plan resolution must not abort task finalization. An empty
-  post-drop plan for an interactive source type falls back to reply-to-origin so
-  a misconfigured `output_target` can't silently eat a reply.
-- **`talk_channel_for_task(config, task) -> str | None`** — which Talk room a
-  task's Talk traffic goes to: the result, and since ISSUE-400 the progress
-  surface too (the ack, every progress edit, the terminal summary edit and the
-  streamed intermediate text). Those four used to post `conversation_token`
-  raw, which is the room's *canonical* token and only postable when it happens
-  to equal the room's Talk ref — so on a promoted room the ack 404'd, came back
-  with no message id, and every edit behind it silently no-opped. Four rungs, in
-  order: **(0)** `tasks.talk_delivery_token`
-  when set, absolutely; **(1)** the task's room's `talk` binding; **(2)**
-  `conversation_token` itself, when the task has one and is not email-sourced;
-  **(3)** `notifications.resolve_conversation_token` (alerts → configured
-  `default_room` → briefing → auto-DM) for an email task whose token is a
-  synthetic 16-char hex thread hash
-  naming no Talk room. No token and no room gives `None`, deliberately *not* the
-  alerts ladder — a task with nothing to deliver to is not an email thread hash
-  needing redirection. A synthetic token that resolves to nothing is returned
-  as-is, preserving the pre-existing silent no-op rather than trading it for a
-  different failure. `scheduler._talk_target_for_delivery` is a shim over this.
-
-  Rung 1 replaced `tasks.talk_delivery_token` as the *general* answer: the
-  column was a denormalized copy of the room's Talk binding, and it went stale
-  whenever a room was promoted to Talk after the task was created. **Rung 0
-  survives on purpose and must be deleted last.** While anything still writes
-  the column it carries information nothing else has — the legacy thread-match
-  branch in `transport/email/inbound.py`, reached when
-  `sent_emails.origin_target` is NULL, copies a Talk room onto the task that the
-  registry may never have heard of. Demoting rung 0 to "a hint for finding a
-  room" reroutes those tasks to the alerts ladder with no error: ISSUE-057's fix
-  undone. Room resolution inside rung 1 is **surface-scoped**
-  (`_canonical_room_token(..., cross_surface=False)`), unlike descriptor
-  stamping — a `surface_ref` is unique only within its surface, and an unscoped
-  match on the delivery path posts the answer into a different conversation.
-  (`cross_surface` has no default: both answers are defensible and the
-  difference is invisible at the call site, so each caller states which it
-  wants. A wrong *descriptor* is re-resolved by live bindings at delivery; a
-  wrong *channel* is not.)
-- **`plan_has_surface(plan, surface) -> bool`** — the replacement for the old
-  `target in ("talk", "both", "all")` string checks. `process_one_task`
-  precomputes `plan_talk` / `plan_email` / `plan_ntfy` / `plan_file` from the
-  resolved plan and branches on those.
-
-`process_one_task` builds the plan once (`make_registry(config)` +
-`resolve_delivery_plan`) and fans out to every push destination. A confirmation
-prompt is eligible only when Talk is in the plan **and** ntfy is not (the `all`
-broadcast target is a fan-out notification, not an interactive turn — mirrors
-main's deliberate exclusion of `all` from the confirmation gate). `stream`
-destinations (REPL) contribute no push work — the `task_events` log is the
-delivery.
+- **`parse_output_target`** (pure): expands `both` / `all`, dedups, drops `none`.
+- **`resolve_delivery_plan`**: explicit `output_target` > reply-to-origin (talk, email, repl) > source-type default > drop with WARNING. Never raises; an empty interactive plan falls back to reply-to-origin.
+- **`talk_channel_for_task`**: Talk room for results and, since ISSUE-400, the ack, edits and streamed text. Rungs: **(0)** `tasks.talk_delivery_token` absolutely; **(1)** the room's `talk` binding (`_canonical_room_token(..., cross_surface=False)`, since a ref is unique only within its surface; `cross_surface` has no default); **(2)** `conversation_token` for non-email tasks; **(3)** `notifications.resolve_conversation_token` for an email thread hash. **Rung 0 is deleted last**: the legacy NULL-`origin_target` thread branch still writes a Talk room the registry may not know (ISSUE-057).
+- **`plan_has_surface`** replaced string checks; `process_one_task` precomputes `plan_talk` / `plan_email` / `plan_ntfy` / `plan_file`. A confirmation prompt needs Talk in the plan and not ntfy.
 
 ### Purpose-keyed routing table (`notifications.py`)
 
-Distinct from `resolve_delivery_plan` (which routes task *results* by
-`output_target`), the per-user **routing table** routes *notifications* by
-*purpose*. `PURPOSES = (reply, alert, log, briefing, notification)`. Each user's
-`UserConfig.routing` maps a purpose → an `output_target` descriptor (e.g.
-`{"alert": "ntfy"}`), persisted in the `user_profiles.routing` JSON column.
-
-- **`resolve_destinations(config, user_id, purpose) -> list[Destination]`** —
-  precedence: `routing[purpose]` descriptor (full comma list) > legacy fields
-  (`alerts_channel` → alert, `log_channel` → log, first briefing token →
-  briefing) > `default_destination` > `[talk]`.
-- **`send_notification(..., surface=None, purpose=None)`** — an explicit
-  `surface` wins (e.g. a heartbeat check's own channel, push.py's `ntfy`); else
-  `purpose` resolves through the routing table; else bare `talk`. This is what
-  makes `routing={"alert": "ntfy"}` actually reroute alerts. Every
-  daemon-raised notice sends on `alert`: heartbeat alerts
-  (`effective_alert_surface` — a check with no explicit `channel` defers to
-  `routing["alert"]`), policy-refusal and deferred security/action alerts, a
-  stored notification's delivery (`notification_sources.DEFAULT_PURPOSE`), the
-  deferred Garmin import's result and the travel-timezone notice. Anything the
-  bot pushes at a user unprompted belongs there — it is the only route the
-  settings page can point at a room, so a purpose no UI surfaces is a message
-  the user cannot move.
-- Set via `istota user ensure --route purpose=descriptor` (validated against
-  `PURPOSES`) or the web `/settings` Preferences card; both go through the same
-  `user_profiles.routing` JSON column. The CLI can set any purpose. The web card
-  surfaces `default_destination`, the `alert` route, and the `log` route. The
-  `log` route is what drives the verbose execution log — it's read by
-  `effective_log_destinations` (the log path), not just stored: routing it to
-  `email` / `ntfy` actually moves the log there (the "(off)" empty option
-  disables it; the legacy `log_channel` field is the back-compat Talk shorthand
-  it supersedes). The remaining purposes are still UI-dead — `briefing`
-  duplicates each briefing's own `conversation_token`, `reply` is vestigial
-  (result delivery routes via `resolve_delivery_plan`/`output_target`, not the
-  routing table), and nothing sends on `notification` any more (ISSUE-476).
-  Its one remaining reader is `routing.routed_notification_room`, which asks it
-  where inbound mail naming no conversation of its own should surface; that
-  falls through to `default_destination` on purpose — such mail belongs in the
-  user's main room, not their alerts channel. The web card preserves any
-  CLI-set non-surfaced routes on round-trip rather than stripping them.
+`PURPOSES = (reply, alert, log, briefing, notification)` in `user_profiles.routing`. `resolve_destinations`: `routing[purpose]` > legacy fields > `default_destination` > `[talk]`. `send_notification`: explicit `surface` wins, else `purpose`. Every daemon-raised notice uses `alert`, the only route the settings page can move. Nothing sends on `notification` (ISSUE-476); `routing.routed_notification_room` reads it for inbound mail naming no conversation, falling through to `default_destination` on purpose.
 
 ## Deliberate residuals (ISSUE-113, closed)
 
-Three things the transport-abstraction spec's *Deviations* section flagged for a
-later sweep were reviewed under ISSUE-113 and kept as-is. They are settled
-decisions, not pending debt.
+- **No `TalkClient` construction outside the singleton** in `async_runtime.py`; daemon paths use `get_talk_client` via `run_coro`.
+- **One exemption, `talk.transient_client(config)`**, for the `nextcloud` skill CLI only (no persistent runtime). `web_app` bearer clients are the separate OAuth case.
+- **The delivery shims stay**: `post_result_to_talk`, `post_result_to_email`, `edit_talk_message` carry the Talk `target_token` override (synthetic email tokens, promoted rooms), email's bool return, and `edit`'s exception → `False`; newer surfaces call `registry.get(surface).deliver(...)`.
+- **Talk inbound caches stay module-global** (they back `get_dm_token`).
 
-**No direct `TalkClient` construction outside the singleton.** The
-Talk-protocol-internal spots that used to build their own `TalkClient`
-(`scheduler._resolve_channel_name`, `scheduler._finalize_log_channel`, the
-`run_cleanup_checks` stale/ancient-task notices, `commands.dispatch` `!command`
-replies, the inbound poller, the confirmation-reply handler) all pull the
-persistent `get_talk_client(config)` singleton and run via `run_coro` — swept by
-the persistent-asyncio-loop refactor. A repo-wide grep finds exactly one
-`TalkClient(...)` construction: the singleton factory in `async_runtime.py`,
-which is its canonical home. The CLI shares that singleton too (via
-`commands.dispatch` → `get_talk_client`), so the "no direct `TalkClient` outside
-the transport" invariant holds by grep.
+## How to add a transport (e.g. Matrix)
 
-**One documented exemption: `talk.transient_client(config)`.** The `nextcloud`
-skill's `talk` group (agent-facing room/message control — see
-`.claude/rules/skills.md`) runs inside the skill CLI, a short-lived subprocess
-with **no persistent asyncio runtime**: it makes one or two requests and exits.
-Standing the persistent runtime up there costs more than it buys, so `talk.py`
-exposes an explicit `transient_client(config)` async context manager that
-constructs a client and closes it on exit. Its docstring names the skill CLI as
-its only sanctioned caller. This is why the grep above finds a second
-construction — it is a deliberate, named exemption rather than a drift, and no
-daemon path may use it. The `web_app` bearer-token clients are a separate,
-already-documented case (user-scoped OAuth, web process only).
+1. Implement `Transport` and register it in `make_registry` behind its flag, no network on construction.
+2. A new `source_type` extends `_surface_for_source_type`; the origin map derives from the surface table.
+3. Set the three room fields and add the `surfaces.SURFACES` row (the surface tests fail otherwise); a `member` row changes seven sites.
+4. Inbound: `poll()` then `ingest_message`, or self-create like email. Outbound: `registry.for_task(task).deliver(...)`.
+5. Tests mock the wire layer.
 
-**The delivery shims stay.** `scheduler.post_result_to_talk`,
-`post_result_to_email`, and `edit_talk_message` remain thin named functions over
-`TalkTransport.deliver`/`.edit` and `transport.email.outbound.deliver_email_result`
-rather than collapsing into bare `registry.get(surface).deliver(...)` calls at
-each site. They centralize three genuine impedance-matches that a uniform
-`Transport.deliver` can't carry: the Talk `target_token` override — carried by
-`edit_talk_message` as well as `post_result_to_talk` since ISSUE-400, and
-covering two cases, the email-source-task-replying-into-Talk synthetic token and
-a promoted room whose canonical token is not its Talk ref — the email
-bool-vs-`int|None` mismatch (the protocol returns a message id, but email has no
-message-id concept and its two callers branch on a success bool), and the Talk
-url/token guard + exception→`False` in `edit`. The event consumers
-(`consumers/talk.py`, `consumers/log_channel.py`) call these by name. Collapsing
-buys no behavioral change and would smear that logic across ~5 call sites plus
-the consumers; the newest surfaces (ntfy, istota_file) already deliver through
-`registry.get(surface).deliver(...)` directly, so the shims are Talk/email-only
-and won't acquire new callers.
-
-**Talk inbound caches stay module-global.** The conversation/participant/DM
-caches remain module-global in `transport/talk/inbound.py` (they back its
-`get_dm_token`, which `notifications.resolve_conversation_token` calls) rather
-than instance state on `TalkTransport`. Email's shared, non-transport helpers
-live in `istota.email_support` (see the layout section). Moving either buys
-little and would churn tightly-coupled tests.
-
-## How to add a transport (e.g. Matrix, web chat)
-
-1. Write `transport/<name>.py` with a class implementing the `Transport`
-   protocol: set `name` + `capabilities`, implement `poll` (normalize the
-   surface's inbound into `IncomingMessage`), `deliver` / `edit` /
-   `download_attachment`, and `resolve_target`.
-2. Register it in `make_registry` behind the surface's enabled flag.
-3. If the surface introduces a new `source_type`, extend
-   `_surface_for_source_type` so `registry.for_task` resolves it. That map is
-   the *delivery* one; the origin map derives from the surface table above, so
-   a source type spelled like its surface needs no second edit.
-4. Answer the room model, whatever the answers are: set `inbound_room_role`,
-   `room_view` and `user_turn_mirror` on the capabilities, and add the matching
-   row to `surfaces.SURFACES` — `None` three times for a surface that is no
-   part of a room. `tests/test_surface_facts.py` fails on a missing row and
-   `tests/test_surface_capability_agreement.py` on a disagreeing one, so
-   neither half can be forgotten quietly. Read "The room model" first: adding a
-   `member` row changes seven call sites at once.
-5. Inbound: the surface's driver calls `transport.poll()` then `ingest_message`
-   per result (or self-creates like email if it has a mid-loop dependency).
-6. Outbound: a task whose surface resolves to your transport delivers through
-   `registry.for_task(task).deliver(...)`; progress acks come for free if your
-   `capabilities.supports_progress_ack` is True.
-7. Tests: instantiate the transport, mock its transport layer (HTTP / IMAP /
-   websocket), and assert `poll` produces the right `IncomingMessage`s and
-   `deliver` / `resolve_target` behave. `make_registry` must do no network on
-   construction.
-
-**Web chat** (`transport/web/`, ISSUE-121): inbound is the `/chat` web POST →
-`ingest_message` (so `WebTransport.poll` returns `[]`); an interactive task's
-result streams over the SSE `task_events` reader. `WebTransport.deliver` is the
-*notification/log/alert* path — it appends a `role='system'` `messages` row to the
-target room (`default_web_room_token` resolves a bare `web` route to the user's
-`general` room). `resolve_target` returns that default token.
-**Matrix** (see `Drafts/Matrix messaging surface spec.md`): a `MatrixTransport`
-over matrix-nio, with Matrix's bridges (WhatsApp / Signal / Telegram) riding the
-same seam.
+Web chat (ISSUE-121): inbound is the `/chat` POST; `default_web_room_token` resolves bare `web` to `general`. Matrix: `Drafts/Matrix messaging surface spec.md`.
 
 ## Input Channels
 
-- **Talk**: long-poll, message cache, ack/progress/result via referenceId. `!commands` intercepted in poller.
-- **Email**: IMAP poll, attachments to `inbox/`, threaded replies via deferred `email output` JSON. Outbound tracked in `sent_emails` for emissary thread matching. The email skill reads `list`/`read`/`search`/`thread`/`attachments`/`from-senders`/`newsletters`, plus `signup-inbox` for a user's separately filed signup messages; it also sends, replies and gates `mark`/`delete`. Ordinary reads are scoped `--scope {mine,shared,all}` via the shared `email_ownership` resolver. Signup addresses use `routing_method="signup"` before sender and thread matching: the first message can mint one authored follow-up prompt, while later messages raise a notification. Its body reaches the model only through the untrusted `signup-inbox` verb. Per-user quiet senders file matching mail silently in `poll_emails`, marked processed and read back via `from-senders`. See `.claude/rules/skills.md`.
-- **TASKS.md**: 30s poll, `[ ] [~] [x] [!]` markers, SHA-256 identity.
-- **REPL** (`istota repl`): interactive terminal loop (`src/istota/repl/`). Each line becomes a `source_type="repl"` task with `output_target="stream"`, run inline via `scheduler.run_task_inline` (no daemon needed); `task_events` stream to the terminal via `TerminalSubscriber`. REPL tasks are inline-only — `db.claim_task` and the daemon's pending-user discovery exclude `source_type="repl"` so a running daemon never double-executes them.
-- **Web chat**: always-on in-app chat surface in the web UI (full-page console at `/chat`, "Chat" nav tab before Feeds). Rooms are per-user channel tokens in `web_chat_rooms` (each gets its own `CHANNEL.md` + sleep-cycle handling); a sent message becomes a `source_type="web"` task (interactive: loads context + `CHANNEL.md` + `guidelines/web.md`) with `output_target="web"`, which routes as a **stream** surface — no Talk/email push, the result and progress live in `task_events`, tailed over SSE. Endpoints under `/api/chat/*` in `web_app.py` (rooms CRUD, message send/history/delete, task confirm/cancel, attachment upload, the session-scoped `GET /chat/files?path=` handover), plus a session-lived `GET /chat/stream` that tails the canonical `messages` store for every room the user is a member of. `!commands` and the `!model <alias>` prefix work identically across surfaces via `commands.dispatch(... surface=...)`. Web chat is also a *delivery* surface (ISSUE-121): alerts, the verbose execution log, and notifications routed to `web` are appended to a room as `role='system'` rows. Knobs under `[web.chat]`; frontend engine in `web/src/lib/stores/chat.ts`, widgets in `web/src/lib/components/chat/`. Not a Talk replacement — an in-app companion. Full reference (rooms + per-room model defaults, composer + attachment intake, drafts, send lifecycle + durability + `client_msg_id`, per-turn message actions, the live room-event stream, app-shell caching) in `.claude/rules/web-chat.md`.
+Talk, email (signup addresses route `routing_method="signup"` first; `.claude/rules/skills.md`), TASKS.md, REPL (inline; `db.claim_task` excludes `repl`), web chat (`.claude/rules/web-chat.md`).
 
 ## Unified Talk / web room sync
 
-Talk and web chat share one surface-independent **room** model (spec in `Specs/Done/unified-talk-web-room-sync.md`). A `rooms` registry (PK = canonical `conversation_token`, `origin` talk|web) + `room_bindings` (per-surface ref) + a canonical `messages` store (role user|assistant|system, `task_id`, `origin_surface`, `external_ids`) + `room_read_state` supersede the de-facto `tasks`-as-history store; a markered one-time migration folds `web_chat_rooms`/`web_chat_messages`/distinct Talk tokens in and backfills. `get_conversation_history` reads `messages` with task-id re-pairing behind a self-healing dual-read (falls back to `tasks` until the store is caught up — a _completeness_ check: every completed turn mirrored, not just the newest, so a partial migration / mid-rollout window can't truncate history to the mirrored subset); Talk keeps its metadata-rich `_build_talk_api_context` for Talk-origin context. Inbound flows through one `transport.ingest.record_inbound` choke point (resolve canonical token → echo-check → store user turn → create task), used by `ingest_message` (Talk/email) and the web POST. The scheduler stores the assistant turn on completion via `_store_room_turn(conn, task, room_token, body)` — one general producer that mirrors **any** room-delivered bot post (subtask, scheduled, briefing, heartbeat, an email round-trip into its own web room, …) as an assistant spine row when the room exists, replacing the old per-source-type `_store_scheduled_room_turn` / `_store_web_room_turn` (canonical-room-transcript spec, ISSUE-176). Storage is *near*-universal and is decided by `scheduler._room_turn_belongs_here`, not by any delivery branch: the row is written when the plan delivers this answer into *that* room on some surface (a Talk leg landing there, or a surface whose `room_view` is `"canonical"` — that push **is** the row, ISSUE-164) **or** when the room already holds the question. Since ISSUE-247 the room is passed in rather than read off `task.conversation_token`, and the Talk rung asks where the Talk leg lands rather than merely whether the plan has one — see "The transcript room" below. Neither holding means a room that never received the question and is not being delivered into, where a row would be an answer-only bubble — ISSUE-136 from the other side. The two rungs are not interchangeable: an email task in a room with `output_target="email"` and no mirrored question must store nothing, while the same task with `output_target="web:<its own room>"` must store a bubble, so the delivery plan carries intent no task-only predicate can express. `origin_surface` = the real source type as provenance, not a visibility gate; only conversational turns additionally carry a `user` row, and a narrower set still gates the caught-up dual-read. **Those two sets are no longer the same** (ISSUE-136): `TRANSCRIPT_SURFACE_FILTER` is assistant-any / user-in-`('web','talk','email')`, while `_CONVERSATIONAL_SOURCE_TYPES` stays `('talk','web')` — email is mirrored as a user+assistant pair but its *complete* history is not guaranteed (a turn completed before the change, or under a `thread` reply-routing policy before the evidence rung existed, has no assistant row and never will), and counting those would peg the room to the legacy `tasks` path forever. Mirroring is not the gate criterion; guaranteed completeness is. A markered `nonconversational_transcript_cleanup_v1` migration drops the synthetic `user` rows the old `unified_rooms_v1` blanket backfill inserted for non-conversational tasks and normalizes backfilled briefing bodies from raw JSON to the delivered body; **its DELETE allowlist must stay in sync with `TRANSCRIPT_SURFACE_FILTER`** — it re-arms on any failure past the DELETE (both `except` branches return without writing the marker) and a restored pre-migration snapshot re-runs it, so a disagreement silently sweeps live turns.
+`rooms`, `room_bindings`, `messages` (role, `task_id`, `origin_surface`, `external_ids`), `room_read_state`. `get_conversation_history` falls back to `tasks` until every completed turn is mirrored. `_store_room_turn` (ISSUE-176) stores an assistant turn when `scheduler._room_turn_belongs_here` holds: the plan delivers into that room (a landing Talk leg, or a canonical push, ISSUE-164) or the room already holds the question; else it would be an answer-only bubble. `TRANSCRIPT_SURFACE_FILTER` (user rows web/talk/email) differs from `_CONVERSATIONAL_SOURCE_TYPES` (talk, web) because email history is not guaranteed complete (ISSUE-136). The `nonconversational_transcript_cleanup_v1` DELETE allowlist must match `TRANSCRIPT_SURFACE_FILTER`: it re-arms on failure and re-runs on restored snapshots.
 
-**The transcript room (ISSUE-247).** Which room an exchange belongs to is resolved **once**, by `transport.routing.transcript_room` / `transcript_room_for_task`, and every writer of a room row keys on that answer. It is *not* `tasks.conversation_token`: on an email task that column is `compute_thread_id(...)`, a hash whose job is grouping `References`, and three writers used to read it as a room — the assistant-turn store, the Talk mirror, and `record_inbound`'s `mirror_only` gate. Each correctly found no room and fell back to a different workaround, so an email exchange reached the room as a `role='system'` note with no question above it while Talk and web were handed different bodies for the same message. The ladder is: the room a `role='user'` row for this task already lives in (strongest — it is where the question actually went, and it is what keeps the two halves together when routing changes mid-exchange); else `conversation_token` when it *is* a registered room (every talk/web task, and an email threaded back into its own room); else, **for an email task only**, a room named by `output_target` (the `room:<token>` form, or an explicit `talk:`/`web:`/bare `talk` leg — the bare one reads `tasks.talk_delivery_token` first, because that is `talk_channel_for_task`'s absolute rung 0 and the two ladders naming different rooms is this bug one level down). What is deliberately **not** a rung is "the room this user's notifications would go to": that is `routed_notification_room`, and only the email poller calls it, on the routes where the message names no conversation at all. As a rung it would fire for an ungated `thread_match` reply under the `thread` reply-routing policy too, writing an external correspondent's verbatim body — which `_conversation_history_from_messages` re-pairs into that room's LLM context — into the user's alerts room, a room the thread had no relationship with. Existence, never creation, at every rung, and never raises — an email task that resolves to no registered room (a cron mailing an external address) stays task-only with no transcript, unchanged. The email poller stamps the resolved room into `output_target` as `room:<token>,email` on the non-thread routes, which is what makes the room a *delivery* destination rather than something derived after the fact: Talk is pushed the same body the canonical row stores. `scheduler._talk_result_mirror_body` survives, narrowed to the case the canonical row genuinely cannot reach — a task delivered to a Talk room that is not its transcript room (ISSUE-242 on the result) — and is now handed exactly what Talk was posted rather than the transcript body. `_notify_confirmed_email_result` is gone; its held-draft branch is covered by `transport.email.outbound._announce_hold`, which fires on every hold rather than only a gated task's. Talk gets a provenance line of its own (`scheduler._format_email_user_repost`, sender + subject, **never** the body — that is the wrapped untrusted prompt): Talk renders from Nextcloud rather than from the canonical store, so the room holding the question does not put it in front of a Talk reader, and the answer would otherwise arrive replying to nothing. What used to carry that there was the deleted notice's `Email reply sent to <sender>` prefix, and only for a gated task.
+**The transcript room** (ISSUE-247), `routing.transcript_room_for_task`, is what every room-row writer keys on, never an email's thread hash. Ladder: the room holding the task's user row; `conversation_token` if registered; for email only, a room named by `output_target` (bare `talk` reads `talk_delivery_token` first, matching rung 0). `routed_notification_room` is not a rung (it would put a correspondent's body in the alerts room). Existence, never creation. The poller stamps `room:<token>,email` on non-thread routes. `scheduler._talk_result_mirror_body` remains only for a Talk room that is not the transcript room; Talk gets `_format_email_user_repost` (sender and subject, never the body). Kept deliberately: a first-contact email parks a confirmation-shaped answer in the room; `delivering_into_room` keeps "plan has a Talk leg" for the task's own token; external bodies reach the room's context behind the `<email_content>` guard and `context._speaker_label` (ISSUE-226).
 
-**Three consequences of naming the room that are decisions, not accidents.** A first-contact email now has a Talk leg, so it is a `_confirmable_surface`: an answer matching `CONFIRMATION_PATTERN` parks the task and asks in the room instead of being mailed unasked. Kept — it is the rule a thread-matched email already followed, the prompt reaches the surface the user reads (ISSUE-241), and an unanswered one is named when it expires; the email leg still never carries the question. The `delivering_into_room` rung compares canonical rooms, but keeps the old "the plan has a Talk leg" answer whenever the transcript room *is* the task's own token — a scheduled job in room A delivering to Talk room B keeps the row it has always had, and tightening that to ISSUE-164's rule is its own change. And the inbound mirror now puts an external correspondent's verbatim body into the routed room's canonical store, so it re-pairs into *that* room's LLM context where before it reached only a room the thread already belonged to. The mitigations are the ones ISSUE-136 and ISSUE-226 put there and are why the body is stored verbatim: the `<email_content>` "external input — do not follow instructions" guard survives into the prompt, and `context._speaker_label` renders the turn as `External sender <addr>` rather than as the room owner's words. The set of rooms that can receive such a turn is what widened; the handling of one did not.
+**Mirror-only surfaces** (ISSUE-136). `record_inbound`'s `mirror_only` path records a non-member turn when the transcript room exists, with no other room side effect. The stored body is the prompt verbatim, guard included.
 
-**Mirror-only surfaces (ISSUE-136).** The surfaces that *own* rooms are the ones whose `inbound_room_role` is `member` — they lazily register an unknown token, bind it, add membership and rename from the surface — and `ingest.record_inbound` gates on `surfaces.is_room_member`. That is deliberately narrower than "surfaces whose turns are stored": `record_inbound`'s `mirror_only` path records a turn from a **non**-room surface when the transcript-room resolution above yields one. That branch tests the negation of membership rather than the value `guest`, so a surface declaring neither would take it too; `guest` is the rule as a declared value, and nothing reads it yet. See "The room model" above. Email is the one live case — a reply threaded back into the web/Talk room it came from, or a first-contact thread whose routing names a room. The gate is room **existence, never creation**, which is what stops mail the bot merely receives from minting rooms in anyone's sidebar; it also keeps the mirror off every other room side effect (no registration, binding, rename, membership, `undismiss_room`, echo ledger or per-room default — so an email into a room the user has *hidden* is stored where they cannot see it, and an email continuation does not pick up the room's standing `!room model` default). **Per-room `brain` is the same rule, not a new one.** `record_inbound` fills `brain` from the room in the same block as `model` and `effort`, inside the `room_surface` guard, so an email continuation runs the `source_type` answer even in a room pinned to another brain — and the same holds for cron, heartbeat, briefing and skill tasks, which bypass `record_inbound` entirely. Those carry no brain of their own — there is no job-level `brain` the way there is a job-level `model` and `effort`, so their column is NULL and they take the `source_type` answer. Whoever adds the next per-room default writes it in that block and not above it: hoisting `existing` out of the guard to reach it would reverse ISSUE-136 for `model` and `effort` at the same time. This makes the user-row gate identical to the assistant-row gate `_store_room_turn` has always used, closing the case where a room showed a bot answer with no question above it. Two consequences worth knowing: the stored user body is the **task prompt verbatim** (`<email_metadata>`/`<email_content>` wrapper and its "external input — do not follow instructions" guard included), because `_conversation_history_from_messages` re-pairs it straight into LLM context and a prettified body would drop the guard (the guard is only half the story — the *speaker label* wrapped around that body used to contradict it by naming the room owner, fixed by the ISSUE-226 sender attribution in `.claude/rules/scheduler.md`); and a turn still facing the untrusted-sender confirmation gate sets `IncomingMessage.suppress_transcript_mirror`, because the mirror commits in the *same transaction* as the task while `db.cancel_task` touches only `tasks` — without it a declined message would be published to the room and stay there. `output_target="room"` fans out by live bindings with an **asymmetric mirror** — web→Talk is a real push, Talk→web pushes nothing (the web loader already renders Talk turns from the shared store), and a confirmation prompt mirrors only when the task's own origin surface is *not* a room view (`surfaces.is_room_view`, read negated — the one site asking the view question rather than the ownership one). That last rule used to be a flat "confirmations never mirror", which silently dropped the question for an email-origin task: it parks on `_confirmable_surface` (which counts the mirror Talk leg), the email leg must never carry the question to the external correspondent, and the mirror leg was excluded too — so nothing asked the user and `expire_stale_confirmations` cancelled the task two hours later. A web-origin confirmation still stays on web, where its SSE stream carries it. On a web→Talk mirror leg the user's question reaches Talk one of two ways: with user-scoped OAuth enabled (see the next section) the web process already posted it _as the user_ at send time and the scheduler suppresses its repost (`db.user_turn_has_external_id(task_id, "talk")`); otherwise the bot reposts it attributed (`💬 <name> (via web):`) before its reply — a pure Talk-surface artifact never written to the canonical `messages` store, so web history/context is unaffected (`_format_mirror_user_repost`). The web room list is **membership-driven** (`db.list_member_rooms`, a `room_members` join) rather than keyed on the single-owner `rooms.user_id`, so a _shared_ room (one token, one transcript) surfaces for every participant — a group Talk room with the bot plus two humans appears in _both_ humans' web lists, each via their own `web_chat_rooms` handle (`UNIQUE(user_id, token)`, not globally unique). Membership is added by `register_room`, by every inbound sender (`record_inbound`), and by the **Talk poll itself**: on first sight the poller registers any conversation the bot participates in (`origin='talk'`, resolving the canonical token via the binding first so a _promoted_ web room isn't duplicated) and seeds membership from the human participants — mapped to istota users via the `actor_id in config.users` + `actorType == "users"` test (an authority test now, not a recording one: non-users become participants, never members), bot excluded — so a room the bot merely _lurks_ in surfaces in web chat without anyone having to message it first. This no longer depends on a `tasks` row existing for the token (the task-keyed `unified_rooms_v1` migration + the old `record_inbound`-only path left a polled-but-never-addressed room — e.g. a quiet `#sysadmin` — invisible, since its history is rebuilt from Nextcloud but its tasks were never carried over). The participant fetch (cached `_get_participants`, 5-min TTL) runs only for a genuinely new room, not every poll; DMs need no fetch (the other party comes from the conversation name). Thereafter membership for active users is kept current by `record_inbound`, which every conversational Talk turn reaches, an unmentioned group turn included. Backfilled for existing deploys by the `room_members_v1` migration. A per-user delete/hide writes a **dismissal tombstone** (`room_dismissals`, keyed `(room_token, user_id)`) _and_ drops that user's membership; `list_member_rooms` excludes a tombstoned room even while membership is later re-added, so the hide is durable. The tombstone is cleared by the user's **own** next message in the room — `record_inbound` → `undismiss_room`, which every turn now reaches, an unmentioned group turn included (SG 5 removed the poll loop's duplicate un-hide along with the drop that needed it) — "re-engagement un-hides"; a co-member's hide is left intact. A Talk message consumed before ingest (a `!command`, a confirmation answer) does not un-hide; a relay answer does, since it is ingested. The web delete UI reflects this: an imported (Talk-origin) room is a one-click **Hide** with no type-the-name confirm, while a web-origin room keeps the destructive type-to-confirm **Delete**. The global `rooms.archived` flag stays reserved for `archive_orphaned_talk_rooms` — "the bot left the Nextcloud room", which a fresh inbound un-archives. Fixes ISSUE-134, where a group room was visible to only one arbitrary participant. Room titles are backfilled from Talk's `displayName` every poll cycle, not just on the next inbound message, so a migrated room stops showing the generic "Talk room". The same poll cycle reconciles the other direction (`db.archive_orphaned_talk_rooms`): a Talk room the bot is no longer in (deleted in Nextcloud / bot removed) is archived so it stops surfacing in web — guarded against a transient empty conversation fetch, archive-not-delete so mirror history survives. An "Also open in Talk" promote (`POST /chat/rooms/{id}/promote`) creates a real Talk conversation via new OCS `TalkClient` methods, with two-way rename propagation, and a Talk turn streams live into an open web room. Full reference in this file.
+**Fan-out**: `output_target="room"` goes by live bindings; web→Talk pushes, Talk→web does not. A confirmation mirrors only when the origin is not a room view (`surfaces.is_room_view` negated). On web→Talk the question arrives as the user's own post (OAuth) or the attributed repost (`_format_mirror_user_repost`, never stored).
+
+**Membership** drives the web room list (`db.list_member_rooms`, per-user `web_chat_rooms` handles, ISSUE-134). The Talk poll registers any conversation the bot is in (canonical token via binding first) and seeds members by the `actor_id in config.users` + `actorType == "users"` authority test (`room_members_v1` backfill). Hide writes a `room_dismissals` tombstone cleared only by the user's own next turn (`undismiss_room`). `rooms.archived` belongs to `db.archive_orphaned_talk_rooms` (guarded against an empty fetch). Promote (`POST /chat/rooms/{id}/promote`) creates a Talk conversation with two-way rename.
 
 ## User-scoped Nextcloud OAuth (post-as-user + read sync)
 
-Opt-in retention of the web login's OAuth pair so the web process can act as the user against Nextcloud Talk (spec in `Specs/Done/user-scoped-nextcloud-oauth-talk-sync.md`). Gate: `[web] token_storage = "encrypted"` **and** `ISTOTA_WEB_TOKEN_KEY` (≥32 chars) present — the key is delivered to the **web unit only** (Ansible `web-secrets.env`, Docker `/data/.web_token_key`), never the scheduler/webhooks units or any task env, and the module (`web_tokens.py`) uses a distinct scrypt salt + table (`web_user_tokens`: Fernet ciphertext pair + plaintext `expires_at`) so "who can decrypt" stays auditable by grep. `callback()` persists the pair at every login (self-heals a dead refresh token); `get_access_token` refreshes within 60s of expiry under a per-user lock (NC rotates refresh tokens — persistence is atomic, `invalid_grant` deletes the row, transient failures keep it); the settings page shows a status card with Disconnect (`DELETE /api/settings/nextcloud-token`); `/api/me` carries `nextcloud_token: {connected, expires_at} | null`. Three consumers, all web-process, all falling back to legacy behaviour when the gate is off or no live token exists: **(1) Post-as-user mirroring** — a web send into a Talk-bound room posts the prompt to Talk immediately as the user (`TalkClient(config, bearer_token=…)`, `referenceId = istota:webmirror:<msg_id>`), stamps the Talk id on the canonical user row, and the scheduler skips its attributed repost; echo prevention is the referenceId fast-path in the Talk poller (race-free — the marker travels in the message) plus the `record_inbound` external-ids ledger as backstop (which excludes same-origin rows so a re-polled duplicate still hits `create_task`'s dedup). Inbound Talk messages now stamp their Talk id into `messages.external_ids` at ingest. **(2) Web→Talk read push** — mark-read/read-all call `mark_conversation_read` when the web cursor actually advanced, fire-and-forget. `_mark_read_as_user` carries the same single forced-refresh-on-401 retry `_post_as_user` has: without it a stale-but-present access token let the message mirror keep working while every read push failed silently, which is the asymmetry ISSUE-333 was reported as. `mark_conversation_read` takes `raise_on_error` for that caller — it swallowed every exception and returned a bool nobody read, so the one place that could act on a status could not see one. **(3) Talk→web read pull** — the rooms poll, throttled per user by `[web.chat] talk_read_sync_interval` (default 60s, 0 disables), fetches the user's conversation list with their bearer token and advances the web cursor of fully-read Talk-bound rooms, capped at `db.room_max_talk_synced_message_id` so web-only system messages stay unread. **There is deliberately no matching web→Talk leg**, and the reason is worth knowing before adding one: the obvious guard — Talk counts the room unread while the web cursor already covers `room_max_talk_synced_message_id` — is unsound in both of its terms. `cap` sees only Talk messages that reached `messages`, and `transport/talk/inbound.py` still drops system messages and the bot's own posts before `record_inbound`, and system messages count toward Talk's `unreadMessages`. An unmentioned message in a multi-user room used to be dropped and is now recorded (SG 5), and so are a sender outside `config.users` and a guest or bot actor (multiplayer Stage 7), so those classes moved, and the guard is still unsound on system messages; and `current` is not evidence the user read anything, since `db.initialize_room_read_state` *seeds* a newly surfaced room's cursor to `MAX(messages.id)` so a backlog does not read as unread. Either alone makes the guard true for a room the user has never read, and `mark_conversation_read` posts with no `lastReadMessage`, so the whole conversation goes read — destroying unread state rather than restoring a badge. Doing this safely needs read-state provenance the schema does not record (seeded versus earned) plus a `lastReadMessage` push, which is its own change; ISSUE-333 stopped at the 401 retry, which is what the reported permanent failure actually was. Star sync is out of scope (Talk has no per-message star API).
+The key reaches the web unit only (Ansible `web-secrets.env`, Docker `/data/.web_token_key`); `web_tokens.py` has its own salt and `web_user_tokens`. `get_access_token` refreshes within 60s under a per-user lock (`invalid_grant` deletes, transient failures keep). Consumers: post-as-user mirroring, web→Talk read push (`_mark_read_as_user`, same 401 retry as `_post_as_user`), Talk→web read pull.
 
-**The credential and the session have independent lifetimes, and closing that gap is what ISSUE-333 is about.** The session is a signed cookie minted once at the callback and validated afterwards only against `ISTOTA_WEB_SESSION_SECRET_KEY` — no round trip to Nextcloud, ever — with a `max_age` Starlette re-issues on every response, so it rolls forward indefinitely while the user keeps clicking. The stored pair is a separate row that two paths delete at any moment (a 400/401 refresh rejection, or a decrypt failure after `ISTOTA_WEB_TOKEN_KEY` is rotated), and the login callback is the **only** writer, which an active user never revisits. So the credential can be dead for weeks behind a perfectly healthy session, and all three consumers fail *closed and silently* — `get_access_token` returns `None` on every failure path and never raises. The reported symptom was two unrelated-looking features degrading at once with nothing in any surface a user reads.
+**No web→Talk unread leg**: system and bot messages count in Talk's `unreadMessages` but never reach `messages`, and `db.initialize_room_read_state` seeds cursors, so the obvious guard is unsound and a push without `lastReadMessage` marks everything read. It needs seeded-vs-earned provenance.
 
-Three things now stand between that and a silent failure. **The loss is durable**: both deletion sites call `web_tokens.note_credential_lost`, which raises the existing `connected_service` notification under `object_id = "nextcloud"` — a row in the inbox plus one push, deduped by `service:nextcloud`. It is deliberately *not* raised for the other three `None` returns: a transient 5xx or network error keeps the row and is not a loss, and "no row stored" is the state of every user who has not logged in since the operator enabled the feature. Raising on either would push a warning nobody can act on, once per rooms poll. `store_tokens` closes the row, from inside the function rather than at its call sites, because "a pair is now stored" is exactly the condition and there are two writers. **The remedy is a button**: `GET /istota/reconnect` re-runs the authorize flow for an already signed-in user and lands back on `/settings`, replacing the card's old instruction to log out and back in. It mints and stores nothing itself — the callback already does that, under the identity the *provider* returns rather than the one in the session — so the only thing it adds is the landing page, carried across the hop as an allowlisted key in the session (`_POST_LOGIN_TARGETS`), never a URL. **The degraded consumers say so**: both bail at WARNING naming the missing token, where the mirror used to bail at DEBUG. A room with no Talk binding stays silent, since that is web-only rather than degraded.
-
-One hardening from the entry was **not** taken, and the reason is structural rather than a matter of effort: a periodic keepalive that refreshes a quiet user's pair before the refresh token ages out would have to run from the scheduler, and this module's whole boundary is that the scheduler and webhook units never load its decrypt path. A keepalive there would put the web-only key in a second unit to solve a problem the rooms poll already covers for any user with the UI open.
-
-## Transport abstraction
-
-A uniform seam over messaging surfaces (`src/istota/transport/`). Inbound, a `Transport.poll()` normalizes a surface's messages into `IncomingMessage`; `ingest_message` maps those onto `db.create_task`. Outbound, `deliver` / `edit` push a task's result to a resolved channel; `resolve_target` picks the channel. `TransportRegistry` (`make_registry(config)`, no I/O on construction) holds the enabled surfaces and `for_task(task)` resolves the primary one by `source_type` (`email`→email, `repl`→repl, `sms`→sms, `whatsapp`→whatsapp, everything else→talk). Eight transports ship — `TalkTransport`, `EmailTransport`, `SmsTransport`, `WhatsAppTransport`, `NtfyTransport`, `IstotaFileTransport` (all `surface_class="push"`), `ReplTransport` (`surface_class="stream"` — `deliver` is a no-op; outbound is the `task_events` log a terminal tails), and `WebTransport` (`surface_class="stream"`, `user_routable=True`) — and **Matrix is the designed-for next consumer** (a new surface = one `Transport` subclass + a `make_registry` line). `WebTransport` is the web chat _delivery_ surface (ISSUE-121): an interactive `source_type="web"` task still streams its own result over `task_events` (routing short-circuits `web` to a stream destination), but the transport's `deliver()` is a real write — alerts, the verbose execution log, and any notification routed to `web` append an unsolicited system message to the user's room as a `role='system'` row in the canonical `messages` store, rendered merged into the room transcript and pushed live by the room stream. Because it's `user_routable`, web auto-appears in every routing UI that reads `registry.routable_names()`. `conversation_token` stays the opaque per-surface channel id and `source_type` the routing key — neither renamed; no DB/config change. Talk delivery/edit (the only `TalkClient` construction outside the CLI) and `notifications._send_talk` flow through `TalkTransport`; email delivery flows through `EmailTransport`; `scheduler.post_result_to_talk` / `edit_talk_message` / `post_result_to_email` are thin shims. The progress-ack subscriber is gated on `capabilities.supports_progress_ack`. Both surfaces are subpackages with both directions co-located (`__init__.py` seam + `inbound.py`; email adds `outbound.py`) and both self-create their tasks inside `poll` via the shared `ingest_message` (the `create_task` must share the inbound `db.get_db` transaction with the poll-cursor advance, or a create failure would lose messages): Talk's inbound body is `transport/talk/inbound.py` (`poll_talk_conversations`), email's is `transport/email/inbound.py` (`poll_emails`); both transports' `poll` return `[]`. Email's shared non-transport helpers live in `istota.email_support`; the low-level clients stay outside the seam (`istota.talk.TalkClient`, `istota.skills.email`). Outbound fan-out (a task delivering to several surfaces) is `transport.routing.resolve_delivery_plan`'s job: it parses `output_target` (`talk`/`email`/`ntfy`/`istota_file`/`stream`/`both`/`all`/`surface:channel`/comma lists), resolves channels, and drops unregistered/unconfigured destinations with a warning. Separately, the per-user **purpose-keyed routing table** (`UserConfig.routing`, purposes `reply`/`alert`/`log`/`briefing`/`notification`) routes _notifications_ via `notifications.send_notification(..., purpose=…)`; the `log` purpose additionally drives the verbose per-task execution log to any user-routable surface (`notifications.effective_log_destinations`, opt-in: `routing["log"]` > legacy `log_channel` > off; Talk streams live, email/ntfy get one final summary). Full reference in this file.
+**Credential and session lifetimes are independent** (ISSUE-333): the cookie rolls forward while the pair can be deleted, and only login rewrites it. Both deletion sites call `web_tokens.note_credential_lost` (`connected_service`, `object_id = "nextcloud"`; not for transient errors or never-stored), closed by `store_tokens`. `GET /istota/reconnect` re-runs authorize, returning via allowlisted `_POST_LOGIN_TARGETS`. A scheduler keepalive was rejected: it would put the web-only key in a second unit.
