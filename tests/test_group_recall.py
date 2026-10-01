@@ -33,8 +33,8 @@ def conn(db_path):
         yield c
 
 
-def _task(token=None, user="alice", **fields):
-    return db.Task(id=7, status="running", user_id=user, source_type="talk",
+def _task(token=None, user="alice", source_type="talk", **fields):
+    return db.Task(id=7, status="running", user_id=user, source_type=source_type,
                    prompt="p", conversation_token=token, **fields)
 
 
@@ -58,6 +58,45 @@ class TestOffARoom:
     def test_an_ended_membership_is_left_out(self, conn):
         db.end_group_membership(conn, "work", "alice", ended_by="operator")
         assert task_group_ids(conn, _task()) == ["fam"]
+
+
+class TestOneToOnePushSurfaces:
+    """Multiplayer D23: an SMS or WhatsApp 1:1 is as private as a room-less
+    task. Its token is derived from the user id and names no room, which the
+    room rule alone reads as an unknown audience."""
+
+    def test_the_users_own_sms_token_loads_every_group(self, conn):
+        from istota.transport.sms import sms_conversation_token
+
+        task = _task(sms_conversation_token("alice"), source_type="sms")
+        assert task_group_ids(conn, task) == ["fam", "work"]
+
+    def test_the_users_own_whatsapp_token_loads_every_group(self, conn):
+        from istota.transport.whatsapp import whatsapp_conversation_token
+
+        task = _task(whatsapp_conversation_token("alice"),
+                     source_type="whatsapp")
+        assert task_group_ids(conn, task) == ["fam", "work"]
+
+    def test_another_users_push_token_loads_nothing(self, conn):
+        from istota.transport.sms import sms_conversation_token
+
+        task = _task(sms_conversation_token("bob"), source_type="sms")
+        assert task_group_ids(conn, task) == []
+
+    def test_a_guest_turn_on_a_push_token_loads_nothing(self, conn):
+        from istota.transport.whatsapp import whatsapp_conversation_token
+
+        task = _task(whatsapp_conversation_token("alice"),
+                     source_type="whatsapp", guest_participant_id=3)
+        assert task_group_ids(conn, task) == []
+
+    def test_a_registered_room_under_that_token_takes_the_room_rule(self, conn):
+        from istota.transport.sms import sms_conversation_token
+
+        token = sms_conversation_token("alice")
+        _room(conn, token, "alice", "carol")
+        assert task_group_ids(conn, _task(token, source_type="sms")) == []
 
 
 class TestInARoom:

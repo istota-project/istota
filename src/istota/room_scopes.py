@@ -221,6 +221,16 @@ def withheld_for_task(
     )
 
 
+def _is_own_push_token(user_id: str, token: str) -> bool:
+    """Whether ``token`` is ``user_id``'s own SMS or WhatsApp 1:1 token."""
+    from .transport.sms import sms_conversation_token
+    from .transport.whatsapp import whatsapp_conversation_token
+
+    return token in (
+        sms_conversation_token(user_id), whatsapp_conversation_token(user_id),
+    )
+
+
 def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
     """The groups whose material this task may carry, sorted; the one answer
     the prompt's ``## Group memory``, the ``Groups/<id>`` binds and the
@@ -239,10 +249,13 @@ def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
     not one. Nothing either where the audience cannot be read: a room with no
     recorded readers, or a surface roster saying "group" over a room the
     registry records one person in. A token naming no registered room is the
-    first case, so a push surface's per-user token (``sms-<hash>``,
-    ``whatsapp-<hash>``) or an email thread with no thread room loads nothing:
-    fail closed, since this function cannot tell a private push token from a
-    room that was never recorded.
+    first case, so an email thread with no thread room loads nothing.
+
+    The exception is the user's own SMS or WhatsApp 1:1 (multiplayer D23):
+    its token is derived from ``task.user_id`` alone and names no room, and
+    the conversation is as private as a room-less task, so it loads the same
+    set. Recognised by deriving the token, never by its prefix, so another
+    user's push token is still an unknown room.
 
     Independent of the room's grants. A grant is the sender's consent to
     disclose their own data and never reaches group material; the audience
@@ -259,7 +272,11 @@ def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
 
     room_token = task.conversation_token
     if db.get_room(conn, room_token) is None:
-        room_token = db.find_room_token_by_ref(conn, room_token) or room_token
+        room_token = db.find_room_token_by_ref(conn, room_token)
+        if room_token is None:
+            if _is_own_push_token(task.user_id, task.conversation_token):
+                return groups
+            room_token = task.conversation_token
     room = room_policy.room_readers(conn, room_token)
     if room.guests or room.others:
         logger.debug(
