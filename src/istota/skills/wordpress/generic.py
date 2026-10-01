@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 
 from .client import WordPressError, fence, fence_tree, selector
-from .content import total_header
+from .common import total_header
 from .discovery import ABILITIES_NAMESPACE
 
 _ROUTE_SEGMENT_RE = re.compile(r"\A[A-Za-z0-9._~!$&'()*+,;=:@-]+\Z")

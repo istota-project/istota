@@ -31,20 +31,25 @@ from __future__ import annotations
 
 import html
 import json
-import os
 import re
-import shlex
-import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
 from istota.skill_host_paths import write_resolved
 
+from . import acf, media
 from .client import WordPressError, fence, fence_tree, raw_text, selectors
+from .common import (  # noqa: F401 (MAX_LIMIT, limit_arg, total_header re-exported)
+    MAX_LIMIT,
+    int_or_none,
+    limit_arg,
+    lookup,
+    read_text_file,
+    total_header,
+)
 from .discovery import routes, taxonomy_fields, taxonomy_route, type_route
 
-MAX_LIMIT = 100
 LIST_STATUSES = ("any", "publish", "draft", "pending", "private", "future")
 
 #: An ACF flexible-content row names its layout here; the value is a selector.
@@ -57,13 +62,6 @@ GET_FIELDS = (
     "format", "sticky", "comment_status", "ping_status", "password_protected",
     "terms", "meta", "acf",
 )
-
-
-def _int_or_none(value) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _terms_of(item: dict, term_fields: list[str]) -> dict:
@@ -112,14 +110,6 @@ def project_post(item: dict, term_fields: list[str], *, full: bool) -> dict:
     return out
 
 
-def limit_arg(value: int | None, default: int) -> int:
-    if value is None:
-        return default
-    if value < 1 or value > MAX_LIMIT:
-        raise WordPressError(f"--limit must be between 1 and {MAX_LIMIT}.", "validation_error")
-    return value
-
-
 def _term_ids(ctx, taxonomy: str, names: str | list[str], *,
               missing: list[str] | None = None) -> list[int]:
     """Names or ids (comma-separated, or a list) to term ids.
@@ -133,34 +123,35 @@ def _term_ids(ctx, taxonomy: str, names: str | list[str], *,
         name = raw.strip()
         if not name:
             continue
-        number = _int_or_none(name)
+        number = int_or_none(name)
         if number is not None:
             ids.append(number)
             continue
         route = route or taxonomy_route(ctx, taxonomy)
-        found, _ = ctx.client.get(route, params={"search": name, "per_page": MAX_LIMIT},
-                                  base=ctx.base)
-        wanted = name.casefold()
-        match = [
-            t.get("id") for t in found or []
-            if isinstance(t, dict) and (
-                html.unescape(str(t.get("name", ""))).casefold() == wanted
-                or str(t.get("slug", "")).casefold() == wanted
-            )
-        ]
-        if not match and missing is not None:
+        match = _find_term(ctx, route, name)
+        if match is None and missing is not None:
             missing.append(name)
             continue
-        if not match:
+        if match is None:
             raise WordPressError(
                 f"No {taxonomy} term named {fence(name)}.", "unknown_term",
             )
-        ids.append(match[0])
+        ids.append(match)
     return ids
 
 
-def total_header(headers, name: str) -> int | None:
-    return _int_or_none(headers.get(name)) if headers is not None else None
+def _find_term(ctx, route: str, name: str) -> int | None:
+    """The id of the term whose name or slug is `name`, case-insensitively."""
+    found, _ = ctx.client.get(route, params={"search": name, "per_page": MAX_LIMIT},
+                              base=ctx.base)
+    wanted = name.casefold()
+    for term in found or []:
+        if isinstance(term, dict) and (
+            html.unescape(str(term.get("name", ""))).casefold() == wanted
+            or str(term.get("slug", "")).casefold() == wanted
+        ):
+            return term.get("id")
+    return None
 
 
 def cmd_list(args) -> dict:
@@ -285,6 +276,41 @@ def cmd_terms_list(args) -> dict:
     }
 
 
+def check_terms_create(args) -> None:
+    if not args.name.strip():
+        raise WordPressError("--name is empty.", "validation_error")
+    if args.parent is not None and args.parent < 0:
+        raise WordPressError("--parent is a term id.", "validation_error")
+
+
+def cmd_terms_create(args) -> dict:
+    """Create one term, unless one of that name or slug exists.
+
+    Gated like ``--create-terms`` (spec §5.7): a term is public as soon as it
+    exists, and an explicit verb must not be the way around that gate. A term
+    already there is returned with ``"created": false`` and no gate, which also
+    makes a retry after ``outcome_unknown`` safe.
+    """
+    ctx = args.wp
+    route = taxonomy_route(ctx, args.taxonomy)
+    name = args.name.strip()
+    existing = _find_term(ctx, route, name)
+    if existing is None and args.slug:
+        existing = _find_term(ctx, route, args.slug)
+    if existing is not None:
+        return {"status": "ok", **ctx.envelope(), "taxonomy": args.taxonomy,
+                "created": False, "id": existing}
+    gate(args, ctx, _terms_actions({args.taxonomy: [name]}))
+    body: dict = {"name": name}
+    if args.parent is not None:
+        body["parent"] = args.parent
+    if args.slug:
+        body["slug"] = args.slug
+    term = post_term(ctx, route, args.taxonomy, body)
+    return {"status": "ok", **ctx.envelope(), "taxonomy": args.taxonomy,
+            "created": True, "item": project_term(term)}
+
+
 # --------------------------------------------------------------------------- #
 # Writes
 # --------------------------------------------------------------------------- #
@@ -297,34 +323,6 @@ MAX_CONTENT_BYTES = 8 * 1024 * 1024
 MAX_META_BYTES = 1024 * 1024
 _TEXT_FIELDS = ("title", "content", "excerpt")
 _TITLE_IN_DESCRIPTION = 80
-
-
-def read_text_file(path: str, label: str, cap: int) -> str:
-    """A UTF-8 file the `EGRESS` stamp already resolved, read without following
-    a symlink swapped in since, and bounded by its own descriptor's size."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError as exc:
-        raise WordPressError(f"Could not open {label}: {exc.strerror}.",
-                             "validation_error") from None
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise WordPressError(f"{label} is not a regular file.", "validation_error")
-        if info.st_size > cap:
-            raise WordPressError(f"{label} is over {cap // 1024} KiB.", "validation_error")
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
-            data = handle.read(cap + 1)
-    finally:
-        if fd >= 0:
-            os.close(fd)
-    if len(data) > cap:
-        raise WordPressError(f"{label} is over {cap // 1024} KiB.", "validation_error")
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        raise WordPressError(f"{label} is not UTF-8 text.", "validation_error") from None
 
 
 def parse_date(value: str) -> tuple[str, str]:
@@ -393,6 +391,8 @@ def _check_fields(args) -> None:
     if args.featured_media_id is not None and args.featured_media_id < 0:
         raise WordPressError("--featured-media-id is an attachment id, or 0 for none.",
                              "validation_error")
+    # Last, so a flag that fails above has opened no file.
+    acf.check(args, media.upload_cap(args.config))
 
 
 def check_create(args) -> None:
@@ -407,7 +407,8 @@ def check_update(args) -> None:
     if args.status == "future" and not args.date_field:
         raise WordPressError("--status future needs --date: the time to publish at.",
                              "validation_error")
-    if not build_payload(args) and not args.term_names:
+    if (not build_payload(args) and not args.term_names and not args.acf_values
+            and args.featured_slot is None):
         raise WordPressError("Nothing to update: pass at least one field to change.",
                              "validation_error")
 
@@ -555,24 +556,32 @@ def create_terms(ctx, missing: dict[str, list[str]]) -> dict[str, list[int]]:
     for taxonomy, names in missing.items():
         route = taxonomy_route(ctx, taxonomy)
         for name in names:
-            hint = lookup(ctx, "terms", "list", "--taxonomy", taxonomy, "--search", name)
             try:
-                term, _ = ctx.client.request("POST", route, json={"name": name},
-                                             base=ctx.base, idempotent=False)
-                term_id = term.get("id") if isinstance(term, dict) else None
-                if not isinstance(term_id, int):
-                    raise WordPressError(
-                        "The site accepted the term and returned no id; it was probably "
-                        "created. Look it up before trying again.",
-                        "outcome_unknown",
-                    )
+                term = post_term(ctx, route, taxonomy, {"name": name})
             except WordPressError as exc:
-                _lookup_hint(exc, hint)
                 if created:
                     exc.extra["created_terms"] = created
                 raise
-            created.setdefault(taxonomy, []).append(term_id)
+            created.setdefault(taxonomy, []).append(term["id"])
     return created
+
+
+def post_term(ctx, route: str, taxonomy: str, body: dict) -> dict:
+    """Create one term, sent once: the term WordPress answered, with an int id."""
+    hint = lookup(ctx, "terms", "list", "--taxonomy", taxonomy, "--search", body["name"])
+    try:
+        term, _ = ctx.client.request("POST", route, json=body, base=ctx.base,
+                                     idempotent=False)
+        if not isinstance(term, dict) or not isinstance(term.get("id"), int):
+            raise WordPressError(
+                "The site accepted the term and returned no id; it was probably "
+                "created. Look it up before trying again.",
+                "outcome_unknown",
+            )
+    except WordPressError as exc:
+        _lookup_hint(exc, hint)
+        raise
+    return term
 
 
 def _apply_terms(ctx, payload: dict, ids: dict, created: dict) -> None:
@@ -602,6 +611,14 @@ def readback(sent: dict, after: dict, term_fields: list[str]) -> dict:
                 elif got[meta_key] != meta_value:
                     changed.append(f"meta.{meta_key}")
             continue
+        if key == "acf":
+            got = after.get("acf") if isinstance(after.get("acf"), dict) else {}
+            for name, field_value in value.items():
+                if name not in got:
+                    dropped.append(f"acf.{name}")
+                elif not acf.same(field_value, got[name]):
+                    changed.append(f"acf.{name}")
+            continue
         if key not in after:
             dropped.append(key)
             continue
@@ -627,6 +644,9 @@ def readback(sent: dict, after: dict, term_fields: list[str]) -> dict:
     if any(k.startswith("meta.") for k in dropped):
         notes.append("WordPress ignores a meta key that is not registered with "
                      "show_in_rest.")
+    if any(k.startswith("acf.") for k in dropped + changed):
+        notes.append("An ACF field did not store as sent: WordPress may have rejected "
+                     "or reformatted the value. `get --fields acf` shows what was saved.")
     if "slug" in changed:
         notes.append("WordPress gave the post a different slug; it adds a suffix when "
                      "the slug is taken.")
@@ -653,18 +673,6 @@ def _written(ctx, route: str, type_slug: str, post_id: int, written, payload: di
     }
 
 
-def lookup(ctx, *argv: str) -> str:
-    """The command that finds out whether an ambiguous write applied.
-
-    It names ``--site`` and ``--blog`` explicitly: run bare, it would search
-    the default site and find nothing, which reads as "send it again".
-    """
-    scope = ["--site", ctx.record.name]
-    if ctx.blog:
-        scope += ["--blog", ctx.blog]
-    return " ".join(shlex.quote(part) for part in (*argv, *scope))
-
-
 def _lookup_hint(exc: WordPressError, hint: str) -> None:
     if exc.reason == "outcome_unknown":
         exc.extra["lookup"] = hint
@@ -681,6 +689,48 @@ def _post_id(item, verb: str) -> int:
     return post_id
 
 
+def _uploaded(report: list[dict]) -> list[dict]:
+    return [{"path": row["path"], "id": row["id"]} for row in report]
+
+
+def _prepare_write(ctx, args, payload: dict, ids: dict, missing: dict) -> tuple[list, dict]:
+    """After the gate and before the post write: the uploads, then any term
+    creates, then the payload filled with what they returned.
+
+    Every upload of the call happens before the post is written (spec §6.2),
+    so a failed upload leaves no post pointing at a missing attachment. A
+    failure from here on names what was already stored.
+    """
+    upload_ids, report = acf.run_uploads(ctx, args.uploads)
+    try:
+        created = create_terms(ctx, missing)
+    except WordPressError as exc:
+        if report:
+            exc.extra["uploaded"] = _uploaded(report)
+        raise
+    _apply_terms(ctx, payload, ids, created)
+    if args.featured_slot is not None:
+        payload["featured_media"] = upload_ids[args.featured_slot.index]
+    if args.acf_values:
+        payload["acf"] = acf.fill(args.acf_values, upload_ids)
+    return report, created
+
+
+def _write_failed(exc: WordPressError, report: list, created: dict) -> None:
+    if created:
+        exc.extra["created_terms"] = created
+    if report:
+        exc.extra["uploaded"] = _uploaded(report)
+
+
+def _extras(out: dict, report: list, created: dict) -> dict:
+    if report:
+        out["uploads"] = report
+    if created:
+        out["created_terms"] = created
+    return out
+
+
 def cmd_create(args) -> dict:
     ctx = args.wp
     route = type_route(ctx, args.type)
@@ -695,9 +745,9 @@ def cmd_create(args) -> dict:
             }
     payload = build_payload(args)
     ids, missing = resolve_terms(ctx, args.type, args.term_names, create=args.create_terms)
+    acf.check_schema(ctx, args.type, args.acf_values)
     gate(args, ctx, _terms_actions(missing))
-    created_terms = create_terms(ctx, missing)
-    _apply_terms(ctx, payload, ids, created_terms)
+    report, created_terms = _prepare_write(ctx, args, payload, ids, missing)
     if args.slug:
         hint = lookup(ctx, "list", "--type", args.type, "--slug", args.slug, "--status", "any")
     else:
@@ -709,14 +759,11 @@ def cmd_create(args) -> dict:
         post_id = _post_id(item, "create")
     except WordPressError as exc:
         _lookup_hint(exc, hint)
-        if created_terms:
-            exc.extra["created_terms"] = created_terms
+        _write_failed(exc, report, created_terms)
         raise
     out = {"status": "ok", **ctx.envelope(), "created": True,
            **_written(ctx, route, args.type, post_id, item, payload)}
-    if created_terms:
-        out["created_terms"] = created_terms
-    return out
+    return _extras(out, report, created_terms)
 
 
 def cmd_update(args) -> dict:
@@ -725,31 +772,32 @@ def cmd_update(args) -> dict:
     current = _current(ctx, route, args.id)
     payload = build_payload(args)
     ids, missing = resolve_terms(ctx, args.type, args.term_names, create=args.create_terms)
+    acf.check_schema(ctx, args.type, args.acf_values)
     label = _label(current, args.type, args.id)
     actions = []
     status_now = current.get("status")
     if status_now in LIVE_STATUSES:
-        fields = sorted(set(payload) | set(args.term_names))
-        actions.append(f"change {', '.join(fields)} of {label}, which is live ({status_now})")
+        fields = set(payload) | set(args.term_names)
+        if args.featured_slot is not None:
+            fields.add("featured_media")
+        fields |= {f"acf.{name}" for name in args.acf_values or {}}
+        actions.append(f"change {', '.join(sorted(fields))} of {label}, which is live "
+                       f"({status_now})")
     status_new = payload.get("status")
     if status_new in LIVE_STATUSES and status_new != status_now:
         actions.append(f"make {label} {status_new}{_when(args)}")
     actions += _terms_actions(missing)
     gate(args, ctx, actions)
-    created_terms = create_terms(ctx, missing)
-    _apply_terms(ctx, payload, ids, created_terms)
+    report, created_terms = _prepare_write(ctx, args, payload, ids, missing)
     try:
         item, _ = ctx.client.request("POST", f"{route}/{args.id}", json=payload,
                                      base=ctx.base, idempotent=True)
     except WordPressError as exc:
-        if created_terms:
-            exc.extra["created_terms"] = created_terms
+        _write_failed(exc, report, created_terms)
         raise
     out = {"status": "ok", **ctx.envelope(), "updated": True,
            **_written(ctx, route, args.type, args.id, item, payload)}
-    if created_terms:
-        out["created_terms"] = created_terms
-    return out
+    return _extras(out, report, created_terms)
 
 
 def cmd_publish(args) -> dict:

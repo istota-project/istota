@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 
 from .client import WordPressError, fence, fence_tree, raw_text, selector, selectors
-from .content import limit_arg, total_header
+from .common import limit_arg, total_header
 
 
 def _true_keys(value) -> list:

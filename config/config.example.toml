@@ -1685,6 +1685,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # private_hosts = []              # exact host names allowed to resolve to a
 #                                 #   private or loopback address, e.g. a local
 #                                 #   ddev site. Every other site must be public.
+# max_upload_mb = 25              # largest file one media upload may send
 
 # ============================================================================
 # ntfy Push Notifications

@@ -686,6 +686,9 @@ class Posts:
                 item[key] = {"raw": value, "rendered": value}
             elif key == "meta":
                 item["meta"].update({k: v for k, v in value.items() if k in self.registered_meta})
+            elif key == "acf":
+                # ACF writes only the fields named; the rest keep their values.
+                item.setdefault("acf", {}).update(value)
             else:
                 item[key] = value
         if self.on_save:
@@ -1131,6 +1134,7 @@ class TestPublishAndDelete:
     ["publish", "--id", "51"],
     ["delete", "--id", "51", "--force"],
     ["create", "--type", "post", "--title", "x", "--terms", "category=Nope", "--create-terms"],
+    ["terms", "create", "--taxonomy", "category", "--name", "Nope"],
 ])
 def test_every_gated_action_sends_no_write_without_confirmation(env, posts, capsys, argv):
     posts.add(status="publish")

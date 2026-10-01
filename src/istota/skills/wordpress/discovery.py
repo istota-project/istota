@@ -26,7 +26,7 @@ ABILITIES_NAMESPACE = "wp-abilities/v1"
 CONNECTOR_ABILITIES = ("istota/options-get", "istota/options-update", "istota/network-sites")
 
 _SCHEMA_PROSE_KEYS = frozenset({"title", "description"})
-_ACF_NOTE = (
+ACF_NOTE = (
     "This type has no ACF fields over REST. Each ACF / SCF field group has a "
     "'Show in REST API' setting, off by default; switch it on in the field "
     "group's settings for its fields to appear here."
@@ -196,7 +196,11 @@ def _acf_summary(acf: dict) -> list[dict]:
     ]
 
 
-def _describe_type(ctx, slug: str, output) -> dict:
+def acf_schema(ctx, slug: str) -> dict | None:
+    """The type's ACF JSON Schema (``schema.properties.acf``), or None if it has none.
+
+    From the cache `describe` fills, or one ``OPTIONS`` on the collection.
+    """
     route = type_route(ctx, slug)
     schema = ctx.cache.get(f"schema:{slug}")
     if not isinstance(schema, dict):
@@ -205,11 +209,17 @@ def _describe_type(ctx, slug: str, output) -> dict:
         schema = schema if isinstance(schema, dict) else {}
         ctx.cache.put(f"schema:{slug}", schema)
     props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
-    acf = props.get("acf") if isinstance(props.get("acf"), dict) else None
+    return props.get("acf") if isinstance(props.get("acf"), dict) else None
+
+
+
+def _describe_type(ctx, slug: str, output) -> dict:
+    route = type_route(ctx, slug)
+    acf = acf_schema(ctx, slug)
     result: dict = {"slug": slug, "route": route}
     if acf is None:
         result["acf"] = None
-        result["acf_note"] = _ACF_NOTE
+        result["acf_note"] = ACF_NOTE
         return result
     fenced = fence_keys(acf, _SCHEMA_PROSE_KEYS)
     result["acf_fields"] = _acf_summary(acf)

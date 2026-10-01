@@ -10,7 +10,10 @@ Usage:
     python -m istota.skills.wordpress delete --id N [--type SLUG] [--force --confirmed]
     python -m istota.skills.wordpress publish --id N [--type SLUG] [--date D] --confirmed
     python -m istota.skills.wordpress terms list --taxonomy SLUG [--search Q]
+    python -m istota.skills.wordpress terms create --taxonomy SLUG --name N [--parent ID] --confirmed
     python -m istota.skills.wordpress media list [--search Q] [--mime image]
+    python -m istota.skills.wordpress media upload --file PATH [--title T] [--alt A] [--caption C]
+    python -m istota.skills.wordpress media update --id N [--title T] [--alt A] [--caption C]
     python -m istota.skills.wordpress users list|get ...
     python -m istota.skills.wordpress settings get
     python -m istota.skills.wordpress plugins list
@@ -116,9 +119,17 @@ def _write_args(parser: argparse.ArgumentParser) -> None:
                         help="TAXONOMY=name1,name2 (names or ids); repeatable")
     parser.add_argument("--create-terms", action="store_true",
                         help="create --terms names that do not exist (needs --confirmed)")
-    parser.add_argument("--featured-media-id", type=int, help="attachment id, 0 for none")
+    featured = parser.add_mutually_exclusive_group()
+    featured.add_argument("--featured-media-id", type=int, help="attachment id, 0 for none")
+    host_path(featured, "--featured-image", mode=EGRESS,
+              help="upload this file from your own workspace and make it the featured image")
     host_path(parser, "--meta-file", mode=EGRESS,
               help="a JSON object of registered post meta, from your own workspace")
+    host_path(parser, "--acf-file", mode=EGRESS,
+              help="a JSON object of ACF fields to write whole, from your own workspace; "
+                   '{"$upload": PATH} anywhere in a value uploads PATH and puts its id there')
+    parser.add_argument("--acf-set", action="append",
+                        help="FIELD=JSON, one ACF field written whole; repeatable")
     _confirmed(parser)
 
 
@@ -194,6 +205,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--taxonomy", required=True, help="taxonomy slug, e.g. category")
     p.add_argument("--search", help="search text")
     _paging(p, limit_help=f"terms per page, 1-{content.MAX_LIMIT} (default 100)")
+    p = terms.add_parser("create", help="create a term (needs --confirmed)")
+    _site_args(p)
+    p.add_argument("--taxonomy", required=True, help="taxonomy slug, e.g. category")
+    p.add_argument("--name", required=True, help="the term name")
+    p.add_argument("--parent", type=int, help="parent term id (hierarchical taxonomies)")
+    p.add_argument("--slug", help="the term slug")
+    _confirmed(p)
 
     p = sub.add_parser("media", help="the media library")
     media_sub = p.add_subparsers(dest="media_command", required=True)
@@ -202,6 +220,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--search", help="search text")
     p.add_argument("--mime", help="image, video, audio, text, application, or a full MIME type")
     _paging(p, limit_help=f"items per page, 1-{content.MAX_LIMIT} (default 20)")
+    p = media_sub.add_parser("upload", help="upload a file to the media library")
+    _site_args(p)
+    host_path(p, "--file", mode=EGRESS, required=True,
+              help="the file to upload, from your own workspace")
+    p.add_argument("--title", help="the attachment title")
+    p.add_argument("--alt", help="alt text")
+    p.add_argument("--caption", help="the caption")
+    p = media_sub.add_parser("update", help="change an attachment's title, alt text or caption")
+    _site_args(p)
+    p.add_argument("--id", type=int, required=True, help="attachment id")
+    p.add_argument("--title", help="the attachment title")
+    p.add_argument("--alt", help="alt text")
+    p.add_argument("--caption", help="the caption")
 
     p = sub.add_parser("users", help="site users")
     users = p.add_subparsers(dest="users_command", required=True)
@@ -309,7 +340,7 @@ def _require_enabled(config) -> None:
 def _open_site(args) -> SiteContext:
     """The record, the entry and a client, in the order that spends least first."""
     user_id = _user_id()
-    config = _load_config()
+    config = getattr(args, "config", None) or _load_config()
     _require_enabled(config)
     records, errors = _read_records(config, user_id)
     try:
@@ -412,23 +443,33 @@ def _site_verb(handler, precheck=None):
     """`handler` with the site opened first and the client closed after.
 
     Opening the site is the vault fetch, so it happens only once the argv has
-    parsed, every host path has resolved and `precheck` (the verb's own local
-    checks) has passed, and never for `sites`.
+    parsed, every host path has resolved, the skill is known to be enabled and
+    `precheck` (the verb's own local checks, with ``args.config`` loaded) has
+    passed, and never for `sites`.
     """
 
     def run(args):
-        if precheck is not None:
-            precheck(args)
-        args.wp = _open_site(args)
+        # A precheck may hold files open for the handler (`media.open_upload`);
+        # whatever it registers here is closed on every path.
+        args.closers = []
         try:
-            return handler(args)
-        except WordPressError as exc:
-            # Which site a refusal or an ambiguous write was about.
-            exc.extra.setdefault("site", args.wp.record.name)
-            exc.extra.setdefault("blog", args.wp.blog)
-            raise
+            args.config = _load_config()
+            _require_enabled(args.config)
+            if precheck is not None:
+                precheck(args)
+            args.wp = _open_site(args)
+            try:
+                return handler(args)
+            except WordPressError as exc:
+                # Which site a refusal or an ambiguous write was about.
+                exc.extra.setdefault("site", args.wp.record.name)
+                exc.extra.setdefault("blog", args.wp.blog)
+                raise
+            finally:
+                args.wp.client.close()
         finally:
-            args.wp.client.close()
+            for close in reversed(args.closers):
+                close()
 
     run.__name__ = handler.__name__
     return run
@@ -465,7 +506,10 @@ COMMANDS = {
     "delete": _write_verb(content.cmd_delete),
     "publish": _write_verb(content.cmd_publish, content.check_publish),
     "terms list": _site_verb(content.cmd_terms_list, content.check_paging),
+    "terms create": _write_verb(content.cmd_terms_create, content.check_terms_create),
     "media list": _site_verb(media.cmd_media_list, content.check_paging),
+    "media upload": _write_verb(media.cmd_media_upload, media.check_upload),
+    "media update": _write_verb(media.cmd_media_update, media.check_media_update),
     "users list": _site_verb(admin.cmd_users_list, content.check_paging),
     "users get": _site_verb(admin.cmd_users_get, admin.check_user_id),
     "settings get": _site_verb(admin.cmd_settings_get),

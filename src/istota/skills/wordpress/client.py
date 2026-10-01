@@ -49,6 +49,7 @@ log = logging.getLogger(__name__)
 
 LABEL = "WORDPRESS CONTENT"
 REQUEST_TIMEOUT = 30.0
+UPLOAD_TIMEOUT = 120.0
 #: A response past this is refused rather than held in memory. A long
 #: flexible-content post is tens of kilobytes; this bounds a misbehaving site.
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
@@ -97,6 +98,16 @@ def resolve_host(host: str, port: int) -> list[str]:
         if address not in seen:
             seen.append(address)
     return seen
+
+
+def _wp_code(body: bytes) -> str | None:
+    """The ``code`` of a WordPress error body, when it is one and well formed."""
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None
+    code = data.get("code") if isinstance(data, dict) else None
+    return code if isinstance(code, str) and _WP_CODE_RE.fullmatch(code) else None
 
 
 def _host_header(host: str, port: int) -> str:
@@ -173,18 +184,26 @@ class WordPressClient:
                     )
         return [str(a) for a in addresses]
 
-    def _build(self, method, url, host, port, address, params, body) -> httpx.Request:
+    def _build(self, method, url, host, port, address, params, body, *,
+               content=None, headers=None, timeout=None) -> httpx.Request:
         target = httpx.URL(url, params=params).copy_with(host=address, port=port)
         credentials = f"{self._username.reveal()}:{self._password.reveal()}"
-        headers = {
+        # The caller's headers first, so they can never replace these four.
+        merged = dict(headers or {})
+        merged.update({
             "Host": _host_header(host, port),
             "Authorization": "Basic " + base64.b64encode(credentials.encode()).decode(),
             "Accept": "application/json",
             "User-Agent": USER_AGENT,
-        }
-        request = httpx.Request(method, target, headers=headers, json=body)
+        })
+        if content is not None:
+            request = httpx.Request(method, target, headers=merged, content=content)
+        else:
+            request = httpx.Request(method, target, headers=merged, json=body)
         extensions = dict(request.extensions or {})
         extensions["sni_hostname"] = host
+        if timeout is not None:
+            extensions["timeout"] = httpx.Timeout(timeout).as_dict()
         request.extensions = extensions
         return request
 
@@ -215,8 +234,20 @@ class WordPressClient:
         json: object = None,
         idempotent: bool | None = None,
         base: str | None = None,
+        content: bytes | None = None,
+        headers: dict | None = None,
+        timeout: float | None = None,
+        definite_codes: frozenset[str] = frozenset(),
     ) -> tuple[object, httpx.Headers]:
-        """One call to ``{base}/wp-json/{route}``: ``(parsed JSON, headers)``."""
+        """One call to ``{base}/wp-json/{route}``: ``(parsed JSON, headers)``.
+
+        `content` sends raw bytes (a media upload) in place of `json`, with the
+        caller's `headers` beside the client's own, which they cannot replace.
+        `definite_codes` are WordPress error codes that, on a 5xx to a request
+        that is not idempotent, mean nothing was stored, because the server
+        answers them before it writes (``rest_upload_sideload_error``). Such an
+        answer is a refusal rather than ``outcome_unknown``.
+        """
         method = method.upper()
         if idempotent is None:
             idempotent = method in _IDEMPOTENT_METHODS
@@ -235,7 +266,8 @@ class WordPressClient:
         index = 0
         while True:
             last = attempt + 1 >= attempts
-            request = self._build(method, url, host, port, addresses[index], params, json)
+            request = self._build(method, url, host, port, addresses[index], params, json,
+                                  content=content, headers=headers, timeout=timeout)
             try:
                 response, body = self._send(request)
             except WordPressError as exc:
@@ -270,7 +302,7 @@ class WordPressClient:
             # 501 is a refusal, not a failure: WordPress answers it for a trash
             # the type does not have, with nothing done.
             if response.status_code >= 500 and response.status_code != 501:
-                if not idempotent:
+                if not idempotent and _wp_code(body) not in definite_codes:
                     raise self._outcome_unknown(method, route, f"HTTP {response.status_code}")
                 if not last:
                     attempt += 1

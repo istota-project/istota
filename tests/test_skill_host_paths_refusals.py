@@ -281,6 +281,31 @@ CASES: dict[tuple[str, str, str], Case] = {
         main="istota.skills.wordpress",
         patch=("istota.skills.wordpress.COMMANDS", "update"),
     ),
+    ("wordpress", "create", "acf_file"): Case(
+        argv=lambda p: ["create", "--type", "post", "--title", "t", "--acf-file", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "create"),
+    ),
+    ("wordpress", "create", "featured_image"): Case(
+        argv=lambda p: ["create", "--type", "post", "--title", "t", "--featured-image", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "create"),
+    ),
+    ("wordpress", "update", "acf_file"): Case(
+        argv=lambda p: ["update", "--id", "1", "--acf-file", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "update"),
+    ),
+    ("wordpress", "update", "featured_image"): Case(
+        argv=lambda p: ["update", "--id", "1", "--featured-image", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "update"),
+    ),
+    ("wordpress", "media.upload", "file"): Case(
+        argv=lambda p: ["media", "upload", "--file", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "media upload"),
+    ),
 
     # -- Stage 6: the writes ------------------------------------------------ #
     ("email", "attachments", "dest"): Case(
@@ -298,7 +323,7 @@ CASES: dict[tuple[str, str, str], Case] = {
 #: How many resolving stamps this file expects to find at the very least.
 #: A parametrization that shrinks is a green run, so the count is asserted
 #: rather than trusted — the same reason the coverage walk asserts a floor.
-STAMP_FLOOR = 31
+STAMP_FLOOR = 36
 
 
 def _skill_parser_modules() -> dict[str, str]:
