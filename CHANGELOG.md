@@ -156,6 +156,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On a phone, tapping outside a field on the sign-in pages now closes the keyboard, as it does in web chat. Before, the keyboard stayed up over the submit button, and in the 6-digit code field, whose number pad has no return key, there was no way to put it away. This covers sign-in, the emailed-code page, set-password and password reset. A tap on another field, a link or a button leaves the keyboard alone, so the first tap on submit still submits (ISSUE-582).
 - A WhatsApp group room in web chat no longer shows a composer that does nothing. A message sent there became a web task that reached nobody in the group, and an unaddressed one got no answer either. Group rooms are now read-only in web chat like your one-to-one SMS and WhatsApp rooms, and the server refuses a send; a group's waiting questions can still be answered from web chat (ISSUE-585).
 - The nightly sleep cycle no longer holds the database write lock while it waits on a model call. It inserted knowledge facts and then ran USER.md curation on the same open transaction, so for about a minute every other writer failed with `database is locked`, including the web credentials page, which then showed nothing.
 
