@@ -82,10 +82,10 @@ def _schema_columns(conn):
     candidates = set(EMBEDDED_HOLDERS)
     for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'"):
         quoted_table = '\"' + table.replace('\"', '\"\"') + '\"'
-        for _, name, kind, *_ in conn.execute(f"PRAGMA table_info({quoted_table})"):
+        for _, name, _, *_ in conn.execute(f"PRAGMA table_info({quoted_table})"):
             column = (table, name)
             columns.add(column)
-            if kind in {"TEXT", "BLOB"} and ("token" in name or name in REFERENCE_NAMES):
+            if "token" in name or name in REFERENCE_NAMES:
                 candidates.add(column)
         for row in conn.execute(f"PRAGMA foreign_key_list({quoted_table})"):
             if row[2] == "rooms":
@@ -121,6 +121,8 @@ def test_token_columns_have_exactly_one_disposition(tmp_path, initialized):
 
 @pytest.mark.parametrize("ddl", [
     "ALTER TABLE rooms ADD COLUMN future_token TEXT",
+    "ALTER TABLE rooms ADD COLUMN future_token VARCHAR(255)",
+    "ALTER TABLE rooms ADD COLUMN future_token",
     "CREATE TABLE future_room_holder (parent TEXT REFERENCES rooms(token))",
 ])
 def test_inventory_guard_refuses_an_unclassified_holder(ddl):

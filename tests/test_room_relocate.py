@@ -105,6 +105,8 @@ def test_refuses_active_tasks_without_any_write(database, status, capsys):
 
 @pytest.mark.parametrize("ddl", [
     "ALTER TABLE rooms ADD COLUMN future_token TEXT",
+    "ALTER TABLE rooms ADD COLUMN future_token VARCHAR(255)",
+    "ALTER TABLE rooms ADD COLUMN future_token",
     "CREATE TABLE future_holder (parent TEXT REFERENCES rooms(token))",
     "DROP TABLE tasks",
 ])
@@ -338,3 +340,61 @@ def test_cli_dry_run_and_run(database):
     listed = subprocess.run([*command, "--list"], text=True, capture_output=True)
     assert listed.returncode == 0, listed.stderr
     assert "already-migrated: rm_" in listed.stdout
+
+
+def test_migration_preserves_retention_orphans(database):
+    with db.get_db(database) as conn:
+        old = legacy(conn, "email-thread-old", "email")
+        ident = db.create_task(conn, user_id="alice", source_type="email", prompt="mail", conversation_token=old)
+        conn.execute("UPDATE tasks SET status='completed',completed_at=datetime('now','-30 days') WHERE id=?", (ident,))
+        conn.execute("INSERT INTO processed_emails(email_id,sender_email,thread_id,task_id) VALUES ('1','bob@example.com',?,?)", (old, ident))
+        assert db.cleanup_old_tasks(conn, 7) == 1
+        before = [tuple(row) for row in conn.execute("PRAGMA foreign_key_check")]
+        assert before
+    assert room_relocate.migrate_database(database) == 0
+    with db.get_db(database) as conn:
+        new = conn.execute("SELECT new_token FROM room_token_migration").fetchone()[0]
+        row = conn.execute("SELECT thread_id,task_id FROM processed_emails").fetchone()
+        assert tuple(row) == (new, ident)
+        assert [tuple(row) for row in conn.execute("PRAGMA foreign_key_check")] == before
+
+
+def test_existing_vector_index_survives_migration(database):
+    import struct
+    sqlite_vec = pytest.importorskip("sqlite_vec")
+    with db.get_db(database) as conn:
+        old = legacy(conn)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.execute("CREATE VIRTUAL TABLE memory_chunks_vec USING vec0(chunk_id INTEGER PRIMARY KEY, embedding FLOAT[384])")
+        embedding = struct.pack("384f", *([0.25] * 384))
+        conn.execute("INSERT INTO memory_chunks_vec(chunk_id,embedding) VALUES (1,?)", (embedding,))
+    assert room_relocate.migrate_database(database) == 0
+    with db.get_db(database) as conn:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        assert bytes(conn.execute("SELECT embedding FROM memory_chunks_vec WHERE chunk_id=1").fetchone()[0]) == embedding
+        assert db.get_room(conn, old) is None
+
+
+def test_new_foreign_key_violation_rolls_back_room(database):
+    with db.get_db(database) as conn:
+        legacy(conn)
+        conn.execute("""CREATE TRIGGER bad_reference AFTER UPDATE OF token ON rooms
+            BEGIN INSERT INTO room_members(room_token,user_id) VALUES ('absent-room','bob'); END""")
+    before = snapshot(database)
+    assert room_relocate.migrate_database(database) == 2
+    assert snapshot(database) == before
+
+
+def test_unavailable_vector_extension_refuses_without_changes(database, monkeypatch, capsys):
+    with db.get_db(database) as conn:
+        legacy(conn)
+        # The detection is by persisted index name; the real vec0 happy path
+        # is exercised above with the optional extension installed.
+        conn.execute("CREATE TABLE memory_chunks_vec(chunk_id INTEGER PRIMARY KEY, embedding BLOB)")
+    before = snapshot(database)
+    monkeypatch.setattr("istota.memory.search.enable_vec_extension", lambda conn: False)
+    assert room_relocate.migrate_database(database) == 1
+    assert "refusal: vector_extension_unavailable" in capsys.readouterr().err
+    assert snapshot(database) == before

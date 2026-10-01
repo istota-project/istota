@@ -103,6 +103,16 @@ PRESERVE_COLUMNS: dict[tuple[str, str], str] = {
     ("web_user_tokens", "access_token"): "credential ciphertext",
     ("web_user_tokens", "refresh_token"): "credential ciphertext",
     ("web_auth_tokens", "token_hash"): "authentication token digest",
+    ("task_usage", "billed_input_tokens"): "model usage count",
+    ("task_usage", "cache_read_tokens"): "model usage count",
+    ("task_usage", "cache_write_tokens"): "model usage count",
+    ("task_usage", "initial_context_tokens"): "model usage count",
+    ("task_usage", "output_tokens"): "model usage count",
+    ("task_usage", "peak_context_tokens"): "model usage count",
+    ("task_usage_models", "billed_input_tokens"): "model usage count",
+    ("task_usage_models", "cache_read_tokens"): "model usage count",
+    ("task_usage_models", "cache_write_tokens"): "model usage count",
+    ("task_usage_models", "output_tokens"): "model usage count",
     # Approval covers the preview/body, never a re-rendered migration result.
     ("whatsapp_skill_requests", "preview_digest"): "approved content digest",
     ("whatsapp_skill_requests", "approved_digest"): "approved content digest",
@@ -137,9 +147,9 @@ def check_inventory(conn: sqlite3.Connection) -> set[tuple[str, str]]:
     for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'"):
         table = row[0]
         for column in conn.execute(f"PRAGMA table_info({_quote(table)})"):
-            name, kind = column[1], column[2].upper()
+            name = column[1]
             columns.add((table, name))
-            if kind in {"TEXT", "BLOB"} and ("token" in name or name in _REFERENCE_NAMES):
+            if "token" in name or name in _REFERENCE_NAMES:
                 candidates.add((table, name))
         for fk in conn.execute(f"PRAGMA foreign_key_list({_quote(table)})"):
             if fk[2] == "rooms":
@@ -174,8 +184,6 @@ def _preflight(conn: sqlite3.Connection) -> None:
     ).fetchone()
     if ambiguous:
         raise MigrationRefusal(f"ambiguous_binding: {ambiguous[0]}:{ambiguous[1]}")
-    if conn.execute("PRAGMA foreign_key_check").fetchone():
-        raise MigrationRefusal("foreign_key_violation")
 
 
 def _descriptor(value: str, old: str, new: str) -> str:
@@ -304,6 +312,9 @@ def _rewrite_destinations(conn, old: str, new: str) -> None:
 
 def _migrate_room(conn: sqlite3.Connection, old: str) -> str:
     """Caller holds BEGIN IMMEDIATE; all canonical holders and mapping commit together."""
+    # Task retention deliberately leaves email provenance pointing at pruned
+    # tasks. Keep those rows; only a violation introduced here is a failure.
+    existing_violations = {tuple(row) for row in conn.execute("PRAGMA foreign_key_check")}
     conn.execute("PRAGMA defer_foreign_keys=ON")
     conn.execute("""CREATE TABLE IF NOT EXISTS room_token_migration (
         old_token TEXT PRIMARY KEY, new_token TEXT NOT NULL, migrated_at TEXT NOT NULL)""")
@@ -335,8 +346,9 @@ def _migrate_room(conn: sqlite3.Connection, old: str) -> str:
             if updated != row[1]:
                 conn.execute(f"UPDATE {table_sql} SET {column_sql}=? WHERE rowid=?", (updated, row[0]))
     conn.execute("INSERT INTO room_token_migration VALUES (?, ?, datetime('now'))", (old, new))
-    if conn.execute("PRAGMA foreign_key_check").fetchone():
-        raise ValueError("foreign key violation after room rewrite")
+    violations = {tuple(row) for row in conn.execute("PRAGMA foreign_key_check")}
+    if violations - existing_violations:
+        raise ValueError("new foreign key violation after room rewrite")
     return new
 
 
@@ -358,6 +370,16 @@ def migrate_database(db_path: Path, *, dry_run: bool = False, list_only: bool = 
         mode = "ro" if dry_run or list_only else "rw"
         conn = sqlite3.connect(Path(db_path).resolve().as_uri() + f"?mode={mode}", uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='memory_chunks_vec'").fetchone():
+            from .memory.search import enable_vec_extension
+            # The loader opens the installed package's extension, never a DB-
+            # supplied path. Restrict extension loading again immediately.
+            conn.enable_load_extension(True)
+            try:
+                if not enable_vec_extension(conn):
+                    raise MigrationRefusal("vector_extension_unavailable")
+            finally:
+                conn.enable_load_extension(False)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("BEGIN" if dry_run or list_only else "BEGIN IMMEDIATE")
         _preflight(conn)
