@@ -41,13 +41,16 @@ def https_host(url):
 def parse_binding(url, attributes, tags, *, source="vault"):
     """Invalid host metadata unbinds the entry; it never retains an old host."""
     hosts = set()
+    # Both are a value a person typed into a URL field: a KeePass entry, or a
+    # credential added in Istota. Deployment config gets neither allowance.
+    typed = source in ("vault", "local")
     try:
         if url:
-            # KeePass URL fields may hold a bare authority. Only vault input
-            # gets this shorthand; actual request URLs still require HTTPS.
-            if source == "vault" and isinstance(url, str) and not any(c in url for c in "/?#@"):
+            # A bare authority gets the https shorthand; actual request URLs
+            # still require HTTPS.
+            if typed and isinstance(url, str) and not any(c in url for c in "/?#@"):
                 url = "https://" + url
-            hosts.add(credential_host(url, allow_http=source == "vault"))
+            hosts.add(credential_host(url, allow_http=typed))
         for value in (attributes.get("istota_hosts") or "").split(","):
             value = value.strip()
             if not value:

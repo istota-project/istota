@@ -15,6 +15,9 @@ from tests.test_secrets_vault import _new_db, _read
 def test_vault_bare_authority_binds_for_https(url, host):
     from istota.credential_broker.bindings import https_host, parse_binding
     assert parse_binding(url, {}, [])["hosts"] == [host]
+    assert parse_binding(url, {}, [], source="local") == {
+        **parse_binding(url, {}, []), "source": "local",
+    }
     assert parse_binding(url, {}, [], source="config")["hosts"] == []
     with pytest.raises(ValueError):
         https_host(url)
@@ -258,6 +261,7 @@ def test_empty_custom_metadata_roundtrips_as_none(tmp_path):
 def test_http_vault_metadata_keeps_scheme(url, host):
     from istota.credential_broker.bindings import https_host, parse_binding
     assert parse_binding(url, {}, [])["hosts"] == [host]
+    assert parse_binding(url, {}, [], source="local")["hosts"] == [host]
     assert parse_binding(url, {}, [], source="config")["hosts"] == []
     with pytest.raises(ValueError):
         https_host(url)
