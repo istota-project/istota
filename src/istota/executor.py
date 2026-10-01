@@ -52,11 +52,13 @@ from .context import (
 )
 from .storage import (
     ensure_channel_directories,
+    ensure_group_directories,
     ensure_user_directories_v2,
     get_user_scripts_path,
     open_user_skill_overlays,
     read_channel_memory,
     read_dated_memories,
+    read_group_memory,
     read_user_config_file,
     read_user_memory_v2,
 )
@@ -4764,6 +4766,7 @@ def build_bwrap_cmd(
     *,
     profile: SandboxProfile,
     withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
+    group_ids: "list[str] | None" = None,
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
@@ -4797,6 +4800,7 @@ def build_bwrap_cmd(
         authorized_skills=authorized_skills,
         workspace_dir=workspace_dir,
         withheld_scopes=withheld_scopes,
+        group_ids=group_ids,
     )
     return render_bwrap_argv(
         plan, cmd, net_proxy_sock=net_proxy_sock, user_temp_dir=user_temp_dir,
@@ -4835,6 +4839,7 @@ def native_fs_roots(
     workspace_dir: Path | None = None,
     control_dir: Path | None = None,
     withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
+    group_ids: "list[str] | None" = None,
 ) -> tuple[list[Path], list[Path], list[Path]]:
     """File-access roots for a native-brain task.
 
@@ -4997,6 +5002,7 @@ def native_fs_roots(
         profile=SandboxProfile.NATIVE,
         workspace_dir=workspace_dir,
         withheld_scopes=withheld_scopes,
+        group_ids=group_ids,
     )
     return project_fs_roots(plan, control_dir)
 
@@ -5772,14 +5778,19 @@ def _apply_memory_cap(
     recalled_memories: str | None,
     knowledge_facts: str | None = None,
     playbooks: str | None = None,
+    *,
+    group_memory: str | None = None,
 ) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None]:
     """Truncate memory components if total exceeds max_memory_chars.
 
     Truncation order: recalled → knowledge facts → dated → playbooks →
-    (warn about user/channel). Playbooks are truncated late because an
+    (warn about user/group/channel). Playbooks are truncated late because an
     actionable procedure is higher-value than recalled snippets, dated context,
     or KG triples (cap-ladder open question resolved in favour of protecting
     playbooks). Returns the updated components.
+
+    ``group_memory`` counts toward the total and is never cut, like user and
+    channel memory, so it is not returned.
     """
     cap = config.max_memory_chars
     if cap <= 0:
@@ -5792,6 +5803,7 @@ def _apply_memory_cap(
         + len(recalled_memories or "")
         + len(knowledge_facts or "")
         + len(playbooks or "")
+        + len(group_memory or "")
     )
     if total <= cap:
         return user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts, playbooks
@@ -5837,8 +5849,9 @@ def _apply_memory_cap(
     if over > 0:
         logger.warning(
             "Memory cap (%d) exceeded by %d chars after truncating recalled/dated/playbooks; "
-            "user_memory=%d, channel_memory=%d chars remain",
-            cap, over, len(user_memory or ""), len(channel_memory or ""),
+            "user_memory=%d, group_memory=%d, channel_memory=%d chars remain",
+            cap, over, len(user_memory or ""), len(group_memory or ""),
+            len(channel_memory or ""),
         )
 
     return user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts, playbooks
@@ -6552,6 +6565,7 @@ def build_prompt(
     attachment_status: "dict[str, str] | None" = None,
     shared_credentials: bool = False,
     withheld_scopes: "frozenset[str] | set[str] | None" = None,
+    group_memory: str | None = None,
 ) -> ComposedPrompt:
     """Build a task's prompt, split by authority rather than by size.
 
@@ -6712,6 +6726,19 @@ The following information has been remembered about this user:
 Current facts about entities relevant to this user:
 
 {knowledge_facts}
+
+"""
+
+    # Group memory: between the user's and the room's, the audience narrowing
+    # user -> group -> room. Retrieved memory, so the user half.
+    group_memory_section = ""
+    if group_memory:
+        group_memory_section = f"""
+## Group memory
+
+Memory shared with the members of each group below. Everything under a group's heading may be said in front of every member of that group.
+
+{group_memory}
 
 """
 
@@ -7122,6 +7149,7 @@ You have access to:
     user_blocks = [
         memory_section,
         knowledge_facts_section,
+        group_memory_section,
         channel_memory_section,
         _backstage_prompt(config, task, conn),
         dated_memories_section,
@@ -7318,6 +7346,71 @@ def _task_withheld_scopes(
             task.id, task.conversation_token, ",".join(sorted(withheld)),
         )
     return withheld
+
+
+def _resolve_task_groups(
+    config: Config,
+    task: db.Task,
+    conn: "db.sqlite3.Connection | None",
+) -> list[str]:
+    """``room_scopes.task_group_ids`` for this task, failing toward nothing.
+
+    The policy is that function's; this is the connection handling. A database
+    that does not exist holds no group (opening it to ask would create it), and
+    any error resolves to the empty set: group material that cannot be shown
+    to belong in this room does not load.
+    """
+    from . import room_scopes
+
+    try:
+        if conn is not None:
+            return room_scopes.task_group_ids(conn, task)
+        if not Path(config.db_path).exists():
+            return []
+        with db.get_db(config.db_path) as g_conn:
+            return room_scopes.task_group_ids(g_conn, task)
+    except Exception as exc:  # noqa: BLE001 — unreadable means no group
+        logger.warning(
+            "could not resolve the groups for task %s, loading none: %s",
+            task.id, exc,
+        )
+        return []
+
+
+def _load_group_memory(
+    config: Config,
+    conn: "db.sqlite3.Connection | None",
+    group_ids: list[str],
+) -> str | None:
+    """Each resolved group's ``GROUP.md`` under a ``### <display name>`` heading.
+
+    Seeds a group's directory on first use, which is what covers a group
+    created before ``istota group create`` seeded one, and what makes its
+    ``Groups/<id>`` bind exist. Never raises.
+    """
+    if not group_ids:
+        return None
+    names: dict[str, str] = {}
+    try:
+        if conn is not None:
+            groups = [db.get_group(conn, g) for g in group_ids]
+        else:
+            with db.get_db(config.db_path) as g_conn:
+                groups = [db.get_group(g_conn, g) for g in group_ids]
+        names = {g["group_id"]: g["display_name"] for g in groups if g}
+    except Exception:  # noqa: BLE001 — a heading falls back to the id
+        pass
+    blocks = []
+    for group_id in group_ids:
+        name = _header_scalar(names.get(group_id) or "").strip() or group_id
+        try:
+            ensure_group_directories(config, group_id, display_name=name)
+            content = read_group_memory(config, group_id)
+        except Exception:  # noqa: BLE001 — graceful degradation
+            content = None
+        if content:
+            blocks.append(f"### {name}\n\n{content.strip()}")
+    return "\n\n".join(blocks) or None
 
 
 def execute_task(
@@ -7833,6 +7926,17 @@ def execute_task(
             # Graceful degradation if storage unavailable
             pass
 
+    # Group memory and the resolved group set (groups spec D6, multiplayer
+    # D21): one answer, read by this block, the `Groups/<id>` binds and the
+    # proxy's `kv --group` gate. `exclude_memory` (newsletter-shaped output)
+    # suppresses it; the room's `memory` scope does not, since that scope is
+    # the sender's own memory and group material has its own audience rule.
+    group_memory = None
+    task_group_ids: list[str] = []
+    if not any(m.exclude_memory for m in _selected_metas):
+        task_group_ids = _resolve_task_groups(config, task, conn)
+        group_memory = _load_group_memory(config, conn, task_group_ids)
+
     # Load channel memory if in a conversation
     channel_memory = None
     if task.conversation_token:
@@ -7910,6 +8014,7 @@ def execute_task(
     # Apply memory size cap
     user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts_text, playbooks_text = _apply_memory_cap(
         config, user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts_text, playbooks_text,
+        group_memory=group_memory,
     )
 
     # Get user's email addresses for confirmation policy
@@ -7971,6 +8076,7 @@ def execute_task(
         skills_index=skills_index,
         confirmation_context=_confirmation_context,
         knowledge_facts=knowledge_facts_text,
+        group_memory=group_memory,
         conn=conn,
         effective_prompt=effective_prompt,
         attachment_status=image_attachment_status(image_prep),
@@ -8152,6 +8258,7 @@ def execute_task(
             user_config=user_config,
             discovered_calendars=discovered_calendars,
             withheld_scopes=_withheld,
+            group_ids=task_group_ids,
         )
         env = _runtime.env
         _proxy_ctx = _runtime.proxy_ctx
@@ -8189,6 +8296,7 @@ def execute_task(
                     workspace_dir=workspace_dir,
                     profile=sandbox_profile,
                     withheld_scopes=_withheld,
+                    group_ids=task_group_ids,
                 )
 
             return _wrap
@@ -8331,6 +8439,7 @@ def execute_task(
                 workspace_dir,
                 control_dir=control_dir,
                 withheld_scopes=_withheld,
+                group_ids=task_group_ids,
             )
 
         # Resolve aliases (role, provider) to a canonical model ID. Talk-poller

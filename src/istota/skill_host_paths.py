@@ -216,6 +216,12 @@ def user_workspace_root() -> Path | None:
 #: route to a skill CLI.
 WITHHELD_SCOPES_VAR = "ISTOTA_WITHHELD_SCOPES"
 
+#: Set by `task_env` in the proxy's base env, naming the task's resolved group
+#: set (`room_scopes.task_group_ids`), comma-separated. `kv --group` refuses a
+#: group not named here (multiplayer D21); absent means none. Never in the
+#: model's env, for the reason above.
+TASK_GROUPS_VAR = "ISTOTA_TASK_GROUPS"
+
 
 def _withheld_from_env() -> set[str]:
     raw = os.environ.get(WITHHELD_SCOPES_VAR, "")

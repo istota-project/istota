@@ -180,6 +180,7 @@ def build_task_runtime(
     user_config: object | None,
     discovered_calendars: list | None = None,
     withheld_scopes: frozenset[str] = frozenset(),
+    group_ids: "list[str] | None" = None,
 ) -> TaskRuntime:
     """Build the model's environment and the per-task proxies for one attempt.
 
@@ -191,6 +192,10 @@ def build_task_runtime(
     walks the whole index too, and the proxy's allowlist is every CLI skill.
     All three read ``reach_index``, the index minus withheld skills. The two
     credential splits keep the full index, since they only remove names.
+
+    ``group_ids`` is the task's resolved group set
+    (``room_scopes.task_group_ids``), handed to the proxy's skill CLIs as
+    ``ISTOTA_TASK_GROUPS`` for the ``kv --group`` gate (multiplayer D21).
 
     Raises whatever ``dispatch_setup_env_hooks`` and
     ``resolve_sandbox_cache_dir`` raise, as the inline block did. Nothing here
@@ -451,6 +456,9 @@ def build_task_runtime(
         if withheld_scopes:
             from .skill_host_paths import WITHHELD_SCOPES_VAR
             proxy_base_env[WITHHELD_SCOPES_VAR] = ",".join(sorted(withheld_scopes))
+        if group_ids:
+            from .skill_host_paths import TASK_GROUPS_VAR
+            proxy_base_env[TASK_GROUPS_VAR] = ",".join(sorted(group_ids))
         # One skill CLI is itself a model caller, and the strip above left it
         # unauthenticated: `code_review` spawns the `claude` binary per
         # reviewer, so from ISSUE-390 every review came back `review_failed`

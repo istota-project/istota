@@ -515,6 +515,17 @@ def _is_member(conn, group_id: str, user_id: str) -> bool:
         return False
 
 
+def _task_groups(conn, task) -> list[str]:
+    """``room_scopes.task_group_ids``, with a database error read as none."""
+    from .room_scopes import task_group_ids
+
+    try:
+        return task_group_ids(conn, task)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("group resolution failed for task %d: %s", task.id, e)
+        return []
+
+
 def _apply_kv_set_op(op, entry, read, write, task_id, namespace, key) -> bool:
     """Replay one set-op against whichever store ``read``/``write`` address.
 
@@ -592,7 +603,10 @@ def _process_deferred_kv_ops(
     An op's ``scope`` picks the store: absent is the task user's own,
     ``"shared"`` is ``shared_kv``, ``"group:<id>"`` is that group's
     ``group_kv`` and is applied only while ``task.user_id`` is a current
-    member. Any other scope is refused.
+    member and the group is in the task's resolved set
+    (``room_scopes.task_group_ids``, multiplayer D21), re-derived here from the
+    task row because the op file is model-written and cannot carry it. Any
+    other scope is refused.
 
     Returns count of operations processed.
     """
@@ -602,6 +616,7 @@ def _process_deferred_kv_ops(
     path, data = loaded
 
     count = 0
+    task_groups: list[str] | None = None
     with db.get_db(config.db_path) as conn:
         # The set-ops read, then write. Without an explicit write lock the first
         # op's read runs in autocommit, and two workers replaying onto one key
@@ -673,7 +688,13 @@ def _process_deferred_kv_ops(
                 continue
             if scope is not None:
                 group_id = _group_of_scope(scope)
-                if group_id is None or not _is_member(conn, group_id, task.user_id):
+                if task_groups is None:
+                    task_groups = _task_groups(conn, task)
+                if (
+                    group_id is None
+                    or group_id not in task_groups
+                    or not _is_member(conn, group_id, task.user_id)
+                ):
                     logger.warning(
                         "group KV write denied for task %d user %s (%s %r %s/%s)",
                         task.id, task.user_id, op, scope, namespace, key,

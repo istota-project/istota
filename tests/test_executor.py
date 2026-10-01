@@ -3300,6 +3300,25 @@ class TestApplyMemoryCap:
         u, d, c, r, k, _pb = _apply_memory_cap(config, None, None, None, None)
         assert u is None and d is None and c is None and r is None
 
+    def test_group_memory_counts_toward_the_cap(self):
+        from istota.executor import _apply_memory_cap
+        config = Config(max_memory_chars=250)
+        # Without the group block: 200 <= 250, nothing cut. With it: 300.
+        u, d, c, r, k, _pb = _apply_memory_cap(
+            config, "A" * 100, None, None, "D" * 100, group_memory="G" * 100,
+        )
+        assert u == "A" * 100
+        assert r is not None and "truncated" in r
+
+    def test_group_memory_is_never_truncated_and_is_named(self, caplog):
+        import logging
+
+        from istota.executor import _apply_memory_cap
+        config = Config(max_memory_chars=50)
+        with caplog.at_level(logging.WARNING, logger="istota.executor"):
+            _apply_memory_cap(config, None, None, None, None, group_memory="G" * 100)
+        assert any("group_memory=100" in r.getMessage() for r in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # TestDatedMemoriesAutoLoad

@@ -34,6 +34,9 @@ VALUE_VERBS = {
 def env(db_path, monkeypatch):
     monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    # The task's resolved group set, which the proxy sets (D21). Naming a
+    # group the caller is not in proves membership is still asked.
+    monkeypatch.setenv("ISTOTA_TASK_GROUPS", "fam,other")
     monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
     monkeypatch.delenv("ISTOTA_TASK_ID", raising=False)
     with db.get_db(db_path) as conn:
@@ -139,6 +142,32 @@ class TestTheGate:
                                                              monkeypatch):
         monkeypatch.setenv("ISTOTA_USER_ID", "bob")
         _run_error(["get", "ns", "k", "--group", "fam"], capsys)
+
+    @pytest.mark.parametrize("verb", sorted({**VALUE_VERBS, **SET_OPS}))
+    def test_a_member_is_refused_a_group_outside_the_tasks_set(
+        self, env, capsys, monkeypatch, verb,
+    ):
+        # D21: a member whose task did not resolve the group (a room with a
+        # non-member in it, a guest's turn) is refused exactly like a stranger.
+        monkeypatch.setenv("ISTOTA_TASK_GROUPS", "other")
+        argv = {**VALUE_VERBS, **SET_OPS}[verb]
+        out = _run_error(argv + ["--group", "fam"], capsys)
+        assert out["error"] == "not a member of group 'fam'"
+
+    def test_no_resolved_set_is_a_refusal(self, env, capsys, monkeypatch):
+        monkeypatch.delenv("ISTOTA_TASK_GROUPS")
+        _run_error(["get", "ns", "k", "--group", "fam"], capsys)
+
+    def test_the_set_is_matched_whole_not_by_substring(self, env, capsys, monkeypatch):
+        monkeypatch.setenv("ISTOTA_TASK_GROUPS", "family, fam2 ,xfam")
+        _run_error(["get", "ns", "k", "--group", "fam"], capsys)
+
+    def test_a_refused_write_outside_the_set_queues_nothing(
+        self, deferred, capsys, monkeypatch,
+    ):
+        monkeypatch.setenv("ISTOTA_TASK_GROUPS", "")
+        _run_error(["set", "ns", "k", '"v"', "--group", "fam"], capsys)
+        assert not deferred.exists()
 
     def test_reserved_namespaces_are_still_refused(self, env, capsys):
         out = _run_error(["get", "_vault_sync", "k", "--group", "fam"], capsys)

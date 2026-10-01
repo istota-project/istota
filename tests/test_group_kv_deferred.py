@@ -214,6 +214,60 @@ class TestRefusals:
         assert _group_value(db_path)["value"] == '"g"'
 
 
+class TestTheResolvedSet:
+    """D21: the apply asks the task's resolved group set as well as membership,
+    re-derived from the task row, because the op file cannot carry it."""
+
+    def _room_task(self, db_path, token, user_id="alice", **fields):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="t", user_id=user_id,
+                                     conversation_token=token, **fields)
+            return db.get_task(conn, task_id)
+
+    def _apply_task(self, config, task, ops, tmp_path):
+        user_temp = tmp_path / "temp" / task.user_id
+        user_temp.mkdir(parents=True, exist_ok=True)
+        path = user_temp / f"task_{task.id}_kv_ops.json"
+        path.write_text(json.dumps(ops))
+        count = _process_deferred_kv_ops(config, task, user_temp)
+        assert not path.exists()
+        return count
+
+    OPS = [{"op": "set", "namespace": "ns", "key": "k", "value": '"v"',
+            "scope": "group:fam"}]
+
+    def test_a_room_of_members_applies(self, setup, db_path, tmp_path):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "r1", "alice", origin="web", name="r1")
+            db.add_web_room_member(conn, "r1", "bob")
+        task = self._room_task(db_path, "r1")
+        assert self._apply_task(setup, task, self.OPS, tmp_path) == 1
+
+    def test_a_room_with_a_non_member_refuses_a_member(
+        self, setup, db_path, tmp_path, caplog,
+    ):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "r2", "alice", origin="web", name="r2")
+            db.add_web_room_member(conn, "r2", "carol")
+        task = self._room_task(db_path, "r2")
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler"):
+            assert self._apply_task(setup, task, self.OPS, tmp_path) == 0
+        assert _group_value(db_path) is None
+        assert any("group KV write denied" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_a_guest_turn_refuses(self, setup, db_path, tmp_path):
+        task = self._room_task(db_path, None, guest_participant_id=5)
+        assert self._apply_task(setup, task, self.OPS, tmp_path) == 0
+        assert _group_value(db_path) is None
+
+    def test_a_mixed_turn_refuses(self, setup, db_path, tmp_path):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "r3", "alice", origin="web", name="r3")
+        task = self._room_task(db_path, "r3", audience="mixed")
+        assert self._apply_task(setup, task, self.OPS, tmp_path) == 0
+
+
 class TestEndToEnd:
     """A sandboxed task writes through the CLI, the scheduler applies the op
     file, and another member's task reads the value back through the CLI."""
@@ -223,6 +277,7 @@ class TestEndToEnd:
 
         monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
         monkeypatch.setenv("ISTOTA_USER_ID", user_id)
+        monkeypatch.setenv("ISTOTA_TASK_GROUPS", "fam")
         if deferred_dir is None:
             monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
             monkeypatch.delenv("ISTOTA_TASK_ID", raising=False)

@@ -198,6 +198,7 @@ def _plan(case, config, task, resources, world, profile: SandboxProfile) -> Moun
             extra_ro_binds=[world["extra"] / name for name in case.extra_ro_binds],
             authorized_skills=frozenset(case.authorized_skills),
             workspace_dir=world["workspace"] if case.workspace else None,
+            group_ids=list(case.group_ids),
         )
 
 
@@ -631,6 +632,7 @@ def test_native_fs_roots_is_this_projection(built: Built):
             built.resources,
             built.world["user_temp"],
             built.world["workspace"] if built.case.workspace else None,
+            group_ids=list(built.case.group_ids),
         )
         # Inside the patch, not after it. Neither the venv nor the source tree
         # is user data, so the projection is the same either way today — but
@@ -648,6 +650,7 @@ def test_native_fs_roots_is_this_projection(built: Built):
             workspace_dir=(
                 built.world["workspace"] if built.case.workspace else None
             ),
+            group_ids=list(built.case.group_ids),
         )
     assert native == project_fs_roots(plan, None)
 

@@ -412,8 +412,16 @@ def build_mount_plan(
     authorized_skills: "frozenset[str] | set[str] | list[str] | None" = None,
     workspace_dir: Path | None = None,
     withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
+    group_ids: "list[str] | None" = None,
 ) -> MountPlan:
     """Every bind, mask and namespace flag this task's sandbox gets, in order.
+
+    ``group_ids`` is the task's resolved group set
+    (``room_scopes.task_group_ids``); each existing ``{mount}/Groups/<id>`` is
+    bound read-write. The planner looks nothing up: it binds what it is
+    handed, as it does ``user_resources``. The set is already empty wherever
+    a guest, an agent or a non-member reads the room, so ``withheld_scopes``
+    does not touch these binds.
 
     ``withheld_scopes`` is what a shared room withholds from this task
     (``room_scopes``). Without ``files`` the user's workspace and their
@@ -774,6 +782,18 @@ def build_mount_plan(
             channel_dir = mount / "Channels" / task.conversation_token
             if channel_dir.exists():
                 _rw(channel_dir, "nextcloud_channel_dir", user_data=True)
+        # `scoped_user_dir` for the same reason as the user bind above: a
+        # collapsing id would bind `{mount}/Groups`, every group, read-write.
+        for group_id in sorted(set(group_ids or ())):
+            group_dir = scoped_user_dir(mount / "Groups", group_id)
+            if group_dir is None:
+                logger.warning(
+                    "sandbox: group id %r does not name a directory under "
+                    "%s/Groups; binding no group directory for task %s.",
+                    group_id, mount, task.id,
+                )
+            elif group_dir.exists():
+                _rw(group_dir, "nextcloud_group_dir", user_data=True)
 
     # --- Huggingface model cache (RO) ---
     hf_cache = home / ".cache" / "huggingface"

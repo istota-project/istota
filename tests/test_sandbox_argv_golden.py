@@ -130,6 +130,10 @@ class Case:
     admin_users: tuple[str, ...] = ()
     user_id: str = "alice"
     conversation_token: str = "room123"
+    #: The task's resolved group set (`room_scopes.task_group_ids`), bound as
+    #: `{mount}/Groups/<id>`. The world creates `family` and `neighbours`; an
+    #: id it does not create is the absent-directory branch.
+    group_ids: tuple[str, ...] = ()
 
     developer_enabled: bool = False
     repos_dir: bool = False
@@ -188,6 +192,10 @@ _RO = "read"
 
 CASES: list[Case] = [
     Case("claude_baseline"),
+    # One group the task resolved, one it resolved whose directory was never
+    # created, and `neighbours` on disk but not resolved: only `family` binds,
+    # read-write, straight after the channel directory.
+    Case("group_member", group_ids=("family", "absent")),
     Case("native_baseline", profile=SandboxProfile.NATIVE),
     # The venv's `bin/python` links outside /usr — a uv-downloaded or
     # pyenv-built interpreter. NATIVE because the tool server is the thing that
@@ -385,7 +393,10 @@ def _make_world(root: Path, case: Case) -> dict[str, Path]:
     base_python.mkdir()
 
     mount = root / "mount"
-    for rel in ("Users/alice", "Users/bob", "Talk", "Channels/room123", "Docs", "Notes"):
+    for rel in (
+        "Users/alice", "Users/bob", "Talk", "Channels/room123", "Docs", "Notes",
+        "Groups/family", "Groups/neighbours",
+    ):
         (mount / rel).mkdir(parents=True)
     (mount / "Users" / "alice" / "inside").mkdir()
 
@@ -544,6 +555,7 @@ def build_argv(case: Case, root: Path, monkeypatch, *, raw: bool = False) -> lis
             authorized_skills=frozenset(case.authorized_skills),
             workspace_dir=world["workspace"] if case.workspace else None,
             profile=case.profile,
+            group_ids=list(case.group_ids),
         )
 
     return argv if raw else normalize(argv, root, world)
@@ -813,6 +825,7 @@ AXES = {
     ),
     "REPL workspace": lambda c: c.workspace,
     "conversation token": lambda c: bool(c.conversation_token),
+    "resolved groups": lambda c: bool(c.group_ids),
     "read-only resource": lambda c: any(p == _RO for _, p in c.resources),
     "read-write resource": lambda c: any(p == _RW for _, p in c.resources),
     "NATIVE profile": lambda c: c.profile is SandboxProfile.NATIVE,

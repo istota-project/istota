@@ -439,6 +439,10 @@ class Case:
     #: it runs as the host with every scope withheld (D2). The guest's display
     #: name is here to show it is **not** rendered in the system half.
     guest_turn: bool = False
+    #: Puts the user in one group whose `GROUP.md` holds a line, and seeds a
+    #: second group the user is *not* in with a sentinel that must never
+    #: render (groups spec D6, multiplayer D21).
+    group: bool = False
 
 
 CASES: tuple[Case, ...] = (
@@ -553,6 +557,11 @@ CASES: tuple[Case, ...] = (
         shared=True,
         guest_turn=True,
     ),
+    # Group memory (groups spec Stage 3), against `base_nextcloud`, which it
+    # differs from in nothing else: the diff is the `## Group memory` block,
+    # in the user half, with the seeded charter. The second group's sentinel
+    # is absent because the user is not in it.
+    Case("group_memory", group=True),
 )
 
 CASES_BY_NAME = {c.name: c for c in CASES}
@@ -819,6 +828,37 @@ def _seed_room(config: Config, case: Case) -> None:
         conn.commit()
 
 
+#: In a group the case's user is not in; must appear in no prompt.
+NOT_MY_GROUP_SENTINEL = "NOT_MY_GROUP_SENTINEL"
+
+
+def _seed_groups(config: Config, case: Case) -> None:
+    if not case.group:
+        return
+    from istota import storage
+
+    with db.get_db(config.db_path) as conn:
+        db.create_group(conn, "family", kind="family",
+                        display_name="Example Family", created_by="operator")
+        db.add_group_member(conn, "family", USER, added_by="operator")
+        db.add_group_member(conn, "family", OTHER_USER, added_by="operator")
+        db.create_group(conn, "neighbours", kind="group",
+                        display_name="Neighbours", created_by="operator")
+        db.add_group_member(conn, "neighbours", OTHER_USER, added_by="operator")
+        conn.commit()
+    storage.ensure_group_directories(config, "family", display_name="Example Family")
+    path = config.workspace_path / "Groups" / "family" / "GROUP.md"
+    path.write_text(
+        path.read_text().replace(
+            "## Reference\n", "## Reference\n\n- The plumber is Ana.\n",
+        )
+    )
+    storage.ensure_group_directories(config, "neighbours", display_name="Neighbours")
+    (config.workspace_path / "Groups" / "neighbours" / "GROUP.md").write_text(
+        f"{NOT_MY_GROUP_SENTINEL}\n"
+    )
+
+
 def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
     """Run one case to the normalized, two-part dry-run rendering.
 
@@ -844,6 +884,7 @@ def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
     _seed_history(config, case)
     _seed_shared_credentials(config, case, monkeypatch)
     _seed_room(config, case)
+    _seed_groups(config, case)
     task = _build_task(case)
     if case.guest_turn:
         from istota.transport.ingest import guest_prompt
@@ -1642,3 +1683,44 @@ class TestThePushSurfacesAreInteractive:
         system, _user = split_halves(assemble(case, tmp_path, monkeypatch))
 
         assert "SKILLS_CHANGELOG_SENTINEL" in system
+
+
+class TestGroupMemoryThroughAssembly:
+    """The `## Group memory` block, through `execute_task`, where it must not
+    appear as well as where it must. `tests/test_group_recall.py` holds the
+    policy as a function; these hold the wiring."""
+
+    def test_it_is_retrieved_memory_in_the_user_half(self, tmp_path, monkeypatch):
+        system, user = split_halves(
+            assemble(CASES_BY_NAME["group_memory"], tmp_path, monkeypatch)
+        )
+        assert "## Group memory" in user
+        assert "### Example Family" in user
+        assert "The plumber is Ana." in user
+        assert "## Group memory" not in system
+        assert "The plumber is Ana." not in system
+        assert NOT_MY_GROUP_SENTINEL not in system + user
+
+    def test_a_guest_turn_carries_none(self, tmp_path, monkeypatch):
+        case = Case(
+            "group_guest_turn", source_type="talk", conversation_token="room-token",
+            room=("family", "talk"), shared=True, guest_turn=True, group=True,
+        )
+        rendered = assemble(case, tmp_path, monkeypatch)
+        assert "## Group memory" not in rendered
+        assert "The plumber is Ana." not in rendered
+
+    def test_a_shared_room_of_members_carries_it(self, tmp_path, monkeypatch):
+        # `shared` adds OTHER_USER, who is in `family` too; and the room
+        # withholds `memory`, which governs USER.md, not group material.
+        case = Case(
+            "group_shared_room", source_type="web", conversation_token="web-room",
+            room=("#home", "web"), shared=True, group=True,
+        )
+        _system, user = split_halves(assemble(case, tmp_path, monkeypatch))
+        assert "The plumber is Ana." in user
+
+    def test_an_exclude_memory_skill_carries_none(self, tmp_path, monkeypatch):
+        case = Case("group_briefing", source_type="briefing", group=True)
+        rendered = assemble(case, tmp_path, monkeypatch)
+        assert "## Group memory" not in rendered

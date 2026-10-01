@@ -143,12 +143,21 @@ def _group_access_denied(group_id: str) -> bool:
     task, never of anything on the command line. An invalid id, an unknown
     group and a group the caller is not in all answer the same, so the refusal
     cannot be used to learn which groups exist. A database error is a refusal.
+
+    The group must also be in the task's resolved set, ``ISTOTA_TASK_GROUPS``
+    (multiplayer D21): a member's task in a room a non-member or a guest reads
+    reaches the group's kv exactly where it would load its ``GROUP.md``, which
+    is not at all. Absent means none.
     """
     from istota import db
+    from istota.skill_host_paths import TASK_GROUPS_VAR
 
     user_id = os.environ.get("ISTOTA_USER_ID", "")
     db_path = os.environ.get("ISTOTA_DB_PATH", "")
     if not user_id or not db_path or not db.is_valid_group_id(group_id):
+        return True
+    resolved = {g.strip() for g in os.environ.get(TASK_GROUPS_VAR, "").split(",")}
+    if group_id not in resolved:
         return True
     try:
         with db.get_db(db_path) as conn:

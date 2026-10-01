@@ -219,3 +219,61 @@ def withheld_for_task(
         assume_shared=bool(task.is_group_chat),
         assume_mixed=task.audience == "mixed",
     )
+
+
+def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
+    """The groups whose material this task may carry, sorted; the one answer
+    the prompt's ``## Group memory``, the ``Groups/<id>`` binds and the
+    ``kv --group`` gate (multiplayer D21) all read.
+
+    A group is in it when ``task.user_id`` is a current member and everyone
+    who reads the answer is too (groups spec D6). Off a room that is every
+    group of the user, since the answer goes to the user alone (a shared room
+    is refused as a delivery target, multiplayer Stage 15). In a room, only the
+    groups whose current members cover the room's members and present
+    principal participants.
+
+    Nothing at all on a guest's turn (emissary mode), on a turn whose stored
+    audience is ``mixed``, or while any guest or agent is present: the charter
+    is "may be said in front of every member", and a guest or another bot is
+    not one. Nothing either where the audience cannot be read: a room with no
+    recorded readers, or a surface roster saying "group" over a room the
+    registry records one person in.
+
+    Independent of the room's grants. A grant is the sender's consent to
+    disclose their own data and never reaches group material; the audience
+    rule here is the only gate, and no grant widens it. Raises on a database
+    error; the caller treats that as the empty set.
+    """
+    if task.guest_participant_id is not None or task.audience == "mixed":
+        return []
+    groups = db.list_user_groups(conn, task.user_id)
+    if not groups or not task.conversation_token:
+        return groups
+
+    room_token = task.conversation_token
+    if db.get_room(conn, room_token) is None:
+        room_token = db.find_room_token_by_ref(conn, room_token) or room_token
+    readers = set(db.list_room_members(conn, room_token))
+    rows = conn.execute(
+        "SELECT kind, user_id FROM room_participants "
+        "WHERE room_token = ? AND left_at IS NULL",
+        (room_token,),
+    ).fetchall()
+    for row in rows:
+        if row["kind"] != "principal" or not row["user_id"]:
+            logger.debug(
+                "group_memory_skipped reason=non_member_reader token=%s",
+                task.conversation_token,
+            )
+            return []
+        readers.add(row["user_id"])
+    if not readers or (task.is_group_chat and len(readers) < 2):
+        logger.debug(
+            "group_memory_skipped reason=room_members_unknown token=%s",
+            task.conversation_token,
+        )
+        return []
+    return [
+        g for g in groups if readers <= set(db.list_group_members(conn, g))
+    ]
