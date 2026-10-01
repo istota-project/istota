@@ -671,6 +671,31 @@ class TestTheModeDecidesTheRoots:
         assert recorder.called, run.envelope or run.stdout
 
 
+class TestTheDerivedEgressRoots:
+    """`egress_roots()` is the `EGRESS` mapping for a path read out of content.
+
+    `wordpress --acf-file` carries `$upload` paths the argv stamp never sees;
+    resolving them against anything but the stamp's own set would let a JSON
+    file name what the flag beside it could not.
+    """
+
+    def test_it_is_the_set_an_egress_stamp_resolves_against(self, mount):
+        from istota.skills import _hostpath
+
+        assert _hostpath.egress_roots() == _hostpath._roots_for(EGRESS, writable=False)
+
+    def test_it_admits_the_workspace_and_deferred_dir_and_nothing_shared(self, mount):
+        from istota.skill_host_paths import path_under_roots
+        from istota.skills._hostpath import egress_roots
+
+        roots = egress_roots()
+        assert path_under_roots(mount.real / "Users" / "alice" / "a.png", roots)
+        assert path_under_roots(mount.deferred.resolve() / "a.png", roots)
+        assert not path_under_roots(mount.real / "Talk" / "a.png", roots)
+        assert not path_under_roots(mount.real / "Channels" / "tok1" / "a.png", roots)
+        assert not path_under_roots(mount.real / "Users" / "bob" / "a.png", roots)
+
+
 # --------------------------------------------------------------------------- #
 # A deployment with no mount
 # --------------------------------------------------------------------------- #

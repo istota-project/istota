@@ -542,6 +542,19 @@ def write_roots() -> list[Path]:
     return _roots_for(WRITE, writable=True)
 
 
+def egress_roots() -> list[Path]:
+    """The roots a path read out of *content* may be under, when its bytes leave.
+
+    `EGRESS`'s set, for the same reason `write_roots` exists: a path that
+    arrives inside a file the model wrote (the ``$upload`` markers in a
+    `wordpress --acf-file`) never passes the argv stamp, so the handler
+    resolves it itself, and spelling `env_host_roots(talk=False,
+    channel=False)` there would be a second copy of the mapping. The caller
+    still applies `memory_refusal` to what resolves, as `_resolve_one` does.
+    """
+    return _roots_for(EGRESS, writable=False)
+
+
 def _operation(dotted: str, action: argparse.Action) -> str:
     """How the refusal names what was refused: the verb and the flag.
 
@@ -699,6 +712,7 @@ __all__: Sequence[str] = (
     "click_commands",
     "click_host_path",
     "click_stamped",
+    "egress_roots",
     "host_path",
     "resolve_parsed",
     "stamp_conflicts",
