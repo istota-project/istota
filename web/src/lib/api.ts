@@ -3248,6 +3248,29 @@ export function putRoomGrants(id: number, scopes: string[]): Promise<RoomGrants>
   });
 }
 
+/** The group a room is linked to (multiplayer Stage 27). `choices` are the
+ * caller's own groups, and empty unless the caller may set the link. */
+export interface RoomGroupLink {
+  group_id: string | null;
+  group_name: string | null;
+  can_set: boolean;
+  refusal: string | null;
+  choices: { group_id: string; display_name: string }[];
+}
+
+export function getRoomGroup(id: number): Promise<RoomGroupLink> {
+  return apiFetch<RoomGroupLink>(`/chat/rooms/${id}/group`);
+}
+
+/** Link the room to one of the caller's groups, or `null` to unlink it. */
+export function putRoomGroup(id: number, groupId: string | null): Promise<RoomGroupLink> {
+  return apiFetch<RoomGroupLink>(`/chat/rooms/${id}/group`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupId }),
+  });
+}
+
 /** A room's `CHANNEL.md` — the standing instructions every task in the room
  * is given. `revision` is opaque and must be handed back on save. */
 export interface ChatRoomMemory {

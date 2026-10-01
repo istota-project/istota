@@ -4,6 +4,7 @@
   import { Modal, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
   import RoomMembers from './RoomMembers.svelte';
   import RoomShareScopes from './RoomShareScopes.svelte';
+  import RoomGroupLink from './RoomGroupLink.svelte';
   import { ROOM_COLORS, ROOM_COLOR_LABELS, roomColorVar } from '$lib/roomColors';
   import {
     getBaseModelChoices,
@@ -443,6 +444,11 @@
     <div class="field">
       <span>What you share here</span>
       <RoomShareScopes roomId={room.id} />
+    </div>
+
+    <div class="field">
+      <span>Group</span>
+      <RoomGroupLink roomId={room.id} />
     </div>
   {/if}
 

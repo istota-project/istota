@@ -10,6 +10,13 @@ await fillApiDouble(api, {
   getRoomMembers: vi.fn(async () => ({ members: [], can_manage: false, message_count: 0 })),
   getChatUsers: vi.fn(async () => ({ users: [] })),
   getRoomGrants: vi.fn(async () => ({ scopes: [], state: 'private' })),
+  getRoomGroup: vi.fn(async () => ({
+    group_id: null,
+    group_name: null,
+    can_set: false,
+    refusal: null,
+    choices: [],
+  })),
 });
 
 // The component asks the autocomplete providers for the model and brain
