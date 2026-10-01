@@ -212,6 +212,19 @@ That third arm matters when a correspondent answers the bot's plain address rath
 
 `list` narrows the fetch server-side, so its thread arm reaches back over your last twenty-five or so sent messages. `search` filters the whole window client-side and has always found these; use it when hunting a reply to something older than that.
 
+## Email thread rooms
+
+A thread with two or more people besides the bot becomes a [shared room](shared-rooms.md) for its host: the Istota user whose thread it is. It appears in the host's web sidebar with the whole conversation, the held drafts inline, and a [side room](side-rooms.md) for steering. A conversation with a single correspondent stays exactly as described above.
+
+- **When.** A room is created when the thread is the host's (their address is on it, or it replies to a mail the bot sent for them) and the sender got past the [confirmation gate](#email-confirmation-gate). Unsolicited mail to a plus address creates nothing, and a held mail is not added to the room at all.
+- **Who.** Everyone on From, To and Cc over the thread is a participant, and nobody leaves by being dropped from Cc. Only the host is a member; another Istota user on the thread is a guest until the host adds them on the web.
+- **When the bot replies.** With the bot in To, the bot replies; in Cc it listens. The thread stays on this rule even when the deployment uses the classifier.
+- **How it replies.** A reply goes to everyone on the latest message (its sender in To, its other recipients in Cc, without the bot's own addresses), threaded to the message that asked, through the [outbound approval gate](#the-outbound-approval-gate), which checks every recipient.
+- **Guests.** A correspondent's message is answered as the host's emissary, and by default the reply waits in the host's side room. The proposal shows the exact mail and its recipients, and approving it is the approval to send: the mail is not held a second time, as long as the recipients have not changed.
+- **Side room.** Your side room's messages arrive as a private mail to your own address, never as a reply on the thread.
+- **Newcomers.** Anyone newly copied on the thread narrows what the bot draws on to the conversation since they joined.
+- **Switching it off.** Anyone on the thread can reply with `!<name> off` as the first line. See [switching the bot off](room-veto.md).
+
 ## Configuration
 
 ```toml

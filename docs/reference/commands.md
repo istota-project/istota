@@ -1,6 +1,6 @@
 # Commands
 
-Commands prefixed with `!` are intercepted before task creation and handled synchronously — no Claude Code invocation; they execute immediately. They are **surface-agnostic**: the same set works in Nextcloud Talk, web chat, SMS and WhatsApp. SMS and WhatsApp sit outside the room model, so the room-scoped commands (`!room`, `!brain`) have no room to read or pin there; everything else behaves the same. `commands.dispatch(...)` runs each handler over a `CommandContext` and delivers the result via the resolved transport. On a push surface (Talk) the result is delivered as a new message; on a stream surface (web) it is returned inline and rendered as a text card.
+Commands prefixed with `!` are intercepted before task creation and handled synchronously — no Claude Code invocation; they execute immediately. They are **surface-agnostic**: the same set works in Nextcloud Talk, web chat, SMS and WhatsApp. SMS and a one-to-one WhatsApp chat sit outside the room model, so the room-scoped commands (`!room`, `!brain`) have no room to read or pin there; everything else behaves the same. A command sent in a WhatsApp group acts on the group's room and is answered in your own chat with the bot. `commands.dispatch(...)` runs each handler over a `CommandContext` and delivers the result via the resolved transport. On a push surface (Talk) the result is delivered as a new message; on a stream surface (web) it is returned inline and rendered as a text card.
 
 ## Available commands
 
@@ -14,6 +14,12 @@ Commands prefixed with `!` are intercepted before task creation and handled sync
 | `!status` | Show running/pending tasks and system stats |
 | `!usage` | Show token usage; adds a by-brain split and the Claude Code plan's rate-limit windows for admins (hidden alias: `!limits`) |
 | `!room` | Show this room's standing model/effort default and the brain it runs; `!room model ALIAS` / `!room effort LEVEL` set the first two, `default` clears |
+| `!room share [SCOPE\|all\|none]` | Show what you share in this [shared room](../features/shared-rooms.md#what-a-task-can-reach), or share a scope for your own turns here |
+| `!room unshare SCOPE\|all` | Withdraw a share in this room |
+| `!room host` | Take over a shared room that has lost its host |
+| `!room guests [off\|held\|direct]` | Show how guests are answered here; the host sets it |
+| `!room group [ID\|none]` | Show or set the [group](../features/groups.md#linking-a-room-to-a-group) this room is linked to; the host sets it |
+| `!<bot name> off` / `!<bot name> on` | [Switch the bot off](../features/room-veto.md) in a shared room, or ask for it back; anyone in the room, guests included |
 | `!brain` | Show which brain this room runs and why; `!brain KIND` pins one (admin, and only where the operator allows it), `!brain default` clears |
 | `!memory user` | Show USER.md contents |
 | `!memory channel` | Show CHANNEL.md contents |
@@ -81,6 +87,16 @@ That block appears when a reading is available, not when `brain.kind` is `claude
 ## Room model default
 
 `!room` shows the room's standing model/effort default; `!room model <alias>` and `!room effort <level>` set it, and `default` clears it. The default lives on the shared room registry, so it applies to every message in that room on both Talk and web, and to every participant. Precedence: an inline `!model` prefix wins over the room default, which wins over the instance `model` config.
+
+## Shared rooms
+
+In a room more than one person reads, `!room share` lists the scopes you share there and the ones withheld; `!room share <scope>` shares one for your own turns in this room, `!room share all` every one, `!room share none` or `!room unshare all` none, and `!room unshare <scope>` takes one back. A share is yours alone and nobody can share for you. While a guest is present, shares are ignored and the reply says so. In a private room a share is accepted and applies once someone joins; a side room has nothing to share.
+
+`!room host` claims a room whose host has left; until someone does, the room records and answers nobody. `!room guests` shows whether a guest's message is answered directly, held for the host's approval, or not answered; `!room guests <off|held|direct>` changes it and is the host's. `!room group` shows the room's group link and `!room group <id>` / `!room group none` sets or removes it, also the host's. In a shared room the room-wide settings (`!room model`, `!room effort`, `!brain`) are the host's too, and other members see them read-only.
+
+`!<bot name> off` uses the bot's name lowercased without spaces (`!istota off`), as the whole message. Anyone in a shared room can send it, and a guest's other commands are ignored. See [switching the bot off](../features/room-veto.md) for what it takes to come back on. While a room is off every other command there is ignored.
+
+`!stop`, `!steer`, `!retry` and `!confirm` act only on your own tasks.
 
 ## Room brain
 

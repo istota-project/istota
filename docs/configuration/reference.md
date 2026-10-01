@@ -187,6 +187,29 @@ The three credentials never enter task environments, prompts, logs or the admin 
 | `previous_tasks_count` | `3` | Unfiltered tasks to inject |
 | `talk_context_limit` | `100` | Messages from Talk API |
 
+## `[speech_gate]`
+
+Whether the bot replies to a turn nobody addressed to it, in a room more than one human reads. A direct conversation is never gated, and a turn that mentions the bot is always answered. Every turn is recorded whatever the mode. See [shared rooms](../features/shared-rooms.md#when-the-bot-speaks).
+
+| Setting | Default | Description |
+|---|---|---|
+| `mode` | `"mention"` | `"mention"` answers only when addressed; `"classifier"` lets a cheap model decide and stays quiet when it fails; `"off"` answers every turn. An unknown value stays quiet |
+| `model` | `"fast"` | Role alias for the classifier, resolved per brain namespace |
+| `window_messages` | `8` | Transcript turns the classifier sees |
+| `max_message_chars` | `400` | Per-turn character cap inside the window |
+| `timeout_seconds` | `8.0` | Classifier call timeout |
+| `decision_retention_days` | `30` | Days to keep `speech_gate_decisions` rows (`0` keeps them) |
+
+Docker: `ISTOTA_SPEECH_GATE_MODE`, `ISTOTA_SPEECH_GATE_MODEL`, `ISTOTA_SPEECH_GATE_WINDOW_MESSAGES`, `ISTOTA_SPEECH_GATE_MAX_MESSAGE_CHARS`, `ISTOTA_SPEECH_GATE_TIMEOUT_SECONDS`, `ISTOTA_SPEECH_GATE_DECISION_RETENTION_DAYS`. Ansible: `istota_speech_gate_*` with the same suffixes.
+
+## `[rooms]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `shared_room_data_policy` | `"restrict"` | `"restrict"` gives a task in a shared room only the scopes its sender granted there; `"off"` gives it everything a private task gets. Any value but `"off"` restricts. A guest's turn is restricted under either value |
+
+Docker: `ISTOTA_ROOMS_SHARED_ROOM_DATA_POLICY`. Ansible: `istota_rooms_shared_room_data_policy`. See [shared rooms](../features/shared-rooms.md#what-a-task-can-reach).
+
 ## `[logging]`
 
 | Setting | Default | Description |

@@ -16,9 +16,13 @@ It is off by default, needs the `signaling` extra, and refuses to boot rather th
 
 ## Multi-user rooms
 
-In rooms with 3+ participants, the bot only responds when @mentioned. Two-person rooms behave like DMs. Participant counts are cached (5 min TTL). The bot's own @mention is stripped from the prompt; other mentions are resolved to `@DisplayName`.
+A group conversation is a [shared room](shared-rooms.md). Every message in it is recorded, including those from guests, Nextcloud users who are not Istota users, and other bots, so the bot knows what was said when it is asked. By default it answers only when @mentioned; `[speech_gate] mode` changes that. Two-person rooms behave like DMs. Participant counts are cached (5 min TTL).
 
-Final responses in group chats use `reply_to` on the original message and prepend `@{user_id}` for notification. Intermediate messages (ack, progress) are sent without reply threading to avoid noise.
+The bot's own @mention is stripped from the prompt in every conversation, a DM included: a DM that is only `@bot` is ignored, `@bot !help` runs the command, and `@bot yes` answers a waiting confirmation. Other mentions are resolved to `@DisplayName`.
+
+A guest who mentions the bot is answered as the room's host, on the host's authority and with nothing private of the host's (see [hosts and guests](shared-rooms.md#hosts-and-guests)). Anyone in the room can switch the bot off with `!<name> off` ([switching the bot off](room-veto.md)).
+
+Final responses in group chats use `reply_to` on the original message, and prepend `@{user_id}` only when a member asked on Talk: an answer to a guest or to a web turn is threaded without a mention. Intermediate messages (ack, progress) are sent without reply threading to avoid noise; for a guest's message the ack carries no progress and is removed when the turn is held or cancelled.
 
 ## Progress updates
 
