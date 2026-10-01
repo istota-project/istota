@@ -1202,7 +1202,7 @@ class WebConfig:
     auth: list[str] = field(default_factory=lambda: ["nextcloud"])
     auth_enrol_ttl_hours: int = 168
     auth_reset_ttl_hours: int = 1
-    auth_login_link_ttl_minutes: int = 15
+    auth_sign_in_code_ttl_minutes: int = 10
     auth_min_password_length: int = 12
     auth_throttle_window_seconds: int = 900
     auth_throttle_max_email: int = 10
@@ -3775,6 +3775,26 @@ def normalize_legacy_document(data: dict) -> None:
     document afterwards copies it first.
     """
     _migrate_whatsapp_flat(data)
+    _migrate_web_login_link_ttl(data)
+
+
+def _migrate_web_login_link_ttl(data: dict) -> None:
+    """Read the retired ``auth_login_link_ttl_minutes`` as the sign-in code TTL.
+
+    Emailed sign-in links became codes (ISSUE-574), and the lifetime setting
+    carries over rather than reverting to the default for a deployment that
+    tuned it. The new key wins when both are present.
+    """
+    web = data.get("web")
+    if not isinstance(web, dict) or "auth_login_link_ttl_minutes" not in web:
+        return
+    legacy = web.pop("auth_login_link_ttl_minutes")
+    if "auth_sign_in_code_ttl_minutes" not in web:
+        web["auth_sign_in_code_ttl_minutes"] = legacy
+    logger.warning(
+        "[web] auth_login_link_ttl_minutes is retired; rename it to "
+        "auth_sign_in_code_ttl_minutes (sign-in links are now emailed codes)"
+    )
 
 
 _LEGACY_BRAIN_DEFAULT_TARGETS = ("claude_code", "tmux")

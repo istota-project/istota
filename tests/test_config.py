@@ -3561,7 +3561,7 @@ class TestWebAuthMethods:
     def test_policy_settings_load(self, tmp_path):
         values = {
             "auth_enrol_ttl_hours": 24, "auth_reset_ttl_hours": 2,
-            "auth_login_link_ttl_minutes": 10, "auth_min_password_length": 16,
+            "auth_sign_in_code_ttl_minutes": 5, "auth_min_password_length": 16,
             "auth_throttle_window_seconds": 600, "auth_throttle_max_email": 5,
             "auth_throttle_max_ip": 20, "auth_mail_link_max_email": 2,
             "trusted_proxy_hops": 1,
@@ -3571,3 +3571,16 @@ class TestWebAuthMethods:
         cfg = load_config(path)
         for key, value in values.items():
             assert getattr(cfg.web, key) == value
+
+    @pytest.mark.parametrize("body,expected", [
+        ("auth_login_link_ttl_minutes = 7", 7),
+        ("auth_login_link_ttl_minutes = 7\nauth_sign_in_code_ttl_minutes = 4", 4),
+    ])
+    def test_retired_login_link_ttl_carries_over(self, tmp_path, caplog, body, expected):
+        """Sign-in links became codes (ISSUE-574); a tuned lifetime is not silently dropped."""
+        path = tmp_path / "config.toml"
+        path.write_text("[web]\n" + body + "\n")
+        cfg = load_config(path)
+        assert cfg.web.auth_sign_in_code_ttl_minutes == expected
+        assert "auth_login_link_ttl_minutes is retired" in caplog.text
+        assert "unknown" not in caplog.text.lower()

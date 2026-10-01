@@ -3908,7 +3908,7 @@ const adminUsersHandler: MockHandler = ({ url, method, body }) => {
     return { updated: true };
   }
   if (method === 'POST' && match[2] === 'logout-all') return { updated: true };
-  if (method === 'POST' && ['invite', 'reset', 'login-link'].includes(match[2])) {
+  if (method === 'POST' && ['invite', 'reset'].includes(match[2])) {
     if (row.identity.disabled)
       return { __status: 400, detail: 'Enable web access before sending a link.' };
     return { sent: true };

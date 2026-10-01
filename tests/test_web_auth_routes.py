@@ -79,14 +79,14 @@ async def test_login_choices(client, configured, methods):
     page = await client.get("/istota/login")
     assert page.status_code == 200
     assert ('name="password"' in page.text) == ("email" in methods)
-    assert ('action="/istota/auth/login-link/request"' in page.text) == ("email" in methods)
+    assert ('action="/istota/auth/sign-in-code/request"' in page.text) == ("email" in methods)
     assert ('href="/istota/login?go=1"' in page.text) == ("nextcloud" in methods)
     assert ('class="divider"' in page.text) == (len(methods) == 2)
     assert page.headers["cache-control"] == "no-store"
     assert page.headers["referrer-policy"] == "no-referrer"
 
 
-async def test_email_login_groups_password_and_link_as_alternatives(client):
+async def test_email_login_groups_password_and_code_as_alternatives(client):
     page = await client.get("/istota/login")
     choices = re.search(r'<fieldset class="email-login">(.*?)</fieldset>', page.text, re.S)
     assert choices is not None
@@ -95,13 +95,13 @@ async def test_email_login_groups_password_and_link_as_alternatives(client):
     assert len(radios) == 2
     assert all('name="email-method"' in radio for radio in radios)
     assert 'id="email-password" checked' in radios[0]
-    assert 'id="email-link"' in radios[1] and "checked" not in radios[1]
+    assert 'id="email-code"' in radios[1] and "checked" not in radios[1]
     password = re.search(r'<div class="email-panel password-panel">(.*?)</form>', choices[1], re.S)
-    link = re.search(r'<div class="email-panel link-panel">(.*?)</form>', choices[1], re.S)
+    code = re.search(r'<div class="email-panel code-panel">(.*?)</form>', choices[1], re.S)
     assert password and 'action="/istota/login/email"' in password[1]
-    assert link and 'action="/istota/auth/login-link/request"' in link[1]
+    assert code and 'action="/istota/auth/sign-in-code/request"' in code[1]
     assert 'href="/istota/auth/reset"' in password[1]
-    assert csrf(page) != csrf(page, "/istota/auth/login-link/request")
+    assert csrf(page) != csrf(page, "/istota/auth/sign-in-code/request")
 
 
 async def test_email_login_uses_live_profile_and_rotates_session(client, configured):
@@ -369,14 +369,12 @@ async def test_callback_database_failure_does_not_mint_session(client, configure
     assert (await client.get("/istota/api/me")).status_code == 401
 
 
-@pytest.mark.parametrize("purpose", ["enrol", "reset", "login"])
+@pytest.mark.parametrize("purpose", ["enrol", "reset"])
 async def test_link_get_is_read_only_and_post_rotates_session(client, configured, purpose):
     path = configured._config.db_path
-    if purpose == "login":
-        web_auth.clear_password(path, "alice")
     before = web_auth.get_identity(path, "alice")
     token = web_auth.issue_token(path, "alice", purpose, 3600)
-    route = "/istota/auth/login-link" if purpose == "login" else "/istota/auth/set-password"
+    route = "/istota/auth/set-password"
     set_session(client, configured, {"planted": "old"})
     page = await client.get(route, params={"token": token})
     assert page.status_code == 200
@@ -395,7 +393,7 @@ async def test_link_get_is_read_only_and_post_rotates_session(client, configured
     session = session_value(client)
     assert "planted" not in session
     assert session["user"] == {"username": "alice", "display_name": "Alice"}
-    assert session["auth"] == {"method": "email", "epoch": before.credential_epoch + (purpose != "login")}
+    assert session["auth"] == {"method": "email", "epoch": before.credential_epoch + 1}
     assert (await client.get("/istota/api/me")).status_code == 200
     assert web_auth.peek_token(path, token) is None
     replay = await client.post(route, data=data)
@@ -414,14 +412,14 @@ async def test_login_csrf_survives_reset_page(client):
 @pytest.mark.parametrize("method,route", [
     ("GET", "/auth/set-password"), ("POST", "/auth/set-password"),
     ("GET", "/auth/reset"), ("POST", "/auth/reset"),
-    ("POST", "/auth/login-link/request"), ("GET", "/auth/login-link"), ("POST", "/auth/login-link"),
+    ("POST", "/auth/sign-in-code/request"), ("GET", "/auth/sign-in-code"), ("POST", "/auth/sign-in-code"),
 ])
 async def test_all_link_routes_disabled(client, configured, method, route):
     configured._config.web.auth = ["nextcloud"]
     assert (await client.request(method, "/istota" + route)).status_code == 404
 
 
-@pytest.mark.parametrize("purpose", ["enrol", "reset", "login"])
+@pytest.mark.parametrize("purpose", ["enrol", "reset"])
 @pytest.mark.parametrize("mutation", ["expired", "disabled", "email", "readded", "orphan"])
 async def test_invalid_links_have_one_card(client, configured, purpose, mutation):
     path = configured._config.db_path
@@ -438,7 +436,7 @@ async def test_invalid_links_have_one_card(client, configured, purpose, mutation
         web_auth.upsert_identity(path, "alice", "alice@example.com")
     elif mutation == "orphan":
         user_profiles.delete_profile(path, "alice")
-    route = "/istota/auth/login-link" if purpose == "login" else "/istota/auth/set-password"
+    route = "/istota/auth/set-password"
     invalid = await client.get(route, params={"token": "invalid"})
     response = await client.get(route, params={"token": token})
     post = await client.post(route, data={"token": token, "password": PASSWORD})
@@ -448,7 +446,7 @@ async def test_invalid_links_have_one_card(client, configured, purpose, mutation
     assert response.headers["referrer-policy"] == "no-referrer"
 
 
-@pytest.mark.parametrize("route,purpose", [("set-password", "enrol"), ("login-link", "login")])
+@pytest.mark.parametrize("route,purpose", [("set-password", "enrol"), ("set-password", "reset")])
 async def test_token_post_requires_csrf(client, configured, route, purpose):
     token = web_auth.issue_token(configured._config.db_path, "alice", purpose, 3600)
     response = await client.post("/istota/auth/" + route, data={"token": token, "password": PASSWORD})
@@ -469,13 +467,12 @@ async def test_password_policy_and_confirmation_leave_token_usable(client, confi
 
 
 async def mail_request(client, purpose, email="alice@example.com"):
-    route = "/istota/auth/reset" if purpose == "reset" else "/istota/auth/login-link/request"
+    route = "/istota/auth/reset" if purpose == "reset" else "/istota/auth/sign-in-code/request"
     page = await client.get("/istota/auth/reset" if purpose == "reset" else "/istota/login")
     return await client.post(route, data={"email": email, "csrf_token": csrf(page, route)})
 
 
-async def test_mail_requests_share_budget_and_delivered_links_work(client, configured, monkeypatch):
-    from urllib.parse import parse_qs, urlsplit
+async def test_mail_requests_share_budget_and_delivered_codes_work(client, configured, monkeypatch):
     from istota.skills import email as mail
 
     configured._config.email.enabled = True
@@ -488,14 +485,11 @@ async def test_mail_requests_share_budget_and_delivered_links_work(client, confi
     for response in responses:
         assert response.headers["cache-control"] == "no-store"
         assert response.headers["referrer-policy"] == "no-referrer"
-    body = sent.call_args.kwargs["body"]
-    link = re.search(r"https://[^\s]+", body)[0]
-    assert link.startswith("https://example.com/istota/auth/login-link?")
-    token = parse_qs(urlsplit(link).query)["token"][0]
-    assert web_auth.peek_token(configured._config.db_path, token, "login") is not None
-    page = await client.get(link)
-    response = await client.post("/istota/auth/login-link", data={
-        "token": token, "csrf_token": csrf(page, "/istota/auth/login-link"),
+    # The third mail is the code for the first code request. The fourth request
+    # was over budget and sent nothing, and must not have retired that code.
+    code = re.search(r"^(\d{6})$", sent.call_args.kwargs["body"], re.M)[1]
+    response = await client.post("/istota/auth/sign-in-code", data={
+        "code": code, "csrf_token": csrf(responses[3], "/istota/auth/sign-in-code"),
     })
     assert response.status_code == 302
     assert (await client.get("/istota/api/me")).status_code == 200
@@ -518,12 +512,14 @@ async def test_mail_request_responses_do_not_disclose_identity(client, configure
 
 @pytest.mark.parametrize("purpose", ["reset", "login"])
 async def test_mail_csrf_refusal_does_no_work(client, configured, monkeypatch, purpose):
-    issue = MagicMock()
+    issue, start = MagicMock(), MagicMock()
     monkeypatch.setattr(web_auth, "issue_mail_link_if_allowed", issue)
-    route = "/istota/auth/reset" if purpose == "reset" else "/istota/auth/login-link/request"
+    monkeypatch.setattr(web_auth, "start_sign_in", start)
+    route = "/istota/auth/reset" if purpose == "reset" else "/istota/auth/sign-in-code/request"
     response = await client.post(route, data={"email": "alice@example.com"})
     assert response.status_code == 403 and "form expired" in response.text
     issue.assert_not_called()
+    start.assert_not_called()
 
 
 @pytest.mark.parametrize("state", ["known", "unknown", "disabled"])
@@ -536,7 +532,6 @@ async def test_mail_lookup_runs_after_response_and_pending_addresses_coalesce(cl
         web_auth.delete_identity(configured._config.db_path, "alice")
     elif state == "disabled":
         web_auth.set_disabled(configured._config.db_path, "alice", True)
-    login = await client.get("/istota/login")
     reset = await client.get("/istota/auth/reset")
     response_sent = asyncio.Event()
     entered = threading.Event()
@@ -570,8 +565,8 @@ async def test_mail_lookup_runs_after_response_and_pending_addresses_coalesce(cl
         }))
         try:
             assert await asyncio.to_thread(entered.wait, 3)
-            second = await asyncio.wait_for(observer.post("/istota/auth/login-link/request", data={
-                "email": "alice@example.com", "csrf_token": csrf(login, "/istota/auth/login-link/request"),
+            second = await asyncio.wait_for(observer.post("/istota/auth/reset", data={
+                "email": "alice@example.com", "csrf_token": csrf(reset, "/istota/auth/reset"),
             }), 2)
             assert second.status_code == 200
             assert calls == ["alice@example.com"]
@@ -590,6 +585,7 @@ async def test_unknown_address_flood_does_not_spend_other_addresses_budget(clien
     monkeypatch.setattr(web_auth_mail, "send_auth_email", send)
     for index in range(12):
         assert (await mail_request(client, "login", f"unknown{index}@example.com")).status_code == 200
+        assert (await mail_request(client, "reset", f"unknown{index}@example.com")).status_code == 200
     assert (await mail_request(client, "login")).status_code == 200
     assert send.call_count == 1
     with db.get_db(configured._config.db_path) as conn:
@@ -600,13 +596,13 @@ async def test_background_failure_is_generic_and_releases_pending_address(client
     original = web_auth.issue_mail_link_if_allowed
     issue = MagicMock(side_effect=RuntimeError("private-token alice@example.com"))
     monkeypatch.setattr(web_auth, "issue_mail_link_if_allowed", issue)
-    failed = await mail_request(client, "login")
+    failed = await mail_request(client, "reset")
     assert failed.status_code == 200
     assert not configured._mail_link_pending
     assert "private-token" not in caplog.text and "alice@example.com" not in caplog.text
     monkeypatch.setattr(web_auth, "issue_mail_link_if_allowed", original)
     configured._config.email.enabled = False
-    disabled_mail = await mail_request(client, "login")
+    disabled_mail = await mail_request(client, "reset")
     assert disabled_mail.content == failed.content
     assert not configured._mail_link_pending
 
@@ -627,13 +623,13 @@ async def test_token_password_write_failure_rolls_back_and_can_retry(client, con
     assert (await client.post("/istota/auth/set-password", data=data)).status_code == 302
 
 
-@pytest.mark.parametrize("purpose", ["reset", "login"])
+@pytest.mark.parametrize("purpose", ["enrol", "reset"])
 async def test_token_database_failure_is_a_generic_card(client, configured, monkeypatch, purpose):
     token = web_auth.issue_token(configured._config.db_path, "alice", purpose, 3600)
     def unavailable(*args):
         raise sqlite3.OperationalError("private-token alice@example.com")
     monkeypatch.setattr(web_auth, "peek_token", unavailable)
-    route = "/istota/auth/login-link" if purpose == "login" else "/istota/auth/set-password"
+    route = "/istota/auth/set-password"
     response = await client.get(route, params={"token": token})
     assert response.status_code == 400 and "link is invalid" in response.text
     assert "private-token" not in response.text

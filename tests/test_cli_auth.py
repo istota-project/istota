@@ -9,7 +9,7 @@ from istota import cli, db, user_profiles, web_auth
 from istota.config import Config
 
 PASSWORD = "a long example passphrase"
-VERBS = ["list", "add", "set-password", "invite", "reset", "login-link",
+VERBS = ["list", "add", "set-password", "invite", "reset", "sign-in-code",
          "disable", "enable", "logout-all", "remove"]
 
 
@@ -77,8 +77,7 @@ def test_duplicate_names_owner_without_creating_profile(config, identity, invoke
     assert user_profiles.get_profile(config.db_path, "bob") is None
 
 
-@pytest.mark.parametrize("verb,purpose", [("add", "enrol"), ("invite", "enrol"),
-                                           ("reset", "reset"), ("login-link", "login")])
+@pytest.mark.parametrize("verb,purpose", [("add", "enrol"), ("invite", "enrol"), ("reset", "reset")])
 def test_print_link_is_usable(config, identity, invoke, verb, purpose):
     args = [verb, "alice", "--print-link"]
     if verb == "add":
@@ -88,7 +87,7 @@ def test_print_link_is_usable(config, identity, invoke, verb, purpose):
     link = next(line for line in out.splitlines() if line.startswith("https://"))
     parsed = urlsplit(link)
     assert parsed.netloc == "bot.example.com"
-    assert parsed.path == "/istota/auth/" + ("login-link" if purpose == "login" else "set-password")
+    assert parsed.path == "/istota/auth/set-password"
     record = web_auth.peek_token(config.db_path, parse_qs(parsed.query)["token"][0], purpose)
     assert record.user_id == "alice" and "state=updated" in out
 
@@ -159,7 +158,7 @@ def test_parser_rejects_password_flag(invoke, verb):
     assert invoke(*args, "--password")[0] == 2
 
 
-@pytest.mark.parametrize("verb", ["set-password", "invite", "reset", "login-link", "disable", "enable", "logout-all"])
+@pytest.mark.parametrize("verb", ["set-password", "invite", "reset", "sign-in-code", "disable", "enable", "logout-all"])
 def test_missing_identity_refused(config, invoke, verb):
     user_profiles.ensure_profile(config.db_path, "alice")
     assert invoke(verb, "alice")[0] == 1
@@ -167,7 +166,7 @@ def test_missing_identity_refused(config, invoke, verb):
 
 
 def test_send_disabled_and_missing_origin_issue_nothing(config, identity, invoke):
-    code, out, err = invoke("login-link", "alice", "--send")
+    code, out, err = invoke("reset", "alice", "--send")
     assert code == 1 and "email is not configured; use --print-link" in err
     assert "token=" not in out + err
     config.site.hostname = ""
@@ -177,8 +176,7 @@ def test_send_disabled_and_missing_origin_issue_nothing(config, identity, invoke
         assert conn.execute("SELECT COUNT(*) FROM web_auth_tokens").fetchone()[0] == 0
 
 
-@pytest.mark.parametrize("verb,purpose", [("add", "enrol"), ("invite", "enrol"),
-                                           ("reset", "reset"), ("login-link", "login")])
+@pytest.mark.parametrize("verb,purpose", [("add", "enrol"), ("invite", "enrol"), ("reset", "reset")])
 def test_send_uses_shared_mail(config, identity, invoke, monkeypatch, verb, purpose):
     from istota import web_auth_mail
     config.email.enabled = True
@@ -207,12 +205,12 @@ def test_smtp_failure_reports_failure_keeps_token(config, identity, invoke, monk
     config.email.enabled = True
     sent = []
     monkeypatch.setattr(web_auth_mail, "send_auth_email", lambda *args: sent.append(args) and False)
-    code, out, err = invoke("login-link", "alice")
+    code, out, err = invoke("reset", "alice")
     assert code == 1 and "--print-link" in err
     assert "state=" not in out and "token=" not in out + err
     link = next(line for line in sent[0][3].splitlines() if line.startswith("https://"))
     token = parse_qs(urlsplit(link).query)["token"][0]
-    assert web_auth.peek_token(config.db_path, token, "login")
+    assert web_auth.peek_token(config.db_path, token, "reset")
 
 
 def test_disabled_identity_cannot_get_link(config, identity, invoke):
@@ -230,13 +228,13 @@ def test_rejected_invite_does_not_create_profile(config, invoke):
 
 def test_link_lifetime_uses_config(config, identity, invoke):
     from datetime import datetime, timedelta, timezone
-    config.web.auth_login_link_ttl_minutes = 7
+    config.web.auth_reset_ttl_hours = 2
     before = datetime.now(timezone.utc).replace(tzinfo=None)
-    code, out, err = invoke("login-link", "alice", "--print-link")
+    code, out, err = invoke("reset", "alice", "--print-link")
     assert code == 0
     with db.get_db(config.db_path) as conn:
         expires = datetime.fromisoformat(conn.execute("SELECT expires_at FROM web_auth_tokens").fetchone()[0])
-    assert timedelta(minutes=7) <= expires - before < timedelta(minutes=7, seconds=5)
+    assert timedelta(hours=2) <= expires - before < timedelta(hours=2, seconds=5)
 
 
 @pytest.mark.parametrize("host,scheme", [("bot.example.com", "https"), ("localhost:8766", "http"),
@@ -262,7 +260,7 @@ def test_database_error_is_operator_failure(config, invoke):
     assert "state=" not in out
 
 
-@pytest.mark.parametrize("purpose", ["enrol", "reset", "login"])
+@pytest.mark.parametrize("purpose", ["enrol", "reset"])
 def test_cli_mail_refuses_changed_recipient_snapshot(config, identity, monkeypatch, purpose):
     from istota import web_auth_mail
     from unittest.mock import Mock
@@ -276,3 +274,27 @@ def test_cli_mail_refuses_changed_recipient_snapshot(config, identity, monkeypat
     send.assert_not_called()
     with db.get_db(config.db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM web_auth_tokens").fetchone()[0] == 0
+
+
+def test_sign_in_code_is_for_the_users_pending_request(config, identity, invoke):
+    """Operator recovery when mail is down (ISSUE-574): it prints a code, never a link."""
+    policy = web_auth.policy_from_config(config)
+    request_id = web_auth.start_sign_in(config.db_path, policy, identity.email, "s" * 32)
+    code, out, err = invoke("sign-in-code", "alice")
+    assert (code, err) == (0, "") and "state=updated" in out and "https://" not in out
+    assert "requested_at=" in out and "pending=1" in out
+    printed = out.split("code=", 1)[1].split()[0]
+    assert web_auth.redeem_sign_in_code(config.db_path, "s" * 32, printed)[0] == "ok"
+
+
+def test_sign_in_code_warns_when_several_requests_are_pending(config, identity, invoke):
+    policy = web_auth.policy_from_config(config)
+    web_auth.start_sign_in(config.db_path, policy, identity.email, "s" * 32)
+    web_auth.start_sign_in(config.db_path, policy, identity.email, "t" * 32)
+    code, out, err = invoke("sign-in-code", "alice")
+    assert code == 0 and "pending=2" in out and "Confirm the request time" in err
+
+
+def test_sign_in_code_without_a_pending_request_refuses(config, identity, invoke):
+    code, out, err = invoke("sign-in-code", "alice")
+    assert code == 1 and "No pending sign-in" in err and "code=" not in out

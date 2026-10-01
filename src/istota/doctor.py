@@ -4973,7 +4973,7 @@ def check_web_auth(config: "Config", probe: bool = True) -> list[CheckResult]:
         "web.auth.mail", OK if config.email.enabled else WARN,
         ("Mail enabled (delivery not probed)" if config.email.enabled else "Mail disabled")
         + f"; {passwordless if passwordless is not None else 'unknown number of'} enabled identities without passwords",
-        "Enable email delivery for self-service reset and sign-in links; use istota auth login-link <user> --print-link for operator recovery."
+        "Enable email delivery for self-service reset links and sign-in codes; use istota auth sign-in-code <user> for operator recovery."
         if not config.email.enabled else "",
     ))
     if identities is None or profiles is None:

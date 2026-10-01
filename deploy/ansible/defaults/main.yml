@@ -850,16 +850,16 @@ istota_web_enabled: true
 istota_web_auth: ["nextcloud", "email"]
 istota_web_port: 8766
 
-# Native email login: link lifetimes and password policy.
+# Native email login: link and code lifetimes and password policy.
 istota_web_auth_enrol_ttl_hours: 168
 istota_web_auth_reset_ttl_hours: 1
-istota_web_auth_login_link_ttl_minutes: 15
+istota_web_auth_sign_in_code_ttl_minutes: 10
 istota_web_auth_min_password_length: 12
 # Verification budgets use this window (seconds).
 istota_web_auth_throttle_window_seconds: 900
 istota_web_auth_throttle_max_email: 10
 istota_web_auth_throttle_max_ip: 30
-istota_web_auth_mail_link_max_email: 3  # requests per email per hour, across link purposes
+istota_web_auth_mail_link_max_email: 3  # mails per address per hour, reset links and sign-in codes together
 # 0 skips IP throttling. Set 1 for a single nginx proxy only when the backend
 # is reachable exclusively through that proxy; count from the backend outwards.
 istota_web_trusted_proxy_hops: 0
