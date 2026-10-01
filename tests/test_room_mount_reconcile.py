@@ -244,3 +244,49 @@ def test_backup_failure_prevents_rewrite(migrated):
     with patch("istota.room_mount_reconcile.storage.create_file_if_absent", return_value=False):
         assert room_relocate.reconcile_mount(config) == 2
     assert path.read_text() == text
+
+
+
+@pytest.mark.parametrize("suffix", [
+    '[[briefings]]\nname=" morning "\ncron="0 9 * * *"\n',
+    'output="none"\n',
+])
+def test_briefing_import_ambiguity_refuses_rewrite(migrated, suffix):
+    config, old, new = migrated
+    text = ('```toml\n[[briefings]]\nname="morning"\ncron="0 8 * * *"\n'
+            'conversation_token="old-talk"\n' + suffix + '```\n')
+    path = userfile(config, "alice", "BRIEFINGS.md", text)
+    assert room_relocate.reconcile_mount(config) == 2
+    assert path.read_text() == text
+
+
+
+def test_live_source_identity_never_becomes_another_rooms_alias(migrated):
+    config, old, new = migrated
+    with db.get_db(config.db_path) as conn:
+        db.register_room(conn, old, "bob", origin="web")
+        assert db._canonical_room_token(conn, old, cross_surface=False) == old
+    original = put(config, f"Channels/{old}/CHANNEL.md", "Bob private notes")
+    from istota.cron_loader import CronJob, generate_cron_md
+    text = generate_cron_md([CronJob(name="job", cron="0 8 * * *", prompt="hi", room=old)])
+    cron = userfile(config, "bob", "CRON.md", text)
+    assert storage.read_channel_memory(config, new) is None
+    assert storage.read_channel_memory(config, old) == "Bob private notes"
+    assert room_relocate.reconcile_mount(config) == 2
+    assert original.read_text() == "Bob private notes"
+    assert not (original.parent.parent / new).exists()
+    assert cron.read_text() == text
+
+
+
+@pytest.mark.parametrize("returncode,expected", [(1, None), (3, "old notes"), (4, "old notes")])
+def test_rclone_fallback_requires_a_missing_file(migrated, returncode, expected):
+    import subprocess
+    config, old, new = migrated
+    config.workspace_path = None
+    with patch("istota.rclone_client.subprocess.run", side_effect=[
+        subprocess.CompletedProcess([], returncode, stdout="", stderr="read failed"),
+        subprocess.CompletedProcess([], 0, stdout="old notes", stderr=""),
+    ]) as command:
+        assert storage.read_channel_memory(config, new) == expected
+    assert command.call_count == (1 if returncode == 1 else 2)

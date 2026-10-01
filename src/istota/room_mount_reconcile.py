@@ -17,7 +17,7 @@ from pathlib import Path
 import tomli
 import tomli_w
 
-from . import cron_loader, storage
+from . import cron_loader, db, storage
 from .nextcloud import dav
 from .nextcloud._http import OcsError, dav_files_url, dav_request
 from .room_relocate import EXIT_OK, EXIT_PARTIAL, EXIT_REFUSED, _descriptor, _preflight, _refusal
@@ -172,11 +172,12 @@ def _briefing_plan(content: str, mapping: dict[str, str]):
     names = set()
     changed = False
     for entry in entries:
-        if _row_from_entry(entry, "migration") is None:
+        row = _row_from_entry(entry, "migration")
+        if row is None or row[3] != entry.get("output", "talk"):
             raise ValueError("malformed briefing entry")
-        if entry["name"] in names:
+        if row[0] in names:
             raise ValueError("duplicate briefing name")
-        names.add(entry["name"])
+        names.add(row[0])
         for key in ("conversation_token", "output"):
             if key not in entry:
                 continue
@@ -265,6 +266,10 @@ def reconcile(config, *, dry_run: bool = False) -> int:
                 "SELECT m.old_token,m.new_token FROM room_token_migration m "
                 "JOIN rooms r ON r.token=m.new_token ORDER BY m.old_token",
             ))
+            collisions = [old for old, new in mapping.items()
+                          if db._canonical_room_token(conn, old, cross_surface=False) != new]
+            for old in collisions:
+                del mapping[old]
             users = set(config.users) | {r[0] for r in conn.execute("SELECT user_id FROM user_profiles")}
         for old, new in mapping.items():
             storage.validate_conversation_token(old)
@@ -286,7 +291,9 @@ def reconcile(config, *, dry_run: bool = False) -> int:
     except Exception as exc:
         print(f"partial: {exc}", file=sys.stderr)
         return EXIT_PARTIAL
-    failures = 0
+    failures = len(collisions)
+    for old in collisions:
+        print(f"failed: {old}: mapping source belongs to a live room", file=sys.stderr)
     for old, new in mapping.items():
         try:
             if config.nextcloud.url:

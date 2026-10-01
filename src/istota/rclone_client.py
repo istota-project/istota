@@ -67,10 +67,20 @@ def rclone_path_exists(remote: str, path: str) -> bool:
 
 def rclone_cat(remote: str, path: str) -> str | None:
     """Read a file via rclone cat. Returns None on failure."""
+    content, _missing = rclone_cat_checked(remote, path)
+    return content
+
+
+def rclone_cat_checked(remote: str, path: str) -> tuple[str | None, bool]:
+    """Return content and a distinct not-found verdict for fallback readers."""
     result = rclone_run(["rclone", "cat", f"{remote}:{path}"])
-    if result is None or result.returncode != 0:
-        return None
-    return result.stdout
+    if result is None:
+        return None, False
+    if result.returncode == 0:
+        return result.stdout, False
+    # https://rclone.org/docs/#list-of-exit-codes
+    # 3 and 4 mean missing directory/file; auth and I/O failures are not absence.
+    return None, result.returncode in (3, 4)
 
 
 def rclone_rcat(remote: str, path: str, content: str) -> bool:

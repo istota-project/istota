@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from .atomic_write import write_text_atomic
 from .rclone_client import (
     rclone_cat,
+    rclone_cat_checked,
     rclone_mkdir,
     rclone_path_exists,
     rclone_rcat,
@@ -2459,20 +2460,16 @@ def channel_memory_tokens(config: "Config", conversation_token: str) -> list[str
     validate_conversation_token(conversation_token)
     try:
         with closing(sqlite3.connect(config.db_path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
-            row = conn.execute(
-                "SELECT m.new_token FROM room_token_migration m JOIN rooms r ON r.token=m.new_token "
-                "WHERE m.old_token=?", (conversation_token,),
-            ).fetchone()
-            canonical = row[0] if row else conversation_token
-            aliases = [r[0] for r in conn.execute(
-                "SELECT m.old_token FROM room_token_migration m JOIN rooms r ON r.token=m.new_token "
-                "WHERE m.new_token=? ORDER BY m.old_token", (canonical,),
-            )]
-            if not row and conn.execute(
-                "SELECT 1 FROM room_token_migration WHERE old_token=?", (conversation_token,),
+            from . import db
+            conn.row_factory = sqlite3.Row
+            canonical = db._canonical_room_token(conn, conversation_token, cross_surface=False)
+            if db.get_room(conn, canonical) is None and conn.execute(
+                "SELECT 1 FROM room_token_migration WHERE old_token=? OR new_token=?",
+                (conversation_token, conversation_token),
             ).fetchone():
                 return []
-        return [validate_conversation_token(t) for t in [canonical, *aliases]]
+            tokens = db._room_ref_tokens(conn, canonical, include_surface_refs=False)
+        return [validate_conversation_token(t) for t in tokens]
     except (sqlite3.Error, OSError, AttributeError):
         return [conversation_token]
 
@@ -2519,9 +2516,11 @@ def read_channel_memory(config: "Config", conversation_token: str) -> str | None
             if content is None:
                 continue
         else:
-            content = _rclone_cat(config.rclone_remote, get_channel_memory_path(token))
-            if content is None:
+            content, missing = rclone_cat_checked(config.rclone_remote, get_channel_memory_path(token))
+            if missing:
                 continue
+            if content is None:
+                return None
         return content if content.strip() else None
     return None
 
