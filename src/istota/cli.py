@@ -1942,7 +1942,17 @@ def cmd_group_create(args):
             )
         except ValueError as e:
             _group_fail(str(e))
+    from .storage import ensure_group_directories
+
     print(f"Created group {args.group_id!r}.")
+    # A group created without its directory is seeded on first use instead
+    # (`executor._load_group_memory`), so a failure here is a note, not an error.
+    if not ensure_group_directories(
+        config, args.group_id, display_name=args.name or args.group_id,
+    ):
+        print("Note: GROUP.md was not created (no workspace mount, or the "
+              "directory is unusable); it is seeded the first time a member's "
+              "task loads the group.")
 
 
 def cmd_group_list(args):
