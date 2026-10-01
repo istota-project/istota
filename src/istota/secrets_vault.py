@@ -207,6 +207,10 @@ SKIP_DUPLICATE_NAME = "two entries produce the same name"
 SKIP_EMPTY_VALUE = "the field is empty"
 SKIP_OVERSIZE_VALUE = "the value is larger than the limit"
 SKIP_UNREADABLE_ROW = "stored value will not decrypt, so it is not deleted"
+#: A name the file produced that a credential added in Istota already holds.
+#: The local credential wins: the file never overwrites a value the user typed
+#: into Istota, nor inherits its grant.
+SKIP_NAME_TAKEN = "name is already used by a credential added in Istota"
 
 #: The whole of it. ``SKIP_RESERVED_SERVICE``, ``SKIP_INELIGIBLE_SERVICE``,
 #: ``SKIP_UNKNOWN_KEY`` and ``SKIP_DELETE_HELD`` left with the service mapping
@@ -221,6 +225,7 @@ SKIP_REASONS = frozenset(
         SKIP_EMPTY_VALUE,
         SKIP_OVERSIZE_VALUE,
         SKIP_UNREADABLE_ROW,
+        SKIP_NAME_TAKEN,
     }
 )
 
@@ -592,6 +597,20 @@ def _preserve_vault_metadata(fd: int, original) -> None:
     os.fchmod(fd, stat.S_IMODE(original.st_mode) or 0o600)
 
 
+def generated_entry_names(slug: str) -> tuple[str | None, str | None, str | None]:
+    """The password, username and URL names :func:`create_entry` writes for ``slug``.
+
+    One derivation for the writer and for the store-side collision check its
+    two callers make first (:func:`local_name_conflict`). ``None`` in a slot
+    means the slug is too long for that name; ``create_entry`` refuses it.
+    """
+    return (
+        slug_name((VAULT_WRITE_GROUP, slug)),
+        slug_name((VAULT_WRITE_GROUP, slug, _USERNAME_SEGMENT)),
+        slug_name((VAULT_WRITE_GROUP, slug, _URL_SEGMENT)),
+    )
+
+
 def create_entry(
     location,
     passphrase: str,
@@ -610,11 +629,7 @@ def create_entry(
     # two caller choices into one vault name.
     if slug_name((slug,)) != slug:
         raise VaultWriteRefused("slug must contain lowercase letters, digits or underscores")
-    names = (
-        slug_name((VAULT_WRITE_GROUP, slug)),
-        slug_name((VAULT_WRITE_GROUP, slug, _USERNAME_SEGMENT)),
-        slug_name((VAULT_WRITE_GROUP, slug, _URL_SEGMENT)),
-    )
+    names = generated_entry_names(slug)
     if any(name is None for name in names):
         raise VaultWriteRefused("slug is too long for the generated credential names")
     try:
@@ -697,7 +712,7 @@ def create_entry(
             os.replace(temp_leaf, leaf, src_dir_fd=location.dir_fd, dst_dir_fd=location.dir_fd)
             if db_path is not None and user_id is not None:
                 try:
-                    apply_vault(db_path, user_id, verified)
+                    applied = apply_vault(db_path, user_id, verified)
                 except Exception as exc:  # noqa: BLE001 - the file is already replaced
                     # The valid KDBX entry is committed. Return its names so
                     # this task can use them; the next sync retries the apply.
@@ -711,6 +726,7 @@ def create_entry(
                         db_path, user_id, OUTCOME_OK, "",
                         unscoped=not verified.scoped,
                         generated_count=verified.generated_count,
+                        name_conflicts=applied.name_conflicts,
                     )
                     if recorded:
                         _SYNC_STATE[user_id] = (temp_digest, OUTCOME_OK)
@@ -825,6 +841,9 @@ class VaultApplyResult:
     cap are absent for a reason that has nothing to do with the user removing
     them — and ``deleted == 0`` alone cannot tell that from a file nobody
     edited.
+
+    ``name_conflicts`` counts the :data:`SKIP_NAME_TAKEN` skips, for the sync
+    record the settings card reads without opening the file.
     """
 
     created: int = 0
@@ -835,6 +854,7 @@ class VaultApplyResult:
     swept: bool = True
     deleted_keys: list[str] = field(default_factory=list)
     skipped: list[tuple[str, str]] = field(default_factory=list)
+    name_conflicts: int = 0
 
 
 def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResult:
@@ -845,11 +865,20 @@ def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResul
     1. **Every name in the read is upserted** under
        :data:`VAULT_ENTRY_SERVICE`, counted by the state ``upsert_secret``
        returns.
-    2. **Every ``vault_entries`` row for this user whose key is not in the read
-       is deleted.** The file is authoritative for the whole namespace. There is
-       no per-service ownership question left to ask, so there is no ``owned``
-       argument and no service the sweep has an opinion about — one namespace,
-       one sweep.
+    2. **Every vault-sourced ``vault_entries`` row for this user whose key is
+       not in the read is deleted.** The file is authoritative for the names it
+       produced. The namespace has three sources, read off each row's binding
+       (:func:`_stored_entry_sources`): ``vault`` (this sync, and any legacy
+       row with no binding, since the sync was the only writer that ever
+       produced one), ``local`` (a credential added in Istota, written only by
+       ``local_credentials``) and ``config`` (deployment forge tokens). Only
+       ``vault`` rows are swept or rebound here.
+
+    **A name the file produces that a ``local`` row holds is not written.** It
+    is skipped as :data:`SKIP_NAME_TAKEN` and counted in ``name_conflicts``:
+    the file never overwrites a value the user typed into Istota, and the local
+    row keeps its grant. Renaming either one ends the conflict on the next
+    sync.
 
     **Four things hold a deletion back, and every one of them is about a delete
     being the single action here that cannot be undone by fixing the cause.**
@@ -923,16 +952,27 @@ def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResul
     # will not decrypt — which is why this is `list_user_services` rather than
     # `get_service_secrets`: that one silently drops an undecryptable row, and
     # a sweep built on it would not know such a row exists to hold back.
-    stored = _stored_entry_names(db_path, user_id)
+    sources = _stored_entry_sources(db_path, user_id)
+    stored = {name for name, source in sources.items() if source == "vault"}
+    taken = {name for name, source in sources.items() if source == "local"}
 
     written: set[str] = set()
     for name in sorted(read.services):
+        if name in taken:
+            result.skipped.append((name, SKIP_NAME_TAKEN))
+            result.name_conflicts += 1
+            logger.warning(
+                "vault: %s is already used by a credential added in Istota, "
+                "so the file's entry is skipped",
+                _label(name),
+            )
+            continue
         # Asked *before* the upsert, because `upsert_secret` derives its own
         # answer from `get_secret` and a row that will not decrypt reads there
         # as absent — so on a deployment with a stale master key every write
         # reports `created` and the counts an operator reads are exactly
         # backwards about what happened to their credentials.
-        existed = name in stored
+        existed = name in sources
         state = secrets_store.upsert_secret(
             db_path, user_id, VAULT_ENTRY_SERVICE, name, read.services[name],
             binding=read.bindings.get(name, {"hosts": [], "headers": [],
@@ -1041,6 +1081,42 @@ def _stored_entry_names(db_path: Path, user_id: str) -> set[str]:
         for row in services.get(VAULT_ENTRY_SERVICE, [])
         if row.get("key")
     }
+
+
+def _stored_entry_sources(db_path: Path, user_id: str) -> dict[str, str]:
+    """Every ``vault_entries`` key this user has, with its binding source.
+
+    Decryptable or not, for the reason :func:`_stored_entry_names` gives, and
+    without opening a Fernet. A key with no binding row reads as ``vault``: the
+    sync is the only writer that ever stored one without a binding, so a
+    legacy row stays the sweep's to remove.
+    """
+    from . import db  # noqa: PLC0415 - see `sync_user` for the import rule
+
+    with db.get_db(db_path) as conn:
+        rows = conn.execute(
+            "SELECT s.key, b.source FROM secrets s "
+            "LEFT JOIN credential_bindings b ON b.user_id = s.user_id AND b.name = s.key "
+            "WHERE s.user_id = ? AND s.service = ?",
+            (user_id, VAULT_ENTRY_SERVICE),
+        ).fetchall()
+    return {str(row[0]): str(row[1] or "vault") for row in rows if row[0]}
+
+
+def local_name_conflict(db_path, user_id: str, names) -> str | None:
+    """The first of ``names`` a credential added in Istota holds, else ``None``.
+
+    ``create_entry``'s own collision check reads the file, and a local
+    credential lives only in the store. Without this, a task creating a name a
+    local credential holds would write the file and the next apply would skip
+    the entry as taken. Both callers (the proxy's ``vault_create`` and
+    ``istota secret vault-new``) ask it before the file is touched.
+    """
+    sources = _stored_entry_sources(Path(db_path), user_id)
+    for name in names:
+        if name and sources.get(name) == "local":
+            return name
+    return None
 
 
 def has_shared_credentials(db_path, user_id: str) -> bool:
@@ -1700,7 +1776,12 @@ def vault_has_other_users(config, user_id: str = "") -> bool:
 
 
 def vault_isolation_refusal(config, user_id: str) -> str | None:
-    """Gate vault use on deployment isolation, before reading credentials."""
+    """Gate the whole credential store on deployment isolation.
+
+    The name is historical: it gates every source in the ``vault_entries``
+    namespace (the KeePassXC sync, credentials added in Istota, and their use
+    by tasks) before any credential is read.
+    """
     if not vault_has_other_users(config, user_id):
         return None
     if config.security.allow_unsandboxed_multi_user_vaults is True:
@@ -1917,6 +1998,7 @@ def encode_sync_state(
     previous: dict | None,
     unscoped: bool | None = None,
     generated_count: int | None = None,
+    name_conflicts: int | None = None,
 ) -> str:
     """The row body for the cycle that just settled.
 
@@ -1944,7 +2026,9 @@ def encode_sync_state(
     tier and snapshotted by ``db_backup`` onto the mount.
 
     ``generated_count`` comes from the parsed group, not flattened names. A
-    failed read carries the last proven count forward.
+    failed read carries the last proven count forward. ``name_conflicts`` is
+    the apply's :data:`SKIP_NAME_TAKEN` count and is carried the same way; a
+    record written before it existed reads as 0.
     """
     carried = (previous or {}).get("ok_at")
     if unscoped is None:
@@ -1952,6 +2036,8 @@ def encode_sync_state(
     if generated_count is None:
         prior_count = (previous or {}).get("generated_count")
         generated_count = prior_count if isinstance(prior_count, int) and prior_count >= 0 else 0
+    if name_conflicts is None:
+        name_conflicts = _count_field(previous, "name_conflicts")
     return json.dumps(
         {
             "at": now,
@@ -1960,9 +2046,16 @@ def encode_sync_state(
             "ok_at": now if outcome == OUTCOME_OK else (carried or None),
             "unscoped": bool(unscoped),
             "generated_count": generated_count,
+            "name_conflicts": name_conflicts,
         },
         sort_keys=True,
     )
+
+
+def _count_field(record: dict | None, key: str) -> int:
+    """A non-negative count off a sync record, 0 when absent or malformed."""
+    value = (record or {}).get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
 def decode_sync_state(raw: object) -> dict | None:
@@ -2016,6 +2109,7 @@ _RECORD_BUSY_TIMEOUT_MS = 2000
 def _record_sync_state(
     db_path, user_id: str, outcome: str, reason: str, *,
     unscoped: bool | None = None, generated_count: int | None = None,
+    name_conflicts: int | None = None,
 ) -> bool:
     """Write down what this cycle settled, for the processes that never see it.
 
@@ -2065,6 +2159,7 @@ def _record_sync_state(
                 previous=previous,
                 unscoped=unscoped,
                 generated_count=generated_count,
+                name_conflicts=name_conflicts,
             )
             db.kv_set(
                 conn,
@@ -2174,6 +2269,7 @@ class VaultSyncResult:
     #: How many names the cycle read, for the notice's count. Names never.
     names: int = 0
     generated_count: int = 0
+    name_conflicts: int = 0
 
 
 @dataclass(frozen=True)
@@ -2207,6 +2303,9 @@ class VaultStatusReport:
     reason: str = ""
     names: tuple[str, ...] = ()
     generated_count: int = 0
+    #: How many file entries the last applied cycle skipped because a
+    #: credential added in Istota holds the name. From the durable record.
+    name_conflicts: int = 0
     skipped: tuple[tuple[str, str], ...] = ()
     scoped: bool = True
     truncated: str = ""
@@ -2481,6 +2580,7 @@ def _sync_resolved(config, user_id, location, path) -> VaultSyncResult:
         unscoped=not read.scoped,
         names=len(read.services),
         generated_count=read.generated_count,
+        name_conflicts=applied.name_conflicts,
     )
 
 
@@ -2640,6 +2740,7 @@ def _publish(config, result: VaultSyncResult, *, deliver: bool) -> VaultSyncResu
         "" if result.outcome == OUTCOME_OK else notification_reason(result.outcome),
         unscoped=result.unscoped if result.outcome == OUTCOME_OK else None,
         generated_count=result.generated_count if result.outcome == OUTCOME_OK else None,
+        name_conflicts=result.name_conflicts if result.outcome == OUTCOME_OK else None,
     )
     _report(
         config,
@@ -2761,6 +2862,7 @@ def _settle(
     unscoped: bool = False,
     names: int = 0,
     generated_count: int = 0,
+    name_conflicts: int = 0,
 ) -> VaultSyncResult:
     """Record the outcome, decide whether it is a transition, and say so once.
 
@@ -2819,6 +2921,7 @@ def _settle(
         unscoped=unscoped,
         names=names,
         generated_count=generated_count,
+        name_conflicts=name_conflicts,
     )
 
 
@@ -2958,6 +3061,7 @@ def vault_status(
             recorded_reason=str(recorded.get("reason") or ""),
             recorded_unscoped=bool(recorded.get("unscoped")),
             generated_count=stored_generated_count,
+            name_conflicts=_count_field(recorded, "name_conflicts"),
         )
 
     if resolution.location is None:

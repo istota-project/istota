@@ -1106,3 +1106,177 @@ def test_vault_isolation_doctor_does_not_probe_when_forbidden(ready, monkeypatch
         pytest.fail("probe=False must not spawn a sandbox probe")
     monkeypatch.setattr("istota.executor._bwrap_available", unexpected_probe)
     assert doctor.check_vault_isolation(config, probe=False).status == doctor.WARN
+
+
+# ---------------------------------------------------------------------------
+# Credentials added in Istota (`source="local"`) and the sync
+# ---------------------------------------------------------------------------
+
+
+LOCAL_VALUE = "lc-sync-fixture-value"
+
+
+def _local(db_path, name, *, url="api.example.com", access=True):
+    from istota import db, local_credentials
+
+    with db.get_db(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        local_credentials.create(
+            conn, "alice",
+            local_credentials.LocalCredential(name=name, value=LOCAL_VALUE, url=url),
+            access=({"scope_mode": "all", "rooms": [], "allow_scheduled": False,
+                     "allow_http": False} if access else None),
+        )
+
+
+def _local_state(db_path, name):
+    from istota import db
+    from istota.credential_broker import bindings, grants
+
+    with db.get_db(db_path) as conn:
+        return (
+            secrets_store.get_secret(db_path, "alice", VAULT_ENTRY_SERVICE, name),
+            (bindings.get_binding(conn, "alice", name) or {}).get("source"),
+            grants.get_grant(conn, "alice", name) is not None,
+        )
+
+
+class TestTheSyncLeavesLocalCredentialsAlone:
+    """The file is authoritative for the names it produced and nothing else."""
+
+    def test_a_local_credential_absent_from_the_file_survives_a_sync(self, ready):
+        """The regression test for the web-credentials spec: before it, the
+        sweep deleted every `vault_entries` row the file did not produce."""
+        from istota.secrets_vault import OUTCOME_OK, sync_user
+
+        config, _path = ready
+        _local(config.db_path, "openrouter_key")
+
+        result = sync_user(config, "alice", deliver=False)
+
+        assert result.outcome == OUTCOME_OK
+        assert result.apply.deleted == 0
+        assert _local_state(config.db_path, "openrouter_key") == (LOCAL_VALUE, "local", True)
+        assert _local_state(config.db_path, "openrouter_key_url") == (
+            "api.example.com", "local", True,
+        )
+
+    def test_a_file_entry_with_a_local_name_is_skipped_and_counted(self, ready):
+        from istota.secrets_vault import (
+            OUTCOME_OK, SKIP_NAME_TAKEN, sync_user, vault_status,
+        )
+
+        config, _path = ready
+        _local(config.db_path, "karakeep_api_key")
+
+        result = sync_user(config, "alice", deliver=False)
+
+        assert result.outcome == OUTCOME_OK
+        assert ("karakeep_api_key", SKIP_NAME_TAKEN) in result.apply.skipped
+        assert result.apply.name_conflicts == 1
+        assert result.name_conflicts == 1
+        assert _local_state(config.db_path, "karakeep_api_key") == (LOCAL_VALUE, "local", True)
+        # The other entry in the same file still lands.
+        assert secrets_store.get_secret(
+            config.db_path, "alice", VAULT_ENTRY_SERVICE, "karakeep_base_url"
+        ) == BASE_URL_VALUE
+        assert vault_status(config, "alice", parse=False).name_conflicts == 1
+
+    def test_a_derived_name_clash_is_skipped_too(self, ready):
+        """A local `x` owns `x_url`; a file entry producing `x_url` must not
+        overwrite it."""
+        from istota.secrets_vault import SKIP_NAME_TAKEN, sync_user
+
+        config, _path = ready
+        _local(config.db_path, "karakeep_base", url="karakeep.example.org")
+
+        # The file's `karakeep/base_url` entry produces `karakeep_base_url`.
+        result = sync_user(config, "alice", deliver=False)
+
+        assert ("karakeep_base_url", SKIP_NAME_TAKEN) in result.apply.skipped
+        assert secrets_store.get_secret(
+            config.db_path, "alice", VAULT_ENTRY_SERVICE, "karakeep_base_url"
+        ) == "karakeep.example.org"
+
+    def test_renaming_ends_the_conflict_and_the_count(self, ready):
+        from istota import local_credentials
+        from istota.secrets_vault import sync_user, vault_status
+
+        config, path = ready
+        _local(config.db_path, "karakeep_api_key")
+        sync_user(config, "alice", deliver=False)
+        local_credentials.delete(config.db_path, "alice", "karakeep_api_key")
+        _write_vault(path, ntfy=True)  # a new digest, so the next cycle parses
+
+        result = sync_user(config, "alice", deliver=False)
+
+        assert result.apply.name_conflicts == 0
+        assert secrets_store.get_secret(
+            config.db_path, "alice", VAULT_ENTRY_SERVICE, "karakeep_api_key"
+        ) == API_KEY_VALUE
+        assert vault_status(config, "alice", parse=False).name_conflicts == 0
+
+    def test_a_row_with_no_binding_is_still_swept(self, ready):
+        """Legacy rows predate bindings; the only writer that produced one was
+        the sync, so they count as `vault`."""
+        from istota.secrets_vault import sync_user
+
+        config, _path = ready
+        secrets_store.set_secret(
+            config.db_path, "alice", VAULT_ENTRY_SERVICE, "legacy_key", "old"
+        )
+
+        result = sync_user(config, "alice", deliver=False)
+
+        assert "legacy_key" in result.apply.deleted_keys
+        assert secrets_store.get_secret(
+            config.db_path, "alice", VAULT_ENTRY_SERVICE, "legacy_key"
+        ) is None
+
+    def test_a_vault_row_the_file_dropped_is_still_swept(self, ready):
+        from istota.secrets_vault import sync_user
+
+        config, path = ready
+        _local(config.db_path, "openrouter_key")
+        sync_user(config, "alice", deliver=False)
+        _write_vault(path, karakeep=False, ntfy=True)
+
+        result = sync_user(config, "alice", deliver=False)
+
+        assert sorted(result.apply.deleted_keys) == ["karakeep_api_key", "karakeep_base_url"]
+        assert _local_state(config.db_path, "openrouter_key") == (LOCAL_VALUE, "local", True)
+
+    def test_a_held_local_name_is_not_rebound_from_the_file(self, tmp_path, secret_key):
+        """`read.held & stored` rebinds held names; a local one is not the
+        file's to rebind."""
+        from istota import db
+        from istota.credential_broker import bindings
+        from istota.secrets_vault import VaultRead, apply_vault
+
+        db_path = tmp_path / "istota.db"
+        db.init_db(db_path)
+        _local(db_path, "openrouter_key", access=False)
+        read = VaultRead(
+            digest="0" * 64, services={}, held=frozenset({"openrouter_key"}),
+            truncated="", scoped=True,
+            bindings={"openrouter_key": bindings.parse_binding("evil.example", {}, [])},
+        )
+
+        apply_vault(db_path, "alice", read)
+
+        with db.get_db(db_path) as conn:
+            assert bindings.get_binding(conn, "alice", "openrouter_key") == {
+                "hosts": ["api.example.com"], "headers": bindings.DEFAULT_HEADERS,
+                "revealable": False, "source": "local",
+            }
+
+    def test_an_older_sync_record_reads_as_no_conflicts(self):
+        from istota.secrets_vault import decode_sync_state, encode_sync_state
+
+        body = encode_sync_state("ok", "", now="2026-10-01T00:00:00Z", previous=None)
+        assert decode_sync_state(body)["name_conflicts"] == 0
+        failed = encode_sync_state(
+            "VaultLocked", "x", now="2026-10-02T00:00:00Z",
+            previous={"name_conflicts": 3},
+        )
+        assert decode_sync_state(failed)["name_conflicts"] == 3

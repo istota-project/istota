@@ -1906,16 +1906,18 @@ class TestApply:
             assert API_KEY_VALUE not in message
             assert TOPIC_VALUE not in message
 
-    def test_the_skip_vocabulary_is_exactly_five(self):
+    def test_the_skip_vocabulary_is_exactly_six(self):
         """The four service-mapping reasons went with the machinery that
         produced them. A reason with no producer reads as a condition the apply
-        can still reach."""
+        can still reach. `SKIP_NAME_TAKEN` is produced by the apply when a
+        credential added in Istota holds a name the file produces."""
         assert secrets_vault_module.SKIP_REASONS == frozenset({
             SKIP_UNUSABLE_NAME,
             SKIP_DUPLICATE_NAME,
             secrets_vault_module.SKIP_EMPTY_VALUE,
             SKIP_OVERSIZE_VALUE,
             SKIP_UNREADABLE_ROW,
+            secrets_vault_module.SKIP_NAME_TAKEN,
         })
 
     @pytest.mark.parametrize(

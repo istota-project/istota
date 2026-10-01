@@ -847,3 +847,38 @@ def test_multi_user_vault_needs_isolation_or_opt_in(
     else:
         cmd_secret(args)
         assert secrets_store.secret_exists(db_path, target, "vault", "passphrase")
+
+
+def test_vault_new_refuses_a_name_a_local_credential_holds(env, monkeypatch, capsys):
+    """`create_entry` checks the file; a local credential is only in the store,
+    so `vault-new` asks the store before it writes the file."""
+    import sys
+
+    from pykeepass import create_database
+
+    from istota.cli import main
+    from istota.credential_broker.bindings import parse_binding
+    from istota.secrets_vault import VAULT_ENTRY_SERVICE
+
+    cfg, db_path, mount = _with_vault(env)
+    path = mount / "Users" / "alice" / "config" / "vault.kdbx"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    create_database(str(path), password=PASSPHRASE)
+    before = path.read_bytes()
+    secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
+    secrets_store.set_secret(
+        db_path, "alice", VAULT_ENTRY_SERVICE, "generated_example_username", "typed",
+        binding={**parse_binding("", {}, [], source="local"), "credential": "generated_example"},
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "istota", "-c", str(cfg), "secret", "vault-new", "--user", "alice",
+        "--slug", "example", "--no-symbols",
+    ])
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "already exists" in err and "generated_example_username" in err
+    assert path.read_bytes() == before
