@@ -300,7 +300,11 @@ class TestEndToEnd:
 
         self._cli(monkeypatch, db_path, "bob", None, None,
                   ["set-members", "ns", "plumbers", "--group", "fam"])
-        assert json.loads(capsys.readouterr().out)["members"] == ["Ana"]
+        from istota.skills.kv import _fence_group_value
+
+        # Read back fenced as another member's content (multiplayer D22).
+        members = json.loads(capsys.readouterr().out)["members"]
+        assert members == _fence_group_value(["Ana"])
 
     def test_a_hand_written_op_file_from_a_non_member(
         self, setup, db_path, tmp_path, caplog,

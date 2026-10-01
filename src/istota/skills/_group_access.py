@@ -17,6 +17,12 @@ import os
 from pathlib import Path
 
 
+#: The untrusted-content label ``GROUP.md`` is fenced under wherever it reaches
+#: the model: ``memory show --group`` and the prompt's ``## Group memory``
+#: block (multiplayer D22). One spelling, so the model meets one marker.
+GROUP_MEMORY_LABEL = "group memory"
+
+
 def group_refusal(group_id: str) -> str:
     """The one refusal text for every reason a group is out of reach."""
     return f"not a member of group '{group_id}'"

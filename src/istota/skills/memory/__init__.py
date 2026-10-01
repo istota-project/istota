@@ -67,7 +67,12 @@ from typing import NamedTuple
 
 from istota.atomic_write import write_text_atomic
 from istota.skills._cli import emit, error_envelope, parse_and_resolve, status_exit_code
-from istota.skills._group_access import group_access_denied, group_refusal
+from istota.skills._group_access import (
+    GROUP_MEMORY_LABEL,
+    group_access_denied,
+    group_refusal,
+)
+from istota.untrusted import frame_untrusted
 from istota.user_scope import is_scopable_user_id
 from istota.memory.curation.audit import (
     write_audit_log,
@@ -659,9 +664,11 @@ def cmd_show(args) -> int:
         # output round-trippable.
         from istota.memory.curation.types import SectionedDoc
         sub = SectionedDoc(preamble=[], sections=[section])
-        body = serialize_sectioned_doc(sub)
-        print(body, end="" if body.endswith("\n") else "\n")
-        return 0
+        text = serialize_sectioned_doc(sub)
+    if target.kind == _GROUP:
+        # Several members write GROUP.md, so it reaches the model fenced, as
+        # the prompt block and `kv --group` do (multiplayer D22).
+        text = frame_untrusted(text, GROUP_MEMORY_LABEL)
     print(text, end="" if text.endswith("\n") else "\n")
     return 0
 

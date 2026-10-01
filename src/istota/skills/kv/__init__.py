@@ -28,6 +28,7 @@ from istota.kv_namespaces import is_reserved_namespace
 from istota.skills._cli import fail as _fail, parse_and_resolve, run_skill_cli
 from istota.skills._group_access import group_access_denied, group_refusal
 from istota.skills._hostpath import READ, host_path
+from istota.untrusted import frame_untrusted
 
 # `list` decodes and prints every value in a namespace. The natural command for
 # orienting in a namespace should not be the one that dumps a 153 KB array into
@@ -141,6 +142,19 @@ def _group(args) -> str | None:
     return getattr(args, "group", None)
 
 
+# Every group value goes back to the model fenced (multiplayer D22): a group
+# store has several authors, and `written_by` names only the last writer, which
+# after a `set-add` is not the author of every member. So the rule is per
+# store, not per writer.
+GROUP_VALUE_LABEL = "group value"
+
+
+def _fence_group_value(value: object) -> str:
+    """A decoded group value as fenced text: a string as itself, else its JSON."""
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return frame_untrusted(text, GROUP_VALUE_LABEL)
+
+
 def _scope(args) -> str | None:
     """The deferred op's ``scope``: the apply step authorizes against it."""
     if getattr(args, "shared", False):
@@ -207,7 +221,8 @@ def cmd_get(args):
             value = result["value"]
         envelope = {"status": "ok", "value": value}
         if _group(args) is not None:
-            # Another member may have written it; say who.
+            # Another member may have written it; say who, and fence it.
+            envelope["value"] = _fence_group_value(value)
             envelope["written_by"] = result.get("written_by")
         print(json.dumps(envelope))
 
@@ -383,6 +398,11 @@ def cmd_list(args):
         keys_only=getattr(args, "keys_only", False),
         max_value_chars=max_value_chars,
     )
+    if group is not None:
+        # After the preview cut, so a truncation never takes the closing marker.
+        for entry in entries:
+            if "value" in entry:
+                entry["value"] = _fence_group_value(entry["value"])
     print(json.dumps({
         "status": "ok",
         "count": len(entries),
@@ -493,7 +513,7 @@ def cmd_set_members(args):
         "status": "ok",
         "total": len(members),
         "offset": offset,
-        "members": page,
+        "members": _fence_group_value(page) if _group(args) is not None else page,
     }))
 
 

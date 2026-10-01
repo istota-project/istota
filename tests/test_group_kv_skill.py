@@ -10,7 +10,7 @@ import json
 import pytest
 
 from istota import db
-from istota.skills.kv import main as kv_main
+from istota.skills.kv import _fence_group_value, main as kv_main
 
 SET_OPS = {
     "set-contains": ["set-contains", "ns", "k", "a"],
@@ -70,7 +70,10 @@ class TestMemberReads:
             db.kv_set(conn, "alice", "ns", "k", '"personal"')
         kv_main(["get", "ns", "k", "--group", "fam"])
         out = json.loads(capsys.readouterr().out)
-        assert out == {"status": "ok", "value": "group", "written_by": "bob"}
+        # The value is fenced as untrusted content (D22); test_group_untrusted
+        # owns that shape. What this pins is which store it came from.
+        assert out["value"] == _fence_group_value("group")
+        assert out["written_by"] == "bob"
 
     def test_list_and_namespaces(self, env, capsys):
         with db.get_db(env) as conn:
@@ -93,7 +96,8 @@ class TestMemberReads:
         kv_main(["set-contains", "ns", "k", "a", "--group", "fam"])
         assert json.loads(capsys.readouterr().out)["contains"] is True
         kv_main(["set-members", "ns", "k", "--group", "fam"])
-        assert json.loads(capsys.readouterr().out)["members"] == ["a", "b"]
+        members = json.loads(capsys.readouterr().out)["members"]
+        assert members == _fence_group_value(["a", "b"])
 
 
 class TestTheGate:
