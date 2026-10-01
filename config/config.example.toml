@@ -1678,6 +1678,15 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #                                 #   put it behind the reverse proxy, not on 0.0.0.0.
 
 # ============================================================================
+# WordPress skill (experimental: add "skill_wordpress" to [experimental] features)
+# ============================================================================
+# Sites live in each user's config/WORDPRESS.md; credentials in their vault.
+# [wordpress]
+# private_hosts = []              # exact host names allowed to resolve to a
+#                                 #   private or loopback address, e.g. a local
+#                                 #   ddev site. Every other site must be public.
+
+# ============================================================================
 # ntfy Push Notifications
 # ============================================================================
 # ntfy is a per-user connected service, configured by each user via the web
