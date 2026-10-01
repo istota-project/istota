@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An experimental `wordpress` skill reads WordPress sites over the core REST API: post types (custom ones included), posts with their raw block content and ACF fields, terms, media, users, settings, plugins, any `GET` route and the Abilities API, across several installs and the sites of a multisite network. Enable it with `skill_wordpress` in `[experimental] features`. Each site is a record in the user's `config/WORDPRESS.md` naming a vault entry that holds the site URL, login and application password; the password goes only to a host the entry is bound to, private addresses are refused unless listed in the new `[wordpress] private_hosts`, and redirects are never followed. Writes come in later releases.
+
 - A skill can now read a whole vault entry, its password, username, URL and custom fields, in one fetch, instead of spending one fetch from `vault_fetch_limit_per_task` per field. For that read the limit counts credentials rather than fields. Grants and the reveal policy apply to every field of the entry, and the entry is refused if any one field would be.
 
 - Your SMS conversation and your one-to-one WhatsApp chat now each have a room. The first text you send creates a room named SMS or WhatsApp, and your texts, the answers, confirmation exchanges, the replies to `!commands` you text, and scheduled jobs and alerts sent to your phone (including ones whose send was blocked) are all recorded in it. A WhatsApp group keeps its own room, and its people's messages now show in its web view, as Talk group messages already did.

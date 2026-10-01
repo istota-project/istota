@@ -141,6 +141,14 @@ Read: `list`, `read`, `search`, `thread`, `attachments --dest`, `from-senders`, 
 - `--fill-credential` checks frame origin against the vault binding, requires HTTPS, fills in one CDP evaluation, needs capability `credential_origin_check`, and is selector-only.
 - Untrusted pixels cannot be fenced; `untrusted.IMAGE_NOTICE` is a notice, not a control, and the 8-round bound is advisory.
 
+### `wordpress/` - WordPress over core REST (experimental, `skill_wordpress`)
+Spec: `WordPress skill spec.md`. Stage 1 is reads only: `sites`, `describe`, `list`, `get`, `terms list`, `media list`, `users list|get`, `settings get`, `plugins list`, `rest GET`, `abilities list`.
+
+- **Credential**: `--site` picks a record in the user's `config/WORDPRESS.md` (`name`, `credential`, `multisite`, `default`; read with `storage.read_user_config_file`), and the record's vault entry is resolved whole with `_credref.resolve_entry` (one fetch) by `_site_verb` before the handler runs, after host paths resolve. URL and login come from the entry, never the file. Site selection and `--blog` shape are checked first, so a typo spends no fetch.
+- **Every request** passes `sites.check_bound` (authority via the broker's `credential_host`, must be in `bound_hosts`; unbound sends nothing), the SSRF rule from `istota/net_guard.py` (any non-public address refuses unless the host is in operator-only `[wordpress] private_hosts`, exact match), a connection pinned to the checked address, and `follow_redirects=False`. HTTPS only; the broker's `allow_http` grant is not honoured yet. `trust_env=False`, with the SSL context built separately so `SSL_CERT_FILE` still applies.
+- Retry once only for idempotent requests; a non-idempotent ambiguous end is `outcome_unknown`. Errors map to the spec's §9.2 `reason`s; server messages are fenced (`WORDPRESS CONTENT`), as is every site-authored string in output (`fence_tree` for ACF, meta, settings, generic bodies; `acf_fc_layout` stays bare).
+- `--blog` is verified against the subsite's own `/wp-json/` index (`url` or `home`) before use. Discovery is cached for an hour in reserved KV `_wordpress`, written directly with `db.kv_set`, keyed by site, blog and a digest of the base URL.
+
 ### `transcribe/` - OCR
 `cmd_ocr` runs Tesseract once (`image_to_data`). `ocr_image_out_of_process` spawns `python -P -m istota.ocr_leaf ocr` (process group, no stdin, `--` before the path, argv from `child_argv`); the leaf imports nothing from `istota` because the skills package star-imports every skill (`TestTheChildImportSurface`). Never raises. Concurrency `image_attachments.OCR_MAX_CONCURRENCY` (4), per call. The child is for memory isolation and a real timeout; `health/ocr._ocr_image` remains an in-process second implementation.
 

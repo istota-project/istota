@@ -251,6 +251,17 @@ CASES: dict[tuple[str, str, str], Case] = {
         patch=("istota.skills.whisper.cli", "cmd_transcribe"),
     ),
 
+    ("wordpress", "describe", "output"): Case(
+        argv=lambda p: ["describe", "--type", "post", "--output", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "describe"),
+    ),
+    ("wordpress", "get", "output"): Case(
+        argv=lambda p: ["get", "--id", "1", "--output", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "get"),
+    ),
+
     # -- Stage 6: the writes ------------------------------------------------ #
     ("email", "attachments", "dest"): Case(
         argv=lambda p: ["attachments", "17", "--dest", p],
