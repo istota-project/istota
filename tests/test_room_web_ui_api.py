@@ -516,3 +516,87 @@ class TestSettingsRefuseASharedRoom:
             db.add_room_member(conn, ref, "alice")
         listed = {r["token"]: r for r in mod._user_talk_rooms("alice")}
         assert listed[ref]["shared"] is True
+
+
+# ---------------------------------------------------------------------------
+# The room's group link (multiplayer Stage 27)
+# ---------------------------------------------------------------------------
+
+
+def _groups(db_path):
+    with db.get_db(db_path) as conn:
+        db.create_group(conn, "fam", kind="family", display_name="Fam",
+                        created_by="operator")
+        db.add_group_member(conn, "fam", "alice", added_by="operator")
+        db.add_group_member(conn, "fam", "bob", added_by="operator")
+        db.create_group(conn, "bobs", kind="team", display_name="Bobs",
+                        created_by="operator")
+        db.add_group_member(conn, "bobs", "bob", added_by="operator")
+
+
+class TestTheGroupLinkEndpoints:
+    async def _url(self, client, cookies, room):
+        room_id = (await _listed(client, cookies, room.token))["id"]
+        return f"/istota/api/chat/rooms/{room_id}/group"
+
+    async def test_the_host_reads_their_own_groups_and_links_one(self, client, db_path):
+        _groups(db_path)
+        room = _shared_room(db_path)
+        cookies = await _login(client, "alice")
+        url = await self._url(client, cookies, room)
+        body = (await client.get(url, cookies=cookies)).json()
+        assert body["group_id"] is None and body["can_set"] is True
+        assert [g["group_id"] for g in body["choices"]] == ["fam"]
+        resp = await client.put(url, json={"group_id": "fam"},
+                                cookies=cookies, headers=ORIGIN)
+        assert resp.status_code == 200
+        assert resp.json()["group_id"] == "fam"
+        assert resp.json()["group_name"] == "Fam"
+        with db.get_db(db_path) as conn:
+            assert db.get_room(conn, room.token).group_id == "fam"
+        resp = await client.put(url, json={"group_id": None},
+                                cookies=cookies, headers=ORIGIN)
+        assert resp.status_code == 200 and resp.json()["group_id"] is None
+
+    async def test_another_member_reads_it_and_is_refused(self, client, db_path):
+        _groups(db_path)
+        room = _shared_room(db_path)
+        with db.get_db(db_path) as conn:
+            db.set_room_group(conn, room.token, "fam")
+        cookies = await _login(client, "bob")
+        url = await self._url(client, cookies, room)
+        body = (await client.get(url, cookies=cookies)).json()
+        assert body["group_id"] == "fam" and body["can_set"] is False
+        assert body["choices"] == []
+        resp = await client.put(url, json={"group_id": "bobs"},
+                                cookies=cookies, headers=ORIGIN)
+        assert resp.status_code == 403
+        with db.get_db(db_path) as conn:
+            assert db.get_room(conn, room.token).group_id == "fam"
+
+    async def test_a_group_the_host_is_not_in_is_refused(self, client, db_path):
+        _groups(db_path)
+        room = _shared_room(db_path)
+        cookies = await _login(client, "alice")
+        url = await self._url(client, cookies, room)
+        resp = await client.put(url, json={"group_id": "bobs"},
+                                cookies=cookies, headers=ORIGIN)
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "You are not a member of group 'bobs'."
+        with db.get_db(db_path) as conn:
+            assert db.get_room(conn, room.token).group_id is None
+
+    async def test_a_malformed_body_is_refused(self, client, db_path):
+        room = _private_room(db_path)
+        cookies = await _login(client, "alice")
+        url = await self._url(client, cookies, room)
+        resp = await client.put(url, json={"group_id": 3},
+                                cookies=cookies, headers=ORIGIN)
+        assert resp.status_code == 400
+
+    async def test_someone_elses_room_is_not_found(self, client, db_path):
+        room = _private_room(db_path)
+        cookies = await _login(client, "alice")
+        url = await self._url(client, cookies, room)
+        other = await _login(client, "carol")
+        assert (await client.get(url, cookies=other)).status_code == 404

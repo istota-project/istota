@@ -1515,12 +1515,16 @@ async def cmd_room(ctx: CommandContext):
     if sub == "guests":
         return _room_guests(conn, token, ctx.user_id, rest.lower())
 
+    if sub == "group":
+        return _room_group(conn, room, ctx.user_id, rest)
+
     if sub in ("share", "unshare"):
         return _room_share(config, conn, room, ctx.user_id, sub, rest.lower())
 
     return (
         "Usage: `!room` (show), `!room model <alias>`, `!room effort <level>`, "
         "`!room host`, `!room guests <off|held|direct>`, "
+        "`!room group [<id>|none]`, "
         "`!room share [<scope>|all|none]`, `!room unshare <scope>`. "
         "Use `default` to clear."
     )
@@ -1619,6 +1623,39 @@ def _room_host(conn, token: str, user_id: str) -> str:
         host = room_policy.get_policy(conn, token).host_user_id
         return f"This room's host is {host}. A host is never replaced while present."
     return "Only a member of this room can host it."
+
+
+def _room_group(conn, room, user_id: str, value: str) -> str:
+    """`!room group [<id>|none]`: the group this room is linked to (Stage 27).
+
+    Any member may read the link; setting it is the host's, to one of the
+    host's own groups (`room_policy.group_link_refusal`, which the web PATCH
+    asks too).
+    """
+    from . import room_policy
+
+    value = value.strip()
+    if not value:
+        if not room.group_id:
+            return (
+                "This room is not linked to a group. `!room group <id>` links it, "
+                "so members' turns here carry that group's memory."
+            )
+        return (
+            f"This room is linked to group `{room.group_id}`. Its memory loads here "
+            "only while everyone in the room is a member and no guest is present."
+        )
+    group_id = None if value.lower() == "none" else value
+    refusal = room_policy.group_link_refusal(conn, room.token, user_id, group_id)
+    if refusal:
+        return refusal
+    db.set_room_group(conn, room.token, group_id)
+    if group_id is None:
+        return "This room is no longer linked to a group."
+    return (
+        f"This room is linked to group `{group_id}`. Its memory loads here only "
+        "while everyone in the room is a member and no guest is present."
+    )
 
 
 def _room_guests(conn, token: str, user_id: str, value: str) -> str:

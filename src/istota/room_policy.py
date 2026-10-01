@@ -239,6 +239,37 @@ def guest_reply_refusal(conn: sqlite3.Connection, room_token: str, user_id: str)
     return None
 
 
+def group_link_refusal(
+    conn: sqlite3.Connection, room_token: str, user_id: str, group_id: str | None,
+) -> str | None:
+    """Why ``user_id`` may not link this room to ``group_id`` (None: unlink), or None.
+
+    The link decides whose shared memory every member's turn carries, so it is
+    a room setting and takes `settings_refusal`'s authority: the host in a room
+    more than one human reads, the one member of a private room. A side room
+    has no link, since it is one member's companion of a room that may have
+    one. Linking also needs the caller to be a current member of a live group;
+    every refusal of the group reads the same, as `kv --group`'s does, so the
+    command is not a way to learn which groups exist.
+    """
+    room = db.get_room(conn, room_token)
+    if room is None:
+        return "This room isn't registered yet."
+    if room.side_of:
+        return "A side room is private to you; link the room it belongs to instead."
+    if not host_present(conn, room_token, user_id):
+        return "Only a member of this room can link it to a group."
+    refusal = settings_refusal(conn, room_token, user_id)
+    if refusal:
+        return refusal
+    if group_id is None:
+        return None
+    if not (db.is_valid_group_id(group_id)
+            and db.is_group_member(conn, group_id, user_id)):
+        return f"You are not a member of group '{group_id}'."
+    return None
+
+
 def set_guest_reply(conn: sqlite3.Connection, room_token: str, value: str) -> RoomPolicy:
     if value not in GUEST_REPLY_VALUES:
         raise ValueError(f"guest_reply must be one of {GUEST_REPLY_VALUES}")

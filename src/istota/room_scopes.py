@@ -241,7 +241,8 @@ def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
     group of the user, since the answer goes to the user alone (a shared room
     is refused as a delivery target, multiplayer Stage 15). In a room, only the
     groups whose current members cover the room's members and present
-    principal participants.
+    principal participants; in a room linked to a group (``rooms.group_id``),
+    that group alone, under the same rule.
 
     Nothing at all on a guest's turn (emissary mode), on a turn whose stored
     audience is ``mixed``, or while any guest or agent is present: the charter
@@ -291,6 +292,12 @@ def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
             task.conversation_token,
         )
         return []
+    # A room linked to a group (multiplayer Stage 27) carries that group and no
+    # other, still under the rule below: the link narrows the candidates, it
+    # never makes a reader a member.
+    registered = db.get_room(conn, room_token)
+    if registered is not None and registered.group_id:
+        groups = [g for g in groups if g == registered.group_id]
     return [
         g for g in groups if readers <= set(db.list_group_members(conn, g))
     ]

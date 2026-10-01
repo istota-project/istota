@@ -1292,7 +1292,15 @@ CREATE TABLE IF NOT EXISTS rooms (
     -- foreign key: deleting the parent must not be refused or cascade into the
     -- member's own transcript; a side room whose parent is gone posts nowhere.
     side_of     TEXT,
-    side_for_user TEXT
+    side_for_user TEXT,
+    -- The group this room is linked to (multiplayer Stage 27), or NULL. A
+    -- linked room's tasks carry that group's material and no other, and only
+    -- while every reader is a current member (`room_scopes.task_group_ids`);
+    -- the link narrows the audience rule and never widens it. Set by the host,
+    -- to a group the host belongs to. No foreign key, for the reason `side_of`
+    -- has none: a group is archived rather than deleted, and a link to one that
+    -- is gone or archived loads nothing. db._migrate_room_group adds it.
+    group_id    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rooms_side

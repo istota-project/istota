@@ -1145,6 +1145,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_room_veto(conn)
     _migrate_room_epochs(conn)
     _migrate_groups(conn)
+    _migrate_room_group(conn)
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
@@ -4261,6 +4262,8 @@ class Room:
     #: None on every other room.
     side_of: str | None = None
     side_for_user: str | None = None
+    #: The group the room is linked to (multiplayer Stage 27), or None.
+    group_id: str | None = None
 
 
 @dataclass
@@ -4320,6 +4323,7 @@ def _row_to_room(row: sqlite3.Row) -> Room:
         last_activity=row["last_activity"] if "last_activity" in keys else None,
         side_of=row["side_of"] if "side_of" in keys else None,
         side_for_user=row["side_for_user"] if "side_for_user" in keys else None,
+        group_id=row["group_id"] if "group_id" in keys else None,
     )
 
 
@@ -5184,6 +5188,19 @@ def set_room_brain(conn: sqlite3.Connection, token: str, brain: str | None) -> N
     """
     conn.execute(
         "UPDATE rooms SET brain = ? WHERE token = ?", (brain, token)
+    )
+
+
+def set_room_group(conn: sqlite3.Connection, token: str, group_id: str | None) -> None:
+    """Link the room to a group, or None to unlink it (multiplayer Stage 27).
+
+    Stored as given: who may write it is `room_policy.group_link_refusal`'s
+    question, and whether it loads anything is asked per turn by
+    `room_scopes.task_group_ids`, so a link outlives a membership change
+    without being trusted across it.
+    """
+    conn.execute(
+        "UPDATE rooms SET group_id = ? WHERE token = ?", (group_id, token)
     )
 
 
@@ -7557,6 +7574,22 @@ def _migrate_side_rooms(conn: sqlite3.Connection) -> None:
         )
     except sqlite3.OperationalError:
         return  # rooms or the marker table not created yet
+
+
+def _migrate_room_group(conn: sqlite3.Connection) -> None:
+    """Add `rooms.group_id` (multiplayer Stage 27).
+
+    Markered (`room_group_v1`) like `_migrate_side_rooms`. Nothing is
+    backfilled: no room was linked to a group before this, and a link is the
+    host's choice, never an inference from who happens to be in the room.
+    """
+    _add_columns(conn, "rooms", {"group_id": "TEXT"})
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_group_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # marker table not created yet
 
 
 # Kept equal to schema.sql's copy by tests/test_room_policy.py.

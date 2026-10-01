@@ -5444,6 +5444,51 @@ def _chat_room_grants(
     }
 
 
+def _chat_room_group(
+    username: str, room_id: int, group_id=_UNSET,
+) -> tuple[int, dict]:
+    """The room's group link (multiplayer Stage 27); with ``group_id``, set first.
+
+    Every member reads the link. ``choices`` are the caller's own live groups,
+    and only for a caller who may set it, so a member who is not the host is
+    shown nothing of anyone's groups. The write asks
+    `room_policy.group_link_refusal`, the rule `!room group` asks, and a
+    refused body changes nothing.
+    """
+    from . import db, room_policy
+
+    with db.get_db(_config.db_path) as conn:
+        found = _chat_member_room(conn, username, room_id)
+        if found is None:
+            return 404, {"error": "room not found"}
+        _handle, reg = found
+        if reg.side_of:
+            return 409, {"error": "a side room is private to its member"}
+        if group_id is not _UNSET:
+            refusal = room_policy.group_link_refusal(conn, reg.token, username, group_id)
+            if refusal:
+                return 403, {"error": refusal}
+            db.set_room_group(conn, reg.token, group_id)
+            reg = db.get_room(conn, reg.token)
+        refusal = room_policy.group_link_refusal(conn, reg.token, username, None)
+        choices = []
+        if refusal is None:
+            for gid in db.list_user_groups(conn, username):
+                group = db.get_group(conn, gid)
+                choices.append({
+                    "group_id": gid,
+                    "display_name": (group or {}).get("display_name") or gid,
+                })
+        linked = db.get_group(conn, reg.group_id) if reg.group_id else None
+    return 200, {
+        "group_id": reg.group_id,
+        "group_name": (linked or {}).get("display_name") or reg.group_id,
+        "can_set": refusal is None,
+        "refusal": refusal,
+        "choices": choices,
+    }
+
+
 # A room's CHANNEL.md is prompt text, not a document store: it is read into
 # every task in the room, so the cap is about what belongs in a system prompt
 # rather than about what the filesystem can hold. 256 KiB is far above any
@@ -8090,6 +8135,39 @@ async def chat_put_room_grants(
         return JSONResponse({"error": "scopes: a list of names is required"}, status_code=400)
     status, payload = await asyncio.to_thread(
         _chat_room_grants, user["username"], room_id, scopes,
+    )
+    return JSONResponse(payload, status_code=status)
+
+
+@api_router.get("/chat/rooms/{room_id}/group")
+async def chat_room_group(
+    room_id: int,
+    user: dict = Depends(_require_api_auth),
+):
+    status, payload = await asyncio.to_thread(
+        _chat_room_group, user["username"], room_id,
+    )
+    return JSONResponse(payload, status_code=status)
+
+
+@api_router.put("/chat/rooms/{room_id}/group")
+async def chat_put_room_group(
+    room_id: int,
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    try:
+        data = await request.json()
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or "group_id" not in data:
+        return JSONResponse({"error": "group_id is required (null unlinks)"}, status_code=400)
+    group_id = data["group_id"]
+    if group_id is not None and not isinstance(group_id, str):
+        return JSONResponse({"error": "group_id: a string or null"}, status_code=400)
+    status, payload = await asyncio.to_thread(
+        _chat_room_group, user["username"], room_id, group_id.strip() if group_id else None,
     )
     return JSONResponse(payload, status_code=status)
 
