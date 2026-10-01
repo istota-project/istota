@@ -643,6 +643,429 @@ class TestOtherReads:
 
 
 # ---------------------------------------------------------------------------
+# Content writes
+# ---------------------------------------------------------------------------
+
+
+class Posts:
+    """A post collection on the fake site: create, update, read back, trash.
+
+    Only meta keys in `registered_meta` are kept, as WordPress keeps only those
+    registered with show_in_rest. `on_save` sees each stored item, for a test
+    that wants WordPress to change what it was sent.
+    """
+
+    def __init__(self, site: Site, base: str = "/wp-json/wp/v2/posts", type_: str = "post"):
+        self.site, self.base, self.type = site, base, type_
+        self.items: dict[int, dict] = {}
+        self.next_id = 50
+        self.registered_meta = {"subtitle"}
+        self.on_save = None
+        site.routes[("POST", base)] = self.create
+        site.routes.setdefault(("GET", base), [])
+
+    def add(self, **fields) -> dict:
+        item = self._blank(self.next_id)
+        self.next_id += 1
+        item.update(fields)
+        self.items[item["id"]] = item
+        self._register(item["id"])
+        return item
+
+    def _blank(self, post_id: int) -> dict:
+        return {"id": post_id, "type": self.type, "slug": "", "status": "draft",
+                "date": "2026-10-01T09:00:00", "date_gmt": "2026-10-01T07:00:00",
+                "title": {"raw": ""}, "content": {"raw": ""}, "excerpt": {"raw": ""},
+                "password": "", "featured_media": 0, "meta": {}, "categories": [],
+                "tags": []}
+
+    def _apply(self, item: dict, body: dict) -> None:
+        for key, value in body.items():
+            if key in ("title", "content", "excerpt"):
+                item[key] = {"raw": value, "rendered": value}
+            elif key == "meta":
+                item["meta"].update({k: v for k, v in value.items() if k in self.registered_meta})
+            else:
+                item[key] = value
+        if self.on_save:
+            self.on_save(item)
+
+    def _register(self, post_id: int) -> None:
+        path = f"{self.base}/{post_id}"
+        self.site.routes[("GET", path)] = lambda r: httpx.Response(200, json=self.items[post_id])
+        self.site.routes[("POST", path)] = lambda r: self.update(post_id, r)
+        self.site.routes[("DELETE", path)] = lambda r: self.delete(post_id, r)
+
+    def create(self, request: httpx.Request) -> httpx.Response:
+        item = self._blank(self.next_id)
+        self.next_id += 1
+        self._apply(item, json.loads(request.content))
+        self.items[item["id"]] = item
+        self._register(item["id"])
+        return httpx.Response(201, json=item)
+
+    def update(self, post_id: int, request: httpx.Request) -> httpx.Response:
+        self._apply(self.items[post_id], json.loads(request.content))
+        return httpx.Response(200, json=self.items[post_id])
+
+    def delete(self, post_id: int, request: httpx.Request) -> httpx.Response:
+        item = self.items[post_id]
+        if request.url.params.get("force") == "true":
+            del self.items[post_id]
+            return httpx.Response(200, json={"deleted": True, "previous": item})
+        item["status"] = "trash"
+        return httpx.Response(200, json=item)
+
+
+def writes(site: Site) -> list[httpx.Request]:
+    return [r for r in site.requests if r.method != "GET"]
+
+
+def body_of(request: httpx.Request) -> dict:
+    return json.loads(request.content)
+
+
+@pytest.fixture
+def posts(env):
+    return Posts(env.site)
+
+
+class TestCreate:
+    def test_it_creates_a_draft_and_reads_it_back(self, env, posts, capsys):
+        code, out = run(["create", "--type", "post", "--title", "Hello",
+                         "--content", "<!-- wp:paragraph --><p>x</p><!-- /wp:paragraph -->",
+                         "--slug", "hello"], capsys)
+        assert code == 0, out
+        [post] = writes(env.site)
+        assert post.url.path == "/wp-json/wp/v2/posts"
+        assert body_of(post) == {"title": "Hello", "slug": "hello", "status": "draft",
+                                 "content": "<!-- wp:paragraph --><p>x</p><!-- /wp:paragraph -->"}
+        assert out["created"] is True
+        assert out["item"]["id"] == 50 and out["item"]["post_status"] == "draft"
+        assert out["readback"] == {"dropped": [], "changed": [], "notes": []}
+        reread = env.site.requests[-1]
+        assert reread.method == "GET" and reread.url.path == "/wp-json/wp/v2/posts/50"
+        assert reread.url.params["context"] == "edit"
+
+    def test_create_cannot_publish(self, env, posts, capsys):
+        with pytest.raises(SystemExit):
+            wp.main(["create", "--type", "post", "--title", "x", "--status", "publish"])
+        capsys.readouterr()
+        assert env.fetches == [] and writes(env.site) == []
+
+    def test_if_absent_returns_the_existing_post(self, env, posts, capsys):
+        posts.add(slug="hello", title={"raw": "Old"})
+        env.site.routes[("GET", "/wp-json/wp/v2/posts")] = lambda r: httpx.Response(
+            200, json=[i for i in posts.items.values() if i["slug"] == r.url.params.get("slug")])
+        code, out = run(["create", "--type", "post", "--title", "New", "--slug", "hello",
+                         "--if-absent"], capsys)
+        assert code == 0, out
+        assert out["created"] is False and out["item"]["id"] == 50
+        assert writes(env.site) == []
+        lookup = next(r for r in env.site.requests if r.url.path == "/wp-json/wp/v2/posts")
+        assert lookup.url.params["status"] == "any" and lookup.url.params["context"] == "edit"
+
+    def test_if_absent_creates_when_nothing_has_the_slug(self, env, posts, capsys):
+        code, out = run(["create", "--type", "post", "--title", "New", "--slug", "fresh",
+                         "--if-absent"], capsys)
+        assert code == 0 and out["created"] is True
+        assert len(writes(env.site)) == 1
+
+    def test_if_absent_needs_a_slug_and_spends_no_fetch(self, env, posts, capsys):
+        code, out = run(["create", "--type", "post", "--title", "x", "--if-absent"], capsys)
+        assert code == 1 and out["reason"] == "validation_error"
+        assert env.fetches == []
+
+    def test_a_suffixed_slug_is_reported(self, env, posts, capsys):
+        posts.on_save = lambda item: item.update(slug=item["slug"] + "-2")
+        _, out = run(["create", "--type", "post", "--title", "x", "--slug", "taken"], capsys)
+        assert out["readback"]["changed"] == ["slug"]
+        assert out["item"]["slug"] == "taken-2"
+        assert any("suffix" in n for n in out["readback"]["notes"])
+
+    def test_filtered_markup_and_unregistered_meta_are_reported(self, env, posts, capsys):
+        def kses(item):
+            item["content"]["raw"] = item["content"]["raw"].replace("<script>x</script>", "")
+        posts.on_save = kses
+        meta = env.mount / "Users" / "alice" / "meta.json"
+        meta.write_text(json.dumps({"subtitle": "s", "secret_key": 1}))
+        code, out = run(["create", "--type", "post", "--title", "x",
+                         "--content", "<p>a</p><script>x</script>",
+                         "--meta-file", str(meta)], capsys)
+        assert code == 0, out
+        assert body_of(writes(env.site)[0])["meta"] == {"subtitle": "s", "secret_key": 1}
+        assert out["readback"]["changed"] == ["content"]
+        assert out["readback"]["dropped"] == ["meta.secret_key"]
+        assert len(out["readback"]["notes"]) == 2
+
+    def test_a_502_on_create_is_one_post_and_outcome_unknown(self, env, posts, capsys):
+        env.site.routes[("POST", "/wp-json/wp/v2/posts")] = httpx.Response(502)
+        code, out = run(["create", "--type", "post", "--title", "x", "--slug", "s"], capsys)
+        assert code == 1 and out["reason"] == "outcome_unknown"
+        assert len(writes(env.site)) == 1
+        assert out["lookup"] == "list --type post --slug s --status any"
+
+    def test_a_disconnect_mid_create_is_one_post_and_outcome_unknown(self, env, posts, capsys):
+        def drop(request):
+            raise httpx.ReadError("connection reset", request=request)
+        env.site.routes[("POST", "/wp-json/wp/v2/posts")] = drop
+        code, out = run(["create", "--type", "post", "--title", "A title"], capsys)
+        assert out["reason"] == "outcome_unknown"
+        assert len(writes(env.site)) == 1
+        assert out["lookup"] == "list --type post --search 'A title' --status any"
+
+    def test_a_validation_error_drops_the_discovery_cache(self, env, posts, capsys):
+        run(["describe"], capsys)
+        env.site.routes[("POST", "/wp-json/wp/v2/posts")] = httpx.Response(
+            400, json={"code": "rest_invalid_param", "message": "Invalid parameter(s): status",
+                       "data": {"params": {"status": "bad"}}})
+        _, out = run(["create", "--type", "post", "--title", "x"], capsys)
+        assert out["reason"] == "validation_error" and out["fields"] == ["status"]
+        with db.get_db(env.config.db_path) as conn:
+            assert db.kv_list(conn, "alice", "_wordpress") == []
+
+    def test_an_offset_date_is_sent_as_utc(self, env, posts, capsys):
+        run(["create", "--type", "post", "--title", "x", "--date", "2026-10-01T09:00+02:00"],
+            capsys)
+        sent = body_of(writes(env.site)[0])
+        assert sent["date_gmt"] == "2026-10-01T07:00:00" and "date" not in sent
+
+    def test_a_bad_date_spends_no_fetch(self, env, posts, capsys):
+        code, out = run(["create", "--type", "post", "--title", "x", "--date", "tomorrow"],
+                        capsys)
+        assert out["reason"] == "validation_error" and env.fetches == []
+
+
+class TestContentFiles:
+    def test_content_file_is_read_from_the_workspace(self, env, posts, capsys):
+        source = env.mount / "Users" / "alice" / "draft.html"
+        source.write_text("<!-- wp:heading --><h2>Hi</h2><!-- /wp:heading -->")
+        code, out = run(["create", "--type", "post", "--title", "x",
+                         "--content-file", str(source)], capsys)
+        assert code == 0, out
+        assert body_of(writes(env.site)[0])["content"].startswith("<!-- wp:heading -->")
+
+    def test_content_file_outside_the_workspace_is_refused_first(self, env, posts, capsys,
+                                                                 tmp_path):
+        outside = tmp_path / "elsewhere.html"
+        outside.write_text("x")
+        code, out = run(["create", "--type", "post", "--title", "x",
+                         "--content-file", str(outside)], capsys)
+        assert out["reason"] == "host_path_refused"
+        assert env.fetches == [] and env.site.requests == []
+
+    def test_content_and_content_file_are_exclusive(self, env, posts, capsys):
+        with pytest.raises(SystemExit):
+            wp.main(["create", "--type", "post", "--title", "x", "--content", "a",
+                     "--content-file", "b"])
+        capsys.readouterr()
+
+    @pytest.mark.parametrize("text", ["[1, 2]", "not json"])
+    def test_meta_file_must_be_a_json_object(self, env, posts, capsys, text):
+        meta = env.mount / "Users" / "alice" / "meta.json"
+        meta.write_text(text)
+        code, out = run(["create", "--type", "post", "--title", "x", "--meta-file", str(meta)],
+                        capsys)
+        assert out["reason"] == "validation_error" and env.fetches == []
+
+
+class TestTerms:
+    def _categories(self, env, existing):
+        created = []
+
+        def create(request):
+            term = {"id": 100 + len(created), "name": body_of(request)["name"]}
+            created.append(term)
+            return httpx.Response(201, json=term)
+
+        env.site.routes[("GET", "/wp-json/wp/v2/categories")] = existing
+        env.site.routes[("POST", "/wp-json/wp/v2/categories")] = create
+        return created
+
+    def test_names_and_ids_resolve_onto_the_rest_base(self, env, posts, capsys):
+        self._categories(env, [{"id": 3, "name": "News", "slug": "news"}])
+        env.site.routes[("GET", "/wp-json/wp/v2/tags")] = [{"id": 9, "name": "a", "slug": "a"}]
+        code, out = run(["create", "--type", "post", "--title", "x",
+                         "--terms", "category=News,12", "--terms", "post_tag=a"], capsys)
+        assert code == 0, out
+        sent = body_of(writes(env.site)[0])
+        assert sent["categories"] == [3, 12] and sent["tags"] == [9]
+        assert out["readback"]["changed"] == []
+
+    def test_a_missing_name_is_an_error_and_writes_nothing(self, env, posts, capsys):
+        self._categories(env, [])
+        code, out = run(["create", "--type", "post", "--title", "x",
+                         "--terms", "category=Typo"], capsys)
+        assert out["reason"] == "unknown_term" and "--create-terms" in out["error"]
+        assert writes(env.site) == []
+
+    def test_create_terms_is_gated(self, env, posts, capsys):
+        self._categories(env, [])
+        code, out = run(["create", "--type", "post", "--title", "x",
+                         "--terms", "category=Essays", "--create-terms"], capsys)
+        assert code == 1 and out["reason"] == "confirmation_required"
+        assert writes(env.site) == []
+        assert "create category terms" in out["would"][0] and out["would"][0].endswith("on blog")
+
+    def test_create_terms_confirmed_creates_then_writes(self, env, posts, capsys):
+        created = self._categories(env, [{"id": 3, "name": "News", "slug": "news"}])
+        code, out = run(["create", "--type", "post", "--title", "x",
+                         "--terms", "category=News,Essays", "--create-terms", "--confirmed"],
+                        capsys)
+        assert code == 0, out
+        assert [r.url.path for r in writes(env.site)] == ["/wp-json/wp/v2/categories",
+                                                          "/wp-json/wp/v2/posts"]
+        assert created == [{"id": 100, "name": "Essays"}]
+        assert body_of(writes(env.site)[1])["categories"] == [3, 100]
+        assert out["created_terms"] == {"category": [100]}
+
+    def test_a_taxonomy_the_type_does_not_have_is_refused(self, env, posts, capsys):
+        code, out = run(["create", "--type", "update", "--title", "x",
+                         "--terms", "post_tag=a"], capsys)
+        assert out["reason"] == "validation_error"
+        assert writes(env.site) == []
+
+    def test_a_post_failing_after_a_term_was_created_names_the_term(self, env, posts, capsys):
+        self._categories(env, [])
+        env.site.routes[("POST", "/wp-json/wp/v2/posts")] = httpx.Response(
+            403, json={"code": "rest_cannot_create", "message": "no"})
+        _, out = run(["create", "--type", "post", "--title", "x", "--terms", "category=New",
+                      "--create-terms", "--confirmed"], capsys)
+        assert out["reason"] == "permission_denied"
+        assert out["created_terms"] == {"category": [100]}
+
+
+class TestUpdate:
+    def test_a_draft_is_updated_without_confirmation_and_retried_once(self, env, posts, capsys):
+        posts.add(title={"raw": "Draft"})
+        calls = []
+
+        def flaky(request):
+            calls.append(request)
+            if len(calls) == 1:
+                return httpx.Response(502)
+            return posts.update(50, request)
+
+        env.site.routes[("POST", "/wp-json/wp/v2/posts/50")] = flaky
+        code, out = run(["update", "--id", "50", "--title", "Better"], capsys)
+        assert code == 0, out
+        assert len(calls) == 2
+        assert body_of(calls[1]) == {"title": "Better"}
+        assert out["updated"] is True and out["readback"]["changed"] == []
+
+    def test_nothing_to_change_spends_no_fetch(self, env, posts, capsys):
+        code, out = run(["update", "--id", "50"], capsys)
+        assert out["reason"] == "validation_error" and env.fetches == []
+
+    def test_a_live_post_is_gated_and_the_description_fences_its_title(self, env, posts, capsys):
+        posts.add(status="publish", title={"raw": HOSTILE})
+        code, out = run(["update", "--id", "50", "--content", "new"], capsys)
+        assert code == 1 and out["reason"] == "confirmation_required"
+        assert writes(env.site) == []
+        [line] = out["would"]
+        assert "which is live (publish)" in line and "(post #50)" in line
+        assert line.count(CLOSE) == 1
+        code, out = run(["update", "--id", "50", "--content", "new", "--confirmed"], capsys)
+        assert code == 0, out
+        assert body_of(writes(env.site)[0]) == {"content": "new"}
+
+    @pytest.mark.parametrize("status", ["publish", "future", "private"])
+    def test_making_a_draft_public_is_gated(self, env, posts, capsys, status):
+        posts.add(title={"raw": "D"})
+        _, out = run(["update", "--id", "50", "--status", status], capsys)
+        assert out["reason"] == "confirmation_required"
+        assert out["would"] == [f'would make "{frame_untrusted("D", "WORDPRESS CONTENT")}" '
+                                f"(post #50) {status} on blog"]
+        assert writes(env.site) == []
+
+    def test_one_confirmation_names_every_gated_action(self, env, posts, capsys):
+        posts.add(status="private", title={"raw": "P"})
+        env.site.routes[("GET", "/wp-json/wp/v2/categories")] = []
+        _, out = run(["update", "--id", "50", "--status", "publish",
+                      "--terms", "category=Fresh", "--create-terms"], capsys)
+        assert out["reason"] == "confirmation_required"
+        assert len(out["would"]) == 3
+        assert writes(env.site) == []
+
+    def test_a_missing_post_is_not_found_before_any_write(self, env, posts, capsys):
+        env.site.routes[("GET", "/wp-json/wp/v2/posts/9")] = httpx.Response(
+            404, json={"code": "rest_post_invalid_id", "message": "Invalid post ID."})
+        _, out = run(["update", "--id", "9", "--title", "x"], capsys)
+        assert out["reason"] == "not_found" and writes(env.site) == []
+
+
+class TestPublishAndDelete:
+    def test_publish_is_gated_then_publishes(self, env, posts, capsys):
+        posts.add(title={"raw": "Weekly update"})
+        code, out = run(["publish", "--id", "50"], capsys)
+        assert code == 1 and out["reason"] == "confirmation_required"
+        assert out["would"][0].startswith('would publish "') and writes(env.site) == []
+        code, out = run(["publish", "--id", "50", "--confirmed"], capsys)
+        assert code == 0, out
+        assert body_of(writes(env.site)[0]) == {"status": "publish"}
+        assert out["item"]["post_status"] == "publish" and out["published"] is True
+
+    def test_a_future_publish_reads_back_as_scheduled(self, env, posts, capsys):
+        posts.add(title={"raw": "Later"})
+        posts.on_save = lambda item: item.update(status="future")
+        _, out = run(["publish", "--id", "50", "--date", "2030-01-01T09:00", "--confirmed"],
+                     capsys)
+        assert body_of(writes(env.site)[0]) == {"status": "publish", "date": "2030-01-01T09:00:00"}
+        assert out["readback"]["changed"] == ["status"]
+
+    def test_delete_without_force_trashes_ungated(self, env, posts, capsys):
+        posts.add()
+        code, out = run(["delete", "--id", "50"], capsys)
+        assert code == 0, out
+        [request] = writes(env.site)
+        assert request.method == "DELETE" and "force" not in request.url.params
+        assert out["trashed"] is True and out["deleted"] is False
+
+    def test_delete_force_is_gated(self, env, posts, capsys):
+        posts.add(title={"raw": "Gone"})
+        code, out = run(["delete", "--id", "50", "--force"], capsys)
+        assert code == 1 and out["reason"] == "confirmation_required"
+        assert "permanently delete" in out["would"][0] and writes(env.site) == []
+        code, out = run(["delete", "--id", "50", "--force", "--confirmed"], capsys)
+        assert code == 0, out
+        assert writes(env.site)[0].url.params["force"] == "true"
+        assert out["deleted"] is True and 50 not in posts.items
+
+    def test_a_type_without_trash_says_how(self, env, posts, capsys):
+        posts.add()
+        env.site.routes[("DELETE", "/wp-json/wp/v2/posts/50")] = httpx.Response(
+            501, json={"code": "rest_trash_not_supported", "message": "no trash"})
+        code, out = run(["delete", "--id", "50"], capsys)
+        assert code == 1 and out["reason"] == "request_refused"
+        assert "--force --confirmed" in out["error"]
+        assert len(writes(env.site)) == 1
+
+    def test_an_ambiguous_delete_is_not_retried(self, env, posts, capsys):
+        posts.add()
+        env.site.routes[("DELETE", "/wp-json/wp/v2/posts/50")] = httpx.Response(503)
+        _, out = run(["delete", "--id", "50"], capsys)
+        assert out["reason"] == "outcome_unknown"
+        assert out["lookup"] == "get --id 50 --type post"
+        assert len(writes(env.site)) == 1
+
+
+@pytest.mark.parametrize("argv", [
+    ["update", "--id", "50", "--title", "x"],
+    ["update", "--id", "51", "--status", "publish"],
+    ["publish", "--id", "51"],
+    ["delete", "--id", "51", "--force"],
+    ["create", "--type", "post", "--title", "x", "--terms", "category=Nope", "--create-terms"],
+])
+def test_every_gated_action_sends_no_write_without_confirmation(env, posts, capsys, argv):
+    posts.add(status="publish")
+    posts.add(status="draft")
+    env.site.routes[("GET", "/wp-json/wp/v2/categories")] = []
+    code, out = run(argv, capsys)
+    assert code == 1 and out["reason"] == "confirmation_required", out
+    assert writes(env.site) == []
+
+
+# ---------------------------------------------------------------------------
 # The password never leaves the client
 # ---------------------------------------------------------------------------
 
@@ -652,10 +1075,12 @@ def test_the_password_is_in_no_output_and_no_log_line(env, capsys, caplog):
     env.site.routes[("GET", "/wp-json/wp/v2/updates/42")] = POST
     env.site.routes[("GET", "/wp-json/wp/v2/settings")] = httpx.Response(
         401, json={"code": "incorrect_password", "message": "bad"})
+    Posts(env.site)
     outputs = []
     for argv in (["sites"], ["describe"], ["get", "--id", "42", "--type", "update"],
                  ["settings", "get"], ["describe", "--site", "nope"],
-                 ["rest", "GET", "https://x"]):
+                 ["rest", "GET", "https://x"], ["create", "--type", "post", "--title", "t"],
+                 ["publish", "--id", "50"], ["update", "--id", "50", "--title", "u"]):
         try:
             wp.main(argv)
         except SystemExit:

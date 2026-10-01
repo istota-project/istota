@@ -1,10 +1,14 @@
 """WordPress skill: read and administer WordPress sites over the core REST API.
 
-Usage (stage 1, reads):
+Usage:
     python -m istota.skills.wordpress sites
     python -m istota.skills.wordpress describe [--type SLUG] [--refresh] [--output OUT]
     python -m istota.skills.wordpress list --type SLUG [--status S] [--search Q] ...
     python -m istota.skills.wordpress get --id N [--type SLUG] [--fields F] [--output OUT]
+    python -m istota.skills.wordpress create --type SLUG --title T [--content-file F] ...
+    python -m istota.skills.wordpress update --id N [--type SLUG] [--status S] ... [--confirmed]
+    python -m istota.skills.wordpress delete --id N [--type SLUG] [--force --confirmed]
+    python -m istota.skills.wordpress publish --id N [--type SLUG] [--date D] --confirmed
     python -m istota.skills.wordpress terms list --taxonomy SLUG [--search Q]
     python -m istota.skills.wordpress media list [--search Q] [--mime image]
     python -m istota.skills.wordpress users list|get ...
@@ -41,7 +45,7 @@ from pathlib import Path
 
 from istota.skills._cli import error_envelope, fail, parse_and_resolve, run_skill_cli
 from istota.skills._credref import resolve_entry
-from istota.skills._hostpath import WRITE, host_path
+from istota.skills._hostpath import EGRESS, WRITE, host_path
 
 from . import admin, content, discovery, generic, media
 from .cache import Cache
@@ -93,6 +97,31 @@ def _paging(parser: argparse.ArgumentParser, *, limit_help: str) -> None:
     parser.add_argument("--page", type=int, default=1, help="result page, from 1")
 
 
+def _confirmed(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--confirmed", action="store_true",
+                        help="the user agreed to exactly what the refusal described")
+
+
+def _write_args(parser: argparse.ArgumentParser) -> None:
+    """The fields `create` and `update` share."""
+    body = parser.add_mutually_exclusive_group()
+    host_path(body, "--content-file", mode=EGRESS,
+              help="read the post content (block markup) from a file in your own workspace")
+    body.add_argument("--content", help="the post content")
+    parser.add_argument("--excerpt", help="the excerpt")
+    parser.add_argument("--slug", help="the post slug")
+    parser.add_argument("--date", help="ISO 8601; naive is site time, an offset is converted to UTC")
+    parser.add_argument("--password", help="a post password; empty to clear it")
+    parser.add_argument("--terms", action="append",
+                        help="TAXONOMY=name1,name2 (names or ids); repeatable")
+    parser.add_argument("--create-terms", action="store_true",
+                        help="create --terms names that do not exist (needs --confirmed)")
+    parser.add_argument("--featured-media-id", type=int, help="attachment id, 0 for none")
+    host_path(parser, "--meta-file", mode=EGRESS,
+              help="a JSON object of registered post meta, from your own workspace")
+    _confirmed(parser)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="istota-skill wordpress",
                                      description="WordPress sites over the REST API")
@@ -124,6 +153,39 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fields", help="comma-separated top-level fields to return")
     host_path(p, "--output", mode=WRITE,
               help="write the full item as JSON here and return a summary")
+
+    p = sub.add_parser("create", help="create a draft or pending post (never publishes)")
+    _site_args(p)
+    p.add_argument("--type", required=True, help="post type slug")
+    p.add_argument("--title", required=True, help="the post title")
+    p.add_argument("--status", default="draft", choices=content.CREATE_STATUSES)
+    p.add_argument("--if-absent", action="store_true",
+                   help="with --slug: return the existing post of that slug instead of a second one")
+    _write_args(p)
+
+    p = sub.add_parser("update", help="change fields of an existing post")
+    _site_args(p)
+    p.add_argument("--id", type=int, required=True, help="post id")
+    p.add_argument("--type", default="post", help="post type slug (default: post)")
+    p.add_argument("--title", help="the post title")
+    p.add_argument("--status", choices=content.UPDATE_STATUSES,
+                   help="publish, future and private need --confirmed")
+    _write_args(p)
+
+    p = sub.add_parser("delete", help="move a post to the trash, or delete it for good")
+    _site_args(p)
+    p.add_argument("--id", type=int, required=True, help="post id")
+    p.add_argument("--type", default="post", help="post type slug (default: post)")
+    p.add_argument("--force", action="store_true",
+                   help="skip the trash and delete for good (needs --confirmed)")
+    _confirmed(p)
+
+    p = sub.add_parser("publish", help="publish a post (needs --confirmed)")
+    _site_args(p)
+    p.add_argument("--id", type=int, required=True, help="post id")
+    p.add_argument("--type", default="post", help="post type slug (default: post)")
+    p.add_argument("--date", help="ISO 8601; a future date schedules the post")
+    _confirmed(p)
 
     p = sub.add_parser("terms", help="taxonomy terms")
     terms = p.add_subparsers(dest="terms_command", required=True)
@@ -367,11 +429,36 @@ def _site_verb(handler, precheck=None):
     return run
 
 
+#: A write refused for one of these may have been refused on stale discovery
+#: (a field group just switched to REST, a route just registered), so the
+#: site's cache is dropped and the next call rediscovers (spec §9.3).
+_STALE_REASONS = frozenset({"acf_not_in_rest", "unknown_route", "validation_error"})
+
+
+def _write_verb(handler, precheck=None):
+    """`_site_verb`, dropping the discovery cache when the site refuses as stale."""
+
+    def run(args):
+        try:
+            return handler(args)
+        except WordPressError as exc:
+            if exc.reason in _STALE_REASONS:
+                args.wp.cache.drop()
+            raise
+
+    run.__name__ = handler.__name__
+    return _site_verb(run, precheck)
+
+
 COMMANDS = {
     "sites": cmd_sites,
     "describe": _site_verb(discovery.cmd_describe),
     "list": _site_verb(content.cmd_list, content.check_paging),
     "get": _site_verb(content.cmd_get, content.check_get),
+    "create": _write_verb(content.cmd_create, content.check_create),
+    "update": _write_verb(content.cmd_update, content.check_update),
+    "delete": _write_verb(content.cmd_delete),
+    "publish": _write_verb(content.cmd_publish, content.check_publish),
     "terms list": _site_verb(content.cmd_terms_list, content.check_paging),
     "media list": _site_verb(media.cmd_media_list, content.check_paging),
     "users list": _site_verb(admin.cmd_users_list, content.check_paging),

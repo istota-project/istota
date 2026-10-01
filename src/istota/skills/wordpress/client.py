@@ -262,7 +262,9 @@ class WordPressClient:
                     f"The connection to {host} failed: {type(exc).__name__}.",
                     "connection_failed",
                 ) from None
-            if response.status_code >= 500:
+            # 501 is a refusal, not a failure: WordPress answers it for a trash
+            # the type does not have, with nothing done.
+            if response.status_code >= 500 and response.status_code != 501:
                 if not idempotent:
                     raise self._outcome_unknown(method, route, f"HTTP {response.status_code}")
                 if not last:
@@ -343,6 +345,9 @@ class WordPressClient:
                 f"WordPress refused these fields: {', '.join(fields) or '(unnamed)'}.{tail}",
                 "validation_error", fields=fields, **extra,
             )
+        if status == 501:
+            return WordPressError(f"The site does not support this (HTTP 501).{tail}",
+                                  "request_refused", **extra)
         if status >= 500:
             return WordPressError(f"The site failed (HTTP {status}).{tail}", "server_error", **extra)
         return WordPressError(f"The site refused the request (HTTP {status}).{tail}",
