@@ -106,6 +106,7 @@ def broker_responder(tmp_path):
 
 
 from tests.test_credential_broker_intercept import broker as tls_broker  # noqa: E402
+from tests.test_credential_broker_intercept import broker_scheme  # noqa: E402, F401 -- shared fixture
 
 broker = tls_broker
 
