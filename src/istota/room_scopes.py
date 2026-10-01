@@ -110,6 +110,32 @@ def is_scope_granted(
     return scope in granted_scopes(conn, room_token, user_id)
 
 
+GRANTS_ACTIVE = "active"
+GRANTS_POLICY_OFF = "policy_off"
+GRANTS_GUESTS_PRESENT = "guests_present"
+GRANTS_PRIVATE = "private"
+
+
+def grant_state(conn: sqlite3.Connection, room_token: str, *, policy: str) -> str:
+    """Whether a member's grants in this room decide anything right now.
+
+    ``policy_off``: the disclosure gate is off and nothing is withheld from a
+    member's turn. ``guests_present``: a guest reads the room, so every grant is
+    ignored (D3). ``private``: one human reads it, so a grant applies once
+    somebody joins. ``active``: grants are what a member's turn may reach.
+    `!room share` and the web grants pane both word their answer from this.
+    """
+    from . import room_policy
+
+    if policy == POLICY_OFF:
+        return GRANTS_POLICY_OFF
+    if room_policy.audience_class(conn, room_token) == room_policy.MIXED:
+        return GRANTS_GUESTS_PRESENT
+    if not db.room_is_shared(conn, room_token):
+        return GRANTS_PRIVATE
+    return GRANTS_ACTIVE
+
+
 def task_withheld_scopes(
     conn: sqlite3.Connection,
     *,

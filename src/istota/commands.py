@@ -1593,11 +1593,12 @@ def _guest_note(config, conn, room) -> str:
     Not said where the disclosure policy is ``off``: nothing is withheld from
     a member's turn there, guest or no guest.
     """
-    from . import room_policy, room_scopes
+    from . import room_scopes
 
-    if config.rooms.shared_room_data_policy == room_scopes.POLICY_OFF:
-        return ""
-    if room_policy.audience_class(conn, room.token) != room_policy.MIXED:
+    state = room_scopes.grant_state(
+        conn, room.token, policy=config.rooms.shared_room_data_policy,
+    )
+    if state != room_scopes.GRANTS_GUESTS_PRESENT:
         return ""
     return (
         "\nA guest reads this room, so grants are ignored here until no guest is "
@@ -1629,8 +1630,9 @@ def _room_guests(conn, token: str, user_id: str, value: str) -> str:
         return "This room has no guest policy."
     if not value:
         return f"Guest replies here: `{policy.guest_reply}`."
-    if room_policy.current_host(conn, policy) != user_id:
-        return "Only this room's host can change how guests are answered."
+    refusal = room_policy.guest_reply_refusal(conn, token, user_id)
+    if refusal:
+        return refusal
     if value not in room_policy.GUEST_REPLY_VALUES:
         return "Usage: `!room guests <off|held|direct>`."
     room_policy.set_guest_reply(conn, token, value)

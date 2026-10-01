@@ -358,6 +358,9 @@ class TestListingMembers:
                 {"user_id": "bob", "display_name": "Bob", "is_owner": False},
             ],
             "can_manage": True,
+            # The one row `_new_room` wrote: what the add dialog says an add
+            # discloses.
+            "message_count": 1,
         }
         bob = await _login(client, "bob")
         bob_room = (await _room_ids(client, bob))[room.token]

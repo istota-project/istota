@@ -4513,6 +4513,13 @@ def list_room_members(conn: sqlite3.Connection, room_token: str) -> list[str]:
     return [r["user_id"] for r in rows]
 
 
+def count_room_messages(conn: sqlite3.Connection, room_token: str) -> int:
+    """How many transcript rows the room holds: what adding a member discloses."""
+    return int(conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE room_token = ?", (room_token,),
+    ).fetchone()[0])
+
+
 def note_member_turn(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
     """An istota user spoke in this room: make them a member and clear their hide.
 

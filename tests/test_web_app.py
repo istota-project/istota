@@ -5487,11 +5487,12 @@ class TestProfileEndpoints:
         assert p.routing == {}
         assert bobs.token not in (p.default_destination or "")
 
-    async def test_a_web_route_may_name_a_room_shared_with_the_caller(
+    async def test_a_web_route_may_not_name_a_room_shared_with_the_caller(
         self, tmp_path, client, app,
     ):
-        # Membership, not ownership: a shared room is a legitimate deliberate
-        # choice, and it is the predicate the room list is built on.
+        # Membership is necessary and no longer sufficient (multiplayer Stage
+        # 17): delivery drops personal content in a room another human reads,
+        # so a route onto one would save and deliver nothing. Refused at save.
         from istota import db, user_profiles
 
         cfg = self._make_test_config(tmp_path)
@@ -5507,9 +5508,10 @@ class TestProfileEndpoints:
             cookies=cookies,
             headers={"origin": "https://example.com"},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 400
+        assert "shared" in resp.text
         p = user_profiles.get_profile(self._db_path, "alice")
-        assert p.routing == {"alert": "web:shared-1"}
+        assert not (p and p.routing)
 
     async def test_a_talk_route_is_checked_against_the_talk_conversations(
         self, tmp_path, client, app,

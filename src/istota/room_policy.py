@@ -189,6 +189,21 @@ def settings_refusal(conn: sqlite3.Connection, room_token: str, user_id: str) ->
     return f"Only this room's host ({host}) can change its settings."
 
 
+def guest_reply_refusal(conn: sqlite3.Connection, room_token: str, user_id: str) -> str | None:
+    """Why ``user_id`` may not change how guests are answered here, or None.
+
+    Host only, in a private room as in a shared one: the host is who a guest's
+    turn runs as, so the choice is theirs. `!room guests` and the web PATCH
+    both ask this.
+    """
+    policy = ensure_policy(conn, room_token)
+    if policy is None:
+        return "This room has no guest policy."
+    if current_host(conn, policy) != user_id:
+        return "Only this room's host can change how guests are answered."
+    return None
+
+
 def set_guest_reply(conn: sqlite3.Connection, room_token: str, value: str) -> RoomPolicy:
     if value not in GUEST_REPLY_VALUES:
         raise ValueError(f"guest_reply must be one of {GUEST_REPLY_VALUES}")
