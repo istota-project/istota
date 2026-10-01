@@ -14,11 +14,11 @@ Subsystems:
 - `scheduler.md` — daemon loop, worker pool, DB tables, deferred ops
 - `config.md` — every dataclass field + TOML mapping
 - `skills.md` — skill metadata, single-axis selection (eager vs menu), per-skill user overlays, CLI modules
-- `transport.md` — Transport seam over messaging surfaces (Talk + email; Matrix / web chat designed-for), plus the room model and multiplayer rooms (speech gate, participants, host and guests, audience, epochs, shared-room delivery refusal)
-- `sms.md` — provider-neutral SMS surface, Twilio and Telnyx adapters, delivery states, and switching
-- `whatsapp.md` — WhatsApp surface behind a provider seam: the common half (adapter-native identity, the one-send ledger, parked status, opt-out), Meta's Cloud API adapter (signed webhook, 24-hour window, templates, cost controls) and the Baileys adapter (paired session, Node sidecar, QR pairing)
+- `transport.md` — Transport seam over messaging surfaces (Talk + email; Matrix / web chat designed-for), plus the room model, phone rooms (SMS and private WhatsApp: mint, transcript writes, backfill) and multiplayer rooms (speech gate, participants, host and guests, audience, epochs, shared-room delivery refusal)
+- `sms.md` — provider-neutral SMS surface, Twilio and Telnyx adapters, delivery states, switching, and the user's private SMS room
+- `whatsapp.md` — WhatsApp surface behind a provider seam: the common half (adapter-native identity, the one-send ledger, parked status, opt-out, the private chat's room), Meta's Cloud API adapter (signed webhook, 24-hour window, templates, cost controls) and the Baileys adapter (paired session, Node sidecar, QR pairing)
 - `relay.md` — relay questions between users: destinations (room, WhatsApp, SMS), the recipient preference, clean-turn approval, per-surface answers and returns
-- `web-chat.md` — web chat surface: rooms, composer, drafts, send durability, message replies, room-event stream
+- `web-chat.md` — web chat surface: rooms, composer, drafts, send durability, message replies, room-event stream, read-only phone rooms
 - `web-ui.md` — web UI backend: route/endpoint map, admin Logs + Configuration panes, settings/module-services split
 - `notifications.md` — the notifications table, the resolver seam, and the six shipped sources
 - `briefings.md` — block/source briefings, shared blocks, titles, HTML email

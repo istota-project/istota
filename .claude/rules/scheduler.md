@@ -77,6 +77,8 @@ Two things about a row read wrongly at a glance:
 
 **Four rows read `briefing_check_interval` for something that is not a briefing** — `shared-blocks`, `scheduled-jobs`, `sleep-cycles` and `cleanup`. Preserved exactly and commented as known: giving them their own keys is an operator-visible config change across `config.py`, `config.example.toml`, the Ansible template and the Docker render, and is separate work.
 
+**`phone-room-backfill`** (a literal 60 seconds, `background`) replays each minted SMS or WhatsApp room's history from before the mint and writes the `_room_backfill` marker once nothing on the room's aliases is unfinished; a marked room costs one indexed read per pass. The mechanism is in `.claude/rules/transport.md` ("Phone rooms").
+
 **`on_error` and `one_shot_on_error` are two fields because the two paths differed.** `None` means the gate propagates on that path. The background spawns were bare in the loop, and `check_briefings` / `check_scheduled_jobs` were bare in `run_scheduler` — so a failure there aborts the one-shot pass while the daemon logs past both, exactly as before.
 
 ### Off-thread periodic checks (`_spawn_background_check`, ISSUE-144)
