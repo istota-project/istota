@@ -25,7 +25,9 @@ as `ISTOTA_DEFERRED_DIR`), which the executor bind-mounts into the sandbox
 at the same path. An anchor there is the same inode for the host curator,
 the host proxy CLI, and a sandboxed CLI alike — and it's per-user, so no
 cross-tenant reach. `deferred_lock_dir()` builds that path. The system-temp
-default is only a fallback for ad-hoc/host-only use (manual CLI, tests).
+default is a fallback for ad-hoc/host-only use (manual CLI, tests), and the
+anchor for GROUP.md, whose writers are several users and all host-side in the
+scheduler unit; it is shared per unit, not per host, under `PrivateTmp`.
 
 Linux + macOS: `fcntl.flock`. Windows is not a supported deployment for
 istota; we don't paper over that here.

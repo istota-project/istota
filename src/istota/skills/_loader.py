@@ -1027,6 +1027,29 @@ def contained_overlay_dir(overlay_dir: Path, user_root: Path) -> Path | None:
     return resolved
 
 
+def contained_group_dir(groups_root: Path, group_id: str) -> Path | None:
+    """``{groups_root}/{group_id}`` resolved, or None if it leads anywhere else.
+
+    ``contained_overlay_dir`` plus equality with the resolved root and the id,
+    so a link at ``Groups/<id>`` cannot reach another group's directory. The
+    rule behind ``storage._contained_group_dir``, taking the root as a path so
+    the memory skill CLI, which has a mount and no ``Config``, applies the same
+    one without importing ``storage``.
+    """
+    from istota.db import is_valid_group_id  # noqa: PLC0415
+
+    if not is_valid_group_id(group_id):
+        return None
+    resolved = contained_overlay_dir(groups_root / group_id, groups_root)
+    if resolved is None:
+        return None
+    try:
+        expected = Path(os.path.realpath(groups_root)) / group_id
+    except OSError:
+        return None
+    return resolved if resolved == expected else None
+
+
 def open_overlay_dir(user_root: Path, *parts: str) -> int | None:
     """An fd on ``{user_root}/{parts...}``, or None if any component below the
     root is not a plain directory reached directly from the one above it.

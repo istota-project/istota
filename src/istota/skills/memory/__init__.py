@@ -86,6 +86,7 @@ from istota.memory.curation.parser import (
 )
 from istota.skills._loader import (
     OVERLAY_NOT_UTF8,
+    contained_group_dir,
     contained_overlay_dir,
     read_overlay_bytes,
 )
@@ -263,14 +264,12 @@ def _group_md_path(group_id: str) -> Path:
     directory is bound read-write into every member's sandbox, so it must
     resolve to exactly `realpath({mount}/Groups)/{group_id}` — "under the root"
     would let a link at `Groups/<id>` land the write on another group's file.
-    The rule is `storage.contained_group_dir`, which the daemon's own read and
+    The rule is `_loader.contained_group_dir`, which the daemon's own read and
     write of the file use.
     """
     if group_access_denied(group_id):
         _err(group_refusal(group_id))
         sys.exit(1)
-    from istota.storage import contained_group_dir  # noqa: PLC0415
-
     groups = _mount_path() / "Groups"
     resolved = contained_group_dir(groups, group_id)
     if resolved is None:
@@ -467,12 +466,14 @@ def _update_last_seen(path: Path, text: str, target: Target) -> None:
 def _lock_dir(target: Target) -> Path | None:
     """Shared anchor dir for the runtime CLI.
 
-    GROUP.md takes the host-wide default anchor: its writers are several
-    users, each with their own deferred dir, so a per-user anchor would let
-    two members' read-modify-writes interleave and drop one. Every group write
-    runs host-side (the membership check needs the database, which no sandbox
-    has), and no curator writes the file, so the host anchor reaches every
-    writer.
+    GROUP.md takes the default anchor in the system temp dir: its writers are
+    several users, each with their own deferred dir, so a per-user anchor
+    would let two members' read-modify-writes interleave and drop one. Today
+    every writer is this CLI, spawned host-side by the skill proxy inside the
+    scheduler (the membership check needs the database, which no sandbox has),
+    and no curator writes the file. The anchor is per systemd unit, not per
+    host (`PrivateTmp=true`), so a GROUP.md writer in another process, such as
+    a web editor, needs a shared local anchor instead.
 
     Otherwise use the per-user deferred dir (`ISTOTA_DEFERRED_DIR`) so the anchor is the
     same inode whether this CLI runs host-side under the skill proxy or inside
