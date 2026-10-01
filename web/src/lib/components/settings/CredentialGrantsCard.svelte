@@ -34,6 +34,7 @@
   let rooms: string[] = $state([]);
   let methods: string[] = $state([]);
   let scheduled = $state(false);
+  let allowHttp = $state(false);
   let omittedRooms = $state(false);
   let confirmExisting = $state(false);
   let confirmRevoke: string | null = $state(null);
@@ -62,6 +63,7 @@
     omittedRooms = rooms.length !== (grant?.rooms.length ?? 0);
     methods = [...(grant?.methods ?? defaultMethods)];
     scheduled = grant?.allow_scheduled ?? false;
+    allowHttp = grant?.allow_http ?? false;
     error = '';
     editorOpen = true;
   }
@@ -87,6 +89,7 @@
         rooms: scope === 'rooms' ? rooms : [],
         methods,
         allow_scheduled: scheduled,
+        allow_http: allowHttp,
       }),
     );
   }
@@ -113,6 +116,7 @@
     const where = grant.scope_mode === 'all' ? 'All rooms' : `${n} room${n === 1 ? '' : 's'}`;
     const parts = [where, grant.methods.join(', ')];
     if (grant.allow_scheduled) parts.push('scheduled');
+    if (grant.allow_http) parts.push('HTTP allowed');
     return parts.join(' · ');
   }
 
@@ -172,8 +176,8 @@
                 <span class="cred-hosts">{credential.hosts.join(', ')}</span>
               {:else}
                 <span class="cred-unbound">
-                  Set a hostname, an HTTPS URL, or <code>istota_hosts</code> in KeePassXC before using
-                  it.
+                  Set a hostname, an HTTP or HTTPS URL, or <code>istota_hosts</code> in KeePassXC before
+                  using it.
                 </span>
               {/if}
               <!-- Written without template whitespace so the line reads
@@ -188,6 +192,9 @@
                 <Badge variant="warn">Unbound</Badge>
               {:else if !credential.grant}
                 <Badge variant="warn">Ungranted</Badge>
+              {/if}
+              {#if credential.hosts.some( (host) => host.startsWith('http://') ) && !credential.grant?.allow_http}
+                <Badge variant="warn">HTTPS required</Badge>
               {/if}
               {#if credential.revealable}<Badge variant="info">Revealable</Badge>{/if}
             </div>
@@ -244,6 +251,13 @@
     <Field label="Allow scheduled tasks" checkbox>
       <input type="checkbox" bind:checked={scheduled} />
     </Field>
+    <Field label="Allow HTTP (override HTTPS requirement)" checkbox>
+      <input type="checkbox" bind:checked={allowHttp} />
+    </Field>
+    <p class="caption">
+      HTTP sends credentials without encryption. Enable only for a service you trust on a trusted
+      network.
+    </p>
     {#if error}<p class="banner error" role="alert">{error}</p>{/if}
   </div>
   {#snippet footer()}

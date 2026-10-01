@@ -6,7 +6,7 @@ import ssl
 import threading
 import tempfile
 from pathlib import Path
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import h11
 import pytest
@@ -27,7 +27,12 @@ def broker_responder():
 
 
 @pytest.fixture
-def broker(tmp_path, monkeypatch, request, broker_responder):
+def broker_scheme(request):
+    return getattr(request, "param", "https")
+
+
+@pytest.fixture
+def broker(tmp_path, monkeypatch, request, broker_responder, broker_scheme):
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
     (tmp_path / "daemon").mkdir()
     config = Config(db_path=tmp_path / "daemon" / "data.db")
@@ -53,7 +58,7 @@ def broker(tmp_path, monkeypatch, request, broker_responder):
         return original_getaddrinfo("127.0.0.1" if name == upstream_host else name, *args, **kwargs)
     monkeypatch.setattr(socket, "getaddrinfo", resolve_local)
     secrets_store.upsert_secret(config.db_path, "alice", "vault_entries", "portal", VALUE.decode(),
-                               binding=parse_binding("https://" + host, {}, []))
+                               binding=parse_binding(broker_scheme + "://" + host, {}, []))
     with db.get_db(config.db_path) as conn:
         grants.put_grant(conn, "alice", "portal")
         task_id = db.create_task(conn, user_id="alice", prompt="test", source_type="talk", conversation_token="room-a")
@@ -62,7 +67,8 @@ def broker(tmp_path, monkeypatch, request, broker_responder):
     stopped = threading.Event()
     def serve(conn):
         try:
-            with ca.server_context(upstream_ca, upstream_host).wrap_socket(conn, server_side=True) as tls:
+            with (nullcontext(conn) if broker_scheme == "http" else
+                  ca.server_context(upstream_ca, upstream_host).wrap_socket(conn, server_side=True)) as tls:
                 tls.settimeout(3)
                 parser = h11.Connection(h11.SERVER)
                 body = b""
@@ -337,3 +343,92 @@ def test_secret_in_response_header_name_is_refused(broker):
     assert response.status_code == 502
     assert VALUE not in repr(response.headers).encode() + payload
     assert dict(response.headers)[b"x-istota-refused"] == b"credential_in_response_header_name"
+
+
+@pytest.mark.parametrize("broker_scheme", ["http"], indirect=True)
+def test_http_requires_override_and_scrubs_response(broker):
+    config, task_id, _, _, proxy, host, received = broker
+
+    secrets_store.upsert_secret(config.db_path, "alice", "vault_entries", "portal_username", "alice",
+        binding={**parse_binding("http://" + host, {}, []), "credential": "portal"})
+    basic = b"Basic " + base64.b64encode(b"{{cred:portal_username}}:" + PLACEHOLDER)
+
+    def request(target=None):
+        with socket.socket(socket.AF_UNIX) as client:
+            client.settimeout(3)
+            client.connect(str(proxy.socket_path))
+            client.sendall(b"GET " + (target or f"http://{host}/".encode()) +
+                           f" HTTP/1.1\r\nHost: {host}\r\nAuthorization: ".encode() +
+                           basic + b"\r\nConnection: close\r\n\r\n")
+            response = b""
+            while chunk := client.recv(65536):
+                response += chunk
+            return response
+
+    assert b"credential_https_required" in request()
+    assert received == []
+    with db.get_db(config.db_path) as conn:
+        grants.put_grant(conn, "alice", "portal", allow_http=True)
+        # A policy edit cannot expand an already admitted task.
+    assert b"credential_changed" in request()
+    with db.get_db(config.db_path) as conn:
+        new_task = db.create_task(conn, user_id="alice", prompt="test", source_type="talk",
+                                 conversation_token="room-a")
+        grants.ensure_credential_grants(conn, new_task, "alice")
+    proxy.broker.task_id = new_task
+    response = request()
+    assert b"200" in response.split(b"\r\n")[0]
+    assert dict(received[0][0].headers)[b"authorization"] == b"Basic " + base64.b64encode(b"alice:" + VALUE)
+    assert VALUE not in response
+    assert PLACEHOLDER in response
+    assert b"403" in request(b"http://other.example/").split(b"\r\n")[0]
+    assert len(received) == 1
+
+
+@pytest.mark.parametrize("broker_scheme", ["http"], indirect=True)
+def test_curl_http_through_bridge_and_native_environment(broker, tmp_path):
+    import shutil
+    import subprocess
+    import sys
+    import time
+    from istota.network_proxy import write_bridge_script
+    from istota.tool_server import merge_proxy_env
+    curl = shutil.which("curl")
+    assert curl, "curl is required to verify the HTTP proxy environment"
+    config, _, _, _, proxy, host, received = broker
+    with db.get_db(config.db_path) as conn:
+        grants.put_grant(conn, "alice", "portal", allow_http=True)
+        task_id = db.create_task(conn, user_id="alice", prompt="test", source_type="talk",
+                                 conversation_token="room-a")
+        grants.ensure_credential_grants(conn, task_id, "alice")
+    proxy.broker.task_id = task_id
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    script = tmp_path / "net-bridge"
+    write_bridge_script(script)
+    process = subprocess.Popen([sys.executable, str(script), str(proxy.socket_path), str(port)])
+    try:
+        deadline = time.monotonic() + 3
+        while True:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=.1):
+                    break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise AssertionError("bridge did not start")
+                time.sleep(.01)
+        env = merge_proxy_env({"PATH": os.environ["PATH"]}, {
+            "HTTP_PROXY": f"http://127.0.0.1:{port}",
+            "http_proxy": f"http://127.0.0.1:{port}", "NO_PROXY": "", "no_proxy": "",
+        })
+        result = subprocess.run([curl, "--silent", "--show-error", "--fail", "--max-time", "3",
+                                 "-H", "Authorization: " + PLACEHOLDER.decode(), "http://" + host + "/"],
+                                env=env, capture_output=True, timeout=5)
+        assert result.returncode == 0, result.stderr
+        assert dict(received[0][0].headers)[b"authorization"] == VALUE
+        assert VALUE not in result.stdout
+        assert PLACEHOLDER in result.stdout
+    finally:
+        process.terminate()
+        process.wait(timeout=3)

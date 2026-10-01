@@ -74,7 +74,7 @@ async def test_vault_bare_domain_sync_delete_and_resync(signed_client, config, t
     base = "/istota/api/settings/credentials"
     origin = {"Origin": "https://example.com"}
     entries = (await signed_client.get(base)).json()["credentials"]
-    assert {entry["name"] for entry in entries} == {"portal", "portal_username", "portal_url"}
+    assert {entry["name"] for entry in entries} == {"portal"}
     assert all(entry["hosts"] == ["portal.example.com"] for entry in entries)
     assert secrets_store.get_secret(config.db_path, "alice", "vault_entries", "portal_url") == "portal.example.com"
     assert (await signed_client.put(base + "/portal", json={}, headers=origin)).status_code == 200
@@ -88,7 +88,7 @@ async def test_vault_bare_domain_sync_delete_and_resync(signed_client, config, t
         assert get_binding(conn, "alice", "portal") is None
         assert get_grant(conn, "alice", "portal") is None
     entries = (await signed_client.get(base)).json()["credentials"]
-    assert {entry["name"] for entry in entries} == {"portal_username", "portal_url"}
+    assert {entry["name"] for entry in entries} == set()
 
     secrets_vault.apply_vault(config.db_path, "alice", read)
     entries = (await signed_client.get(base)).json()["credentials"]
@@ -158,3 +158,64 @@ async def test_deleted_room_can_be_removed_from_grant(signed_client, config):  #
                                       json={"scope_mode": "rooms", "rooms": [kept.token], "methods": ["GET"]})
     assert response.status_code == 200
     assert response.json()["grant"]["rooms"] == [kept.token]
+
+
+async def test_entry_fields_share_grant_and_http_override(signed_client, config, tmp_path):  # noqa: F811
+    from istota import secrets_vault
+    from istota.credential_broker import grants
+    from tests.test_secrets_vault import _new_db, _read
+    kp, path = _new_db(tmp_path)
+    kp.add_entry(kp.root_group, "portal", "alice", "fixture-password",
+                 url="http://192.0.2.10:8080/login")
+    kp.save()
+    read, _ = _read(path)
+    secrets_vault.apply_vault(config.db_path, "alice", read)
+    base = "/istota/api/settings/credentials"
+    origin = {"Origin": "https://example.com"}
+    entries = (await signed_client.get(base)).json()["credentials"]
+    assert [entry["name"] for entry in entries] == ["portal"]
+    assert entries[0]["hosts"] == ["http://192.0.2.10:8080"]
+    response = await signed_client.put(base + "/portal", json={}, headers=origin)
+    assert response.status_code == 200
+    assert response.json()["grant"]["allow_http"] is False
+    with db.get_db(config.db_path) as conn:
+        task = db.create_task(conn, user_id="alice", prompt="test", source_type="talk",
+                              conversation_token="room-a")
+        grants.ensure_credential_grants(conn, task, "alice")
+        assert grants.check_credential_grant(conn, task, "alice", "portal_username",
+            "http://192.0.2.10:8080", "GET", "authorization") == "credential_https_required"
+    response = await signed_client.put(base + "/portal", json={"allow_http": True}, headers=origin)
+    assert response.status_code == 200
+    with db.get_db(config.db_path) as conn:
+        assert grants.check_credential_grant(conn, task, "alice", "portal_username",
+            "http://192.0.2.10:8080", "GET", "authorization") == "credential_changed"
+        task = db.create_task(conn, user_id="alice", prompt="test", source_type="talk",
+                              conversation_token="room-a")
+        assert set(grants.ensure_credential_grants(conn, task, "alice")) == {"portal"}
+        assert grants.check_credential_grant(conn, task, "alice", "portal_username",
+            "http://192.0.2.10:8080", "GET", "authorization") is None
+    await signed_client.delete(base + "/portal", headers=origin)
+    with db.get_db(config.db_path) as conn:
+        assert grants.check_credential_grant(conn, task, "alice", "portal_username",
+            "http://192.0.2.10:8080", "GET", "authorization") == "credential_not_granted"
+
+
+async def test_grouping_uses_entry_identity_with_custom_fields_and_no_password(signed_client, config, tmp_path):  # noqa: F811
+    from istota import secrets_vault
+    from tests.test_secrets_vault import _new_db, _read
+    kp, path = _new_db(tmp_path)
+    entry = kp.add_entry(kp.root_group, "service", "alice", "", url="https://service.example")
+    entry.set_custom_property("api_token", "fixture-token")
+    kp.add_entry(kp.root_group, "other_username", "", "fixture-other", url="https://other.example")
+    kp.save()
+    read, _ = _read(path)
+    secrets_vault.apply_vault(config.db_path, "alice", read)
+    base = "/istota/api/settings/credentials"
+    entries = (await signed_client.get(base)).json()["credentials"]
+    assert {entry["name"] for entry in entries} == {"service", "other_username"}
+    response = await signed_client.put(base + "/service", json={}, headers={"Origin": "https://example.com"})
+    assert response.status_code == 200
+    response = await signed_client.delete(base + "/service/value", headers={"Origin": "https://example.com"})
+    assert response.json()["deleted"] is True
+    assert not secrets_store.secret_exists(config.db_path, "alice", "vault_entries", "service_api_token")
+    assert secrets_store.secret_exists(config.db_path, "alice", "vault_entries", "other_username")

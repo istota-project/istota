@@ -108,6 +108,7 @@ it('edits a grant from the row menu and saves narrow defaults', async () => {
       rooms: [],
       methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH'],
       allow_scheduled: false,
+      allow_http: false,
     }),
   );
 });
@@ -247,6 +248,26 @@ it('drops unavailable room selections so a grant can still be narrowed', async (
       rooms: ['live-room'],
       methods: ['GET'],
       allow_scheduled: false,
+      allow_http: false,
     }),
+  );
+});
+
+it('requires an explicit HTTP override', async () => {
+  vi.mocked(getCredentialGrants).mockResolvedValue(
+    settings({ credentials: [portal({ hosts: ['http://192.0.2.10:8080'] })] }),
+  );
+  render(CredentialGrantsCard);
+  await screen.findByText('http://192.0.2.10:8080');
+  await chooseAction('portal', 'Edit grant');
+  const toggle = screen.getByLabelText('Allow HTTP (override HTTPS requirement)');
+  expect((toggle as HTMLInputElement).checked).toBe(false);
+  await fireEvent.click(toggle);
+  await fireEvent.click(screen.getByRole('button', { name: 'Save grant' }));
+  await waitFor(() =>
+    expect(saveCredentialGrant).toHaveBeenCalledWith(
+      'portal',
+      expect.objectContaining({ allow_http: true }),
+    ),
   );
 });

@@ -10742,7 +10742,7 @@ def _credential_settings(username: str, action="list", name="", payload=None):
                  for room in db.list_member_rooms(conn, username)]
         if action == "save":
             payload = payload or {}
-            allowed = {"scope_mode", "methods", "allow_scheduled", "rooms"}
+            allowed = {"scope_mode", "methods", "allow_scheduled", "rooms", "allow_http"}
             if payload.keys() - allowed:
                 raise HTTPException(status_code=400, detail="unknown credential grant field")
             requested_rooms = payload.get("rooms", [])
@@ -10755,13 +10755,12 @@ def _credential_settings(username: str, action="list", name="", payload=None):
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return {"ok": True, "grant": grant}
-        names = {row[0] for row in conn.execute(
-            "SELECT key FROM secrets WHERE user_id=? AND service='vault_entries'", (username,))}
+        names = set(bindings.credential_groups(conn, username))
         names.update(row[0] for row in conn.execute(
             "SELECT name FROM credential_bindings WHERE user_id=? AND source='config'", (username,)))
         credentials = []
         for credential_name in sorted(names):
-            binding = bindings.get_binding(conn, username, credential_name) or {
+            binding = bindings.get_entry_binding(conn, username, credential_name) or {
                 "hosts": [], "headers": [], "revealable": False, "source": "vault"}
             credentials.append({"name": credential_name, **binding,
                                 "grant": grants.get_grant(conn, username, credential_name)})
@@ -10809,7 +10808,7 @@ async def settings_credential_delete(
     if name.startswith("forge."):
         raise HTTPException(status_code=400, detail="Deployment credentials are managed in configuration")
     deleted = await asyncio.to_thread(
-        secrets_store.delete_secret, _config.db_path, user["username"], "vault_entries", name,
+        secrets_store.delete_secret, _config.db_path, user["username"], "vault_entries", name, all_fields=True,
     )
     return {"ok": True, "deleted": deleted}
 

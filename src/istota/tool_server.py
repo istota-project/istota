@@ -58,7 +58,7 @@ from istota import tool_server_protocol as proto
 # children this process forks. `NO_PROXY=` is set to empty on purpose there, so
 # membership is what counts and a falsy value must still be carried.
 _PROXY_ENV_VARS = (
-    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+    "HTTPS_PROXY", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
     "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO",
     "NODE_EXTRA_CA_CERTS",
 )

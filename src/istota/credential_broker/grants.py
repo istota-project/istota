@@ -8,7 +8,7 @@ same transaction as the caller's credential lookup before substitution.
 import json
 
 from .. import db
-from .bindings import get_binding, forge_bindings
+from .bindings import get_binding, forge_bindings, credential_name, get_entry_binding
 
 DEFAULT_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH"]
 METHODS = frozenset([*DEFAULT_METHODS, "DELETE", "OPTIONS"])
@@ -16,11 +16,14 @@ NAMESPACE = "_credential_grants"
 
 
 def get_grant(conn, user_id, name):
+    name = credential_name(conn, user_id, name)
     row = conn.execute("SELECT * FROM credential_grants WHERE user_id=? AND name=?",
                        (user_id, name)).fetchone()
     if row is None:
         return None
     grant = dict(row)
+    option = db.kv_get(conn, user_id, NAMESPACE, "allow_http:" + name)
+    grant["allow_http"] = bool(option and option["value"] == "true")
     grant["methods"] = json.loads(grant["methods"])
     grant["allow_scheduled"] = bool(grant["allow_scheduled"])
     grant["rooms"] = [r[0] for r in conn.execute(
@@ -30,9 +33,10 @@ def get_grant(conn, user_id, name):
 
 
 def put_grant(conn, user_id, name, *, scope_mode="all", methods=None,
-              allow_scheduled=False, rooms=()):
+              allow_scheduled=False, rooms=(), allow_http=False):
+    name = credential_name(conn, user_id, name)
     methods = DEFAULT_METHODS.copy() if methods is None else methods
-    if (scope_mode not in ("all", "rooms") or type(allow_scheduled) is not bool
+    if (scope_mode not in ("all", "rooms") or type(allow_scheduled) is not bool or type(allow_http) is not bool
             or not isinstance(methods, list) or not methods
             or any(not isinstance(m, str) or m not in METHODS for m in methods)
             or not isinstance(rooms, (list, tuple))
@@ -40,7 +44,7 @@ def put_grant(conn, user_id, name, *, scope_mode="all", methods=None,
         raise ValueError("invalid credential grant policy")
     if scope_mode == "all" and rooms:
         raise ValueError("all-room grants cannot name individual rooms")
-    binding = get_binding(conn, user_id, name)
+    binding = get_entry_binding(conn, user_id, name)
     if not binding or not binding["hosts"]:
         raise ValueError("credential is not bound")
     # Start the write lock before reading the revision. The reserved KV tombstone
@@ -61,10 +65,13 @@ def put_grant(conn, user_id, name, *, scope_mode="all", methods=None,
     conn.execute("DELETE FROM credential_grant_rooms WHERE user_id=? AND name=?", (user_id, name))
     conn.executemany("INSERT INTO credential_grant_rooms VALUES (?, ?, ?)",
                      [(user_id, name, room) for room in sorted(set(rooms))])
+    db.kv_set(conn, user_id, NAMESPACE, "allow_http:" + name, json.dumps(allow_http))
     return get_grant(conn, user_id, name)
 
 
 def delete_grant(conn, user_id, name):
+    name = credential_name(conn, user_id, name)
+    db.kv_delete(conn, user_id, NAMESPACE, "allow_http:" + name)
     conn.execute("DELETE FROM credential_grant_rooms WHERE user_id=? AND name=?", (user_id, name))
     conn.execute("DELETE FROM credential_grants WHERE user_id=? AND name=?", (user_id, name))
 
@@ -126,7 +133,7 @@ def ensure_credential_grants(conn, task_id, user_id):
         for row in conn.execute("SELECT name FROM credential_grants WHERE user_id=?", (user_id,)):
             name = row["name"]
             grant = get_grant(conn, user_id, name)
-            binding = get_binding(conn, user_id, name)
+            binding = get_entry_binding(conn, user_id, name)
             if binding and binding["hosts"] and _in_scope(grant, task, scheduled):
                 conn.execute("INSERT OR IGNORE INTO credential_task_grants VALUES (?, ?, ?, ?)",
                              (task_id, user_id, name, grant["policy_revision"]))
@@ -142,8 +149,9 @@ def check_credential_grant(conn, task_id, user_id, name, host, method, header, *
     if not conn.in_transaction:
         conn.execute("BEGIN")
     task, scheduled = _task_context(conn, task_id, user_id)
+    policy_name = credential_name(conn, user_id, name)
     snapshot = conn.execute("SELECT policy_revision FROM credential_task_grants "
-                            "WHERE task_id=? AND user_id=? AND name=?", (task_id, user_id, name)).fetchone()
+                            "WHERE task_id=? AND user_id=? AND name=?", (task_id, user_id, policy_name)).fetchone()
     grant = get_grant(conn, user_id, name)
     if snapshot is None or grant is None:
         return "credential_not_granted"
@@ -162,6 +170,8 @@ def check_credential_grant(conn, task_id, user_id, name, host, method, header, *
         binding = None
     if binding is None or host not in binding["hosts"]:
         return "credential_not_bound"
+    if host.startswith("http://") and not grant["allow_http"]:
+        return "credential_https_required"
     if header.lower() not in binding["headers"]:
         return "credential_header_not_allowed"
     if method not in grant["methods"]:

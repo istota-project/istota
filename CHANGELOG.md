@@ -75,6 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Credential settings now groups a vault entry’s password, username, URL and custom fields under one grant. Deleting a credential removes all its imported fields. HTTP vault URLs keep their destination and can be used through the credential broker after enabling the explicit HTTP override in the grant popup; HTTPS remains the default requirement.
+
 - Vault credentials with a bare hostname in KeePassXC's URL field no longer appear as unbound. They bind to that host for HTTPS use without changing the saved URL.
 
 - The credential grant editor now uses the shared form styling and a Cancel/Save footer. The credential menu also lets you delete stale stored vault credentials; entries still in KeePassXC can return on a later import, without their old grants.
