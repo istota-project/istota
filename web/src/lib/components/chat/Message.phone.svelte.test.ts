@@ -43,7 +43,7 @@ describe('the texted-turn mark', () => {
     expect(container.querySelector('.via-mark')?.textContent).toContain('Sent on WhatsApp');
     const mark = container.querySelector<HTMLElement>('.via-mark [data-whatsapp]');
     expect(mark?.dataset.whatsapp).toBe('private');
-    expect(mark?.querySelector('svg')?.getAttribute('fill')).toBe('currentColor');
+    expect(mark?.querySelector('svg')?.classList.contains('lucide-message-circle')).toBe(true);
   });
 
   it('draws the group glyph for a WhatsApp turn in a group room', () => {
@@ -54,7 +54,7 @@ describe('the texted-turn mark', () => {
     });
     const mark = container.querySelector<HTMLElement>('.via-mark [data-whatsapp]');
     expect(mark?.dataset.whatsapp).toBe('group');
-    expect(mark?.querySelector('svg')?.getAttribute('fill')).toBe('none');
+    expect(mark?.querySelector('svg')?.classList.contains('lucide-messages-circle')).toBe(true);
   });
 
   it('marks nothing on a typed turn', () => {

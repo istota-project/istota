@@ -1,11 +1,11 @@
 <script lang="ts">
   /**
    * The one glyph for a phone surface, shared by the room list, the chat
-   * header and a texted turn's provenance line (ISSUE-584). WhatsApp is green;
-   * the private 1:1 chat gets a filled bubble and a group the outline, so the
-   * two can be told apart from the icon alone.
+   * header and a texted turn's provenance line (ISSUE-584). WhatsApp is green:
+   * one bubble for the private 1:1 chat, two for a group, both outlined like
+   * every other glyph in the app.
    */
-  import { Smartphone, MessageCircle } from '@lucide/svelte';
+  import { Smartphone, MessageCircle, MessagesCircle } from '@lucide/svelte';
 
   let {
     surface,
@@ -17,8 +17,8 @@
 {#if surface === 'sms'}
   <Smartphone {size} />
 {:else}
-  <span class="whatsapp" class:group data-whatsapp={group ? 'group' : 'private'}>
-    <MessageCircle {size} fill={group ? 'none' : 'currentColor'} />
+  <span class="whatsapp" data-whatsapp={group ? 'group' : 'private'}>
+    {#if group}<MessagesCircle {size} />{:else}<MessageCircle {size} />{/if}
   </span>
 {/if}
 
