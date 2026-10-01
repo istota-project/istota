@@ -291,6 +291,8 @@ bypass_accept_marker = "{{ istota_brain_tmux_bypass_accept_marker | istota_toml_
 [security]
 sandbox_enabled = {{ istota_security_sandbox_enabled | lower }}
 allow_unsandboxed_multi_user_vaults = {{ istota_security_allow_unsandboxed_multi_user_vaults | lower }}
+vault_fetch_limit_per_task = {{ istota_security_vault_fetch_limit_per_task }}
+vault_writes_per_task = {{ istota_security_vault_writes_per_task }}
 skill_proxy_enabled = {{ istota_security_skill_proxy_enabled | lower }}
 skill_proxy_timeout = {{ istota_security_skill_proxy_timeout }}
 skill_client_wait_seconds = {{ istota_security_skill_client_wait_seconds }}
@@ -309,6 +311,12 @@ sandbox_cache_max_gb = {{ istota_security_sandbox_cache_max_gb }}
 "{{ skill | istota_toml_escape }}" = {{ seconds | int }}
 {% endfor %}
 {% endif %}
+
+[security.credential_broker]
+enabled = {{ istota_security_credential_broker_enabled | lower }}
+enforce_reveal = {{ istota_security_credential_broker_enforce_reveal | lower }}
+scan_max_bytes = {{ istota_security_credential_broker_scan_max_bytes }}
+leaf_validity_hours = {{ istota_security_credential_broker_leaf_validity_hours }}
 
 [security.network]
 enabled = {{ istota_security_network_enabled | lower }}
@@ -741,6 +749,15 @@ reconcile_min_dwell_sec = {{ istota_location_reconcile_min_dwell_sec }}
 
 [web]
 auth = {{ istota_web_auth | to_json }}
+auth_enrol_ttl_hours = {{ istota_web_auth_enrol_ttl_hours }}
+auth_reset_ttl_hours = {{ istota_web_auth_reset_ttl_hours }}
+auth_login_link_ttl_minutes = {{ istota_web_auth_login_link_ttl_minutes }}
+auth_min_password_length = {{ istota_web_auth_min_password_length }}
+auth_throttle_window_seconds = {{ istota_web_auth_throttle_window_seconds }}
+auth_throttle_max_email = {{ istota_web_auth_throttle_max_email }}
+auth_throttle_max_ip = {{ istota_web_auth_throttle_max_ip }}
+auth_mail_link_max_email = {{ istota_web_auth_mail_link_max_email }}
+trusted_proxy_hops = {{ istota_web_trusted_proxy_hops }}
 enabled = true
 port = {{ istota_web_port }}
 oauth2_provider = "{{ istota_web_oauth2_provider | istota_toml_escape }}"

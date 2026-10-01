@@ -71,6 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Ansible deployments can now configure trusted proxy hops, email-login limits and link lifetimes, vault request limits, and the optional credential broker. These controls were missing from the role, so inventory could not override the application's defaults. The new role defaults preserve existing behavior.
+
 - Immediate task execution from the command line no longer holds a database transaction across credential admission. It reserves the task before starting and reports liveness during execution, so the scheduler cannot also claim it.
 
 - Assembling a task prompt with the default configuration no longer creates an empty `data/istota.db` in the working directory. The room lookup in the prompt header now skips a database file that does not exist instead of opening it, which created it (ISSUE-570).
