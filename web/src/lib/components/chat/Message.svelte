@@ -3,6 +3,7 @@
   import { chatFileUrl, type ExternalTurnDisplay } from '$lib/api';
   import { copyText } from '$lib/clipboard';
   import { renderMarkdown } from '$lib/markdown';
+  import { findPlainMentions, type MentionTarget } from '$lib/mentions';
   import type { ChatMessage } from '$lib/stores/chat';
   import type { OutboundDraft } from '$lib/api';
   import { messageCopyText, renderGroups } from '$lib/stores/segments';
@@ -45,6 +46,7 @@
     aggregate = false,
     active = false,
     touch = false,
+    mentions = [],
   }: {
     message: ChatMessage;
     // True when this message continues a run from the same author, so the
@@ -142,6 +144,11 @@
     // with a trackpad reports hover, and a tap there still strands a synthesized
     // :hover. This mutes the hover reveal for as long as touch is what's in use.
     touch?: boolean;
+    // Who may be `@`-mentioned where this row is shown: the room's members by
+    // user id and the bot's name, the viewer's own entry marked `self`. Empty
+    // (the default) styles nothing, which is what the aggregate views get,
+    // since their rows come from many rooms.
+    mentions?: MentionTarget[];
   } = $props();
 
   const isUser = $derived(message.role === 'user');
@@ -175,7 +182,25 @@
 
   // System (!command) output goes through the safe markdown renderer; user text
   // is shown verbatim and the assistant body is rendered below.
-  const bodyHtml = $derived(isSystem ? renderMarkdown(message.text) : '');
+  const bodyHtml = $derived(isSystem ? renderMarkdown(message.text, mentions) : '');
+
+  // A user row is shown verbatim, so mentions are split out as text segments
+  // rather than through the markdown renderer. Not applied to an external
+  // turn: a stranger's mail styled with a member's name would read as that
+  // member being addressed in the room.
+  const userSegments = $derived.by(() => {
+    const text = message.text ?? '';
+    const spans = isUser && !message.origin ? findPlainMentions(text, mentions) : [];
+    const out: { text: string; mention?: boolean; self?: boolean }[] = [];
+    let at = 0;
+    for (const span of spans) {
+      if (span.start > at) out.push({ text: text.slice(at, span.start) });
+      out.push({ text: text.slice(span.start, span.end), mention: true, self: span.target.self });
+      at = span.end;
+    }
+    if (at < text.length || out.length === 0) out.push({ text: text.slice(at) });
+    return out;
+  });
 
   // ---- External-origin turns -------------------------------------------------
   // A user row whose `origin` is set came from a surface this room does not live
@@ -801,7 +826,12 @@
                around a sibling button would render as leading and trailing
                blank space in every user message. -->
           <div class="body user-body">
-            <span class="user-text">{message.text}</span>
+            <span class="user-text"
+              >{#each userSegments as seg, i (i)}{#if seg.mention}<span
+                    class="mention"
+                    class:mention-self={seg.self}>{seg.text}</span
+                  >{:else}{seg.text}{/if}{/each}</span
+            >
           </div>
         {/if}
         {#if message.attachments?.length}
@@ -924,11 +954,11 @@
 					       region inserted already-populated is not reliably announced, so
 					       this is semantics rather than a guarantee of an announcement. -->
             <div class="markdown banner warn run-notice" role="status">
-              {@html renderMarkdown(g.text)}
+              {@html renderMarkdown(g.text, mentions)}
             </div>
           {:else}
             <div class="body markdown">
-              {@html renderMarkdown(g.text)}
+              {@html renderMarkdown(g.text, mentions)}
             </div>
           {/if}
         {/each}

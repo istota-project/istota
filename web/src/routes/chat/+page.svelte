@@ -46,7 +46,9 @@
   import { dropDraft } from '$lib/stores/drafts';
   import { dropQueue, MAX_QUEUED_PER_ROOM } from '$lib/stores/sendQueue';
   import { isImeComposing } from '$lib/platform/input';
-  import type { ChatAttachment, ChatRoom, ChatView } from '$lib/api';
+  import type { ChatAttachment, ChatRoom, ChatView, RoomMember } from '$lib/api';
+  import { loadRoomMembers, dropRoomMembers } from '$lib/roomMembers';
+  import type { MentionTarget } from '$lib/mentions';
   import { getCurrentUser } from '$lib/userContext';
   import { getSelectableBrains } from '$lib/components/chat/autocomplete/providers';
 
@@ -178,6 +180,45 @@
   // about what the glyph means.
   const sharedRoomTitle = (room: { origin?: string | null; talk_token?: string | null }) =>
     isTalkRoom(room) ? 'Shared room, also on Nextcloud Talk' : 'Shared room';
+
+  // Who may be `@`-mentioned in the open room (ISSUE-578): its members by user
+  // id, the viewer's own entry marked, and the bot's name. Only in a shared
+  // room, which is where a mention says something; a private room's only
+  // other reader is the bot. Keyed by room id so a slow fetch for the room
+  // just left never paints its members onto the one just opened.
+  let loadedMembers = $state<{ roomId: number; list: RoomMember[] } | null>(null);
+  // Bumped when this viewer changes the membership, so the fetch runs again.
+  let membersEpoch = $state(0);
+  const sharedRoomId = $derived(!inViewMode && activeRoom?.shared ? activeRoom.id : null);
+  $effect(() => {
+    const id = sharedRoomId;
+    void membersEpoch;
+    // Read so any update to the room list asks again; within the cache's
+    // lifetime that answers from memory, past it it refetches. Membership
+    // changes made elsewhere reach this page no other way.
+    void activeRoom;
+    if (id == null) return;
+    let live = true;
+    loadRoomMembers(id).then((list) => {
+      // The same cached array means nothing changed, and reassigning would
+      // re-render every row's mentions for nothing.
+      if (live && (loadedMembers?.roomId !== id || loadedMembers.list !== list)) {
+        loadedMembers = { roomId: id, list };
+      }
+    });
+    return () => {
+      live = false;
+    };
+  });
+  const mentionTargets = $derived.by((): MentionTarget[] => {
+    if (sharedRoomId == null || loadedMembers?.roomId !== sharedRoomId) return [];
+    const targets: MentionTarget[] = loadedMembers.list.map((m) => ({
+      name: m.user_id,
+      self: m.user_id === userId,
+    }));
+    targets.push({ name: botName });
+    return targets;
+  });
 
   // A room whose host left answers nobody until a member claims it (D14).
   const hostLost = $derived(!!activeRoom?.policy && activeRoom.policy.host === null);
@@ -925,6 +966,10 @@
   // with it the policy the modal shows, comes from the listing.
   async function membersChanged() {
     const id = settingsRoom?.id;
+    if (id != null) {
+      dropRoomMembers(id);
+      membersEpoch++;
+    }
     await session.refreshRooms();
     if (id != null) settingsRoom = $rooms.find((r) => r.id === id) ?? null;
   }
@@ -1298,6 +1343,7 @@
                 aggregate={inViewMode}
                 active={message.cid === activeCid}
                 touch={pointerIsTouch}
+                mentions={mentionTargets}
               />
             {/each}
           </div>

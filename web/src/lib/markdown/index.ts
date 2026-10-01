@@ -24,6 +24,7 @@
 import MarkdownIt from 'markdown-it';
 import hljs from 'highlight.js/lib/common';
 import { base } from '$app/paths';
+import { findMentions, mentionMatcher, type MentionTarget } from '$lib/mentions';
 
 const md = new MarkdownIt({
   html: false, // never emit raw HTML from source — safe-by-construction
@@ -253,7 +254,72 @@ md.renderer.rules.image = (tokens, idx, options, env, self) => {
   );
 };
 
-export function renderMarkdown(src: string): string {
+/**
+ * `@name` mentions, as their own token (ISSUE-578).
+ *
+ * Runs over `text` tokens only, so a literal `@` inside a code span, a fenced
+ * block or a link's text is never a mention: those reach here as
+ * `code_inline`, `fence` and text between `link_open` and `link_close`, and
+ * the last is skipped by depth. Which names match is the caller's list
+ * (`env.mentions`), never any `@word`; see `$lib/mentions`.
+ *
+ * After `text_join`, not straight after `inline`: before it an escape such as
+ * `a\_@bob` is three tokens, and `@bob` at the start of its own token loses
+ * the `_` that, as the reader sees it, sits right before the `@`.
+ *
+ * Its renderer escapes the matched text, which is the only thing from the
+ * source that reaches the `{@html}` sink; the class names are fixed strings.
+ */
+md.core.ruler.after('text_join', 'mention', (state) => {
+  const targets: MentionTarget[] | undefined = state.env?.mentions;
+  if (!targets || targets.length === 0) return;
+  const matcher = mentionMatcher(targets);
+  if (!matcher) return;
+  for (const block of state.tokens) {
+    if (block.type !== 'inline' || !block.children) continue;
+    const out: typeof block.children = [];
+    let linkDepth = 0;
+    for (const tok of block.children) {
+      if (tok.type === 'link_open') linkDepth++;
+      else if (tok.type === 'link_close') linkDepth = Math.max(0, linkDepth - 1);
+      const spans =
+        tok.type === 'text' && linkDepth === 0 ? findMentions(tok.content, targets, matcher) : [];
+      if (spans.length === 0) {
+        out.push(tok);
+        continue;
+      }
+      let at = 0;
+      for (const span of spans) {
+        if (span.start > at) {
+          const text = new state.Token('text', '', 0);
+          text.content = tok.content.slice(at, span.start);
+          out.push(text);
+        }
+        const mention = new state.Token('mention', '', 0);
+        mention.content = tok.content.slice(span.start, span.end);
+        mention.meta = { self: !!span.target.self };
+        out.push(mention);
+        at = span.end;
+      }
+      if (at < tok.content.length) {
+        const text = new state.Token('text', '', 0);
+        text.content = tok.content.slice(at);
+        out.push(text);
+      }
+    }
+    block.children = out;
+  }
+});
+
+md.renderer.rules.mention = (tokens, idx) => {
+  const tok = tokens[idx];
+  const cls = tok.meta?.self ? 'mention mention-self' : 'mention';
+  return `<span class="${cls}">${md.utils.escapeHtml(tok.content)}</span>`;
+};
+
+/** Render a chat message. `mentions` names who may be `@`-mentioned where it
+ *  is shown; without it nothing is styled as a mention. */
+export function renderMarkdown(src: string, mentions?: readonly MentionTarget[]): string {
   if (!src) return '';
-  return md.render(src);
+  return md.render(src, mentions && mentions.length > 0 ? { mentions } : {});
 }

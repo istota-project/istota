@@ -395,3 +395,21 @@
     padding-right: max(0.75rem, var(--safe-right));
   }
 }
+
+/* An `@name` mention (ISSUE-578), from `renderMarkdown` and from the user-row
+   splitter in Message.svelte. Not under `.markdown`: a user's own text is
+   rendered verbatim, outside that container, and the two must look alike.
+   The viewer's own mention is the stronger wash, so a reader can find what
+   addresses them. The colours are tokens, so both themes follow. */
+.mention {
+  padding: 0 0.2em;
+  border-radius: var(--radius-sm);
+  color: var(--accent-blue);
+  background: color-mix(in srgb, var(--accent-blue) 12%, transparent);
+  white-space: nowrap;
+}
+.mention-self {
+  font-weight: 600;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--accent-blue) 30%, transparent);
+}
