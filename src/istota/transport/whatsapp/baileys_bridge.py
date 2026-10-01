@@ -3540,7 +3540,12 @@ class BaileysBridge:
     def _dispatch(self, message_type: str, payload: dict) -> None:
         if message_type == proto.MSG_SEND_RESULT:
             self._resolve_send(payload)
-        elif message_type in (proto.MSG_INBOUND, proto.MSG_RECEIPT):
+        elif message_type in (
+            proto.MSG_INBOUND, proto.MSG_RECEIPT, proto.MSG_GROUP_ROSTER,
+        ):
+            # A roster rides the inbound queue so it is applied in order with
+            # the messages around it: the sidecar sends a group's roster ahead
+            # of its first message, and that message needs the room it makes.
             self._enqueue(message_type, payload)
         elif message_type == proto.MSG_READY:
             self._status.ready = True
@@ -3871,6 +3876,8 @@ class BaileysBridge:
         try:
             if message_type == proto.MSG_INBOUND:
                 event = proto.inbound_event(payload)
+            elif message_type == proto.MSG_GROUP_ROSTER:
+                event = proto.group_roster(payload)
             else:
                 event = proto.delivery_event(payload)
         except proto.BaileysProtocolError as exc:
@@ -3941,6 +3948,9 @@ class BaileysBridge:
                 # the transaction has already committed, so a raise here would
                 # retry an event the ledger has already claimed.
                 logger.warning("whatsapp.baileys.responses_failed", exc_info=True)
+            for result in results:
+                if getattr(result, "leave_group_jid", None):
+                    await self.leave_group(result.leave_group_jid)
             return
 
     def _apply_batch_to_db(self, event):
@@ -3968,6 +3978,37 @@ class BaileysBridge:
             )
 
     # -- outbound -----------------------------------------------------------
+
+    async def leave_group(self, group_jid: str) -> bool:
+        """Ask the sidecar to leave a WhatsApp group (D14). Never raises.
+
+        True when the frame was written. Nothing waits for an answer: the
+        group's own `group-participants.update` for the bot is what the room
+        hears back, and a sidecar that missed this frame leaves the bot in a
+        group whose room is already archived, which delivers nothing.
+        """
+        try:
+            line = proto.encode(proto.MSG_LEAVE_GROUP, group_jid=group_jid)
+            await asyncio.wait_for(
+                self._write_lock.acquire(), timeout=self._send_timeout,
+            )
+        except Exception:
+            logger.warning("whatsapp.baileys.leave_group_not_written")
+            return False
+        try:
+            writer = self._writer
+            if writer is None or writer.is_closing():
+                logger.warning("whatsapp.baileys.leave_group_no_sidecar")
+                return False
+            writer.write(line)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(writer.drain(), timeout=DRAIN_TIMEOUT)
+            return True
+        except Exception:
+            logger.warning("whatsapp.baileys.leave_group_not_written")
+            return False
+        finally:
+            self._write_lock.release()
 
     async def send(self, request: WhatsAppSendRequest) -> WhatsAppSendOutcome:
         """Write one `send` line and wait for its answer. Never raises.

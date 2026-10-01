@@ -1085,6 +1085,19 @@ def _resolve_one(
             return None
         channel = transport.resolve_target(task)
         if dest.channel and dest.channel != channel:
+            from .whatsapp.identity import normalize_group_jid
+
+            if normalize_group_jid(dest.channel):
+                # A room's WhatsApp group binding, reached by fan-out from a
+                # task that is not that group's own turn — a web turn in the
+                # group's room, a scheduled job naming it. A group is answered
+                # only from its own turns (multiplayer D6); falling through to
+                # the user's own chat would send it somewhere nobody asked.
+                logger.info(
+                    "Not delivering task %s into a WhatsApp group it was not "
+                    "asked in", getattr(task, "id", "?"),
+                )
+                return None
             # `whatsapp:<phone-or-id>` is refused rather than obeyed. The route
             # grammar must not become a way to send to an arbitrary contact, so
             # the binding wins always — said out loud rather than rewritten in

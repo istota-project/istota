@@ -6126,8 +6126,10 @@ def room_identity_line(
         # requires the assembled prompt to carry no "Nextcloud" literal on the
         # storage-neutral backend, and a local-backend deployment can hold
         # migrated `origin='talk'` rows.
-        where = "Talk" if room.origin == "talk" else "web chat"
-        if talk_ref and room.origin != "talk":
+        where = {"talk": "Talk", "whatsapp": "a WhatsApp group"}.get(
+            room.origin, "web chat",
+        )
+        if talk_ref and room.origin not in ("talk", "whatsapp"):
             where = "web chat, also open in Talk"
         descriptor = _header_scalar(
             room_target_descriptor(token, room.origin, talk_ref)

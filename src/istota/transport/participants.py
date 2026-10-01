@@ -79,6 +79,7 @@ def guest_label(ref: ParticipantRef) -> str:
 
 def is_multi_human(
     conn: sqlite3.Connection, *, surface: str, room_token: str, is_group_chat: bool,
+    room_container: bool = False,
 ) -> bool:
     """Whether a turn on ``surface`` in ``room_token`` is in front of more than one human.
 
@@ -86,9 +87,11 @@ def is_multi_human(
     surface that owns rooms, ``db.room_is_shared``. A guest surface (email)
     keeps its own answer only: its turn is mirrored into a room's transcript,
     but its reply goes back by mail, so the room's audience is not its own.
+    ``room_container`` is a room on a surface that owns none in general — a
+    WhatsApp group (D6) — and counts as one that does.
     """
     if is_group_chat:
         return True
-    if not is_room_member(surface):
+    if not (is_room_member(surface) or room_container):
         return False
     return db.room_is_shared(conn, room_token)

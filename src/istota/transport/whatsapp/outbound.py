@@ -35,6 +35,7 @@ import sqlite3
 import unicodedata
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ... import db
@@ -585,6 +586,36 @@ def _gate(
     return "pending", send_kind
 
 
+def _group_gate(
+    conn, config: Config, caps: "WhatsAppProviderCaps | None", room_token: str,
+) -> tuple[str, str]:
+    """`_gate` for a send into a WhatsApp group room (multiplayer D6).
+
+    No user binding and no opt-out: the destination is the group, which a
+    member's STOP to their own chat with the bot does not govern. Groups are
+    Baileys only, so an adapter that meters or keeps a service window — Meta's
+    — has nothing to send through; the group must still be a registered,
+    unarchived room bound to a group JID.
+    """
+    from ...config import whatsapp_config_errors
+    from .groups import group_destination
+
+    if not config.whatsapp.enabled or whatsapp_config_errors(config):
+        return "unconfigured", "service"
+    if caps is None or caps.metered or caps.has_service_window:
+        return "unconfigured", "service"
+    if not group_destination(conn, room_token):
+        return "unconfigured", "service"
+    return "pending", "service"
+
+
+def _group_destination_now(config: Config, room_token: str) -> str:
+    from .groups import group_destination
+
+    with db.get_db(config.db_path) as conn:
+        return group_destination(conn, room_token)
+
+
 def _claim(
     config: Config,
     *,
@@ -596,6 +627,7 @@ def _claim(
     caps: "WhatsAppProviderCaps | None",
     request_id: str | None = None,
     relay_return_id: str | None = None,
+    group_room: str | None = None,
 ) -> tuple[str, WhatsAppDeliveryRecord]:
     """Insert-or-reuse one ledger row and take it, in one transaction.
 
@@ -636,10 +668,13 @@ def _claim(
             row["status"] in _NO_RESEND or row["claimed_at"] is not None
         ):
             return "settled", _record(row)
-        status, send_kind = _gate(
-            conn, config, user_id, ignore_opt_out=ignore_opt_out, month=month,
-            caps=caps,
-        )
+        if group_room is not None:
+            status, send_kind = _group_gate(conn, config, caps, group_room)
+        else:
+            status, send_kind = _gate(
+                conn, config, user_id, ignore_opt_out=ignore_opt_out, month=month,
+                caps=caps,
+            )
         if request_id is not None:
             from ...whatsapp_requests import admit_request
 
@@ -1010,8 +1045,13 @@ async def deliver_whatsapp(
     client=None,
     request_id: str | None = None,
     relay_return_id: str | None = None,
+    group_room: str | None = None,
 ) -> WhatsAppDeliveryRecord:
     """Claim and perform one logical send. At most one Cloud API call.
+
+    `group_room` sends into the WhatsApp group that room is bound to rather
+    than to `user_id`'s own chat; `user_id` is then who the ledger row and any
+    failure alert belong to.
 
     `client` is the Cloud client injection this function has always taken, and
     it is now applied by replacing the resolved adapter's `send` rather than by
@@ -1071,6 +1111,7 @@ async def deliver_whatsapp(
         _claim, config,
         logical_key=logical_key, user_id=user_id, task_id=task_id,
         bodies=bodies, ignore_opt_out=ignore_opt_out, caps=caps, request_id=request_id, relay_return_id=relay_return_id,
+        group_room=group_room,
     )
     if outcome == "settled":
         return record
@@ -1084,6 +1125,7 @@ async def deliver_whatsapp(
             body=bodies[record.send_kind], send_kind=record.send_kind,
             task_id=task_id, buttons=buttons,
             reply_to_message_id=reply_to_message_id, adapter=adapter, request_id=request_id, relay_return_id=relay_return_id,
+            group_room=group_room,
         )
     except BaseException:
         # `BaseException`, not `Exception`: this runs as a FastAPI background
@@ -1117,6 +1159,7 @@ async def _send_claimed(
     adapter,
     request_id: str | None = None,
     relay_return_id: str | None = None,
+    group_room: str | None = None,
 ) -> WhatsAppDeliveryRecord:
     """The body of :func:`deliver_whatsapp` from a claimed row onwards.
 
@@ -1137,7 +1180,11 @@ async def _send_claimed(
         # Resolved *after* the claim and immediately before the call, so a
         # binding the operator changed while the task ran is honoured and the
         # old destination never receives the answer.
-        if relay_return_id is not None:
+        if group_room is not None:
+            destination = await asyncio.to_thread(
+                _group_destination_now, config, group_room,
+            )
+        elif relay_return_id is not None:
             from ...message_relays import return_whatsapp_destination
 
             destination = await asyncio.to_thread(return_whatsapp_destination, config, relay_id=relay_return_id,
@@ -1234,6 +1281,26 @@ def _request(
         to=destination, text=body, kind="service",
         reply_to_message_id=reply_to_message_id, buttons=tuple(buttons),
     )
+
+
+def group_room_for_task(config: Config, task) -> str | None:
+    """The WhatsApp group room a task answers into, or None for any other task.
+
+    Only a task a group's own turn created (source `whatsapp`, its token a
+    room bound to a group). A task from anywhere else — a web turn in the
+    group's room included, since D4 makes that view the principals' backstage
+    — never reaches the group through here.
+    """
+    if task is None or task.source_type != "whatsapp" or not task.conversation_token:
+        return None
+    if not config.db_path or not Path(config.db_path).exists():
+        return None
+    from .groups import group_destination
+
+    with db.get_db(config.db_path) as conn:
+        if group_destination(conn, task.conversation_token):
+            return task.conversation_token
+    return None
 
 
 def current_destination(
@@ -1749,6 +1816,7 @@ def is_whatsapp_configured(config: Config, user_id: str) -> bool:
 
 
 __all__ = [
+    "group_room_for_task",
     "SERVICE_WINDOW",
     "TEMPLATE_PARAMETER_LIMIT",
     "TRUNCATION_SUFFIX",

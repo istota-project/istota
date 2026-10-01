@@ -26,7 +26,9 @@ What this module holds, and what it deliberately does not:
 - **External views.** On web the side room is itself. On Talk it is the
   member's own private conversation with the bot, each message headed
   ``re: <room>`` (`push_to_talk_view`), and only when the parent is on Talk.
-  Nothing binds the side room to that conversation: it is its own room.
+  On WhatsApp it is the member's own chat with the bot's number, headed the
+  same way (`push_to_whatsapp_view`), when the parent is a WhatsApp group.
+  Nothing binds the side room to either: it is its own room.
 
 - **Side-room answers** (D4 item 1). A task in a shared room that needs a scope
   the room withholds asks for the answer privately (`queue_side_answer`): the
@@ -268,6 +270,53 @@ async def push_to_talk_view(
         return None
 
 
+async def push_to_whatsapp_view(
+    config, *, user_id: str, parent_token: str, body: str, reference_id: str,
+) -> bool:
+    """Send ``body`` to the user's own WhatsApp chat with the bot, headed ``re: <room>``.
+
+    The side room's external view on WhatsApp (D4), and only for a parent
+    bound to a WhatsApp group: a member reading the room elsewhere reads its
+    side room there. The chat is the user's own binding, so it is private by
+    construction. True when the message reached WhatsApp.
+    """
+    def _resolve():
+        with db.get_db(config.db_path) as conn:
+            parent = db.get_room(conn, parent_token)
+            if parent is None or db.get_room_binding(conn, parent_token, "whatsapp") is None:
+                return None
+            return HEADER_PREFIX + room_label(parent)
+
+    header = await asyncio.to_thread(_resolve)
+    if header is None:
+        return False
+    from .transport.whatsapp import REACHED_META
+    from .transport.whatsapp.outbound import current_destination, deliver_whatsapp
+
+    if not await asyncio.to_thread(current_destination, config, user_id):
+        return False
+    try:
+        record = await deliver_whatsapp(
+            config, logical_key=f"side-view:{reference_id}", user_id=user_id,
+            text=f"{header}\n\n{body}",
+        )
+    except Exception as exc:
+        logger.warning("side room WhatsApp view send failed for %s: %s", user_id, exc)
+        return False
+    return record.status in REACHED_META
+
+
+def whatsapp_confirmation_body(prompt: str, task_id: int) -> str:
+    """A side-routed question as its WhatsApp view carries it.
+
+    A bare YES in that chat answers only a question parked there, and this one
+    is parked in the group's room, so the message names the command that
+    answers it by id.
+    """
+    return (f"{prompt}\n\nTask #{task_id}. Reply `!confirm {task_id} yes` "
+            f"or `!confirm {task_id} no`.")
+
+
 # ---------------------------------------------------------------------------
 # Confirmations raised in a shared room
 # ---------------------------------------------------------------------------
@@ -280,6 +329,9 @@ class ConfirmationRoute:
     parent_token: str
     side_token: str | None
     talk_bound: bool
+    # The parent is a WhatsApp group: the question also goes to the
+    # principal's own WhatsApp chat (`push_to_whatsapp_view`).
+    whatsapp_bound: bool = False
 
 
 def confirmation_route(conn, task) -> ConfirmationRoute | None:
@@ -299,11 +351,13 @@ def confirmation_route(conn, task) -> ConfirmationRoute | None:
             and not is_shared_room(conn, parent_token, is_group_chat=task.is_group_chat)):
         return None
     talk_bound = db.get_room_binding(conn, parent_token, "talk") is not None
+    whatsapp_bound = db.get_room_binding(conn, parent_token, "whatsapp") is not None
     try:
         side = db.ensure_side_room(conn, parent_token, task.user_id)
     except ValueError:
         return ConfirmationRoute(parent_token=parent_token, side_token=None, talk_bound=False)
-    return ConfirmationRoute(parent_token=parent_token, side_token=side.token, talk_bound=talk_bound)
+    return ConfirmationRoute(parent_token=parent_token, side_token=side.token,
+                             talk_bound=talk_bound, whatsapp_bound=whatsapp_bound)
 
 
 def write_confirmation(conn, route: ConfirmationRoute, task, prompt: str) -> None:
@@ -422,9 +476,10 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
         logger.info("task %s: guest reply not proposed: %s", task.id, exc)
         return None
     talk_bound = db.get_room_binding(conn, parent, "talk") is not None
+    whatsapp_bound = db.get_room_binding(conn, parent, "whatsapp") is not None
     return GuestProposal(
         route=ConfirmationRoute(parent_token=parent, side_token=side.token,
-                                talk_bound=talk_bound),
+                                talk_bound=talk_bound, whatsapp_bound=whatsapp_bound),
         preview=row["preview"],
     )
 
@@ -612,8 +667,11 @@ def _post_destination(conn, parent_token: str, user_id: str) -> dict:
             or not db.is_room_member(conn, parent_token, user_id)):
         raise RequestError("parent_unavailable")
     talk = db.get_room_binding(conn, parent_token, "talk")
+    whatsapp = db.get_room_binding(conn, parent_token, "whatsapp")
     destination = {"kind": "room", "room_token": parent_token,
                    "talk_ref": talk.surface_ref if talk else None, "label": room_label(room)}
+    if whatsapp is not None:
+        destination["whatsapp_ref"] = whatsapp.surface_ref
     destination["fingerprint"] = destination_fingerprint(destination)
     return destination
 
@@ -698,6 +756,7 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                 return None
             if row["state"] != "queued":
                 return None
+            whatsapp_group = False
             if row["queue_deadline"] is None or row["queue_deadline"] <= db.sql_datetime_now():
                 raise RequestError("queue_expired")
             user = row["requester_user_id"]
@@ -716,6 +775,7 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                 if current["fingerprint"] != row["binding_fingerprint"]:
                     raise RequestError("destination_changed")
                 target, talk_ref, parent = current["room_token"], current["talk_ref"], current["room_token"]
+                whatsapp_group = bool(current.get("whatsapp_ref"))
                 reference = "room-post:" + request_id
             else:
                 parent = destination.get("parent") or ""
@@ -734,7 +794,7 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                          "WHERE id=?", (request_id,))
             return {"request_id": request_id, "kind": row["kind"], "user_id": user, "body": body,
                     "message_id": message_id, "talk_ref": talk_ref, "parent": parent,
-                    "reference": reference}
+                    "reference": reference, "whatsapp_group": whatsapp_group}
 
 
 def _mark_sent(conn, request_id: str) -> None:
@@ -797,8 +857,22 @@ async def deliver_request(config, row) -> None:
                     claim["talk_ref"], claim["body"], reference_id=claim["reference"])
             except Exception as exc:
                 logger.warning("room post %s: Talk post failed: %s", claim["request_id"], exc)
+        if claim["whatsapp_group"]:
+            # The group itself (multiplayer D6). Like the Talk half, a failed
+            # send does not fail the post: the canonical row is the post, and
+            # the ledger row and its alert say what happened to the group.
+            from .transport.whatsapp.outbound import deliver_whatsapp
+            try:
+                await deliver_whatsapp(
+                    config, logical_key=claim["reference"], user_id=claim["user_id"],
+                    text=claim["body"], group_room=claim["parent"])
+            except Exception as exc:
+                logger.warning("room post %s: WhatsApp post failed: %s", claim["request_id"], exc)
     else:
         talk_id = await push_to_talk_view(
+            config, user_id=claim["user_id"], parent_token=claim["parent"],
+            body=claim["body"], reference_id=claim["reference"])
+        await push_to_whatsapp_view(
             config, user_id=claim["user_id"], parent_token=claim["parent"],
             body=claim["body"], reference_id=claim["reference"])
     await asyncio.to_thread(_settle, config, claim, talk_id)

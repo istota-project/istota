@@ -154,8 +154,12 @@ def check_room(conn: sqlite3.Connection, config, *, recipient_user_id: str, fing
 def destination_fingerprint(destination: dict) -> str:
     """What admission compares, so a changed destination closes the relay."""
     if destination["kind"] == "room":
-        return text_hash(json.dumps([destination["room_token"], destination["talk_ref"]],
-                                    ensure_ascii=True, separators=(",", ":")))
+        # A WhatsApp group binding joins the hash only when there is one, so
+        # every fingerprint stored before groups existed still compares equal.
+        parts = [destination["room_token"], destination["talk_ref"]]
+        if destination.get("whatsapp_ref"):
+            parts.append(destination["whatsapp_ref"])
+        return text_hash(json.dumps(parts, ensure_ascii=True, separators=(",", ":")))
     return destination["fingerprint"]
 
 

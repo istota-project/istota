@@ -3241,7 +3241,9 @@ def process_one_task(
                     post_sms_message = (
                         f"{result}\n\nTask #{task_id}. Reply YES or NO."
                     )
-                if _own_origin_whatsapp:
+                # A WhatsApp group's question went to the principal's side
+                # room above; asking it in the group is what that prevents.
+                if _own_origin_whatsapp and side_confirmation is None:
                     # The buttons carry the answer; the sentence carries the
                     # task id, which is what makes `!confirm <id>` and a later
                     # typed YES work on a client that renders no buttons.
@@ -3292,7 +3294,8 @@ def process_one_task(
                     and post_sms_message is None
                     and post_whatsapp_message is None
                     and not (side_confirmation is not None
-                             and side_confirmation.talk_bound)
+                             and (side_confirmation.talk_bound
+                                  or side_confirmation.whatsapp_bound))
                 ):
                     notification_results.append(held_notification)
                     held_notification = None
@@ -3998,13 +4001,26 @@ def process_one_task(
     # `talk_response_id`, so a reply to it answers by Path A. A push that
     # posted nothing owes the withheld notification, as a failed Talk post does.
     side_undelivered = False
-    if side_confirmation is not None and side_confirmation.talk_bound:
-        side_msg_id = run_coro(side_rooms.push_to_talk_view(
-            config, user_id=task.user_id,
-            parent_token=side_confirmation.parent_token, body=result,
-            reference_id=f"istota:task:{task.id}:confirmation",
-        ))
-        side_undelivered = side_msg_id is None
+    if side_confirmation is not None and (
+        side_confirmation.talk_bound or side_confirmation.whatsapp_bound
+    ):
+        side_msg_id = None
+        side_whatsapp_sent = False
+        if side_confirmation.talk_bound:
+            side_msg_id = run_coro(side_rooms.push_to_talk_view(
+                config, user_id=task.user_id,
+                parent_token=side_confirmation.parent_token, body=result,
+                reference_id=f"istota:task:{task.id}:confirmation",
+            ))
+        if side_confirmation.whatsapp_bound:
+            # A WhatsApp group's view is the principal's own chat with the bot.
+            side_whatsapp_sent = bool(run_coro(side_rooms.push_to_whatsapp_view(
+                config, user_id=task.user_id,
+                parent_token=side_confirmation.parent_token,
+                body=side_rooms.whatsapp_confirmation_body(result, task.id),
+                reference_id=f"istota:task:{task.id}:confirmation",
+            )))
+        side_undelivered = side_msg_id is None and not side_whatsapp_sent
         if side_msg_id:
             try:
                 with db.get_db(config.db_path) as conn:
@@ -4023,6 +4039,10 @@ def process_one_task(
             side_answer_parent = None
         if side_answer_parent:
             run_coro(side_rooms.push_to_talk_view(
+                config, user_id=task.user_id, parent_token=side_answer_parent,
+                body=result, reference_id=f"istota:task:{task.id}:side-answer",
+            ))
+            run_coro(side_rooms.push_to_whatsapp_view(
                 config, user_id=task.user_id, parent_token=side_answer_parent,
                 body=result, reference_id=f"istota:task:{task.id}:side-answer",
             ))

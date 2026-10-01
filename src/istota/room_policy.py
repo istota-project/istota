@@ -134,12 +134,17 @@ def current_host(conn: sqlite3.Connection, policy: RoomPolicy | None) -> str | N
         return None
     if host_present(conn, policy.room_token, policy.host_user_id):
         return policy.host_user_id
+    lose_host(conn, policy.room_token, policy.host_user_id)
+    return None
+
+
+def lose_host(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
+    """Record that ``user_id`` no longer hosts the room (D14). Sticky."""
     conn.execute(
         "UPDATE room_policy SET host_user_id = NULL "
         "WHERE room_token = ? AND host_user_id = ?",
-        (policy.room_token, policy.host_user_id),
+        (room_token, user_id),
     )
-    return None
 
 
 def claim_host(conn: sqlite3.Connection, room_token: str, user_id: str) -> str:

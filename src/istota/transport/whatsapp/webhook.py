@@ -23,12 +23,12 @@ timeout and then raises (`.claude/rules/notifications.md`). A database failure
 rolls back and answers 503, so Meta retries; a complete or wholly duplicate
 batch answers an empty 200.
 
-**Nothing here touches a room.** No registration, no binding, no membership,
-no canonical `messages` row, no mirror. WhatsApp is its own external
-conversation, and `ingest_message` reaches the non-room branch because the
-surface owns no rooms and `mirror_to_room` is False. The conversation token
-names no registered room, so `transcript_room` resolves nothing for it and
-there is no special case to add anywhere in `ingest`.
+**A direct chat touches no room.** No registration, no binding, no
+membership, no canonical `messages` row, no mirror. A direct WhatsApp chat is
+its own external conversation, and `ingest_message` reaches the non-room branch
+because the surface owns no rooms and `mirror_to_room` is False. A *group* is
+the exception and lives in `groups.py`: its JID is a room binding (multiplayer
+D6), reached only for a Baileys event carrying a group context.
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ from ._types import (
     WhatsAppDeliveryEvent,
     WhatsAppDeliveryStatus,
     WhatsAppEvent,
+    WhatsAppGroupRoster,
     WhatsAppInboundMedia,
     WhatsAppUserIdentity,
 )
@@ -171,6 +172,11 @@ class WhatsAppEventResult:
     # a disposition check at the send site, so the one exception is declared
     # where it is decided and cannot be widened by a string comparison drifting.
     response_ignores_opt_out: bool = False
+    # The room a group member's `!command` acts on; None for a direct chat,
+    # whose commands act on the user's own WhatsApp conversation.
+    conversation_token: str | None = None
+    # D14: the host left this group, so the bridge leaves it after the commit.
+    leave_group_jid: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -773,9 +779,17 @@ def _handle_inbound(
             config.whatsapp.provider,
         )
         return WhatsAppEventResult("inactive_provider")
+    if event.group is not None:
+        # A group is a room (multiplayer D6), and only the Baileys decoder
+        # builds this context. The sender resolves to a member or a guest
+        # there, never through the direct-chat path below.
+        from .groups import handle_group_message
+
+        return handle_group_message(conn, config, event)
     if event.message_type == "group":
-        # Before identity lookup, deliberately: a group message is out of scope
-        # whoever sent it, and resolving a principal for one would put a
+        # A group message that names no sender — Cloud's, which this surface
+        # does not support (D6), or an older sidecar's. Before identity
+        # lookup, deliberately: resolving a principal for one would put a
         # third party's text into that user's task history.
         return WhatsAppEventResult("group")
 
@@ -1121,6 +1135,19 @@ def _handle_delivery(
     )
 
 
+def _handle_roster(
+    conn, config: Config, roster: WhatsAppGroupRoster, *, provider: str,
+) -> WhatsAppEventResult:
+    """A group's roster, under the inbound gates a group message passes."""
+    if not config.whatsapp.enabled:
+        return WhatsAppEventResult("unconfigured")
+    if provider != config.whatsapp.provider:
+        return WhatsAppEventResult("inactive_provider")
+    from .groups import apply_roster
+
+    return apply_roster(conn, config, roster)
+
+
 def handle_whatsapp_batch(
     conn,
     config: Config,
@@ -1164,6 +1191,8 @@ def handle_whatsapp_batch(
     for event in events:
         if isinstance(event, WhatsAppDeliveryEvent):
             results.append(_handle_delivery(conn, config, event))
+        elif isinstance(event, WhatsAppGroupRoster):
+            results.append(_handle_roster(conn, config, event, provider=provider))
         else:
             results.append(_handle_inbound(conn, config, event, provider=provider))
     return results
@@ -1193,7 +1222,8 @@ async def resolve_event_response(
         # none — `!route` and its neighbours read it and would report that the
         # deployment has no surfaces at all.
         command = await commands.dispatch(
-            config, result.user_id, whatsapp_conversation_token(result.user_id),
+            config, result.user_id,
+            result.conversation_token or whatsapp_conversation_token(result.user_id),
             result.command_text, surface="whatsapp",
         )
         return command.text or None

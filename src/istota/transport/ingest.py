@@ -486,6 +486,11 @@ def record_inbound(
     author: ParticipantRef | None = None,
     # The text as typed is a `!command` (see `IncomingMessage.is_command`).
     is_command: bool = False,
+    # The message's container is a registered room on a surface that does not
+    # own rooms in general: a WhatsApp group (multiplayer D6), whose surface
+    # also carries the 1:1 chats that are never rooms. The caller has already
+    # registered the room; this turn then takes the room-surface path.
+    room_container: bool = False,
 ) -> InboundResult:
     """Resolve → echo-check → store user message → ask the gate → create task.
 
@@ -517,7 +522,7 @@ def record_inbound(
     # room-*view* question, which drives the outbound fan-out and which
     # `is_room_view` answers separately for the one site where the two can
     # diverge (the scheduler's confirmation mirror gate).
-    room_surface = is_room_member(surface) and bool(room_token)
+    room_surface = (is_room_member(surface) or room_container) and bool(room_token)
     # A turn with an istota user behind it. Only such a turn can register a
     # room, join or un-hide one, or create a task; anyone else is recorded into
     # a room that already exists, or not at all.
@@ -797,7 +802,7 @@ def record_inbound(
     #    shared room with a direct-conversation prompt, since web never sets it.
     multi_human = participants.is_multi_human(
         conn, surface=surface, room_token=transcript_token or room_token,
-        is_group_chat=is_group_chat,
+        is_group_chat=is_group_chat, room_container=room_container,
     )
     # 4a. The room's policy (multiplayer Stage 11): its host, whether it has
     #     lost one, and how it treats this guest. Only a room surface has one;
