@@ -56,6 +56,10 @@ USER_AGENT = "istota-wordpress"
 
 _IDEMPOTENT_METHODS = frozenset({"GET", "OPTIONS", "HEAD"})
 _WP_CODE_RE = re.compile(r"\A[a-z0-9_]{1,64}\Z")
+_FIELD_NAME_RE = re.compile(r"\A[A-Za-z0-9_\-\[\]]{1,64}\Z")
+#: A selector the model echoes back (a role, a capability, a namespace, a
+#: rest_base): bare when it has this shape, fenced when it does not.
+_SELECTOR_RE = re.compile(r"\A[A-Za-z0-9_.:/\-]{1,128}\Z")
 
 AUTH_FAILED_HELP = (
     "WordPress rejected the application password. The three ordinary causes "
@@ -93,6 +97,12 @@ def resolve_host(host: str, port: int) -> list[str]:
         if address not in seen:
             seen.append(address)
     return seen
+
+
+def _host_header(host: str, port: int) -> str:
+    """The Host header for a name or an address literal, brackets on IPv6."""
+    name = f"[{host}]" if ":" in host else host
+    return name if port == 443 else f"{name}:{port}"
 
 
 class WordPressClient:
@@ -138,7 +148,7 @@ class WordPressClient:
         root = (base or self.site_url).rstrip("/")
         return f"{root}/wp-json/{route.lstrip('/')}"
 
-    def _checked_address(self, host: str, port: int) -> str:
+    def _checked_addresses(self, host: str, port: int) -> list[str]:
         name = host.lower().rstrip(".")
         try:
             addresses = [ipaddress.ip_address(name)]
@@ -161,13 +171,13 @@ class WordPressClient:
                         f"may; nothing was sent.",
                         "host_refused",
                     )
-        return str(addresses[0])
+        return [str(a) for a in addresses]
 
     def _build(self, method, url, host, port, address, params, body) -> httpx.Request:
         target = httpx.URL(url, params=params).copy_with(host=address, port=port)
         credentials = f"{self._username.reveal()}:{self._password.reveal()}"
         headers = {
-            "Host": host if port == 443 else f"{host}:{port}",
+            "Host": _host_header(host, port),
             "Authorization": "Basic " + base64.b64encode(credentials.encode()).decode(),
             "Accept": "application/json",
             "User-Agent": USER_AGENT,
@@ -218,18 +228,25 @@ class WordPressClient:
         parts = urlsplit(url)
         host = parts.hostname or ""
         port = parts.port or 443
-        address = self._checked_address(host, port)
+        addresses = self._checked_addresses(host, port)
 
         attempts = 2 if idempotent else 1
-        for attempt in range(attempts):
-            last = attempt + 1 == attempts
-            request = self._build(method, url, host, port, address, params, json)
+        attempt = 0
+        index = 0
+        while True:
+            last = attempt + 1 >= attempts
+            request = self._build(method, url, host, port, addresses[index], params, json)
             try:
                 response, body = self._send(request)
             except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-                # Nothing reached the server, so this is a definite failure
-                # whatever the method.
+                # Nothing reached the server, so trying the next checked
+                # address is safe whatever the method, and costs no retry.
+                if index + 1 < len(addresses):
+                    index += 1
+                    continue
                 if not last:
+                    attempt += 1
+                    index = 0
                     continue
                 raise WordPressError(
                     f"Could not connect to {host}: {type(exc).__name__}.",
@@ -239,6 +256,7 @@ class WordPressClient:
                 if not idempotent:
                     raise self._outcome_unknown(method, route, type(exc).__name__) from None
                 if not last:
+                    attempt += 1
                     continue
                 raise WordPressError(
                     f"The connection to {host} failed: {type(exc).__name__}.",
@@ -248,9 +266,9 @@ class WordPressClient:
                 if not idempotent:
                     raise self._outcome_unknown(method, route, f"HTTP {response.status_code}")
                 if not last:
+                    attempt += 1
                     continue
             return self._interpret(response, body), response.headers
-        raise AssertionError("unreachable")  # pragma: no cover
 
     def get(self, route: str, *, params: dict | None = None, base: str | None = None):
         return self.request("GET", route, params=params, base=base)
@@ -317,12 +335,10 @@ class WordPressClient:
             return WordPressError(f"Not found (HTTP 404).{tail}", "not_found", **extra)
         if status == 400 and code in ("rest_invalid_param", "rest_missing_callback_param"):
             params = (data.get("data") or {}).get("params") if isinstance(data.get("data"), dict) else None
-            if isinstance(params, dict):
-                fields = sorted(str(k) for k in params)
-            elif isinstance(params, list):
-                fields = sorted(str(k) for k in params)
-            else:
-                fields = []
+            names = params if isinstance(params, (dict, list)) else []
+            # Field names come off the server; keep only identifier-shaped ones
+            # so they can sit outside the fence.
+            fields = sorted(str(k) for k in names if _FIELD_NAME_RE.fullmatch(str(k)))
             return WordPressError(
                 f"WordPress refused these fields: {', '.join(fields) or '(unnamed)'}.{tail}",
                 "validation_error", fields=fields, **extra,
@@ -331,6 +347,23 @@ class WordPressClient:
             return WordPressError(f"The site failed (HTTP {status}).{tail}", "server_error", **extra)
         return WordPressError(f"The site refused the request (HTTP {status}).{tail}",
                               "request_refused", **extra)
+
+
+def selector(value):
+    """A site-supplied selector, bare if it is identifier-shaped, fenced if not.
+
+    Role slugs, capability names, REST namespaces and logins are chosen by
+    plugins or by whoever registered, so one that could carry a sentence is
+    fenced like any other site text.
+    """
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    text = str(value)
+    return text if _SELECTOR_RE.fullmatch(text) else fence(text)
+
+
+def selectors(values) -> list:
+    return [selector(v) for v in values or [] if isinstance(v, str)]
 
 
 def fence_tree(value, *, keep: frozenset[str] = frozenset()):

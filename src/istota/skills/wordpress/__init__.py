@@ -61,6 +61,8 @@ from .sites import (
 
 log = logging.getLogger(__name__)
 
+FEATURE = "skill_wordpress"
+
 
 @dataclass
 class SiteContext:
@@ -227,10 +229,26 @@ def _entry_text(entry, field: str) -> str:
     return value.reveal().strip() if value is not None else ""
 
 
+def _require_enabled(config) -> None:
+    """Refuse unless the operator enabled the skill.
+
+    The proxy runs every `cli: true` skill whatever the experimental gate
+    says (that gate decides selection and the menu), so a CLI that reaches
+    the vault and the network carries its own (`skills.md`).
+    """
+    if not config.experimental.is_enabled(FEATURE):
+        raise SiteError(
+            f"The wordpress skill is not enabled on this deployment; the operator "
+            f"adds {FEATURE!r} to [experimental] features.",
+            "skill_disabled",
+        )
+
+
 def _open_site(args) -> SiteContext:
     """The record, the entry and a client, in the order that spends least first."""
     user_id = _user_id()
     config = _load_config()
+    _require_enabled(config)
     records, errors = _read_records(config, user_id)
     try:
         record = select_site(records, args.site)
@@ -270,7 +288,8 @@ def _open_site(args) -> SiteContext:
         transport=_transport(),
         resolve=_resolver(),
     )
-    cache = Cache(config.db_path, user_id, site=record.name, blog=blog, base=base)
+    cache = Cache(config.db_path, user_id, site=record.name, blog=blog,
+                  scope_key=f"{record.credential}|{base}")
     ctx = SiteContext(record=record, client=client, base=base, blog=blog, cache=cache)
     if blog is not None:
         try:
@@ -316,7 +335,9 @@ def _check_blog_exists(ctx: SiteContext, *, refresh: bool) -> None:
 
 def cmd_sites(args) -> dict:
     """The records in WORDPRESS.md. No network and no vault fetch."""
-    records, errors = _read_records(_load_config(), _user_id())
+    config = _load_config()
+    _require_enabled(config)
+    records, errors = _read_records(config, _user_id())
     return {
         "status": "ok",
         "file": f"config/{SITES_FILE}",
@@ -325,14 +346,17 @@ def cmd_sites(args) -> dict:
     }
 
 
-def _site_verb(handler):
+def _site_verb(handler, precheck=None):
     """`handler` with the site opened first and the client closed after.
 
     Opening the site is the vault fetch, so it happens only once the argv has
-    parsed and every host path has resolved, and never for `sites`.
+    parsed, every host path has resolved and `precheck` (the verb's own local
+    checks) has passed, and never for `sites`.
     """
 
     def run(args):
+        if precheck is not None:
+            precheck(args)
         args.wp = _open_site(args)
         try:
             return handler(args)
@@ -346,15 +370,15 @@ def _site_verb(handler):
 COMMANDS = {
     "sites": cmd_sites,
     "describe": _site_verb(discovery.cmd_describe),
-    "list": _site_verb(content.cmd_list),
-    "get": _site_verb(content.cmd_get),
-    "terms list": _site_verb(content.cmd_terms_list),
-    "media list": _site_verb(media.cmd_media_list),
-    "users list": _site_verb(admin.cmd_users_list),
-    "users get": _site_verb(admin.cmd_users_get),
+    "list": _site_verb(content.cmd_list, content.check_paging),
+    "get": _site_verb(content.cmd_get, content.check_get),
+    "terms list": _site_verb(content.cmd_terms_list, content.check_paging),
+    "media list": _site_verb(media.cmd_media_list, content.check_paging),
+    "users list": _site_verb(admin.cmd_users_list, content.check_paging),
+    "users get": _site_verb(admin.cmd_users_get, admin.check_user_id),
     "settings get": _site_verb(admin.cmd_settings_get),
     "plugins list": _site_verb(admin.cmd_plugins_list),
-    "rest": _site_verb(generic.cmd_rest),
+    "rest": _site_verb(generic.cmd_rest, generic.prepare_rest),
     "abilities list": _site_verb(generic.cmd_abilities_list),
 }
 

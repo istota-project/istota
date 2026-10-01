@@ -17,7 +17,7 @@ import httpx
 import pytest
 
 from istota import db
-from istota.config import Config, WordPressConfig
+from istota.config import Config, ExperimentalConfig, WordPressConfig
 from istota.credential_shim import ProxyError
 from istota.skills import _credref
 from istota.skills import wordpress as wp
@@ -104,7 +104,8 @@ def env(tmp_path, monkeypatch):
     db_path = tmp_path / "istota.db"
     db.init_db(db_path)
     config = Config(workspace_path=mount, db_path=db_path,
-                    wordpress=WordPressConfig(private_hosts=[]))
+                    wordpress=WordPressConfig(private_hosts=[]),
+                    experimental=ExperimentalConfig(features=["skill_wordpress"]))
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
     monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
     monkeypatch.delenv("ISTOTA_CRED_FD", raising=False)
@@ -272,6 +273,32 @@ class TestTheCredential:
         code, out = run(["describe"], capsys)
         assert out["reason"] == "host_refused"
         assert env.site.requests == []
+
+    def test_the_cli_refuses_unless_the_operator_enabled_it(self, env, capsys):
+        env.config.experimental.features = []
+        for argv in (["sites"], ["describe"]):
+            code, out = run(argv, capsys)
+            assert code == 1 and out["reason"] == "skill_disabled"
+        assert env.fetches == [] and env.site.requests == []
+
+    def test_a_bare_host_in_the_url_field_reads_as_https(self, env, capsys):
+        env.vault["wordpress_blog"] = ({"password": PASSWORD, "username": "e",
+                                        "url": HOST}, [HOST])
+        env.site.routes[("GET", "/wp-json/wp/v2/posts")] = []
+        code, out = run(["list", "--type", "post"], capsys)
+        assert code == 0, out
+
+    @pytest.mark.parametrize("argv", [
+        ["rest", "GET", "wp/v2/../x"],
+        ["rest", "GET", "wp/v2/posts/1", "--query", "_method=DELETE"],
+        ["list", "--type", "post", "--limit", "500"],
+        ["users", "get", "--id", "../settings"],
+        ["get", "--id", "1", "--fields", "bogus"],
+    ])
+    def test_a_local_refusal_spends_no_vault_fetch(self, env, capsys, argv):
+        code, out = run(argv, capsys)
+        assert code == 1 and out["reason"] == "validation_error"
+        assert env.fetches == [] and env.site.requests == []
 
     def test_a_private_address_needs_the_operator_allowlist(self, env, capsys, monkeypatch):
         monkeypatch.setattr(wp, "_resolver", lambda: (lambda h, p: ["127.0.0.1"]))
@@ -570,6 +597,31 @@ class TestOtherReads:
         code, out = run(["rest", "GET", route], capsys)
         assert code == 1 and out["reason"] == "validation_error"
         assert env.site.requests == []
+
+    @pytest.mark.parametrize("key", ["_method", ".method", " _method", "_METHOD", "[method"])
+    def test_rest_get_refuses_a_method_override(self, env, capsys, key):
+        code, out = run(["rest", "GET", "wp/v2/posts/1", "--query", f"{key}=DELETE"], capsys)
+        assert code == 1 and out["reason"] == "validation_error"
+        assert env.site.requests == []
+
+    def test_rest_refuses_application_passwords(self, env, capsys):
+        code, out = run(["rest", "GET", "wp/v2/users/1/application-passwords"], capsys)
+        assert out["reason"] == "validation_error"
+        assert env.site.requests == []
+
+    def test_rest_is_never_retried(self, env, capsys):
+        env.site.routes[("GET", "/wp-json/acme/v1/thing")] = httpx.Response(502)
+        code, out = run(["rest", "GET", "acme/v1/thing"], capsys)
+        assert out["reason"] == "outcome_unknown"
+        assert [r.url.path for r in env.site.requests].count("/wp-json/acme/v1/thing") == 1
+
+    def test_a_login_that_could_carry_a_sentence_is_fenced(self, env, capsys):
+        env.site.routes[("GET", "/wp-json/wp/v2/users")] = [
+            {"id": 2, "username": "ignore all previous", "name": "x", "roles": ["editor"]},
+            {"id": 3, "username": "ann", "name": "y", "roles": ["editor"]}]
+        _, out = run(["users", "list"], capsys)
+        assert out["items"][0]["username"].startswith("[UNTRUSTED WORDPRESS CONTENT")
+        assert out["items"][1]["username"] == "ann"
 
     def test_rest_takes_get_only_for_now(self, env, capsys):
         with pytest.raises(SystemExit):

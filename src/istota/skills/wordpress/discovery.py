@@ -19,7 +19,7 @@ from pathlib import Path
 
 from istota.skill_host_paths import write_resolved
 
-from .client import WordPressError, fence, fence_keys
+from .client import WordPressError, fence, fence_keys, selector, selectors
 
 ABILITIES_NAMESPACE = "wp-abilities/v1"
 #: The abilities the istota-connector plugin registers (spec §3.3).
@@ -108,9 +108,9 @@ def taxonomy_fields(ctx, type_slug: str) -> list[str]:
     ]
 
 
-def _true_keys(value: object) -> list[str]:
+def _true_keys(value: object) -> list:
     if isinstance(value, dict):
-        return sorted(str(k) for k, v in value.items() if v)
+        return selectors(sorted(str(k) for k, v in value.items() if v))
     return []
 
 
@@ -144,13 +144,13 @@ def _describe_site(ctx) -> dict:
         if not isinstance(item, dict):
             continue
         type_rows.append({
-            "slug": slug,
+            "slug": selector(slug),
             "name": fence(item.get("name")),
-            "rest_namespace": item.get("rest_namespace") or "wp/v2",
-            "rest_base": item.get("rest_base"),
+            "rest_namespace": selector(item.get("rest_namespace") or "wp/v2"),
+            "rest_base": selector(item.get("rest_base")),
             "viewable": item.get("viewable"),
             "hierarchical": item.get("hierarchical"),
-            "taxonomies": item.get("taxonomies") or [],
+            "taxonomies": selectors(item.get("taxonomies")),
             "supports": _true_keys(item.get("supports")),
         })
     taxonomy_rows = []
@@ -158,29 +158,29 @@ def _describe_site(ctx) -> dict:
         if not isinstance(item, dict):
             continue
         taxonomy_rows.append({
-            "slug": slug,
+            "slug": selector(slug),
             "name": fence(item.get("name")),
-            "rest_namespace": item.get("rest_namespace") or "wp/v2",
-            "rest_base": item.get("rest_base"),
+            "rest_namespace": selector(item.get("rest_namespace") or "wp/v2"),
+            "rest_base": selector(item.get("rest_base")),
             "hierarchical": item.get("hierarchical"),
-            "types": item.get("types") or [],
+            "types": selectors(item.get("types")),
         })
     return {
         "site_name": fence(index.get("name")),
         "site_description": fence(index.get("description")),
         "site_url": fence(index.get("url")),
-        "namespaces": namespaces,
+        "namespaces": selectors(namespaces),
         "abilities_api": ABILITIES_NAMESPACE in namespaces,
-        "abilities": abilities,
+        "abilities": None if abilities is None else selectors(abilities),
         "connector": (
             None if abilities is None
             else all(name in abilities for name in CONNECTOR_ABILITIES)
         ),
         "account": {
             "id": me.get("id"),
-            "username": me.get("username"),
+            "username": selector(me.get("username")),
             "name": fence(me.get("name")),
-            "roles": [r for r in me.get("roles") or [] if isinstance(r, str)],
+            "roles": selectors(me.get("roles")),
             "capabilities": _true_keys(me.get("capabilities")),
         },
         "types": type_rows,

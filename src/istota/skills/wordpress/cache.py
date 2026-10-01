@@ -6,9 +6,10 @@ nor overwrite it through `istota-skill kv` (`kv_namespaces.py`), and written wit
 until the task succeeds and would not be visible to the next call in the same
 task.
 
-Keys are scoped by site name, blog and a digest of the base URL, so pointing a
-site's vault entry at another address starts a fresh cache rather than serving
-the old site's types for the rest of the hour.
+Keys are scoped by site name, blog and a digest of the credential name and the
+base URL, so pointing a site at another entry or another address starts a fresh
+cache rather than serving the old account's capabilities for the rest of the
+hour.
 
 A cache is an optimisation, so it never fails a call: an absent database, a
 busy lock or a malformed row reads as a miss and is logged at debug.
@@ -32,11 +33,11 @@ _BUSY_TIMEOUT_MS = 2000
 
 
 class Cache:
-    def __init__(self, db_path, user_id: str, *, site: str, blog: str | None, base: str,
+    def __init__(self, db_path, user_id: str, *, site: str, blog: str | None, scope_key: str,
                  ttl: int = TTL_SECONDS, now=time.time) -> None:
         self._db_path = Path(db_path) if db_path else None
         self._user_id = user_id
-        digest = hashlib.sha256(base.encode()).hexdigest()[:12]
+        digest = hashlib.sha256(scope_key.encode()).hexdigest()[:12]
         self.scope = f"{site}|{blog or '-'}|{digest}|"
         self._ttl = ttl
         self._now = now

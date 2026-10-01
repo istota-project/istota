@@ -277,9 +277,10 @@ def resolve_entry(name: str, operation: str) -> tuple[SecretEntry | None, str | 
 
     Public for the one caller whose entry name is not an argv value: the
     `wordpress` CLI maps `--site` to a record in the user's `WORDPRESS.md` and
-    resolves the entry that record names, in `main` before dispatch, so the
-    stamp's guarantee (no handler runs on an unresolved credential) holds there
-    too. A stamped argument would have let the model name any entry directly.
+    resolves the entry that record names before the verb's handler runs, so
+    the stamp's guarantee (no handler works on an unresolved credential) holds
+    there too. The record is model-writable, so this is not a narrower reach
+    than a stamp; what bounds it is the entry's own host binding.
     """
     if not name:
         return None, f"Empty credential name: {operation} refused."

@@ -164,17 +164,33 @@ def cmd_list(args) -> dict:
     }
 
 
-def _narrow(item: dict, fields: str | None) -> dict:
-    if not fields:
-        return item
-    wanted = [f.strip() for f in fields.split(",") if f.strip()]
+def wanted_fields(fields: str | None) -> list[str]:
+    wanted = [f.strip() for f in (fields or "").split(",") if f.strip()]
     unknown = sorted(set(wanted) - set(GET_FIELDS))
     if unknown:
         raise WordPressError(
             f"Unknown --fields {', '.join(unknown)}; choose from {', '.join(GET_FIELDS)}.",
             "validation_error",
         )
+    return wanted
+
+
+def _narrow(item: dict, fields: str | None) -> dict:
+    wanted = wanted_fields(fields)
+    if not wanted:
+        return item
     return {"id": item.get("id"), **{f: item.get(f) for f in wanted}}
+
+
+def check_paging(args) -> None:
+    """The local checks a listing verb can fail before any fetch is spent."""
+    limit_arg(args.limit, 1)
+    if args.page < 1:
+        raise WordPressError("--page starts at 1.", "validation_error")
+
+
+def check_get(args) -> None:
+    wanted_fields(args.fields)
 
 
 def cmd_get(args) -> dict:

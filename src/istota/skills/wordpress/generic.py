@@ -13,11 +13,15 @@ from __future__ import annotations
 
 import re
 
-from .client import WordPressError, fence, fence_tree
+from .client import WordPressError, fence, fence_tree, selector
 from .content import total_header
 from .discovery import ABILITIES_NAMESPACE
 
 _ROUTE_SEGMENT_RE = re.compile(r"\A[A-Za-z0-9._~!$&'()*+,;=:@-]+\Z")
+
+#: Route segments the skill never reaches: application passwords are a
+#: credential path the model has no reason to list (spec §5.4).
+_REFUSED_SEGMENTS = frozenset({"application-passwords"})
 
 
 def check_route(route: str) -> str:
@@ -35,7 +39,20 @@ def check_route(route: str) -> str:
         if segment in (".", "..") or not _ROUTE_SEGMENT_RE.fullmatch(segment):
             raise WordPressError(f"Route segment {segment!r} is not allowed.",
                                  "validation_error")
+        if segment.lower() in _REFUSED_SEGMENTS:
+            raise WordPressError("Application passwords are not reachable through this skill.",
+                                 "validation_error")
     return "/".join(segments)
+
+
+def _php_name(key: str) -> str:
+    """A query key as PHP files it in ``$_GET``: leading spaces dropped, and
+    space, ``.`` and ``[`` turned into ``_``. WordPress reads ``_method`` from
+    there, so ``.method`` reaches it as ``_method`` too."""
+    name = key.lstrip(" ")
+    for char in (" ", ".", "["):
+        name = name.replace(char, "_")
+    return name
 
 
 def _query(pairs: list[str] | None) -> list[tuple[str, str]]:
@@ -44,15 +61,28 @@ def _query(pairs: list[str] | None) -> list[tuple[str, str]]:
         key, sep, value = pair.partition("=")
         if not sep or not key.strip():
             raise WordPressError(f"--query takes K=V, got {pair!r}.", "validation_error")
+        # WordPress honours `_method` on any request, so a GET carrying
+        # `_method=DELETE` would be a delete. `rest` reads only, for now.
+        if _php_name(key).lower().startswith("_method"):
+            raise WordPressError("--query may not override the HTTP method (_method).",
+                                 "validation_error")
         out.append((key.strip(), value))
     return out
+
+
+def prepare_rest(args) -> None:
+    """Check the route and the query before the vault fetch is spent."""
+    check_route(args.route)
+    _query(args.query)
 
 
 def cmd_rest(args) -> dict:
     ctx = args.wp
     route = check_route(args.route)
+    # Never retried (spec §9.1): the skill cannot know what a plugin's route
+    # does, even on GET.
     body, headers = ctx.client.request(args.method, route, params=_query(args.query) or None,
-                                       base=ctx.base)
+                                       base=ctx.base, idempotent=False)
     return {
         "status": "ok",
         **ctx.envelope(),
@@ -90,8 +120,8 @@ def cmd_abilities_list(args) -> dict:
             continue
         notes = _annotations(ability)
         rows.append({
-            "name": ability.get("name"),
-            "category": ability.get("category"),
+            "name": selector(ability.get("name")),
+            "category": selector(ability.get("category")),
             "label": fence(ability.get("label")),
             "description": fence(ability.get("description")),
             "readonly": notes.get("readonly") is True,

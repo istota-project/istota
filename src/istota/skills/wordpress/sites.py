@@ -189,7 +189,12 @@ def normalize_site_url(url: str) -> str:
     The trailing slash goes so a path can be appended; a WordPress in a
     subdirectory keeps its path.
     """
-    parts = urlsplit(url.strip())
+    url = url.strip()
+    # The broker reads a bare authority in the URL field as https (it binds
+    # one that way), so the site URL does too.
+    if "://" not in url and not any(c in url for c in "/?#@"):
+        url = "https://" + url
+    parts = urlsplit(url)
     if parts.scheme != "https":
         raise SiteError(
             "The site URL must be HTTPS. WordPress itself disables application "
