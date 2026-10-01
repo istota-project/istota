@@ -228,11 +228,14 @@ def resolve_thread(
         # The thread's room exists but the caller could not use it (its host is
         # no longer configured): never re-found it with this message's people.
         return None
-    token = db.register_room(
-        conn, None, owner_user_id, origin=SURFACE,
+    room = db.register_bound_room(
+        conn, owner_user_id, origin=SURFACE,
         name=_room_name(getattr(email, "subject", None)),
-    ).token
-    db.add_room_binding(conn, token, SURFACE, root)
+        surface=SURFACE, surface_ref=root,
+    )
+    if room is None:
+        return None
+    token = room.token
     # The people on the first message are who the thread was written for.
     _sync(conn, config, token, people, acknowledged=True)
     db.mark_audience_baseline(conn, token, SURFACE)

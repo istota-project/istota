@@ -711,12 +711,12 @@ def _apply_room_pass(
             member_ids = _istota_members_for_conversation(
                 plan.conv, plan.participants, config,
             )
-            if member_ids:
-                plan.canonical = db.register_room(
-                    conn, None, member_ids[0],
-                    origin="talk", name=plan.display_name,
-                ).token
-                db.add_room_binding(conn, plan.canonical, "talk", plan.token)
+            room = db.register_bound_room(
+                conn, member_ids[0], origin="talk", name=plan.display_name,
+                surface="talk", surface_ref=plan.token,
+            ) if member_ids else None
+            if room is not None:
+                plan.canonical = room.token
                 # Founders, not joiners: the room is registered the first
                 # time it is seen, so everyone on its roster now — guests
                 # included — is who it was already written for.
