@@ -1409,7 +1409,7 @@ async def login_link_request(request: Request):
 # somebody's login flow. A fixed table cannot be talked into an absolute URL, a
 # protocol-relative one, or a traversal.
 _POST_LOGIN_TARGETS = {
-    "settings": "/istota/settings",
+    "settings": "/istota/settings/connections",
 }
 _DEFAULT_POST_LOGIN_TARGET = "/istota/"
 
@@ -1644,7 +1644,7 @@ async def google_connect(request: Request):
             "Google connect declined for user %s: nothing selected within the "
             "instance scope ceiling", user["username"],
         )
-        return RedirectResponse(url="/istota/settings?google=no_scopes", status_code=302)
+        return RedirectResponse(url="/istota/settings/connections?google=no_scopes", status_code=302)
 
     # ``access_type=offline`` is what makes Google issue a refresh token at
     # all, and ``prompt=consent`` is what makes it issue one *again* on a
@@ -1674,7 +1674,7 @@ async def google_callback(request: Request):
         token = await _oauth.google.authorize_access_token(request)
     except Exception as e:
         logger.error("Google OAuth callback failed: %s", e)
-        return RedirectResponse(url="/istota/settings?google=error", status_code=302)
+        return RedirectResponse(url="/istota/settings/connections?google=error", status_code=302)
 
     access_token = token.get("access_token", "")
     refresh_token = token.get("refresh_token", "")
@@ -1684,7 +1684,7 @@ async def google_callback(request: Request):
     if not access_token or not refresh_token:
         logger.error("Google OAuth: missing tokens (access=%s, refresh=%s)",
                       bool(access_token), bool(refresh_token))
-        return RedirectResponse(url="/istota/settings?google=error", status_code=302)
+        return RedirectResponse(url="/istota/settings/connections?google=error", status_code=302)
 
     import json
     expiry = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
@@ -1703,7 +1703,7 @@ async def google_callback(request: Request):
     except _UnauthorizedException:
         return RedirectResponse(url="/istota/login", status_code=302)
     logger.info("Google account connected for user %s", user["username"])
-    return RedirectResponse(url="/istota/settings?google=connected", status_code=302)
+    return RedirectResponse(url="/istota/settings/connections?google=connected", status_code=302)
 
 
 # ============================================================================

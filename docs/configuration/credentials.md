@@ -110,7 +110,7 @@ What it holds is **shared credentials**: a flat namespace of name-to-value pairs
 
 Two halves, both deliberate, and neither happens by accident.
 
-**Put the file in the folder.** Every user gets a `vault` folder inside their own bot directory, made for them whether or not they use it — `istota/vault/` on a default deployment, since that directory is named from `bot_name` lowercased. Copy a `.kdbx` there. Settings, Connected services lists what it found: one file is read on sight, and with several there the card asks which. What is stored is that **filename**, not a path, so there is nothing to spell wrongly and nowhere else for it to point. Deleting or renaming the chosen file brings the question back rather than leaving Istota reading nothing.
+**Put the file in the folder.** Every user gets a `vault` folder inside their own bot directory, made for them whether or not they use it — `istota/vault/` on a default deployment, since that directory is named from `bot_name` lowercased. Copy a `.kdbx` there. Settings, Credentials lists what it found: one file is read on sight, and with several there the card asks which. What is stored is that **filename**, not a path, so there is nothing to spell wrongly and nowhere else for it to point. Deleting or renaming the chosen file brings the question back rather than leaving Istota reading nothing.
 
 **Generate the passphrase**, from the same card or from a host shell. A file with no passphrase behind it is not a vault and nothing reads it, which is why the card says "Not set up" until both halves are there. Turning a vault off is removing either one.
 
@@ -161,7 +161,7 @@ Browser credential fills require a bound HTTPS origin now. An unbound entry or a
 
 ### The passphrase
 
-The passphrase is a per-user secret like any other, stored in the `secrets` table under the `vault` service. It is set once, either from the vault card in Settings, Connected services — **Generate a new passphrase** — or from a host shell:
+The passphrase is a per-user secret like any other, stored in the `secrets` table under the `vault` service. It is set once, either from the vault card in Settings, Credentials — **Generate a new passphrase** — or from a host shell:
 
 ```bash
 istota secret ensure -u alice --service vault --key passphrase --generate
@@ -243,9 +243,9 @@ A task holding the socket can still read a value deliberately (`istota-credentia
 
 ### What the settings UI does
 
-The "Connected services" heading carries a status line for a user who has a vault: where the file is read from, how many shared credentials Istota holds and what they are called, how many were created under `generated/`, when it was last applied, and the error class when it is failing. It also says when the last read was unscoped.
+The vault card under Settings → Credentials carries a status line for a user who has a vault: where the file is read from, how many shared credentials Istota holds and what they are called, how many were created under `generated/`, when it was last applied, and the error class when it is failing. It also says when the last read was unscoped.
 
-Under it is the card that sets the vault up: the folder to put the file in, the files found there, and the passphrase. It renders for a user who has no vault at all, which is who it is for. What it does not offer is a path of any kind — see [turning it on](#turning-it-on) — and the file half is withheld for a vault a `vault_path` already names, which it says instead. The passphrase half renders either way: it is a credential the user owns rather than a setting an operator made.
+The same card sets the vault up: the folder to put the file in, the files found there, and the passphrase. It renders for a user who has no vault at all, which is who it is for. What it does not offer is a path of any kind — see [turning it on](#turning-it-on) — and the file half is withheld for a vault a `vault_path` already names, which it says instead. The passphrase half renders either way: it is a credential the user owns rather than a setting an operator made.
 
 The credential-name list is the feedback this feature exists to give. A name in it is a credential Istota holds; a name you expected and cannot see is a group you misspelled or an entry with a warning in the log. Names only — no value reaches that page — and only that user's own.
 

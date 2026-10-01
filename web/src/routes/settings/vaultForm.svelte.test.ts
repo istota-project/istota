@@ -1,5 +1,5 @@
 /**
- * The credential vault's form, under "Connected services".
+ * The credential vault's form, on Settings → Credentials.
  *
  * Its sibling `vaultHeading.svelte.test.ts` covers the *status line*, which
  * renders only for a vault that exists. This covers the form, and the split
@@ -130,7 +130,8 @@ const native = vi.hoisted(() => ({
 }));
 vi.mock('$lib/platform/native', () => native);
 
-import Page from './+page.svelte';
+import Page from './credentials/+page.svelte';
+import SettingsLayout from './+layout.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 import type { User } from '$lib/api';
 
@@ -189,8 +190,7 @@ function configured(over: Partial<VaultStatus> = {}): VaultStatus {
 }
 
 async function mount() {
-  render(Harness, { component: Page, user: person });
-  await waitFor(() => expect(api.getSettingsServices).toHaveBeenCalled());
+  render(Harness, { component: Page, layout: SettingsLayout, user: person });
   await waitFor(() => expect(api.getVaultStatus).toHaveBeenCalled());
 }
 

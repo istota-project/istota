@@ -11,9 +11,12 @@
      file in `src/routes/` without the `+` prefix, and vitest picks up
      `*.test.ts` only. */
   import Layout from '../+layout.svelte';
+  import SettingsLayout from './+layout.svelte';
   import Settings from './+page.svelte';
 </script>
 
 <Layout>
-  <Settings />
+  <SettingsLayout>
+    <Settings />
+  </SettingsLayout>
 </Layout>

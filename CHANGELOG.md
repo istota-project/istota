@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- User settings is split into sections with a sidebar: Account, Preferences, Delivery, Credentials and Connections, instead of one long page. An unsaved edit survives switching sections and is still covered by the Save button, and links from notifications and the Google connect flow open the relevant section.
+
+- Credentials in Settings are now a compact list with one row per credential showing its hosts, where it comes from and what its grant allows, with Edit grant and Revoke grant in each row's menu. Revoking a grant now asks for confirmation first.
+
 - The Security card now sits directly below Identity in Settings and uses the same field, description and button styles as the other settings cards.
 
 - Admin Users now uses the same user cells as Status, with one action menu per row and a table that fits the available width. Add user and Attach email open dialogs with local error feedback; web-access help is collapsed above the list.

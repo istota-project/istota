@@ -1,5 +1,5 @@
 /**
- * The credential vault's status line on the "Connected services" heading.
+ * The credential vault's status line, on the vault card in Settings → Credentials.
  *
  * **The case that matters is the one that renders nothing.** A vault is an
  * optional per-user feature that almost nobody has, and a heading that always
@@ -86,7 +86,8 @@ const native = vi.hoisted(() => ({
 }));
 vi.mock('$lib/platform/native', () => native);
 
-import Page from './+page.svelte';
+import Page from './credentials/+page.svelte';
+import SettingsLayout from './+layout.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 import type { User } from '$lib/api';
 
@@ -145,10 +146,10 @@ const SYNC_AT = '2025-01-15T10:00:00Z';
 const RENDERED_SYNC = formatRelative(SYNC_AT);
 
 async function mount() {
-  render(Harness, { component: Page, user: person });
-  // The services fetch is part of the page's own load; waiting on it is what
-  // says the render below happened after the data arrived rather than before.
-  await waitFor(() => expect(api.getSettingsServices).toHaveBeenCalled());
+  render(Harness, { component: Page, layout: SettingsLayout, user: person });
+  // The vault fetch is the card's own load; waiting on it is what says the
+  // render below happened after the data arrived rather than before.
+  await waitFor(() => expect(api.getVaultStatus).toHaveBeenCalled());
 }
 
 function heading() {
@@ -185,10 +186,9 @@ describe('a user with no credential vault', () => {
     await mount();
     await waitFor(() => expect(api.getVaultStatus).toHaveBeenCalled());
     expect(heading()).toBeNull();
-    // And the heading it would have hung off is still there, so the assertion
-    // above is about the vault line rather than about a page that failed to
-    // render its Connected services section at all.
-    expect(screen.getByText('Connected services')).toBeTruthy();
+    // And the section it sits in still rendered, so the assertion above is
+    // about the vault line rather than about a page that failed to render.
+    expect(screen.getByRole('heading', { name: 'Credentials' })).toBeTruthy();
   });
 
   it('is told nothing when the endpoint fails, and the page still loads', async () => {
@@ -198,7 +198,7 @@ describe('a user with no credential vault', () => {
     await mount();
     await waitFor(() => expect(api.getVaultStatus).toHaveBeenCalled());
     expect(heading()).toBeNull();
-    expect(screen.getByText('Karakeep')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Credentials' })).toBeTruthy();
   });
 });
 

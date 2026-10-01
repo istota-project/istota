@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import CredentialGrantsCard from './CredentialGrantsCard.svelte';
+import type { CredentialGrantsSettings } from '$lib/api';
 vi.mock('$app/paths', () => ({ base: '/istota' }));
 vi.mock('$lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/api')>()),
@@ -9,33 +10,94 @@ vi.mock('$lib/api', async (importOriginal) => ({
   grantExistingCredentials: vi.fn(),
   revokeCredentialGrant: vi.fn(),
 }));
-import { getCredentialGrants, saveCredentialGrant, grantExistingCredentials } from '$lib/api';
+import {
+  getCredentialGrants,
+  saveCredentialGrant,
+  grantExistingCredentials,
+  revokeCredentialGrant,
+} from '$lib/api';
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
-it('shows binding metadata and saves narrow defaults without scheduled access', async () => {
-  vi.mocked(getCredentialGrants).mockResolvedValue({
-    credentials: [
-      {
-        name: 'portal',
-        source: 'vault',
-        hosts: ['portal.example'],
-        headers: ['authorization'],
-        revealable: false,
-        grant: null,
-      },
-    ],
+
+type Credential = CredentialGrantsSettings['credentials'][number];
+
+function portal(over: Partial<Credential> = {}): Credential {
+  return {
+    name: 'portal',
+    source: 'vault',
+    hosts: ['portal.example'],
+    headers: ['authorization'],
+    revealable: false,
+    grant: null,
+    ...over,
+  };
+}
+
+function settings(over: Partial<CredentialGrantsSettings> = {}): CredentialGrantsSettings {
+  return {
+    credentials: [portal()],
     rooms: [],
-    grant_existing_available: true,
-    sandboxed: false,
-  });
+    grant_existing_available: false,
+    sandboxed: true,
+    ...over,
+  };
+}
+
+// bits-ui opens the menu on pointerdown, which jsdom only partly implements;
+// the keyboard path is equivalent (see KebabMenu.svelte.test.ts).
+async function chooseAction(credential: string, action: string) {
+  await fireEvent.keyDown(screen.getByLabelText(`Actions for ${credential}`), { key: 'Enter' });
+  await fireEvent.click(await screen.findByText(action));
+}
+
+function row(name: string): HTMLElement {
+  return screen.getByTestId(`credential-${name}`);
+}
+
+it('shows one row per credential with its host and access state', async () => {
+  vi.mocked(getCredentialGrants).mockResolvedValue(
+    settings({
+      sandboxed: false,
+      credentials: [
+        portal(),
+        portal({
+          name: 'billing',
+          source: 'config',
+          hosts: ['billing.example', 'api.billing.example'],
+          revealable: true,
+          grant: {
+            scope_mode: 'rooms',
+            rooms: ['r1', 'r2'],
+            methods: ['GET', 'POST'],
+            allow_scheduled: true,
+          },
+        }),
+        portal({ name: 'loose', hosts: [] }),
+      ],
+    }),
+  );
+  render(CredentialGrantsCard);
+  await screen.findByText('portal.example');
+
+  expect(within(row('portal')).getByText('Ungranted')).toBeTruthy();
+  const billing = row('billing');
+  expect(within(billing).getByText('billing.example, api.billing.example')).toBeTruthy();
+  expect(within(billing).getByText('Revealable')).toBeTruthy();
+  expect(within(billing).queryByText('Ungranted')).toBeNull();
+  expect(billing.textContent).toContain('2 rooms · GET, POST · scheduled');
+  expect(billing.textContent).toContain('Deployment configuration');
+  expect(within(row('loose')).getByText('Unbound')).toBeTruthy();
+  expect(screen.getByText(/values are not contained/i)).toBeTruthy();
+});
+
+it('edits a grant from the row menu and saves narrow defaults', async () => {
+  vi.mocked(getCredentialGrants).mockResolvedValue(settings());
   vi.mocked(saveCredentialGrant).mockResolvedValue({ ok: true });
   render(CredentialGrantsCard);
   await screen.findByText('portal.example');
-  expect(screen.getByText('Ungranted')).toBeTruthy();
-  expect(screen.getByText(/values are not contained/i)).toBeTruthy();
-  await fireEvent.click(screen.getByRole('button', { name: 'Edit grant for portal' }));
+  await chooseAction('portal', 'Edit grant');
   expect((screen.getByLabelText('Allow scheduled tasks') as HTMLInputElement).checked).toBe(false);
   await fireEvent.click(screen.getByRole('button', { name: 'Save grant' }));
   await waitFor(() =>
@@ -48,22 +110,39 @@ it('shows binding metadata and saves narrow defaults without scheduled access', 
   );
 });
 
+it('offers no grant edit for an unbound credential', async () => {
+  vi.mocked(getCredentialGrants).mockResolvedValue(
+    settings({ credentials: [portal({ hosts: [] })] }),
+  );
+  render(CredentialGrantsCard);
+  await screen.findByText('Unbound');
+  await fireEvent.keyDown(screen.getByLabelText('Actions for portal'), { key: 'Enter' });
+  const edit = await screen.findByText('Edit grant');
+  expect(edit.hasAttribute('data-disabled')).toBe(true);
+});
+
+it('asks before revoking a grant', async () => {
+  vi.mocked(getCredentialGrants).mockResolvedValue(
+    settings({
+      credentials: [
+        portal({
+          grant: { scope_mode: 'all', rooms: [], methods: ['GET'], allow_scheduled: false },
+        }),
+      ],
+    }),
+  );
+  vi.mocked(revokeCredentialGrant).mockResolvedValue({ ok: true });
+  render(CredentialGrantsCard);
+  await screen.findByText('portal.example');
+  await chooseAction('portal', 'Revoke grant');
+  expect(revokeCredentialGrant).not.toHaveBeenCalled();
+  const dialog = screen.getByRole('dialog');
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Revoke' }));
+  await waitFor(() => expect(revokeCredentialGrant).toHaveBeenCalledWith('portal'));
+});
+
 it('requires confirmation for grant-existing and keeps a failed save visible', async () => {
-  vi.mocked(getCredentialGrants).mockResolvedValue({
-    credentials: [
-      {
-        name: 'portal',
-        source: 'vault',
-        hosts: ['portal.example'],
-        headers: ['authorization'],
-        revealable: false,
-        grant: null,
-      },
-    ],
-    rooms: [],
-    grant_existing_available: true,
-    sandboxed: true,
-  });
+  vi.mocked(getCredentialGrants).mockResolvedValue(settings({ grant_existing_available: true }));
   vi.mocked(grantExistingCredentials).mockResolvedValue({ ok: true, count: 1 });
   render(CredentialGrantsCard);
   await screen.findByText('portal.example');
@@ -73,7 +152,7 @@ it('requires confirmation for grant-existing and keeps a failed save visible', a
   await fireEvent.click(dialog.querySelector('.btn-primary')!);
   await waitFor(() => expect(grantExistingCredentials).toHaveBeenCalledOnce());
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-  await fireEvent.click(screen.getByRole('button', { name: 'Edit grant for portal' }));
+  await chooseAction('portal', 'Edit grant');
   vi.mocked(saveCredentialGrant).mockRejectedValueOnce(new Error('Could not save policy'));
   await fireEvent.click(screen.getByRole('button', { name: 'Save grant' }));
   await waitFor(() =>
@@ -82,30 +161,25 @@ it('requires confirmation for grant-existing and keeps a failed save visible', a
 });
 
 it('drops unavailable room selections so a grant can still be narrowed', async () => {
-  vi.mocked(getCredentialGrants).mockResolvedValue({
-    credentials: [
-      {
-        name: 'portal',
-        source: 'vault',
-        hosts: ['portal.example'],
-        headers: ['authorization'],
-        revealable: false,
-        grant: {
-          scope_mode: 'rooms',
-          rooms: ['live-room', 'deleted-room'],
-          methods: ['GET'],
-          allow_scheduled: false,
-        },
-      },
-    ],
-    rooms: [{ token: 'live-room', name: 'Personal' }],
-    grant_existing_available: false,
-    sandboxed: true,
-  });
+  vi.mocked(getCredentialGrants).mockResolvedValue(
+    settings({
+      credentials: [
+        portal({
+          grant: {
+            scope_mode: 'rooms',
+            rooms: ['live-room', 'deleted-room'],
+            methods: ['GET'],
+            allow_scheduled: false,
+          },
+        }),
+      ],
+      rooms: [{ token: 'live-room', name: 'Personal' }],
+    }),
+  );
   vi.mocked(saveCredentialGrant).mockResolvedValue({ ok: true });
   render(CredentialGrantsCard);
   await screen.findByText('portal.example');
-  await fireEvent.click(screen.getByRole('button', { name: 'Edit grant for portal' }));
+  await chooseAction('portal', 'Edit grant');
   await fireEvent.click(screen.getByRole('button', { name: 'Save grant' }));
   await waitFor(() =>
     expect(saveCredentialGrant).toHaveBeenCalledWith('portal', {

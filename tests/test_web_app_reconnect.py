@@ -170,7 +170,7 @@ class TestWhereItLands:
             resp = await _callback(client)
 
         assert resp.status_code == 302
-        assert resp.headers["location"] == "/istota/settings"
+        assert resp.headers["location"] == "/istota/settings/connections"
 
     async def test_a_plain_login_still_lands_on_the_app(self, tmp_path, keyed):
         """The regression guard on the change: every other login is unaffected."""
@@ -315,7 +315,7 @@ class TestTheRedirectAllowlist:
     def test_a_known_key_maps_to_its_path(self):
         import istota.web_app as mod
 
-        assert mod._post_login_target("settings") == "/istota/settings"
+        assert mod._post_login_target("settings") == "/istota/settings/connections"
 
     @pytest.mark.parametrize("hostile", [
         "https://evil.example/",
