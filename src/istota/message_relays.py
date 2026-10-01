@@ -239,11 +239,36 @@ def private_origin(conn, config, *, actor_user_id: str, surface: str,
         if config.whatsapp.enabled and binding and binding.provider == config.whatsapp.provider:
             return {"surface": surface, "channel": conversation_token,
                     "binding": binding_fingerprint(config.whatsapp.provider, binding)}
-    if surface == "sms" and conversation_token == sms_conversation_token(actor_user_id):
+    if surface == "sms":
+        from . import room_policy
+
+        surface_ref = sms_conversation_token(actor_user_id)
+        bound = db.resolve_room_token(conn, "sms", surface_ref)
+        canonical = bool(bound) and conversation_token == bound
+        if not canonical and conversation_token != surface_ref:
+            raise RequestError("unsupported_origin")
+        if bound:
+            room = db.get_room(conn, bound)
+            readers = room_policy.room_readers(conn, bound)
+            if (room is None or room.archived or readers.guests or readers.others
+                    or set(readers.members) != {actor_user_id}):
+                raise RequestError("unsupported_origin")
+            if not canonical and surface_ref not in db._room_ref_tokens(
+                conn, bound, include_surface_refs=False,
+            ):
+                raise RequestError("unsupported_origin")
+        elif conn.execute(
+            "SELECT 1 FROM room_token_migration WHERE old_token=?", (surface_ref,),
+        ).fetchone():
+            # A deleted room's old descriptor cannot become a new phone origin.
+            raise RequestError("unsupported_origin")
         number = config.sms_phone_number_for(actor_user_id)
         if config.sms.enabled and number:
-            return {"surface": surface, "channel": conversation_token,
-                    "binding": text_hash(number)}
+            origin = {"surface": surface, "channel": surface_ref,
+                      "binding": text_hash(number)}
+            if canonical:
+                origin["room_token"] = bound
+            return origin
     raise RequestError("unsupported_origin")
 
 

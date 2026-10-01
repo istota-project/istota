@@ -1798,3 +1798,80 @@ class TestSmsRoomMint:
         with db.get_db(config.db_path) as conn:
             assert db.get_task(conn, first.task_id).status == 'pending_confirmation'
             assert conn.execute('SELECT count(*) FROM messages').fetchone()[0] == 1
+
+    def test_canonical_sms_command_can_manage_relays(self, tmp_path):
+        from istota import message_relays
+        config = _config(tmp_path)
+        sent = []
+        providers = _providers(_adapter(
+            lambda req: sent.append(req.text) or SmsSendResult('relay-list', 'accepted', 1)
+        ))
+        asyncio.run(_handle(config, providers, _inbound(text='!relay list')))
+        assert sent == ['No relays.']
+        with db.get_db(config.db_path) as conn:
+            token = db.resolve_room_token(conn, 'sms', sms_conversation_token('alice'))
+            origin = message_relays.private_origin(
+                conn, config, actor_user_id='alice', surface='sms', conversation_token=token,
+            )
+            message_relays.validate_origin(conn, config, actor_user_id='alice', origin=origin)
+            assert origin['room_token'] == token
+            assert origin['channel'] == sms_conversation_token('alice')
+
+    @pytest.mark.parametrize('change', ['shared', 'guest', 'archived', 'deleted', 'foreign'])
+    def test_canonical_sms_relay_origin_requires_own_live_private_room(self, tmp_path, change):
+        from istota import message_relays
+        from istota.whatsapp_requests import RequestError
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            result = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            token = db.get_task(conn, result.task_id).conversation_token
+            if change == 'shared':
+                db.add_room_member(conn, token, 'bob')
+            elif change == 'guest':
+                db.upsert_room_participant(conn, room_token=token, surface='web', surface_ref='guest', kind='guest')
+            elif change == 'archived':
+                db.set_room_archived(conn, token, True)
+            elif change == 'deleted':
+                room = db.ensure_web_chat_handle(conn, 'alice', token, 'SMS')
+                db.delete_web_chat_room(conn, room.id, 'alice')
+            else:
+                token = db.register_room(conn, None, 'bob', origin='sms').token
+            with pytest.raises(RequestError, match='unsupported_origin'):
+                message_relays.private_origin(conn, config, actor_user_id='alice', surface='sms', conversation_token=token)
+
+    def test_relay_origin_survives_mint_but_not_delete_and_recreate(self, tmp_path):
+        from istota import message_relays
+        from istota.whatsapp_requests import RequestError
+        config = _config(tmp_path)
+        ref = sms_conversation_token('alice')
+        with db.get_db(config.db_path) as conn:
+            legacy = message_relays.private_origin(
+                conn, config, actor_user_id='alice', surface='sms', conversation_token=ref,
+            )
+            assert 'room_token' not in legacy
+        with db.get_db(config.db_path) as conn:
+            first = handle_provider_event(conn, config, _inbound())
+        with db.get_db(config.db_path) as conn:
+            message_relays.validate_origin(conn, config, actor_user_id='alice', origin=legacy)
+            token = db.get_task(conn, first.task_id).conversation_token
+            current = message_relays.private_origin(
+                conn, config, actor_user_id='alice', surface='sms', conversation_token=token,
+            )
+            room = db.ensure_web_chat_handle(conn, 'alice', token, 'SMS')
+            assert db.delete_web_chat_room(conn, room.id, 'alice')
+            for origin in (legacy, current):
+                with pytest.raises(RequestError, match='unsupported_origin'):
+                    message_relays.validate_origin(conn, config, actor_user_id='alice', origin=origin)
+        with db.get_db(config.db_path) as conn:
+            second = handle_provider_event(conn, config, _inbound(provider_message_id='new', provider_event_id='event-new'))
+        with db.get_db(config.db_path) as conn:
+            new_token = db.get_task(conn, second.task_id).conversation_token
+            assert new_token != token
+            fresh = message_relays.private_origin(
+                conn, config, actor_user_id='alice', surface='sms', conversation_token=new_token,
+            )
+            message_relays.validate_origin(conn, config, actor_user_id='alice', origin=fresh)
+            for origin in (legacy, current):
+                with pytest.raises(RequestError, match='unsupported_origin'):
+                    message_relays.validate_origin(conn, config, actor_user_id='alice', origin=origin)
