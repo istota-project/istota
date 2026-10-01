@@ -566,6 +566,55 @@ CREATE TABLE IF NOT EXISTS shared_kv (
 
 CREATE INDEX IF NOT EXISTS idx_shared_kv_ns ON shared_kv(namespace);
 
+-- Groups (groups-and-shared-scope Stage 1): a named set of istota users with a
+-- store of its own. `kind` is display-only; no code path may branch on it
+-- (tests/test_groups.py::test_kind_is_display_only). `group_id` names a
+-- directory under {mount}/Groups, so `db.create_group` refuses anything
+-- `db.is_valid_group_id` does not accept. An archived group is out of every
+-- membership answer and its rows stay readable to the operator CLI. Kept equal
+-- to `db._GROUPS_DDL` by tests/test_groups.py.
+CREATE TABLE IF NOT EXISTS groups (
+    group_id     TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL DEFAULT 'group',
+    display_name TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    created_by   TEXT NOT NULL,
+    archived_at  TEXT
+);
+
+-- Membership is a history, never a set: removal sets `ended_at`, no row is
+-- deleted, and a re-join inserts a new row, so `(group_id, user_id)` is not
+-- unique. `role` (owner | member) is recorded and read by nothing in v1
+-- (tests/test_groups.py::test_role_is_inert).
+CREATE TABLE IF NOT EXISTS group_members (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id   TEXT NOT NULL REFERENCES groups(group_id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    role       TEXT NOT NULL DEFAULT 'member',
+    added_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    added_by   TEXT NOT NULL,
+    ended_at   TEXT,
+    ended_by   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id, ended_at);
+
+CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id, ended_at);
+
+-- `shared_kv` with an audience: the group's members. The table does no
+-- authorization; `written_by` is provenance and never an authorization input.
+CREATE TABLE IF NOT EXISTS group_kv (
+    group_id   TEXT NOT NULL REFERENCES groups(group_id) ON DELETE CASCADE,
+    namespace  TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    written_by TEXT,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (group_id, namespace, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_kv_ns ON group_kv(group_id, namespace);
+
 -- Cron bookkeeping for module-owned shared briefing blocks (generated once
 -- globally, written into shared_kv). Mirrors briefing_state.
 CREATE TABLE IF NOT EXISTS briefing_shared_block_state (

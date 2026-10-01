@@ -1144,6 +1144,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_room_policy(conn)
     _migrate_room_veto(conn)
     _migrate_room_epochs(conn)
+    _migrate_groups(conn)
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
@@ -7702,6 +7703,59 @@ def _migrate_room_epochs(conn: sqlite3.Connection) -> None:
         return  # rooms or the marker table not created yet (fresh install)
 
 
+# Kept equal to schema.sql's copy by tests/test_groups.py.
+_GROUPS_DDL = (
+    """CREATE TABLE IF NOT EXISTS groups (
+    group_id     TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL DEFAULT 'group',
+    display_name TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    created_by   TEXT NOT NULL,
+    archived_at  TEXT
+)""",
+    """CREATE TABLE IF NOT EXISTS group_members (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id   TEXT NOT NULL REFERENCES groups(group_id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    role       TEXT NOT NULL DEFAULT 'member',
+    added_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    added_by   TEXT NOT NULL,
+    ended_at   TEXT,
+    ended_by   TEXT
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id, ended_at)",
+    "CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id, ended_at)",
+    """CREATE TABLE IF NOT EXISTS group_kv (
+    group_id   TEXT NOT NULL REFERENCES groups(group_id) ON DELETE CASCADE,
+    namespace  TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    written_by TEXT,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (group_id, namespace, key)
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_group_kv_ns ON group_kv(group_id, namespace)",
+)
+
+
+def _migrate_groups(conn: sqlite3.Connection) -> None:
+    """Create `groups`, `group_members` and `group_kv`, empty (groups Stage 1).
+
+    Markered (`groups_v1`), nothing backfilled: no group exists before an
+    operator creates one. `schema.sql` would create the three on its own; the
+    migration is here so an upgraded database is built from one copy of the
+    DDL that a test holds equal to the fresh one.
+    """
+    for statement in _GROUPS_DDL:
+        conn.execute(statement)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('groups_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+
+
 def _migrate_notifications(conn: sqlite3.Connection) -> None:
     """Create the `notifications` inbox table and its indexes on existing DBs.
 
@@ -9594,6 +9648,270 @@ def shared_kv_namespaces(conn: sqlite3.Connection) -> list[str]:
         "SELECT DISTINCT namespace FROM shared_kv ORDER BY namespace",
     )
     return [row["namespace"] for row in cursor.fetchall()]
+
+
+# ============================================================================
+# Groups (groups-and-shared-scope)
+# ============================================================================
+#
+# A group is a named set of istota users with a store of its own. Pure DB
+# operations: `is_group_member` is the one authorization gate and, like
+# `is_room_member`, does no policy of its own; every caller pairs it with the
+# trusted identity (the task's `user_id`, the proxy's `ISTOTA_USER_ID`), never
+# with anything the model wrote. Membership is a history: nothing here deletes
+# a `group_members` row. An archived group is out of every membership answer
+# (`is_group_member`, `list_user_groups`, `get_group` by default) while its
+# rows, members and `group_kv` stay readable to the operator.
+
+GROUP_ROLES = ("owner", "member")
+
+_GROUP_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{1,63}")
+
+
+def is_valid_group_id(group_id: object) -> bool:
+    """Whether ``group_id`` may name a group.
+
+    Two checks. ``is_scopable_user_id`` is the ISSUE-402 lexical rule, reused
+    because a group id names a directory under ``{mount}/Groups`` exactly as a
+    user id names one under ``Users/``. The charset is narrower than any user
+    id's, because a group id is chosen by a person and appears in CLI arguments
+    and in a deferred op's ``scope`` string.
+    """
+    if not is_scopable_user_id(group_id):
+        return False
+    return _GROUP_ID_RE.fullmatch(group_id) is not None
+
+
+def _group_dict(row: sqlite3.Row) -> dict:
+    return {
+        "group_id": row["group_id"],
+        "kind": row["kind"],
+        "display_name": row["display_name"],
+        "created_at": row["created_at"],
+        "created_by": row["created_by"],
+        "archived_at": row["archived_at"],
+    }
+
+
+def create_group(
+    conn: sqlite3.Connection, group_id: str, *,
+    kind: str, display_name: str, created_by: str,
+) -> None:
+    """Create a group. Raises ``ValueError`` on an unusable id or one already
+    taken, archived groups included: an id names a directory and a history,
+    and reusing it would hand a new audience an old store."""
+    if not is_valid_group_id(group_id):
+        raise ValueError(f"invalid group id: {group_id!r}")
+    try:
+        conn.execute(
+            "INSERT INTO groups (group_id, kind, display_name, created_by) "
+            "VALUES (?, ?, ?, ?)",
+            (group_id, kind or "group", display_name or "", created_by),
+        )
+    except sqlite3.IntegrityError:
+        raise ValueError(f"group already exists: {group_id!r}") from None
+
+
+def archive_group(
+    conn: sqlite3.Connection, group_id: str, *, at: str | None = None,
+) -> bool:
+    """Retire a group. True if a live group was archived."""
+    cursor = conn.execute(
+        "UPDATE groups SET archived_at = COALESCE(?, datetime('now')) "
+        "WHERE group_id = ? AND archived_at IS NULL",
+        (at, group_id),
+    )
+    return cursor.rowcount > 0
+
+
+def get_group(
+    conn: sqlite3.Connection, group_id: str, *, include_archived: bool = False,
+) -> dict | None:
+    """The group, or None when absent (or archived, unless asked for)."""
+    row = conn.execute(
+        "SELECT * FROM groups WHERE group_id = ?", (group_id,),
+    ).fetchone()
+    if row is None or (row["archived_at"] is not None and not include_archived):
+        return None
+    return _group_dict(row)
+
+
+def list_groups(
+    conn: sqlite3.Connection, *, include_archived: bool = False,
+) -> list[dict]:
+    sql = "SELECT * FROM groups"
+    if not include_archived:
+        sql += " WHERE archived_at IS NULL"
+    return [_group_dict(r) for r in conn.execute(sql + " ORDER BY group_id")]
+
+
+def add_group_member(
+    conn: sqlite3.Connection, group_id: str, user_id: str, *,
+    role: str = "member", added_by: str,
+) -> None:
+    """Record ``user_id`` as a current member of a live group.
+
+    A no-op when a current membership exists (its role is left alone); a fresh
+    row otherwise, so a re-join is a second row and the history reads. Raises
+    ``ValueError`` for an unknown or archived group, an unknown role, or a user
+    id that could not name a directory of its own.
+    """
+    if role not in GROUP_ROLES:
+        raise ValueError(f"invalid group role: {role!r}")
+    if not is_scopable_user_id(user_id):
+        raise ValueError(f"invalid user id: {user_id!r}")
+    if get_group(conn, group_id) is None:
+        raise ValueError(f"no such group: {group_id!r}")
+    current = conn.execute(
+        "SELECT 1 FROM group_members "
+        "WHERE group_id = ? AND user_id = ? AND ended_at IS NULL LIMIT 1",
+        (group_id, user_id),
+    ).fetchone()
+    if current is not None:
+        return
+    conn.execute(
+        "INSERT INTO group_members (group_id, user_id, role, added_by) "
+        "VALUES (?, ?, ?, ?)",
+        (group_id, user_id, role, added_by),
+    )
+
+
+def end_group_membership(
+    conn: sqlite3.Connection, group_id: str, user_id: str, *,
+    ended_by: str, at: str | None = None,
+) -> bool:
+    """End ``user_id``'s current membership. Deletes nothing. True if a
+    current membership was ended."""
+    cursor = conn.execute(
+        "UPDATE group_members SET ended_at = COALESCE(?, datetime('now')), "
+        "ended_by = ? WHERE group_id = ? AND user_id = ? AND ended_at IS NULL",
+        (at, ended_by, group_id, user_id),
+    )
+    return cursor.rowcount > 0
+
+
+def is_group_member(conn: sqlite3.Connection, group_id: str, user_id: str) -> bool:
+    """The gate: a current membership of a live group. False for anything it
+    cannot establish, an empty or non-string argument included."""
+    if not isinstance(group_id, str) or not isinstance(user_id, str):
+        return False
+    if not group_id or not user_id:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM group_members m JOIN groups g ON g.group_id = m.group_id "
+        "WHERE m.group_id = ? AND m.user_id = ? AND m.ended_at IS NULL "
+        "AND g.archived_at IS NULL LIMIT 1",
+        (group_id, user_id),
+    ).fetchone()
+    return row is not None
+
+
+def list_group_members(conn: sqlite3.Connection, group_id: str) -> list[str]:
+    """Current members, sorted. Answers for an archived group too: it is the
+    operator's listing, and the gates above are what exclude archived groups."""
+    rows = conn.execute(
+        "SELECT DISTINCT user_id FROM group_members "
+        "WHERE group_id = ? AND ended_at IS NULL ORDER BY user_id",
+        (group_id,),
+    ).fetchall()
+    return [r["user_id"] for r in rows]
+
+
+def list_user_groups(conn: sqlite3.Connection, user_id: str) -> list[str]:
+    """The live groups ``user_id`` currently belongs to, sorted."""
+    rows = conn.execute(
+        "SELECT DISTINCT m.group_id FROM group_members m "
+        "JOIN groups g ON g.group_id = m.group_id "
+        "WHERE m.user_id = ? AND m.ended_at IS NULL AND g.archived_at IS NULL "
+        "ORDER BY m.group_id",
+        (user_id,),
+    ).fetchall()
+    return [r["group_id"] for r in rows]
+
+
+def group_membership_history(conn: sqlite3.Connection, group_id: str) -> list[dict]:
+    """Every membership row the group has had, oldest first."""
+    rows = conn.execute(
+        "SELECT user_id, role, added_at, added_by, ended_at, ended_by "
+        "FROM group_members WHERE group_id = ? ORDER BY id",
+        (group_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def group_kv_get(
+    conn: sqlite3.Connection, group_id: str, namespace: str, key: str,
+) -> dict | None:
+    """A value from a group's store: value, updated_at, written_by, or None."""
+    row = conn.execute(
+        "SELECT value, updated_at, written_by FROM group_kv "
+        "WHERE group_id = ? AND namespace = ? AND key = ?",
+        (group_id, namespace, key),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "value": row["value"],
+        "updated_at": row["updated_at"],
+        "written_by": row["written_by"],
+    }
+
+
+def group_kv_set(
+    conn: sqlite3.Connection, group_id: str, namespace: str, key: str,
+    value: str, written_by: str,
+) -> None:
+    """Upsert a value in a group's store. ``written_by`` is provenance only."""
+    conn.execute(
+        """
+        INSERT INTO group_kv (group_id, namespace, key, value, written_by, updated_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(group_id, namespace, key) DO UPDATE SET
+            value = excluded.value,
+            written_by = excluded.written_by,
+            updated_at = excluded.updated_at
+        """,
+        (group_id, namespace, key, value, written_by),
+    )
+
+
+def group_kv_delete(
+    conn: sqlite3.Connection, group_id: str, namespace: str, key: str,
+) -> bool:
+    """Delete a key from a group's store. True if it existed."""
+    cursor = conn.execute(
+        "DELETE FROM group_kv WHERE group_id = ? AND namespace = ? AND key = ?",
+        (group_id, namespace, key),
+    )
+    return cursor.rowcount > 0
+
+
+def group_kv_list(
+    conn: sqlite3.Connection, group_id: str, namespace: str,
+) -> list[dict]:
+    """Every entry in one of a group's namespaces, ordered by key."""
+    rows = conn.execute(
+        "SELECT key, value, updated_at, written_by FROM group_kv "
+        "WHERE group_id = ? AND namespace = ? ORDER BY key",
+        (group_id, namespace),
+    ).fetchall()
+    return [
+        {
+            "key": r["key"],
+            "value": r["value"],
+            "updated_at": r["updated_at"],
+            "written_by": r["written_by"],
+        }
+        for r in rows
+    ]
+
+
+def group_kv_namespaces(conn: sqlite3.Connection, group_id: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT DISTINCT namespace FROM group_kv WHERE group_id = ? ORDER BY namespace",
+        (group_id,),
+    ).fetchall()
+    return [r["namespace"] for r in rows]
 
 
 # ============================================================================

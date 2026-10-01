@@ -1910,6 +1910,129 @@ def cmd_user_remove(args):
         print(f"No profile row for {args.name!r} (nothing to remove).")
 
 
+#: `created_by` / `added_by` / `ended_by` for a write made through this CLI.
+#: Provenance only, never an authorization input: the operator CLI is already
+#: privileged, and it has no task identity to record.
+_GROUP_OPERATOR = "operator"
+
+
+def _group_fail(message: str) -> None:
+    print(f"Error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _group_config(args):
+    return load_config(Path(args.config) if args.config else None)
+
+
+def cmd_group_create(args):
+    """Create a group. The id names a directory, so both id checks apply."""
+    config = _group_config(args)
+    if not db.is_valid_group_id(args.group_id):
+        _group_fail(
+            f"invalid group id {args.group_id!r}: 2-64 characters of a-z, 0-9, "
+            "'.', '_' or '-', starting with a letter or digit"
+        )
+    with db.get_db(config.db_path) as conn:
+        try:
+            db.create_group(
+                conn, args.group_id, kind=args.kind or "group",
+                display_name=args.name or args.group_id,
+                created_by=_GROUP_OPERATOR,
+            )
+        except ValueError as e:
+            _group_fail(str(e))
+    print(f"Created group {args.group_id!r}.")
+
+
+def cmd_group_list(args):
+    config = _group_config(args)
+    with db.get_db(config.db_path) as conn:
+        groups = db.list_groups(conn, include_archived=args.all)
+        members = {g["group_id"]: db.list_group_members(conn, g["group_id"])
+                   for g in groups}
+    if not groups:
+        print("No groups")
+        return
+    for g in groups:
+        state = " (archived)" if g["archived_at"] else ""
+        print(f"{g['group_id']:20} {g['kind']:10} {g['display_name']:24} "
+              f"{len(members[g['group_id']])} member(s){state}")
+
+
+def cmd_group_show(args):
+    """The group, its current members and its whole membership history."""
+    config = _group_config(args)
+    with db.get_db(config.db_path) as conn:
+        group = db.get_group(conn, args.group_id, include_archived=True)
+        if group is None:
+            _group_fail(f"no such group: {args.group_id!r}")
+        group["members"] = db.list_group_members(conn, args.group_id)
+        group["history"] = db.group_membership_history(conn, args.group_id)
+    print(json.dumps(group, indent=2))
+
+
+def cmd_group_add_member(args):
+    """Add a configured user. A typo'd member is a silent hole in the audience,
+    so a user id the deployment does not know is refused."""
+    config = _group_config(args)
+    if config.get_user(args.user_id) is None:
+        _group_fail(f"{args.user_id!r} is not a configured user")
+    with db.get_db(config.db_path) as conn:
+        try:
+            db.add_group_member(conn, args.group_id, args.user_id,
+                                role=args.role, added_by=_GROUP_OPERATOR)
+        except ValueError as e:
+            _group_fail(str(e))
+    print(f"{args.user_id} is a member of {args.group_id!r}.")
+
+
+def cmd_group_remove_member(args):
+    """End a membership and print the retained history: nothing is deleted."""
+    config = _group_config(args)
+    with db.get_db(config.db_path) as conn:
+        if not db.end_group_membership(conn, args.group_id, args.user_id,
+                                       ended_by=_GROUP_OPERATOR):
+            _group_fail(
+                f"{args.user_id!r} has no current membership of {args.group_id!r}"
+            )
+        history = db.group_membership_history(conn, args.group_id)
+    print(json.dumps({"group_id": args.group_id, "history": history}, indent=2))
+
+
+def cmd_group_archive(args):
+    config = _group_config(args)
+    with db.get_db(config.db_path) as conn:
+        if not db.archive_group(conn, args.group_id):
+            _group_fail(f"no live group {args.group_id!r} to archive")
+    print(f"Archived group {args.group_id!r}. Its rows stay readable here.")
+
+
+def cmd_group_kv_get(args):
+    """Read one value. Archived groups too: archiving stops loading, not this."""
+    config = _group_config(args)
+    with db.get_db(config.db_path) as conn:
+        result = db.group_kv_get(conn, args.group_id, args.namespace, args.key)
+    if result is None:
+        print(json.dumps({"status": "not_found"}))
+        return
+    print(json.dumps({
+        "status": "ok", "value": json.loads(result["value"]),
+        "written_by": result["written_by"],
+    }))
+
+
+def cmd_group_kv_list(args):
+    config = _group_config(args)
+    with db.get_db(config.db_path) as conn:
+        entries = db.group_kv_list(conn, args.group_id, args.namespace)
+    print(json.dumps({"status": "ok", "entries": [
+        {"key": e["key"], "value": json.loads(e["value"]),
+         "written_by": e["written_by"], "updated_at": e["updated_at"]}
+        for e in entries
+    ]}))
+
+
 def _whatsapp_block_detail(blocked) -> str:
     """The open circuit's evidence, in full rather than fingerprinted.
 
@@ -4826,6 +4949,48 @@ def main():
     )
     user_remove_parser.add_argument("--name", required=True, help="User ID")
 
+    # group (with subparsers): groups-and-shared-scope. No delete and no
+    # in-band membership management, deliberately; archive is the retire path.
+    group_parser = subparsers.add_parser("group", help="Group management")
+    group_subparsers = group_parser.add_subparsers(dest="group_action", required=True)
+    group_create_parser = group_subparsers.add_parser("create", help="Create a group")
+    group_create_parser.add_argument("group_id", help="Group id (a-z, 0-9, . _ -)")
+    group_create_parser.add_argument(
+        "--kind", default="group",
+        help="Free-text label (family, team, ...); display only",
+    )
+    group_create_parser.add_argument("--name", help="Display name (default: the id)")
+    group_list_parser = group_subparsers.add_parser("list", help="List groups")
+    group_list_parser.add_argument("--all", action="store_true",
+                                   help="Include archived groups")
+    group_show_parser = group_subparsers.add_parser(
+        "show", help="Show a group, its members and its membership history",
+    )
+    group_show_parser.add_argument("group_id")
+    group_add_parser = group_subparsers.add_parser("add-member", help="Add a member")
+    group_add_parser.add_argument("group_id")
+    group_add_parser.add_argument("user_id")
+    group_add_parser.add_argument("--role", choices=list(db.GROUP_ROLES),
+                                  default="member")
+    group_remove_parser = group_subparsers.add_parser(
+        "remove-member", help="End a membership (the history is kept)",
+    )
+    group_remove_parser.add_argument("group_id")
+    group_remove_parser.add_argument("user_id")
+    group_archive_parser = group_subparsers.add_parser("archive", help="Archive a group")
+    group_archive_parser.add_argument("group_id")
+    group_kv_get_parser = group_subparsers.add_parser(
+        "kv-get", help="Read a value from a group's store",
+    )
+    group_kv_get_parser.add_argument("group_id")
+    group_kv_get_parser.add_argument("namespace")
+    group_kv_get_parser.add_argument("key")
+    group_kv_list_parser = group_subparsers.add_parser(
+        "kv-list", help="List a namespace of a group's store",
+    )
+    group_kv_list_parser.add_argument("group_id")
+    group_kv_list_parser.add_argument("namespace")
+
     # calendar (with subparsers)
     calendar_parser = subparsers.add_parser("calendar", help="Calendar management")
     calendar_subparsers = calendar_parser.add_subparsers(dest="calendar_action", required=True)
@@ -5163,6 +5328,18 @@ def main():
             "remove": cmd_user_remove,
         }
         user_commands[args.user_action](args)
+    elif args.command == "group":
+        group_commands = {
+            "create": cmd_group_create,
+            "list": cmd_group_list,
+            "show": cmd_group_show,
+            "add-member": cmd_group_add_member,
+            "remove-member": cmd_group_remove_member,
+            "archive": cmd_group_archive,
+            "kv-get": cmd_group_kv_get,
+            "kv-list": cmd_group_kv_list,
+        }
+        group_commands[args.group_action](args)
     elif args.command == "calendar":
         calendar_commands = {
             "discover": cmd_calendar_discover,
