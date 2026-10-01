@@ -535,9 +535,11 @@ features = []
 
 # [security.credential_broker]
 # enabled = false                 # opt-in header substitution for snapshotted bound hosts
-# enforce_reveal = false          # reserved for the reveal-enforcement rollout
+# enforce_reveal = false          # audit public value reads; true refuses non-revealable values
 # scan_max_bytes = 1048576         # request scan and response scrub limit
 # leaf_validity_hours = 24         # positive lifetime for per-host TLS certificates
+# Enable enforcement after a week with no would_refuse credential_reveal events.
+# Manifest env reads (including forge tokens) are refused too; skills still get their env.
 # The CA stays in daemon state. Only sandbox commands receive its trust bundle.
 # Network proxy and effective sandboxing are required for credential containment.
 

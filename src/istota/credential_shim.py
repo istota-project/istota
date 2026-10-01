@@ -18,11 +18,9 @@ deployment that has not reinstalled still runs the current one. And it is the
 program ``skills/developer`` used to generate as a string literal, promoted —
 the shape it replaces, not a new one.
 
-It replaces the five-line socket client ``skills/developer.setup_env`` used to
-generate as a string literal. Two socket clients for one protocol is the
-duplication ``AGENTS.md`` opens with, so the developer skill's git credential
-helper now shells out to the ``env`` verb here, which is that generated
-program's behaviour byte for byte.
+It replaces the socket client ``skills/developer.setup_env`` used to generate.
+With the broker enabled, developer credential helpers use placeholders. The
+legacy ``env`` verb still uses the same public socket and reveal policy.
 
 Seven verbs::
 
@@ -34,23 +32,16 @@ Seven verbs::
     istota-credential env <VAR>                  # a manifest-declared var
     istota-credential new <slug> [options]        # create a vault entry
 
-``run`` is the verb this exists for. It resolves each name over the proxy
-socket and ``execvpe``s the given argv with those variables added to its own
-environment, so the ordinary path — a script, a ``curl``, a CLI that wants a
-token — puts the credential in front of the program that needs it and nowhere
-else: not in the model's context, not in the transcript, not in the argv of
-anything. ``get`` is kept because removing it would be theatre
-(``run X=n -- sh -c 'echo "$X"'`` is the same thing in one more step) and it is
-what a skill CLI or a person on a host shell wants; it is demoted instead —
-absent from the prompt, and sent with ``mode: read`` so the proxy logs it at
-WARNING while an injection logs at INFO.
+``placeholder`` is the broker path: the value is added outside the sandbox.
+``get`` and both forms of ``run`` ask for a value and, under reveal enforcement,
+work only for vault entries tagged ``istota:reveal``. ``env`` reads manifest
+variables, which have no reveal marker and are all refused under enforcement.
+Before enforcement, the proxy audits the public reads it would refuse.
 
-**This program is not a boundary and must not be read as one.** It sits in a
-directory bound read-write into the sandbox, so the model can overwrite it, and
-the socket answers a hand-rolled five-line client just as readily. Every rule
-that matters — which names exist, how many fetches an attempt may make — is
-enforced in ``SkillProxy``. What this buys is that the ordinary path leaves no
-copy of the value anywhere.
+The shim is a convenience, not the gate. A hand-written client can speak the
+same protocol; ``SkillProxy`` enforces reveal permission and the fetch cap.
+Host-side skill CLIs use a private inherited fd, selected explicitly by
+``_credref``, to resolve credentials without giving values to the model.
 
 Exit codes: ``1`` for a refusal, an absent name or a usage error; ``2`` when
 ``ISTOTA_SKILL_PROXY_SOCK`` is unset, which is what a deployment with the skill
@@ -340,7 +331,7 @@ def _cmd_new(args: list[str]) -> int:
 
 
 def _cmd_env(args: list[str]) -> int:
-    """The manifest-declared variable fetch, byte for byte as it was.
+    """A manifest-declared variable fetch, refused under reveal enforcement.
 
     A different namespace from the three verbs above — ``derive_lookup_allowlist``
     over skill manifests, not the user's vault — reached through the proxy's

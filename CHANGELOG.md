@@ -171,6 +171,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Operators can now audit and then refuse direct reads of brokered credentials. Vault entries explicitly marked revealable keep direct access; host-side skills keep working through their private channel. Enforcement also refuses direct reads of deployment credentials, including forge tokens, and remains off until the operator completes the audit period.
+
 - Browser credential fills now require the destination to match the credential's HTTPS URL or explicitly configured hosts in the password vault. Rebuild the browser image to enable fills; older images are refused. The credential list now shows bound hosts and reveal metadata.
 
 - A task can no longer use another task’s network proxy by connecting to its socket. New connections must come from the task’s own process tree, as skill-proxy connections already do.

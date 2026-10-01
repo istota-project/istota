@@ -191,7 +191,8 @@ class TestVaultCredential:
 
 class TestTheFetchLog:
     def _levels(self, caplog, marker):
-        return [r.levelno for r in caplog.records if marker in r.getMessage()]
+        return [r.levelno for r in caplog.records
+                if "vault_credential task_id" in r.getMessage() and marker in r.getMessage()]
 
     def test_an_injection_logs_at_info_and_a_read_at_warning(
         self, sock_path, caplog,

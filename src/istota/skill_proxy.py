@@ -525,6 +525,10 @@ class SkillProxy:
                         "name": name,
                     })
                     return
+                # Manifest values have no user-controlled reveal marker. Skills
+                # receive them in their host-side env, never through this read.
+                if self._refuse_brokered_credential(conn, name, "credential", "read"):
+                    return
                 self._send_response(conn, {"value": self.credential_env[name]})
                 return
 
@@ -920,6 +924,26 @@ class SkillProxy:
             "confirmation_readable": confirmation_readable,
         })
 
+    def _refuse_brokered_credential(
+        self, conn: socket.socket, name: str, request_type: str, mode: str,
+    ) -> bool:
+        """Audit a public value read, or refuse it when reveal enforcement is on."""
+        enforce = bool(self.config and self.config.security.credential_broker.enforce_reveal)
+        label = label_for_display(name)
+        logger.warning(
+            "credential_reveal task_id=%s type=%s name=%s mode=%s "
+            "action=%s reason=credential_brokered",
+            self.task_id, request_type, label, mode,
+            "refused" if enforce else "would_refuse",
+        )
+        if not enforce:
+            return False
+        self._send_response(conn, {
+            "error": "Credential is brokered; use a placeholder or a host-side skill (credential_brokered)",
+            "reason": "credential_brokered", "name": label,
+        })
+        return True
+
     def _serve_vault_credential(
         self, conn: socket.socket, request: dict, *, trusted_skill: bool = False,
     ) -> None:
@@ -976,6 +1000,19 @@ class SkillProxy:
                 "name": label,
             })
             return
+
+        if not trusted_skill:
+            revealable = False
+            if self.config is not None and self.user_id:
+                from . import db
+                from .credential_broker.bindings import get_binding
+                with db.get_db(self.config.db_path) as database:
+                    metadata = get_binding(database, self.user_id, name)
+                revealable = bool(metadata and metadata["revealable"])
+            if not revealable and self._refuse_brokered_credential(
+                conn, name, "vault_credential", mode,
+            ):
+                return
 
         # The audit trail, and the only new observability this adds. INFO where
         # the value is being handed to something other than the model —

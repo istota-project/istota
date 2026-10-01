@@ -153,7 +153,7 @@ with `ISTOTA_SCHEDULER_VAULT_SYNC_INTERVAL` for the cadence.
 
 A vault entry's HTTPS URL binds all its credential names to that host and port. Add exact `host[:port]` names in the comma-separated custom field `istota_hosts` for other destinations. Wildcards and plain HTTP are refused. Invalid host metadata leaves the entry unbound. Custom fields beginning with `istota_` are reserved metadata and never become credential names.
 
-`istota_headers` sets the comma-separated allowed authentication headers; the default is `Authorization`, `PRIVATE-TOKEN`, `X-API-Key` and `X-Auth-Token`. `Proxy-Authorization` is never allowed. The `istota:reveal` tag records that an entry may be revealed. Reveal enforcement and grants are not active yet; the credential list shows their metadata in preparation for those controls.
+`istota_headers` sets the comma-separated allowed authentication headers; the default is `Authorization`, `PRIVATE-TOKEN`, `X-API-Key` and `X-Auth-Token`. `Proxy-Authorization` is never allowed. The `istota:reveal` tag permits public value reads when reveal enforcement is enabled. Grants govern placeholder use; the reveal tag is a separate exception for commands that must hold the value.
 
 `istota-credential list` shows bound hosts, whether an entry is revealable, and its grant status. Configured forge tokens appear as `forge.gitlab` and `forge.github` for tasks already authorized to use them. Their hosts come from the deployment's forge URLs; public GitHub also includes `api.github.com`.
 
@@ -390,4 +390,17 @@ Only a host bound to a credential in the task snapshot is intercepted. Every oth
 
 Response headers and bodies no larger than that cap are scrubbed for the exact substituted bytes. A response field name containing a substituted value is refused, since a placeholder cannot be a valid field name. Larger bodies stream without body scrubbing; audit records state both scan limits. This is not protection against an upstream service deliberately encoding or transforming a credential in its response. Compressed request bodies, compressed responses to authenticated requests, trailers and upgrades are unsupported. Both TLS legs use HTTP/1.1, so pinned-certificate clients and clients that require HTTP/2 need a host-side skill or a revealable credential.
 
-`istota doctor --only security.credential_broker` reports the CA, task trust bundles, proxy and peer-check readiness, effective sandboxing, and counts of unbound or ungranted entries. The CA stays in daemon state; only public trust bundles enter tasks. The daemon verifies upstream TLS using its own trust store. Without effective sandboxing, credentials are not contained. Existing credential fetch commands remain available in this rollout stage; reveal enforcement and automatic forge-client placeholders follow separately.
+`istota doctor --only security.credential_broker` reports the CA, task trust bundles, proxy and peer-check readiness, effective sandboxing, and counts of unbound or ungranted entries. The CA stays in daemon state; only public trust bundles enter tasks. The daemon verifies upstream TLS using its own trust store. Without effective sandboxing, credentials are not contained. With the broker enabled, developer git helpers and gh/glab use placeholders. Public value reads remain available until reveal enforcement is enabled.
+
+
+### Reveal enforcement rollout
+
+`[security.credential_broker] enforce_reveal = false` is the default. Each public value read of a brokered credential logs a WARNING with `credential_reveal`, `action=would_refuse`, the task, request type, credential name and claimed mode. Values are never logged. This includes callers claiming `mode=skill`: only the private inherited channel given to a host-side skill is trusted. Audit logging does not contain credentials; callers still receive values in this mode.
+
+Enable the broker and migrate scripts to placeholders or host-side skills. Watch the `credential_reveal` records for a week of normal use. Resolve every `would_refuse` use, then observe a full week without one before setting `enforce_reveal = true`. This is an operator rollout step, with no automatic timer or activation. Restart the daemon after changing the setting. Setting it back to false restores public reads and their audit records.
+
+Under enforcement, `get`, `run` and `run --stdin` return `credential_brokered` for an entry without the `istota:reveal` tag. The daemon checks live metadata on each read, so removing the tag and syncing revokes the exception for running tasks too. A missing binding grants no exception. Revealable reads keep the existing fetch cap and read WARNING. `list`, `placeholder` and `new` remain available; a new entry is brokered by default.
+
+`env` reads manifest variables, which have no reveal marker, so enforcement refuses all of them, including forge tokens. A hand-written socket client receives the same refusal. Use the forge placeholders or a host-side skill instead; skills still receive their declared environment credentials and resolve vault names through their private channel. A forge wrapper still on its legacy token path will fail until the broker is enabled. The devbox has a separate proxy and is outside this rollout.
+
+Enforcement is independent of the interception switch. Turning it on before migrating consumers can break their authentication. It cannot contain values on an unsandboxed deployment.
