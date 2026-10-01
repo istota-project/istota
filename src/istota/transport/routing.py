@@ -563,8 +563,8 @@ def room_target_descriptor(
       ``whatsapp``: its web view is read-only, so a reminder asked for by text
       has to be sent by text. The bare destination resolves the user's own
       binding and the push is recorded in the room. ``phone_surface`` comes
-      from :func:`private_phone_rooms`, the one decision the prompt header and
-      `istota-skill rooms list` both read.
+      from :func:`private_phone_rooms`, the one decision the prompt header,
+      `istota-skill rooms list` and the `talk create` refusal all read.
 
     Pure — the caller supplies the binding it already read.
     """
@@ -1032,8 +1032,8 @@ def private_phone_rooms(conn, user_id: str) -> dict[str, str]:
 
     What a reader is told to schedule into such a room by
     (:func:`room_target_descriptor`'s ``phone_surface``). One decision for the
-    prompt header and `istota-skill rooms list`, so the two cannot name
-    different targets for the same room. At most two entries.
+    prompt header, `istota-skill rooms list` and the `talk create` refusal,
+    so they cannot name different targets for the same room. At most two entries.
     """
     found: dict[str, str] = {}
     if not user_id:
