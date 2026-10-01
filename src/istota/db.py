@@ -9729,11 +9729,12 @@ def is_valid_group_id(group_id: object) -> bool:
     because a group id names a directory under ``{mount}/Groups`` exactly as a
     user id names one under ``Users/``. The charset is narrower than any user
     id's, because a group id is chosen by a person and appears in CLI arguments
-    and in a deferred op's ``scope`` string.
+    and in a deferred op's ``scope`` string. ``none`` is reserved: it is how
+    `!room group none` says "unlink".
     """
     if not is_scopable_user_id(group_id):
         return False
-    return _GROUP_ID_RE.fullmatch(group_id) is not None
+    return group_id != "none" and _GROUP_ID_RE.fullmatch(group_id) is not None
 
 
 def _group_dict(row: sqlite3.Row) -> dict:

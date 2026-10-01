@@ -647,6 +647,36 @@ def cmd_remove_subheading(args) -> int:
     )
 
 
+def _channel_notes_shared() -> bool:
+    """The prompt's D24 rule for the calling task's room, read host-side.
+
+    Anything unanswerable (no database, no task row, a read error) reads as
+    shared: a fence on a private room's notes costs a marker.
+    """
+    from istota import db
+    from istota.room_scopes import channel_notes_shared
+
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+    if not db_path or not Path(db_path).is_file():
+        return True
+    try:
+        with db.get_db(Path(db_path)) as conn:
+            task = None
+            task_id = os.environ.get("ISTOTA_TASK_ID", "")
+            if task_id.isdigit():
+                task = db.get_task(conn, int(task_id))
+            if task is None:
+                return True
+            return channel_notes_shared(
+                conn, task.conversation_token,
+                guest_turn=task.guest_participant_id is not None,
+                is_group_chat=bool(task.is_group_chat),
+            )
+    except Exception as exc:  # noqa: BLE001 — fail toward the fence
+        logger.warning("memory: could not tell whether the room is shared: %s", exc)
+        return True
+
+
 def cmd_show(args) -> int:
     _refuse_retired_skill_flag(args)
     target = _resolve_target(args, verb="show")
@@ -669,6 +699,10 @@ def cmd_show(args) -> int:
         # Several members write GROUP.md, so it reaches the model fenced, as
         # the prompt block and `kv --group` do (multiplayer D22).
         text = frame_untrusted(text, GROUP_MEMORY_LABEL)
+    elif target.kind == _CHANNEL and _channel_notes_shared():
+        from istota.room_scopes import CHANNEL_NOTES_LABEL
+
+        text = frame_untrusted(text, CHANNEL_NOTES_LABEL)
     print(text, end="" if text.endswith("\n") else "\n")
     return 0
 

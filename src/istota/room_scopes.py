@@ -221,6 +221,35 @@ def withheld_for_task(
     )
 
 
+#: The fence label a shared room's `CHANNEL.md` carries, in the prompt block,
+#: in recall and in `memory show --channel` (multiplayer D24).
+CHANNEL_NOTES_LABEL = "room notes"
+
+
+def channel_notes_shared(
+    conn: sqlite3.Connection,
+    conversation_token: str | None,
+    *,
+    guest_turn: bool = False,
+    is_group_chat: bool = False,
+) -> bool:
+    """Whether a room's `CHANNEL.md` may have several authors (D24).
+
+    A guest's turn, a surface roster saying "group", or a registered room more
+    than one human has ever been in. Ever, not now: notes a member wrote stay
+    theirs after they leave. Raises what the reads raise; each caller chooses
+    its failure direction, and both choose the fence.
+    """
+    if guest_turn or is_group_chat:
+        return True
+    if not conversation_token:
+        return False
+    token: str | None = conversation_token
+    if db.get_room(conn, token) is None:
+        token = db.find_room_token_by_ref(conn, token)
+    return token is not None and db.room_was_ever_shared(conn, token)
+
+
 def _is_own_push_token(user_id: str, token: str) -> bool:
     """Whether ``token`` is ``user_id``'s own SMS or WhatsApp 1:1 token."""
     from .transport.sms import sms_conversation_token

@@ -28,6 +28,7 @@ from . import email_support
 from . import secrets_vault
 from . import task_cgroup
 from . import task_env
+from .room_scopes import CHANNEL_NOTES_LABEL as CHANNEL_MEMORY_LABEL
 from .claude_runtime_env import (
     CLAUDE_RUNTIME_ENV_VARS,  # used by `_PROXY_LOOKUP_BLOCKED` below, and
     # re-exported: the drift guard reads it beside `build_clean_env`.
@@ -7406,10 +7407,6 @@ def _resolve_task_groups(
         return []
 
 
-#: The fence label on a shared room's `CHANNEL.md` in the prompt (D24).
-CHANNEL_MEMORY_LABEL = "room notes"
-
-
 def _channel_memory_is_shared(config: Config, task: db.Task, conn) -> bool:
     """Whether this task's `CHANNEL.md` may have several authors (multiplayer D24).
 
@@ -7424,11 +7421,10 @@ def _channel_memory_is_shared(config: Config, task: db.Task, conn) -> bool:
         return True
     if not task.conversation_token:
         return False
-    from .side_rooms import canonical_token
+    from .room_scopes import channel_notes_shared
 
     def _read(c) -> bool:
-        token = canonical_token(c, task.conversation_token)
-        return token is not None and db.room_was_ever_shared(c, token)
+        return channel_notes_shared(c, task.conversation_token)
 
     try:
         if conn is not None:

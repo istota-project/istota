@@ -110,6 +110,8 @@ class TestTheId:
     @pytest.mark.parametrize("group_id", [
         "", ".", "..", "a/b", "/abs", "x" * 200, "Family", "a", " fam",
         "fam ", "fam\0", "-fam", ".fam", "fa m", None, 7,
+        # `!room group none` unlinks a room, so no group may be called that.
+        "none",
     ])
     def test_an_unusable_id_is_refused(self, conn, group_id):
         assert not db.is_valid_group_id(group_id)
