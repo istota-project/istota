@@ -3,7 +3,16 @@
   import { get } from 'svelte/store';
   import { page } from '$app/state';
   import { describeRoomOff } from '$lib/roomOff';
-  import { Plus, MessageSquare, Cloud, ChevronDown, Circle, Star, CheckCheck } from 'lucide-svelte';
+  import {
+    Plus,
+    MessageSquare,
+    Cloud,
+    ChevronDown,
+    Circle,
+    Star,
+    CheckCheck,
+    Users,
+  } from 'lucide-svelte';
   import {
     AppShell,
     ShellHeader,
@@ -1087,7 +1096,18 @@
           style:--room-tint={tint}
         >
           <button class="room-btn" onclick={() => selectRoom(room.id)} type="button">
-            {#if isTalk}
+            {#if room.shared}
+              <!-- More than one human reads this room, so it outranks the
+							     origin glyph: who will see a message matters more than which
+							     surface mirrors it. The Talk fact moves into the title. -->
+              <span
+                class="room-origin shared"
+                title={isTalk ? 'Shared room, also on Nextcloud Talk' : 'Shared room'}
+                aria-label="Shared room"
+              >
+                <Users size={13} />
+              </span>
+            {:else if isTalk}
               <!-- Leading origin glyph: a tinted cloud marks a room mirrored
 							     to Nextcloud Talk. Sits in its own flex slot before the
 							     title so it never eats name width or gets clipped by the
@@ -1739,6 +1759,9 @@
   }
   .room-origin.talk {
     color: var(--accent-amber);
+  }
+  .room-origin.shared {
+    color: var(--accent-blue);
   }
 
   /* Room colour (ISSUE-433). The wash is deliberately weak — it has to be
