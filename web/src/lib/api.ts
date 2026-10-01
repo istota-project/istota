@@ -1284,6 +1284,9 @@ export interface VaultStatus {
   entry_count?: number;
   /** Credentials in the vault's generated/ group. */
   generated_count?: number;
+  /** File entries the last sync that read the file skipped because a credential
+   *  added in Istota already has the name. Counts entries, not field names. */
+  name_conflicts?: number;
   /** Their names, sorted, capped by the server. Names only — no value reaches
    *  this payload — and this user's own, which is why the card may show them
    *  where `doctor` reports counts to every admin. */
@@ -4401,18 +4404,127 @@ export interface CredentialGrant {
   allow_http?: boolean;
   policy_revision?: number;
 }
+/** `local` was added in Istota, `vault` came from the KeePassXC sync, `config`
+ *  from the deployment. Only a `local` credential is edited on the page. */
+export type CredentialSource = 'local' | 'vault' | 'config';
+export interface CredentialSummary {
+  name: string;
+  source: CredentialSource;
+  hosts: string[];
+  headers: string[];
+  revealable: boolean;
+  grant: CredentialGrant | null;
+  /** Local credentials only: the stored site, which is not secret. */
+  url?: string;
+  /** Local credentials only: the bound hosts other than the site's, comma-separated,
+   *  as the server's parser splits them. */
+  extra_hosts?: string;
+  /** Local credentials only. The username itself is never sent. */
+  username_set?: boolean;
+}
 export interface CredentialGrantsSettings {
-  credentials: {
-    name: string;
-    source: string;
-    hosts: string[];
-    headers: string[];
-    revealable: boolean;
-    grant: CredentialGrant | null;
-  }[];
+  credentials: CredentialSummary[];
   rooms: { token: string; name: string }[];
   grant_existing_available: boolean;
   sandboxed: boolean;
+  /** False only when the deployment withholds the credential store from tasks;
+   *  `add_blocked_reason` then says why. */
+  can_add: boolean;
+  add_blocked_reason: string;
+  broker_enabled: boolean;
+}
+export interface CredentialAccess {
+  scope_mode: 'all' | 'rooms';
+  rooms: string[];
+  allow_scheduled: boolean;
+  allow_http: boolean;
+}
+export interface NewCredential {
+  name: string;
+  value: string;
+  username: string;
+  url: string;
+  extra_hosts: string;
+  headers: string;
+  revealable: boolean;
+  access?: CredentialAccess;
+}
+/** `value: null` keeps the stored value. `username: null` keeps the stored
+ *  username and `''` removes it. The other four are required: the server reads
+ *  an absent `url` as a mistake rather than as "clear the site". */
+export interface CredentialUpdate {
+  value: string | null;
+  username: string | null;
+  url: string;
+  extra_hosts: string;
+  headers: string;
+  revealable: boolean;
+}
+export interface CredentialWriteResult {
+  ok: boolean;
+  name: string;
+  username_name: string | null;
+  url_name: string | null;
+  grant: CredentialGrant | null;
+}
+
+/** A refused credential write. `field` names the input it is about, or is null
+ *  for a refusal of the whole request, which the form shows as a banner. The
+ *  message is the server's and never carries the value. */
+export class CredentialWriteError extends Error {
+  readonly field: string | null;
+  constructor(message: string, field: string | null) {
+    super(message);
+    this.name = 'CredentialWriteError';
+    this.field = field;
+  }
+}
+
+/** Outside `apiFetch` because a refusal's `field` has to reach the form, and
+ *  `apiFetch` keeps only the message. */
+async function credentialWrite(path: string, method: string, body: unknown) {
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}/api/settings/credentials${path}`, {
+      method,
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    noteTransport(false, 'unreachable');
+    throw new CredentialWriteError(
+      'Istota could not be reached. Check the list before trying again.',
+      null,
+    );
+  }
+  noteTransport(true);
+  if (resp.status === 401) throw new AuthError();
+  let payload: unknown = null;
+  try {
+    payload = await resp.json();
+  } catch {
+    payload = null;
+  }
+  if (!resp.ok) {
+    const raw = (payload ?? {}) as { detail?: unknown; field?: unknown };
+    const message =
+      typeof raw.detail === 'string' && raw.detail.trim()
+        ? raw.detail
+        : `API error: ${resp.status}`;
+    throw new CredentialWriteError(message, typeof raw.field === 'string' ? raw.field : null);
+  }
+  return payload as CredentialWriteResult;
+}
+
+export function createCredential(credential: NewCredential): Promise<CredentialWriteResult> {
+  return credentialWrite('', 'POST', credential);
+}
+export function updateLocalCredential(
+  name: string,
+  update: CredentialUpdate,
+): Promise<CredentialWriteResult> {
+  return credentialWrite(`/${encodeURIComponent(name)}/local`, 'PATCH', update);
 }
 export function getCredentialGrants(): Promise<CredentialGrantsSettings> {
   return apiFetch('/settings/credentials');

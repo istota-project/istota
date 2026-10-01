@@ -11496,9 +11496,36 @@ async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
     return {"services": cards}
 
 
+_GRANT_FIELDS = frozenset({"scope_mode", "allow_scheduled", "rooms", "allow_http"})
+
+
+def _validate_grant_payload(conn, username: str, payload) -> dict:
+    """Check a grant body's keys and rooms; the type checks are ``put_grant``'s.
+
+    Shared by the grant editor's save and the add form, so a room the user is
+    not in is refused the same way on both. Raises ``LocalCredentialError``
+    on field ``access``; the grant save maps it to a plain 400.
+    """
+    from . import db
+    from .local_credentials import LocalCredentialError
+
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise LocalCredentialError("access", "access must be an object")
+    if payload.keys() - _GRANT_FIELDS:
+        raise LocalCredentialError("access", "unknown credential grant field")
+    member_rooms = {room.token for room in db.list_member_rooms(conn, username)}
+    requested_rooms = payload.get("rooms", [])
+    if (not isinstance(requested_rooms, list)
+            or any(not isinstance(r, str) or r not in member_rooms for r in requested_rooms)):
+        raise LocalCredentialError("access", "room is not available to this user")
+    return payload
+
+
 def _credential_settings(username: str, action="list", name="", payload=None):
     """Read metadata or edit the signed-in user's grants in one transaction."""
-    from . import db
+    from . import db, local_credentials, secrets_vault
     from .credential_broker import bindings, grants
     from .executor import effective_sandboxing
 
@@ -11518,15 +11545,10 @@ def _credential_settings(username: str, action="list", name="", payload=None):
         rooms = [{"token": room.token, "name": room.name or room.token}
                  for room in db.list_member_rooms(conn, username)]
         if action == "save":
-            payload = payload or {}
-            allowed = {"scope_mode", "allow_scheduled", "rooms", "allow_http"}
-            if payload.keys() - allowed:
-                raise HTTPException(status_code=400, detail="unknown credential grant field")
-            requested_rooms = payload.get("rooms", [])
-            if (not isinstance(requested_rooms, list)
-                    or any(not isinstance(r, str) or r not in {room["token"] for room in rooms}
-                           for r in requested_rooms)):
-                raise HTTPException(status_code=400, detail="room is not available to this user")
+            try:
+                payload = _validate_grant_payload(conn, username, payload)
+            except local_credentials.LocalCredentialError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             try:
                 grant = grants.put_grant(conn, username, name, **payload)
             except ValueError as exc:
@@ -11539,11 +11561,165 @@ def _credential_settings(username: str, action="list", name="", payload=None):
         for credential_name in sorted(names):
             binding = bindings.get_entry_binding(conn, username, credential_name) or {
                 "hosts": [], "headers": [], "revealable": False, "source": "vault"}
-            credentials.append({"name": credential_name, **binding,
-                                "grant": grants.get_grant(conn, username, credential_name)})
+            row = {"name": credential_name, **binding,
+                   "grant": grants.get_grant(conn, username, credential_name)}
+            if binding.get("source") == local_credentials.SOURCE:
+                # The edit form's inputs. Never the value or the username.
+                row.update(local_credentials.stored_fields(conn, username, credential_name))
+            credentials.append(row)
         existing_available = db.kv_get(conn, username, grants.NAMESPACE, "granted_existing") is None
+    refusal = secrets_vault.vault_isolation_refusal(_config, username) or ""
     return {"credentials": credentials, "rooms": rooms,
-            "grant_existing_available": existing_available, "sandboxed": effective_sandboxing(_config)}
+            "grant_existing_available": existing_available, "sandboxed": effective_sandboxing(_config),
+            "can_add": not refusal, "add_blocked_reason": refusal,
+            "broker_enabled": bool(_config.security.credential_broker.enabled)}
+
+
+# The body carries a secret, so the write routes parse it themselves: a
+# declared body parameter would answer a bad one with FastAPI's 422, which
+# echoes the offending input.
+_CREDENTIAL_BODY_LIMIT = 64 * 1024
+_CREDENTIAL_STORE_FAILED = "the credential could not be stored; see the daemon log"
+# Field -> (kind, nullable). Nullable on update means "keep what is stored".
+_CREDENTIAL_CREATE_FIELDS = {
+    "name": ("text", False), "value": ("text", False), "username": ("text", False),
+    "url": ("text", False), "extra_hosts": ("text", False), "headers": ("text", False),
+    "revealable": ("bool", False), "access": ("object", True),
+}
+_CREDENTIAL_UPDATE_FIELDS = {
+    "value": ("text", True), "username": ("text", True),
+    "url": ("text", False), "extra_hosts": ("text", False), "headers": ("text", False),
+    "revealable": ("bool", False),
+}
+_CREDENTIAL_KNOWN_KEYS = frozenset(_CREDENTIAL_CREATE_FIELDS) | frozenset(_CREDENTIAL_UPDATE_FIELDS)
+_CREDENTIAL_CREATE_REQUIRED = ("name", "value")
+_CREDENTIAL_UPDATE_REQUIRED = ("url", "extra_hosts", "headers", "revealable")
+
+
+async def _read_credential_body(request: Request) -> object:
+    """The request body as JSON, bounded at 64 KiB. Error details carry no input.
+
+    The bound is `_read_bounded_body`'s, so a body with no declared length is
+    refused too.
+    """
+    from .avatars import AvatarError
+    from .local_credentials import LocalCredentialError
+
+    try:
+        raw = await _read_bounded_body(request, _CREDENTIAL_BODY_LIMIT)
+    except AvatarError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from None
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        raise LocalCredentialError("", "the request body is not JSON") from None
+
+
+def _check_credential_body(body: object, fields: dict, required: tuple) -> dict:
+    """Keys and types only; the content rules are ``local_credentials``'."""
+    from .local_credentials import LocalCredentialError
+
+    if not isinstance(body, dict):
+        raise LocalCredentialError("", "the request body must be an object")
+    for key in body:
+        if key not in fields:
+            # Only a known field name is echoed (one route's field sent to the
+            # other), so a value sent as a key cannot come back.
+            if key in _CREDENTIAL_KNOWN_KEYS:
+                raise LocalCredentialError(key, f"unknown field: {key}")
+            raise LocalCredentialError("", "unknown field")
+    for key in required:
+        if key not in body:
+            raise LocalCredentialError(key, f"{key} is required")
+    for key, (kind, nullable) in fields.items():
+        if key not in body or (nullable and body[key] is None):
+            continue
+        value = body[key]
+        if kind == "text" and not isinstance(value, str):
+            raise LocalCredentialError(key, f"{key} must be text")
+        if kind == "bool" and type(value) is not bool:
+            raise LocalCredentialError(key, f"{key} must be true or false")
+        if kind == "object" and not isinstance(value, dict):
+            raise LocalCredentialError(key, f"{key} must be an object")
+    return body
+
+
+def _create_local_credential(user_id: str, fields: dict) -> dict:
+    from . import db, local_credentials
+
+    with db.get_db(_config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        access = fields.get("access")
+        if access is not None:
+            access = _validate_grant_payload(conn, user_id, access)
+        cred = local_credentials.LocalCredential(
+            name=fields["name"], value=fields["value"],
+            username=fields.get("username", ""), url=fields.get("url", ""),
+            extra_hosts=fields.get("extra_hosts", ""), headers=fields.get("headers", ""),
+            revealable=fields.get("revealable", False),
+        )
+        return local_credentials.create(conn, user_id, cred, access=access)
+
+
+def _update_local_credential(user_id: str, name: str, fields: dict) -> dict:
+    from . import db, local_credentials
+
+    with db.get_db(_config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        return local_credentials.update(
+            conn, user_id, name, value=fields.get("value"), username=fields.get("username"),
+            url=fields["url"], extra_hosts=fields["extra_hosts"], headers=fields["headers"],
+            revealable=fields["revealable"],
+        )
+
+
+async def _write_local_credential(request: Request, user_id: str, name: str | None):
+    """Create (``name is None``) or update a credential added in Istota."""
+    from . import local_credentials, secrets_vault
+
+    if _config is None or not _config.db_path:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    refusal = await asyncio.to_thread(secrets_vault.vault_isolation_refusal, _config, user_id)
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
+    try:
+        body = await _read_credential_body(request)
+        if name is None:
+            fields = _check_credential_body(
+                body, _CREDENTIAL_CREATE_FIELDS, _CREDENTIAL_CREATE_REQUIRED)
+            result = await asyncio.to_thread(_create_local_credential, user_id, fields)
+            verb = "created"
+        else:
+            fields = _check_credential_body(
+                body, _CREDENTIAL_UPDATE_FIELDS, _CREDENTIAL_UPDATE_REQUIRED)
+            result = await asyncio.to_thread(_update_local_credential, user_id, name, fields)
+            verb = "updated"
+    except local_credentials.LocalCredentialError as exc:
+        return JSONResponse({"detail": str(exc), "field": exc.field or None}, status_code=400)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # The type only: an exception's text could carry what was being stored.
+        logger.error("credential write via settings failed: %s", type(exc).__name__)
+        return JSONResponse({"detail": _CREDENTIAL_STORE_FAILED}, status_code=500)
+    logger.info("credential %s via settings: %s", verb, secrets_vault._label(result["name"]))
+    return {"ok": True, **result}
+
+
+@api_router.post("/settings/credentials")
+async def settings_credential_create(
+    request: Request, user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    return await _write_local_credential(request, user["username"], None)
+
+
+@api_router.patch("/settings/credentials/{name}/local")
+async def settings_credential_update(
+    name: str, request: Request, user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    return await _write_local_credential(request, user["username"], name)
 
 
 @api_router.get("/settings/credentials")
@@ -11577,16 +11753,26 @@ async def settings_credential_revoke(
 async def settings_credential_delete(
     name: str, user: dict = Depends(_require_api_auth), _csrf: None = Depends(_verify_origin),
 ) -> dict:
-    """Remove the user's stored vault value, binding and grant together."""
-    from . import secrets_store
+    """Remove the user's stored value, binding and grant together.
+
+    For a KeePassXC credential this removes the stored copy, which the next sync
+    brings back if the entry is still in the file. For one added in Istota it is
+    a real deletion: no source writes it again.
+    """
+    from . import secrets_store, secrets_vault
 
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
     if name.startswith("forge."):
         raise HTTPException(status_code=400, detail="Deployment credentials are managed in configuration")
+    refusal = await asyncio.to_thread(secrets_vault.vault_isolation_refusal, _config, user["username"])
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
     deleted = await asyncio.to_thread(
         secrets_store.delete_secret, _config.db_path, user["username"], "vault_entries", name, all_fields=True,
     )
+    if deleted:
+        logger.info("credential deleted via settings: %s", secrets_vault._label(name))
     return {"ok": True, "deleted": deleted}
 
 
@@ -11705,6 +11891,9 @@ def _vault_settings_payload(username: str) -> dict:
         # actionable: "all 412 of them" is a different sentence from "all 3".
         "entry_count": entries.count,
         "generated_count": report.generated_count,
+        # File entries the last sync skipped because a credential added in
+        # Istota already holds the name. The card tells the user to rename one.
+        "name_conflicts": report.name_conflicts,
         # The names themselves, which is the feedback this feature has never
         # had: after dropping a file in and generating a passphrase, the user
         # can see which names arrived, and a name they expected and cannot see

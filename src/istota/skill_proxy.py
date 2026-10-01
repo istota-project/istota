@@ -38,6 +38,34 @@ logger = logging.getLogger("istota.skill_proxy")
 VAULT_MODES = frozenset({"skill", "inject", "read"})
 VAULT_MODE_DEFAULT = "read"
 
+
+def entry_fields(entry: str, values: dict[str, str]) -> dict[str, str]:
+    """An entry's member names as field keys: `password`, `username`, `url`, custom.
+
+    The entry's own name is its password, and every other member is
+    `<entry>_<field>` because the vault parser named it so, so its key is the
+    part after the prefix. That short key is used only when nothing else could
+    land on it: not `password`, not another member's short key, and not any
+    member's full name. Otherwise the member keeps its full name, which is
+    unique, so no field is dropped, overwritten or mistaken for the password.
+    """
+    prefix = entry + "_"
+    short = {m: m[len(prefix):] if m.startswith(prefix) else m
+             for m in values if m != entry}
+    claimed: dict[str, int] = {}
+    for key in short.values():
+        claimed[key] = claimed.get(key, 0) + 1
+    fields: dict[str, str] = {}
+    if entry in values:
+        fields["password"] = values[entry]
+    for member in sorted(short):
+        key = short[member]
+        if key == "password" or claimed[key] > 1 or key in values:
+            key = member
+        fields[key] = values[member]
+    return fields
+
+
 # Owner-only, so no other local user can ask this proxy for a credential. This
 # proxy's own decision, stated here rather than inherited from the server
 # lifecycle it is handed to. It keeps out no other *task*, since they all run
@@ -575,6 +603,10 @@ class SkillProxy:
                 self._serve_vault_credential(conn, request)
                 return
 
+            if req_type == "vault_entry":
+                self._serve_vault_entry(conn, request)
+                return
+
             if req_type == "vault_create":
                 self._serve_vault_create(conn, request)
                 return
@@ -733,13 +765,17 @@ class SkillProxy:
                         request = json.loads(line)
                     except (ValueError, UnicodeError):
                         return
-                    if not isinstance(request, dict) or request.get("type") != "vault_credential":
+                    req_type = request.get("type") if isinstance(request, dict) else None
+                    if req_type not in ("vault_credential", "vault_entry"):
                         self._send_response(conn, {
                             "error": "Private channel accepts credential reads only",
                             "reason": "invalid_credential_request",
                         })
                         return
-                    self._serve_vault_credential(conn, request, trusted_skill=True)
+                    if req_type == "vault_entry":
+                        self._serve_vault_entry(conn, request, trusted_skill=True)
+                    else:
+                        self._serve_vault_credential(conn, request, trusted_skill=True)
         except OSError:
             # The owning invocation closed, timed out, or stopped reading.
             pass
@@ -765,6 +801,25 @@ class SkillProxy:
             count = self._vault_fetches
         limit = self.vault_fetch_limit
         return count, not limit or count <= limit
+
+    def _refuse_fetch_limit(self, conn: socket.socket, request_type: str, count: int) -> None:
+        """The over-budget answer, the same for every name and both read types.
+
+        It names no credential, so a present and an absent name get one reply
+        and the cap cannot be used to enumerate the namespace.
+        """
+        logger.warning(
+            "proxy_rejected task_id=%s type=%s "
+            "count=%d limit=%d reason=vault_credential_limit",
+            self.task_id, request_type, count, self.vault_fetch_limit,
+        )
+        self._send_response(conn, {
+            "error": (
+                f"Shared credential fetch limit reached for this task "
+                f"({self.vault_fetch_limit})"
+            ),
+            "reason": "vault_credential_limit",
+        })
 
     def _serve_vault_create(self, conn: socket.socket, request: dict) -> None:
         """Create one entry from a host-only passphrase and return names only."""
@@ -832,6 +887,13 @@ class SkillProxy:
                 refuse("vault_not_configured", "Credential vault cannot be opened")
                 return
             try:
+                taken = secrets_vault.local_name_conflict(
+                    config.db_path, user_id, secrets_vault.generated_entry_names(slug),
+                )
+                if taken:
+                    raise secrets_vault.VaultWriteRefused(
+                        f"credential name already exists: {secrets_vault._label(taken)}"
+                    )
                 passphrase = secrets_vault._resolve_passphrase(config.db_path, user_id)
                 for attempt in range(2):
                     data, digest = secrets_vault.read_vault_bytes(
@@ -992,18 +1054,7 @@ class SkillProxy:
 
         count, within = self._spend_vault_fetch()
         if not within:
-            logger.warning(
-                "proxy_rejected task_id=%s type=vault_credential "
-                "count=%d limit=%d reason=vault_credential_limit",
-                self.task_id, count, self.vault_fetch_limit,
-            )
-            self._send_response(conn, {
-                "error": (
-                    f"Shared credential fetch limit reached for this task "
-                    f"({self.vault_fetch_limit})"
-                ),
-                "reason": "vault_credential_limit",
-            })
+            self._refuse_fetch_limit(conn, "vault_credential", count)
             return
 
         if name not in self.vault_credentials:
@@ -1092,6 +1143,98 @@ class SkillProxy:
         if request.get("binding") is not True:
             reply.pop("bound_hosts", None)
         self._send_response(conn, reply)
+
+    def _serve_vault_entry(
+        self, conn: socket.socket, request: dict, *, trusted_skill: bool = False,
+    ) -> None:
+        """Every field of one vault entry, charged once against the cap.
+
+        The per-field read charges a login, its password and its URL as three
+        fetches; this charges the entry once, so for an entry read the budget
+        counts credentials rather than fields. Every rule that read applies to
+        one field applies here to each member, and one refusal refuses the
+        whole entry: a field the per-field path would withhold must not come
+        back through this one. Same order as there: charge, limit, presence.
+
+        Membership is the vault parser's (`credential_groups`), never a name
+        suffix, and only members in this task's snapshot are read, so a
+        withheld namespace has no entries at all.
+        """
+        name = str(request.get("name", ""))
+        mode = "skill" if trusted_skill else str(request.get("mode", ""))
+        if mode not in VAULT_MODES:
+            mode = VAULT_MODE_DEFAULT
+        label = label_for_display(name)
+
+        count, within = self._spend_vault_fetch()
+        if not within:
+            self._refuse_fetch_limit(conn, "vault_entry", count)
+            return
+
+        def refuse(reason: str, message: str, *, named: bool = True) -> None:
+            logger.warning(
+                "proxy_rejected task_id=%s type=vault_entry name=%s mode=%s reason=%s",
+                self.task_id, label, mode, reason,
+            )
+            reply = {"error": message, "reason": reason}
+            if named:
+                reply["name"] = label
+            self._send_response(conn, reply)
+
+        def not_present() -> None:
+            refuse("vault_credential_not_present", f"No shared credential named {label!r}")
+
+        if not name or self.config is None or not self.user_id:
+            not_present()
+            return
+        from . import db, secrets_store
+        from .credential_broker.bindings import credential_groups, get_binding, get_entry_binding
+
+        with db.get_db(self.config.db_path) as database:
+            members = [m for m in credential_groups(database, self.user_id).get(name, [])
+                       if m in self.vault_credentials]
+        if not members:
+            not_present()
+            return
+
+        if (trusted_skill and self.config.security.credential_broker.enabled):
+            for member in members:
+                if member in self._created_names:
+                    continue
+                reason = self._skill_grant_refusal(member)
+                if reason:
+                    refuse(reason, f"Credential {label!r} is not granted to this task ({reason})")
+                    return
+
+        with db.get_db(self.config.db_path) as database:
+            # Permission, values and hosts from one view, so a rotation or a
+            # reveal change mid-read cannot pair one field's policy with
+            # another's value.
+            database.execute("BEGIN IMMEDIATE")
+            if not trusted_skill:
+                hidden = [m for m in members
+                          if not (get_binding(database, self.user_id, m) or {}).get("revealable")]
+                if hidden and self._refuse_brokered_credential(conn, name, "vault_entry", mode):
+                    return
+            values = {}
+            for member in members:
+                value = secrets_store.get_secret(
+                    self.config.db_path, self.user_id, "vault_entries", member,
+                    connection=database,
+                )
+                if value is None:
+                    refuse("vault_credential_not_present", "Credential no longer available",
+                           named=False)
+                    return
+                values[member] = value
+            hosts = (get_entry_binding(database, self.user_id, name) or {}).get("hosts", [])
+
+        logger.log(
+            logging.INFO if mode in ("skill", "inject") else logging.WARNING,
+            "vault_entry task_id=%s name=%s mode=%s fields=%d count=%d",
+            self.task_id, label, mode, len(values), count,
+        )
+        self._send_response(conn, {"fields": entry_fields(name, values), "bound_hosts": hosts})
 
     @staticmethod
     def _recv_all(conn: socket.socket) -> str:
