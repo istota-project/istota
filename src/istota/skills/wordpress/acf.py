@@ -28,11 +28,6 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
-
-from istota.skill_host_paths import memory_refusal, resolve_in_roots
-from istota.skills._hostpath import egress_roots
-
 from . import media
 from .client import WordPressError
 from .common import read_text_file
@@ -82,16 +77,6 @@ class Uploads:
         return Slot(self._seen[key])
 
 
-def _resolve_marker_path(raw: str, operation: str) -> str:
-    resolved, error = resolve_in_roots(Path(raw), egress_roots(), writable=False,
-                                       operation=operation)
-    if error is None:
-        error = memory_refusal(resolved)
-    if error is not None:
-        raise WordPressError(error, "host_path_refused")
-    return str(resolved)
-
-
 def _marker(value: dict, where: str, uploads: Uploads) -> Slot:
     extra = sorted(set(value) - {UPLOAD_KEY, *_MARKER_FIELDS})
     if extra:
@@ -110,7 +95,7 @@ def _marker(value: dict, where: str, uploads: Uploads) -> Slot:
             if not isinstance(value[key], str):
                 raise WordPressError(f"{key} at {where} must be a string.", "validation_error")
             meta[field] = value[key]
-    resolved = _resolve_marker_path(path, f"wordpress {UPLOAD_KEY} at {where}")
+    resolved = media.egress_path(path, f"wordpress {UPLOAD_KEY} at {where}")
     return uploads.add(resolved, f"{UPLOAD_KEY} at {where}", meta)
 
 
@@ -177,6 +162,7 @@ def check(args, cap: int) -> None:
 
     uploads = Uploads(cap, args.closers)
     args.uploads = uploads
+    args.deadline = media.call_deadline(args.config)
     args.featured_slot = None
     featured = getattr(args, "featured_image", None)
     if featured:
@@ -204,9 +190,10 @@ def check_schema(ctx, type_slug: str, values: dict | None) -> None:
         )
 
 
-def run_uploads(ctx, uploads: Uploads) -> tuple[dict[int, int], list[dict]]:
+def run_uploads(ctx, uploads: Uploads,
+                deadline: float | None = None) -> tuple[dict[int, int], list[dict]]:
     """Upload every file: ``({slot index: attachment id}, report rows)``."""
-    done = media.upload_all(ctx, uploads.sources)
+    done = media.upload_all(ctx, uploads.sources, deadline)
     ids = {index: item["id"] for index, item in done.items()}
     report = [media.upload_report(uploads.sources[i], item) for i, item in done.items()]
     return ids, report

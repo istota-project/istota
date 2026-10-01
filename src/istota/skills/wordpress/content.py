@@ -39,7 +39,7 @@ from urllib.parse import quote
 from istota.skill_host_paths import write_resolved
 
 from . import acf, media
-from .client import WordPressError, fence, fence_tree, raw_text, selectors
+from .client import WordPressError, fence, fence_tree, raw_text, selector, selectors
 from .common import (  # noqa: F401 (MAX_LIMIT, limit_arg, total_header re-exported)
     MAX_LIMIT,
     int_or_none,
@@ -140,17 +140,22 @@ def _term_ids(ctx, taxonomy: str, names: str | list[str], *,
     return ids
 
 
-def _find_term(ctx, route: str, name: str) -> int | None:
-    """The id of the term whose name or slug is `name`, case-insensitively."""
+def _find_term(ctx, route: str, name: str, *, parent: int | None = None,
+               full: bool = False):
+    """The term whose name or slug is `name`, case-insensitively: its id, or
+    with `full` the whole term. With `parent`, only a term under that parent.
+    """
     found, _ = ctx.client.get(route, params={"search": name, "per_page": MAX_LIMIT},
                               base=ctx.base)
     wanted = name.casefold()
     for term in found or []:
-        if isinstance(term, dict) and (
-            html.unescape(str(term.get("name", ""))).casefold() == wanted
-            or str(term.get("slug", "")).casefold() == wanted
-        ):
-            return term.get("id")
+        if not isinstance(term, dict) or not isinstance(term.get("id"), int):
+            continue
+        if parent is not None and term.get("parent") != parent:
+            continue
+        if (html.unescape(str(term.get("name", ""))).casefold() == wanted
+                or str(term.get("slug", "")).casefold() == wanted):
+            return term if full else term["id"]
     return None
 
 
@@ -294,13 +299,19 @@ def cmd_terms_create(args) -> dict:
     ctx = args.wp
     route = taxonomy_route(ctx, args.taxonomy)
     name = args.name.strip()
-    existing = _find_term(ctx, route, name)
+    existing = _find_term(ctx, route, name, parent=args.parent, full=True)
     if existing is None and args.slug:
-        existing = _find_term(ctx, route, args.slug)
+        existing = _find_term(ctx, route, args.slug, parent=args.parent, full=True)
     if existing is not None:
         return {"status": "ok", **ctx.envelope(), "taxonomy": args.taxonomy,
-                "created": False, "id": existing}
-    gate(args, ctx, _terms_actions({args.taxonomy: [name]}))
+                "created": False, "item": project_term(existing)}
+    where = []
+    if args.parent is not None:
+        where.append(f"under term #{args.parent}")
+    if args.slug:
+        where.append(f"with slug {selector(args.slug)}")
+    action = _terms_actions({args.taxonomy: [name]})[0]
+    gate(args, ctx, [" ".join([action, *where])])
     body: dict = {"name": name}
     if args.parent is not None:
         body["parent"] = args.parent
@@ -701,7 +712,11 @@ def _prepare_write(ctx, args, payload: dict, ids: dict, missing: dict) -> tuple[
     so a failed upload leaves no post pointing at a missing attachment. A
     failure from here on names what was already stored.
     """
-    upload_ids, report = acf.run_uploads(ctx, args.uploads)
+    upload_ids, report = acf.run_uploads(ctx, args.uploads, args.deadline)
+    if report:
+        # A post write cut off by the proxy's timeout reports nothing, and the
+        # retry it invites would create the post twice.
+        media.check_deadline(args.deadline, "writing the post", _uploaded(report))
     try:
         created = create_terms(ctx, missing)
     except WordPressError as exc:

@@ -30,12 +30,16 @@ from __future__ import annotations
 import os
 import re
 import stat
+import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from istota.image_sniff import sniff_decodable
+from istota.skill_host_paths import memory_refusal, resolve_in_roots
+from istota.skills._hostpath import egress_roots
 
-from .client import UPLOAD_TIMEOUT, WordPressError, fence, raw_text
+from .client import UPLOAD_TIMEOUT, WordPressError, fence, raw_text, selector
 from .common import limit_arg, lookup, total_header
 
 MEDIA_ROUTE = "wp/v2/media"
@@ -48,6 +52,10 @@ _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".jpe", ".gif", ".webp", "
 _DEFINITE_CODES = frozenset({"rest_upload_sideload_error"})
 _FILENAME_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 _META_FIELDS = ("title", "alt_text", "caption")
+#: Seconds kept back from the proxy's ceiling for the post write and read-back.
+CALL_RESERVE_SECONDS = 45
+#: No upload is started with less than this left.
+MIN_UPLOAD_SECONDS = 15
 
 
 def project_media(item: dict) -> dict:
@@ -145,14 +153,55 @@ def safe_filename(path: str) -> str:
     return f"{stem}.{suffix}" if suffix else stem
 
 
+def egress_path(path: str, operation: str) -> str:
+    """`path` resolved under the `EGRESS` roots with `memory_refusal`, or a refusal.
+
+    The rule a stamped `EGRESS` argument gets at parse, for a path that never
+    passed the stamp (an ACF ``$upload`` marker), and for the path an open
+    descriptor turned out to name.
+    """
+    resolved, error = resolve_in_roots(Path(path), egress_roots(), writable=False,
+                                       operation=operation)
+    if error is None:
+        error = memory_refusal(resolved)
+    if error is not None:
+        raise WordPressError(error, "host_path_refused")
+    return str(resolved)
+
+
+def _fd_path(fd: int) -> str | None:
+    """Where an open descriptor points, from the kernel; None where it cannot say."""
+    try:
+        if sys.platform == "darwin":
+            import fcntl
+
+            raw = fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024))
+            return os.fsdecode(raw.split(b"\0", 1)[0])
+        if sys.platform.startswith("linux"):
+            return os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        return None
+    return None
+
+
 def open_upload(path: str, label: str, cap: int, meta: dict | None = None) -> UploadSource:
-    """Open one already-resolved path for upload, or refuse it, sending nothing."""
+    """Open one already-resolved path for upload, or refuse it, sending nothing.
+
+    ``O_NOFOLLOW`` guards only the last component, so a directory above it
+    swapped for a symlink between the resolve and this open would carry the
+    open elsewhere. The descriptor's own path is checked against the same
+    rule after the open, which closes that window where the kernel reports
+    the path (Linux, macOS).
+    """
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError as exc:
         raise WordPressError(f"Could not open {label}: {exc.strerror}.",
                              "validation_error") from None
     try:
+        real = _fd_path(fd)
+        if real is not None:
+            egress_path(real, f"wordpress {label}")
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise WordPressError(f"{label} is not a regular file.", "validation_error")
@@ -185,7 +234,7 @@ def _kept(item: dict, key: str, wanted: str) -> bool:
     return (raw_text(got) if key != "alt_text" else (got if isinstance(got, str) else "")) == wanted
 
 
-def upload(ctx, source: UploadSource) -> dict:
+def upload(ctx, source: UploadSource, *, timeout: float = UPLOAD_TIMEOUT) -> dict:
     """Send one file. The attachment as WordPress answered, after any follow-up.
 
     The result carries ``metadata_error`` when the follow-up failed and
@@ -200,7 +249,7 @@ def upload(ctx, source: UploadSource) -> dict:
             "POST", MEDIA_ROUTE, params=meta or None, content=data,
             headers={"Content-Type": source.mime,
                      "Content-Disposition": f'attachment; filename="{source.filename}"'},
-            base=ctx.base, idempotent=False, timeout=UPLOAD_TIMEOUT,
+            base=ctx.base, idempotent=False, timeout=timeout,
             definite_codes=_DEFINITE_CODES,
         )
         media_id = item.get("id") if isinstance(item, dict) else None
@@ -230,24 +279,72 @@ def upload(ctx, source: UploadSource) -> dict:
     return result
 
 
-def upload_all(ctx, sources: list[UploadSource]) -> dict[int, dict]:
+def call_deadline(config) -> float:
+    """The `time.monotonic()` by which this call must have finished its uploads.
+
+    The proxy kills a skill CLI at its timeout and returns nothing the CLI
+    built, so an upload still running then loses the ``uploaded`` list and the
+    lookup, and the model's retry sends every finished upload again. The
+    budget is the proxy's own ceiling for this skill less a reserve for the
+    post write and read-back that follow.
+    """
+    from istota.skill_proxy import resolve_skill_timeout  # heavy; uploads only
+
+    security = config.security
+    try:
+        ceiling = resolve_skill_timeout(security.skill_proxy_timeout,
+                                        security.skill_proxy_timeouts, "wordpress",
+                                        security.skill_client_wait_seconds)
+    except Exception:  # noqa: BLE001 — a malformed setting falls back to the default
+        ceiling = 300
+    return time.monotonic() + max(MIN_UPLOAD_SECONDS, ceiling - CALL_RESERVE_SECONDS)
+
+
+def _uploaded(sources: list[UploadSource], done: dict[int, dict]) -> list[dict]:
+    return [{"path": sources[i].path, "id": item.get("id")} for i, item in done.items()]
+
+
+def check_deadline(deadline: float | None, what: str, stored: list[dict]) -> float:
+    """Seconds left before `deadline`, or a refusal naming what was stored."""
+    if deadline is None:
+        return UPLOAD_TIMEOUT
+    remaining = deadline - time.monotonic()
+    if remaining < MIN_UPLOAD_SECONDS:
+        raise WordPressError(
+            f"Stopped before {what}: this call is close to the skill's time limit, and "
+            f"a call cut off there reports nothing. Reuse what was uploaded and send "
+            f"the rest in another call.",
+            "time_budget", uploaded=stored,
+        )
+    return remaining
+
+
+def upload_all(ctx, sources: list[UploadSource],
+               deadline: float | None = None) -> dict[int, dict]:
     """Upload every source, in order: ``{index: attachment}``.
 
     A failure part-way raises with the uploads already made listed under
     ``uploaded``, so nothing that follows (the post write) runs and the agent
-    can reuse or delete what was stored.
+    can reuse or delete what was stored. An upload that could not finish
+    before `deadline` is not started.
     """
     done: dict[int, dict] = {}
     for index, source in enumerate(sources):
         try:
-            done[index] = upload(ctx, source)
+            remaining = check_deadline(deadline, f"uploading {source.path}",
+                                       _uploaded(sources, done))
+            done[index] = upload(ctx, source, timeout=min(UPLOAD_TIMEOUT, remaining))
         except WordPressError as exc:
             if done:
-                exc.extra["uploaded"] = [
-                    {"path": sources[i].path, "id": item.get("id")} for i, item in done.items()
-                ]
+                exc.extra["uploaded"] = _uploaded(sources, done)
             exc.extra.setdefault("failed_path", source.path)
             raise
+        except OSError as exc:
+            raise WordPressError(
+                f"Could not read {source.path}: {exc.strerror}; it was not sent.",
+                "validation_error", uploaded=_uploaded(sources, done),
+                failed_path=source.path,
+            ) from None
     return done
 
 
@@ -255,7 +352,7 @@ def upload_report(source: UploadSource, item: dict) -> dict:
     out = {
         "path": source.path,
         "id": item.get("id"),
-        "mime_type": item.get("mime_type"),
+        "mime_type": selector(item.get("mime_type")),
         "source_url": fence(item.get("source_url")),
         "metadata_kept": item.get("metadata_kept", []),
     }
@@ -277,12 +374,14 @@ def check_upload(args) -> None:
     source = open_upload(args.file, "--file", upload_cap(args.config), _meta_args(args))
     args.closers.append(source.close)
     args.upload_source = source
+    args.deadline = call_deadline(args.config)
 
 
 def cmd_media_upload(args) -> dict:
     ctx = args.wp
     source = args.upload_source
-    item = upload(ctx, source)
+    remaining = check_deadline(args.deadline, "uploading", [])
+    item = upload(ctx, source, timeout=min(UPLOAD_TIMEOUT, remaining))
     report = upload_report(source, item)
     return {"status": "ok", **ctx.envelope(), "uploaded": True,
             "item": project_media(item), **{k: report[k] for k in report

@@ -188,6 +188,39 @@ class TestMediaUpload:
         assert code == 1 and out["reason"] == "request_refused"
         assert len(writes(env.site)) == 1
 
+    def test_any_other_5xx_body_stays_an_unknown(self, env, capsys):
+        """The negative control for the definite-code reading: only the code
+        WordPress sends before it stores anything is a refusal."""
+        env.site.routes[("POST", "/wp-json/wp/v2/media")] = httpx.Response(
+            500, json={"code": "internal_server_error", "message": "boom"})
+        path = own(env, "photo.png")
+        _, out = run(["media", "upload", "--file", str(path)], capsys)
+        assert out["reason"] == "outcome_unknown" and len(writes(env.site)) == 1
+
+    def test_no_upload_starts_past_the_call_budget(self, env, media, capsys, monkeypatch):
+        import time
+
+        from istota.skills.wordpress import media as media_mod
+
+        monkeypatch.setattr(media_mod, "call_deadline", lambda config: time.monotonic() - 1)
+        path = own(env, "photo.png")
+        code, out = run(["media", "upload", "--file", str(path)], capsys)
+        assert code == 1 and out["reason"] == "time_budget"
+        assert writes(env.site) == []
+
+    def test_a_parent_directory_swapped_after_the_check_is_caught_at_the_open(
+            self, env, capsys, tmp_path):
+        """The descriptor's own path is re-checked, so a directory above the
+        file that changed between the resolve and the open cannot carry it out."""
+        from istota.skills.wordpress import media as media_mod
+
+        secret = tmp_path / "elsewhere"
+        secret.mkdir()
+        (secret / "x.png").write_bytes(PNG)
+        with pytest.raises(media_mod.WordPressError) as err:
+            media_mod.open_upload(str(secret / "x.png"), "--file", 1024 * 1024)
+        assert err.value.reason == "host_path_refused"
+
     def test_a_hostile_file_name_cannot_break_the_header(self, env, media, capsys):
         path = own(env, 'a";b=c\r.png')
         code, out = run(["media", "upload", "--file", str(path)], capsys)
@@ -301,6 +334,32 @@ class TestUploadMarkers:
         assert out["failed_path"] == str(b.resolve())
         assert "media list --search b" in out["lookup"]
         assert [r.url.path for r in writes(env.site)] == ["/wp-json/wp/v2/media"] * 2
+
+    def test_a_post_write_past_the_budget_is_not_started(
+            self, env, media, updates, capsys, monkeypatch):
+        from istota.skills.wordpress import media as media_mod
+
+        clock = {"now": 1000.0}
+
+        class FakeTime:
+            @staticmethod
+            def monotonic():
+                return clock["now"]
+
+        monkeypatch.setattr(media_mod, "time", FakeTime)
+        monkeypatch.setattr(media_mod, "call_deadline", lambda config: 1100.0)
+
+        def slow(request):
+            clock["now"] += 95  # the upload ate the budget
+            return media.create(request)
+
+        env.site.routes[("POST", "/wp-json/wp/v2/media")] = slow
+        a = own(env, "a.png")
+        code, out = run(["create", "--type", "update", "--title", "x",
+                         "--acf-set", "hero=" + json.dumps({"$upload": str(a)})], capsys)
+        assert code == 1 and out["reason"] == "time_budget"
+        assert out["uploaded"] == [{"path": str(a.resolve()), "id": 900}]
+        assert [r.url.path for r in writes(env.site)] == ["/wp-json/wp/v2/media"]
 
     def test_a_failed_post_write_lists_the_uploads(self, env, media, updates, capsys):
         a = own(env, "a.png")
@@ -471,8 +530,18 @@ class TestTermsCreate:
         code, out = run(["terms", "create", "--taxonomy", "category", "--name", "essays"],
                         capsys)
         assert code == 0, out
-        assert out == {**out, "created": False, "id": 5}
+        assert out["created"] is False and out["item"]["id"] == 5
         assert created == []
+
+    def test_a_namesake_under_another_parent_is_not_reused(self, env, capsys):
+        created = self._categories(env, [{"id": 5, "name": "Essays", "parent": 0}])
+        code, out = run(["terms", "create", "--taxonomy", "category", "--name", "Essays",
+                         "--parent", "12"], capsys)
+        assert out["reason"] == "confirmation_required"
+        assert "under term #12" in out["would"][0]
+        run(["terms", "create", "--taxonomy", "category", "--name", "Essays",
+             "--parent", "12", "--confirmed"], capsys)
+        assert created == [{"name": "Essays", "parent": 12}]
 
     def test_an_ambiguous_create_names_the_lookup(self, env, capsys):
         self._categories(env, [])

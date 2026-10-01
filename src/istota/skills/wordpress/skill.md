@@ -138,7 +138,7 @@ Every string the site wrote (titles, content, ACF text, term names, user names, 
 
 ## Errors
 
-Errors carry a `reason`: `skill_disabled` (the operator has not enabled the skill), `unknown_site`, `vault_credential_refused`, `credential_unbound`, `credential_incomplete`, `credential_host_mismatch`, `host_refused` (a private address the operator has not allowed, or a redirect, which is never followed), `unknown_blog`, `unknown_type`, `unknown_taxonomy`, `unknown_term`, `auth_failed`, `permission_denied`, `unknown_route`, `not_found`, `validation_error` (with the refused `fields`), `acf_not_in_rest` (with the `fields`), `confirmation_required`, `request_refused`, `server_error`, `connection_failed`, `outcome_unknown`, `host_path_refused`. Tell the user what the reason means; `auth_failed` lists its three ordinary causes.
+Errors carry a `reason`: `skill_disabled` (the operator has not enabled the skill), `unknown_site`, `vault_credential_refused`, `credential_unbound`, `credential_incomplete`, `credential_host_mismatch`, `host_refused` (a private address the operator has not allowed, or a redirect, which is never followed), `unknown_blog`, `unknown_type`, `unknown_taxonomy`, `unknown_term`, `auth_failed`, `permission_denied`, `unknown_route`, `not_found`, `validation_error` (with the refused `fields`), `acf_not_in_rest` (with the `fields`), `confirmation_required`, `time_budget` (the call stopped before an upload or the post write that might not finish within the skill time limit; `uploaded` lists what was stored), `request_refused`, `server_error`, `connection_failed`, `outcome_unknown`, `host_path_refused`. Tell the user what the reason means; `auth_failed` lists its three ordinary causes.
 
 ## Out of scope
 
