@@ -136,6 +136,12 @@ class BrainRequest:
     # the problem because it comes from a resolved config path.
     composed_system_prompt_path: Path | None = None
 
+    # The `claude` CLI's settings document (`claude_code.cli_settings_document`),
+    # written by the executor beside the system half and passed as `--settings`.
+    # Same rules as that path: absolute, required once set. NativeBrain reads
+    # nothing from it; it is carried so a reroute onto a CLI brain keeps it.
+    cli_settings_path: Path | None = None
+
     # Whether the brain should stream events for progress callbacks. When
     # False, the brain may pick a faster non-streaming path if it has one.
     streaming: bool = True

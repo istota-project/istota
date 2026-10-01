@@ -66,7 +66,7 @@ File-access framing is storage-backend-aware (storage-agnostic-vocabulary spec):
 
 ### The two prompt files
 
-Written to `{temp_dir}/.control/{user_id}/task_{id}/` before the request is built, unconditionally. `prompt.txt` is the exact stdin / tmux / native initial message; `system_prompt.txt` is `composed_system_prompt_path`. `briefing_meta.json` and `attachments/` live there too: every per-task file the daemon authors, nothing the model writes. `task_{id}_result.txt` stays in the per-user temp dir because the model writes it.
+Written to `{temp_dir}/.control/{user_id}/task_{id}/` before the request is built, unconditionally. `prompt.txt` is the exact stdin / tmux / native initial message; `system_prompt.txt` is `composed_system_prompt_path`; `cli_settings.json` is `cli_settings_path`, the `claude` CLI's `--settings` document. `briefing_meta.json` and `attachments/` live there too: every per-task file the daemon authors, nothing the model writes. `task_{id}_result.txt` stays in the per-user temp dir because the model writes it.
 
 The guards name the **directory**, a sibling of the per-user temp dir. `temp_dir` is bound at no path, so nothing model-writable is an ancestor and there is no mkdir-to-mount symlink window (`.developer` survives that window only because the repos bind buries it, ISSUE-320). `get_task_control_dir` refuses an empty or non-`str` `user_id`, one escaping the root (the `get_user_repos_dir` equality) or one casefold-equal to `.control`. `ensure_task_control_dir` makes each level 0700, re-asserts the mode, opens `O_NOFOLLOW | O_DIRECTORY` and refuses a non-directory or one the daemon does not own. The composed path resolves the directory (the in-namespace destination) but not the filename, keeping `O_NOFOLLOW` meaningful; belt-and-braces, kept on purpose.
 
@@ -159,7 +159,7 @@ Overrides log `compose_full_result: mechanism=… original_chars=… recovered_c
 - `parse_api_error`, `is_transient_api_error` re-exported from `executor`; the newer helpers are imported from `brain.claude_code` directly.
 
 ## Constants
-Background types excluded from context: `scheduled`, `briefing`. Control dir `CONTROL_DIR_NAME = ".control"`, files 0600: `prompt.txt`, `system_prompt.txt`, `briefing_meta.json` (read and unlinked by the scheduler), `attachments/`. Result file in the user temp dir, model-written.
+Background types excluded from context: `scheduled`, `briefing`. Control dir `CONTROL_DIR_NAME = ".control"`, files 0600: `prompt.txt`, `system_prompt.txt`, `cli_settings.json`, `briefing_meta.json` (read and unlinked by the scheduler), `attachments/`. Result file in the user temp dir, model-written.
 
 ## Security functions
 

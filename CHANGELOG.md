@@ -291,6 +291,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- On the Claude Code brains, a task can no longer leave Claude Code project settings behind for later tasks. A `.claude/settings.json`, `.mcp.json` or `CLAUDE.md` written into a user's task directory used to apply to every later task of that user, and on deployments without the sandbox to every user's tasks; project settings are now ignored, and the settings that switch off commit and PR attribution travel with each task's own read-only files. One side effect: `istota repl` started inside a repository no longer loads that repository's `CLAUDE.md` on its own, so ask for it to be read if you rely on it.
 - With the credential broker enabled, a host-side skill such as `browse interact --fill-credential` now honours the credential's grant: it needs an entry granted to the task when it started, so an ungranted entry, a room the grant does not cover, or a scheduled task without scheduled use is refused. A task may still fill an entry it created itself with `istota-credential new`. Before, grants bound only the proxy's header substitution.
 
 - `enforce_reveal` now takes effect only with the credential broker enabled, and the daemon warns at startup when it is set without it. Enforcement without the broker refused every git and `gh`/`glab` call.
