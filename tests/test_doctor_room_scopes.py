@@ -1,26 +1,25 @@
-"""`security.room_scope_confinement` (multiplayer Stage 28).
+"""`security.room_scope_confinement` (multiplayer Stage 28, ISSUE-576).
 
-A shared room withholds scopes at six seams; the filesystem half (the
-workspace bind, the memory masks, the per-task temp dir) exists only where a
-task runs inside bubblewrap. On the shipped Docker stack, macOS and the
-standalone install the other seams still hold, and the files are reachable.
+A guest's turn withholds every scope at six seams; the filesystem half (the
+workspace bind, the per-task temp dir) exists only where a task runs inside
+bubblewrap. On the shipped Docker stack, macOS and the standalone install the
+other seams still hold, and the host's files are reachable.
 """
 
-import pytest
 
 from istota import doctor
-from istota.config import Config, RoomsConfig
+from istota.config import Config
 
 NAME = "security.room_scope_confinement"
 
 
-def _check(monkeypatch, *, sandboxed, policy="restrict", probe=False):
+def _check(monkeypatch, *, sandboxed, probe=False):
     monkeypatch.setattr(
         doctor, "_deployment_sandboxing",
         lambda _config, _probe: (sandboxed, "" if sandboxed is not None else "cold memo"),
     )
     return doctor.check_room_scope_confinement(
-        Config(rooms=RoomsConfig(shared_room_data_policy=policy)), probe,
+        Config(), probe,
     )
 
 
@@ -46,7 +45,3 @@ def test_an_unestablished_answer_says_so(monkeypatch):
     assert result.status == doctor.WARN
     assert "cold memo" in result.detail
 
-
-@pytest.mark.parametrize("sandboxed", [True, False])
-def test_policy_off_withholds_nothing_to_confine(monkeypatch, sandboxed):
-    assert _check(monkeypatch, sandboxed=sandboxed, policy="off").status == doctor.SKIP

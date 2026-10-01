@@ -535,7 +535,7 @@ features = []
 
 # [security.credential_broker]
 # enabled = false                 # opt-in header substitution for snapshotted bound hosts
-# enforce_reveal = false          # audit public value reads; true refuses non-revealable values
+# enforce_reveal = false          # audit public value reads; true refuses non-revealable values (needs enabled)
 # scan_max_bytes = 1048576         # request scan and response scrub limit
 # leaf_validity_hours = 24         # positive lifetime for per-host TLS certificates
 # Enable enforcement after a week with no would_refuse credential_reveal events.
@@ -939,14 +939,6 @@ max_message_chars = 400
 timeout_seconds = 8.0
 # Days to keep the speech_gate_decisions audit rows (0 keeps them forever)
 decision_retention_days = 30
-
-[rooms]
-# What a task may read in a room more than one human reads. "restrict" gives it
-# only the scopes its sender granted in that room (skills marked safe, and the
-# room's own CHANNEL.md, are always available); the sender's files, memory and
-# private skills are withheld until they share them. "off" gives a shared-room
-# task everything a private one gets. Any other value restricts.
-shared_room_data_policy = "restrict"
 
 [money]
 # Whether the portfolio module may look up ticker metadata from a third-party
@@ -1732,7 +1724,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # Login methods: nextcloud, email, or both. Bare strings remain accepted.
 # Migrate with ["nextcloud", "email"], attach identities with istota auth add,
 # then select ["email"] after every user has an identity. Passwords are optional;
-# email sign-in links work without them when SMTP is configured.
+# emailed sign-in codes work without them when SMTP is configured.
 # ["none"] is exclusive and only supported by istota serve on loopback.
 # Direct uvicorn, Docker and Ansible refuse none, even on a loopback backend.
 # Never put a public proxy in front of the local no-auth launcher.
@@ -1740,12 +1732,12 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # auth = ["nextcloud"]
 # auth_enrol_ttl_hours = 168
 # auth_reset_ttl_hours = 1
-# auth_login_link_ttl_minutes = 15
+# auth_sign_in_code_ttl_minutes = 10  # an emailed code works only in the browser that asked for it
 # auth_min_password_length = 12
 # auth_throttle_window_seconds = 900
 # auth_throttle_max_email = 10
 # auth_throttle_max_ip = 30
-# auth_mail_link_max_email = 3
+# auth_mail_link_max_email = 3  # mails per address per hour, reset links and sign-in codes together
 # trusted_proxy_hops = 0  # Set only when the backend is restricted to trusted proxies.
 # oauth2_provider = "https://cloud.example.com"   # public NC URL the browser hits
 # oauth2_client_id = "istota-web"

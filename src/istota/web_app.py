@@ -826,7 +826,8 @@ button.btn { cursor: pointer; }
 }
 .email-panel { display: none; grid-column: 1 / -1; padding-top: 1.25rem; }
 #email-password:checked ~ .password-panel,
-#email-link:checked ~ .link-panel { display: block; }
+#email-code:checked ~ .code-panel { display: block; }
+.code-input { font-size: 1.4rem; letter-spacing: 0.3em; text-align: center; font-variant-numeric: tabular-nums; }
 .form-field { display: grid; gap: 0.4rem; }
 .password-label { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
 .recovery { color: var(--text-muted); font-size: 0.75rem; text-decoration: none; }
@@ -1049,7 +1050,7 @@ def _render_form_page(bot_name: str, headline: str, body: str, mark: str) -> str
 
 def _render_login_page(
     bot_name: str, mark: str, *, methods: list[str],
-    login_csrf: str = "", link_csrf: str = "", error: str | None = None,
+    login_csrf: str = "", code_csrf: str = "", error: str | None = None,
     email_prefill: str = "",
 ) -> str:
     body = f'<p class="form-error">{escape(error)}</p>' if error else ""
@@ -1063,8 +1064,8 @@ def _render_login_page(
             '<fieldset class="email-login"><legend class="visually-hidden">Sign in with email</legend>'
             '<input class="visually-hidden" type="radio" name="email-method" id="email-password" checked>'
             '<label class="email-choice" for="email-password">Password</label>'
-            '<input class="visually-hidden" type="radio" name="email-method" id="email-link">'
-            '<label class="email-choice" for="email-link">Email link</label>'
+            '<input class="visually-hidden" type="radio" name="email-method" id="email-code">'
+            '<label class="email-choice" for="email-code">Email code</label>'
             '<div class="email-panel password-panel">'
             '<form method="post" action="/istota/login/email">'
             f'<input type="hidden" name="csrf_token" value="{escape(login_csrf)}">'
@@ -1076,22 +1077,22 @@ def _render_login_page(
             '<input id="login-password" type="password" name="password" '
             'autocomplete="current-password" required></div>'
             '<button class="btn btn-primary" type="submit">Log in</button></form></div>'
-            '<div class="email-panel link-panel">'
-            '<form method="post" action="/istota/auth/login-link/request">'
-            f'<input type="hidden" name="csrf_token" value="{escape(link_csrf)}">'
-            '<div class="form-field"><label for="link-email">Email</label>'
-            f'<input id="link-email" type="email" name="email" value="{escape(email_prefill)}" '
-            'autocomplete="email" aria-describedby="link-help" required></div>'
-            '<p class="form-help" id="link-help">We’ll email you a one-time sign-in link. No password needed.</p>'
-            f'<button class="btn btn-primary" type="submit">{_MAIL_ICON}Send sign-in link</button>'
+            '<div class="email-panel code-panel">'
+            '<form method="post" action="/istota/auth/sign-in-code/request">'
+            f'<input type="hidden" name="csrf_token" value="{escape(code_csrf)}">'
+            '<div class="form-field"><label for="code-email">Email</label>'
+            f'<input id="code-email" type="email" name="email" value="{escape(email_prefill)}" '
+            'autocomplete="email" aria-describedby="code-help" required></div>'
+            '<p class="form-help" id="code-help">We’ll email you a 6-digit sign-in code. No password needed.</p>'
+            f'<button class="btn btn-primary" type="submit">{_MAIL_ICON}Email me a code</button>'
             '</form></div></fieldset>'
             '<script>'
             'const passwordEmail = document.getElementById("login-email");'
-            'const linkEmail = document.getElementById("link-email");'
-            'document.getElementById("email-link").addEventListener("change", () => {'
-            'linkEmail.value = passwordEmail.value;});'
+            'const codeEmail = document.getElementById("code-email");'
+            'document.getElementById("email-code").addEventListener("change", () => {'
+            'codeEmail.value = passwordEmail.value;});'
             'document.getElementById("email-password").addEventListener("change", () => {'
-            'passwordEmail.value = linkEmail.value;});'
+            'passwordEmail.value = codeEmail.value;});'
             '</script>'
         )
     return _render_form_page(bot_name, "Sign in to continue", body, mark)
@@ -1126,7 +1127,7 @@ async def login(request: Request):
     return HTMLResponse(_render_login_page(
         _config.bot_name, mark, methods=_config.web.auth,
         login_csrf=_csrf_token(request, "login"),
-        link_csrf=_csrf_token(request, "login-link-request"),
+        code_csrf=_csrf_token(request, "sign-in-code-request"),
     ), headers=_AUTH_PAGE_HEADERS)
 
 
@@ -1194,7 +1195,7 @@ async def _invalid_auth_link() -> HTMLResponse:
     return await _auth_error("This link is invalid", "It may have expired or already been used. Request a new link.", 400)
 
 
-async def _peek_auth_link(token: object, *, login: bool = False):
+async def _peek_auth_link(token: object):
     if not isinstance(token, str):
         return None
     try:
@@ -1202,23 +1203,21 @@ async def _peek_auth_link(token: object, *, login: bool = False):
     except Exception:
         logger.warning("Auth link lookup failed")
         return None
-    purposes = {"login"} if login else {"enrol", "reset"}
-    return record if record and record.purpose in purposes else None
+    return record if record and record.purpose in {"enrol", "reset"} else None
 
 
-async def _finish_link_sign_in(request: Request, result) -> Response:
-    if result is None:
-        return await _invalid_auth_link()
+async def _start_email_session(request: Request, result) -> Response | None:
+    """Mint the session for a verified email credential, or ``None`` if it went stale."""
     user_id, email, epoch = result
     try:
         profile = await asyncio.to_thread(user_profiles.get_profile, _config.db_path, user_id)
         identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user_id)
     except Exception:
-        logger.warning("Auth link session lookup failed")
-        return await _invalid_auth_link()
+        logger.warning("Email sign-in session lookup failed")
+        return None
     if (profile is None or identity is None or identity.disabled
             or identity.email != email or identity.credential_epoch != epoch):
-        return await _invalid_auth_link()
+        return None
     request.session.clear()
     request.session["user"] = {"username": user_id, "display_name": profile.display_name}
     request.session["auth"] = {"method": "email", "epoch": epoch}
@@ -1277,48 +1276,137 @@ async def set_password_submit(request: Request):
     except Exception:
         logger.warning("Auth link password update failed")
         return await _invalid_auth_link()
-    return await _finish_link_sign_in(request, result)
+    response = await _start_email_session(request, result) if result is not None else None
+    return response or await _invalid_auth_link()
 
 
-@auth_router.get("/auth/login-link")
-async def login_link_page(request: Request):
-    if not _config.web.has_method("email"):
-        raise HTTPException(status_code=404)
-    token = request.query_params.get("token", "")
-    if await _peek_auth_link(token, login=True) is None:
-        return await _invalid_auth_link()
-    body = (
-        '<form method="post" action="/istota/auth/login-link">'
-        f'<input type="hidden" name="token" value="{escape(token)}">'
-        f'<input type="hidden" name="csrf_token" value="{escape(_csrf_token(request, "login-link"))}">'
-        '<button class="btn" type="submit">Sign in</button></form>'
+# Email sign-in by code (ISSUE-574). The browser that asks holds a secret in its
+# signed session, and the emailed code redeems only together with it. A link
+# opened in whatever app reads the mail, iOS's browser rather than the istota
+# app's web view for one, could never complete a sign-in begun somewhere else.
+_SIGN_IN_SESSION_KEY = "sign_in"
+
+
+def _pending_sign_in(request: Request) -> dict | None:
+    value = request.session.get(_SIGN_IN_SESSION_KEY)
+    if isinstance(value, dict) and isinstance(value.get("secret"), str):
+        return value
+    return None
+
+
+async def _sign_in_code_form(request: Request, error: str = "", status_code: int = 200) -> HTMLResponse:
+    body = f'<p class="form-error">{escape(error)}</p>' if error else ""
+    body += (
+        '<p class="tagline">If this address can sign in, a 6-digit code is on its way. '
+        'Enter it here, in this window.</p>'
+        '<form method="post" action="/istota/auth/sign-in-code">'
+        f'<input type="hidden" name="csrf_token" value="{escape(_csrf_token(request, "sign-in-code"))}">'
+        '<div class="form-field"><label for="sign-in-code">Code</label>'
+        '<input id="sign-in-code" class="code-input" type="text" name="code" inputmode="numeric" '
+        'autocomplete="one-time-code" maxlength="9" required autofocus></div>'
+        '<button class="btn btn-primary" type="submit">Sign in</button></form>'
+        '<a class="recovery" href="/istota/login">Use a different address or send a new code</a>'
     )
-    return await _auth_form("Confirm sign-in", body)
+    return await _auth_form("Check your email", body, status_code)
 
 
-@auth_router.post("/auth/login-link")
-async def login_link_submit(request: Request):
+def _send_sign_in_code(config, request_id: str):
+    # BackgroundTask runs this after the response, so the identity lookup and
+    # the mail cannot be timed from the page.
+    try:
+        issued = web_auth.issue_sign_in_code_if_allowed(
+            config.db_path, web_auth.policy_from_config(config), request_id,
+        )
+        if issued is None:
+            return
+        code, identity = issued
+        profile = user_profiles.get_profile(config.db_path, identity.user_id)
+        if profile is None:
+            return
+        message = web_auth_mail.build_sign_in_code_email(
+            config.bot_name, profile.display_name, code, config.web.auth_sign_in_code_ttl_minutes,
+        )
+        web_auth_mail.send_auth_email(config, identity.email, *message)
+    except Exception:
+        # Backend/SMTP exception text may contain the address or the code.
+        logger.warning("Requested sign-in code could not be sent")
+
+
+@auth_router.post("/auth/sign-in-code/request")
+async def sign_in_code_request(request: Request):
     if not _config.web.has_method("email"):
         raise HTTPException(status_code=404)
     form = await request.form()
-    token = form.get("token", "")
-    if await _peek_auth_link(token, login=True) is None:
-        return await _invalid_auth_link()
-    if not _check_csrf(request, "login-link", form.get("csrf_token")):
+    if not _check_csrf(request, "sign-in-code-request", form.get("csrf_token")):
         return await _auth_error("This form expired", "Reload and try again.", 403)
+    email = form.get("email", "")
+    if not isinstance(email, str) or not email.strip() or len(email) > 320:
+        return await _auth_error("Sign-in failed", "Enter a valid email address.", 400)
+    email = web_auth.normalize_email(email)
+    policy = web_auth.policy_from_config(_config)
+    # Address-blind: the same gate as a password attempt, before any database work.
+    if not _admit_password_request(email, _client_ip(request), policy):
+        return await _auth_error("Too many attempts", "Wait a few minutes and try again.", 429)
+    # One secret per browser, so a repeat request past the mail budget leaves
+    # the code already sent working rather than stranding the user.
+    previous = _pending_sign_in(request)
+    secret = previous["secret"] if previous else secrets.token_urlsafe(32)
     try:
-        result = await asyncio.to_thread(web_auth.consume_login_token, _config.db_path, token)
+        request_id = await asyncio.to_thread(web_auth.start_sign_in, _config.db_path, policy, email, secret)
     except Exception:
-        logger.warning("Auth sign-in link consumption failed")
-        return await _invalid_auth_link()
-    return await _finish_link_sign_in(request, result)
+        logger.warning("Sign-in request could not be recorded")
+        return await _auth_error("Sign-in is unavailable", "Try again in a moment.", 503)
+    request.session[_SIGN_IN_SESSION_KEY] = {"secret": secret}
+    response = await _sign_in_code_form(request)
+    response.background = BackgroundTask(_send_sign_in_code, _config, request_id)
+    return response
+
+
+@auth_router.get("/auth/sign-in-code")
+async def sign_in_code_page(request: Request):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    if _pending_sign_in(request) is None:
+        return RedirectResponse("/istota/login", status_code=302, headers=_AUTH_PAGE_HEADERS)
+    return await _sign_in_code_form(request)
+
+
+@auth_router.post("/auth/sign-in-code")
+async def sign_in_code_submit(request: Request):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    form = await request.form()
+    if not _check_csrf(request, "sign-in-code", form.get("csrf_token")):
+        return await _auth_error("This form expired", "Reload and try again.", 403)
+    pending = _pending_sign_in(request)
+    code = form.get("code", "")
+    status, result = "dead", None
+    if pending is not None and isinstance(code, str):
+        try:
+            status, result = await asyncio.to_thread(
+                web_auth.redeem_sign_in_code, _config.db_path, pending["secret"], code,
+            )
+        except Exception:
+            logger.warning("Sign-in code redemption failed")
+            return await _auth_error("Sign-in is unavailable", "Try again in a moment.", 503)
+    if status == "ok":
+        response = await _start_email_session(request, result)
+        if response is not None:
+            return response
+    elif status == "bad":
+        return await _sign_in_code_form(request, "That code was not accepted. Check it and try again.", 400)
+    request.session.pop(_SIGN_IN_SESSION_KEY, None)
+    return await _auth_error(
+        "This code has expired",
+        "It may have been used, replaced by a newer one, or mistyped too many times. Request a new code.", 400,
+    )
 
 
 _mail_link_pending: set[tuple[str, str]] = set()
 _mail_link_lock = threading.Lock()
 
 
-def _send_requested_auth_link(config, email: str, purpose: str, pending_key: tuple[str, str]):
+def _send_requested_auth_link(config, email: str, pending_key: tuple[str, str]):
     # BackgroundTask runs this synchronous function through anyio's threadpool.
     # Its finally also runs if the HTTP request is cancelled during delivery.
     try:
@@ -1326,7 +1414,7 @@ def _send_requested_auth_link(config, email: str, purpose: str, pending_key: tup
 
         host, scheme = external_origin(config)
         issued = web_auth.issue_mail_link_if_allowed(
-            config.db_path, web_auth.policy_from_config(config), email, purpose,
+            config.db_path, web_auth.policy_from_config(config), email, "reset",
         )
         if issued is None:
             return
@@ -1334,16 +1422,10 @@ def _send_requested_auth_link(config, email: str, purpose: str, pending_key: tup
         profile = user_profiles.get_profile(config.db_path, identity.user_id)
         if profile is None:
             return
-        path = "login-link" if purpose == "login" else "set-password"
-        link = f"{scheme}://{host}/istota/auth/{path}?token={token}"
-        if purpose == "login":
-            message = web_auth_mail.build_login_link_email(
-                config.bot_name, profile.display_name, link, config.web.auth_login_link_ttl_minutes,
-            )
-        else:
-            message = web_auth_mail.build_reset_email(
-                config.bot_name, profile.display_name, link, config.web.auth_reset_ttl_hours,
-            )
+        link = f"{scheme}://{host}/istota/auth/set-password?token={token}"
+        message = web_auth_mail.build_reset_email(
+            config.bot_name, profile.display_name, link, config.web.auth_reset_ttl_hours,
+        )
         web_auth_mail.send_auth_email(config, identity.email, *message)
     except Exception:
         # Backend/SMTP exception text may contain the address or the token.
@@ -1351,31 +1433,6 @@ def _send_requested_auth_link(config, email: str, purpose: str, pending_key: tup
     finally:
         with _mail_link_lock:
             _mail_link_pending.discard(pending_key)
-
-
-async def _request_auth_link(request: Request, purpose: str):
-    if not _config.web.has_method("email"):
-        raise HTTPException(status_code=404)
-    form = await request.form()
-    csrf_purpose = "reset" if purpose == "reset" else "login-link-request"
-    if not _check_csrf(request, csrf_purpose, form.get("csrf_token")):
-        return await _auth_error("This form expired", "Reload and try again.", 403)
-    response = await _auth_form(
-        "Check your email",
-        '<p class="tagline">If this address can sign in, an email with a link will arrive shortly.</p>'
-        '<a class="btn" href="/istota/login">Back to sign in</a>',
-    )
-    email = form.get("email", "")
-    if isinstance(email, str) and len(email) <= 320:
-        email = web_auth.normalize_email(email)
-        key = (str(_config.db_path), email)
-        # Reserve after the final await, so cancellation during rendering cannot
-        # leave a marker for a background task that was never handed off.
-        with _mail_link_lock:
-            if key not in _mail_link_pending:
-                _mail_link_pending.add(key)
-                response.background = BackgroundTask(_send_requested_auth_link, _config, email, purpose, key)
-    return response
 
 
 @auth_router.get("/auth/reset")
@@ -1394,12 +1451,27 @@ async def reset_page(request: Request):
 
 @auth_router.post("/auth/reset")
 async def reset_submit(request: Request):
-    return await _request_auth_link(request, "reset")
-
-
-@auth_router.post("/auth/login-link/request")
-async def login_link_request(request: Request):
-    return await _request_auth_link(request, "login")
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    form = await request.form()
+    if not _check_csrf(request, "reset", form.get("csrf_token")):
+        return await _auth_error("This form expired", "Reload and try again.", 403)
+    response = await _auth_form(
+        "Check your email",
+        '<p class="tagline">If this address can sign in, an email with a link will arrive shortly.</p>'
+        '<a class="btn" href="/istota/login">Back to sign in</a>',
+    )
+    email = form.get("email", "")
+    if isinstance(email, str) and len(email) <= 320:
+        email = web_auth.normalize_email(email)
+        key = (str(_config.db_path), email)
+        # Reserve after the final await, so cancellation during rendering cannot
+        # leave a marker for a background task that was never handed off.
+        with _mail_link_lock:
+            if key not in _mail_link_pending:
+                _mail_link_pending.add(key)
+                response.background = BackgroundTask(_send_requested_auth_link, _config, email, key)
+    return response
 
 
 # Where a completed OAuth round trip may land, keyed rather than stored as a
@@ -2016,14 +2088,11 @@ async def _admin_send_auth_link(config, user_id: str, purpose: str):
         if identity.disabled or profile is None:
             raise ValueError("An enabled identity and a live profile are required to send a link")
         policy = web_auth.policy_from_config(config)
-        ttl = {"enrol": policy.enrol_ttl_seconds, "reset": policy.reset_ttl_seconds,
-               "login": policy.login_link_ttl_seconds}[purpose]
+        ttl = {"enrol": policy.enrol_ttl_seconds, "reset": policy.reset_ttl_seconds}[purpose]
         token = web_auth.issue_token(config.db_path, user_id, purpose, ttl, expected_identity=identity)
-        route = "login-link" if purpose == "login" else "set-password"
-        link = f"{scheme}://{host}/istota/auth/{route}?token={token}"
-        builder = {"enrol": web_auth_mail.build_enrol_email, "reset": web_auth_mail.build_reset_email,
-                   "login": web_auth_mail.build_login_link_email}[purpose]
-        message = builder(config.bot_name, profile.display_name, link, ttl // (60 if purpose == "login" else 3600))
+        link = f"{scheme}://{host}/istota/auth/set-password?token={token}"
+        builder = {"enrol": web_auth_mail.build_enrol_email, "reset": web_auth_mail.build_reset_email}[purpose]
+        message = builder(config.bot_name, profile.display_name, link, ttl // 3600)
         try:
             return web_auth_mail.send_auth_email(config, identity.email, *message)
         except Exception:
@@ -2032,7 +2101,7 @@ async def _admin_send_auth_link(config, user_id: str, purpose: str):
     sent = await _admin_auth_write(send)
     if not sent:
         logger.warning("Admin auth mail could not be sent user=%s purpose=%s", user_id, purpose)
-        raise HTTPException(status_code=502, detail="The invitation or sign-in link could not be sent. The identity is saved; try sending again.")
+        raise HTTPException(status_code=502, detail="The invitation or reset link could not be sent. The identity is saved; try sending again.")
     return {"sent": True}
 
 
@@ -2066,11 +2135,6 @@ async def admin_user_invite(user_id: str, _: dict = Depends(_require_admin), _cs
 @api_router.post("/admin/users/{user_id}/reset")
 async def admin_user_reset(user_id: str, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
     return await _admin_send_auth_link(_config, user_id, "reset")
-
-
-@api_router.post("/admin/users/{user_id}/login-link")
-async def admin_user_login_link(user_id: str, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
-    return await _admin_send_auth_link(_config, user_id, "login")
 
 
 @api_router.post("/admin/users/{user_id}/disable")
@@ -6195,45 +6259,6 @@ def _chat_claim_host(username: str, room_id: int) -> tuple[int, dict]:
     return 200, payload
 
 
-def _chat_room_grants(
-    username: str, room_id: int, scopes: list[str] | None = None,
-) -> tuple[int, dict]:
-    """The caller's own grants in a room; with ``scopes``, replaced by them first.
-
-    A grant is consent to disclose one's own data to the room (speech-gate B3),
-    so it takes no user id: the writer is the caller, always. Every name is
-    checked before anything is written, so a refused body changes nothing.
-    """
-    from . import db, room_scopes
-    from .skills._loader import load_skill_index
-
-    index = load_skill_index(_config.skills_dir, bundled_dir=_config.bundled_skills_dir)
-    names = room_scopes.scope_names(index)
-    with db.get_db(_config.db_path) as conn:
-        found = _chat_member_room(conn, username, room_id)
-        if found is None:
-            return 404, {"error": "room not found"}
-        _handle, reg = found
-        if reg.side_of:
-            return 409, {"error": "a side room is private to its member"}
-        if scopes is not None:
-            unknown = sorted(set(scopes) - set(names))
-            if unknown:
-                return 400, {"error": f"unknown scope: {', '.join(unknown)}"}
-            room_scopes.revoke_scopes(conn, reg.token, username)
-            room_scopes.grant_scopes(
-                conn, reg.token, username, [n for n in names if n in scopes],
-            )
-        granted = room_scopes.granted_scopes(conn, reg.token, username)
-        state = room_scopes.grant_state(
-            conn, reg.token, policy=_config.rooms.shared_room_data_policy,
-        )
-    return 200, {
-        "scopes": [{"name": n, "granted": n in granted} for n in names],
-        "state": state,
-    }
-
-
 def _chat_room_group(
     username: str, room_id: int, group_id=_UNSET,
 ) -> tuple[int, dict]:
@@ -8901,37 +8926,6 @@ async def chat_claim_room_host(
 ):
     status, payload = await asyncio.to_thread(
         _chat_claim_host, user["username"], room_id,
-    )
-    return JSONResponse(payload, status_code=status)
-
-
-@api_router.get("/chat/rooms/{room_id}/grants")
-async def chat_room_grants(
-    room_id: int,
-    user: dict = Depends(_require_api_auth),
-):
-    status, payload = await asyncio.to_thread(
-        _chat_room_grants, user["username"], room_id,
-    )
-    return JSONResponse(payload, status_code=status)
-
-
-@api_router.put("/chat/rooms/{room_id}/grants")
-async def chat_put_room_grants(
-    room_id: int,
-    request: Request,
-    user: dict = Depends(_require_api_auth),
-    _csrf: None = Depends(_verify_origin),
-):
-    try:
-        data = await request.json()
-    except ValueError:
-        data = None
-    scopes = data.get("scopes") if isinstance(data, dict) else None
-    if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
-        return JSONResponse({"error": "scopes: a list of names is required"}, status_code=400)
-    status, payload = await asyncio.to_thread(
-        _chat_room_grants, user["username"], room_id, scopes,
     )
     return JSONResponse(payload, status_code=status)
 

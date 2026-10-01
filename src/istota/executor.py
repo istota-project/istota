@@ -543,15 +543,17 @@ def task_temp_dir(
 ) -> Path:
     """The temp directory a task's sandbox binds and writes its deferred ops to.
 
-    The per-user directory for every task a room does not restrict. That
+    The per-user directory for every task nothing is withheld from. That
     directory is shared by all of the user's tasks in every room, so it holds
     what their private tasks left: downloads, staged attachments, deferred-op
-    files. A task whose room withholds anything (``restricted``) gets a
-    directory of its own inside it, bound instead of it, so a shared room's
-    audience cannot reach the rest (multiplayer Stage 13).
+    files. A task with anything withheld (``restricted``) gets a directory of
+    its own inside it, bound instead of it (multiplayer Stage 13). Since
+    ISSUE-576 that is a task in a shared room no member asked there (a guest's
+    turn takes the branch below), and the arm also answers for a task an
+    earlier release ran restricted, so a retry across the upgrade writes where
+    the scheduler reads.
 
-    A guest's turn always gets one, under its own prefix, whatever the room
-    withholds. It runs as the host (multiplayer D2) with less authority than
+    A guest's turn always gets one, under its own prefix. It runs as the host (multiplayer D2) with less authority than
     the host, and the per-user directory is where the host's other tasks leave
     deferred-op files the scheduler replays with the host's full authority,
     keyed by a task id the model can guess.
@@ -4472,8 +4474,8 @@ def resolve_sandbox_cache_dir(
     derivation exists to avoid, failing silently.
 
     Never raises. Every rejection falls open to the pre-ISSUE-305 behaviour,
-    because both callers run on the task path — for NativeBrain, per Bash call —
-    and the alternative to failing open is a config typo that fails every task.
+    because both callers run on the task path — for NativeBrain, once per task
+    attempt, when it spawns the tool server — and the alternative to failing open is a config typo that fails every task.
     """
     def _refuse(message: str) -> None:
         # Called from `build_bwrap_cmd` and from `execute_task`, on every task,
@@ -4485,7 +4487,8 @@ def resolve_sandbox_cache_dir(
 
     # Inside the `try`, deliberately, and this is not a style choice. The
     # never-raises contract is what both callers rest on, and one of them is
-    # `build_bwrap_cmd` under NativeBrain, which reaches this per Bash call. The
+    # `build_bwrap_cmd` under NativeBrain, which reaches this once per task
+    # attempt, so a raise here fails the attempt before any tool runs. The
     # branch selection touches paths: `get_user_repos_dir` guards only `OSError`
     # while `Path.resolve()` raises `ValueError` on an embedded null byte and
     # `Path(root) / user_id` raises `TypeError` on a non-str user id. The
@@ -5384,7 +5387,7 @@ def _build_talk_api_context(
 
     conversation_context = format_talk_context_for_prompt(
         relevant, truncation=config.conversation.context_truncation,
-        user_tz=user_tz,
+        user_tz=user_tz, principal=task.user_id,
     )
     logger.info(
         "Loaded %d Talk API context messages (%d chars) for task %d",
@@ -5495,7 +5498,7 @@ def _build_db_context(
         if relevant:
             conversation_context = format_context_for_prompt(
                 relevant, truncation=config.conversation.context_truncation,
-                user_tz=user_tz,
+                user_tz=user_tz, principal=task.user_id,
             )
             logger.info(
                 "Loaded %d context messages (%d chars) for task %d",
@@ -6215,7 +6218,7 @@ def room_card(
     """The room card (multiplayer D7): who reads this room and whom the bot serves.
 
     Built from tables, never from the model: the room's members and guests, its
-    host, and the scopes `_task_withheld_scopes` withholds from this turn. It is
+    host, and the scopes `_task_withheld_scopes` withholds from a guest's turn. It is
     in the system half, so it survives compaction and follows the two rules
     there — every scalar through `_header_scalar`, and nothing pointing into
     the user half.
@@ -6299,32 +6302,27 @@ def room_card(
     if persona_loaded:
         lines.append(f"The persona in use is that of '{principal}'.")
 
-    # A guest reading the room makes it `mixed` (D3): grants are ignored for
-    # everything posted here, the same rule `room_scopes` enforces.
-    mixed = readers.guests > 0 or task.audience == "mixed"
     if withheld_scopes is not None:
         scopes = ", ".join(_header_scalar(s) for s in sorted(withheld_scopes))
         if guest_turn:
             lines.append(
-                f"Withheld from this turn, whatever '{principal}' has granted, "
-                f"because a guest wrote it: {scopes or 'nothing'}."
+                f"Withheld from this turn, because a guest wrote it: "
+                f"{scopes or 'nothing'}."
             )
-        elif mixed and scopes:
+        elif withheld_scopes:
             lines.append(
-                f"Withheld from this turn, whatever '{principal}' has granted, "
-                f"because a guest reads this room: {scopes}."
-            )
-        elif scopes:
-            lines.append(
-                f"Withheld from this turn: {scopes}. '{principal}' can grant one "
-                "here with `!room share <scope>` (`!room share all` grants every "
-                "one); everyone in this room then sees answers that use it."
+                f"Withheld from this turn, because no member of this room asked "
+                f"it here: {scopes}."
             )
         else:
             lines.append(
-                "Nothing is withheld from this turn, so anything you reach may "
-                "end up in front of everyone here."
+                f"This turn runs with everything '{principal}' can reach, and "
+                "anything you reach may end up in front of everyone here. Their "
+                "personal memory is not loaded into this room; read it with the "
+                "memory skill only when they ask for it."
             )
+            if readers.guests > 0 or task.audience == "mixed":
+                lines.append("A guest reads this room.")
 
     if room_cli_available:
         if guest_turn:
@@ -6332,19 +6330,17 @@ def room_card(
                 f"Anything else goes to '{principal}''s private side room with "
                 "`istota-skill room whisper`."
             )
-        else:
-            if withheld_scopes:
-                lines.append(
-                    "If answering needs something withheld here, run "
-                    "`istota-skill room answer-privately`: it asks "
-                    f"'{principal}''s own question again in their side room, "
-                    "where only they read the answer. Then say here that you "
-                    "have answered privately, and do not answer it here."
-                )
+        elif withheld_scopes:
             lines.append(
                 f"Anything only '{principal}' should see goes to their private "
-                "side room with `istota-skill room whisper`; post to the room "
-                "only as your reply."
+                "side room with `istota-skill room whisper`."
+            )
+        else:
+            lines.append(
+                f"Anything only '{principal}' should see goes to their private "
+                "side room with `istota-skill room whisper`, or "
+                "`istota-skill room answer-privately` to answer their question "
+                "there instead; post to the room only as your reply."
             )
     lines.append("Room notes (CHANNEL.md) are read by everyone in this room.")
     return "".join(f"\n{line}" for line in lines)
@@ -7032,7 +7028,14 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # most the snapshot's 1000 characters, which is the price of the frame
     # always being there.
     reply_quote_section = ""
-    if task.reply_to_content:
+    if task.reply_to_content and channel_memory_shared:
+        # A room several people have written in: the quoted message may be
+        # another participant's, and this turn runs at full reach (ISSUE-576).
+        reply_quote_section = (
+            "Replying to this message, which may be another participant's:\n"
+            f"{frame_untrusted(task.reply_to_content, REPLY_QUOTE_LABEL)}\n\n"
+        )
+    elif task.reply_to_content:
         quoted = "\n".join(
             f"> {line}" for line in task.reply_to_content.splitlines() or [""]
         )
@@ -7351,59 +7354,68 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
     return assembled.prompt
 
 
+#: The fence label on a quoted reply parent in a shared room.
+REPLY_QUOTE_LABEL = "QUOTED MESSAGE"
+
+
 def _task_withheld_scopes(
     config: Config,
     conn: "db.sqlite3.Connection | None",
     task: db.Task,
     skill_index: dict,
 ) -> frozenset[str]:
-    """What this task's room withholds from it; empty outside a shared room.
+    """What this task may not reach (`room_scopes.withheld_for_task`).
 
     Read once per task and handed to every reach seam, so selection, the
     proxy's allowlist, the credential and hook env and the sandbox binds all
-    act on one answer. Fails toward withholding: a room whose audience or
-    grants cannot be read is restricted, never opened.
-
-    A database file that does not exist holds no room, so nothing is shared;
-    opening it to ask would create it.
+    act on one answer. A member's turn runs at full reach in every room
+    (ISSUE-576). A database that does not exist holds no room; one that cannot
+    be opened withholds every scope from a task whose answer depends on it.
     """
     from . import room_scopes
 
-    policy = config.rooms.shared_room_data_policy
-    if task.guest_participant_id is not None:
-        # Emissary mode (multiplayer D2); `room_scopes.withheld_for_task`
-        # answers it from the row alone, so no database is needed.
-        withheld = room_scopes.withheld_for_task(
-            None, task, policy=policy, skill_index=skill_index)
-        logger.info(
-            "emissary_mode task_id=%s room=%s withheld=%s",
-            task.id, task.conversation_token, ",".join(sorted(withheld)),
+    try:
+        with db.get_db_if_present(config.db_path, conn) as c:
+            withheld = room_scopes.withheld_for_task(c, task, skill_index=skill_index)
+    except Exception as exc:  # noqa: BLE001 — an unopenable DB restricts
+        logger.warning(
+            "could not open the database to read the room for task %s, "
+            "withholding every scope: %s", task.id, exc,
         )
-        return withheld
-    if policy == room_scopes.POLICY_OFF or not task.conversation_token:
-        return frozenset()
-    if conn is not None:
-        withheld = room_scopes.withheld_for_task(
-            conn, task, policy=policy, skill_index=skill_index)
-    else:
-        try:
-            with db.get_db_if_present(config.db_path) as temp_conn:
-                if temp_conn is None:
-                    return frozenset()
-                withheld = room_scopes.withheld_for_task(
-                    temp_conn, task, policy=policy, skill_index=skill_index)
-        except Exception as exc:  # noqa: BLE001 — an unopenable DB restricts
-            logger.warning(
-                "could not open the database to read room grants for task %s, "
-                "withholding every scope: %s", task.id, exc,
-            )
-            withheld = room_scopes.withheld_scopes(skill_index, frozenset())
+        withheld = room_scopes.all_scopes(skill_index)
     if withheld:
         logger.info(
-            "shared_room_restriction task_id=%s room=%s withheld=%s",
-            task.id, task.conversation_token, ",".join(sorted(withheld)),
+            "room_restriction task_id=%s room=%s guest=%s withheld=%s",
+            task.id, task.conversation_token, task.guest_participant_id is not None,
+            ",".join(sorted(withheld)),
         )
     return withheld
+
+
+def _ambient_memory_off(
+    config: Config, task: db.Task, conn: "db.sqlite3.Connection | None",
+) -> bool:
+    """``room_scopes.ambient_memory_off``, with the connection handling.
+
+    A database that does not exist holds no room. One that cannot be opened
+    leaves the memory out, as an unreadable audience does.
+    """
+    from . import room_scopes
+
+    if task.guest_participant_id is not None or task.audience == "mixed" \
+            or task.is_group_chat:
+        return True
+    if not task.conversation_token:
+        return False
+    try:
+        with db.get_db_if_present(config.db_path, conn) as c:
+            return room_scopes.ambient_memory_off(c, task)
+    except Exception as exc:  # noqa: BLE001 — unreadable means shared
+        logger.warning(
+            "could not read the audience for task %s, leaving ambient memory "
+            "out: %s", task.id, exc,
+        )
+        return True
 
 
 def _resolve_task_groups(
@@ -7905,8 +7917,11 @@ def execute_task(
 
     # Compute behavior flags from selected skills
     _selected_metas = [skill_index[n] for n in selected_skills if n in skill_index]
+    # A shared room leaves the sender's ambient memory out of the prompt
+    # (ISSUE-576); the memory skill is still there when they ask for it.
     _skip_memory = (
         any(m.exclude_memory for m in _selected_metas) or "memory" in _withheld
+        or _ambient_memory_off(config, task, conn)
     )
     _skip_persona = any(m.exclude_persona for m in _selected_metas)
 

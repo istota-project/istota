@@ -18,7 +18,7 @@ Deleting a room is a hard, token-scoped cascade across `task_events`, `tasks`, `
 
 The room's creator can add other Istota users under **Members** in the room settings. The add dialog says how many messages the new member will see, since they get the whole transcript. Only the creator adds or removes members; any other member can leave. A room bound to Talk takes its members from Talk instead.
 
-A room with more than one person is a [shared room](shared-rooms.md): the bot answers when addressed (`@name`, or its name as the first word) and records the rest, each member's private data stays out until they share it under **What you share here** (or with `!room share`), and settings that change the room for everyone are the host's. Each member's [side room](side-rooms.md) appears under the shared room in the sidebar. A room someone has switched off says so in a banner above the conversation, naming who switched it off.
+A room with more than one person is a [shared room](shared-rooms.md): the bot answers when addressed (`@name`, or its name as the first word) and records the rest, each member's turn runs with everything that member can reach except their personal memory, and settings that change the room for everyone are the host's. Each member's [side room](side-rooms.md) appears under the shared room in the sidebar. A room someone has switched off says so in a banner above the conversation, naming who switched it off.
 
 ## Sending a message
 

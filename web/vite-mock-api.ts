@@ -1200,7 +1200,7 @@ function mockAggregateRows(): any[] {
     .map((r) => ({ ...r.msg, _createdAtMs: r.createdAt }));
 }
 
-// Multiplayer rooms (shared rooms, grants, host, group link, veto). Room 3
+// Multiplayer rooms (shared rooms, host, group link, veto). Room 3
 // (`invoices`) is a web room carol shares with dave; room 2 (the Talk room) also
 // has a guest, who has switched the bot off there. Every other room is carol's
 // alone. The shapes follow `web_app._room_sharing` and the room endpoints.
@@ -1209,7 +1209,6 @@ const MOCK_DIRECTORY = [
   { user_id: 'dave', display_name: 'Dave' },
   { user_id: 'erin', display_name: 'Erin' },
 ];
-const MOCK_ROOM_SCOPES = ['files', 'memory', 'calendar', 'email', 'money', 'health'];
 const MOCK_GROUPS = [{ group_id: 'family', display_name: 'Family' }];
 const mockRoomMembers = new Map<number, string[]>([
   [2, ['carol', 'dave']],
@@ -1220,7 +1219,6 @@ const mockRoomHosts = new Map<number, string | null>([
   [3, 'carol'],
 ]);
 const mockRoomGuestReply = new Map<number, 'off' | 'held' | 'direct'>();
-const mockRoomGrants = new Map<number, Set<string>>();
 const mockRoomGroups = new Map<number, string | null>();
 const mockRoomsWithGuests = new Set<number>([2]);
 const mockRoomsOff = new Set<number>([2]);
@@ -1267,19 +1265,6 @@ function mockRoomSharing(room: MockChatRoom) {
       guest_reply: mockRoomGuestReply.get(room.id) ?? 'direct',
       settings_refusal: mockSettingsRefusal(room.id),
     },
-  };
-}
-
-function mockGrantState(id: number): string {
-  if (!mockRoomShared(id)) return 'private';
-  return mockRoomsWithGuests.has(id) ? 'guests_present' : 'active';
-}
-
-function mockRoomGrantsView(id: number) {
-  const granted = mockRoomGrants.get(id) ?? new Set<string>();
-  return {
-    scopes: MOCK_ROOM_SCOPES.map((name) => ({ name, granted: granted.has(name) })),
-    state: mockGrantState(id),
   };
 }
 
@@ -1539,9 +1524,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
     return { users: MOCK_DIRECTORY };
   }
   {
-    const m = path.match(
-      /^\/istota\/api\/chat\/rooms\/(\d+)\/(members|grants|host|group)(?:\/([^/]+))?$/,
-    );
+    const m = path.match(/^\/istota\/api\/chat\/rooms\/(\d+)\/(members|host|group)(?:\/([^/]+))?$/);
     const room = m ? mockChatRooms.find((r) => r.id === Number(m[1])) : undefined;
     if (m && !room) return { __status: 404, error: 'room not found' };
     if (m && room) {
@@ -1580,14 +1563,6 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
           members.filter((u) => u !== userId),
         );
         return { ok: true };
-      }
-      if (m[2] === 'grants' && method === 'GET') return mockRoomGrantsView(id);
-      if (m[2] === 'grants' && method === 'PUT') {
-        const scopes: unknown[] = Array.isArray(body?.scopes) ? body.scopes : [];
-        const unknown = scopes.find((x) => !MOCK_ROOM_SCOPES.includes(String(x)));
-        if (unknown !== undefined) return { __status: 400, error: `${unknown} is not a scope` };
-        mockRoomGrants.set(id, new Set(scopes.map(String)));
-        return mockRoomGrantsView(id);
       }
       if (m[2] === 'host' && method === 'POST') {
         const host = mockRoomHosts.get(id) ?? null;
@@ -3933,7 +3908,7 @@ const adminUsersHandler: MockHandler = ({ url, method, body }) => {
     return { updated: true };
   }
   if (method === 'POST' && match[2] === 'logout-all') return { updated: true };
-  if (method === 'POST' && ['invite', 'reset', 'login-link'].includes(match[2])) {
+  if (method === 'POST' && ['invite', 'reset'].includes(match[2])) {
     if (row.identity.disabled)
       return { __status: 400, detail: 'Enable web access before sending a link.' };
     return { sent: true };

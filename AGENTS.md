@@ -12,7 +12,7 @@ Subsystems:
 - `executor.md` — `execute_task()`, env mapping, prompt assembly, security
 - `prompts.md` — the two halves of a task prompt, and the control directory that hands them over
 - `scheduler.md` — daemon loop, worker pool, DB tables, deferred ops
-- `config.md` — every dataclass field + TOML mapping
+- `config.md` — the config rules that are not obvious from the dataclasses, and the TOML mapping
 - `skills.md` — skill metadata, single-axis selection (eager vs menu), per-skill user overlays, CLI modules
 - `transport.md` — Transport seam over messaging surfaces (Talk + email; Matrix / web chat designed-for), plus the room model, phone rooms (SMS and private WhatsApp: mint, transcript writes, backfill) and multiplayer rooms (speech gate, participants, host and guests, audience, epochs, shared-room delivery refusal)
 - `sms.md` — provider-neutral SMS surface, Twilio and Telnyx adapters, delivery states, switching, and the user's private SMS room
@@ -73,7 +73,7 @@ src/istota/
 │   ├── whatsapp/groups.py  # A Baileys group as a room: roster, registration, addressing, D14 leave → whatsapp.md
 │   └── email/threads.py  # A multi-party email thread as a room: minting, participants, reply-all → transport.md
 ├── speech_gate.py        # Whether the bot answers a turn in a multi-human room; every turn is recorded first → transport.md
-├── room_scopes.py        # Grants, the withheld-scope set every reach seam reads, and a task's resolved group set → sandbox.md
+├── room_scopes.py        # The withheld-scope set every reach seam reads, the ambient-memory rule, and a task's resolved group set → sandbox.md
 ├── room_policy.py        # Per-room host, guest_reply, audience class and readers; who may change a shared room → transport.md
 ├── room_veto.py          # `!<bot> off|on`, the one-time announcement, and the room-notices queue → transport.md
 ├── side_rooms.py         # A member's private room beside a shared one: whispers, held posts, guest proposals, side answers → relay.md
@@ -182,7 +182,7 @@ Admin user IDs in `/etc/istota/admins` (empty = all admin). Non-admins: scoped m
 
 ### Shared rooms
 
-A room may hold several humans: a Talk group, a web room with more than one member, a WhatsApp group (Baileys), an email thread with two or more humans besides the bot. **Every turn is recorded first, then the speech gate decides whether to answer** (`[speech_gate] mode = "mention"` by default, so a group turn is answered when it addresses the bot). Talk records guests, non-istota users and other bots as participants; the `config.users` test decides authority, not recording. A member's turn runs as that member; a guest's runs as the room's host at room-safe reach, with every scope withheld. In a shared room a member's private data reaches the task only through a scope they granted with `!room share`, enforced at the reach seams and the mount plan (`[rooms] shared_room_data_policy = "restrict"`), and grants are ignored while a guest is present. A shared room is never a delivery destination for personal content. Full rules in `.claude/rules/transport.md` ("Multiplayer rooms"), the binds in `.claude/rules/sandbox.md`.
+A room may hold several humans: a Talk group, a web room with more than one member, a WhatsApp group (Baileys), an email thread with two or more humans besides the bot. **Every turn is recorded first, then the speech gate decides whether to answer** (`[speech_gate] mode = "mention"` by default, so a group turn is answered when it addresses the bot). Talk records guests, non-istota users and other bots as participants; the `config.users` test decides authority, not recording. **A turn runs with its sender's reach** (ISSUE-576): a member's turn runs as that member at full reach, guest present or not, minus the ambient memory (`USER.md`, recall, knowledge facts, playbooks) no shared room loads into the prompt; a guest's turn runs as the room's host with every scope withheld, and so does a task nobody asked in the room (a cron job, briefing or subtask whose conversation is shared). Other participants' turns in history are fenced as untrusted. There are no per-room grants. A shared room is never a delivery destination for personal content. Full rules in `.claude/rules/transport.md` ("Multiplayer rooms"), the binds in `.claude/rules/sandbox.md`.
 
 ### Nextcloud Layout
 
@@ -221,7 +221,7 @@ Full posture, with the reasoning and the shape-by-shape caveats, in `.claude/rul
 - **Network proxy**: `--unshare-net` + CONNECT proxy on a Unix socket; allowlist of `host:port`. TLS interception only for hosts bound to a credential in the task snapshot, when the optional credential broker is enabled.
 - **Skill proxy**: strips secret env vars from the model; CLI calls go through a Unix socket that injects credentials server-side. Required wherever the sandbox is — `istota-skill` refuses to run in-sandbox rather than reaching for databases that are not there.
 - **Host paths in skill CLIs**: a skill CLI runs host-side with the daemon's filesystem view, so any verb taking a host path is scoped by `skill_host_paths.py` — never `NEXTCLOUD_MOUNT_PATH` whole. Symlinks rejected, callers use the returned resolved path.
-- **Shared rooms withhold by reach**: a task in a room more than one human reads gets only what its sender granted there. Without `files`, `{mount}/Users/{user_id}` is not bound; a restricted task gets its own `room-task-<id>` temp dir and no Talk bind; `files` without `memory` masks the memory directories. On a shape with no bwrap this is prompt and env only, and `doctor` warns.
+- **Shared rooms withhold by reach, for guests and unasked tasks only**: a guest's turn, and a task nobody asked in a shared room, withhold every scope. Then `{mount}/Users/{user_id}` is not bound, the task gets its own `emissary-task-<id>` / `room-task-<id>` temp dir and no Talk bind. A member's own turn binds what their private room does. On a shape with no bwrap this is prompt and env only, and `doctor` warns.
 - **No Docker API in the sandbox**: no socket is bound at any path and no `DOCKER_HOST` is exported. Project builds go to the user's devbox over the exec transport (`.claude/rules/devbox.md`).
 - **Native WebFetch tool**: daemon-netns, credential-free, SSRF-hardened, and **available to every user**. What bounds it is `[brain.native.web_fetch]`'s own egress policy, which binds every caller alike; `admin_only = true` restores the identity gate it shipped with.
 - **Deferred DB**: sandboxed tasks write JSON to the temp dir; the scheduler processes it after success. Identity (`user_id`, `conversation_token`) always from the task, never the JSON. Subtasks rate-limited and admin-only.
@@ -287,7 +287,7 @@ This repo is public, so `.githooks/pre-commit` scans staged content twice: `gitl
 
 Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config/istota/config.toml` → `/etc/istota/config.toml`. Override with `-c PATH`.
 
-Per-user data lives in DB tables (`user_profiles`, `user_resources`, `briefing_configs`, `secrets`) populated by `istota user|resource|briefing|secret ensure`. The `[users.X]` block in `config.toml` (docker entrypoint path) is also accepted; DB rows win at config-load time. The retired `config/users/{user}.toml` mechanism is gone. CalDAV derived from Nextcloud. Field-by-field reference in `.claude/rules/config.md`.
+Per-user data lives in DB tables (`user_profiles`, `user_resources`, `briefing_configs`, `secrets`) populated by `istota user|resource|briefing|secret ensure`. The `[users.X]` block in `config.toml` (docker entrypoint path) is also accepted; DB rows win at config-load time. The retired `config/users/{user}.toml` mechanism is gone. CalDAV derived from Nextcloud. The dataclasses in `config.py` and `config.example.toml` list every field; the non-obvious rules are in `.claude/rules/config.md`.
 
 ## Deployment
 

@@ -1516,23 +1516,6 @@ CREATE TABLE IF NOT EXISTS message_deletions (
     deleted_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- A member's standing consent for one room: when `user_id` is the sender in
--- `room_token`, this class of their data may be read and its answer may land in
--- a transcript the other members read. Absence is denial. `scope` is a skill
--- name or one of the synthetic scopes (`files`, `memory`). A grant is the
--- member's own and is never written on anyone else's behalf. Created empty and
--- never backfilled: granting everything to existing rooms would restore the
--- disclosure hole with no record that anyone chose it. The FK cascade is
--- decorative (foreign_keys unset); room deletion hand-deletes from here.
--- Kept equal to `db._ROOM_DATA_GRANTS_DDL` by tests/test_room_members_api.py.
-CREATE TABLE IF NOT EXISTS room_data_grants (
-    room_token TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
-    user_id    TEXT NOT NULL,
-    scope      TEXT NOT NULL,
-    granted_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (room_token, user_id, scope)
-);
-
 -- One row per room that has ever needed one: who hosts it and how it treats
 -- guests (multiplayer Stage 11, D2/D9/D11/D14). Made by
 -- `room_policy.ensure_policy` the first time a room is shared or a guest
@@ -2073,6 +2056,25 @@ CREATE TABLE IF NOT EXISTS web_auth_tokens (
     created_by TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_web_auth_tokens_user ON web_auth_tokens(user_id, purpose);
+
+-- Pending email sign-ins (ISSUE-574). A row is opened for any address typed on
+-- the sign-in page; `code_hash`, `user_id` and `credential_epoch` are set only
+-- when a code is minted for a live identity. Redeeming needs the code and the
+-- secret held by the client that opened the row; both are stored as digests.
+CREATE TABLE IF NOT EXISTS web_auth_sign_ins (
+    id INTEGER PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE,
+    secret_hash TEXT NOT NULL,
+    email TEXT NOT NULL,
+    code_hash TEXT,
+    user_id TEXT,
+    credential_epoch INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_web_auth_sign_ins_email ON web_auth_sign_ins(email, used_at);
 
 CREATE TABLE IF NOT EXISTS web_auth_attempts (
     id INTEGER PRIMARY KEY,

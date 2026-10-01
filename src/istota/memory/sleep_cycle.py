@@ -213,6 +213,12 @@ def _run_sleep_cycle_brain(
         sandbox_wrap=None,
         result_file=None,
     )
+    # The call runs for up to minutes. A write the caller left pending (facts,
+    # chunks, state) would otherwise hold the database's write lock across it,
+    # and every other writer fails at its busy timeout. Each sleep-cycle step
+    # is best-effort on its own, so committing here splits no unit of work.
+    if conn is not None and conn.in_transaction:
+        conn.commit()
     try:
         primary_started_at = time.time()
         primary_started_monotonic = time.monotonic()
@@ -235,9 +241,8 @@ def _run_sleep_cycle_brain(
     # This runs nightly, per user and per channel, against a general-tier model
     # and has no task row — which made it the largest single piece of spend the
     # deployment could not see.
-    # The caller's connection where it has one. Each pass holds a single write
-    # transaction for its duration, so opening a second connection here would
-    # block on the write lock for the full busy timeout.
+    # The caller's connection where it has one: it may hold a write again by
+    # now, and a second connection would wait on it for the full busy timeout.
     persist_brain_usage(
         config, conn, usage=result.usage, origin="sleep_cycle",
         user_id=user_id, brain_kind=result.brain_kind,

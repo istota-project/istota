@@ -1141,7 +1141,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_messages_author(conn)
     # After the author backfill, which is what it reads.
     _migrate_room_participants(conn)
-    _migrate_room_data_grants(conn)
+    _migrate_drop_room_data_grants(conn)
     _migrate_side_rooms(conn)
     _migrate_room_policy(conn)
     _migrate_room_veto(conn)
@@ -2892,6 +2892,7 @@ def _conversation_history_from_messages(
                COALESCE(t.source_type, mu.origin_surface) AS source_type,
                COALESCE(mu.author_user_id, t.user_id) AS user_id,
                mu.author_label AS author_label,
+               mu.author_user_id AS author_user_id,
                {EMAIL_SENDER_SUBQUERY.format(alias="t")}
         FROM messages mu
         LEFT JOIN tasks t
@@ -2937,13 +2938,24 @@ def _conversation_history_from_messages(
             # An answered email turn's sender comes off `processed_emails` as
             # before; an unanswered row has no task, so its stored label (already
             # sanitized at ingest) is the only record of who wrote it.
+            # A row with a label and no user id was written by somebody who is
+            # not a user (a guest, an outside correspondent), answered or not.
+            # Without this an answered guest turn reads as the host's own,
+            # since `user_id` falls back to the task's (ISSUE-576).
             external_sender=(
-                _external_sender_for_row(row, user_email_addresses)
+                (_external_sender_for_row(row, user_email_addresses)
+                 or _third_party_label(row))
                 if answered else row["author_label"]
             ),
             message_id=row["message_id"],
         ))
     return history
+
+
+def _third_party_label(row) -> str | None:
+    if row["author_user_id"] is None and row["author_label"]:
+        return row["author_label"]
+    return None
 
 
 def _messages_caught_up(conn: sqlite3.Connection, conversation_token: str) -> bool:
@@ -4372,7 +4384,6 @@ def delete_web_chat_room(
     conn.execute(f"DELETE FROM room_members WHERE room_token IN ({ref_marks})", refs)
     conn.execute(f"DELETE FROM room_dismissals WHERE room_token IN ({ref_marks})", refs)
     conn.execute(f"DELETE FROM room_participants WHERE room_token IN ({ref_marks})", refs)
-    conn.execute(f"DELETE FROM room_data_grants WHERE room_token IN ({ref_marks})", refs)
     conn.execute(f"DELETE FROM room_policy WHERE room_token IN ({ref_marks})", refs)
     conn.execute(f"DELETE FROM room_vetoes WHERE room_token IN ({ref_marks})", refs)
     conn.execute(f"DELETE FROM room_notices WHERE room_token IN ({ref_marks})", refs)
@@ -7831,35 +7842,21 @@ def _migrate_room_participants(conn: sqlite3.Connection) -> None:
     )
 
 
-# Kept equal to schema.sql's copy by tests/test_room_members_api.py.
-_ROOM_DATA_GRANTS_DDL = """
-CREATE TABLE IF NOT EXISTS room_data_grants (
-    room_token TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
-    user_id    TEXT NOT NULL,
-    scope      TEXT NOT NULL,
-    granted_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (room_token, user_id, scope)
-)
-"""
+def _migrate_drop_room_data_grants(conn: sqlite3.Connection) -> None:
+    """Drop the retired per-room scope grants (ISSUE-576).
 
+    A member's turn in a shared room now runs at full reach, so a grant decides
+    nothing and its rows carry nothing forward. One way: a checkout rolled back
+    past this recreates the table empty from its own `schema.sql`, which reads
+    as "nothing granted", the default every member had before granting.
 
-def _migrate_room_data_grants(conn: sqlite3.Connection) -> None:
-    """Create `room_data_grants`, empty, and record that it was created empty.
-
-    **No backfill, and the marker is what says so.** Granting every scope to
-    every existing shared room would reopen the disclosure hole the table exists
-    to close, under a name that looks like consent nobody gave. The marker
-    (`room_grants_v1`) records that this database got the table with nothing in
-    it, so a later migration cannot mistake an empty table on an upgraded
-    install for one that predates the decision.
+    `IF EXISTS` and no marker, as `_migrate_drop_retired_vault_table`: the
+    statement is idempotent and a failed run is retried by the next boot.
     """
-    conn.execute(_ROOM_DATA_GRANTS_DDL)
     try:
-        conn.execute(
-            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_grants_v1')"
-        )
-    except sqlite3.OperationalError:
-        return  # marker table not created yet (very early fresh install)
+        conn.execute("DROP TABLE IF EXISTS room_data_grants")
+    except sqlite3.OperationalError as e:
+        logger.warning("retired room grants table drop failed: %s", e)
 
 
 def _migrate_side_rooms(conn: sqlite3.Connection) -> None:

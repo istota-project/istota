@@ -1,4 +1,4 @@
-"""The shared-room scope vocabulary, the grant reads and the ``safe`` markings."""
+"""The shared-room scope vocabulary, who withholds what, and the ``safe`` markings."""
 
 from __future__ import annotations
 
@@ -27,14 +27,6 @@ def conn(tmp_path):
         yield c
 
 
-def _grant(conn, token, user_id, *scopes):
-    for scope in scopes:
-        conn.execute(
-            "INSERT INTO room_data_grants (room_token, user_id, scope) VALUES (?, ?, ?)",
-            (token, user_id, scope),
-        )
-
-
 def _shared_room(conn) -> str:
     room = db.create_web_chat_room(conn, "alice", "Family")
     db.add_room_member(conn, room.token, "bob")
@@ -46,74 +38,129 @@ class TestTheVocabulary:
         index = _index(calendar="private", web="safe", money="private")
         assert room_scopes.scope_names(index) == ["calendar", "money", "files", "memory"]
 
-    def test_withheld_is_the_complement_of_granted(self):
-        index = _index(calendar="private", money="private")
-        withheld = room_scopes.withheld_scopes(index, frozenset({"calendar", "files"}))
-        assert withheld == {"money", "memory"}
-
-
-class TestTheGrantReads:
-    def test_nothing_is_granted_by_default(self, conn):
-        assert room_scopes.granted_scopes(conn, _shared_room(conn), "alice") == frozenset()
-
-    def test_a_grant_is_the_granting_users_own(self, conn):
-        token = _shared_room(conn)
-        _grant(conn, token, "alice", "calendar")
-        assert room_scopes.is_scope_granted(conn, token, "alice", "calendar")
-        assert not room_scopes.is_scope_granted(conn, token, "bob", "calendar")
-
-    def test_a_read_error_grants_nothing(self):
-        broken = sqlite3.connect(":memory:")
-        assert room_scopes.granted_scopes(broken, "t", "alice") == frozenset()
+    def test_all_scopes_is_every_scope(self):
+        index = _index(calendar="private", web="safe")
+        assert room_scopes.all_scopes(index) == {"calendar", "files", "memory"}
 
 
 class TestWhatATaskIsWithheld:
+    """ISSUE-576: a turn runs with its sender's reach."""
+
     INDEX = _index(calendar="private", sensitive_actions="safe")
 
-    def _withheld(self, conn, token, *, policy="restrict", user_id="alice"):
-        return room_scopes.task_withheld_scopes(
-            conn, policy=policy, conversation_token=token, user_id=user_id,
-            skill_index=self.INDEX,
-        )
+    def test_a_members_turn_in_a_shared_room_withholds_nothing(self, make_task):
+        task = make_task(user_id="alice", conversation_token="room-1", is_group_chat=True,
+                         source_type="talk")
+        assert room_scopes.withheld_for_task(None, task, skill_index=self.INDEX) == frozenset()
 
-    def test_a_private_room_withholds_nothing(self, conn):
+    def test_a_members_turn_with_a_guest_present_withholds_nothing(self, make_task):
+        task = make_task(user_id="alice", conversation_token="room-1", audience="mixed",
+                         source_type="web")
+        assert room_scopes.withheld_for_task(None, task, skill_index=self.INDEX) == frozenset()
+
+    def test_a_guests_turn_withholds_every_scope(self, make_task):
+        task = make_task(user_id="alice", conversation_token="room-1", guest_participant_id=7)
+        assert room_scopes.withheld_for_task(None, task, skill_index=self.INDEX) == {
+            "calendar", "files", "memory",
+        }
+
+
+class TestATaskNobodyAskedInTheRoom:
+    """A cron job, a briefing or a subtask whose conversation is a shared room
+    lands its answer there with no member asking, so it runs at room-safe reach."""
+
+    INDEX = _index(calendar="private")
+
+    @pytest.mark.parametrize("source_type", ["scheduled", "briefing", "subtask"])
+    def test_a_shared_room_withholds_every_scope(self, conn, make_task, source_type):
+        task = make_task(user_id="alice", conversation_token=_shared_room(conn),
+                         source_type=source_type)
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == {
+            "calendar", "files", "memory",
+        }
+
+    def test_control_a_members_turn_there_withholds_nothing(self, conn, make_task):
+        task = make_task(user_id="alice", conversation_token=_shared_room(conn),
+                         source_type="web")
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == frozenset()
+
+    def test_control_a_private_room_withholds_nothing(self, conn, make_task):
         room = db.create_web_chat_room(conn, "alice", "Mine")
-        assert self._withheld(conn, room.token) == frozenset()
+        task = make_task(user_id="alice", conversation_token=room.token,
+                         source_type="scheduled")
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == frozenset()
 
-    def test_a_shared_room_withholds_every_ungranted_scope(self, conn):
-        token = _shared_room(conn)
-        _grant(conn, token, "alice", "files")
-        assert self._withheld(conn, token) == {"calendar", "memory"}
+    def test_an_unreadable_audience_withholds_everything(self, make_task):
+        broken = sqlite3.connect(":memory:")
+        task = make_task(user_id="alice", conversation_token="t", source_type="scheduled")
+        assert room_scopes.withheld_for_task(broken, task, skill_index=self.INDEX) == {
+            "calendar", "files", "memory",
+        }
 
-    def test_a_task_marked_group_chat_is_restricted_before_the_roster_is(self, conn):
-        # A Talk group's first turn, or one whose roster fetch failed: the
-        # surface said group, the participants table does not know yet.
+
+class TestATurnWrittenBySomeoneElse:
+    """An outside correspondent's reply continuing a shared room's email
+    thread runs as the member it was routed to, but no member asked it."""
+
+    INDEX = _index(calendar="private")
+
+    def _turn(self, conn, token, **author):
+        tid = db.create_task(conn, user_id="alice", source_type="email",
+                             prompt="p", conversation_token=token)
+        db.add_message(conn, token, role="user", body="p", origin_surface="email",
+                       task_id=tid, **author)
+        return db.get_task(conn, tid)
+
+    def test_an_outside_sender_withholds_every_scope(self, conn):
+        task = self._turn(conn, _shared_room(conn), author_label="carol@example.com")
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == {
+            "calendar", "files", "memory",
+        }
+
+    def test_control_the_members_own_mail_withholds_nothing(self, conn):
+        task = self._turn(conn, _shared_room(conn), author_user_id="alice")
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == frozenset()
+
+    def test_control_a_private_room_withholds_nothing(self, conn):
         room = db.create_web_chat_room(conn, "alice", "Mine")
-        assert room_scopes.task_withheld_scopes(
-            conn, policy="restrict", conversation_token=room.token, user_id="alice",
-            skill_index=self.INDEX, assume_shared=True,
-        ) == {"calendar", "files", "memory"}
+        task = self._turn(conn, room.token, author_label="carol@example.com")
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == frozenset()
 
-    def test_policy_off_withholds_nothing(self, conn):
-        assert self._withheld(conn, _shared_room(conn), policy="off") == frozenset()
 
-    def test_no_conversation_withholds_nothing(self, conn):
-        assert self._withheld(conn, "") == frozenset()
+class TestAmbientMemory:
+    """The one thing a member's turn in a shared room loses."""
 
-    def test_a_surface_ref_is_read_against_its_room(self, conn):
-        # A promoted room's Talk ref differs from its canonical token, and a
-        # task can carry either; the audience and the grants are the room's.
+    def test_a_shared_room_leaves_it_out(self, conn, make_task):
+        task = make_task(user_id="alice", conversation_token=_shared_room(conn))
+        assert room_scopes.ambient_memory_off(conn, task) is True
+
+    def test_a_surface_ref_is_read_against_its_room(self, conn, make_task):
         token = _shared_room(conn)
         db.add_room_binding(conn, token, "talk", "talk-ref-1")
-        _grant(conn, token, "alice", "calendar", "files", "memory")
-        assert self._withheld(conn, "talk-ref-1") == frozenset()
+        task = make_task(user_id="alice", conversation_token="talk-ref-1")
+        assert room_scopes.ambient_memory_off(conn, task) is True
 
-    def test_an_unreadable_audience_withholds_everything(self):
+    def test_control_a_private_room_keeps_it(self, conn, make_task):
+        room = db.create_web_chat_room(conn, "alice", "Mine")
+        task = make_task(user_id="alice", conversation_token=room.token)
+        assert room_scopes.ambient_memory_off(conn, task) is False
+
+    def test_no_conversation_keeps_it(self, conn, make_task):
+        assert room_scopes.ambient_memory_off(conn, make_task(user_id="alice")) is False
+
+    @pytest.mark.parametrize("fields", [
+        {"is_group_chat": True}, {"audience": "mixed"}, {"guest_participant_id": 3},
+    ])
+    def test_the_task_row_alone_can_say_shared(self, fields, make_task):
+        # A Talk group's first turn, a stored mixed audience, a guest's turn:
+        # no database is needed, and none is consulted.
+        task = make_task(user_id="alice", conversation_token="t", **fields)
+        assert room_scopes.ambient_memory_off(None, task) is True
+
+    def test_an_unreadable_audience_leaves_it_out(self, make_task):
         broken = sqlite3.connect(":memory:")
-        assert room_scopes.task_withheld_scopes(
-            broken, policy="restrict", conversation_token="t", user_id="alice",
-            skill_index=self.INDEX,
-        ) == {"calendar", "files", "memory"}
+        task = make_task(user_id="alice", conversation_token="t")
+        assert room_scopes.ambient_memory_off(broken, task) is True
 
 
 class TestTheManifestField:

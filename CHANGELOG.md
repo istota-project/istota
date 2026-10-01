@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Room identity migration now carries channel memories and scheduled destinations to the new room names. Interrupted moves can resume, conflicting files are left for an operator to resolve, and schedule files are backed up before rewriting.
 
-- The web chat room list marks a shared room with a people icon, so a room that someone besides you reads is visible before you open it. For a shared Talk room, the icon's tooltip says it is also on Nextcloud Talk.
+- The web chat room list marks a shared room with a people icon, so a room that someone besides you reads is visible before you open it. For a shared Talk room, the icon's tooltip says it is also on Nextcloud Talk. The same icon follows the room name in the chat header, so it stays visible when the room list is closed.
+- In a shared web chat room, an `@name` mention of a room member or of the bot is highlighted in the message, and a mention of you stands out more than one of somebody else. Only members' user ids and the bot's name count, never a display name or any other `@word`, and an `@` inside code is left alone.
+- Typing `@` in a shared web chat room's composer suggests the room's members and the bot, filtered by user id or display name as you type, the way `!` suggests commands. Accepting one inserts a mention that renders highlighted.
 - Rooms can hold more than one person on every surface. A web chat room's creator can add other users of the installation under Members, Talk group conversations work as before, a WhatsApp group the bot's number is in becomes a room on the Baileys adapter, and an email thread with two or more people besides the bot becomes a room for its owner. See [shared rooms](docs/features/shared-rooms.md).
 
 - Every message in a shared room is now recorded, and a speech gate decides whether the bot answers. `[speech_gate] mode = "mention"` (the default) answers a message that addresses the bot, `"classifier"` lets a cheap model decide from the last few turns and stays quiet when it fails, and `"off"` answers everything. The unanswered turns are part of the context when somebody does ask, and every decision is logged in `speech_gate_decisions` with no message text.
@@ -30,15 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Each member of a shared room has a private side room beside it, for anything meant for them and not the room. Confirmations, private answers (`istota-skill room whisper`), a guest's held reply and your own backstage notes land there, and a task there posts into the room only through `istota-skill room post`, which is held for your approval with the exact text shown. On the web it sits under the room in the sidebar and can show inline as a bubble only you see; on Talk, WhatsApp and email it is your private chat or mail headed "re: <room>". See [side rooms](docs/features/side-rooms.md).
 
-- `!room share <scope>` lets you share one kind of your data (calendar, files, memory, a skill) for your own turns in one shared room, with `!room share all|none` and `!room unshare <scope>` beside it and toggles in the room settings. When a question needs something the room withholds, the bot answers it in your side room instead (`istota-skill room answer-privately`) and tells the room it did.
+- In a shared room the bot answers a member with everything it can use for them in their private room, with or without a guest present, apart from their personal memory: `USER.md`, recalled memories, remembered facts and playbooks are never loaded into a shared room's prompt, and the bot reads a note only when asked. A guest's turn, and a task nobody asked in the room such as a scheduled job, runs with none of the host's data. Other participants' messages reach the model fenced as someone else's words. When an answer should stay private, the bot can answer it in your side room (`istota-skill room answer-privately`) and tell the room it did.
 
 - Anyone in a shared room, guests included, can switch the bot off there with `!<bot name> off`. While it is off, nothing in the room is recorded or answered; it comes back when a member sends `!<bot name> on` and everyone who switched it off agrees or has left. Removing the bot's number from a WhatsApp group does the same. The bot also introduces itself once to a room with a guest: who it is, whom it works for, and how to switch it off. See [switching the bot off](docs/features/room-veto.md).
 
-- A shared room's system prompt carries a room card: who reads the room, whom the bot is acting for and who hosts, whose persona is in use, and what is withheld from this turn and how to share it. It replaces the single "This is a group conversation" sentence, and it names nobody by display name.
+- A shared room's system prompt carries a room card: who reads the room, whom the bot is acting for and who hosts, whose persona is in use, and what this turn can use. It replaces the single "This is a group conversation" sentence, and it names nobody by display name.
 
 - `!room host` takes over a room whose host has left, `!room group [<id>|none]` links a room to a [group](docs/features/groups.md#linking-a-room-to-a-group) so that group's memory loads there for members' turns, and the same three settings are in the web room settings for the host.
 
-- `istota doctor` warns (`security.room_scope_confinement`) when shared rooms restrict data on a deployment with no bubblewrap sandbox, where a withheld scope is removed from the prompt and the environment but not from the filesystem.
+- `istota doctor` warns (`security.room_scope_confinement`) on a deployment with no bubblewrap sandbox, where a guest's turn loses the host's data in the prompt and the environment but can still read the host's files on disk.
 
 - Users of one installation can now share a memory as a group: a family, a team, any named set of people. Each group has a `GROUP.md` that loads into every member's prompt as "Group memory", and a key-value store reached with `istota-skill kv ... --group <id>`. The bot writes to them only when a member asks, never from the nightly sleep cycle. Everything in a group's store may be said in front of every current and future member, so in a room with anyone outside the group none of it loads, and a member's conversation with the bot alone loads all of their groups. Group material reaches the model fenced as untrusted content, since any member can write it. The operator creates groups and manages membership with `istota group`; membership is kept as a history rather than deleted. See `docs/features/groups.md`.
 
@@ -82,12 +84,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - New rooms use independent room IDs in their links and memory folders. Talk delivery uses the bound conversation address, including for rooms first opened in Talk.
 
+- Email sign-in now sends a 6-digit code instead of a link, and the code works only in the browser or app that asked for it. On iOS the link opened in Safari, so the istota app never got the session; you now type the code into the app, and Mail can fill it in for you. Each code allows five tries, and wrong codes are capped at 20 per address per day. The admin "Send sign-in link" action is gone, and `istota auth login-link` is replaced by `istota auth sign-in-code <user>`, which prints a fresh code for the user's pending sign-in when mail is down. Password setup and reset links are unchanged. **Upgrade note:** `[web] auth_login_link_ttl_minutes` is now `auth_sign_in_code_ttl_minutes` (default 10); the old key is still read and logs a warning, but the Ansible variable `istota_web_auth_login_link_ttl_minutes` is ignored, so rename it to `istota_web_auth_sign_in_code_ttl_minutes` if you set it. (ISSUE-574)
 - A room colour now only tints the room's row in the web chat sidebar. The dot it also added beside the room name is gone.
-- **Breaking:** a task in a shared room now reads only what its sender has shared there. `[rooms] shared_room_data_policy = "restrict"` is the default, so on the day you upgrade every existing group Talk room loses access to each member's `USER.md`, workspace and private skills until that member runs `!room share all` (or shares single scopes) in the room. There is deliberately no migration that shares everything for existing rooms. `shared_room_data_policy = "off"` restores the old reach for members' turns.
-
-  **Upgrade note:** decide per room. In each group room where members want the bot to use their data in front of the others, each of them runs `!room share all` there; otherwise leave it restricted.
-
-- While a guest is present in a room, every member's shares are ignored, because an answer there reaches the guest. The card and `!room share` say so.
+- In a group Talk room your `USER.md`, recalled memories, remembered facts and playbooks are no longer put into the prompt, since everyone in the room reads the answer. Everything else your turns could use there is unchanged.
 
 - A shared room can no longer receive personal deliveries. Briefings, alerts, the activity log and routes naming a room more than one person reads are dropped with a warning, the settings pages refuse to save such a room, and a default room that becomes shared stops being the default. A reply to a turn asked in the room still lands there.
 
@@ -111,9 +110,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A group can no longer be named `none`, so `!room group none` always removes a room's link.
 
-- **Upgrade note:** a deploy runs these markered migrations on the framework database, in this order, and none of them shares anybody's data: `room_participants_v1` (the `room_participants` table and a backfill of the Talk and web authors of existing turns into it and into `messages.author_participant_id`), `room_grants_v1` (`room_data_grants`, empty), `side_rooms_v1` (`rooms.side_of`, `rooms.side_for_user`), `room_policy_v1` (`room_policy`, empty), `room_veto_v1` (three `room_policy` columns, `room_vetoes`, `room_notices`), `room_epochs_v1` (`room_epochs`, with a `pending:talk` marker for every existing Talk-bound room so its next roster is taken as the baseline), `groups_v1` and `room_group_v1` (`rooms.group_id`). After those it rebuilds `whatsapp_skill_requests` for the `side_whisper` and `room_post` kinds plus `origin` and `destination` columns; a refused rebuild rolls back and is retried at the next start, refusing only rows of the new kinds meanwhile. It also adds `processed_emails.recipients` and the `speech_gate_decisions` table.
+- **Upgrade note:** a deploy runs these markered migrations on the framework database, in this order, and none of them shares anybody's data: `room_participants_v1` (the `room_participants` table and a backfill of the Talk and web authors of existing turns into it and into `messages.author_participant_id`), `side_rooms_v1` (`rooms.side_of`, `rooms.side_for_user`), `room_policy_v1` (`room_policy`, empty), `room_veto_v1` (three `room_policy` columns, `room_vetoes`, `room_notices`), `room_epochs_v1` (`room_epochs`, with a `pending:talk` marker for every existing Talk-bound room so its next roster is taken as the baseline), `groups_v1` and `room_group_v1` (`rooms.group_id`). After those it rebuilds `whatsapp_skill_requests` for the `side_whisper` and `room_post` kinds plus `origin` and `destination` columns; a refused rebuild rolls back and is retried at the next start, refusing only rows of the new kinds meanwhile. It also adds `processed_emails.recipients` and the `speech_gate_decisions` table, and drops `room_data_grants` where an earlier build of this release created it.
 
-- **Upgrade note:** new settings `[speech_gate]` (`mode`, `model`, `window_messages`, `max_message_chars`, `timeout_seconds`, `decision_retention_days`) and `[rooms] shared_room_data_policy`. Docker reads `ISTOTA_SPEECH_GATE_*` and `ISTOTA_ROOMS_SHARED_ROOM_DATA_POLICY`; Ansible reads `istota_speech_gate_*` and `istota_rooms_shared_room_data_policy`.
+- **Upgrade note:** new settings `[speech_gate]` (`mode`, `model`, `window_messages`, `max_message_chars`, `timeout_seconds`, `decision_retention_days`). Docker reads `ISTOTA_SPEECH_GATE_*`; Ansible reads `istota_speech_gate_*`. A config that still sets `[rooms] shared_room_data_policy`, from an earlier build of this release, gets a warning and the key is ignored.
 
 - **Upgrade note:** after upgrading, each existing room with a guest present and a host gets the bot's one-time announcement, posted by the scheduler.
 
@@ -148,6 +147,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `browse interact --click` and `--fill` now drive the page the way the coordinate flags already did: the pointer travels to the element and presses it, and a value is typed key by key rather than inserted whole. A filled field used to receive no keystroke at all — the value simply appeared, which is exactly what a login form behind bot detection is watching for — and a click arrived with no movement behind it. Measured on the shipped container, the same fill went from no key events to ten, and a click from one pointer movement to fifteen along an approach path. Selectors, results and error codes are unchanged, each action now reports which element it matched, and the older method is still there as an automatic fallback when the typed path cannot run.
 
 ### Fixed
+
+- The nightly sleep cycle no longer holds the database write lock while it waits on a model call. It inserted knowledge facts and then ran USER.md curation on the same open transaction, so for about a minute every other writer failed with `database is locked`, including the web credentials page, which then showed nothing.
 
 - The credential vault card counts each credential once instead of counting its password, username and other fields separately. The credentials card description now wraps at the same width as the vault card.
 
@@ -277,9 +278,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- With the credential broker enabled, a host-side skill such as `browse interact --fill-credential` now honours the credential's grant: it needs an entry granted to the task when it started, so an ungranted entry, a room the grant does not cover, or a scheduled task without scheduled use is refused. A task may still fill an entry it created itself with `istota-credential new`. Before, grants bound only the proxy's header substitution.
+
+- `enforce_reveal` now takes effect only with the credential broker enabled, and the daemon warns at startup when it is set without it. Enforcement without the broker refused every git and `gh`/`glab` call.
+
+- A task in a shared room with the developer skill withheld no longer removes your forge bindings, which made your other running tasks fail to authenticate to the forge.
+
 - The Nextcloud skill no longer lets a task post into, rename, describe, invite into, leave or delete a Talk conversation that someone other than the task's user reads, except a post into the room the task was asked in. Before, a private task could post into a group room directly and skip the held `room post`. `talk invite` and `talk create --invite` from a task invite only the caller.
 
-- With your memory withheld in a shared room, the Nextcloud skill's WebDAV verbs refuse your `USER.md`, dated memories and playbooks, `files list` and `files search` leave their names out, and the sandbox masks them even when your files are shared. A task cannot rename the bot directory to get around the masks.
+- On a guest's turn the Nextcloud skill's file and share verbs refuse the host's workspace, and `files list` and `files search` leave the host's memory directories out.
 
 - A guest's turn runs in a temp directory of its own rather than the host's, so it cannot leave a deferred operation for the host's next task to replay at the host's authority, and it has no native web fetch or search.
 

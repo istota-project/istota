@@ -1,8 +1,10 @@
-"""A shared room reads only what its members granted, at every reach seam.
+"""A turn runs with its sender's reach, at every reach seam (ISSUE-576).
 
-The disclosure gate is a boundary only if every route to a member's private
-data is cut, so this drives one real task through ``execute_task`` and asserts
-at four seams, each of which passes in a state the others refuse:
+A member's turn in a shared room reaches everything their private room does:
+asking in a room they know others read is the decision that the answer may be
+read there. A guest's turn runs as the host and reaches nothing of the host's.
+This drives one real task through ``execute_task`` and asserts at four seams,
+each of which passes in a state the others refuse:
 
 1. ``effective_disabled_skills`` withholds ``calendar`` (selection, the menu).
 2. The ``allowed_skills`` handed to ``SkillProxy`` omits ``calendar``: the real
@@ -12,10 +14,8 @@ at four seams, each of which passes in a state the others refuse:
    whole index, so authorizing fewer skills does not remove it.
 4. The sandbox argv binds no ``{mount}/Users/{user_id}``.
 
-A test asserting only the first would pass against an advisory implementation.
-Then two controls: the same task in a private room, and in the shared room after
-the sender granted ``files``, ``calendar`` and ``health``, both asserting the
-opposite on all four.
+What a member's turn in a shared room does lose is ambient memory: ``USER.md``
+is not put into its prompt.
 
 The default suite patches ``_bwrap_available`` and reads argv; it has never run
 a namespace. The smoke witness is ``tests/smoke/test_sandbox_shared_room.py``.
@@ -94,26 +94,11 @@ def config(tmp_path, _bwrap_flag_cache):
     return cfg
 
 
-def _share(config, token: str, user: str, *scopes: str) -> None:
-    """Grant through `!room share`, the writer a member actually uses."""
-    import asyncio
-
-    from istota import commands
-
-    with db.get_db(config.db_path) as conn:
-        for scope in scopes:
-            reply = asyncio.run(commands.dispatch(
-                config, user, token, f"!room share {scope}", surface="web", conn=conn,
-            ))
-            assert f"`{scope}` is shared" in reply.text, reply.text
-
-
-def _room(config, *, shared: bool, grants: tuple[str, ...] = ()) -> str:
+def _room(config, *, shared: bool) -> str:
     with db.get_db(config.db_path) as conn:
         room = db.create_web_chat_room(conn, "alice", "Family")
         if shared:
             db.add_room_member(conn, room.token, "bob")
-    _share(config, room.token, "alice", *grants)
     return room.token
 
 
@@ -190,30 +175,49 @@ def _user_dir(config) -> str:
     return str((config.workspace_path / "Users" / "alice").resolve())
 
 
-class TestASharedRoomWithNoGrants:
-    """The sender granted nothing, so nothing private reaches the task."""
+class TestAMembersTurnInASharedRoom:
+    """The regression for ISSUE-576: nothing is withheld from a member."""
 
-    def test_calendar_is_disabled(self, config):
+    def test_calendar_is_not_disabled(self, config):
         seen = _run(config, _room(config, shared=True))
-        assert "calendar" in seen["disabled"]
+        assert "calendar" not in seen["disabled"]
 
-    def test_the_proxy_will_not_run_calendar(self, config):
+    def test_the_proxy_runs_calendar(self, config):
         seen = _run(config, _room(config, shared=True))
-        assert "calendar" not in seen["allowed_skills"]
+        assert "calendar" in seen["allowed_skills"]
 
-    def test_the_health_db_path_reaches_no_one(self, config):
+    def test_the_health_db_path_reaches_the_proxy(self, config):
         seen = _run(config, _room(config, shared=True))
-        assert "HEALTH_DB_PATH" not in seen["proxy_base_env"]
+        assert seen["proxy_base_env"].get("HEALTH_DB_PATH") == HEALTH_DB
         assert "HEALTH_DB_PATH" not in seen["model_env"]
 
-    def test_the_user_workspace_is_not_bound(self, config):
+    def test_the_user_workspace_is_bound(self, config):
         seen = _run(config, _room(config, shared=True))
         assert seen["argv"][0] == "bwrap"
+        assert _user_dir(config) in _binds(seen["argv"])
+
+    def test_the_vault_is_served(self, config):
+        seen = _run(config, _room(config, shared=True))
+        assert seen["vault"] == {"bank": "s3cret"}
+        assert seen["vault_writes"] == config.security.vault_writes_per_task
+
+
+class TestAGuestsTurnReachesNothing:
+    """Control: the same room, the same seams, a guest's turn."""
+
+    def test_every_seam_withholds(self, config):
+        seen = _run(config, _room(config, shared=True), guest=True)
+        assert "calendar" in seen["disabled"]
+        assert "calendar" not in seen["allowed_skills"]
+        assert "HEALTH_DB_PATH" not in seen["proxy_base_env"]
+        assert "HEALTH_DB_PATH" not in seen["model_env"]
         assert _user_dir(config) not in _binds(seen["argv"])
+        assert seen["vault"] == {}
+        assert seen["vault_writes"] == 0
 
 
-class TestMemoryIsAScope:
-    """``memory`` is not a skill, so no skill gate can withhold it."""
+class TestAmbientMemoryStaysOut:
+    """``USER.md`` reaches the prompt unasked, so a shared room leaves it out."""
 
     SENTINEL = "alice-private-memory-sentinel"
 
@@ -230,33 +234,20 @@ class TestMemoryIsAScope:
         seen = _run(config, _room(config, shared=True))
         assert self.SENTINEL not in seen["prompt"]
 
-    def test_user_md_reaches_a_private_room(self, config):
+    def test_control_user_md_reaches_a_private_room(self, config):
         self._write_user_md(config)
         seen = _run(config, _room(config, shared=False))
         assert self.SENTINEL in seen["prompt"]
 
-    def test_user_md_reaches_a_shared_room_once_granted(self, config):
-        self._write_user_md(config)
-        seen = _run(config, _room(config, shared=True, grants=("memory",)))
-        assert self.SENTINEL in seen["prompt"]
-
-
-class TestTheCredentialVault:
-    """The sender's shared credentials are fetchable by name: no grant covers them."""
-
-    def test_a_shared_room_serves_no_vault(self, config):
+    def test_the_memory_files_stay_reachable_on_request(self, config):
+        # Left out of the prompt, not out of reach: the workspace that holds
+        # USER.md is bound, so "what did I note about X" still works.
         seen = _run(config, _room(config, shared=True))
-        assert seen["vault"] == {}
-        assert seen["vault_writes"] == 0
-
-    def test_a_private_room_serves_it(self, config):
-        seen = _run(config, _room(config, shared=False))
-        assert seen["vault"] == {"bank": "s3cret"}
-        assert seen["vault_writes"] == config.security.vault_writes_per_task
+        assert _user_dir(config) in _binds(seen["argv"])
 
 
 class TestHostPathsFollowTheFilesScope:
-    """A granted skill CLI's host-path roots drop the workspace with ``files``."""
+    """A skill CLI's host-path roots drop the workspace with ``files``."""
 
     def _roots(self, tmp_path, monkeypatch, withheld: str | None):
         from istota.skill_host_paths import (
@@ -293,15 +284,15 @@ class TestHostPathsFollowTheFilesScope:
     def test_the_marker_reaches_the_proxy_and_not_the_model(self, config):
         from istota.skill_host_paths import WITHHELD_SCOPES_VAR
 
-        seen = _run(config, _room(config, shared=True))
+        seen = _run(config, _room(config, shared=True), guest=True)
         assert "files" in seen["proxy_base_env"][WITHHELD_SCOPES_VAR].split(",")
         assert WITHHELD_SCOPES_VAR not in seen["model_env"]
-        private = _run(config, _room(config, shared=False))
-        assert WITHHELD_SCOPES_VAR not in private["proxy_base_env"]
+        member = _run(config, _room(config, shared=True))
+        assert WITHHELD_SCOPES_VAR not in member["proxy_base_env"]
 
 
 class TestAPrivateRoomIsUnchanged:
-    """Control: one member, so the gate is never consulted."""
+    """Control: one member."""
 
     def test_every_seam_reaches_the_private_data(self, config):
         seen = _run(config, _room(config, shared=False))
@@ -310,47 +301,6 @@ class TestAPrivateRoomIsUnchanged:
         assert seen["proxy_base_env"].get("HEALTH_DB_PATH") == HEALTH_DB
         assert seen["argv"][0] == "bwrap"
         assert _user_dir(config) in _binds(seen["argv"])
-
-
-class TestAfterTheSenderGrants:
-    """Control: the same shared room once the sender has shared the scopes."""
-
-    def test_every_seam_reaches_the_granted_data(self, config):
-        token = _room(config, shared=True, grants=("files", "calendar", "health"))
-        seen = _run(config, token)
-        assert "calendar" not in seen["disabled"]
-        assert "calendar" in seen["allowed_skills"]
-        assert seen["proxy_base_env"].get("HEALTH_DB_PATH") == HEALTH_DB
-        assert _user_dir(config) in _binds(seen["argv"])
-
-    def test_a_grant_by_another_member_is_not_the_senders(self, config):
-        token = _room(config, shared=True)
-        _share(config, token, "bob", "files", "calendar", "health")
-        seen = _run(config, token)
-        assert "calendar" in seen["disabled"]
-        assert "calendar" not in seen["allowed_skills"]
-        assert "HEALTH_DB_PATH" not in seen["proxy_base_env"]
-        assert _user_dir(config) not in _binds(seen["argv"])
-
-
-class TestThePolicySwitch:
-    def test_policy_off_restores_every_seam(self, config):
-        from istota.config import RoomsConfig
-
-        config.rooms = RoomsConfig(shared_room_data_policy="off")
-        seen = _run(config, _room(config, shared=True))
-        assert "calendar" not in seen["disabled"]
-        assert "calendar" in seen["allowed_skills"]
-        assert seen["proxy_base_env"].get("HEALTH_DB_PATH") == HEALTH_DB
-        assert _user_dir(config) in _binds(seen["argv"])
-
-    def test_an_unknown_policy_restricts(self, config):
-        from istota.config import RoomsConfig
-
-        config.rooms = RoomsConfig(shared_room_data_policy="restirct")
-        seen = _run(config, _room(config, shared=True))
-        assert "calendar" in seen["disabled"]
-        assert _user_dir(config) not in _binds(seen["argv"])
 
 
 class TestTheMountPlanPerScope:
@@ -433,7 +383,7 @@ class TestAGuestsTurn:
     namespace. Only a directory of its own inside it is."""
 
     def test_the_hosts_temp_dir_is_not_bound_only_its_own(self, config):
-        seen = _run(config, _room(config, shared=True, grants=("calendar",)), guest=True)
+        seen = _run(config, _room(config, shared=True), guest=True)
         argv = seen["argv"]
         host_dir = str((config.temp_dir / "alice").resolve())
         rw = [argv[i + 1] for i, tok in enumerate(argv) if tok == "--bind"]
@@ -444,10 +394,9 @@ class TestAGuestsTurn:
         assert "calendar" in seen["disabled"]
 
     def test_control_an_unrestricted_turn_binds_the_temp_dir(self, config):
-        # In a shared room the host's own turn is restricted and gets a
-        # directory of its own too (Stage 13); only an unrestricted task binds
-        # the per-user one.
-        seen = _run(config, _room(config, shared=False))
+        # A member's turn, in a private or a shared room, is unrestricted and
+        # binds the per-user directory.
+        seen = _run(config, _room(config, shared=True))
         host_dir = str((config.temp_dir / "alice").resolve())
         argv = seen["argv"]
         assert host_dir in [argv[i + 1] for i, tok in enumerate(argv) if tok == "--bind"]

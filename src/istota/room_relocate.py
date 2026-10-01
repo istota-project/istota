@@ -30,7 +30,6 @@ REWRITE_COLUMNS: dict[tuple[str, str], str] = {
     ("room_participants", "room_token"): "room_token",
     ("room_read_state", "room_token"): "room_token",
     ("room_dismissals", "room_token"): "room_token",
-    ("room_data_grants", "room_token"): "room_token",
     ("room_policy", "room_token"): "room_token",
     ("room_vetoes", "room_token"): "room_token",
     ("room_notices", "room_token"): "room_token",

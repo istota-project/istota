@@ -1391,10 +1391,10 @@ def refuse_shared_rooms(
     fallback, if it has one, decides what happens to an emptied list.
 
     ``conversation_token`` is the room the caller's task ran in. A leg into
-    that room is a conversational reply and is kept, because the disclosure
-    gate (`room_scopes.task_withheld_scopes`) keys on exactly that room, so the
-    answer was produced at the reach the room allows. Any other shared room
-    would receive output produced at the reach of somewhere else.
+    that room is a conversational reply and is kept: the member asked there,
+    knowing who reads it, which is the consent a member's full reach in a
+    shared room rests on (ISSUE-576). Any other shared room would receive
+    output nobody asked for in it.
 
     Fails toward refusal: a registry that cannot be read refuses every room
     leg, since a room that cannot be checked cannot be shown private. A

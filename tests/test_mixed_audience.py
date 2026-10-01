@@ -1,26 +1,19 @@
-"""A guest in the room withholds every scope; the answer goes to the side room.
+"""A guest in the room: who reaches what, and the side-room answer.
 
-Multiplayer Stage 13 (D3 `mixed`, D4 item 1). Four things, each a boundary
-rather than advice:
+Multiplayer Stage 13 (D3 `mixed`, D4 item 1), as ISSUE-576 left it:
 
-1. **Reach, not advice, under a `mixed` audience.** A member's grants are
-   consent to disclose to the room's *members*. Once a guest is present they
-   are ignored for front-stage output: the member's own turn runs at room-safe
-   reach at every seam, whatever they granted. Control: the same grants with
-   the guest gone reach again.
-2. **The side-room answer.** A front-stage task that needs a withheld scope
-   queues the principal's own question in their side room, where it runs as a
-   private task. The public task never gains the scope.
-3. **The restricted task's own directories.** A restricted task binds neither
-   the per-user temp dir, which every task of that user shares, nor the flat
-   Talk attachments dir, which holds every conversation's attachments. It gets
-   a directory of its own and a copy of its own attachments.
-4. **`files` and `memory` are independent.** Granting `files` and not `memory`
-   masks the memory directories inside the workspace bind, and a skill CLI's
-   host paths refuse them.
+1. **A member's turn runs at full reach with a guest present.** The boundary
+   is the member's own choices: having the guest there, and asking in front of
+   them. What it loses is ambient memory, which no shared room loads.
+2. **A guest's turn reaches nothing of the host's**, at every seam.
+3. **The side-room answer.** A member's question can be asked again in their
+   side room, where it runs as a private task with their memory loaded.
+4. **A guest's turn gets its own directories.** It binds neither the per-user
+   temp dir, which every task of the host shares, nor the flat Talk
+   attachments dir, which holds every conversation's attachments.
 
-The default suite reads argv; the smoke witness for the changed mounts is owed
-by Stage 28 (`tests/smoke/test_sandbox_shared_room.py`).
+The default suite reads argv; the smoke witness for the mounts is
+`tests/smoke/test_sandbox_shared_room.py`.
 """
 
 from __future__ import annotations
@@ -43,7 +36,6 @@ from . import test_shared_room_restriction as _base
 config = _base.config
 _bwrap_flag_cache = _base._bwrap_flag_cache
 
-ALL_GRANTS = ("files", "memory", "calendar", "health")
 SENTINEL = "alice-private-memory-sentinel"
 
 
@@ -55,14 +47,6 @@ def _guest(config, token: str) -> int:
         )
 
 
-def _guest_leaves(config, token: str) -> None:
-    with db.get_db(config.db_path) as conn:
-        conn.execute(
-            "UPDATE room_participants SET left_at = datetime('now') "
-            "WHERE room_token = ? AND kind = 'guest'", (token,),
-        )
-
-
 def _user_md(config) -> None:
     path = (config.workspace_path / "Users" / "alice" / config.bot_dir_name
             / "config" / "USER.md")
@@ -70,123 +54,62 @@ def _user_md(config) -> None:
     path.write_text(f"# Memory\n\n{SENTINEL}\n", encoding="utf-8")
 
 
-def _assert_no_private_reach(seen, config) -> None:
-    assert "calendar" in seen["disabled"]
-    assert "calendar" not in seen["allowed_skills"]
-    assert "HEALTH_DB_PATH" not in seen["proxy_base_env"]
-    assert "HEALTH_DB_PATH" not in seen["model_env"]
-    assert _user_dir(config) not in _binds(seen["argv"])
-    assert SENTINEL not in seen["prompt"]
-    assert seen["vault"] == {}
-
-
-class TestAGuestPresentWithholdsEveryGrant:
-    """Reach, not advice: every seam, on the member's own turn."""
-
-    def test_a_members_grants_do_not_reach_a_room_a_guest_reads(self, config):
+class TestAGuestInTheRoom:
+    def test_a_members_turn_still_reaches_everything_but_ambient_memory(self, config):
         _user_md(config)
-        token = _room(config, shared=True, grants=ALL_GRANTS)
+        token = _room(config, shared=True)
         _guest(config, token)
-        _assert_no_private_reach(_run(config, token), config)
-
-    def test_a_guests_turn_reaches_nothing_the_host_granted(self, config):
-        _user_md(config)
-        token = _room(config, shared=True, grants=ALL_GRANTS)
-        _guest(config, token)
-        _assert_no_private_reach(_run(config, token, guest=True), config)
-
-    def test_a_turn_stored_as_mixed_stays_withheld_after_the_guest_left(self, config):
-        # Either signal withholds: the audience the turn was written for, or
-        # the audience that reads the answer.
-        token = _room(config, shared=True, grants=ALL_GRANTS)
-        _guest(config, token)
-        _guest_leaves(config, token)
-        with db.get_db(config.db_path) as conn:
-            conn.execute("UPDATE tasks SET audience = 'mixed'")
-        from istota import room_scopes
-
-        with db.get_db(config.db_path) as conn:
-            withheld = room_scopes.task_withheld_scopes(
-                conn, policy="restrict", conversation_token=token, user_id="alice",
-                skill_index={"calendar": object()}, assume_mixed=True,
-            )
-        assert {"calendar", "files", "memory"} <= withheld
-
-    def test_control_the_grants_reach_again_once_the_guest_has_left(self, config):
-        _user_md(config)
-        token = _room(config, shared=True, grants=ALL_GRANTS)
-        _guest(config, token)
-        _guest_leaves(config, token)
         seen = _run(config, token)
         assert "calendar" in seen["allowed_skills"]
         assert seen["proxy_base_env"].get("HEALTH_DB_PATH") == HEALTH_DB
         assert _user_dir(config) in _binds(seen["argv"])
-        assert SENTINEL in seen["prompt"]
+        assert seen["vault"] == {"bank": "s3cret"}
+        assert SENTINEL not in seen["prompt"]
+
+    def test_a_guests_turn_reaches_nothing_of_the_hosts(self, config):
+        _user_md(config)
+        token = _room(config, shared=True)
+        _guest(config, token)
+        seen = _run(config, token, guest=True)
+        assert "calendar" in seen["disabled"]
+        assert "calendar" not in seen["allowed_skills"]
+        assert "HEALTH_DB_PATH" not in seen["proxy_base_env"]
+        assert "HEALTH_DB_PATH" not in seen["model_env"]
+        assert _user_dir(config) not in _binds(seen["argv"])
+        assert SENTINEL not in seen["prompt"]
+        assert seen["vault"] == {}
 
 
-class TestTheCardAndTheGrantCommandSaySo:
-    def test_the_card_offers_no_grant_while_a_guest_reads_the_room(self, config):
+class TestTheCard:
+    def test_the_card_says_a_guest_reads_the_room(self, config):
         from istota.executor import room_card
 
-        token = _room(config, shared=True, grants=("calendar",))
+        token = _room(config, shared=True)
         _guest(config, token)
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, _running(conn, "alice", token))
         card = room_card(
-            config, task, withheld_scopes=frozenset({"calendar", "files"}),
-            room_cli_available=True,
+            config, task, withheld_scopes=frozenset(), room_cli_available=True,
         )
+        assert "A guest reads this room." in card
+        assert "everything 'alice' can reach" in card
         assert "!room share" not in card
-        assert "whatever 'alice' has granted" in card
         assert "istota-skill room answer-privately" in card
         # Without the room CLI the verb is not named.
         assert "answer-privately" not in room_card(
-            config, task, withheld_scopes=frozenset({"calendar"}),
-            room_cli_available=False,
+            config, task, withheld_scopes=frozenset(), room_cli_available=False,
         )
 
-    def test_control_without_a_guest_the_grant_command_is_offered(self, config):
+    def test_control_without_a_guest_it_says_nothing_about_one(self, config):
         from istota.executor import room_card
 
         token = _room(config, shared=True)
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, _running(conn, "alice", token))
-        card = room_card(config, task, withheld_scopes=frozenset({"calendar"}),
+        card = room_card(config, task, withheld_scopes=frozenset(),
                          room_cli_available=True)
-        assert "`!room share <scope>`" in card
-        assert "istota-skill room answer-privately" in card
-
-    def test_room_share_says_grants_are_ignored_while_a_guest_is_present(self, config):
-        token = _room(config, shared=True)
-        _guest(config, token)
-        import asyncio
-
-        from istota import commands
-
-        with db.get_db(config.db_path) as conn:
-            reply = asyncio.run(commands.dispatch(
-                config, "alice", token, "!room share calendar", surface="web", conn=conn,
-            ))
-            listing = asyncio.run(commands.dispatch(
-                config, "alice", token, "!room share", surface="web", conn=conn,
-            ))
-        assert "guest" in reply.text and "ignored" in reply.text
-        assert "guest" in listing.text and "ignored" in listing.text
-
-    def test_room_share_says_nothing_about_guests_where_the_policy_is_off(self, config):
-        import asyncio
-
-        from istota import commands
-        from istota.config import RoomsConfig
-
-        config.rooms = RoomsConfig(shared_room_data_policy="off")
-        token = _room(config, shared=True)
-        _guest(config, token)
-        with db.get_db(config.db_path) as conn:
-            reply = asyncio.run(commands.dispatch(
-                config, "alice", token, "!room share calendar", surface="web", conn=conn,
-            ))
-        assert "ignored" not in reply.text
+        assert "guest" not in card
+        assert "personal memory is not loaded" in card
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +146,7 @@ class TestTheSideRoomAnswer:
         assert [(r["role"], r["body"], r["author_user_id"], r["task_id"]) for r in rows] == [
             ("user", "what's on my calendar tomorrow?", "alice", task.id)]
 
-    def test_the_side_room_task_runs_at_the_principals_full_reach(self, config):
+    def test_the_side_room_task_loads_the_principals_memory(self, config):
         token = _room(config, shared=True)
         _guest(config, token)
         with db.get_db(config.db_path) as conn:
@@ -231,15 +154,13 @@ class TestTheSideRoomAnswer:
             new = side_rooms.queue_side_answer(
                 conn, config, actor_user_id="alice", task_id=origin)["task_id"]
             conn.execute("UPDATE tasks SET status='pending'")
-        from istota.executor import _task_withheld_scopes
+        from istota.executor import _ambient_memory_off
 
         with db.get_db(config.db_path) as conn:
-            front = _task_withheld_scopes(
-                config, conn, db.get_task(conn, origin), {"calendar": object()})
-            back = _task_withheld_scopes(
-                config, conn, db.get_task(conn, new), {"calendar": object()})
-        assert "calendar" in front
-        assert back == frozenset()
+            front = _ambient_memory_off(config, db.get_task(conn, origin), conn)
+            back = _ambient_memory_off(config, db.get_task(conn, new), conn)
+        assert front is True
+        assert back is False
 
     def test_a_guests_turn_cannot_start_a_full_reach_task(self, config):
         token = _room(config, shared=True)
@@ -283,28 +204,22 @@ def _rw(argv):
     return [argv[i + 1] for i, tok in enumerate(argv) if tok == "--bind"]
 
 
-class TestARestrictedTasksOwnDirectories:
+class TestAGuestsTurnHasItsOwnDirectories:
     def test_the_per_user_temp_dir_is_not_bound_only_its_own(self, config):
-        seen = _run(config, _room(config, shared=True))
+        token = _room(config, shared=True)
+        _guest(config, token)
+        seen = _run(config, token, guest=True)
         user_dir = str((config.temp_dir / "alice").resolve())
         rw = _rw(seen["argv"])
         assert user_dir not in rw
-        own = [p for p in rw if p.startswith(user_dir + "/room-task-")]
+        own = [p for p in rw if p.startswith(user_dir + "/emissary-task-")]
         assert len(own) == 1
         assert seen["model_env"]["ISTOTA_DEFERRED_DIR"] == own[0]
 
-    def test_the_scheduler_reads_its_deferred_ops_from_there(self, config):
+    def test_control_a_members_turn_binds_the_per_user_dir(self, config):
         from istota.executor import task_deferred_dir
 
-        _run(config, _room(config, shared=True))
-        with db.get_db(config.db_path) as conn:
-            task = db.get_task(conn, 1)
-        assert task_deferred_dir(config, task).name == "room-task-1"
-
-    def test_control_a_private_task_binds_the_per_user_dir(self, config):
-        from istota.executor import task_deferred_dir
-
-        seen = _run(config, _room(config, shared=False))
+        seen = _run(config, _room(config, shared=True))
         user_dir = str((config.temp_dir / "alice").resolve())
         assert user_dir in _rw(seen["argv"])
         with db.get_db(config.db_path) as conn:
@@ -318,7 +233,8 @@ class TestARestrictedTasksOwnDirectories:
         own = talk / "ticket.pdf"
         own.write_bytes(b"%PDF-1.4 ticket")
         token = _room(config, shared=True)
-        seen = _run(config, token, attachments=[str(own)])
+        _guest(config, token)
+        seen = _run(config, token, guest=True, attachments=[str(own)])
         binds = _binds(seen["argv"])
         assert str(talk.resolve()) not in binds
         assert str(own) not in seen["prompt"]
@@ -327,19 +243,21 @@ class TestARestrictedTasksOwnDirectories:
         assert staged.read_bytes() == b"%PDF-1.4 ticket"
         assert str(staged.resolve()) in seen["prompt"]
 
-    def test_a_later_unrestricted_attempt_writes_where_the_scheduler_reads(
+    def test_a_retry_of_a_task_an_earlier_release_restricted_writes_where_it_did(
         self, config,
     ):
-        # Attempt 1 ran restricted and made the task's own directory; the
-        # member then shared everything, so attempt 2 is unrestricted. Its
-        # deferred ops must still land where `task_deferred_dir` looks.
+        # Before ISSUE-576 a member's shared-room turn ran restricted in
+        # `room-task-<id>`. A retry after the upgrade is unrestricted and must
+        # still write where `task_deferred_dir` reads.
         from istota.executor import task_deferred_dir, task_temp_dir
 
-        _run(config, _room(config, shared=True))
+        token = _room(config, shared=True)
         with db.get_db(config.db_path) as conn:
-            task = db.get_task(conn, 1)
-        assert task_temp_dir(config, task, restricted=False) == task_deferred_dir(config, task)
-        assert task_deferred_dir(config, task).name == "room-task-1"
+            task = db.get_task(conn, _running(conn, "alice", token))
+        legacy = config.temp_dir / "alice" / f"room-task-{task.id}"
+        legacy.mkdir(parents=True)
+        assert task_temp_dir(config, task, restricted=False) == legacy
+        assert task_deferred_dir(config, task) == legacy
 
     def test_a_skill_cli_host_path_refuses_the_talk_dir_when_restricted(
         self, tmp_path, monkeypatch,
@@ -367,136 +285,11 @@ class TestARestrictedTasksOwnDirectories:
 
 
 # ---------------------------------------------------------------------------
-# files and memory are independent
+# The memory directories under a withheld scope
 # ---------------------------------------------------------------------------
 
 
-def _masks(argv):
-    return [argv[i + 1] for i, tok in enumerate(argv) if tok == "--tmpfs"]
-
-
-class TestFilesWithoutMemory:
-    def _memory_dirs(self, config):
-        base = (config.workspace_path / "Users" / "alice").resolve()
-        dirs = [base / "memories", base / config.bot_dir_name / "config",
-                base / config.bot_dir_name / "playbooks"]
-        for d in dirs:
-            d.mkdir(parents=True, exist_ok=True)
-        return [str(d) for d in dirs]
-
-    def test_files_granted_alone_masks_the_memory_directories(self, config):
-        dirs = self._memory_dirs(config)
-        seen = _run(config, _room(config, shared=True, grants=("files",)))
-        assert _user_dir(config) in _binds(seen["argv"])
-        masks = _masks(seen["argv"])
-        for d in dirs:
-            assert d in masks
-
-    def test_an_absent_memory_directory_is_made_and_masked(self, config):
-        """Unmasked, a files-granted task could create `playbooks/` and write a
-        playbook that later private tasks recall (Stage 13's residual)."""
-        base = (config.workspace_path / "Users" / "alice").resolve()
-        base.mkdir(parents=True, exist_ok=True)
-        seen = _run(config, _room(config, shared=True, grants=("files",)))
-        masks = _masks(seen["argv"])
-        for d in (base / "memories", base / config.bot_dir_name / "config",
-                  base / config.bot_dir_name / "playbooks"):
-            assert d.is_dir() and not d.is_symlink()
-            assert str(d) in masks
-
-    def test_a_symlinked_memory_directory_masks_what_it_names(self, config):
-        base = (config.workspace_path / "Users" / "alice").resolve()
-        (base / "notes" / "kept").mkdir(parents=True)
-        (base / "memories").symlink_to(base / "notes" / "kept")
-        seen = _run(config, _room(config, shared=True, grants=("files",)))
-        masks = _masks(seen["argv"])
-        assert str(base / "notes" / "kept") in masks
-
-    def test_a_symlinked_parent_creates_nothing_through_it(self, config, tmp_path):
-        """A link at the bot directory to somewhere the sandbox does not bind:
-        nothing is made on the far side, and nothing there needs a mask."""
-        base = (config.workspace_path / "Users" / "alice").resolve()
-        base.mkdir(parents=True, exist_ok=True)
-        outside = tmp_path / "elsewhere"
-        outside.mkdir()
-        (base / config.bot_dir_name).symlink_to(outside)
-        seen = _run(config, _room(config, shared=True, grants=("files",)))
-        assert list(outside.iterdir()) == []
-        assert not [m for m in _masks(seen["argv"]) if m.startswith(str(outside.resolve()))]
-
-    @pytest.mark.parametrize("target", [".", "/usr"])
-    def test_a_link_to_the_workspace_or_a_system_path_masks_neither(self, config, target):
-        base = (config.workspace_path / "Users" / "alice").resolve()
-        base.mkdir(parents=True, exist_ok=True)
-        (base / "memories").symlink_to(target)
-        seen = _run(config, _room(config, shared=True, grants=("files",)))
-        masks = _masks(seen["argv"])
-        assert str(base) not in masks and "/usr" not in masks
-        assert str(base / "memories") not in masks
-
-    def test_the_bot_directory_is_a_mountpoint_so_it_cannot_be_renamed(self, config):
-        """rename(2) refuses only a dentry that is itself a mountpoint. Without
-        a mount of its own, the bot directory (parent of the masked config/
-        and playbooks/) could be renamed away and config/USER.md recreated
-        outside the mask (Stage 16's open question). A self-bind makes it one;
-        it must precede the masks, which bwrap applies last."""
-        self._memory_dirs(config)
-        bot = str((config.workspace_path / "Users" / "alice" / config.bot_dir_name).resolve())
-        seen = _run(config, _room(config, shared=True, grants=("files",)))
-        argv = seen["argv"]
-        self_binds = [i for i, tok in enumerate(argv)
-                      if tok == "--bind" and argv[i + 1] == bot and argv[i + 2] == bot]
-        assert self_binds, "no self-bind of the bot directory"
-        workspace = argv.index(_user_dir(config))
-        first_mask = argv.index("--tmpfs", workspace)
-        assert workspace < self_binds[0] < first_mask
-        # `memories/` sits directly under the workspace bind and is a mask
-        # itself, so its parent needs no bind of its own.
-        assert _user_dir(config) not in [argv[i + 1] for i in self_binds]
-
-    def test_the_command_runs_only_if_the_bound_directory_is_the_planned_one(
-        self, config,
-    ):
-        """The self-bind's source is a name in a directory another task of the
-        same user can write, so a symlink swapped in between the plan and
-        bwrap's mount would bind whatever it points at (`..` is every user's
-        workspace). The command is wrapped in a check, run inside the
-        namespace after every mount, that the path is the inode the plan saw."""
-        import os
-
-        self._memory_dirs(config)
-        bot = (config.workspace_path / "Users" / "alice" / config.bot_dir_name).resolve()
-        st = os.stat(bot, follow_symlinks=False)
-        seen = _run(config, _room(config, shared=True, grants=("files",)))
-        argv = seen["argv"]
-        tail = argv[argv.index("--") + 1:]
-        guard = next(i for i, tok in enumerate(tail) if "stat -c %d:%i" in tok)
-        assert tail[guard - 2:guard] == ["/bin/sh", "-c"]
-        assert tail[guard + 2:guard + 5] == [str(bot), f"{st.st_dev}:{st.st_ino}", "--"]
-        assert tail[guard + 5] == "claude"
-
-    def test_a_symlinked_bot_directory_is_not_self_bound(self, config, tmp_path):
-        """A link there is not a directory the plan can pin by identity, and
-        binding it by name is the swap the guard exists for."""
-        base = (config.workspace_path / "Users" / "alice").resolve()
-        (base / "real-bot" / "config").mkdir(parents=True)
-        (base / config.bot_dir_name).symlink_to(base / "real-bot")
-        seen = _run(config, _room(config, shared=True, grants=("files",)))
-        argv = seen["argv"]
-        assert str(base / config.bot_dir_name) not in _binds(argv)
-
-    def test_control_both_granted_binds_no_bot_directory(self, config):
-        self._memory_dirs(config)
-        bot = str((config.workspace_path / "Users" / "alice" / config.bot_dir_name).resolve())
-        seen = _run(config, _room(config, shared=True, grants=("files", "memory")))
-        assert bot not in _binds(seen["argv"])
-
-    def test_control_both_granted_masks_nothing_of_the_workspace(self, config):
-        dirs = self._memory_dirs(config)
-        seen = _run(config, _room(config, shared=True, grants=("files", "memory")))
-        masks = _masks(seen["argv"])
-        assert not [d for d in dirs if d in masks]
-
+class TestTheMemoryHostPathRefusal:
     def test_a_skill_cli_host_path_refuses_memory_when_it_is_withheld(
         self, tmp_path, monkeypatch,
     ):

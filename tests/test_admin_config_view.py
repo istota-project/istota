@@ -269,7 +269,7 @@ class TestLabels:
 
 @pytest.mark.parametrize("name", [
     "auth", "auth_enrol_ttl_hours", "auth_reset_ttl_hours",
-    "auth_login_link_ttl_minutes", "auth_min_password_length",
+    "auth_sign_in_code_ttl_minutes", "auth_min_password_length",
     "auth_throttle_window_seconds", "auth_throttle_max_email",
     "auth_throttle_max_ip", "auth_mail_link_max_email",
 ])

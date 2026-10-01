@@ -187,8 +187,9 @@ def build_task_runtime(
 ) -> TaskRuntime:
     """Build the model's environment and the per-task proxies for one attempt.
 
-    ``withheld_scopes`` is what a shared room withholds from this task
-    (``room_scopes.task_withheld_scopes``), empty everywhere else. Three of the
+    ``withheld_scopes`` is what this task may not reach: every scope on a
+    guest's turn or a task no member asked in a shared room
+    (``room_scopes.withheld_for_task``), empty everywhere else. Three of the
     disclosure gate's reach seams are here, and each is needed because the
     others leave its route open: hooks and identity vars are resolved over the
     whole index rather than the authorized set, credential auto-authorization
@@ -369,10 +370,6 @@ def build_task_runtime(
     proxy_only_env, env = _split_credential_env(
         env, derive_proxy_only_set(skill_index),
     )
-    available_forge_names = {
-        "forge." + forge for forge in ("gitlab", "github")
-        if env.get(forge.upper() + "_TOKEN")
-    }
     credential_env = {}
     if config.security.skill_proxy_enabled:
         from .skill_proxy import SkillProxy, effective_client_wait
@@ -604,7 +601,12 @@ def build_task_runtime(
             began = not c.in_transaction
             if began:
                 c.execute("BEGIN IMMEDIATE")
-            sync_forge_bindings(c, task.user_id, config.developer, available_names=available_forge_names)
+            # Bindings are per user and shared by every task, so they follow
+            # the identity gate the settings page uses. A task whose room
+            # withholds `developer` is kept out by the snapshot (`_withheld`),
+            # not by deleting the rows a concurrent task of this user reads.
+            available = None if config.is_admin(task.user_id) and config.developer.enabled else set()
+            sync_forge_bindings(c, task.user_id, config.developer, available_names=available)
             ensure_credential_grants(
                 c, task.id, task.user_id, withheld_scopes=withheld_scopes,
             )

@@ -112,11 +112,6 @@
     const mailDisabled = busy || !view?.email_enabled || user.identity?.disabled;
     return [
       { label: 'Send invitation', disabled: mailDisabled, onSelect: () => act(user, 'invite') },
-      {
-        label: 'Send sign-in link',
-        disabled: mailDisabled,
-        onSelect: () => act(user, 'login-link'),
-      },
       { label: 'Send password reset', disabled: mailDisabled, onSelect: () => act(user, 'reset') },
       {
         label: 'Sign out everywhere',
@@ -145,9 +140,7 @@
     confirmOpen = false;
     try {
       await adminUserAction(user.user_id, action);
-      notice = ['invite', 'login-link', 'reset'].includes(action)
-        ? 'Link sent.'
-        : 'Identity updated.';
+      notice = ['invite', 'reset'].includes(action) ? 'Link sent.' : 'Identity updated.';
     } catch (e) {
       failed(e);
     } finally {
@@ -237,7 +230,7 @@
                         >{user.state === 'nextcloud_only'
                           ? 'Nextcloud only'
                           : user.state === 'passwordless'
-                            ? 'Sign-in link'
+                            ? 'Email code'
                             : 'Password set'}</span
                       >
                     {/if}

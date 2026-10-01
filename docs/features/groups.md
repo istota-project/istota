@@ -64,7 +64,7 @@ The room's host sets the link, and only to a group the host belongs to. In a pri
 
 A link to a group that is later archived, or that the room's members leave, stays on the room and loads nothing until it applies again.
 
-Room grants (what a host lets the bot read in a shared room) do not affect any of this. A grant is consent to disclose the granter's own data; group material follows only the audience rule above.
+A member's turn in a shared room runs with everything that member can reach, but that reach is their own data and does not widen any of this. Group material follows only the audience rule above.
 
 ## How the model sees it
 

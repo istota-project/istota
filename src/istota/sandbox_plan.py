@@ -34,14 +34,12 @@ from __future__ import annotations
 import logging
 import os
 import shlex
-import stat
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from . import credential_shim
-from .skill_host_paths import memory_dir_parts
 from .user_scope import is_within, scoped_user_dir
 
 if TYPE_CHECKING:
@@ -57,19 +55,6 @@ Mode = Literal["ro", "rw", "tmpfs", "symlink", "flag"]
 #: boundary and its two callers lose different things by it — see the comment
 #: at the emission site in :func:`build_mount_plan`.
 EXTRA_RO_BIND = "extra_ro_bind"
-
-#: A memory mask's parent bound onto itself, so it is a mountpoint and
-#: rename(2) refuses it (see `build_mount_plan`).
-MEMORY_PARENT_BIND = "memory_parent_self_bind"
-
-#: The in-namespace check `render_bwrap_argv` puts in front of a command whose
-#: plan pinned a path's identity. Exit 125 names the refusal on stderr.
-IDENTITY_GUARD = (
-    'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do '
-    '[ "$(stat -c %d:%i -- "$1" 2>/dev/null)" = "$2" ] || '
-    '{ echo "istota sandbox: $1 is not the directory that was planned; refusing '
-    'to run" >&2; exit 125; }; shift 2; done; shift; exec "$@"'
-)
 
 #: The `/etc` entries every profile binds read-only. Module scope because
 #: `config_sandbox_bound_roots` has to name the same set from outside
@@ -172,10 +157,6 @@ class MountPlan:
     #: Masks refused because they would have shadowed a path the task needs.
     #: Logged at build time; carried here so a caller can report on them.
     refused_masks: tuple[Path, ...] = ()
-    #: ``(in-namespace path, "dev:ino")`` pairs the command checks after every
-    #: mount and before it runs: a bind whose source a task can swap between
-    #: plan and mount is refused at the door rather than trusted.
-    identity_checks: tuple[tuple[Path, str], ...] = ()
     #: The validated REPL workspace, if one was supplied. Also the chdir target
     #: when set, and the extra entry ``mask_protected_paths`` was given.
     workspace_resolved: Path | None = None
@@ -211,91 +192,6 @@ class SandboxProfile(str, Enum):
 
     CLAUDE = "claude"
     NATIVE = "native"
-
-
-def memory_masks(config: Config, user_dir: Path) -> list[Path]:
-    """The in-namespace paths that hold the user's ``memory`` scope, to mask.
-
-    ``memories/``, and under the bot directory ``config/`` (``USER.md`` and the
-    per-skill overlays) and ``playbooks/`` — `skill_host_paths.memory_dir_parts`,
-    the list the host-path refusal reads too. Every one of them is masked
-    whatever state it is in, because each state the old test skipped was a way
-    past the mask for a task with ``files`` granted:
-
-    - **Absent**: created now, by the daemon, one component at a time through
-      ``O_NOFOLLOW`` directory descriptors, so nothing is created through a
-      symlink. Unmasked, the task could create it and write a playbook or a
-      dated memory that later private tasks recall.
-    - **A symlink** (at the directory or at a parent): the mask goes on the
-      directory it resolves to when that lies strictly below the workspace,
-      at its in-namespace path. A target outside the workspace is logged and
-      left alone rather than masked, since a mask there could cover the whole
-      bind or a system path the task needs.
-
-    A path whose target is not a directory holds no memory and gets nothing.
-    Never raises; a component that cannot be opened or created is skipped and
-    logged, the one residual.
-    """
-    real_root = Path(os.path.realpath(user_dir))
-    out: list[Path] = []
-    for parts in memory_dir_parts(config.bot_dir_name):
-        target = _memory_dir(user_dir, parts)
-        if target is None:
-            continue
-        if target == user_dir.joinpath(*parts):
-            out.append(target)
-            continue
-        # Strictly below the workspace, never the workspace itself or anything
-        # outside it: a link to `.` or to `/usr` must not become a mask over
-        # the whole bind or a system path.
-        if target != real_root and is_within(target, real_root):
-            out.append(user_dir / target.relative_to(real_root))
-        else:
-            logger.warning(
-                "sandbox_plan: memory directory %s links outside the workspace; "
-                "not masked", "/".join(parts),
-            )
-    return list(dict.fromkeys(out))
-
-
-def _memory_dir(user_dir: Path, parts: tuple[str, ...]) -> Path | None:
-    """``user_dir/parts`` as a directory to mask, made if absent, or the real
-    directory a symlink on the way names. None where there is none."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    try:
-        fd = os.open(user_dir, os.O_RDONLY | os.O_DIRECTORY)
-    except OSError:
-        return None
-    try:
-        for name in parts:
-            try:
-                next_fd = os.open(name, flags, dir_fd=fd)
-            except FileNotFoundError:
-                try:
-                    os.mkdir(name, dir_fd=fd)
-                except FileExistsError:
-                    pass
-                next_fd = os.open(name, flags, dir_fd=fd)
-            os.close(fd)
-            fd = next_fd
-        return user_dir.joinpath(*parts)
-    except OSError:
-        # A symlink (ELOOP) or a non-directory (ENOTDIR) on the way, or a
-        # component that could not be made. Where it resolves is what the
-        # namespace shows, so that is what is masked.
-        resolved = Path(os.path.realpath(user_dir.joinpath(*parts)))
-        try:
-            if resolved.is_dir():
-                return resolved
-        except OSError:
-            pass
-        logger.warning(
-            "sandbox_plan: memory directory %s is neither a directory nor a "
-            "link to one; not masked", "/".join(parts),
-        )
-        return None
-    finally:
-        os.close(fd)
 
 
 def plan_masks(config: Config, protected: list[Path]) -> tuple[list[Path], list[Path]]:
@@ -442,8 +338,10 @@ def build_mount_plan(
     a guest, an agent or a non-member reads the room, so ``withheld_scopes``
     does not touch these binds.
 
-    ``withheld_scopes`` is what a shared room withholds from this task
-    (``room_scopes``). Without ``files`` the user's workspace and their
+    ``withheld_scopes`` is what this task may not reach: every scope on a
+    guest's turn or a task no member asked in a shared room, nothing otherwise
+    (``room_scopes.withheld_for_task``, ISSUE-576).
+    Without ``files`` the user's workspace and their
     per-resource mounts are not bound at all, which is what makes the
     disclosure gate a boundary rather than advice: no skill gate touches a
     bind. Without ``developer`` the repos subtree goes, and with it the cache
@@ -996,35 +894,6 @@ def build_mount_plan(
             else:
                 _ro(rpath, "user_resource", user_data=True)
 
-    # --- Memory inside a bound workspace (`files` without `memory`) ---
-    # The memory directories are masked (below, with the database masks), so
-    # the two scopes are granted independently. rename(2) refuses only a
-    # dentry that is itself a mountpoint, so each mask's parent below the
-    # workspace (the bot directory) is bound onto itself: otherwise it could be
-    # renamed away and `config/USER.md` recreated outside the mask. That bind's
-    # source is a name another task of this user can replace with a symlink
-    # between here and bwrap's mount, so its identity is pinned now and checked
-    # inside the namespace before the command runs (`identity_checks`). A
-    # parent that is not a plain directory is not self-bound at all.
-    withheld_memory: list[Path] = []
-    identity_checks: list[tuple[Path, str]] = []
-    if user_dir is not None and "files" not in withheld_scopes and "memory" in withheld_scopes:
-        withheld_memory = memory_masks(config, user_dir)
-        for parent in dict.fromkeys(m.parent for m in withheld_memory):
-            if parent == user_dir or not is_within(parent, user_dir):
-                continue
-            try:
-                st = os.stat(parent, follow_symlinks=False)
-            except OSError:
-                continue
-            if not stat.S_ISDIR(st.st_mode):
-                logger.warning(
-                    "sandbox_plan: %s is not a plain directory; not self-bound", parent,
-                )
-                continue
-            _rw(parent, MEMORY_PARENT_BIND)
-            identity_checks.append((parent, f"{st.st_dev}:{st.st_ino}"))
-
     # --- Extra RO binds (e.g. service sockets for same-host APIs, and the
     # document a task-less OCR call reads) ---
     #
@@ -1080,7 +949,6 @@ def build_mount_plan(
     # that is not a bind, and `mask_protected_paths` adds it from the config.
     protected = executor.mask_protected_paths(config, plan_mounts=tuple(mounts))
     masks, refused = plan_masks(config, protected)
-    masks.extend(withheld_memory)
 
     return MountPlan(
         mounts=tuple(mounts),
@@ -1088,7 +956,6 @@ def build_mount_plan(
         masks=tuple(masks),
         refused_masks=tuple(refused),
         workspace_resolved=workspace_resolved,
-        identity_checks=tuple(identity_checks),
     )
 
 
@@ -1198,15 +1065,6 @@ def render_bwrap_argv(
     # --- Lifecycle ---
     args.extend(["--die-with-parent", "--chdir", str(plan.chdir)])
     args.append("--")
-
-    if plan.identity_checks:
-        # Inside the namespace, after every mount: each pinned path must still
-        # be the inode the plan stat'ed, or nothing runs. `exec` keeps the pid
-        # and every inherited descriptor (the tool server's socketpair).
-        pinned: list[str] = []
-        for path, identity in plan.identity_checks:
-            pinned += [str(path), identity]
-        cmd = ["/bin/sh", "-c", IDENTITY_GUARD, "sh", *pinned, "--", *cmd]
 
     if net_proxy_sock:
         # Wrap the command in a shell that starts the TCP-to-Unix bridge as a

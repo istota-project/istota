@@ -63,10 +63,10 @@ class TestAPrivateRoom:
 
 class TestARoomWithANonMember:
     def test_no_seam_gets_the_group(self, config, family):
-        # bob reads the room and is not in `fam`; granting `memory` and
-        # `files` does not change that, since a grant is about the sender's
-        # own data and group material follows the audience rule alone.
-        seen = _run(config, _room(config, shared=True, grants=("memory", "files")))
+        # bob reads the room and is not in `fam`; alice's full reach there
+        # does not change that, since group material follows the audience
+        # rule alone.
+        seen = _run(config, _room(config, shared=True))
         assert "FAMILY_SENTINEL" not in seen["prompt"]
         assert not _group_bound(seen, family)
         assert TASK_GROUPS_VAR not in seen["proxy_base_env"]

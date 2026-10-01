@@ -14,8 +14,6 @@ Commands prefixed with `!` are intercepted before task creation and handled sync
 | `!status` | Show running/pending tasks and system stats |
 | `!usage` | Show token usage; adds a by-brain split and the Claude Code plan's rate-limit windows for admins (hidden alias: `!limits`) |
 | `!room` | Show this room's standing model/effort default and the brain it runs; `!room model ALIAS` / `!room effort LEVEL` set the first two, `default` clears |
-| `!room share [SCOPE\|all\|none]` | Show what you share in this [shared room](../features/shared-rooms.md#what-a-task-can-reach), or share a scope for your own turns here |
-| `!room unshare SCOPE\|all` | Withdraw a share in this room |
 | `!room host` | Take over a shared room that has lost its host |
 | `!room guests [off\|held\|direct]` | Show how guests are answered here; the host sets it |
 | `!room group [ID\|none]` | Show or set the [group](../features/groups.md#linking-a-room-to-a-group) this room is linked to; the host sets it |
@@ -90,7 +88,7 @@ That block appears when a reading is available, not when `brain.kind` is `claude
 
 ## Shared rooms
 
-In a room more than one person reads, `!room share` lists the scopes you share there and the ones withheld; `!room share <scope>` shares one for your own turns in this room, `!room share all` every one, `!room share none` or `!room unshare all` none, and `!room unshare <scope>` takes one back. A share is yours alone and nobody can share for you. While a guest is present, shares are ignored and the reply says so. In a private room a share is accepted and applies once someone joins; a side room has nothing to share.
+`!room share` and `!room unshare` are retired: a member's turn in a shared room uses everything they can reach, and the commands say so.
 
 `!room host` claims a room whose host has left; until someone does, the room records and answers nobody. `!room guests` shows whether a guest's message is answered directly, held for the host's approval, or not answered; `!room guests <off|held|direct>` changes it and is the host's. `!room group` shows the room's group link and `!room group <id>` / `!room group none` sets or removes it, also the host's. In a shared room the room-wide settings (`!room model`, `!room effort`, `!brain`) are the host's too, and other members see them read-only.
 

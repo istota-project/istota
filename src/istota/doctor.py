@@ -3704,41 +3704,36 @@ def check_vault_isolation(config: "Config", probe: bool) -> CheckResult:
 
 
 def check_room_scope_confinement(config: "Config", probe: bool) -> CheckResult:
-    """Whether a shared room's withheld scopes are withheld from the filesystem.
+    """Whether a guest's turn is kept out of the host's files on disk.
 
-    `room_scopes` withholds a scope at six seams: the prompt, the skill menu,
-    the proxy's allowlist, credentials, the host-path roots and the sandbox
-    mounts. The last is the only one that keeps a file out of reach of a
-    shell command, and it exists only where tasks run in bubblewrap. Elsewhere
-    (the shipped Docker stack, macOS, the standalone install) a task in a
-    shared room can still read the sender's workspace and memory from disk.
+    A guest's turn in a shared room runs as the host with every scope withheld
+    (`room_scopes.withheld_for_task`), at six seams: the prompt, the skill
+    menu, the proxy's allowlist, credentials, the host-path roots and the
+    sandbox mounts. The last is the only one that keeps a file out of reach of
+    a shell command, and it exists only where tasks run in bubblewrap.
+    Elsewhere (the shipped Docker stack, macOS, the standalone install) a
+    guest's turn can still read the host's workspace from disk.
     """
-    from .room_scopes import POLICY_OFF
-
     name = "security.room_scope_confinement"
-    if config.rooms.shared_room_data_policy == POLICY_OFF:
-        return CheckResult(
-            name, SKIP, "[rooms] shared_room_data_policy = \"off\": nothing is withheld",
-        )
     effective, why = _deployment_sandboxing(config, probe)
     if effective:
         return CheckResult(
-            name, OK, "withheld scopes are also kept out of the task's filesystem",
+            name, OK, "a guest's turn is also kept out of the host's filesystem",
         )
     if effective is None:
         return CheckResult(
-            name, WARN, "whether withheld scopes reach the filesystem could not be "
-            "established: " + why,
+            name, WARN, "whether a guest's turn reaches the host's filesystem "
+            "could not be established: " + why,
             remedy="Run `istota doctor --only security.room_scope_confinement` on the host.",
         )
     return CheckResult(
         name, WARN,
-        "tasks run without a sandbox here, so a shared room's withheld scopes are "
-        "removed from the prompt, the skills and the environment only, not from "
-        "the filesystem: a shell command can still read the sender's files and "
-        "memory",
+        "tasks run without a sandbox here, so a guest's turn in a shared room "
+        "loses the host's data in the prompt, the skills and the environment "
+        "only, not on the filesystem: a shell command can still read the host's "
+        "files",
         remedy="Run istota on Linux with bubblewrap (the Ansible deployment), or "
-        "treat every shared room as able to read its members' files.",
+        "do not let guests into rooms on this deployment.",
     )
 
 
@@ -4978,7 +4973,7 @@ def check_web_auth(config: "Config", probe: bool = True) -> list[CheckResult]:
         "web.auth.mail", OK if config.email.enabled else WARN,
         ("Mail enabled (delivery not probed)" if config.email.enabled else "Mail disabled")
         + f"; {passwordless if passwordless is not None else 'unknown number of'} enabled identities without passwords",
-        "Enable email delivery for self-service reset and sign-in links; use istota auth login-link <user> --print-link for operator recovery."
+        "Enable email delivery for self-service reset links and sign-in codes; use istota auth sign-in-code <user> for operator recovery."
         if not config.email.enabled else "",
     ))
     if identities is None or profiles is None:

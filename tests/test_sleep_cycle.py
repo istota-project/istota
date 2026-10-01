@@ -1850,3 +1850,75 @@ class TestAppendDatedMemory:
         path = tmp_path / "2026-09-06.md"
         path.write_text("\n\n")
         assert _append_dated_memory(path, "- One\n") == "- One\n"
+
+
+class TestNoWriteLockAcrossTheBrainCall:
+    """A sleep-cycle brain call runs for up to minutes; the caller's open write
+    transaction must not be held across it, or every other writer — the web
+    credentials page, the scheduler's own checks — waits out the busy timeout
+    and fails with `database is locked`."""
+
+    @staticmethod
+    def _brain_probing_the_lock(db_path, seen):
+        import sqlite3
+        from istota.brain import BrainResult
+
+        def execute(req):
+            other = sqlite3.connect(str(db_path), timeout=0.05)
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                other.execute("ROLLBACK")
+                seen.append("acquired")
+            except sqlite3.OperationalError as e:
+                seen.append(str(e))
+            finally:
+                other.close()
+            return BrainResult(success=True, result_text=NO_NEW_MEMORIES)
+
+        return execute
+
+    def test_pending_write_is_committed_before_the_call(self, mount_config, db_path):
+        seen: list[str] = []
+        with db.get_db(db_path) as conn:
+            db.kv_set(conn, "alice", "probe", "k", "v")
+            assert conn.in_transaction
+            with patch("istota.memory.sleep_cycle.make_brain") as mock_make_brain:
+                mock_make_brain.return_value.execute.side_effect = (
+                    self._brain_probing_the_lock(db_path, seen)
+                )
+                ok, _ = sleep_cycle_module._run_sleep_cycle_brain(
+                    mount_config, "prompt", model="", label="probe",
+                    user_id="alice", conn=conn,
+                )
+        assert ok
+        assert seen == ["acquired"]
+
+    def test_curation_after_fact_insert_does_not_hold_the_lock(self, mount_config, db_path):
+        """The production shape: facts are inserted, then USER.md curation
+        calls the brain on the same connection."""
+        mount_config.sleep_cycle.curate_user_memory = True
+        seen: list[str] = []
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="I'm allergic to eggs", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Noted.")
+            extraction = (
+                "MEMORIES:\n- A note (2026-01-28, ref:%d)\n\n"
+                "FACTS:\n"
+                '[{"subject": "alice", "predicate": "allergic_to", "object": "eggs", "source_ref": %d}]\n\n'
+                "TOPICS:\n{}"
+            ) % (t, t)
+            probe = self._brain_probing_the_lock(db_path, seen)
+            from istota.brain import BrainResult
+
+            def execute(req):
+                if not seen:
+                    seen.append("extraction")
+                    return BrainResult(success=True, result_text=extraction)
+                probe(req)
+                return BrainResult(success=True, result_text='{"ops": []}')
+
+            with patch("istota.memory.sleep_cycle.make_brain") as mock_make_brain:
+                mock_make_brain.return_value.execute.side_effect = execute
+                process_user_sleep_cycle(mount_config, conn, "alice")
+        assert seen[:2] == ["extraction", "acquired"]

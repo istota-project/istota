@@ -1,7 +1,7 @@
 // Generic prefix-autocomplete primitive for the chat composer. The engine
 // (useAutocomplete) is trigger-agnostic; each trigger is described by a
-// CompletionProvider. Adding a new trigger (a `!command`, a `!model` alias, a
-// future `@mention`) is a new provider object, not a composer change.
+// CompletionProvider. Adding a new trigger (a `!command`, a `!model` alias, an
+// `@mention`) is a new provider object, not a composer change.
 
 export interface Suggestion {
   /** Text spliced in place of the match range when accepted, e.g. "!more ". */

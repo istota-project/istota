@@ -237,8 +237,8 @@ def memory_dir_parts(bot_dir_name: str) -> list[tuple[str, ...]]:
 
     ``memories/`` (dated memories), and under the bot directory ``config/``
     (``USER.md`` and the per-skill overlays) and ``playbooks/``. The one list
-    the sandbox's masks, the host-path refusal below and the nextcloud skill's
-    WebDAV refusal all read. The bot entries are dropped for a bot directory
+    the host-path refusal below and the nextcloud skill's WebDAV refusal both
+    read. The bot entries are dropped for a bot directory
     name that is not a single path component.
     """
     parts: list[tuple[str, ...]] = [("memories",)]
@@ -256,10 +256,10 @@ def withheld_from_env() -> frozenset[str]:
 def memory_refusal(resolved: Path) -> str | None:
     """A refusal when ``resolved`` is the user's memory and the room withholds it.
 
-    ``files`` and ``memory`` are separate scopes. With ``files`` granted the
-    workspace is a root, and the memory inside it — ``memories/``, and under
-    the bot directory ``config/`` and ``playbooks/`` — is the same set the
-    sandbox masks (`sandbox_plan.memory_masks`). None when nothing is refused.
+    Since ISSUE-576 anything withheld is every scope, ``files`` included,
+    which already drops the workspace root; this stays as the narrower
+    refusal should the two ever be withheld apart. None when nothing is
+    refused.
     """
     if "memory" not in _withheld_from_env():
         return None

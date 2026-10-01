@@ -541,9 +541,6 @@ max_message_chars = {{ istota_speech_gate_max_message_chars }}
 timeout_seconds = {{ istota_speech_gate_timeout_seconds }}
 decision_retention_days = {{ istota_speech_gate_decision_retention_days }}
 
-[rooms]
-shared_room_data_policy = "{{ istota_rooms_shared_room_data_policy | istota_toml_escape }}"
-
 [logging]
 level = "{{ istota_logging_level | istota_toml_escape }}"
 output = "{{ istota_logging_output | istota_toml_escape }}"
@@ -762,7 +759,7 @@ reconcile_min_dwell_sec = {{ istota_location_reconcile_min_dwell_sec }}
 auth = {{ istota_web_auth | to_json }}
 auth_enrol_ttl_hours = {{ istota_web_auth_enrol_ttl_hours }}
 auth_reset_ttl_hours = {{ istota_web_auth_reset_ttl_hours }}
-auth_login_link_ttl_minutes = {{ istota_web_auth_login_link_ttl_minutes }}
+auth_sign_in_code_ttl_minutes = {{ istota_web_auth_sign_in_code_ttl_minutes }}
 auth_min_password_length = {{ istota_web_auth_min_password_length }}
 auth_throttle_window_seconds = {{ istota_web_auth_throttle_window_seconds }}
 auth_throttle_max_email = {{ istota_web_auth_throttle_max_email }}

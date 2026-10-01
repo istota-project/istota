@@ -26,7 +26,7 @@ istota auth add alice --email alice@example.com --print-link
 
 Add `alice` to `/etc/istota/admins` before inviting more users. An empty allowlist grants every user task-admin privileges for historical compatibility, while the web admin pane requires an explicit entry. Doctor fails this combination when multiple email identities exist. The printed enrolment link opens a password form and signs the user in on submission. Set a password for the first administrator so mail failure cannot prevent login. `istota auth set-password alice` prompts privately; `--password-stdin` reads one line for automation. There is no password argument on the command line.
 
-The login page has password and email-link forms whenever email is enabled. A sign-in email contains a single-use link, valid for 15 minutes by default. Opening it only shows a confirmation form; pressing Sign in consumes it. Enrolment and reset links instead set a password and sign in on submission, with default lifetimes of seven days and one hour. Anonymous reset and sign-in requests share a send budget and return the same confirmation for unknown, disabled and throttled addresses. Passwordless identities can sign in through mail; they are not incomplete accounts.
+The login page has password and email-code forms whenever email is enabled. Asking for a code opens a pending sign-in tied to that browser: the browser keeps a secret in its session, and the emailed 6-digit code works only together with it. The code is valid for 10 minutes by default and dies after five wrong guesses. Asking again from the same browser retires the earlier code only once a new one is sent, so a request over the mail budget leaves the last code working. Wrong codes are also capped at 20 per address per day across every browser, because anyone can ask for a code for any address; `istota auth sign-in-code` clears that cap. The mail carries no link, so opening it in another app or on another device changes nothing, and the iOS app's sign-in completes in the app. The code sits in the subject and on its own line, which lets Apple's one-time-code autofill offer it from Mail. Enrolment and reset links set a password and sign in on submission, with default lifetimes of seven days and one hour. Anonymous reset links and sign-in codes share a send budget of three mails per address per hour and return the same page for unknown, disabled and throttled addresses. Passwordless identities can sign in by code; they are not incomplete accounts.
 
 | Operator command | Effect |
 |---|---|
@@ -34,20 +34,20 @@ The login page has password and email-link forms whenever email is enabled. A si
 | `istota auth add alice --email alice@example.com` | Attach email to an existing profile; add `--create-user` to create one |
 | `istota auth invite alice --send` | Send an enrolment link |
 | `istota auth reset alice --print-link` | Print a password-reset link when mail is unavailable |
-| `istota auth login-link alice --print-link` | Print a one-time sign-in link without setting a password |
+| `istota auth sign-in-code alice` | Print a fresh code for the newest pending email sign-in for alice's address, with when it was requested, for when mail is down. It works only in the browser that asked, and anyone can open a request for an address, so confirm the request time with alice before reading the code out |
 | `istota auth disable alice` / `enable alice` | Change login availability and revoke existing sessions |
 | `istota auth logout-all alice` | Revoke every session for an identity |
 | `istota auth remove alice` | Remove login identity and invalidate its links; preserve profile and user data |
 
-All three link commands accept `--send` or `--print-link`; omitted means send. `auth add` has `--send-invite` and `--print-link`. Successful commands end with `state=created`, `state=updated` or `state=unchanged`; list always reports unchanged, and issued links and credential operations report updated. Identity changes are separate from inbound routing addresses.
+Both link commands accept `--send` or `--print-link`; omitted means send. `auth add` has `--send-invite` and `--print-link`. Successful commands end with `state=created`, `state=updated` or `state=unchanged`; list always reports unchanged, and issued links and credential operations report updated. Identity changes are separate from inbound routing addresses.
 
-The admin Users pane can attach email to an existing profile, create a profile, send links, disable login and remove an identity. It refuses disabling or removing the last enabled administrator identity, even with Nextcloud also enabled. The operator CLI remains the recovery authority and can override that protection. Disable blocks both email and Nextcloud login for that identity. Removing an identity blocks email login and revokes its sessions, but leaves Nextcloud login possible if that method is enabled. Nextcloud-only profiles have no per-user revoke or disable control until an email identity is attached. New users can sign in immediately; their background work starts after the scheduler reloads or restarts.
+The admin Users pane can attach email to an existing profile, create a profile, send invitation and reset links, disable login and remove an identity. It has no action that sends a sign-in code, because a code only works in the browser that asked for it. It refuses disabling or removing the last enabled administrator identity, even with Nextcloud also enabled. The operator CLI remains the recovery authority and can override that protection. Disable blocks both email and Nextcloud login for that identity. Removing an identity blocks email login and revokes its sessions, but leaves Nextcloud login possible if that method is enabled. Nextcloud-only profiles have no per-user revoke or disable control until an email identity is attached. New users can sign in immediately; their background work starts after the scheduler reloads or restarts.
 
 Settings has a Security card for email sessions. Password users supply their current password to change it; the change signs out every tab and device, including the caller. Passwordless users see a set-password link. Attaching an identity, changing its email or password, disabling it, and signing out everywhere revoke the user's existing sessions, including Nextcloud sessions. Epochs start with a random generation and then increase, so deleting and recreating an identity cannot revive old cookies. Removing an identity retains a session generation in `web_auth_retired_epochs`, so earlier Nextcloud and legacy cookies stay revoked; a fresh Nextcloud login uses that retained generation. Database read errors fail closed. Removing an authentication method rejects sessions minted by that method. Active streams repeat the checks and close after revocation.
 
 Run `istota doctor --only web.auth` for method source, hostname, mail configuration, identity counts, admin allowlist, proxy IP throttle and session-secret checks. Mail configuration checks do not send a probe. The IP verification budget is inactive while `web.trusted_proxy_hops` is zero. A positive value selects the client address from the forwarded chain; only enable it when the backend cannot be reached around those proxies.
 
-The shipped proxies suppress access logs for `/istota/auth/set-password` and `/istota/auth/login-link`; both web launchers disable uvicorn access logs. An outer proxy must do the same or omit query strings, since the token grants access. Authentication pages are not cached and send no referrer. `["none"]` is reserved for the direct `istota serve` loopback launcher without a public reverse proxy; Docker, Ansible and direct uvicorn refuse it.
+The shipped proxies suppress access logs for `/istota/auth/set-password`; both web launchers disable uvicorn access logs. An outer proxy must do the same or omit query strings, since the token grants access. Authentication pages are not cached and send no referrer. `["none"]` is reserved for the direct `istota serve` loopback launcher without a public reverse proxy; Docker, Ansible and direct uvicorn refuse it.
 
 ## Nextcloud OAuth2 setup
 
@@ -119,19 +119,10 @@ The Ansible role handles this automatically when `istota_web_enabled` is set and
 
 The web app listens on `127.0.0.1:{port}` and should not be exposed directly. Put it behind nginx (or your preferred reverse proxy).
 
-The Ansible role generates an nginx config automatically. The general location is below. Email login also requires the two exact token locations so query strings never enter access logs:
+The Ansible role generates an nginx config automatically. The general location is below. Email login also requires the exact token location so query strings never enter access logs:
 
 ```nginx
 location = /istota/auth/set-password {
-    access_log off;
-    proxy_pass http://127.0.0.1:8766;
-    proxy_set_header Host $http_host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
-
-location = /istota/auth/login-link {
     access_log off;
     proxy_pass http://127.0.0.1:8766;
     proxy_set_header Host $http_host;
@@ -226,15 +217,15 @@ A **Browsers** page lists each live browser instance (user, slot, idle time) and
 
 | Route | Purpose |
 |---|---|
-| `/istota/login` | Enabled login methods, password and email-link forms |
+| `/istota/login` | Enabled login methods, password and email-code forms |
 | `/istota/login/email` | Password sign-in (POST) |
-| `/istota/auth/login-link/request` | Request a sign-in link (POST) |
-| `/istota/auth/login-link` | Confirm a one-time sign-in link (GET/POST) |
+| `/istota/auth/sign-in-code/request` | Request an emailed sign-in code for this browser (POST) |
+| `/istota/auth/sign-in-code` | Enter the code (GET/POST) |
 | `/istota/auth/reset` | Request a password-reset link (GET/POST) |
 | `/istota/auth/set-password` | Enrolment or reset form (GET/POST) |
 | `/istota/api/account/password` | Change password and end every session (POST) |
 | `/istota/api/admin/users` | List or create profiles and email identities |
-| `/istota/api/admin/users/{user_id}` | Remove an email identity (DELETE); action suffixes: invite, login-link, reset, disable, logout-all (POST) |
+| `/istota/api/admin/users/{user_id}` | Remove an email identity (DELETE); action suffixes: invite, reset, disable, logout-all (POST) |
 | `/istota/callback` | Token exchange + identity resolution |
 | `/istota/logout` | Session clear |
 | `/istota/api/me` | User info + features |

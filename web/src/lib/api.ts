@@ -544,8 +544,7 @@ export function createAdminUser(user: { user_id: string; email: string; display_
   });
 }
 
-export type AdminUserAction =
-  'invite' | 'reset' | 'login-link' | 'disable' | 'enable' | 'logout-all' | 'remove';
+export type AdminUserAction = 'invite' | 'reset' | 'disable' | 'enable' | 'logout-all' | 'remove';
 
 export function adminUserAction(userId: string, action: AdminUserAction) {
   const path = `/admin/users/${encodeURIComponent(userId)}`;
@@ -3305,29 +3304,6 @@ export interface DirectoryUser {
 
 export function getChatUsers(): Promise<{ users: DirectoryUser[] }> {
   return apiFetch('/chat/users');
-}
-
-/** Whether a member's grants decide anything right now: `active`, or one of the
- * three reasons they do not. */
-export type GrantState = 'active' | 'private' | 'guests_present' | 'policy_off';
-
-export interface RoomGrants {
-  scopes: { name: string; granted: boolean }[];
-  state: GrantState;
-}
-
-/** The caller's own grants. The API takes no user id: a grant is its writer's. */
-export function getRoomGrants(id: number): Promise<RoomGrants> {
-  return apiFetch<RoomGrants>(`/chat/rooms/${id}/grants`);
-}
-
-/** Replace the caller's grants in this room with exactly `scopes`. */
-export function putRoomGrants(id: number, scopes: string[]): Promise<RoomGrants> {
-  return apiFetch<RoomGrants>(`/chat/rooms/${id}/grants`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ scopes }),
-  });
 }
 
 /** The group a room is linked to (multiplayer Stage 27). `choices` are the

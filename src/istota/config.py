@@ -306,19 +306,6 @@ class SpeechGateConfig:
 
 
 @dataclass
-class RoomsConfig:
-    """What a task in a room more than one human reads may reach.
-
-    Read by ``room_scopes.task_withheld_scopes``. ``"restrict"`` withholds every
-    scope the sender has not granted in that room; ``"off"`` gives a shared-room
-    task everything a private one gets. Any other value restricts, since a typo
-    must not reopen the disclosure the default closes.
-    """
-
-    shared_room_data_policy: str = "restrict"
-
-
-@dataclass
 class SchedulerConfig:
     # 5, not 2, because 5 is what every deployment actually runs: the Ansible
     # template, the Docker render, `config.example.toml` and `istota setup` all
@@ -1215,7 +1202,7 @@ class WebConfig:
     auth: list[str] = field(default_factory=lambda: ["nextcloud"])
     auth_enrol_ttl_hours: int = 168
     auth_reset_ttl_hours: int = 1
-    auth_login_link_ttl_minutes: int = 15
+    auth_sign_in_code_ttl_minutes: int = 10
     auth_min_password_length: int = 12
     auth_throttle_window_seconds: int = 900
     auth_throttle_max_email: int = 10
@@ -1472,6 +1459,12 @@ class CredentialBrokerConfig:
     enforce_reveal: bool = False
     scan_max_bytes: int = 1048576
     leaf_validity_hours: int = 24
+
+    @property
+    def reveal_enforced(self) -> bool:
+        # Without the broker there are no placeholders, so refusing public
+        # reads would only break git, the forge CLIs and `run`.
+        return self.enabled and self.enforce_reveal
 
 
 @dataclass
@@ -2095,7 +2088,6 @@ class Config:
     whatsapp: WhatsAppConfig = field(default_factory=WhatsAppConfig)
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     speech_gate: SpeechGateConfig = field(default_factory=SpeechGateConfig)
-    rooms: RoomsConfig = field(default_factory=RoomsConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     devbox: DevboxConfig = field(default_factory=DevboxConfig)
@@ -3521,6 +3513,7 @@ _RETIRED = frozenset({
     "site.enabled",
     "site.base_path",
     "security.sandbox_admin_db_write",
+    "rooms",
     # Still honoured, by `_apply_renamed_keys`, which warns in its own terms.
     "scheduler.istota_file_poll_interval",
 })
@@ -3782,6 +3775,26 @@ def normalize_legacy_document(data: dict) -> None:
     document afterwards copies it first.
     """
     _migrate_whatsapp_flat(data)
+    _migrate_web_login_link_ttl(data)
+
+
+def _migrate_web_login_link_ttl(data: dict) -> None:
+    """Read the retired ``auth_login_link_ttl_minutes`` as the sign-in code TTL.
+
+    Emailed sign-in links became codes (ISSUE-574), and the lifetime setting
+    carries over rather than reverting to the default for a deployment that
+    tuned it. The new key wins when both are present.
+    """
+    web = data.get("web")
+    if not isinstance(web, dict) or "auth_login_link_ttl_minutes" not in web:
+        return
+    legacy = web.pop("auth_login_link_ttl_minutes")
+    if "auth_sign_in_code_ttl_minutes" not in web:
+        web["auth_sign_in_code_ttl_minutes"] = legacy
+    logger.warning(
+        "[web] auth_login_link_ttl_minutes is retired; rename it to "
+        "auth_sign_in_code_ttl_minutes (sign-in links are now emailed codes)"
+    )
 
 
 _LEGACY_BRAIN_DEFAULT_TARGETS = ("claude_code", "tmux")
@@ -4260,6 +4273,14 @@ def load_config(config_path: Path | None = None) -> Config:
                 ", ".join(retired),
             )
 
+    if "shared_room_data_policy" in (data.get("rooms") or {}):
+        logger.warning(
+            "[rooms] shared_room_data_policy is no longer supported and is being "
+            "ignored. A member's turn in a shared room runs with that member's "
+            "full reach, and their personal memory is never loaded there "
+            "(ISSUE-576). Remove the key."
+        )
+
     if "security" in data:
         sec = data["security"]
         # Two things the walk cannot say. The first is a key that was removed
@@ -4317,6 +4338,8 @@ def load_config(config_path: Path | None = None) -> Config:
     _warn_ro_paths_over_control_tree(config)
     if config.security.credential_broker.enabled and not config.security.sandbox_enabled:
         logger.warning("Credential broker enabled without sandboxing: values are not contained")
+    if config.security.credential_broker.enforce_reveal and not config.security.credential_broker.enabled:
+        logger.warning("[security.credential_broker] enforce_reveal has no effect while enabled = false")
 
     config.admin_users = load_admin_users()
 

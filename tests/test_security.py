@@ -478,7 +478,7 @@ class TestSandboxCacheDirEnv:
         assert resolve_sandbox_cache_dir(config, "alice") is None
 
     def test_a_broken_config_never_raises(self, tmp_path):
-        """Both callers are on the task path — for NativeBrain, per Bash call.
+        """Both callers are on the task path — for NativeBrain, once per task attempt.
         An exception here would fail every task, which is the outcome failing
         open exists to prevent."""
         cache = tmp_path / "uvcache"

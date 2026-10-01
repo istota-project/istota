@@ -72,18 +72,16 @@ def _load_context():
 
 
 def _room_withheld(config, user_id: str, skill_index) -> frozenset[str]:
-    """What the calling task's room withholds from it (seam 6, multiplayer).
+    """What the calling task withholds from it (seam 6, multiplayer).
 
-    The executor's seams are what enforce a shared room's restriction; this is
-    the subprocess backstop, so a skill body or an overlay the room withholds
-    is not handed back by `skills show` either. Two readings, unioned: the set
-    the executor computed for the task (`ISTOTA_WITHHELD_SCOPES`, put in the
-    proxy's environment and never the model's), and a fresh derivation from
-    the task's own row, through the same `room_scopes.withheld_for_task` the
-    executor calls. The row rather than a room token, because only the row
-    says the turn is a guest's, and a guest's turn withholds everything
-    whatever the room's grants say. Fresh, so a grant revoked mid-task takes
-    effect here at once.
+    The executor's seams are what enforce a guest turn's restriction; this is
+    the subprocess backstop, so a skill body or an overlay a guest's turn may
+    not reach is not handed back by `skills show` either. Two readings,
+    unioned: the set the executor computed for the task
+    (`ISTOTA_WITHHELD_SCOPES`, put in the proxy's environment and never the
+    model's), and a fresh derivation from the task's own row through the same
+    `room_scopes.withheld_for_task` the executor calls, since only the row says
+    the turn is a guest's or nobody asked it in the room.
 
     No task (an operator's shell, the heartbeat's id 0) reads the environment
     alone. A database that cannot be read withholds every scope.
@@ -108,12 +106,10 @@ def _room_withheld(config, user_id: str, skill_index) -> frozenset[str]:
             task = db.get_task(conn, task_id)
             if task is not None and task.user_id == user_id:
                 withheld |= room_scopes.withheld_for_task(
-                    conn, task,
-                    policy=config.rooms.shared_room_data_policy,
-                    skill_index=skill_index,
+                    conn, task, skill_index=skill_index,
                 )
     except Exception:
-        withheld |= room_scopes.withheld_scopes(skill_index, frozenset())
+        withheld |= room_scopes.all_scopes(skill_index)
     return frozenset(withheld)
 
 

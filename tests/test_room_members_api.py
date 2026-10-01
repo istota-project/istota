@@ -12,8 +12,6 @@ Also here: `room_data_grants` (schema and markered migration, no backfill) and
 `is_group_chat` on a task being recomputed from the one multi-human predicate.
 """
 
-import sqlite3
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -64,67 +62,37 @@ def _config(db_path, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# room_data_grants: schema and migration
+# room_data_grants: retired and dropped (ISSUE-576)
 # ---------------------------------------------------------------------------
 
 
-def _pre_grants_schema() -> str:
-    schema = (Path(__file__).parents[1] / "schema.sql").read_text()
-    start = schema.index("-- A member's standing consent")
-    end = schema.index("-- The speech gate's audit trail")
-    return schema[:start] + schema[end:]
-
-
-class TestRoomDataGrantsMigration:
-    def test_the_migration_creates_what_a_fresh_install_gets(self, tmp_path, db_path):
-        old = tmp_path / "old.db"
-        with sqlite3.connect(old) as conn:
-            conn.executescript(_pre_grants_schema())
+class TestRoomDataGrantsRetired:
+    def test_a_fresh_install_has_no_grants_table(self, db_path):
+        with db.get_db(db_path) as conn:
             assert conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE name = 'room_data_grants'"
             ).fetchone() is None
-        # The migrations alone, not schema.sql: that is what an upgrade runs
-        # before the schema file, and what must stand on its own.
-        with sqlite3.connect(old) as conn:
-            conn.row_factory = sqlite3.Row
-            db._run_migrations(conn)
-            conn.commit()
-        with db.get_db(db_path) as fresh, db.get_db(old) as upgraded:
-            a = [tuple(r) for r in fresh.execute("PRAGMA table_info(room_data_grants)")]
-            b = [tuple(r) for r in upgraded.execute("PRAGMA table_info(room_data_grants)")]
-            assert a and a == b
-            assert upgraded.execute(
-                "SELECT 1 FROM _migration_state WHERE name = 'room_grants_v1'"
-            ).fetchone() is not None
 
-    def test_no_grant_is_backfilled_for_an_existing_shared_room(self, tmp_path):
-        old = tmp_path / "old.db"
-        with sqlite3.connect(old) as conn:
-            conn.executescript(_pre_grants_schema())
-            conn.execute(
-                "INSERT INTO rooms (token, user_id, origin) VALUES ('grp', 'alice', 'talk')"
-            )
-            conn.executemany(
-                "INSERT INTO room_members (room_token, user_id) VALUES ('grp', ?)",
-                [("alice",), ("bob",)],
-            )
-        db.init_db(old)
-        db.init_db(old)
-        with db.get_db(old) as conn:
-            assert conn.execute("SELECT COUNT(*) FROM room_data_grants").fetchone()[0] == 0
-
-    def test_deleting_a_room_drops_its_grants(self, db_path):
+    def test_an_upgraded_install_loses_the_table_and_its_rows(self, db_path):
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "mine")
             conn.execute(
-                "INSERT INTO room_data_grants (room_token, user_id, scope) "
-                "VALUES (?, 'alice', 'calendar')", (room.token,),
+                "CREATE TABLE room_data_grants (room_token TEXT NOT NULL, "
+                "user_id TEXT NOT NULL, scope TEXT NOT NULL, "
+                "PRIMARY KEY (room_token, user_id, scope))"
             )
-            assert db.delete_web_chat_room(conn, room.id, "alice")
-            assert conn.execute(
-                "SELECT COUNT(*) FROM room_data_grants WHERE room_token = ?",
+            conn.execute(
+                "INSERT INTO room_data_grants VALUES (?, 'alice', 'calendar')",
                 (room.token,),
-            ).fetchone()[0] == 0
+            )
+        db.init_db(db_path)
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            assert conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'room_data_grants'"
+            ).fetchone() is None
+            # Deleting a room no longer names the table, so it works without it.
+            assert db.delete_web_chat_room(conn, room.id, "alice")
 
 
 # ---------------------------------------------------------------------------

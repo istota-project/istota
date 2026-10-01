@@ -1,4 +1,4 @@
-"""Auth-link messages and synchronous delivery for CLI and web callers."""
+"""Auth-link and sign-in code messages and synchronous delivery for CLI and web callers."""
 
 from __future__ import annotations
 
@@ -33,10 +33,22 @@ def build_reset_email(bot_name: str, display_name: str, link: str, ttl_hours: in
                     f"This link expires in {ttl_hours} {unit}. If you did not request it, you can ignore it.")
 
 
-def build_login_link_email(bot_name: str, display_name: str, link: str, ttl_minutes: int) -> tuple[str, str, str]:
-    return _message(bot_name, display_name, link, "Sign in",
-                    f"This link expires in {ttl_minutes} minutes. Anyone who has this link can sign in as you. "
-                    "If you did not request it, you can ignore it.")
+def build_sign_in_code_email(bot_name: str, display_name: str, code: str, ttl_minutes: int) -> tuple[str, str, str]:
+    """A code, never a link: it opens wherever the mail is read and is useless there (ISSUE-574).
+
+    The code sits in the subject and alone on its own line, which is what lets
+    Apple's one-time-code autofill offer it from Mail.
+    """
+    subject = f"{code} is your {bot_name} sign-in code"
+    greeting = f"Hello {display_name}," if display_name else "Hello,"
+    detail = (f"Enter it on the {bot_name} sign-in screen where you asked for it. It expires in "
+              f"{ttl_minutes} minutes and works only there. Never type it into a page you did not "
+              "open yourself. If you did not request it, you can ignore this email.")
+    plain = f"{greeting}\n\nYour {bot_name} sign-in code is:\n\n{code}\n\n{detail}\n"
+    html = (f"<p>{escape(greeting)}</p><p>Your {escape(bot_name)} sign-in code is:</p>"
+            f'<p style="font-size:1.5em;letter-spacing:0.2em"><strong>{escape(code)}</strong></p>'
+            f"<p>{escape(detail)}</p>")
+    return subject, plain, html
 
 
 def send_auth_email(config: Config, to: str, subject: str, plain: str, html: str) -> bool:

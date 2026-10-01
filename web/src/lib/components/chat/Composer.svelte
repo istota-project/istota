@@ -35,7 +35,12 @@
   } from '$lib/api';
   import AutocompletePopover from './autocomplete/AutocompletePopover.svelte';
   import { createAutocomplete, type AcceptResult } from './autocomplete/useAutocomplete.svelte';
-  import { commandProvider, modelAliasProvider } from './autocomplete/providers';
+  import {
+    commandProvider,
+    mentionProvider,
+    modelAliasProvider,
+    type MentionCandidate,
+  } from './autocomplete/providers';
   import { createRecorder, formatElapsed } from './useRecorder.svelte';
   import { usesSoftKeyboard, isImeComposing, IME_COMMIT_GRACE_MS } from '$lib/platform/input';
   import {
@@ -65,6 +70,7 @@
     replyTo = null,
     onReplyChange,
     restoreSend = null,
+    mentionCandidates = [],
   }: {
     onSend: (text: string, attachments: ChatAttachment[], replyTo?: MessageReply | null) => void;
     onCancel?: () => void;
@@ -157,6 +163,9 @@
      * composer is what acts on it.
      */
     restoreSend?: { n: number; text: string; attachments: ChatAttachment[] } | null;
+    /** Who `@` offers: the open room's members and the bot, the same list the
+     *  transcript styles mentions from. Empty outside a shared room. */
+    mentionCandidates?: MentionCandidate[];
   } = $props();
 
   let text = $state('');
@@ -408,9 +417,10 @@
   // (with the space) wins over the bare-! command matcher.
   const AC_LIST_ID = 'chat-ac-listbox';
   const acOptionId = (key: string) => `chat-ac-opt-${key}`;
-  const ac = createAutocomplete([modelAliasProvider(), commandProvider()], {
-    onAccept: applyAccept,
-  });
+  const ac = createAutocomplete(
+    [modelAliasProvider(), commandProvider(), mentionProvider(() => mentionCandidates)],
+    { onAccept: applyAccept },
+  );
   let acActiveDescendant = $derived(
     ac.open && ac.suggestions[ac.activeIndex]
       ? acOptionId(ac.suggestions[ac.activeIndex].key)

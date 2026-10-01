@@ -14,7 +14,7 @@ from tests.test_ansible_config_template import load_config_from, render
 SETTINGS = [
     ("web", "auth_enrol_ttl_hours", 48),
     ("web", "auth_reset_ttl_hours", 2),
-    ("web", "auth_login_link_ttl_minutes", 5),
+    ("web", "auth_sign_in_code_ttl_minutes", 5),
     ("web", "auth_min_password_length", 16),
     ("web", "auth_throttle_window_seconds", 300),
     ("web", "auth_throttle_max_email", 4),

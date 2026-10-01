@@ -3,7 +3,6 @@
   import type { ChatRoom, GuestReply, RoomPatch, SelectableBrain } from '$lib/api';
   import { Modal, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
   import RoomMembers from './RoomMembers.svelte';
-  import RoomShareScopes from './RoomShareScopes.svelte';
   import RoomGroupLink from './RoomGroupLink.svelte';
   import { ROOM_COLORS, ROOM_COLOR_LABELS, roomColorVar } from '$lib/roomColors';
   import {
@@ -445,11 +444,6 @@
         onChanged={onMembersChanged}
         {onLeft}
       />
-    </div>
-
-    <div class="field">
-      <span>What you share here</span>
-      <RoomShareScopes roomId={room.id} />
     </div>
 
     <div class="field">

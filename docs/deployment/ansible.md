@@ -327,7 +327,7 @@ When adding new fields to the config system:
 
 ## Signing in without Nextcloud
 
-Set `istota_web_auth: ["email"]`, configure `istota_hostname`, vault a persistent `istota_web_secret_key`, and configure SMTP for password resets and email sign-in links. The role defaults to `["nextcloud", "email"]`. Keep both methods while attaching identities to existing users, then select `["email"]` when every user can sign in that way. See [email login setup](../features/web-interface.md#email-login) for bootstrap and recovery commands.
+Set `istota_web_auth: ["email"]`, configure `istota_hostname`, vault a persistent `istota_web_secret_key`, and configure SMTP for password resets and email sign-in codes. The role defaults to `["nextcloud", "email"]`. Keep both methods while attaching identities to existing users, then select `["email"]` when every user can sign in that way. See [email login setup](../features/web-interface.md#email-login) for bootstrap and recovery commands.
 
 The direct uvicorn unit refuses `["none"]` even though it binds loopback: nginx publishes that backend. No-auth is supported only by `istota serve` on loopback, without a public proxy. The role excludes both email token paths from nginx access logs and disables uvicorn access logs. Apply the same exclusion to any outer proxy.
 
@@ -339,12 +339,12 @@ The role writes these email-login settings under `[web]`:
 | --- | --- | --- |
 | `istota_web_auth_enrol_ttl_hours` | `168` | Password-setup link lifetime in hours |
 | `istota_web_auth_reset_ttl_hours` | `1` | Password-reset link lifetime in hours |
-| `istota_web_auth_login_link_ttl_minutes` | `15` | Email sign-in link lifetime in minutes |
+| `istota_web_auth_sign_in_code_ttl_minutes` | `10` | Email sign-in code lifetime in minutes |
 | `istota_web_auth_min_password_length` | `12` | Minimum password length |
 | `istota_web_auth_throttle_window_seconds` | `900` | Verification budget window in seconds |
 | `istota_web_auth_throttle_max_email` | `10` | Verification attempts per email in the window |
 | `istota_web_auth_throttle_max_ip` | `30` | Verification attempts per trusted client IP in the window |
-| `istota_web_auth_mail_link_max_email` | `3` | Mail-link requests per email per hour, across link purposes |
+| `istota_web_auth_mail_link_max_email` | `3` | Mails per address per hour, reset links and sign-in codes together |
 | `istota_web_trusted_proxy_hops` | `0` | Trusted hops in the forwarded client-address chain |
 
 ## Credential controls

@@ -48,7 +48,6 @@ def test_migrate_preserves_multiplayer_state_and_native_refs(database):
         conn.execute("UPDATE tasks SET talk_delivery_token=? WHERE id=?", (old, task))
         db.add_message(conn, old, role="user", body="hi", origin_surface="talk")
         conn.execute("INSERT INTO room_participants(room_token,surface,surface_ref,kind) VALUES (?, 'talk','guest','guest')", (old,))
-        conn.execute("INSERT INTO room_data_grants(room_token,user_id,scope) VALUES (?,'alice','memory')", (old,))
         conn.execute("INSERT INTO credential_grant_rooms(user_id,name,conversation_token) VALUES ('alice','service',?)", (old,))
         conn.execute("INSERT INTO talk_poll_state(conversation_token,last_known_message_id) VALUES (?,42)", (old,))
         conn.execute("INSERT INTO talk_messages(conversation_token,message_id) VALUES (?,42)", (old,))
@@ -71,7 +70,7 @@ def test_migrate_preserves_multiplayer_state_and_native_refs(database):
         assert db.get_room(conn, new_side).side_of == new
         assert db.get_task(conn, task).output_target == f"room:{new}, talk:{old}, web:{new_side}"
         assert db.get_task(conn, task).talk_delivery_token == old
-        for table in ("room_members", "room_participants", "room_data_grants", "room_policy",
+        for table in ("room_members", "room_participants", "room_policy",
                       "room_vetoes", "room_notices", "room_epochs", "speech_gate_decisions", "messages"):
             assert conn.execute(f"SELECT count(*) FROM {table} WHERE room_token=?", (new,)).fetchone()[0] == 1
         assert conn.execute("SELECT conversation_token FROM credential_grant_rooms").fetchone()[0] == new
