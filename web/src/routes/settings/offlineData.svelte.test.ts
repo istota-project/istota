@@ -57,7 +57,8 @@ const offline = vi.hoisted(() => ({
 }));
 vi.mock('$lib/offline/clear', () => offline);
 
-import Page from './+page.svelte';
+import Page from './preferences/+page.svelte';
+import SettingsLayout from './+layout.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 import type { User } from '$lib/api';
 
@@ -84,7 +85,7 @@ const person: User = {
   },
 };
 
-const renderPage = () => render(Harness, { component: Page, user: person });
+const renderPage = () => render(Harness, { component: Page, layout: SettingsLayout, user: person });
 
 beforeEach(() => {
   native.shellAtLeast.mockReturnValue(true);

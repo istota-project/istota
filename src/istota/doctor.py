@@ -3208,7 +3208,7 @@ _VAULT_PATH_REMEDIES = {
     ),
     "folder": (
         "Put a .kdbx file in the user's vault folder, or — where there are "
-        "several — choose one from Settings, Connected services. Neither state "
+        "several — choose one from Settings, Credentials. Neither state "
         "is broken and neither is an operator's to fix; the user's own card "
         "asks for exactly this."
     ),

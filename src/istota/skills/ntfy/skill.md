@@ -62,4 +62,4 @@ The title is always plain text: `--title` is an HTTP header and is never rendere
 
 ## Failure mode
 
-If ntfy isn't configured (no topic), the command returns an error envelope and exit 1. Tell the user to set the topic at `/istota/settings` (Connected services → ntfy) and proceed via Talk for this task.
+If ntfy isn't configured (no topic), the command returns an error envelope and exit 1. Tell the user to set the topic at `/istota/settings/connections` (ntfy) and proceed via Talk for this task.

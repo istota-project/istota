@@ -729,7 +729,7 @@ def cmd_import_garmin_tracks(args):
         except gm.GarminAuthError as e:
             _fail(
                 f"Garmin not connected ({e}). Connect it in "
-                "Settings → Connected services."
+                "Settings → Connections."
             )
         except gm.GarminRateLimited:
             _fail("Garmin rate-limited — try again later.")
@@ -748,7 +748,7 @@ def cmd_import_garmin_tracks(args):
         _fail(
             "Garmin track import needs ISTOTA_SECRET_KEY (direct) or a "
             "task context to delegate. Use the web UI 'Import GPS "
-            "tracks' button under Settings → Connected services."
+            "tracks' button under Settings → Connections."
         )
     path = Path(deferred) / f"task_{task_id}_garmin_import.json"
     path.write_text(json.dumps({"days_back": days_back}), encoding="utf-8")

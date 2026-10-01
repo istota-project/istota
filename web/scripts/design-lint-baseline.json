@@ -192,7 +192,7 @@
   "src/routes/money/transactions/+page.svelte": {
     "off-scale-space": 3
   },
-  "src/routes/settings/+page.svelte": {
+  "src/routes/settings/preferences/+page.svelte": {
     "off-scale-space": 1
   }
 }

@@ -6,10 +6,14 @@
     saveCredentialGrant,
     revokeCredentialGrant,
     grantExistingCredentials,
+    type CredentialGrant,
     type CredentialGrantsSettings,
   } from '$lib/api';
-  import { Button, Select, Modal, ConfirmDialog } from '$lib/components/ui';
+  import { Badge, Button, ConfirmDialog, KebabMenu, Modal, Select } from '$lib/components/ui';
+  import type { KebabItem } from '$lib/components/ui/KebabMenu.svelte';
   import SettingsCard from './SettingsCard.svelte';
+
+  type Credential = CredentialGrantsSettings['credentials'][number];
 
   let { onSignedOut = () => {} }: { onSignedOut?: () => void } = $props();
   let data: CredentialGrantsSettings | null = $state(null);
@@ -23,6 +27,7 @@
   let scheduled = $state(false);
   let omittedRooms = $state(false);
   let confirmExisting = $state(false);
+  let confirmRevoke: string | null = $state(null);
   const defaultMethods = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH'];
   const allMethods = [...defaultMethods, 'DELETE', 'OPTIONS'];
 
@@ -75,52 +80,98 @@
       }),
     );
   }
+  function revoke() {
+    const name = confirmRevoke;
+    confirmRevoke = null;
+    if (name) return mutate(() => revokeCredentialGrant(name));
+  }
+
+  function sourceLabel(c: Credential): string {
+    return c.source === 'config' ? 'Deployment configuration' : 'Password vault';
+  }
+
+  /** What the grant allows, on one line: where, which methods, and whether a
+   * scheduled task may use it. */
+  function grantSummary(grant: CredentialGrant): string {
+    const n = grant.rooms.length;
+    const where = grant.scope_mode === 'all' ? 'All rooms' : `${n} room${n === 1 ? '' : 's'}`;
+    const parts = [where, grant.methods.join(', ')];
+    if (grant.allow_scheduled) parts.push('scheduled');
+    return parts.join(' · ');
+  }
+
+  function menu(c: Credential): KebabItem[] {
+    // Disabled rather than absent on an unbound credential: a grant needs a
+    // host to bind to, and the row says how to give it one.
+    const items: KebabItem[] = [
+      { label: 'Edit grant', disabled: busy || !c.hosts.length, onSelect: () => edit(c.name) },
+    ];
+    if (c.grant)
+      items.push({
+        label: 'Revoke grant',
+        danger: true,
+        disabled: busy,
+        onSelect: () => (confirmRevoke = c.name),
+      });
+    return items;
+  }
 </script>
 
-<SettingsCard title="Credentials">
-  <p class="hint">
-    Choose which rooms, HTTP methods and scheduled tasks may use each credential. These grants take
-    effect when the credential broker is enabled.
+<SettingsCard title={data ? `Credentials (${data.credentials.length})` : 'Credentials'}>
+  {#snippet actions()}
+    {#if data?.grant_existing_available}
+      <Button variant="pill" size="sm" onclick={() => (confirmExisting = true)} disabled={busy}>
+        Grant what exists
+      </Button>
+    {/if}
+  {/snippet}
+  <p class="card-hint">
+    Which rooms, HTTP methods and scheduled tasks may use each credential. A credential is sent only
+    to the hosts it is bound to. Grants take effect when the credential broker is enabled.
   </p>
-  {#if error}<p class="banner error" role="alert">{error}</p>{/if}
+  {#if error && !editorOpen}<p class="banner error" role="alert">{error}</p>{/if}
   {#if data}
-    {#if !data.sandboxed}<p class="hint">
+    {#if !data.sandboxed}
+      <p class="banner info">
         Credential values are not contained on this deployment because tasks run without a
         filesystem sandbox.
-      </p>{/if}
-    {#if data.grant_existing_available}
-      <Button onclick={() => (confirmExisting = true)} disabled={busy}>Grant what exists</Button>
+      </p>
     {/if}
-    {#each data.credentials as credential (credential.name)}
-      <div class="credential">
-        <strong>{credential.name}</strong>
-        <span class="hint"
-          >{credential.source === 'config' ? 'Deployment configuration' : 'Password vault'}</span
-        >
-        {#if credential.revealable}<span class="status-pill">Revealable</span>{/if}
-        {#if !credential.grant}<span class="status-pill">Ungranted</span>{/if}
-        {#if credential.hosts.length}
-          <p>{credential.hosts.join(', ')}</p>
-          <p class="hint">Allowed headers: {credential.headers.join(', ') || 'None'}</p>
-          <Button
-            ariaLabel={`Edit grant for ${credential.name}`}
-            onclick={() => edit(credential.name)}
-            disabled={busy}>Edit grant</Button
-          >
-          {#if credential.grant}
-            <Button
-              variant="danger"
-              onclick={() => mutate(() => revokeCredentialGrant(credential.name))}
-              disabled={busy}>Revoke grant</Button
-            >
-          {/if}
-        {:else}
-          <p class="hint">
-            Unbound. Set an HTTPS URL or istota_hosts in KeePassXC before using this credential.
-          </p>
-        {/if}
-      </div>
-    {:else}<p class="hint">No credentials have been stored.</p>{/each}
+    {#if data.credentials.length === 0}
+      <p class="empty">No credentials have been stored.</p>
+    {:else}
+      <ul class="cred-list">
+        {#each data.credentials as credential (credential.name)}
+          <li class="cred-row" data-testid="credential-{credential.name}">
+            <code class="cred-name">{credential.name}</code>
+            <div class="cred-main">
+              {#if credential.hosts.length}
+                <span class="cred-hosts">{credential.hosts.join(', ')}</span>
+              {:else}
+                <span class="cred-unbound">
+                  Set an HTTPS URL or <code>istota_hosts</code> in KeePassXC before using it.
+                </span>
+              {/if}
+              <!-- Written without template whitespace so the line reads
+                   exactly "Source · Rooms · Methods" with no stray gaps. -->
+              <span class="cred-meta"
+                >{sourceLabel(credential)}{#if credential.grant}{' · ' +
+                    grantSummary(credential.grant)}{/if}</span
+              >
+            </div>
+            <div class="cred-badges">
+              {#if !credential.hosts.length}
+                <Badge variant="warn">Unbound</Badge>
+              {:else if !credential.grant}
+                <Badge variant="warn">Ungranted</Badge>
+              {/if}
+              {#if credential.revealable}<Badge variant="info">Revealable</Badge>{/if}
+            </div>
+            <KebabMenu items={menu(credential)} ariaLabel="Actions for {credential.name}" />
+          </li>
+        {/each}
+      </ul>
+    {/if}
   {/if}
 </SettingsCard>
 
@@ -167,13 +218,105 @@
   confirmDisabled={busy}
   confirmVariant="primary"
 />
+<ConfirmDialog
+  open={confirmRevoke !== null}
+  title="Revoke grant"
+  message="Are you sure you want to revoke the grant for {confirmRevoke}? No task can use it until it is granted again."
+  confirmLabel="Revoke"
+  confirmVariant="danger"
+  onConfirm={revoke}
+  onCancel={() => (confirmRevoke = null)}
+/>
 
 <style>
-  .credential {
-    border-top: 1px solid var(--border-default);
-    padding: var(--space-4) 0;
-    margin-top: var(--space-4);
+  .card-hint {
+    margin: 0 0 var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
   }
+
+  .cred-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .cred-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) 0;
+  }
+
+  .cred-row + .cred-row {
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .cred-name {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-primary);
+    background: var(--surface-raised);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    flex: 0 1 9rem;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .cred-main {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .cred-hosts {
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+  }
+
+  .cred-unbound {
+    font-size: var(--text-sm);
+    color: var(--status-warn-fg);
+  }
+
+  .cred-meta {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  .cred-badges {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: var(--space-1);
+  }
+
+  /* On a phone the name and the menu share the first line and the rest wraps
+     under them, so a long host list is not squeezed into a sliver beside the
+     badges. */
+  @media (max-width: 600px) {
+    .cred-row {
+      flex-wrap: wrap;
+    }
+    .cred-name {
+      flex: 1 1 auto;
+    }
+    .cred-row :global(.ui-kebab-trigger) {
+      order: 1;
+    }
+    .cred-main {
+      order: 2;
+      flex-basis: 100%;
+    }
+    .cred-badges {
+      order: 3;
+      justify-content: flex-start;
+    }
+  }
+
   .grant-fields {
     display: flex;
     flex-direction: column;

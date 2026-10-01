@@ -925,7 +925,7 @@ class TestConnectedServiceResolver:
         assert total == 1 and len(items) == 1
         (action,) = items[0].actions
         assert (action.id, action.method, action.href) == (
-            "reconnect", "LINK", "/settings",
+            "reconnect", "LINK", "/settings/connections",
         )
         assert action.endpoint is None
         assert items[0].link is None

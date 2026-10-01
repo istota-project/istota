@@ -669,7 +669,7 @@ def acquire_client(
     tokens = load_tokens(db_path, user_id)
     if not tokens:
         raise GarminAuthError(
-            "no Garmin tokens — connect via Settings → Connected services",
+            "no Garmin tokens — connect via Settings → Connections",
         )
     adapter = _build_adapter()
     adapter.load_tokens(tokens)  # rehydrate; may rotate the blob in memory

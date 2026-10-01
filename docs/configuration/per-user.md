@@ -15,7 +15,7 @@ Per-user data lives in three DB tables and (optionally) the user's Nextcloud wor
 The DB rows are populated four ways:
 
 - **Ansible**: `istota user|resource|briefing|secret ensure …` — each idempotent and prints `STATE: created|updated|noop` for `changed_when` semantics.
-- **Web UI**: `/istota/settings` (Profile + Connected services + module pages) and the per-feature settings under `/istota/{feeds,money,location}/settings`.
+- **Web UI**: `/istota/settings` (Account, Preferences, Delivery, Credentials and Connections sections) and the per-feature settings under `/istota/{feeds,money,location}/settings`.
 - **Auto-seed**: on first OAuth login the profile row is created from the Nextcloud display_name and any `[users.X]` block. Subsequent logins do not overwrite values the user has edited.
 - **TOML migration**: on scheduler startup, `import_from_user_configs` (one each for profiles / resources / briefings) seeds DB rows from any remaining `[users.X]` block whose natural key isn't already present.
 
@@ -82,7 +82,7 @@ alert = "ntfy"                 # heartbeat + security alerts go to ntfy
 log = "web:<room-token>"       # verbose execution log streamed to a web chat room
 ```
 
-> ntfy push notifications are **not** a profile field. They live in the encrypted `secrets` table — provision via the web UI (`/istota/settings` → Connected services → ntfy push) or `istota secret ensure --user alice --service ntfy --key topic --value …`.
+> ntfy push notifications are **not** a profile field. They live in the encrypted `secrets` table — provision via the web UI (`/istota/settings/connections` → ntfy push) or `istota secret ensure --user alice --service ntfy --key topic --value …`.
 
 `vault_path` is **not in `user_profiles`**, and that is a security control rather than an omission. Every other per-user scalar above is overlaid from that table, which the settings UI writes; this one decides which file the daemon decrypts with a key it holds, so it may not be settable by anything downstream of a task.
 
