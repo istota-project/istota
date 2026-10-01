@@ -48,6 +48,8 @@ REWRITE_COLUMNS: dict[tuple[str, str], str] = {
     ("sent_emails", "conversation_token"): "email_thread",
     ("memory_chunks", "user_id"): "channel_namespace",
     ("memory_chunks", "source_id"): "channel_path",
+    # index_file stores the same path in metadata_json.file_path.
+    ("memory_chunks", "metadata_json"): "channel_path_json",
     # Origin: room_token/parent and web channel are canonical, Talk channel is
     # a surface ref. Destination: room_token/parent are canonical; talk_ref,
     # group refs and email thread refs stay intact. Never recursively replace

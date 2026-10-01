@@ -64,6 +64,7 @@ EMBEDDED_HOLDERS = {
     ("istota_kv", "value"),
     ("memory_chunks", "user_id"),
     ("memory_chunks", "source_id"),
+    ("memory_chunks", "metadata_json"),
     ("message_relays", "origin"),
     ("message_relays", "destination"),
     ("whatsapp_skill_requests", "origin"),
