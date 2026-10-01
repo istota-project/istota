@@ -12,6 +12,8 @@
     Star,
     CheckCheck,
     Users,
+    Smartphone,
+    MessageCircle,
   } from 'lucide-svelte';
   import {
     AppShell,
@@ -172,6 +174,13 @@
   let composerH = $state(0);
 
   const activeRoom = $derived($rooms.find((r) => r.id === $activeRoomId) ?? null);
+  // The open room is the transcript of the user's own SMS or WhatsApp thread:
+  // read here, answered by text. The label is what the notice and the
+  // confirmation card name. The server refuses a send either way; hiding the
+  // composer is the courtesy, not the gate.
+  const readOnlyPhone = $derived(
+    activeRoom?.read_only ? (activeRoom.phone_surface === 'whatsapp' ? 'WhatsApp' : 'SMS') : null,
+  );
 
   // A room whose host left answers nobody until a member claims it (D14).
   const hostLost = $derived(!!activeRoom?.policy && activeRoom.policy.host === null);
@@ -1107,6 +1116,19 @@
               >
                 <Users size={13} />
               </span>
+            {:else if room.phone_surface}
+              <!-- A room bound to a phone thread: an SMS conversation, or a
+							     WhatsApp chat or group. Outranked by the shared glyph above,
+							     which a WhatsApp group also carries. -->
+              <span
+                class="room-origin phone"
+                title={room.phone_surface === 'sms' ? 'SMS conversation' : 'WhatsApp conversation'}
+                aria-label={room.phone_surface === 'sms' ? 'SMS' : 'WhatsApp'}
+              >
+                {#if room.phone_surface === 'sms'}<Smartphone size={13} />{:else}<MessageCircle
+                    size={13}
+                  />{/if}
+              </span>
             {:else if isTalk}
               <!-- Leading origin glyph: a tinted cloud marks a room mirrored
 							     to Nextcloud Talk. Sits in its own flex slot before the
@@ -1261,7 +1283,7 @@
                 onQueueSend={inViewMode ? undefined : releaseQueuedSend}
                 onQueueEdit={inViewMode ? undefined : session.editQueued}
                 onQueueRemove={inViewMode ? undefined : session.removeQueued}
-                onReply={inViewMode ? undefined : stageReply}
+                onReply={inViewMode || readOnlyPhone ? undefined : stageReply}
                 onJumpToMessage={inViewMode ? undefined : jumpToCitedMessage}
                 onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
                 onJump={(token, taskId) => session.jumpToTask(token, taskId)}
@@ -1276,6 +1298,7 @@
                 aggregate={inViewMode}
                 active={message.cid === activeCid}
                 touch={pointerIsTouch}
+                answerByText={inViewMode ? null : readOnlyPhone}
               />
             {/each}
           </div>
@@ -1333,38 +1356,48 @@
            view that has no composer at all; it is the shell's `extras` band
            now, so this condition is back to the one thing the dock is for. -->
       <div class="composer-dock" bind:this={dockEl}>
-        <Composer
-          onSend={(t, atts, reply) => {
-            // Sending is the end of reading back: whatever the user had scrolled
-            // up to look at, the message they just wrote — and the reply to it —
-            // is what they want to see. So the send re-arms the stick-to-bottom
-            // latch rather than respecting it, which is the one case where the
-            // "only if you were already at the bottom" rule is wrong.
-            //
-            // Pinned immediately as well as latched: `send` is async, so the
-            // message may be a network round trip away, and the transcript
-            // should be waiting at the bottom for it rather than jumping when it
-            // lands. The $messages effect covers the landing itself.
-            atBottom = true;
-            showJumpToLatest = false;
-            // See retryFailedSend: the store settles its own failures onto the
-            // message row, so this only covers a rejection that escaped it.
-            session
-              .send(t, atts, reply ?? undefined)
-              .catch(() => notifyError('Couldn’t send that message.'));
-            tick().then(() => pinToBottom());
-          }}
-          onCancel={() => session.cancel()}
-          {busy}
-          queueing={busy || !$online}
-          {queueFull}
-          placeholder="Your message…"
-          {draftKey}
-          sendSettled={settleSignal}
-          replyTo={stagedReply}
-          onReplyChange={(msgId) => (stagedReplyId = msgId)}
-          restoreSend={returnedSend}
-        />
+        {#if readOnlyPhone}
+          <!-- A phone room is read-only here (decided 2026-10-01): the turn
+               belongs on the phone, and a web send would answer in web while
+               the thread it started in heard nothing. -->
+          <p class="readonly-notice" role="note">
+            This is the transcript of your {readOnlyPhone} conversation. Reply by {readOnlyPhone}
+            to continue it.
+          </p>
+        {:else}
+          <Composer
+            onSend={(t, atts, reply) => {
+              // Sending is the end of reading back: whatever the user had scrolled
+              // up to look at, the message they just wrote — and the reply to it —
+              // is what they want to see. So the send re-arms the stick-to-bottom
+              // latch rather than respecting it, which is the one case where the
+              // "only if you were already at the bottom" rule is wrong.
+              //
+              // Pinned immediately as well as latched: `send` is async, so the
+              // message may be a network round trip away, and the transcript
+              // should be waiting at the bottom for it rather than jumping when it
+              // lands. The $messages effect covers the landing itself.
+              atBottom = true;
+              showJumpToLatest = false;
+              // See retryFailedSend: the store settles its own failures onto the
+              // message row, so this only covers a rejection that escaped it.
+              session
+                .send(t, atts, reply ?? undefined)
+                .catch(() => notifyError('Couldn’t send that message.'));
+              tick().then(() => pinToBottom());
+            }}
+            onCancel={() => session.cancel()}
+            {busy}
+            queueing={busy || !$online}
+            {queueFull}
+            placeholder="Your message…"
+            {draftKey}
+            sendSettled={settleSignal}
+            replyTo={stagedReply}
+            onReplyChange={(msgId) => (stagedReplyId = msgId)}
+            restoreSend={returnedSend}
+          />
+        {/if}
       </div>
     {/if}
   </div>
@@ -1491,6 +1524,15 @@
     right: 0;
     bottom: 0;
     z-index: 6;
+  }
+  .readonly-notice {
+    margin: 0;
+    padding: var(--space-3) var(--space-4);
+    text-align: center;
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    background: var(--surface-base);
+    border-top: 1px solid var(--border-default);
   }
 
   /* Covers the composer's band plus a short run-up above it, so the dissolve is

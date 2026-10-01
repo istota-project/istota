@@ -191,7 +191,12 @@
   // Both keyed off one predicate: `origin` is optional in the type, and an
   // origin-less room with a talk_token otherwise passed canPromote while
   // failing isPromoted, mislabelling the button.
-  const canPromote = $derived(room.origin !== 'talk');
+  // A phone room is not offered either: the server refuses to promote anything
+  // but a web-origin room, and its binding is the user's phone identity.
+  const canPromote = $derived(room.origin !== 'talk' && !room.phone_surface);
+  const phoneLabel = $derived(
+    room.phone_surface === 'sms' ? 'SMS' : room.phone_surface === 'whatsapp' ? 'WhatsApp' : null,
+  );
   const isPromoted = $derived(canPromote && !!room.talk_token);
   // An imported (Talk-origin) room is hidden per-user, not destroyed — this
   // must match the backend's hide condition (`reg.origin == 'talk'`), NOT
@@ -464,31 +469,48 @@
     {#if copyError}<p class="copy-error">{copyError}</p>{/if}
   </div>
 
-  <div class="field">
-    <span>Nextcloud Talk</span>
-    {#if onTalk}
-      <p class="caption talk-on">
-        This room is also open in Nextcloud Talk — replies sync to your phone.
-      </p>
-    {/if}
-    {#if canPromote && onPromote && !locked}
-      <button class="talk-btn" type="button" disabled={promoting} onclick={handlePromote}>
-        {#if promoting}
-          {isPromoted ? 'Checking…' : 'Opening…'}
+  {#if phoneLabel}
+    <!-- Read-only by design: the binding is the user's phone identity, which
+         belongs to the connected-services flow, so there is nothing to unbind
+         here. -->
+    <div class="field">
+      <span>Connected to</span>
+      <p class="caption phone-binding">
+        {#if room.read_only}
+          {phoneLabel} — this room is the transcript of your {phoneLabel} conversation. It is read-only
+          here; reply by {phoneLabel}.
         {:else}
-          {isPromoted ? 'Reconnect to Talk' : 'Also open in Talk'}
-        {/if}
-      </button>
-      <p class="caption">
-        {#if isPromoted}
-          If the Talk conversation for this room was deleted, this creates a new one and points the
-          room at it. Nothing changes while the existing conversation is still there.
-        {:else}
-          Creates a Nextcloud Talk conversation so this chat is reachable from the Talk apps.
+          {phoneLabel} — this room is a {phoneLabel} group.
         {/if}
       </p>
-    {/if}
-  </div>
+    </div>
+  {:else}
+    <div class="field">
+      <span>Nextcloud Talk</span>
+      {#if onTalk}
+        <p class="caption talk-on">
+          This room is also open in Nextcloud Talk — replies sync to your phone.
+        </p>
+      {/if}
+      {#if canPromote && onPromote && !locked}
+        <button class="talk-btn" type="button" disabled={promoting} onclick={handlePromote}>
+          {#if promoting}
+            {isPromoted ? 'Checking…' : 'Opening…'}
+          {:else}
+            {isPromoted ? 'Reconnect to Talk' : 'Also open in Talk'}
+          {/if}
+        </button>
+        <p class="caption">
+          {#if isPromoted}
+            If the Talk conversation for this room was deleted, this creates a new one and points
+            the room at it. Nothing changes while the existing conversation is still there.
+          {:else}
+            Creates a Nextcloud Talk conversation so this chat is reachable from the Talk apps.
+          {/if}
+        </p>
+      {/if}
+    </div>
+  {/if}
 
   {#if isImported}
     <p class="caption hide-hint">
