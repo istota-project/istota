@@ -60,14 +60,19 @@ def test_shared_room_grants_and_membership_follow_old_identity(room_db):
         assert room_scopes.task_withheld_scopes(conn, conversation_token=OLD, user_id="alice", skill_index={}, policy="restrict") == frozenset({"files", "memory"})
 
 
-def test_history_aliases_preserve_epoch_boundaries(room_db):
+@pytest.mark.parametrize("collision", [False, True])
+def test_history_aliases_preserve_epoch_boundaries(room_db, collision):
     with db.get_db(room_db) as conn:
         task = db.create_task(conn, "old private turn", "alice", conversation_token=OLD)
+        if collision:
+            db.register_room(conn, "unrelated", "carol", origin="talk")
+            db.add_room_binding(conn, "unrelated", "talk", OLD)
         db.add_room_member(conn, NEW, "bob")
-        cutoff = db.front_stage_cutoff(conn, OLD)
+        cutoff = db.front_stage_cutoff(conn, NEW if collision else OLD)
         assert cutoff.task_id == task
         assert OLD in db.room_ref_tokens(conn, NEW)
-        assert NEW in db.room_ref_tokens(conn, OLD)
+        if not collision:
+            assert NEW in db.room_ref_tokens(conn, OLD)
         assert db.pre_cutoff_room_task_ids(conn, NEW, cutoff, [task]) == {task}
 
 
@@ -177,3 +182,70 @@ def test_forwarding_does_not_claim_an_existing_rooms_history(room_db):
         other = db.create_task(conn, "other room", "bob", conversation_token=OLD)
         conn.execute("UPDATE tasks SET status = 'completed', result = 'private' WHERE id = ?", (other,))
         assert db.get_conversation_history(conn, NEW) == []
+
+
+@pytest.mark.parametrize("collision", [False, True])
+async def test_revoked_member_cannot_read_through_old_handle(room_db, monkeypatch, collision):
+    from istota import web_app
+
+    monkeypatch.setattr(web_app, "_config", Config(db_path=room_db))
+    with db.get_db(room_db) as conn:
+        db.add_web_room_member(conn, NEW, "bob")
+        if collision:
+            db.register_room(conn, "unrelated", "carol", origin="talk")
+            db.add_room_binding(conn, "unrelated", "talk", OLD)
+        stale = conn.execute("INSERT INTO web_chat_rooms (user_id, token, name) VALUES (?, ?, ?) RETURNING id", ("bob", OLD, "Room")).fetchone()[0]
+        current = db.ensure_web_chat_handle(conn, "bob", NEW, "Room")
+        db.drop_web_room_member(conn, OLD, "bob")
+        db.add_message(conn, NEW, role="system", body="after revocation", origin_surface="web")
+        assert not db.is_room_member(conn, NEW, "bob")
+    for handle in (stale, current.id):
+        response = await web_app.chat_room_messages(handle, user={"username": "bob"})
+        assert getattr(response, "status_code", 200) == 404
+
+
+def test_renaming_old_handle_updates_current_room(room_db, monkeypatch):
+    from istota import web_app
+
+    monkeypatch.setattr(web_app, "_config", Config(db_path=room_db))
+    with db.get_db(room_db) as conn:
+        handle = conn.execute("INSERT INTO web_chat_rooms (user_id, token, name) VALUES (?, ?, ?) RETURNING id", ("alice", OLD, "Room")).fetchone()[0]
+    result = web_app._chat_update_room("alice", handle, "Renamed", None)
+    assert result["token"] == NEW
+    with db.get_db(room_db) as conn:
+        assert db.get_room(conn, NEW).name == "Renamed"
+
+
+async def test_forwarded_descriptor_delivers_through_preserved_web_binding(room_db):
+    from istota.transport.web import WebTransport
+
+    config = Config(db_path=room_db)
+    with db.get_db(room_db) as conn:
+        conn.execute("UPDATE room_bindings SET surface_ref = ? WHERE room_token = ? AND surface = 'web'", (OLD, NEW))
+    task = SimpleNamespace(id=1, source_type="scheduled", conversation_token=None)
+    web = next(d for d in routing._expand_room_destinations(config, task, token=OLD) if d.surface == "web")
+    assert web.channel == OLD
+    message_id = await WebTransport(config).deliver(web.channel, "forwarded notice")
+    assert message_id is not None
+    with db.get_db(room_db) as conn:
+        assert [m.body for m in db.list_system_messages(conn, NEW)] == ["forwarded notice"]
+
+
+def test_delete_migrated_room_removes_old_handles_and_history(room_db):
+    with db.get_db(room_db) as conn:
+        stale = conn.execute("INSERT INTO web_chat_rooms (user_id, token, name) VALUES (?, ?, ?) RETURNING id", ("alice", OLD, "Room")).fetchone()[0]
+        current = db.ensure_web_chat_handle(conn, "alice", NEW, "Room")
+        old_task = db.create_task(conn, "old history", "alice", conversation_token=OLD)
+        assert db.delete_web_chat_room(conn, current.id, "alice")
+        assert db.get_web_chat_room(conn, stale) is None
+        assert db.get_task(conn, old_task) is None
+        assert routing.canonical_room_token(conn, OLD) is None
+
+
+def test_deleted_alias_never_falls_through_to_reused_surface_ref(room_db):
+    with db.get_db(room_db) as conn:
+        conn.execute("DELETE FROM rooms WHERE token = ?", (NEW,))
+        db.register_room(conn, "unrelated", "bob", origin="talk")
+        db.add_room_binding(conn, "unrelated", "talk", OLD)
+        assert routing._canonical_room_token(conn, "talk", OLD, cross_surface=False) is None
+        assert room_scopes.canonical_token(conn, OLD) is None

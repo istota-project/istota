@@ -3691,7 +3691,7 @@ def update_web_chat_room(
         f"UPDATE web_chat_rooms SET {', '.join(sets)} WHERE id = ? RETURNING *",
         params,
     ).fetchone()
-    return _row_to_web_chat_room(row) if row else None
+    return get_web_chat_room(conn, row["id"]) if row else None
 
 
 def ensure_web_chat_handle(
@@ -4263,50 +4263,52 @@ def delete_web_chat_room(
     if room is None or room.user_id != user_id:
         return False
     token = room.token
+    refs = _room_ref_tokens(conn, token, include_surface_refs=False)
+    ref_marks = ", ".join("?" for _ in refs)
     # Every member's tasks, not only the caller's: a web room can hold more
     # than one member, and a co-member's row would otherwise outlive its room.
     conn.execute(
         "DELETE FROM task_events WHERE task_id IN "
-        "(SELECT id FROM tasks WHERE conversation_token = ?)",
-        (token,),
+        f"(SELECT id FROM tasks WHERE conversation_token IN ({ref_marks}))",
+        refs,
     )
     conn.execute(
         "DELETE FROM credential_task_grants WHERE task_id IN "
-        "(SELECT id FROM tasks WHERE conversation_token = ?)",
-        (token,),
+        f"(SELECT id FROM tasks WHERE conversation_token IN ({ref_marks}))",
+        refs,
     )
-    conn.execute("DELETE FROM tasks WHERE conversation_token = ?", (token,))
-    conn.execute("DELETE FROM web_chat_messages WHERE token = ?", (token,))
+    conn.execute(f"DELETE FROM tasks WHERE conversation_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM web_chat_messages WHERE token IN ({ref_marks})", refs)
     conn.execute(
-        "DELETE FROM channel_sleep_cycle_state WHERE conversation_token = ?",
-        (token,),
+        f"DELETE FROM channel_sleep_cycle_state WHERE conversation_token IN ({ref_marks})",
+        refs,
     )
     # Unified-rooms tables — FK cascades are decorative (foreign_keys unset),
     # so hand-delete every row keyed on the token. Stars first: they key on
     # message ids that are about to disappear.
     conn.execute(
         "DELETE FROM message_stars WHERE message_id IN "
-        "(SELECT id FROM messages WHERE room_token = ?)",
-        (token,),
+        f"(SELECT id FROM messages WHERE room_token IN ({ref_marks}))",
+        refs,
     )
-    conn.execute("DELETE FROM messages WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM message_deletions WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_bindings WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_read_state WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_members WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_dismissals WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_participants WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_data_grants WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_policy WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_vetoes WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_notices WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM room_epochs WHERE room_token = ?", (token,))
-    conn.execute("DELETE FROM rooms WHERE token = ?", (token,))
+    conn.execute(f"DELETE FROM messages WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM message_deletions WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_bindings WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_read_state WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_members WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_dismissals WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_participants WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_data_grants WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_policy WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_vetoes WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_notices WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM room_epochs WHERE room_token IN ({ref_marks})", refs)
+    conn.execute(f"DELETE FROM rooms WHERE token IN ({ref_marks})", refs)
     # Drop every participant's handle for the token, not just the requester's
     # (room_id): a promoted web room can accrue handles for other members, and
     # leaving an orphan handle pointing at a now-deleted room would suppress
     # their default-room creation and yield an empty room list (ISSUE-134).
-    conn.execute("DELETE FROM web_chat_rooms WHERE token = ?", (token,))
+    conn.execute(f"DELETE FROM web_chat_rooms WHERE token IN ({ref_marks})", refs)
     return True
 
 
@@ -4682,9 +4684,11 @@ def drop_web_room_member(
     """
     room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     remove_room_member(conn, room_token, user_id)
+    refs = _room_ref_tokens(conn, room_token, include_surface_refs=False)
+    placeholders = ", ".join("?" for _ in refs)
     conn.execute(
-        "DELETE FROM web_chat_rooms WHERE user_id = ? AND token = ?",
-        (user_id, room_token),
+        f"DELETE FROM web_chat_rooms WHERE user_id = ? AND token IN ({placeholders})",
+        (user_id, *refs),
     )
 
 
@@ -4854,17 +4858,21 @@ def _canonical_room_token(
     """
     if get_room(conn, token) is not None:
         return token
+    mapping = conn.execute(
+        "SELECT m.new_token, r.token FROM room_token_migration m "
+        "LEFT JOIN rooms r ON r.token = m.new_token WHERE m.old_token = ?",
+        (token,),
+    ).fetchone()
+    if mapping is not None and mapping[1] is None:
+        # The permanent alias is also a tombstone. A reused surface ref must
+        # not turn an old bookmark or descriptor into access to another room.
+        return token
     bound = resolve_room_token(conn, surface, token) if surface else None
     if bound is None and cross_surface:
         bound = find_room_token_by_ref(conn, token)
     if bound is not None:
         return bound
-    row = conn.execute(
-        "SELECT r.token FROM room_token_migration m "
-        "JOIN rooms r ON r.token = m.new_token WHERE m.old_token = ?",
-        (token,),
-    ).fetchone()
-    return row[0] if row else token
+    return mapping[0] if mapping is not None else token
 
 
 def room_ref_tokens(conn: sqlite3.Connection, room_token: str) -> list[str]:
@@ -4875,8 +4883,11 @@ def room_ref_tokens(conn: sqlite3.Connection, room_token: str) -> list[str]:
 def _room_ref_tokens(
     conn: sqlite3.Connection, room_token: str, *, include_surface_refs: bool = True,
 ) -> list[str]:
-    """The canonical token plus every surface ref bound to it: the values a
-    `tasks.conversation_token` or a Talk cache row for this room can carry."""
+    """The current identity, permanent aliases and optionally bound surface refs.
+
+    History keeps its existing token namespace by excluding surface refs;
+    audience cutoffs also cover the Talk cache's native references.
+    """
     room_token = _canonical_room_token(conn, room_token, cross_surface=include_surface_refs)
     refs = [room_token]
     if include_surface_refs:
@@ -4889,7 +4900,9 @@ def _room_ref_tokens(
         "SELECT old_token FROM room_token_migration WHERE new_token = ? ORDER BY old_token",
         (room_token,),
     ):
-        if row[0] not in refs and _canonical_room_token(conn, row[0]) == room_token:
+        if row[0] not in refs and _canonical_room_token(
+            conn, row[0], cross_surface=False,
+        ) == room_token:
             refs.append(row[0])
     return refs
 
