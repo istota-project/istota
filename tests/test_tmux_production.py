@@ -87,6 +87,7 @@ class TestFlagHelper:
         flags = build_claude_cli_flags(req)
         assert flags == [
             "--disallowedTools", "Agent", "Workflow",
+            "--settings", '{"attribution": {"commit": "", "pr": ""}}',
             "--model", "claude-opus-4-8", "--effort", "high",
             "--system-prompt-file", str(sp),
         ]

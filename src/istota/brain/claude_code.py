@@ -878,6 +878,8 @@ def _is_root() -> bool:
 # purpose (the warning is operator-facing, not per-request).
 _WARNED_UNSUPPORTED_FLAGS: set[str] = set()
 
+_NO_ATTRIBUTION_SETTINGS = json.dumps({"attribution": {"commit": "", "pr": ""}})
+
 
 def advisor_active(
     req: BrainRequest, *, unsupported: frozenset[str] = frozenset()
@@ -965,6 +967,10 @@ def build_claude_cli_flags(
             return
         flags.extend([flag, *values])
 
+    # The CLI's own prompt tells the model to sign commits and PRs, which the
+    # `commit` skill forbids; a skill sentence loses to it, the setting does not.
+    if req.allowed_tools:
+        _add("--settings", _NO_ATTRIBUTION_SETTINGS)
     if req.model:
         _add("--model", req.model)
     if req.effort:

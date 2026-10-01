@@ -212,6 +212,41 @@ class TestAdvisorFlag:
         assert flags.index("--effort") < flags.index("--advisor")
 
 
+class TestAttributionSettings:
+    """The CLI's own prompt tells the model to sign commits and PRs with a
+    Claude trailer, which the `commit` skill forbids. The setting removes that
+    instruction at the source; a skill sentence alone lost to it."""
+
+    def _flags(self, tmp_path, allowed_tools):
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        return build_claude_cli_flags(BrainRequest(
+            prompt="hi", allowed_tools=allowed_tools, cwd=tmp_path, env={},
+            timeout_seconds=60,
+        ))
+
+    def test_a_tool_run_blanks_commit_and_pr_attribution(self, tmp_path):
+        import json
+
+        flags = self._flags(tmp_path, ["Bash"])
+        settings = json.loads(flags[flags.index("--settings") + 1])
+        assert settings["attribution"] == {"commit": "", "pr": ""}
+
+    def test_a_text_only_call_gets_no_settings(self, tmp_path):
+        assert "--settings" not in self._flags(tmp_path, [])
+
+    def test_the_tmux_launch_carries_it_too(self, tmp_path):
+        from istota.brain.claude_code import build_claude_cli_flags
+        from istota.brain.tmux_claude import _TMUX_UNSUPPORTED_FLAGS
+
+        req = BrainRequest(
+            prompt="hi", allowed_tools=["Bash"], cwd=tmp_path, env={},
+            timeout_seconds=60,
+        )
+        flags = build_claude_cli_flags(req, unsupported=_TMUX_UNSUPPORTED_FLAGS)
+        assert "--settings" in flags
+
+
 class TestComposedSystemPromptFlag:
     """`--append-system-prompt-file` carries Istota's composed system half.
 
