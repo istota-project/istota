@@ -143,7 +143,7 @@ istota-skill wordpress rest POST acme/v1/thing [--query K=V ...] [--body-file bo
 istota-skill wordpress abilities run acme/do-thing [--input-file input.json] [--confirmed]
 ```
 
-- `rest` takes `GET`, `POST`, `PUT`, `PATCH` or `DELETE`. Every method but `GET` needs `--confirmed`, because the skill cannot know what a plugin's route does. `--body-file` is a JSON file from your own workspace. The route and query rules above hold for every method.
+- `rest` takes `GET`, `POST`, `PUT`, `PATCH` or `DELETE`. Every method but `GET` needs `--confirmed`, because the skill cannot know what a plugin's route does. `--body-file` is a JSON file from your own workspace, and the `would` line shows the body. The route and query rules above hold for every method, and `rest_route` is refused in `--query` like `_method`. `batch/v1` is refused; send each request on its own. Deleting a user or a plugin through `rest` is refused.
 - `abilities run` reads the ability first. One marked `readonly` runs without `--confirmed`; any other needs it, and a `destructive` one says so in the `would` line. `--input-file` is the ability's input as JSON.
 - Neither is ever retried. An ambiguous end is `outcome_unknown`; check the site before sending again.
 

@@ -214,7 +214,8 @@ def cmd_users_update(args) -> dict:
         if value is not None:
             body[field] = value.strip() if field == "email" else value
             changes.append(f"{field} -> {quoted(body[field])}")
-    label = f"user #{current.get('id', ident)} {fence(current.get('name'))}".rstrip()
+    shown_id = current.get("id") if isinstance(current.get("id"), int) else ident
+    label = f"user #{shown_id} {fence(current.get('name'))}".rstrip()
     gate(args, ctx, [f"update {label}: {'; '.join(changes)}"])
     user, _ = ctx.client.request("POST", f"wp/v2/users/{ident}", json=body, base=ctx.base,
                                  idempotent=True)
@@ -271,8 +272,9 @@ def cmd_settings_update(args) -> dict:
     for key, value in wanted.items():
         if key in current:
             was = current[key]
-            # The current value is the site's words; the new one the model's.
-            was_text = fence(was) if isinstance(was, str) else _shown(was)
+            # The current value is the site's words, whatever its type; the
+            # new one is the model's.
+            was_text = fence(was if isinstance(was, str) else _shown(was))
             changes.append(f"{key} from {was_text} to {_shown(value)}")
         else:
             changes.append(f"{key} (a setting this site does not report) to {_shown(value)}")
@@ -354,7 +356,8 @@ def _plugin_status(args, new_status: str) -> dict:
                 f"without --network.",
                 "validation_error",
             )
-    if was == new_status:
+    # Activating a network-active plugin on one site changes nothing in core.
+    if was == new_status or (new_status == "active" and was == "network-active"):
         return {"status": "ok", **ctx.envelope(), "changed": False,
                 "item": project_plugin(current)}
     verb = "deactivate" if new_status == "inactive" else "activate"

@@ -4,9 +4,11 @@
 revisions, autosaves. The route is relative to the site's ``/wp-json/`` and may
 not name a scheme, a host, a dot segment, a query, a fragment or a
 percent-escape, so it cannot leave the site; queries go in ``--query``, where
-``_method`` is refused for every method, since WordPress would act on it in
-place of the method the user agreed to. Every method but ``GET`` is gated
-(spec §5.6): the skill cannot know what a plugin's route does. No `rest` call is
+``_method`` and ``rest_route`` are refused for every method, since WordPress
+would act on them in place of the method and route the user agreed to. The
+``batch/v1`` route and deleting users or plugins (spec §5.4) are refused too.
+Every method but ``GET`` is gated (spec §5.6), with the body shown in the
+``would`` line: the skill cannot know what a plugin's route does. No `rest` call is
 retried, ``GET`` included, for the same reason. The body comes back with every
 string fenced, since the skill cannot know which of a plugin's fields are the
 site's words.
@@ -32,6 +34,14 @@ _ROUTE_SEGMENT_RE = re.compile(r"\A[A-Za-z0-9._~!$&'()*+,;=:@-]+\Z")
 #: Route segments the skill never reaches: application passwords are a
 #: credential path the model has no reason to touch (spec §5.4).
 _REFUSED_SEGMENTS = frozenset({"application-passwords"})
+#: Collections whose items `rest DELETE` may not remove (spec §5.4).
+_UNDELETABLE = frozenset({"users", "plugins"})
+#: Query keys WordPress reads ahead of the request itself: `_method` replaces
+#: the HTTP method, and `rest_route` replaces the route in the path, which
+#: would put every route check above out of play.
+_REFUSED_QUERY_KEYS = ("_method", "rest_route")
+#: How much of a body or an input a `would` line shows before it says so.
+_SHOWN_BODY_CHARS = 600
 
 REST_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 MAX_BODY_BYTES = 8 * 1024 * 1024
@@ -58,7 +68,21 @@ def check_route(route: str) -> str:
         if segment.lower() in _REFUSED_SEGMENTS:
             raise WordPressError("Application passwords are not reachable through this skill.",
                                  "validation_error")
+    # One batch request runs many routes, none of which this check would see.
+    if segments and segments[0].lower() == "batch":
+        raise WordPressError("The batch route is not reachable through this skill; send "
+                             "each request on its own.", "validation_error")
     return "/".join(segments)
+
+
+def check_write_route(method: str, route: str) -> None:
+    """Spec §5.4: deleting a user or a plugin is left to wp-admin, `rest` included."""
+    if method != "DELETE":
+        return
+    parts = [s.lower() for s in route.split("/")]
+    if parts[:2] == ["wp", "v2"] and len(parts) > 3 and parts[2] in _UNDELETABLE:
+        raise WordPressError(f"Deleting {parts[2]} is not offered; do it in wp-admin.",
+                             "validation_error")
 
 
 def _php_name(key: str) -> str:
@@ -77,18 +101,22 @@ def _query(pairs: list[str] | None) -> list[tuple[str, str]]:
         key, sep, value = pair.partition("=")
         if not sep or not key.strip():
             raise WordPressError(f"--query takes K=V, got {pair!r}.", "validation_error")
-        # WordPress honours `_method` on any request, so a GET carrying
-        # `_method=DELETE` would be a delete, and a confirmed POST could be one.
-        if _php_name(key).lower().startswith("_method"):
-            raise WordPressError("--query may not override the HTTP method (_method).",
-                                 "validation_error")
+        # A GET carrying `_method=DELETE` would be a delete, and a confirmed
+        # POST carrying `rest_route=` would go to a route the user never saw.
+        name = _php_name(key).lower()
+        if any(name.startswith(refused) for refused in _REFUSED_QUERY_KEYS):
+            raise WordPressError(
+                "--query may not override the HTTP method or the route (_method, rest_route).",
+                "validation_error",
+            )
         out.append((key.strip(), value))
     return out
 
 
 def prepare_rest(args) -> None:
     """Check the route, the query and the body before the vault fetch is spent."""
-    check_route(args.route)
+    route = check_route(args.route)
+    check_write_route(args.method, route)
     _query(args.query)
     args.body = None
     if args.body_file:
@@ -97,14 +125,21 @@ def prepare_rest(args) -> None:
         args.body = read_json_file(args.body_file, "--body-file", MAX_BODY_BYTES)
 
 
+def shown_json(value) -> str:
+    """A model-written JSON value for a `would` line, whole up to a bound."""
+    text = json.dumps(value, ensure_ascii=False)
+    if len(text) <= _SHOWN_BODY_CHARS:
+        return text
+    return (f"{text[:_SHOWN_BODY_CHARS]}... ({len(text)} characters, the first "
+            f"{_SHOWN_BODY_CHARS} shown)")
+
+
 def _describe_rest(method: str, route: str, query: list, body) -> str:
     parts = [f"send {method} {route}"]
     if query:
         parts.append("with query " + "&".join(f"{k}={v}" for k, v in query))
-    if isinstance(body, dict):
-        parts.append("with a body setting " + (", ".join(sorted(map(str, body))) or "nothing"))
-    elif body is not None:
-        parts.append(f"with a {len(json.dumps(body))}-byte JSON body")
+    if body is not None:
+        parts.append(f"with the body {shown_json(body)}")
     return " ".join(parts) + ", a route whose effect the skill cannot check"
 
 
@@ -179,8 +214,9 @@ def check_ability(args) -> None:
 def php_query(prefix: str, value) -> list[tuple[str, str]]:
     """`value` as PHP's bracket syntax, which is how a GET carries ``input``.
 
-    Booleans go as ``true``/``false`` and numbers as their digits; the
-    ability's schema validation accepts both for those types. A null or an
+    Booleans go as ``1``/``0``, not ``true``/``false``: schema validation
+    accepts either, but nothing turns the string back into a boolean, and
+    PHP reads ``"false"`` as true. Numbers go as their digits. A null or an
     empty list or object has no spelling there and is left out.
     """
     if isinstance(value, dict):
@@ -196,7 +232,7 @@ def php_query(prefix: str, value) -> list[tuple[str, str]]:
     if value is None:
         return []
     if isinstance(value, bool):
-        return [(prefix, "true" if value else "false")]
+        return [(prefix, "1" if value else "0")]
     return [(prefix, str(value))]
 
 
@@ -213,9 +249,11 @@ def cmd_abilities_run(args) -> dict:
     notes = _annotations(ability)
     readonly = notes.get("readonly") is True
     destructive = notes.get("destructive") is True
-    if not readonly:
+    # An ability that calls itself both is gated: the annotation is the
+    # site's own claim, and the cautious half wins.
+    if not readonly or destructive:
         kind = "destructive ability" if destructive else "ability"
-        given = " with the given input" if args.input is not None else ""
+        given = f" with the input {shown_json(args.input)}" if args.input is not None else ""
         gate(args, ctx, [f"run the {kind} {args.name} "
                          f"({fence(ability.get('label')) or 'no label'}){given}"])
     route = f"{ABILITIES_NAMESPACE}/abilities/{args.name}/run"

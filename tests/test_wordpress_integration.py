@@ -233,11 +233,21 @@ def test_abilities_list(live, capsys):
 @pytest.mark.skipif(not (PLUGIN and BLOG),
                     reason="ISTOTA_WP_TEST_PLUGIN and ISTOTA_WP_TEST_BLOG not set")
 def test_network_plugin_deactivate_and_reactivate(live, capsys):
-    """§14.3: does core REST network-activate? Main site, so no --blog."""
+    """§14.3: does core REST network-activate? Main site, so no --blog.
+
+    The plugin must start network-active, and it is left that way: if REST
+    will not reactivate it, the test fails and says to do it by hand.
+    """
+    code, listed = cli(capsys, "plugins", "list", scoped=False)
+    assert code == 0, listed
+    status = {item["plugin"]: item["plugin_status"] for item in listed["items"]}
+    assert status.get(PLUGIN) == "network-active", (
+        f"{PLUGIN} must be network-active before this test; it is {status.get(PLUGIN)}")
     code, out = cli(capsys, "plugins", "deactivate", "--plugin", PLUGIN, "--network",
                     "--confirmed", scoped=False)
     assert code == 0, out
     code, out = cli(capsys, "plugins", "activate", "--plugin", PLUGIN, "--network",
                     "--confirmed", scoped=False)
     print("network activation:", out.get("reason", "ok"))
-    assert code == 0 or out["reason"] == "unsupported_on_multisite", out
+    assert code == 0, (f"{PLUGIN} is now deactivated network-wide; network-activate it "
+                       f"again in the network admin. The skill answered: {out}")
