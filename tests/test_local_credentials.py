@@ -303,6 +303,43 @@ class TestUpdate:
         assert _entry(db_path, "api_key_url") is None
         assert _binding(db_path, "api_key")["hosts"] == []
 
+    def test_a_field_name_another_local_credential_owns_is_never_taken_over(self, db_path):
+        """`foo` was created with no site, so `foo_url` was free to be a
+        credential of its own. Giving `foo` a site must not overwrite it."""
+        _create(db_path, LocalCredential(name="foo", value=VALUE))
+        with pytest.raises(LocalCredentialError) as exc:
+            _create(db_path, LocalCredential(name="foo_url", value=NEW_VALUE,
+                                             url="api.example.com"), access=ALL_ROOMS)
+        assert exc.value.field == "name"
+
+    @pytest.mark.parametrize("site", ["other.example.com", ""])
+    def test_update_refuses_a_field_row_owned_by_a_file_entry(self, db_path, site):
+        """A KeePassXC entry titled `foo url` is a credential named `foo_url`.
+        Editing a local `foo` must neither overwrite nor delete it."""
+        _create(db_path, LocalCredential(name="foo", value=VALUE))
+        secrets_store.set_secret(
+            db_path, "alice", VAULT_ENTRY_SERVICE, "foo_url", "from-the-file",
+            binding=bindings.parse_binding("files.example.com", {}, []),
+        )
+        with pytest.raises(LocalCredentialError) as exc:
+            _update(db_path, "foo", url=site)
+        assert exc.value.field == "url"
+        assert _entry(db_path, "foo_url") == "from-the-file"
+        with db.get_db(db_path) as conn:
+            assert bindings.credential_name(conn, "alice", "foo_url") == "foo_url"
+            assert bindings.get_binding(conn, "alice", "foo_url")["source"] == "vault"
+
+    def test_update_refuses_a_username_row_owned_by_another_credential(self, db_path):
+        _create(db_path, LocalCredential(name="foo", value=VALUE))
+        secrets_store.set_secret(
+            db_path, "alice", VAULT_ENTRY_SERVICE, "foo_username", "from-the-file",
+            binding=bindings.parse_binding("", {}, []),
+        )
+        with pytest.raises(LocalCredentialError) as exc:
+            _update(db_path, "foo", username=USERNAME)
+        assert exc.value.field == "username"
+        assert _entry(db_path, "foo_username") == "from-the-file"
+
     def test_a_bad_new_value_changes_nothing(self, db_path):
         self._seed(db_path)
         with pytest.raises(LocalCredentialError) as exc:

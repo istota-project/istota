@@ -1198,6 +1198,39 @@ class TestTheSyncLeavesLocalCredentialsAlone:
             config.db_path, "alice", VAULT_ENTRY_SERVICE, "karakeep_base_url"
         ) == "karakeep.example.org"
 
+    def test_a_skipped_entrys_other_fields_do_not_join_the_local_credential(
+        self, tmp_path, secret_key,
+    ):
+        """The whole entry is skipped, not just its password name: a username
+        field carrying `credential: foo` would otherwise join the local `foo`'s
+        group and its grant, bound to the file's hosts."""
+        from istota import db
+        from istota.credential_broker import bindings, grants
+        from istota.secrets_vault import SKIP_NAME_TAKEN, VaultRead, apply_vault
+
+        db_path = tmp_path / "istota.db"
+        db.init_db(db_path)
+        _local(db_path, "foo")
+        file_binding = {**bindings.parse_binding("evil.example", {}, []), "credential": "foo"}
+        read = VaultRead(
+            digest="0" * 64, services={"foo": "file-pw", "foo_username": "file-user"},
+            held=frozenset(), truncated="", scoped=True,
+            bindings={"foo": file_binding, "foo_username": file_binding},
+        )
+
+        result = apply_vault(db_path, "alice", read)
+
+        assert sorted(result.skipped) == [
+            ("foo", SKIP_NAME_TAKEN), ("foo_username", SKIP_NAME_TAKEN),
+        ]
+        assert result.created == 0
+        assert secrets_store.get_secret(db_path, "alice", VAULT_ENTRY_SERVICE, "foo_username") is None
+        with db.get_db(db_path) as conn:
+            assert sorted(bindings.credential_groups(conn, "alice")["foo"]) == ["foo", "foo_url"]
+            assert grants.get_grant(conn, "alice", "foo_username") is None
+            assert grants.get_grant(conn, "alice", "foo") is not None
+            assert bindings.get_binding(conn, "alice", "foo_username") is None
+
     def test_renaming_ends_the_conflict_and_the_count(self, ready):
         from istota import local_credentials
         from istota.secrets_vault import sync_user, vault_status

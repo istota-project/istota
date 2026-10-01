@@ -132,6 +132,25 @@ def _taken_names(conn, user_id: str) -> set[str]:
     return taken
 
 
+def _foreign_field(conn, user_id: str, owner: str, field_name: str) -> bool:
+    """Whether ``field_name`` is stored and belongs to something other than ``owner``.
+
+    A derived name can become taken after ``owner`` was created: a KeePassXC
+    entry titled ``foo url`` is a credential named ``foo_url`` of its own.
+    Writing or deleting that row from ``owner``'s edit would take it over.
+    """
+    present = conn.execute(
+        "SELECT 1 FROM secrets WHERE user_id=? AND service=? AND key=? "
+        "UNION SELECT 1 FROM credential_bindings WHERE user_id=? AND name=?",
+        (user_id, _SERVICE, field_name, user_id, field_name),
+    ).fetchone()
+    if present is None:
+        return False
+    binding = _bindings.get_binding(conn, user_id, field_name)
+    return (_bindings.credential_name(conn, user_id, field_name) != owner
+            or binding is None or binding["source"] != SOURCE)
+
+
 def _begin(conn) -> None:
     if not conn.in_transaction:
         conn.execute("BEGIN IMMEDIATE")
@@ -187,6 +206,12 @@ def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = N
             raise LocalCredentialError(
                 "name", f"{name} would clash with the existing credential {candidate}"
             )
+    for suffix in ("_" + secrets_vault._USERNAME_SEGMENT, "_" + secrets_vault._URL_SEGMENT):
+        owner = name[: -len(suffix)] if name.endswith(suffix) else ""
+        if owner and owner in taken:
+            raise LocalCredentialError(
+                "name", f"{name} is a field name of the existing credential {owner}"
+            )
     value = _check_text("value", cred.value, required=True)
     username = _check_text("username", cred.username, required=False)
     binding = _build_binding(cred.url, cred.extra_hosts, cred.headers, cred.revealable)
@@ -234,6 +259,11 @@ def update(conn, user_id: str, name: str, *, value: str | None, username: str, u
         value = _check_text("value", value, required=True)
     username = _check_text("username", username, required=False)
     binding = _build_binding(url, extra_hosts, headers, revealable)
+    for field, field_name in (("username", username_name), ("url", url_name)):
+        if _foreign_field(conn, user_id, name, field_name):
+            raise LocalCredentialError(
+                field, f"{name} would clash with the existing credential {field_name}"
+            )
     if not binding["hosts"] and _grants.get_grant(conn, user_id, name) is not None:
         raise LocalCredentialError(
             "url", "this credential has access settings; remove its access first, or keep a site"

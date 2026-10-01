@@ -842,8 +842,10 @@ class VaultApplyResult:
     them — and ``deleted == 0`` alone cannot tell that from a file nobody
     edited.
 
-    ``name_conflicts`` counts the :data:`SKIP_NAME_TAKEN` skips, for the sync
-    record the settings card reads without opening the file.
+    ``name_conflicts`` counts the file *entries* skipped as
+    :data:`SKIP_NAME_TAKEN` (an entry's username and URL fields are skipped
+    with it and not counted again), for the sync record the settings card
+    reads without opening the file.
     """
 
     created: int = 0
@@ -877,8 +879,10 @@ def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResul
     **A name the file produces that a ``local`` row holds is not written.** It
     is skipped as :data:`SKIP_NAME_TAKEN` and counted in ``name_conflicts``:
     the file never overwrites a value the user typed into Istota, and the local
-    row keeps its grant. Renaming either one ends the conflict on the next
-    sync.
+    row keeps its grant. Every field of that file entry is skipped with it.
+    Renaming either one ends the conflict on the next sync that reads the
+    file: the digest cache skips an unchanged file, so that is the next edit
+    to it, a restart, or a forced sync.
 
     **Four things hold a deletion back, and every one of them is about a delete
     being the single action here that cannot be undone by fixing the cause.**
@@ -957,10 +961,16 @@ def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResul
     taken = {name for name, source in sources.items() if source == "local"}
 
     written: set[str] = set()
+    conflicting_entries: set[str] = set()
     for name in sorted(read.services):
-        if name in taken:
+        # The whole entry is skipped, not just the colliding name: a sibling
+        # field carries `credential: <owner>` and would otherwise join the
+        # local credential's group, and its grant, bound to the file's hosts.
+        owner = read.bindings.get(name, {}).get("credential", name)
+        if name in taken or owner in taken:
             result.skipped.append((name, SKIP_NAME_TAKEN))
-            result.name_conflicts += 1
+            conflicting_entries.add(owner)
+            result.name_conflicts = len(conflicting_entries)
             logger.warning(
                 "vault: %s is already used by a credential added in Istota, "
                 "so the file's entry is skipped",
