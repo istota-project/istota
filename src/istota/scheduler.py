@@ -3294,8 +3294,7 @@ def process_one_task(
                     and post_sms_message is None
                     and post_whatsapp_message is None
                     and not (side_confirmation is not None
-                             and (side_confirmation.talk_bound
-                                  or side_confirmation.whatsapp_bound))
+                             and side_confirmation.externally_viewed)
                 ):
                     notification_results.append(held_notification)
                     held_notification = None
@@ -4001,11 +4000,10 @@ def process_one_task(
     # `talk_response_id`, so a reply to it answers by Path A. A push that
     # posted nothing owes the withheld notification, as a failed Talk post does.
     side_undelivered = False
-    if side_confirmation is not None and (
-        side_confirmation.talk_bound or side_confirmation.whatsapp_bound
-    ):
+    if side_confirmation is not None and side_confirmation.externally_viewed:
         side_msg_id = None
         side_whatsapp_sent = False
+        side_email_sent = False
         if side_confirmation.talk_bound:
             side_msg_id = run_coro(side_rooms.push_to_talk_view(
                 config, user_id=task.user_id,
@@ -4025,7 +4023,18 @@ def process_one_task(
                     f"{side_rooms.text_hash(result)[:16]}"
                 ),
             )))
-        side_undelivered = side_msg_id is None and not side_whatsapp_sent
+        if side_confirmation.email_bound:
+            # An email thread's view is a private mail to the principal's own
+            # address, never a reply on the thread.
+            side_email_sent = bool(run_coro(side_rooms.push_to_email_view(
+                config, user_id=task.user_id,
+                parent_token=side_confirmation.parent_token,
+                body=side_rooms.email_confirmation_body(result, task.id),
+                reference_id=f"istota:task:{task.id}:confirmation",
+            )))
+        side_undelivered = (
+            side_msg_id is None and not side_whatsapp_sent and not side_email_sent
+        )
         if side_msg_id:
             try:
                 with db.get_db(config.db_path) as conn:
@@ -4048,6 +4057,10 @@ def process_one_task(
                 body=result, reference_id=f"istota:task:{task.id}:side-answer",
             ))
             run_coro(side_rooms.push_to_whatsapp_view(
+                config, user_id=task.user_id, parent_token=side_answer_parent,
+                body=result, reference_id=f"istota:task:{task.id}:side-answer",
+            ))
+            run_coro(side_rooms.push_to_email_view(
                 config, user_id=task.user_id, parent_token=side_answer_parent,
                 body=result, reference_id=f"istota:task:{task.id}:side-answer",
             ))

@@ -20,7 +20,7 @@ import sqlite3
 from typing import TYPE_CHECKING
 
 from .. import db
-from ..surfaces import is_room_member
+from ..surfaces import is_room_member_for
 from ._types import ParticipantRef
 
 if TYPE_CHECKING:
@@ -88,10 +88,11 @@ def is_multi_human(
     keeps its own answer only: its turn is mirrored into a room's transcript,
     but its reply goes back by mail, so the room's audience is not its own.
     ``room_container`` is a room on a surface that owns none in general — a
-    WhatsApp group (D6) — and counts as one that does.
+    WhatsApp group or a multi-party email thread (D6, D10) — and counts as one
+    that does.
     """
     if is_group_chat:
         return True
-    if not (is_room_member(surface) or room_container):
+    if not is_room_member_for(surface, room_container=room_container):
         return False
     return db.room_is_shared(conn, room_token)

@@ -45,6 +45,7 @@ from ._types import InboundWhatsAppEvent, WhatsAppGroupMember, WhatsAppGroupRost
 
 if TYPE_CHECKING:
     from ...config import Config
+    from ...speech_gate import GateDecision
     from .webhook import WhatsAppEventResult
 
 logger = logging.getLogger(__name__)
@@ -308,10 +309,62 @@ def _departed(
     }
 
 
+def classify_group_event(config: "Config", event) -> "GateDecision | None":
+    """The speech gate's classifier answer for a group turn, asked ahead.
+
+    Call before `handle_whatsapp_batch` opens `BEGIN IMMEDIATE`, for the reason
+    `ingest.classify_ahead` gives: the model call must not hold the write lock.
+    None for anything that is not a text turn in a registered group, and from
+    every mode but the classifier. Never raises.
+    """
+    group = getattr(event, "group", None)
+    if group is None or getattr(event, "message_type", None) not in _TEXT_TYPES:
+        return None
+    text = (getattr(event, "text", None) or "").strip()
+    if not text or text.startswith("!"):
+        return None
+    from ... import speech_gate
+    from ..ingest import classify_ahead
+
+    if speech_gate.normalize_mode(config.speech_gate.mode) != "classifier":
+        return None
+    try:
+        group_jid = identity_rules.normalize_group_jid(group.group_jid)
+        if not group_jid:
+            return None
+        with db.get_db(config.db_path) as conn:
+            token = db.resolve_room_token(conn, SURFACE, group_jid)
+            room = db.get_room(conn, token) if token else None
+            if room is None or room.archived:
+                return None
+            sender_jid = identity_rules.normalize_jid(event.from_user.jid)
+            user_id = (
+                identity_rules.group_member_user(conn, sender_jid) if sender_jid else None
+            )
+            addressed = addressed_to_bot(
+                conn, config, text, mentions_bot=group.mentions_bot,
+                reply_to_message_id=event.reply_to_message_id,
+            )
+    except Exception as e:  # noqa: BLE001 — a failed lookup is a failed decision
+        logger.warning("whatsapp.group.classify_failed: %s", type(e).__name__)
+        return None
+    return classify_ahead(
+        config, surface=SURFACE, surface_ref=group_jid,
+        user_id=user_id or room.user_id, text=text, is_group_chat=False,
+        addressed_to_bot=addressed, source_type="whatsapp", room_container=True,
+        author_label=None if user_id else (event.from_user.username or None),
+    )
+
+
 def handle_group_message(
     conn, config: "Config", event: InboundWhatsAppEvent,
+    *, classified: "GateDecision | None" = None,
 ) -> "WhatsAppEventResult":
-    """One message posted in a group, inside the batch transaction."""
+    """One message posted in a group, inside the batch transaction.
+
+    ``classified`` is `classify_group_event`'s answer for this event, asked
+    before the transaction opened; without it the classifier rung fails closed.
+    """
     from .webhook import WhatsAppEventResult, _claim, _set_disposition
 
     assert event.group is not None
@@ -382,6 +435,7 @@ def handle_group_message(
         ),
         is_command=is_command,
         room_container=True,
+        classified=classified,
     )
     disposition = "task" if outcome.task_id is not None else f"group_{outcome.outcome}"
     return done(WhatsAppEventResult(
@@ -392,6 +446,7 @@ def handle_group_message(
 __all__ = [
     "addressed_to_bot",
     "apply_roster",
+    "classify_group_event",
     "group_destination",
     "group_room_token",
     "handle_group_message",

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Sequence
 
 from .. import db, room_policy, speech_gate
-from ..surfaces import is_room_member
+from ..surfaces import is_room_member_for
 from ..untrusted import frame_untrusted
 from . import participants
 from ._types import IncomingMessage, ParticipantRef
@@ -240,7 +240,9 @@ def _ask_gate(
         guest_command=bool(policy and policy.guest_command),
         guest_reply=policy.guest_reply if policy else room_policy.DIRECT,
         loop_capped=bool(policy and policy.loop_capped),
-        mode=config.speech_gate.mode,
+        mode=room_policy.effective_speech_mode(
+            conn, room_token, config.speech_gate.mode,
+        ),
         classified=classified,
         model=config.speech_gate.model,
     )
@@ -318,6 +320,8 @@ def classify_ahead(
     addressed_to_bot: bool,
     source_type: str | None = None,
     earlier: Sequence[tuple[str, str]] = (),
+    room_container: bool = False,
+    author_label: str | None = None,
 ) -> speech_gate.GateDecision | None:
     """Run the speech gate's classifier for a turn before it is recorded.
 
@@ -331,7 +335,12 @@ def classify_ahead(
     ``classifier``, a turn addressed to the bot, a surface that does not own
     its rooms, or a room `participants.is_multi_human` says holds one human
     (the predicate `record_inbound`'s gate reads) — so the default mode costs
-    one string comparison. ``earlier`` is the ``(user_id, text)`` of turns ahead of this
+    one string comparison. ``room_container`` is the caller's statement that
+    the conversation is a WhatsApp group or an email thread room (D10), and the
+    room's own effective mode (`room_policy.effective_speech_mode`) decides
+    once the room is read, so an email thread room on a classifier deployment
+    asks nothing. ``author_label`` names this turn's author in the window when
+    it is not an istota user (a guest in a group). ``earlier`` is the ``(user_id, text)`` of turns ahead of this
     one in the same unrecorded batch, oldest first; they belong in the window
     and are not stored yet. Never raises: a failure is a failed decision, which
     the gate reads as "do not speak".
@@ -339,7 +348,7 @@ def classify_ahead(
     gate = config.speech_gate
     if speech_gate.normalize_mode(gate.mode) != "classifier":
         return None
-    if addressed_to_bot or not is_room_member(surface):
+    if addressed_to_bot or not is_room_member_for(surface, room_container=room_container):
         return None
     source_type = source_type or surface
     try:
@@ -351,15 +360,20 @@ def classify_ahead(
             )
             if not participants.is_multi_human(
                 conn, surface=surface, room_token=room_token,
-                is_group_chat=is_group_chat,
+                is_group_chat=is_group_chat, room_container=room_container,
             ):
+                return None
+            if speech_gate.normalize_mode(room_policy.effective_speech_mode(
+                conn, room_token, gate.mode,
+            )) != "classifier":
                 return None
             room = db.get_room(conn, room_token)
             pending = []
-            for author_id, body in [*earlier, (user_id, text)]:
-                author_user_id, author_label = resolve_author(config, author_id, None)
+            turns_ahead = [(a, b, None) for a, b in earlier]
+            for author_id, body, label in [*turns_ahead, (user_id, text, author_label)]:
+                author_user_id, resolved_label = resolve_author(config, author_id, None)
                 pending.append(speech_gate.pending_turn(
-                    author_label or author_user_id or author_id, body,
+                    label or resolved_label or author_user_id or author_id, body,
                     max_message_chars=gate.max_message_chars,
                 ))
             turns = speech_gate.load_window(
@@ -487,9 +501,10 @@ def record_inbound(
     # The text as typed is a `!command` (see `IncomingMessage.is_command`).
     is_command: bool = False,
     # The message's container is a registered room on a surface that does not
-    # own rooms in general: a WhatsApp group (multiplayer D6), whose surface
-    # also carries the 1:1 chats that are never rooms. The caller has already
-    # registered the room; this turn then takes the room-surface path.
+    # own rooms in general: a WhatsApp group or an email thread room
+    # (multiplayer D6, D10), whose surface also carries conversations that are
+    # never rooms. The caller has already registered the room; this turn then
+    # takes the room-surface path.
     room_container: bool = False,
 ) -> InboundResult:
     """Resolve → echo-check → store user message → ask the gate → create task.
@@ -522,7 +537,10 @@ def record_inbound(
     # room-*view* question, which drives the outbound fan-out and which
     # `is_room_view` answers separately for the one site where the two can
     # diverge (the scheduler's confirmation mirror gate).
-    room_surface = (is_room_member(surface) or room_container) and bool(room_token)
+    room_surface = (
+        is_room_member_for(surface, room_container=room_container)
+        and bool(room_token)
+    )
     # A turn with an istota user behind it. Only such a turn can register a
     # room, join or un-hide one, or create a task; anyone else is recorded into
     # a room that already exists, or not at all.
@@ -566,6 +584,14 @@ def record_inbound(
             output_target=output_target,
             talk_delivery_token=delivery_token,
         )
+    # A mirror-only turn never lands in a shared room (multiplayer Stage 15's
+    # rule, reached at ingest): an email reply threaded back into a room that
+    # several people read would put a correspondent's mail, and the answer
+    # `_room_turn_belongs_here` then stores under it, in front of all of them.
+    # It is the permanent kind of absence, so it is recorded on the task below.
+    if (not room_surface and mirror_to_room and transcript_token
+            and db.room_is_shared(conn, transcript_token)):
+        mirror_to_room = False
     mirror_only = (
         not room_surface
         and mirror_to_room
@@ -916,5 +942,6 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         classified=msg.classified,
         author=msg.author,
         is_command=msg.is_command,
+        room_container=msg.room_container,
     )
     return result.task_id

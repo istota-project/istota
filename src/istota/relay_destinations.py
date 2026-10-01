@@ -159,6 +159,8 @@ def destination_fingerprint(destination: dict) -> str:
         parts = [destination["room_token"], destination["talk_ref"]]
         if destination.get("whatsapp_ref"):
             parts.append(destination["whatsapp_ref"])
+        if destination.get("email_ref"):
+            parts.append("email:" + destination["email_ref"])
         return text_hash(json.dumps(parts, ensure_ascii=True, separators=(",", ":")))
     return destination["fingerprint"]
 

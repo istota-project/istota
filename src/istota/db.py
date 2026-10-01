@@ -504,6 +504,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
 
     # Processed emails migrations
     _add_columns(conn, "processed_emails", {"routing_method": "TEXT"})
+    # The message's To and Cc, so an email thread room's reply-all goes to the
+    # latest message's people (multiplayer D6).
+    _add_columns(conn, "processed_emails", {"recipients": "TEXT"})
 
     # WhatsApp bindings: the adapter split (whatsapp-baileys-adapter spec).
     # `jid` is the Baileys-native identity and `provider` says which adapter
@@ -6550,6 +6553,7 @@ def _migrate_processed_emails_uidvalidity(conn: sqlite3.Connection) -> None:
                 task_id INTEGER,
                 routing_method TEXT,
                 processed_at TEXT DEFAULT (datetime('now')),
+                recipients TEXT,
                 UNIQUE (uidvalidity, email_id),
                 FOREIGN KEY (task_id) REFERENCES tasks(id)
             )
@@ -6561,10 +6565,10 @@ def _migrate_processed_emails_uidvalidity(conn: sqlite3.Connection) -> None:
             INSERT INTO processed_emails
             (id, uidvalidity, email_id, sender_email, subject, thread_id,
              message_id, "references", user_id, task_id, routing_method,
-             processed_at)
+             processed_at, recipients)
             SELECT id, 0, email_id, sender_email, subject, thread_id,
                    message_id, "references", user_id, task_id, routing_method,
-                   processed_at
+                   processed_at, recipients
             FROM _processed_emails_old
         """)
         conn.execute("DROP TABLE _processed_emails_old")
@@ -8272,15 +8276,20 @@ def mark_email_processed(
     task_id: int | None = None,
     routing_method: str | None = None,
     uidvalidity: int = 0,
+    recipients: str | None = None,
 ) -> int:
-    """Record a processed email, keyed by (uidvalidity, email_id)."""
+    """Record a processed email, keyed by (uidvalidity, email_id).
+
+    ``recipients`` is the message's To and Cc as a JSON list; ``thread_id`` is
+    the room token for a message on an email thread room.
+    """
     cursor = conn.execute(
         """
-        INSERT INTO processed_emails (uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO processed_emails (uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method, recipients)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
-        (uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method),
+        (uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method, recipients),
     )
     return cursor.fetchone()[0]
 

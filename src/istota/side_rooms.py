@@ -27,7 +27,9 @@ What this module holds, and what it deliberately does not:
   member's own private conversation with the bot, each message headed
   ``re: <room>`` (`push_to_talk_view`), and only when the parent is on Talk.
   On WhatsApp it is the member's own chat with the bot's number, headed the
-  same way (`push_to_whatsapp_view`), when the parent is a WhatsApp group.
+  same way (`push_to_whatsapp_view`), when the parent is a WhatsApp group. On
+  email it is a private mail to the member's own address, never a reply on the
+  thread (`push_to_email_view`), when the parent is an email thread room.
   Nothing binds the side room to either: it is its own room.
 
 - **Side-room answers** (D4 item 1). A task in a shared room that needs a scope
@@ -306,6 +308,56 @@ async def push_to_whatsapp_view(
     return record.status in REACHED_META
 
 
+def _send_private_mail(config, *, to: str, subject: str, body: str) -> None:
+    from .email_support import get_email_config
+    from .skills.email import send_email
+
+    send_email(to=to, subject=subject, body=body, config=get_email_config(config),
+               from_addr=config.email.bot_email)
+
+
+async def push_to_email_view(
+    config, *, user_id: str, parent_token: str, body: str, reference_id: str,
+) -> bool:
+    """Mail ``body`` to the user's own address, headed ``re: <room>`` (D4).
+
+    The side room's external view on email, and only for a parent bound to an
+    email thread: a fresh mail with no threading headers, so it can never
+    land on the thread itself. The address is the user's own configured one,
+    which no outbound policy holds. True when the mail was handed to SMTP.
+    """
+    def _resolve():
+        with db.get_db(config.db_path) as conn:
+            parent = db.get_room(conn, parent_token)
+            if parent is None or db.get_room_binding(conn, parent_token, "email") is None:
+                return None
+            return HEADER_PREFIX + room_label(parent)
+
+    if not getattr(config.email, "enabled", False):
+        return False
+    user = config.users.get(user_id)
+    address = user.email_addresses[0] if user and user.email_addresses else None
+    subject = await asyncio.to_thread(_resolve)
+    if subject is None or not address:
+        return False
+    try:
+        await asyncio.to_thread(
+            _send_private_mail, config, to=address, subject=subject, body=body,
+        )
+    except Exception as exc:
+        logger.warning("side room email view send failed for %s (%s): %s",
+                       user_id, reference_id, exc)
+        return False
+    return True
+
+
+def email_confirmation_body(prompt: str, task_id: int) -> str:
+    """A side-routed question as its email view carries it: a reply to that
+    private mail is a new message, not an answer, so it names the command."""
+    return (f"{prompt}\n\nTask #{task_id}. Answer in the side room, or send "
+            f"!confirm {task_id} yes or !confirm {task_id} no on any surface.")
+
+
 def whatsapp_confirmation_body(prompt: str, task_id: int) -> str:
     """A side-routed question as its WhatsApp view carries it.
 
@@ -337,6 +389,13 @@ class ConfirmationRoute:
     # The parent is a WhatsApp group: the question also goes to the
     # principal's own WhatsApp chat (`push_to_whatsapp_view`).
     whatsapp_bound: bool = False
+    # The parent is an email thread: the question also goes to the
+    # principal's own address (`push_to_email_view`).
+    email_bound: bool = False
+
+    @property
+    def externally_viewed(self) -> bool:
+        return self.talk_bound or self.whatsapp_bound or self.email_bound
 
 
 def confirmation_route(conn, task) -> ConfirmationRoute | None:
@@ -357,12 +416,14 @@ def confirmation_route(conn, task) -> ConfirmationRoute | None:
         return None
     talk_bound = db.get_room_binding(conn, parent_token, "talk") is not None
     whatsapp_bound = db.get_room_binding(conn, parent_token, "whatsapp") is not None
+    email_bound = db.get_room_binding(conn, parent_token, "email") is not None
     try:
         side = db.ensure_side_room(conn, parent_token, task.user_id)
     except ValueError:
         return ConfirmationRoute(parent_token=parent_token, side_token=None, talk_bound=False)
     return ConfirmationRoute(parent_token=parent_token, side_token=side.token,
-                             talk_bound=talk_bound, whatsapp_bound=whatsapp_bound)
+                             talk_bound=talk_bound, whatsapp_bound=whatsapp_bound,
+                             email_bound=email_bound)
 
 
 def write_confirmation(conn, route: ConfirmationRoute, task, prompt: str) -> None:
@@ -482,9 +543,11 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
         return None
     talk_bound = db.get_room_binding(conn, parent, "talk") is not None
     whatsapp_bound = db.get_room_binding(conn, parent, "whatsapp") is not None
+    email_bound = db.get_room_binding(conn, parent, "email") is not None
     return GuestProposal(
         route=ConfirmationRoute(parent_token=parent, side_token=side.token,
-                                talk_bound=talk_bound, whatsapp_bound=whatsapp_bound),
+                                talk_bound=talk_bound, whatsapp_bound=whatsapp_bound,
+                                email_bound=email_bound),
         preview=row["preview"],
     )
 
@@ -673,10 +736,13 @@ def _post_destination(conn, parent_token: str, user_id: str) -> dict:
         raise RequestError("parent_unavailable")
     talk = db.get_room_binding(conn, parent_token, "talk")
     whatsapp = db.get_room_binding(conn, parent_token, "whatsapp")
+    email = db.get_room_binding(conn, parent_token, "email")
     destination = {"kind": "room", "room_token": parent_token,
                    "talk_ref": talk.surface_ref if talk else None, "label": room_label(room)}
     if whatsapp is not None:
         destination["whatsapp_ref"] = whatsapp.surface_ref
+    if email is not None:
+        destination["email_ref"] = email.surface_ref
     destination["fingerprint"] = destination_fingerprint(destination)
     return destination
 
@@ -762,6 +828,7 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
             if row["state"] != "queued":
                 return None
             whatsapp_group = False
+            email_thread = False
             if row["queue_deadline"] is None or row["queue_deadline"] <= db.sql_datetime_now():
                 raise RequestError("queue_expired")
             user = row["requester_user_id"]
@@ -781,6 +848,7 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                     raise RequestError("destination_changed")
                 target, talk_ref, parent = current["room_token"], current["talk_ref"], current["room_token"]
                 whatsapp_group = bool(current.get("whatsapp_ref"))
+                email_thread = bool(current.get("email_ref"))
                 reference = "room-post:" + request_id
             else:
                 parent = destination.get("parent") or ""
@@ -799,7 +867,8 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                          "WHERE id=?", (request_id,))
             return {"request_id": request_id, "kind": row["kind"], "user_id": user, "body": body,
                     "message_id": message_id, "talk_ref": talk_ref, "parent": parent,
-                    "reference": reference, "whatsapp_group": whatsapp_group}
+                    "reference": reference, "whatsapp_group": whatsapp_group,
+                    "email_thread": email_thread, "task_id": row["origin_task_id"]}
 
 
 def _mark_sent(conn, request_id: str) -> None:
@@ -873,11 +942,25 @@ async def deliver_request(config, row) -> None:
                     text=claim["body"], group_room=claim["parent"])
             except Exception as exc:
                 logger.warning("room post %s: WhatsApp post failed: %s", claim["request_id"], exc)
+        if claim["email_thread"] and claim["task_id"] is not None:
+            # The thread itself, as a reply-all through the outbound gate. As
+            # with the other halves, the canonical row is the post; a held or
+            # failed mail is reported by the gate and the send log.
+            from .transport.email.outbound import deliver_thread_post
+            try:
+                await deliver_thread_post(
+                    config, task_id=int(claim["task_id"]), room_token=claim["parent"],
+                    body=claim["body"])
+            except Exception as exc:
+                logger.warning("room post %s: email reply-all failed: %s", claim["request_id"], exc)
     else:
         talk_id = await push_to_talk_view(
             config, user_id=claim["user_id"], parent_token=claim["parent"],
             body=claim["body"], reference_id=claim["reference"])
         await push_to_whatsapp_view(
+            config, user_id=claim["user_id"], parent_token=claim["parent"],
+            body=claim["body"], reference_id=claim["reference"])
+        await push_to_email_view(
             config, user_id=claim["user_id"], parent_token=claim["parent"],
             body=claim["body"], reference_id=claim["reference"])
     await asyncio.to_thread(_settle, config, claim, talk_id)

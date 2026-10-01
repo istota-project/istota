@@ -742,7 +742,8 @@ def _parse_callback(callback_data: str) -> tuple[int, str] | None:
 
 
 def _handle_inbound(
-    conn, config: Config, event: InboundWhatsAppEvent, *, provider: str
+    conn, config: Config, event: InboundWhatsAppEvent, *, provider: str,
+    classified=None,
 ) -> WhatsAppEventResult:
     if not config.whatsapp.enabled:
         return WhatsAppEventResult("unconfigured")
@@ -785,7 +786,7 @@ def _handle_inbound(
         # there, never through the direct-chat path below.
         from .groups import handle_group_message
 
-        return handle_group_message(conn, config, event)
+        return handle_group_message(conn, config, event, classified=classified)
     if event.message_type == "group":
         # A group message that names no sender — Cloud's, which this surface
         # does not support (D6), or an older sidecar's. Before identity
@@ -1154,8 +1155,13 @@ def handle_whatsapp_batch(
     events: Sequence[WhatsAppEvent],
     *,
     provider: str = db.WHATSAPP_LEGACY_PROVIDER,
+    classified: "Mapping[str, object] | None" = None,
 ) -> list[WhatsAppEventResult]:
     """Apply every event of one authenticated batch in one transaction.
+
+    ``classified`` maps a group message's id to the speech gate's classifier
+    answer, asked by `groups.classify_group_event` before this was called,
+    since the model call must not run under the lock taken below.
 
     `BEGIN IMMEDIATE` up front, so the write lock is taken before the first
     read the later writes depend on rather than being upgraded halfway through
@@ -1194,7 +1200,10 @@ def handle_whatsapp_batch(
         elif isinstance(event, WhatsAppGroupRoster):
             results.append(_handle_roster(conn, config, event, provider=provider))
         else:
-            results.append(_handle_inbound(conn, config, event, provider=provider))
+            results.append(_handle_inbound(
+                conn, config, event, provider=provider,
+                classified=(classified or {}).get(getattr(event, "message_id", "")),
+            ))
     return results
 
 

@@ -6126,10 +6126,11 @@ def room_identity_line(
         # requires the assembled prompt to carry no "Nextcloud" literal on the
         # storage-neutral backend, and a local-backend deployment can hold
         # migrated `origin='talk'` rows.
-        where = {"talk": "Talk", "whatsapp": "a WhatsApp group"}.get(
-            room.origin, "web chat",
-        )
-        if talk_ref and room.origin not in ("talk", "whatsapp"):
+        where = {
+            "talk": "Talk", "whatsapp": "a WhatsApp group",
+            "email": "an email thread",
+        }.get(room.origin, "web chat")
+        if talk_ref and room.origin not in ("talk", "whatsapp", "email"):
             where = "web chat, also open in Talk"
         descriptor = _header_scalar(
             room_target_descriptor(token, room.origin, talk_ref)
@@ -6150,13 +6151,15 @@ def room_identity_line(
                 "you are already in."
             )
         )
-        if room.origin == "whatsapp":
-            # A group is answered only from its own turns (multiplayer D6):
-            # routing drops a scheduled job's leg into it, so naming a
-            # descriptor here would promise a post that never appears.
+        if room.origin in ("whatsapp", "email"):
+            # A group or a thread is answered only from its own turns
+            # (multiplayer D6): a scheduled job's leg into it reaches nobody on
+            # it, so naming a descriptor here would promise a post that never
+            # appears.
+            what = "group" if room.origin == "whatsapp" else "thread"
             return (
                 f"\nRoom: this conversation is a registered room on {where}. "
-                "A scheduled job or a reminder cannot post into the group. "
+                f"A scheduled job or a reminder cannot post into the {what}. "
                 + closing
             )
         return (

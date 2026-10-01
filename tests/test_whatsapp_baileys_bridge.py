@@ -618,7 +618,8 @@ class TestTheInboundReceiver:
         """
         seen = {}
 
-        def spy(conn, config, events, *, provider=db.WHATSAPP_LEGACY_PROVIDER):
+        def spy(conn, config, events, *, provider=db.WHATSAPP_LEGACY_PROVIDER,
+                classified=None):
             seen["provider"] = provider
             seen["events"] = events
             return []

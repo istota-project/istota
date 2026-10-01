@@ -421,8 +421,13 @@ class TestTheSharedPredicate:
             )
         assert result.outcome == "created"
 
-    def test_an_email_mirrored_into_a_shared_room_keeps_its_task(self, config, db_path):
-        """A guest surface's reply goes by mail; the room's audience is not its own."""
+    def test_an_email_routed_at_a_shared_room_keeps_its_task(self, config, db_path):
+        """A guest surface's reply goes by mail; the room's audience is not its own.
+
+        Since multiplayer Stage 19 the turn is not mirrored into a shared room
+        at all (Stage 15's delivery rule, reached at ingest), so the task is
+        the whole of it and records the room as one it is withheld from.
+        """
         with db.get_db(db_path) as conn:
             _room(conn, token="web-1", members=("alice", "bob"), origin="web")
             result = record_inbound(
@@ -434,7 +439,8 @@ class TestTheSharedPredicate:
                 "SELECT COUNT(*) FROM messages WHERE room_token = 'web-1'"
             ).fetchone()[0]
             assert _participants(conn, "web-1") == []
-        assert stored == 1
+            assert db.get_task(conn, result.task_id).withheld_from_room
+        assert stored == 0
         assert result.outcome == "created"
 
     def test_classify_ahead_asks_about_a_shared_web_room(self, config, db_path):

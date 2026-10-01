@@ -3969,12 +3969,19 @@ class BaileysBridge:
         that comparison tautological and the gate inert.
         """
         from ... import db  # noqa: PLC0415
+        from .groups import classify_group_event  # noqa: PLC0415
         from .webhook import handle_whatsapp_batch  # noqa: PLC0415
 
+        # Asked before the transaction opens: a model call must not hold the
+        # write lock `handle_whatsapp_batch` takes.
+        decision = classify_group_event(self._config, event)
+        classified = (
+            {event.message_id: decision} if decision is not None else None
+        )
         with db.get_db(self._config.db_path) as conn:
             return handle_whatsapp_batch(
                 conn, self._config, [event],
-                provider=db.WHATSAPP_BAILEYS_PROVIDER,
+                provider=db.WHATSAPP_BAILEYS_PROVIDER, classified=classified,
             )
 
     # -- outbound -----------------------------------------------------------

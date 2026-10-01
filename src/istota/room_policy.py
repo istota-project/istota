@@ -29,6 +29,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from . import db
+from .speech_gate import normalize_mode
 
 GUEST_REPLY_VALUES = ("off", "held", "direct")
 OFF, HELD, DIRECT = GUEST_REPLY_VALUES
@@ -55,6 +56,29 @@ class RoomPolicy:
 
 def default_guest_reply(surface: object) -> str:
     return _DEFAULT_GUEST_REPLY.get(surface if isinstance(surface, str) else "", HELD)
+
+
+def effective_speech_mode(
+    conn: sqlite3.Connection, room_token: str | None, deployment_mode: str,
+) -> str:
+    """The speech mode a room's unaddressed turns are decided by (D5).
+
+    The room's own ``speech_mode`` when it names a mode; otherwise the
+    deployment's, except that an email thread room never defaults to the
+    classifier: speaking there is a reply-all to everyone on the thread, so
+    only the bot in To makes it speak until the host chooses otherwise.
+    """
+    if not room_token:
+        return deployment_mode
+    policy = get_policy(conn, room_token)
+    own = normalize_mode(policy.speech_mode) if policy is not None else None
+    if own:
+        return own
+    if normalize_mode(deployment_mode) == "classifier":
+        room = db.get_room(conn, room_token)
+        if room is not None and room.origin == "email":
+            return "mention"
+    return deployment_mode
 
 
 def _row_to_policy(row) -> RoomPolicy:

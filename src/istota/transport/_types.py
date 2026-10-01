@@ -96,6 +96,10 @@ class IncomingMessage:
     # commands before ingest; for a guest, whose commands are ignored, this is
     # what keeps one from becoming a task instead.
     is_command: bool = False
+    # The message's container is a room on a surface that owns none in
+    # general: an email thread room (multiplayer D6, D10). The transport has
+    # already registered it; see `record_inbound`'s parameter of the same name.
+    room_container: bool = False
     output_target: str | None = None  # "talk"|"email"|"ntfy"|comma list|None
     model: str | None = None          # !model override (canonical id)
     effort: str | None = None
