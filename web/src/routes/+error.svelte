@@ -1,7 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { page } from '$app/state';
-  import { CircleAlert, House, Lock, RotateCw, SearchX, ServerCrash } from 'lucide-svelte';
+  import { CircleAlert, House, Lock, RotateCw, SearchX, ServerCrash } from '@lucide/svelte';
 
   const status = $derived(page.status ?? 500);
   const isServer = $derived(status >= 500);

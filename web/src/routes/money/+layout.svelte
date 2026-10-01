@@ -23,7 +23,7 @@
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { MONEY_SETTINGS_SECTIONS } from '$lib/money/settingsSections';
-  import { Cog } from 'lucide-svelte';
+  import { Cog } from '@lucide/svelte';
 
   let { children } = $props();
 

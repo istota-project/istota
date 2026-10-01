@@ -12,7 +12,7 @@
     Star,
     CheckCheck,
     Users,
-  } from 'lucide-svelte';
+  } from '@lucide/svelte';
   import PhoneSurfaceIcon from '$lib/components/chat/PhoneSurfaceIcon.svelte';
   import {
     AppShell,

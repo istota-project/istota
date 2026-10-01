@@ -2,7 +2,7 @@
   import { base } from '$app/paths';
   import { getProfile } from '$lib/api';
   import { onMount } from 'svelte';
-  import { HeartPulse, MapPin, MessageSquare, Newspaper, Rss, Wallet } from 'lucide-svelte';
+  import { HeartPulse, MapPin, MessageSquare, Newspaper, Rss, Wallet } from '@lucide/svelte';
   import { buildGreeting, noteSegments, type Greeting } from '$lib/greeting';
   import { AppShell, ShellHeader } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { CornerDownRight, MessageSquare, FileText } from 'lucide-svelte';
+  import { CornerDownRight, MessageSquare, FileText } from '@lucide/svelte';
   import type { SearchResultsData, SearchResultItem } from '$lib/stores/segments';
 
   let {

@@ -27,7 +27,7 @@
     ConfirmDialog,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
-  import { LayoutGrid, List, Cog, Star, CheckCheck, Circle } from 'lucide-svelte';
+  import { LayoutGrid, List, Cog, Star, CheckCheck, Circle } from '@lucide/svelte';
   import { notifyError } from '$lib/stores/notices';
 
   let { children } = $props();

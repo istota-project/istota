@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { FileText, Play, Star } from 'lucide-svelte';
+  import { FileText, Play, Star } from '@lucide/svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
   import { fileKind, inlineMedia, playerUrl, providerLabel } from '$lib/feeds/embed';

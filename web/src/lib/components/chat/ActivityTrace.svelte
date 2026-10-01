@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ChevronRight, ChevronDown, X } from 'lucide-svelte';
+  import { ChevronRight, ChevronDown, X } from '@lucide/svelte';
   import type { Segment } from '$lib/stores/segments';
 
   // The model's tool calls for one assistant turn, in order. Rendered as ONE

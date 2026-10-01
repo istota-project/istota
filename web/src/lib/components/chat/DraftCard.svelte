@@ -41,7 +41,7 @@
    * exists to make harder, not easier.
    */
   import { Button } from '$lib/components/ui';
-  import { Mail } from 'lucide-svelte';
+  import { Mail } from '@lucide/svelte';
   import type { OutboundDraft } from '$lib/api';
 
   let {

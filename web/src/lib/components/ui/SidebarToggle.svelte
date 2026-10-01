@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { PanelLeft, PanelLeftClose } from 'lucide-svelte';
+  import { PanelLeft, PanelLeftClose } from '@lucide/svelte';
 
   interface Props {
     open: boolean;

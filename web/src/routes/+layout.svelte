@@ -4,7 +4,7 @@
   import { page, updated } from '$app/state';
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
-  import { Menu, Sun, Moon } from 'lucide-svelte';
+  import { Menu, Sun, Moon } from '@lucide/svelte';
   import { DropdownMenu } from 'bits-ui';
   import { getMe, AuthError, type User } from '$lib/api';
   import LogoutButton from '$lib/components/LogoutButton.svelte';

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Copy, Star, Trash2, Reply, Mail, Info, Pencil, X } from 'lucide-svelte';
+  import { Copy, Star, Trash2, Reply, Mail, Info, Pencil, X } from '@lucide/svelte';
   import PhoneSurfaceIcon from './PhoneSurfaceIcon.svelte';
   import { chatFileUrl, type ExternalTurnDisplay } from '$lib/api';
   import { copyText } from '$lib/clipboard';

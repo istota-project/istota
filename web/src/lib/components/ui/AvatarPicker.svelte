@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { Camera } from 'lucide-svelte';
+  import { Camera } from '@lucide/svelte';
   import Button from './Button.svelte';
 
   interface Props {

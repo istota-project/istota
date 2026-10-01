@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Info, CircleCheck, TriangleAlert, CircleAlert, X } from 'lucide-svelte';
+  import { Info, CircleCheck, TriangleAlert, CircleAlert, X } from '@lucide/svelte';
   import { currentNotice, dismissNotice, type NoticeSeverity } from '$lib/stores/notices';
 
   /**

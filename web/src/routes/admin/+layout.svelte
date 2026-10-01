@@ -10,7 +10,7 @@
     SlidersHorizontal,
     Stethoscope,
     Users,
-  } from 'lucide-svelte';
+  } from '@lucide/svelte';
 
   let { children } = $props();
 

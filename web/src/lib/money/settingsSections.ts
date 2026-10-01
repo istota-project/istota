@@ -1,5 +1,5 @@
-import { Plug, ArrowLeftRight, Receipt, PieChart, Landmark } from 'lucide-svelte';
-import type { ComponentType } from 'svelte';
+import { Plug, ArrowLeftRight, Receipt, PieChart, Landmark } from '@lucide/svelte';
+import type { LucideIcon } from '@lucide/svelte';
 
 /**
  * The money settings sections, in sidebar order.
@@ -15,7 +15,7 @@ import type { ComponentType } from 'svelte';
 export interface MoneySettingsSection {
   href: string;
   label: string;
-  icon: ComponentType;
+  icon: LucideIcon;
 }
 
 export const MONEY_SETTINGS_SECTIONS: MoneySettingsSection[] = [
