@@ -151,10 +151,13 @@ def exchange(tls, host, *, method=b"GET", header=b"authorization", value=PLACEHO
              body=b"", target=b"/", extra=()):
     parser = h11.Connection(h11.CLIENT)
     headers = [(b"host", host.encode()), (header, value), (b"content-length", str(len(body)).encode()), *extra]
-    tls.sendall(parser.send(h11.Request(method=method, target=target, headers=headers)))
+    wire = parser.send(h11.Request(method=method, target=target, headers=headers))
     if body:
-        tls.sendall(parser.send(h11.Data(data=body)))
-    tls.sendall(parser.send(h11.EndOfMessage()))
+        wire += parser.send(h11.Data(data=body))
+    wire += parser.send(h11.EndOfMessage())
+    # A header-only refusal may close immediately; submit this small request
+    # together so the helper does not race that refusal with a second write.
+    tls.sendall(wire)
     response = None
     payload = b""
     while True:
