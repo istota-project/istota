@@ -490,6 +490,94 @@ def _process_deferred_sent_emails(
     return count
 
 
+_GROUP_SCOPE_PREFIX = "group:"
+
+
+def _group_of_scope(scope: object) -> str | None:
+    """The group a deferred op's ``scope`` names, or None for anything else.
+
+    Exact prefix and a valid id, nothing looser: the scope is model-written, and
+    a scope that is neither absent, ``"shared"`` nor this is refused rather than
+    falling through to the task's own store.
+    """
+    if not isinstance(scope, str) or not scope.startswith(_GROUP_SCOPE_PREFIX):
+        return None
+    group_id = scope[len(_GROUP_SCOPE_PREFIX):]
+    return group_id if db.is_valid_group_id(group_id) else None
+
+
+def _is_member(conn, group_id: str, user_id: str) -> bool:
+    """``db.is_group_member``, with a database error read as a refusal."""
+    try:
+        return db.is_group_member(conn, group_id, user_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("group membership check failed for %s: %s", group_id, e)
+        return False
+
+
+def _apply_kv_set_op(op, entry, read, write, task_id, namespace, key) -> bool:
+    """Replay one set-op against whichever store ``read``/``write`` address.
+
+    Re-reads the current value at apply time, so ops queued by different tasks
+    compose. True when a value was written.
+    """
+    members = entry.get("members") or []
+    keep_newest = entry.get("keep_newest")
+    if op == "set-trim":
+        # bool is an int subclass, and `keep_newest: true` would otherwise
+        # trim to one member.
+        if (
+            not isinstance(keep_newest, int)
+            or isinstance(keep_newest, bool)
+            or keep_newest < 0
+        ):
+            logger.warning(
+                "Bad set-trim op for task %d: keep_newest=%r", task_id, keep_newest,
+            )
+            return False
+    elif not isinstance(members, list):
+        logger.warning("Bad %s op for task %d: members not a list", op, task_id)
+        return False
+    row = read()
+    if row is None and op == "set-trim":
+        return False  # Nothing to trim; don't create the key.
+    current: list = []
+    if row is not None:
+        try:
+            parsed = json.loads(row["value"])
+        except json.JSONDecodeError:
+            logger.warning(
+                "Skipping %s for task %d: %s/%s is not valid JSON",
+                op, task_id, namespace, key,
+            )
+            return False
+        if not isinstance(parsed, list):
+            logger.warning(
+                "Skipping %s for task %d: %s/%s is not a JSON array",
+                op, task_id, namespace, key,
+            )
+            return False
+        current = parsed
+    if op == "set-add":
+        seen = set(current)
+        new_members = list(current)
+        for m in members:
+            if m not in seen:
+                new_members.append(m)
+                seen.add(m)
+    elif op == "set-trim":
+        # Re-read means the trim composes with set-adds queued earlier in the
+        # same task, and lands on the real size. Negative index, not
+        # len()-keep: the latter clamps at -len when keep > len and silently
+        # drops members.
+        new_members = current[-keep_newest:] if keep_newest else []
+    else:
+        to_remove = set(members)
+        new_members = [m for m in current if m not in to_remove]
+    write(json.dumps(new_members))
+    return True
+
+
 def _process_deferred_kv_ops(
     config: Config, task: db.Task, user_temp_dir: Path,
 ) -> int:
@@ -500,6 +588,11 @@ def _process_deferred_kv_ops(
     scheduler processes them here. The set ops re-read the current value from
     the DB before applying their change, so concurrent ops across tasks compose
     correctly.
+
+    An op's ``scope`` picks the store: absent is the task user's own,
+    ``"shared"`` is ``shared_kv``, ``"group:<id>"`` is that group's
+    ``group_kv`` and is applied only while ``task.user_id`` is a current
+    member. Any other scope is refused.
 
     Returns count of operations processed.
     """
@@ -574,76 +667,42 @@ def _process_deferred_kv_ops(
                         task.id, e,
                     )
                 continue
+            if scope is not None:
+                group_id = _group_of_scope(scope)
+                if group_id is None or not _is_member(conn, group_id, task.user_id):
+                    logger.warning(
+                        "group KV write denied for task %d user %s (%s %r %s/%s)",
+                        task.id, task.user_id, op, scope, namespace, key,
+                    )
+                    continue
+
+                def read():
+                    return db.group_kv_get(conn, group_id, namespace, key)
+
+                def write(value):
+                    db.group_kv_set(conn, group_id, namespace, key, value, task.user_id)
+
+                def delete():
+                    db.group_kv_delete(conn, group_id, namespace, key)
+            else:
+                def read():
+                    return db.kv_get(conn, task.user_id, namespace, key)
+
+                def write(value):
+                    db.kv_set(conn, task.user_id, namespace, key, value)
+
+                def delete():
+                    db.kv_delete(conn, task.user_id, namespace, key)
             try:
                 if op == "set":
-                    value = entry.get("value", "")
-                    db.kv_set(conn, task.user_id, namespace, key, value)
+                    write(entry.get("value", ""))
                     count += 1
                 elif op == "delete":
-                    db.kv_delete(conn, task.user_id, namespace, key)
+                    delete()
                     count += 1
                 elif op in ("set-add", "set-remove", "set-trim"):
-                    members = entry.get("members") or []
-                    keep_newest = entry.get("keep_newest")
-                    if op == "set-trim":
-                        # bool is an int subclass, and `keep_newest: true`
-                        # would otherwise trim to one member.
-                        if (
-                            not isinstance(keep_newest, int)
-                            or isinstance(keep_newest, bool)
-                            or keep_newest < 0
-                        ):
-                            logger.warning(
-                                "Bad set-trim op for task %d: keep_newest=%r",
-                                task.id, keep_newest,
-                            )
-                            continue
-                    elif not isinstance(members, list):
-                        logger.warning(
-                            "Bad %s op for task %d: members not a list", op, task.id,
-                        )
-                        continue
-                    row = db.kv_get(conn, task.user_id, namespace, key)
-                    if row is None and op == "set-trim":
-                        # Nothing to trim; don't create the key.
-                        continue
-                    current: list = []
-                    if row is not None:
-                        try:
-                            parsed = json.loads(row["value"])
-                        except json.JSONDecodeError:
-                            logger.warning(
-                                "Skipping %s for task %d: %s/%s is not valid JSON",
-                                op, task.id, namespace, key,
-                            )
-                            continue
-                        if not isinstance(parsed, list):
-                            logger.warning(
-                                "Skipping %s for task %d: %s/%s is not a JSON array",
-                                op, task.id, namespace, key,
-                            )
-                            continue
-                        current = parsed
-                    if op == "set-add":
-                        seen = set(current)
-                        new_members = list(current)
-                        for m in members:
-                            if m not in seen:
-                                new_members.append(m)
-                                seen.add(m)
-                    elif op == "set-trim":
-                        # Re-read means the trim composes with set-adds queued
-                        # earlier in the same task, and lands on the real size.
-                        # Negative index, not len()-keep: the latter clamps at
-                        # -len when keep > len and silently drops members.
-                        new_members = current[-keep_newest:] if keep_newest else []
-                    else:
-                        to_remove = set(members)
-                        new_members = [m for m in current if m not in to_remove]
-                    db.kv_set(
-                        conn, task.user_id, namespace, key, json.dumps(new_members),
-                    )
-                    count += 1
+                    if _apply_kv_set_op(op, entry, read, write, task.id, namespace, key):
+                        count += 1
                 else:
                     logger.warning(
                         "Unknown KV op %r in deferred file for task %d", op, task.id,

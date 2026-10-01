@@ -98,6 +98,13 @@ def _defer_write(
     return _defer_op(entry)
 
 
+def _with_scope(args, entry: dict) -> dict:
+    scope = _scope(args)
+    if scope:
+        entry["scope"] = scope
+    return entry
+
+
 def _load_config():
     """Load config for the direct-write admin gate.
 
@@ -129,16 +136,68 @@ def _shared_write_denied() -> bool:
     return True
 
 
-def _load_set(conn, user_id: str, namespace: str, key: str) -> tuple[list | None, bool]:
+def _group_access_denied(group_id: str) -> bool:
+    """Whether the caller may not touch ``group_id``'s store. Fail-closed.
+
+    Membership is asked of ``ISTOTA_USER_ID``, which the proxy sets from the
+    task, never of anything on the command line. An invalid id, an unknown
+    group and a group the caller is not in all answer the same, so the refusal
+    cannot be used to learn which groups exist. A database error is a refusal.
+    """
+    from istota import db
+
+    user_id = os.environ.get("ISTOTA_USER_ID", "")
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+    if not user_id or not db_path or not db.is_valid_group_id(group_id):
+        return True
+    try:
+        with db.get_db(db_path) as conn:
+            return not db.is_group_member(conn, group_id, user_id)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _group(args) -> str | None:
+    return getattr(args, "group", None)
+
+
+def _scope(args) -> str | None:
+    """The deferred op's ``scope``: the apply step authorizes against it."""
+    if getattr(args, "shared", False):
+        return "shared"
+    group = _group(args)
+    return f"group:{group}" if group is not None else None
+
+
+def _read_value(conn, args, namespace: str, key: str) -> dict | None:
+    """A per-user or group value row. Shared reads are handled by the callers."""
+    from istota import db
+
+    group = _group(args)
+    if group is not None:
+        return db.group_kv_get(conn, group, namespace, key)
+    return db.kv_get(conn, _user_id(), namespace, key)
+
+
+def _write_value(conn, args, namespace: str, key: str, value: str) -> None:
+    """Direct (unsandboxed) write to the per-user or group store."""
+    from istota import db
+
+    group = _group(args)
+    if group is not None:
+        db.group_kv_set(conn, group, namespace, key, value, _user_id())
+    else:
+        db.kv_set(conn, _user_id(), namespace, key, value)
+
+
+def _load_set(conn, args, namespace: str, key: str) -> tuple[list | None, bool]:
     """Load a set-shaped value. Returns (members, exists).
 
     - If the key doesn't exist: ([], False).
     - If it exists and is a JSON array: (members, True).
     - If it exists but isn't an array: prints error JSON and exits.
     """
-    from istota import db
-
-    row = db.kv_get(conn, user_id, namespace, key)
+    row = _read_value(conn, args, namespace, key)
     if row is None:
         return [], False
     try:
@@ -154,12 +213,11 @@ def cmd_get(args):
     from istota import db
 
     shared = getattr(args, "shared", False)
-    user_id = None if shared else _user_id()
     with _get_conn() as conn:
         if shared:
             result = db.shared_kv_get(conn, args.namespace, args.key)
         else:
-            result = db.kv_get(conn, user_id, args.namespace, args.key)
+            result = _read_value(conn, args, args.namespace, args.key)
     if result is None:
         print(json.dumps({"status": "not_found"}))
     else:
@@ -232,11 +290,12 @@ def cmd_set(args):
 
     shared = getattr(args, "shared", False)
 
-    # Try deferred write first (sandbox mode). The shared-write gate is applied
-    # at apply time against task.user_id (the trusted identity), so the deferred
-    # op just carries scope:"shared" — it is not authorized here.
+    # Try deferred write first (sandbox mode). The shared and group gates are
+    # applied at apply time against task.user_id (the trusted identity), so the
+    # deferred op just carries its scope. `main` already refused a non-member's
+    # group op, but that check is not what authorizes the write.
     if _defer_write("set", args.namespace, args.key, args.value,
-                    scope="shared" if shared else None):
+                    scope=_scope(args)):
         print(json.dumps({"status": "ok", "deferred": True}))
         return
 
@@ -251,9 +310,8 @@ def cmd_set(args):
         print(json.dumps({"status": "ok"}))
         return
 
-    user_id = _user_id()
     with _get_conn() as conn:
-        db.kv_set(conn, user_id, args.namespace, args.key, args.value)
+        _write_value(conn, args, args.namespace, args.key, args.value)
     print(json.dumps({"status": "ok"}))
 
 
@@ -261,8 +319,7 @@ def cmd_delete(args):
     shared = getattr(args, "shared", False)
 
     # Try deferred write first (sandbox mode).
-    if _defer_write("delete", args.namespace, args.key,
-                    scope="shared" if shared else None):
+    if _defer_write("delete", args.namespace, args.key, scope=_scope(args)):
         print(json.dumps({"status": "ok", "deferred": True}))
         return
 
@@ -277,9 +334,12 @@ def cmd_delete(args):
         print(json.dumps({"status": "ok", "deleted": deleted}))
         return
 
-    user_id = _user_id()
+    group = _group(args)
     with _get_conn() as conn:
-        deleted = db.kv_delete(conn, user_id, args.namespace, args.key)
+        if group is not None:
+            deleted = db.group_kv_delete(conn, group, args.namespace, args.key)
+        else:
+            deleted = db.kv_delete(conn, _user_id(), args.namespace, args.key)
     print(json.dumps({"status": "ok", "deleted": deleted}))
 
 
@@ -326,9 +386,12 @@ def cmd_list(args):
         _fail("--max-value-chars must be >= 0 (0 disables truncation)")
 
     shared = getattr(args, "shared", False)
+    group = _group(args)
     with _get_conn() as conn:
         if shared:
             entries = db.shared_kv_list(conn, args.namespace)
+        elif group is not None:
+            entries = db.group_kv_list(conn, group, args.namespace)
         else:
             entries = db.kv_list(conn, _user_id(), args.namespace)
     truncated = render_list_entries(
@@ -348,9 +411,12 @@ def cmd_namespaces(args):
     from istota import db
 
     shared = getattr(args, "shared", False)
+    group = _group(args)
     with _get_conn() as conn:
         if shared:
             namespaces = db.shared_kv_namespaces(conn)
+        elif group is not None:
+            namespaces = db.group_kv_namespaces(conn, group)
         else:
             namespaces = db.kv_namespaces(conn, _user_id())
     # Reserved namespaces are refused by every other verb, so listing them
@@ -394,9 +460,8 @@ def cmd_set_contains(args):
     would otherwise have to guess, and gets the scalar exactly when the batch
     happens to hold one item.
     """
-    user_id = _user_id()
     with _get_conn() as conn:
-        members, _ = _load_set(conn, user_id, args.namespace, args.key)
+        members, _ = _load_set(conn, args, args.namespace, args.key)
     try:
         present = set(members)
     except TypeError:
@@ -429,16 +494,14 @@ def cmd_set_contains(args):
 
 
 def cmd_set_size(args):
-    user_id = _user_id()
     with _get_conn() as conn:
-        members, _ = _load_set(conn, user_id, args.namespace, args.key)
+        members, _ = _load_set(conn, args, args.namespace, args.key)
     print(json.dumps({"status": "ok", "size": len(members)}))
 
 
 def cmd_set_members(args):
-    user_id = _user_id()
     with _get_conn() as conn:
-        members, _ = _load_set(conn, user_id, args.namespace, args.key)
+        members, _ = _load_set(conn, args, args.namespace, args.key)
     offset = max(0, args.offset)
     limit = max(0, args.limit)
     page = members[offset:offset + limit]
@@ -451,13 +514,10 @@ def cmd_set_members(args):
 
 
 def cmd_set_add(args):
-    from istota import db
-
-    user_id = _user_id()
     # Read current state to validate set shape and report an `added` count
     # reflecting the read-time view (deferred apply may see a fresher state).
     with _get_conn() as conn:
-        current, _ = _load_set(conn, user_id, args.namespace, args.key)
+        current, _ = _load_set(conn, args, args.namespace, args.key)
     existing = set(current)
     added = 0
     for m in args.members:
@@ -465,12 +525,12 @@ def cmd_set_add(args):
             existing.add(m)
             added += 1
 
-    if _defer_op({
+    if _defer_op(_with_scope(args, {
         "op": "set-add",
         "namespace": args.namespace,
         "key": args.key,
         "members": list(args.members),
-    }):
+    })):
         print(json.dumps({"status": "ok", "added": added, "deferred": True}))
         return
 
@@ -481,31 +541,28 @@ def cmd_set_add(args):
             new_members.append(m)
             seen.add(m)
     with _get_conn() as conn:
-        db.kv_set(conn, user_id, args.namespace, args.key, json.dumps(new_members))
+        _write_value(conn, args, args.namespace, args.key, json.dumps(new_members))
     print(json.dumps({"status": "ok", "added": added}))
 
 
 def cmd_set_remove(args):
-    from istota import db
-
-    user_id = _user_id()
     with _get_conn() as conn:
-        current, _ = _load_set(conn, user_id, args.namespace, args.key)
+        current, _ = _load_set(conn, args, args.namespace, args.key)
     to_remove = set(args.members)
     removed = sum(1 for m in current if m in to_remove)
 
-    if _defer_op({
+    if _defer_op(_with_scope(args, {
         "op": "set-remove",
         "namespace": args.namespace,
         "key": args.key,
         "members": list(args.members),
-    }):
+    })):
         print(json.dumps({"status": "ok", "removed": removed, "deferred": True}))
         return
 
     new_members = [m for m in current if m not in to_remove]
     with _get_conn() as conn:
-        db.kv_set(conn, user_id, args.namespace, args.key, json.dumps(new_members))
+        _write_value(conn, args, args.namespace, args.key, json.dumps(new_members))
     print(json.dumps({"status": "ok", "removed": removed}))
 
 
@@ -520,14 +577,11 @@ def cmd_set_trim(args):
     `set-remove` preserves relative order, so oldest-first holds and "newest N"
     is well defined.
     """
-    from istota import db
-
     if args.keep_newest < 0:
         _fail("--keep-newest must be >= 0")
 
-    user_id = _user_id()
     with _get_conn() as conn:
-        current, exists = _load_set(conn, user_id, args.namespace, args.key)
+        current, exists = _load_set(conn, args, args.namespace, args.key)
 
     # `current[len(current) - keep:]` is wrong: when keep > len the start index
     # goes negative and Python clamps it at -len, so a keep between len and
@@ -541,12 +595,12 @@ def cmd_set_trim(args):
     # apply time, and short-circuiting here would silently drop the trim on the
     # create-then-cap run the docs recommend. The replay re-reads and skips a
     # genuinely absent key itself.
-    if _defer_op({
+    if _defer_op(_with_scope(args, {
         "op": "set-trim",
         "namespace": args.namespace,
         "key": args.key,
         "keep_newest": args.keep_newest,
-    }):
+    })):
         print(json.dumps({
             "status": "ok", "removed": removed, "size": len(kept), "deferred": True,
         }))
@@ -558,7 +612,7 @@ def cmd_set_trim(args):
         return
 
     with _get_conn() as conn:
-        db.kv_set(conn, user_id, args.namespace, args.key, json.dumps(kept))
+        _write_value(conn, args, args.namespace, args.key, json.dumps(kept))
     print(json.dumps({"status": "ok", "removed": removed, "size": len(kept)}))
 
 
@@ -570,11 +624,13 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
 
     _shared_help = "Use the cross-user shared_kv store (writes admin-only)"
+    _group_help = "Use this group's store (members only)"
 
     p_get = sub.add_parser("get", help="Get a value")
     p_get.add_argument("namespace")
     p_get.add_argument("key")
     p_get.add_argument("--shared", action="store_true", help=_shared_help)
+    p_get.add_argument("--group", metavar="GROUP_ID", help=_group_help)
 
     p_set = sub.add_parser("set", help="Set a value (JSON)")
     p_set.add_argument("namespace")
@@ -587,11 +643,13 @@ def build_parser():
              "$ISTOTA_DEFERRED_DIR or your workspace",
     )
     p_set.add_argument("--shared", action="store_true", help=_shared_help)
+    p_set.add_argument("--group", metavar="GROUP_ID", help=_group_help)
 
     p_del = sub.add_parser("delete", help="Delete a key")
     p_del.add_argument("namespace")
     p_del.add_argument("key")
     p_del.add_argument("--shared", action="store_true", help=_shared_help)
+    p_del.add_argument("--group", metavar="GROUP_ID", help=_group_help)
 
     p_list = sub.add_parser("list", help="List keys in a namespace")
     p_list.add_argument("namespace")
@@ -605,9 +663,11 @@ def build_parser():
              "0 returns them whole)",
     )
     p_list.add_argument("--shared", action="store_true", help=_shared_help)
+    p_list.add_argument("--group", metavar="GROUP_ID", help=_group_help)
 
     p_ns = sub.add_parser("namespaces", help="List all namespaces")
     p_ns.add_argument("--shared", action="store_true", help=_shared_help)
+    p_ns.add_argument("--group", metavar="GROUP_ID", help=_group_help)
 
     sub.add_parser(
         "shared-status",
@@ -617,6 +677,8 @@ def build_parser():
     # Set-ops accept --shared only so we can reject it with a clean JSON error
     # (curated shared content is whole-value writes, not incremental set
     # membership). Without the flag argparse would exit 2 with a stderr message.
+    # --group is accepted for real: a group store is appended to by its
+    # members over time, which is what the set-ops are for.
     p_contains = sub.add_parser(
         "set-contains",
         help="Check one or more string members against the JSON-array value "
@@ -626,6 +688,7 @@ def build_parser():
     p_contains.add_argument("key")
     p_contains.add_argument("members", nargs="+")
     p_contains.add_argument("--shared", action="store_true", help=argparse.SUPPRESS)
+    p_contains.add_argument("--group", metavar="GROUP_ID", help=_group_help)
 
     p_size = sub.add_parser(
         "set-size",
@@ -634,6 +697,7 @@ def build_parser():
     p_size.add_argument("namespace")
     p_size.add_argument("key")
     p_size.add_argument("--shared", action="store_true", help=argparse.SUPPRESS)
+    p_size.add_argument("--group", metavar="GROUP_ID", help=_group_help)
 
     p_members = sub.add_parser(
         "set-members",
@@ -644,6 +708,7 @@ def build_parser():
     p_members.add_argument("--limit", type=int, default=100)
     p_members.add_argument("--offset", type=int, default=0)
     p_members.add_argument("--shared", action="store_true", help=argparse.SUPPRESS)
+    p_members.add_argument("--group", metavar="GROUP_ID", help=_group_help)
 
     p_add = sub.add_parser(
         "set-add",
@@ -653,6 +718,7 @@ def build_parser():
     p_add.add_argument("key")
     p_add.add_argument("members", nargs="+")
     p_add.add_argument("--shared", action="store_true", help=argparse.SUPPRESS)
+    p_add.add_argument("--group", metavar="GROUP_ID", help=_group_help)
 
     p_remove = sub.add_parser(
         "set-remove",
@@ -662,6 +728,7 @@ def build_parser():
     p_remove.add_argument("key")
     p_remove.add_argument("members", nargs="+")
     p_remove.add_argument("--shared", action="store_true", help=argparse.SUPPRESS)
+    p_remove.add_argument("--group", metavar="GROUP_ID", help=_group_help)
 
     p_trim = sub.add_parser(
         "set-trim",
@@ -675,6 +742,7 @@ def build_parser():
         help="Number of members to keep, counting from the end",
     )
     p_trim.add_argument("--shared", action="store_true", help=argparse.SUPPRESS)
+    p_trim.add_argument("--group", metavar="GROUP_ID", help=_group_help)
 
     return parser
 
@@ -695,11 +763,18 @@ def main(argv=None):
             f"and cannot be read or written through this CLI",
             namespace=namespace,
         )
+    # Keyed on `shared` alone: set-ops take --group.
     if args.command in _SET_OPS and getattr(args, "shared", False):
         _fail(
             "--shared is not supported for set-ops "
             "(shared scope is whole-value only)"
         )
+    group = _group(args)
+    if group is not None:
+        if getattr(args, "shared", False):
+            _fail("--group and --shared cannot be combined")
+        if _group_access_denied(group):
+            _fail(f"not a member of group '{group}'")
     commands = {
         "get": cmd_get,
         "set": cmd_set,
