@@ -18,6 +18,11 @@ Optional:
     ISTOTA_WP_TEST_OPTIONS_PAGE  an ACF options page slug, and
     ISTOTA_WP_TEST_OPTIONS_FIELD a text field on it, for the options round trip;
                                  needs the istota-connector plugin
+    ISTOTA_WP_TEST_FIELDS_TYPE   a post type, and
+    ISTOTA_WP_TEST_FIELDS_FIELD  a flexible content field on it with a layout
+                                 holding a repeater of a text sub-field, for
+                                 `fields get` / `fields edit`; needs
+                                 istota-connector 0.2.0
 
 Point these at a local development copy of a site, never at production: the
 test writes. Make a local-only application password in wp-admin and revoke it
@@ -48,6 +53,7 @@ from istota import db
 from istota.config import Config, WordPressConfig
 from istota.skills import _credref
 from istota.skills import wordpress as wp
+from istota.untrusted import frame_untrusted
 
 URL = os.environ.get("ISTOTA_WP_TEST_URL", "").strip()
 USER = os.environ.get("ISTOTA_WP_TEST_USER", "").strip()
@@ -294,3 +300,143 @@ def test_network_sites(live, capsys):
         pytest.skip("network sites needs a super admin; the test account is not one")
     assert code == 0 and out.get("status") == "ok", out
     assert out["count"] >= 2 and any(site["id"] == 1 for site in out["sites"]), out
+
+
+FIELDS_TYPE = os.environ.get("ISTOTA_WP_TEST_FIELDS_TYPE", "").strip()
+FIELDS_FIELD = os.environ.get("ISTOTA_WP_TEST_FIELDS_FIELD", "").strip()
+TEXTUAL = ("text", "textarea")
+
+
+def plain(value):
+    """A fenced string from `fields get` back to the site's own text."""
+    return unfenced(value) if isinstance(value, str) and value else value
+
+
+def pick_layouts(definition: dict) -> tuple[dict, dict, str, str, str]:
+    """A layout holding a repeater of a text sub-field, and a layout with a
+    text sub-field of its own (the same layout when it is the only one)."""
+    listy = None
+    for layout in definition["layouts"]:
+        for sub in layout["sub_fields"]:
+            if sub["type"] != "repeater":
+                continue
+            text = next((s["name"] for s in sub["sub_fields"] if s["type"] in TEXTUAL), None)
+            if text:
+                listy = (layout, sub["name"], text)
+                break
+        if listy:
+            break
+    assert listy, "no layout of the field has a repeater with a text sub-field"
+    others = [lay for lay in definition["layouts"] if lay["name"] != listy[0]["name"]]
+    for layout in [*others, listy[0]]:
+        text = next((s["name"] for s in layout["sub_fields"] if s["type"] in TEXTUAL), None)
+        if text:
+            return listy[0], layout, listy[1], listy[2], text
+    raise AssertionError("no layout of the field has a text sub-field of its own")
+
+
+@pytest.mark.skipif(not (FIELDS_TYPE and FIELDS_FIELD),
+                    reason="ISTOTA_WP_TEST_FIELDS_TYPE and ISTOTA_WP_TEST_FIELDS_FIELD not set")
+def test_fields_edit_on_a_flexible_field(live, capsys):
+    """`fields get` and `fields edit` on a scratch draft; needs istota-connector 0.2.0.
+
+    ISTOTA_WP_TEST_FIELDS_TYPE is a post type whose field groups hold
+    ISTOTA_WP_TEST_FIELDS_FIELD, a flexible content field in REST with one
+    layout carrying a repeater of a text sub-field, such as `page` and a
+    page-builder `blocks` field. The draft is deleted afterwards.
+    """
+    tag = uuid.uuid4().hex[:8]
+    field = FIELDS_FIELD
+    made = ok(capsys, "create", "--type", FIELDS_TYPE, "--title", f"istota fields smoke {tag}",
+              "--slug", f"istota-fields-smoke-{tag}")
+    pid = str(made["item"]["id"])
+    edit = ["fields", "edit", "--id", pid]
+    try:
+        listing = ok(capsys, "fields", "get", "--id", pid)
+        assert field in {row["name"] for row in listing["fields"]}, listing["fields"]
+        read = ok(capsys, "fields", "get", "--id", pid, "--path", field)
+        assert read["value"] == [] and read["token"].startswith("sha256:"), read
+        listing_token = next(row["token"] for row in listing["fields"] if row["name"] == field)
+        assert listing_token == read["token"]
+        lay, other, rep, text, other_text = pick_layouts(read["definition"])
+        rows = f"{field}/0/{rep}"
+
+        # Insert on a draft is not gated. The second row is disabled, as an
+        # editor might leave one, to see it survive edits of its sibling.
+        first = {"acf_fc_layout": lay["name"], rep: [{text: "one"}, {text: "two"}]}
+        second = {"acf_fc_layout": other["name"], other_text: "kept",
+                  "acf_fc_layout_disabled": True}
+        out = ok(capsys, *edit, "--token", read["token"],
+                 "--insert", f"{field}/-={json.dumps(first)}",
+                 "--insert", f"{field}/-={json.dumps(second)}")
+        assert out["readback"]["changed"] == [], out["readback"]
+        assert out["previous_token"] == read["token"] and out["token"] != read["token"]
+        stale, token = read["token"], out["token"]
+        row1 = ok(capsys, "fields", "get", "--id", pid, "--path", f"{field}/1")["value"]
+        assert row1["acf_fc_layout_disabled"] is True, row1
+        assert plain(row1[other_text]) == "kept", row1
+
+        # A fenced value is unwrapped; ops apply in order, indices shifting.
+        deux = json.dumps(frame_untrusted("deux", "WORDPRESS CONTENT"))
+        out = ok(capsys, *edit, "--token", token,
+                 "--set", f"{rows}/1/{text}={deux}",
+                 "--insert", f"{rows}/-={json.dumps({text: 'three'})}",
+                 "--move", f"{rows}/2={rows}/0")
+        assert out["readback"]["changed"] == [], out["readback"]
+        token = out["token"]
+        got = ok(capsys, "fields", "get", "--id", pid, "--path", rows)["value"]
+        assert [plain(r[text]) for r in got] == ["three", "one", "deux"], got
+
+        # A set followed by a move of the same row: the readback follows it.
+        out = ok(capsys, *edit, "--token", token,
+                 "--set", f"{rows}/0/{text}={json.dumps('drei')}",
+                 "--move", f"{rows}/0={rows}/2")
+        assert out["readback"]["changed"] == [], out["readback"]
+        assert out["changed"][0]["path"] == f"{rows}/2/{text}", out["changed"]
+        assert plain(out["changed"][0]["value"]) == "drei", out["changed"]
+        token = out["token"]
+        got = ok(capsys, "fields", "get", "--id", pid, "--path", rows)
+        assert [plain(r[text]) for r in got["value"]] == ["one", "deux", "drei"], got["value"]
+        assert got["token"] == token
+
+        # A stale token is refused before any write, and names the current one.
+        code, out = cli(capsys, *edit, "--token", stale, "--set", f'{rows}/0/{text}="x"')
+        assert code != 0 and out["reason"] == "stale_value" and out["token"] == token, out
+        assert ok(capsys, "fields", "get", "--id", pid, "--path", field)["token"] == token
+
+        # A whole row copied out of fenced `fields get` output goes back clean.
+        got = ok(capsys, "fields", "get", "--id", pid, "--path", f"{field}/0")
+        row = got["value"]
+        row[rep][0][text] = frame_untrusted("eins", "WORDPRESS CONTENT")
+        out = ok(capsys, *edit, "--token", got["token"], "--set", f"{field}/0={json.dumps(row)}")
+        assert out["readback"]["changed"] == [], out["readback"]
+        token = out["token"]
+        got = ok(capsys, "fields", "get", "--id", pid, "--path", f"{field}/0")["value"]
+        stored = [plain(r[text]) for r in got[rep]]
+        assert stored == ["eins", "deux", "drei"], got
+        assert not any("UNTRUSTED" in s for s in stored), stored
+
+        # The disabled sibling came through every edit of row 0 untouched.
+        row1 = ok(capsys, "fields", "get", "--id", pid, "--path", f"{field}/1")["value"]
+        assert row1["acf_fc_layout_disabled"] is True and plain(row1[other_text]) == "kept", row1
+
+        # A set that drops rows asks first, on a draft too, and writes nothing.
+        shrink = ("--set", f"{rows}=[{json.dumps({text: 'only'})}]")
+        code, out = cli(capsys, *edit, "--token", token, *shrink)
+        assert out["reason"] == "confirmation_required", out
+        assert any(f"{rows}: 3 rows → 1" in line for line in out["would"]), out["would"]
+        assert ok(capsys, "fields", "get", "--id", pid, "--path", field)["token"] == token
+        out = ok(capsys, *edit, "--token", token, *shrink, "--confirmed")
+        assert len(out["previous"][0]) == 3, out["previous"]
+        token = out["token"]
+
+        # Removing a row asks first, and hands back what it removed.
+        code, out = cli(capsys, *edit, "--token", token, "--remove", f"{field}/1")
+        assert out["reason"] == "confirmation_required", out
+        out = ok(capsys, *edit, "--token", token, "--remove", f"{field}/1", "--confirmed")
+        assert out["previous"][0]["acf_fc_layout"] == other["name"], out["previous"]
+        assert out["previous"][0]["acf_fc_layout_disabled"] is True
+        got = ok(capsys, "fields", "get", "--id", pid, "--path", field)["value"]
+        assert len(got) == 1 and [plain(r[text]) for r in got[0][rep]] == ["only"], got
+    finally:
+        cli(capsys, "delete", "--id", pid, "--type", FIELDS_TYPE, "--force", "--confirmed")
