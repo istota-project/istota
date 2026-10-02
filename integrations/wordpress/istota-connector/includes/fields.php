@@ -587,10 +587,10 @@ function istota_fields_child( array $def, $value, $segment ) {
 	$kind = istota_fields_kind( $def );
 	if ( 'object' === $kind || 'row' === $kind ) {
 		$subs = istota_fields_sub_fields( $def );
-		if ( ! is_string( $segment ) || ! isset( $subs[ $segment ] ) ) {
+		if ( ! is_string( $segment ) || ! isset( $subs[ $segment ] ) || ! is_array( $value ) ) {
 			return null;
 		}
-		$child = ( is_array( $value ) && array_key_exists( $segment, $value ) ) ? $value[ $segment ] : null;
+		$child = array_key_exists( $segment, $value ) ? $value[ $segment ] : null;
 		return array( $subs[ $segment ], $child );
 	}
 	if ( 'rows' === $kind ) {
@@ -869,6 +869,33 @@ function istota_fields_tag( array $def, $value, &$counter ) {
 	return $value;
 }
 
+/**
+ * $new with the row identities of the $old it replaces, matched by position,
+ * so a set of a row or a list compares its nested lists with their own.
+ */
+function istota_fields_inherit_tags( array $def, $old, $new ) {
+	$kind = istota_fields_kind( $def );
+	if ( 'rows' === $kind && is_array( $old ) && istota_fields_is_list( $new ) ) {
+		foreach ( $new as $i => $row ) {
+			if ( isset( $old[ $i ] ) ) {
+				$new[ $i ] = istota_fields_inherit_tags( istota_fields_row_def( $def, $i, $row ), $old[ $i ], $row );
+			}
+		}
+		return $new;
+	}
+	if ( ( 'object' === $kind || 'row' === $kind ) && is_array( $old ) && is_array( $new ) ) {
+		if ( 'row' === $kind && isset( $old[ ISTOTA_FIELDS_ROW_TAG ] ) ) {
+			$new[ ISTOTA_FIELDS_ROW_TAG ] = $old[ ISTOTA_FIELDS_ROW_TAG ];
+		}
+		foreach ( istota_fields_sub_fields( $def ) as $name => $sub ) {
+			if ( array_key_exists( $name, $old ) && array_key_exists( $name, $new ) ) {
+				$new[ $name ] = istota_fields_inherit_tags( $sub, $old[ $name ], $new[ $name ] );
+			}
+		}
+	}
+	return $new;
+}
+
 function istota_fields_untag( array $def, $value ) {
 	$none = null;
 	return istota_fields_tag( $def, $value, $none );
@@ -968,13 +995,27 @@ function istota_fields_apply( array $field, $value, array $ops ) {
 			$def      = $target['field'];
 			$previous = istota_fields_untag( $def, $target['value'] );
 			istota_fields_collect( $result['errors'], istota_fields_check_shape( $def, $new, $where ), $label );
-			istota_fields_put( $work, $path, istota_fields_fill( $def, $new ) );
+			// A set clears what its value leaves out, so a required sub-field left out is
+			// a required field set to null, which is refused. An insert only reports it.
+			$cleared = array();
+			istota_fields_missing_into( $def, $new, $where, $cleared );
+			foreach ( $cleared as $at ) {
+				$result['errors'][] = array(
+					'op'      => $label,
+					'path'    => $at,
+					'message' => 'Required; a set clears what it leaves out.',
+				);
+			}
+			istota_fields_put( $work, $path, istota_fields_inherit_tags( $def, $target['value'], istota_fields_fill( $def, $new ) ) );
 			$result['written'][] = array( 'op' => $i, 'path' => $where, 'field' => $def, 'value' => $new );
 		} else {
 			// insert, remove and move act on a row of a repeater or flexible content list.
 			$parent_path = array_slice( $path, 0, -1 );
 			$index       = $path[ count( $path ) - 1 ];
-			$parent      = $parent_path ? istota_fields_resolve( $field, $work, $parent_path ) : array( 'found' => false, 'exists' => '' );
+			if ( ! $parent_path ) {
+				throw istota_fields_op_error( 'validation_error', sprintf( '%s takes the path of a row, such as %s/0.', $verb, $where ), $label, array( 'path' => $where ) );
+			}
+			$parent      = istota_fields_resolve( $field, $work, $parent_path );
 			if ( ! $parent['found'] ) {
 				throw istota_fields_op_error( 'unknown_path', sprintf( '%s does not exist; %s is the deepest part that does.', $where, '' === $parent['exists'] ? 'none' : $parent['exists'] ), $label, array( 'path' => $where, 'exists' => $parent['exists'] ) );
 			}
@@ -1162,8 +1203,15 @@ function istota_fields_sort_keys( $value ) {
 }
 
 function istota_fields_canonical_json( $value ) {
+	// json_encode rather than wp_json_encode, so this file needs no WordPress; only
+	// PHP computes the token, and invalid UTF-8 is substituted as wp_json_encode would.
 	$json = json_encode( istota_fields_sort_keys( $value ), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE );
-	return false === $json ? 'null' : $json;
+	if ( false === $json ) {
+		// INF or NAN, from a stored number too large for a float. Hashing a stand-in
+		// would make the token blind to edits of this field.
+		throw new Istota_Fields_Error( 'unsupported_field', 'This field holds a value that cannot be encoded as JSON: ' . json_last_error_msg() . '.' );
+	}
+	return $json;
 }
 
 /** The token of a top-level field's normalized value: sha256: and hex. */

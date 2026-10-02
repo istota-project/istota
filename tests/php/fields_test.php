@@ -446,6 +446,26 @@ test(
 		round_trips( $link_url, $stored, 'https://example.test/' );
 		round_trips( $link_url, '', null );
 
+		$edges = array( 'gallery' => array(), 'relationship' => array(), 'checkbox' => array() );
+		foreach ( $edges as $type => $empty ) {
+			foreach ( array( false, '', null ) as $raw ) {
+				round_trips( f( $type, 'e' ), $raw, $empty );
+			}
+		}
+		round_trips( f( 'gallery', 'e' ), '0', array() );
+		round_trips( f( 'gallery', 'e' ), 0, array() );
+		round_trips( f( 'relationship', 'e' ), '0', array() );
+		round_trips( f( 'relationship', 'e' ), 0, array() );
+		round_trips( f( 'checkbox', 'e' ), '0', array( '0' ) );
+		foreach ( array( 'user', 'page_link', 'post_object' ) as $type ) {
+			foreach ( array( false, '', null, '0', 0 ) as $raw ) {
+				round_trips( f( $type, 'e', array( 'multiple' => 0 ) ), $raw, null );
+			}
+		}
+		round_trips( f( 'link', 'e' ), false, null );
+		// ACF's link update_value stores a url empty() calls empty as "", "0" included.
+		round_trips( f( 'link', 'e' ), '0', null );
+
 		$map = f( 'google_map', 'gm' );
 		$place = array(
 			'address' => 'Somewhere',
@@ -455,6 +475,7 @@ test(
 		round_trips( $map, $place, $place );
 		round_trips( $map, false, null );
 		round_trips( $map, '', null );
+		round_trips( $map, null, null );
 	}
 );
 
@@ -757,6 +778,22 @@ test(
 			}
 		);
 		ok( $e && 'validation_error' === $e->reason, 'remove acts only on rows' );
+		foreach ( array( 'insert', 'remove', 'move' ) as $verb ) {
+			$e = raised(
+				function () use ( $field, $blocks, $verb ) {
+					istota_fields_apply( $field, $blocks, array( array( 'op' => $verb, 'path' => 'blocks', 'from' => 'blocks', 'value' => array() ) ) );
+				}
+			);
+			ok( $e && 'validation_error' === $e->reason, "$verb of a whole field is malformed, not an unknown path" );
+		}
+
+		// The same op matrix on flexible content rows.
+		$hero = array( 'acf_fc_layout' => 'hero', 'image' => 9 );
+		same( array( 'hero', 'First', 'text', 'Second' ), titles( apply_ok( $field, $blocks, array( array( 'op' => 'insert', 'path' => 'blocks/0', 'value' => $hero ) ) )['value'] ), 'flexible: insert at 0' );
+		same( array( 'First', 'text', 'Second', 'hero' ), titles( apply_ok( $field, $blocks, array( array( 'op' => 'insert', 'path' => 'blocks/3', 'value' => $hero ) ) )['value'] ), 'flexible: insert at the length' );
+		same( array( 'First', 'text', 'Second', 'hero' ), titles( apply_ok( $field, $blocks, array( array( 'op' => 'insert', 'path' => 'blocks/-', 'value' => $hero ) ) )['value'] ), 'flexible: insert at "-"' );
+		same( array( 'text', 'Second', 'First' ), titles( apply_ok( $field, $blocks, array( array( 'op' => 'move', 'from' => 'blocks/0', 'path' => 'blocks/2' ) ) )['value'] ), 'flexible: move forward' );
+		same( array( 'First', 'text' ), titles( apply_ok( $field, $blocks, array( array( 'op' => 'remove', 'path' => 'blocks/2' ) ) )['value'] ), 'flexible: remove the last row' );
 		$e = raised(
 			function () use ( $field, $blocks ) {
 				istota_fields_apply( $field, $blocks, array( array( 'op' => 'insert', 'path' => 'blocks/0/options/0', 'value' => array() ) ) );
@@ -794,7 +831,25 @@ test(
 		same( $blocks, $list['previous'][0], 'previous for a whole list is the list as read' );
 
 		$changed = istota_fields_apply( $field, $blocks, array( array( 'op' => 'set', 'path' => 'blocks/1', 'value' => array( 'acf_fc_layout' => 'hero', 'image' => 4 ) ) ) );
-		ok( 1 === count( $changed['errors'] ) && 'blocks/1/acf_fc_layout' === $changed['errors'][0]['path'], 'changing a row\'s layout by set is refused' );
+		ok( in_array( 'blocks/1/acf_fc_layout', array_column( $changed['errors'], 'path' ), true ), 'changing a row\'s layout by set is refused' );
+
+		$cleared = istota_fields_apply( $field, $blocks, array( array( 'op' => 'set', 'path' => 'blocks/0/items/0', 'value' => array( 'done' => true ) ) ) );
+		same( array( 'blocks/0/items/0/label' ), array_column( $cleared['errors'], 'path' ), 'a set that leaves out a required sub-field is refused' );
+
+		// A shape-invalid set followed by an op inside it is an unknown path, never a PHP error.
+		$e = raised(
+			function () use ( $field, $blocks ) {
+				istota_fields_apply(
+					$field,
+					$blocks,
+					array(
+						array( 'op' => 'set', 'path' => 'blocks/0/options', 'value' => 5 ),
+						array( 'op' => 'set', 'path' => 'blocks/0/options/spacing', 'value' => 'lg' ),
+					)
+				);
+			}
+		);
+		ok( $e && 'unknown_path' === $e->reason && 'ops[1]' === $e->params['op'], 'an op into a value a set left malformed is unknown_path' );
 
 		$whole = apply_ok( f( 'text', 'subtitle' ), 'old', array( array( 'op' => 'set', 'path' => 'subtitle', 'value' => 'new' ) ) );
 		same( 'new', $whole['value'], 'a whole top-level field' );
@@ -1006,6 +1061,10 @@ test(
 		);
 		$grown = istota_fields_apply( blocks_field(), $moved, array( array( 'op' => 'move', 'from' => 'blocks/2', 'path' => 'blocks/0' ) ) );
 		same( array(), $grown['errors'], 'an over-max list another row\'s move shifted is not refused' );
+		$whole = $moved[0];
+		$whole['title'] = 'Renamed';
+		$kept = istota_fields_apply( blocks_field(), $moved, array( array( 'op' => 'set', 'path' => 'blocks/0', 'value' => $whole ) ) );
+		same( array(), $kept['errors'], 'a whole-row set keeps the row\'s identity: its over-max list is not made worse' );
 		$add = istota_fields_apply( blocks_field(), $moved, array( array( 'op' => 'insert', 'path' => 'blocks/0', 'value' => array( 'acf_fc_layout' => 'list', 'items' => $four ) ) ) );
 		ok( 1 === count( $add['errors'] ) && 'blocks/0/items' === $add['errors'][0]['path'], 'a new row with a nested list over max is refused' );
 
@@ -1027,6 +1086,9 @@ test(
 			array( array( 'op' => 'remove', 'path' => 'teams/0/members/0' ) )
 		);
 		ok( 1 === count( $short['errors'] ) && 'teams/0/members' === $short['errors'][0]['path'], 'but an existing one emptied below its min is refused' );
+		$stored = array( array( 'team' => 'A', 'members' => array( array( 'who' => 'x' ) ) ) );
+		$by_row = istota_fields_apply( $teams, $stored, array( array( 'op' => 'set', 'path' => 'teams/0', 'value' => array( 'team' => 'A', 'members' => array() ) ) ) );
+		ok( 1 === count( $by_row['errors'] ) && 'teams/0/members' === $by_row['errors'][0]['path'], 'and so is one emptied by setting its whole row' );
 	}
 );
 
@@ -1065,6 +1127,12 @@ test(
 		$same = apply_ok( blocks_field(), $blocks, array( array( 'op' => 'set', 'path' => 'blocks/0/title', 'value' => 'First' ) ) );
 		same( $before, istota_fields_token( $same['value'] ), 'a set to the same value leaves it' );
 		same( $before, istota_fields_token( blocks_value() ), 'apply does not touch its input' );
+		$e = raised(
+			function () {
+				istota_fields_token( array( 'n' => INF ) );
+			}
+		);
+		ok( $e && 'unsupported_field' === $e->reason, 'a value JSON cannot encode is refused, not hashed as null' );
 	}
 );
 
