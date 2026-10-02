@@ -479,6 +479,33 @@ class TestThePlugin:
         assert names.index("integer") < names.index("boolean")
         assert set(names) == {"string", "integer", "number", "boolean", "null", "array", "object"}
 
+    def test_field_values_are_read_with_every_flexible_row(self):
+        # Decision 13: SCF drops disabled flexible rows on any read outside
+        # wp-admin, and an edit written back from such a read deletes them. The
+        # field abilities read only through istota_connector_raw_value(), which
+        # installs the filter that keeps them.
+        text = PLUGIN.read_text()
+        fields_part = text[text.index("// istota/fields-get and istota/fields-edit."):]
+        reads = [m.start() for m in re.finditer(r"\bacf_get_value\(", fields_part)]
+        allowed = [fields_part.index("function istota_connector_flexible_rows("),
+                   fields_part.index("function istota_connector_raw_value(")]
+        for at in reads:
+            owner = fields_part.rfind("\nfunction ", 0, at) + 1
+            assert owner in allowed, fields_part[owner:owner + 80]
+        assert "add_filter( 'acf/pre_load_value', 'istota_connector_flexible_rows', 10, 3 );" in text
+        assert "remove_filter( 'acf/pre_load_value', 'istota_connector_flexible_rows', 10 );" in text
+
+    def test_the_edit_writes_slashed_through_the_field_it_read(self):
+        # update_metadata() unslashes; an unslashed write strips every backslash
+        # in the field, rows the edit never named included. update_field() by key
+        # cannot find a seamless clone's composite key.
+        text = PLUGIN.read_text()
+        edit = text[text.index("function istota_connector_fields_edit("):]
+        edit = edit[:edit.index("\n}\n")]
+        assert "acf_update_value( wp_slash( $stored ), $target['storage'], $write_field );" in edit
+        code = "\n".join(line for line in edit.splitlines() if not line.strip().startswith("//"))
+        assert "update_field(" not in code
+
     def test_the_main_file_loads_the_value_model(self):
         assert "require_once __DIR__ . '/includes/fields.php';" in PLUGIN.read_text()
 

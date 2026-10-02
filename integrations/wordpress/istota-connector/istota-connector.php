@@ -268,11 +268,20 @@ function istota_connector_fields_target( $input ) {
 		if ( is_wp_error( $page ) ) {
 			return $page;
 		}
+		$fields = array();
+		foreach ( istota_connector_rest_fields( $input['page'] ) as $name => $field ) {
+			if ( istota_fields_has_value( $field ) ) {
+				$fields[ $name ] = $field;
+			}
+		}
 		return array(
-			'storage' => $page['post_id'],
+			// The id SCF's own options screen reads and writes: a multilingual
+			// plugin moves it to a per-language one, and a read and a write that
+			// disagreed would replace one translation with another.
+			'storage' => acf_get_valid_post_id( $page['post_id'] ),
 			'post'    => null,
 			'page'    => $input['page'],
-			'fields'  => istota_connector_rest_fields( $input['page'] ),
+			'fields'  => $fields,
 		);
 	}
 	$post_id = absint( $input['post_id'] );
@@ -313,6 +322,14 @@ function istota_connector_not_in_rest( $name ) {
 	);
 }
 
+/** A field's stored meta, through the API this ACF has: by field since 6.5, else by name. */
+function istota_connector_meta( $post_id, array $field ) {
+	if ( function_exists( 'acf_get_metadata_by_field' ) ) {
+		return acf_get_metadata_by_field( $post_id, $field );
+	}
+	return acf_get_metadata( $post_id, $field['name'] );
+}
+
 /**
  * A flexible content field's raw value with every row, disabled ones included,
  * for acf/pre_load_value while istota_connector_raw_value() reads.
@@ -328,11 +345,11 @@ function istota_connector_flexible_rows( $pre, $post_id, $field ) {
 	if ( null !== $pre || ! is_array( $field ) || ! isset( $field['type'] ) || 'flexible_content' !== $field['type'] || empty( $field['name'] ) ) {
 		return $pre;
 	}
-	$value = acf_get_metadata_by_field( $post_id, $field );
+	$value = istota_connector_meta( $post_id, $field );
 	if ( empty( $value ) || empty( $field['layouts'] ) ) {
 		return array();
 	}
-	$meta     = acf_get_metadata_by_field( $post_id, array( 'name' => '_' . $field['name'] . '_layout_meta' ) );
+	$meta     = istota_connector_meta( $post_id, array( 'name' => '_' . $field['name'] . '_layout_meta' ) );
 	$disabled = array();
 	$renamed  = array();
 	if ( is_array( $meta ) ) {
@@ -631,7 +648,14 @@ function istota_connector_after_write( array $target ) {
 		);
 		clean_post_cache( $target['post']->ID );
 	}
+	// ACF's own handler on this hook saves $_POST['acf'], unfiltered. This
+	// request carries none, and no executor's form data may ride along.
+	$posted = array_key_exists( 'acf', $_POST ) ? $_POST['acf'] : null; // phpcs:ignore WordPress.Security.NonceVerification.Missing
+	unset( $_POST['acf'] );
 	do_action( 'acf/save_post', $target['storage'] );
+	if ( null !== $posted ) {
+		$_POST['acf'] = $posted;
+	}
 }
 
 function istota_connector_fields_edit( $input ) {
@@ -735,7 +759,16 @@ function istota_connector_fields_edit( $input ) {
 	} catch ( Istota_Fields_Error $e ) {
 		return istota_connector_fields_error( $e );
 	}
-	update_field( $field['key'], $stored, $target['storage'] );
+	// acf_update_value() with the field as read, not update_field() by key: a
+	// seamless clone's composite key is one update_field() cannot look up, and
+	// it would write a stray meta row instead. Slashed, because update_metadata()
+	// and SCF's option writer unslash, and ACF's own form path hands them $_POST,
+	// which is slashed already; unslashed, every backslash in the field is lost.
+	// No pagination: a paginated repeater's update_value merges rows by key once
+	// acf/save_post has fired in this process, and a whole value is not a page.
+	$write_field               = $field;
+	$write_field['pagination'] = 0;
+	acf_update_value( wp_slash( $stored ), $target['storage'], $write_field );
 	istota_connector_after_write( $target );
 
 	$after = istota_connector_normalized( $target['storage'], $field );
@@ -746,18 +779,17 @@ function istota_connector_fields_edit( $input ) {
 	if ( is_wp_error( $new_token ) ) {
 		return $new_token;
 	}
-	$written_paths = array();
-	foreach ( $result['written'] as $entry ) {
-		$written_paths[ $entry['op'] ] = $entry['path'];
-	}
 	$changed  = array();
 	$previous = array();
 	foreach ( $ops as $i => $op ) {
-		$path = isset( $written_paths[ $i ] ) ? $written_paths[ $i ] : $op['path'];
+		// Where the op's node ended up, after later ops shifted rows above it.
+		$path = $result['paths'][ $i ];
 		$now  = null;
-		if ( 'remove' !== $op['op'] ) {
+		if ( null !== $path ) {
 			$node = istota_fields_resolve( $field, $after, istota_fields_parse_path( $path ) );
 			$now  = $node['found'] ? $node['value'] : null;
+		} else {
+			$path = $op['path'];
 		}
 		$changed[]  = array(
 			'op'    => $op['op'],

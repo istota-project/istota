@@ -1070,7 +1070,7 @@ test(
 				array( 'op' => 'insert', 'path' => 'blocks/0', 'value' => array( 'acf_fc_layout' => 'text' ) ),
 			)
 		);
-		same( array( 'blocks/0/items/3/label', 'blocks/0/body' ), $result['missing_required'], 'missing_required names the paths' );
+		same( array( 'blocks/1/items/3/label', 'blocks/0/body' ), $result['missing_required'], 'missing_required names the paths in the new value, after the later insert shifted the list row' );
 	}
 );
 
@@ -1243,6 +1243,66 @@ test(
 		same( array(), istota_fields_leaves( items_field(), 'not a list', 'items' ), 'a malformed list has no leaves' );
 		$leaf = istota_fields_leaves( f( 'image', 'image' ), null, 'blocks/1/image' );
 		same( array( array( 'path' => 'blocks/1/image', 'field' => f( 'image', 'image' ), 'value' => null ) ), $leaf, 'a leaf field written whole is its own leaf' );
+	}
+);
+
+test(
+	'each op reports where its node is in the new value',
+	function () {
+		$result = apply_ok(
+			blocks_field(),
+			blocks_value(),
+			array(
+				array( 'op' => 'set', 'path' => 'blocks/2/title', 'value' => 'Second edited' ),
+				array( 'op' => 'insert', 'path' => 'blocks/0/items/-', 'value' => array( 'label' => 'd' ) ),
+				array( 'op' => 'set', 'path' => 'blocks/0/items/1/label', 'value' => 'B' ),
+				array( 'op' => 'insert', 'path' => 'blocks/0', 'value' => array( 'acf_fc_layout' => 'text', 'body' => 'x' ) ),
+				array( 'op' => 'move', 'from' => 'blocks/1/items/3', 'path' => 'blocks/1/items/0' ),
+				array( 'op' => 'remove', 'path' => 'blocks/2' ),
+			)
+		);
+		same(
+			array( 'blocks/2/title', 'blocks/1/items/0', 'blocks/1/items/2/label', 'blocks/0', 'blocks/1/items/0', null ),
+			$result['paths'],
+			'paths follow rows shifted by later inserts and moves; a remove has none'
+		);
+		$after = $result['value'];
+		same( 'Second edited', $after[2]['title'], 'the first op\'s final path holds its value' );
+		same( 'B', $after[1]['items'][2]['label'], 'the third op\'s final path holds its value' );
+		$gone = apply_ok(
+			blocks_field(),
+			blocks_value(),
+			array(
+				array( 'op' => 'set', 'path' => 'blocks/2/title', 'value' => 'x' ),
+				array( 'op' => 'remove', 'path' => 'blocks/2' ),
+			)
+		);
+		same( array( null, null ), $gone['paths'], 'a node a later op removed has no path' );
+	}
+);
+
+test(
+	'row ops refuse a list holding a row of an undefined layout',
+	function () {
+		$raw   = raw_blocks();
+		$raw[] = array( 'acf_fc_layout' => 'retired', 'field_old' => 'kept' );
+		$value = istota_fields_normalize( blocks_field(), $raw );
+		foreach ( array(
+			array( 'op' => 'insert', 'path' => 'blocks/0', 'value' => array( 'acf_fc_layout' => 'text', 'body' => 'x' ) ),
+			array( 'op' => 'remove', 'path' => 'blocks/1' ),
+			array( 'op' => 'move', 'from' => 'blocks/0', 'path' => 'blocks/2' ),
+		) as $op ) {
+			$e = raised(
+				function () use ( $value, $op ) {
+					istota_fields_apply( blocks_field(), $value, array( $op ) );
+				}
+			);
+			ok( $e && 'validation_error' === $e->reason, $op['op'] . ' refused beside an undefined layout' );
+		}
+		$set = apply_ok( blocks_field(), $value, array( array( 'op' => 'set', 'path' => 'blocks/0/title', 'value' => 'ok' ) ) );
+		same( 'ok', $set['value'][0]['title'], 'a set, which shifts nothing, still applies' );
+		$inner = apply_ok( blocks_field(), blocks_value(), array( array( 'op' => 'insert', 'path' => 'blocks/0/items/0', 'value' => array( 'label' => 'n' ) ) ) );
+		same( 'n', $inner['value'][0]['items'][0]['label'], 'a list with only known layouts is untouched by the rule' );
 	}
 );
 
