@@ -280,6 +280,31 @@ def undelivered_key(task_id: int | str) -> str:
     return f"undelivered:{_slug(task_id, limit=24, fallback='0')}"
 
 
+def room_migration_key() -> str:
+    return "room-migration:partial"
+
+
+def admin_readers(config: "Config") -> list[str]:
+    """Who an operator alert with no user behind it goes to.
+
+    `load_admin_users()` returning an empty set is `Config.is_admin`'s "every
+    user is an admin", the single-user install's ordinary state, so it fans
+    out rather than reaching nobody. An admins file naming nobody in
+    `config.users` (a stale entry, a renamed account) falls back the same way
+    rather than writing rows for users with no configuration.
+    """
+    from ..config import load_admin_users  # noqa: PLC0415
+
+    try:
+        admins = load_admin_users()
+    except Exception:
+        logger.warning("task_alert.admins_unreadable", exc_info=True)
+        admins = set()
+    if admins:
+        return sorted(admins & set(config.users)) or sorted(config.users)
+    return sorted(config.users)
+
+
 # --- the write path ------------------------------------------------------
 
 
