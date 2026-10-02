@@ -101,10 +101,10 @@ Write ACF values in the shape `get` returns and `describe --type` documents. `--
 `fields get` and `fields edit` change one row, one sub-field or one list position of an ACF field on a post (any type) or an options page, and send only that. They need the istota-connector plugin, version 0.2.0 or later.
 
 ```bash
-istota-skill wordpress fields get --id 4580                       # the fields, each with a token
-istota-skill wordpress fields get --id 4580 --path blocks         # the value there and its definition
-istota-skill wordpress fields get --id 4580 --path blocks/0/items --output items.json
-istota-skill wordpress fields edit --id 4580 --token TOKEN \
+istota-skill wordpress fields get --id 42                       # the fields, each with a token
+istota-skill wordpress fields get --id 42 --path blocks         # the value there and its definition
+istota-skill wordpress fields get --id 42 --path blocks/0/items --output items.json
+istota-skill wordpress fields edit --id 42 --token TOKEN \
     [--set PATH=JSON] [--insert PATH=JSON] [--remove PATH] [--move FROM=TO] \
     [--set-file PATH=FILE] [--insert-file PATH=FILE] [--ops-file ops.json] [--confirmed]
 ```
