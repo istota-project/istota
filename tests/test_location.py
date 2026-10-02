@@ -5,7 +5,6 @@ import json
 import sys
 from types import SimpleNamespace
 from datetime import datetime, timedelta
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -48,6 +47,107 @@ def _init_loc_db(tmp_path, name: str = "location.db"):
     return db_path
 
 
+def _add_place(db_path, name, lat=34.0, lon=-118.0, **kw):
+    with location_db.connect(db_path) as conn:
+        pid = location_db.add_place(conn, name, lat, lon, **kw)
+        conn.commit()
+    return pid
+
+
+def _seed_cluster(conn, lat, lon, count=15):
+    for i in range(count):
+        ts = f"2026-01-10T09:{i:02d}:00Z"
+        # Tiny jitter so they share a rounded grid cell
+        location_db.insert_ping(
+            conn, ts, lat + (i % 3) * 0.00002, lon,
+            accuracy=5.0, activity_type="stationary",
+        )
+
+
+def _home_and_gym(conn):
+    pid_home = location_db.add_place(conn, "home", 34.0, -118.0)
+    pid_gym = location_db.add_place(conn, "gym", 34.1, -118.1)
+    home = location_db.get_place_by_name(conn, "home")
+    gym = location_db.get_place_by_name(conn, "gym")
+    return (pid_home, home), (pid_gym, gym)
+
+
+def _location_config(monkeypatch):
+    from istota import webhook_receiver as wr
+    cfg = MagicMock()
+    cfg.location.accuracy_threshold_m = 100.0
+    cfg.location.visit_exit_minutes = 5.0
+    monkeypatch.setattr(wr, "_config", cfg)
+
+
+def _skill():
+    from istota.skills import location
+    return location
+
+
+def _capture(fn, args, *, exit_code=None):
+    """Call a location CLI command and return its parsed JSON stdout.
+
+    With ``exit_code`` the command must exit with that status.
+    """
+    captured = io.StringIO()
+    with patch.object(sys, "stdout", captured):
+        if exit_code is None:
+            fn(args)
+        else:
+            with pytest.raises(SystemExit) as exc:
+                fn(args)
+            assert exc.value.code == exit_code
+    return json.loads(captured.getvalue())
+
+
+def _run_cmd(fn, **args):
+    """Call a location CLI command and return its parsed JSON stdout.
+
+    Args are a ``SimpleNamespace``, not a ``MagicMock``: a Mock answers every
+    attribute with a truthy Mock, so a command reading an option the test never
+    set silently takes a fallback branch instead of failing.
+    """
+    return _capture(fn, SimpleNamespace(**args))
+
+
+def _loc_env(db_path, framework_db=None):
+    return patch.dict("os.environ", {
+        "LOCATION_DB_PATH": str(db_path),
+        "ISTOTA_DB_PATH": str(framework_db or db_path),
+    })
+
+
+def _run_cli(fn, db_path, *, exit_code=None, **attrs):
+    """Run a command against ``db_path`` with ``MagicMock`` args carrying ``attrs``."""
+    args = MagicMock()
+    for key, value in attrs.items():
+        setattr(args, key, value)
+    with _loc_env(db_path):
+        return _capture(fn, args, exit_code=exit_code)
+
+
+def _patch_nominatim(method, *, returns=None, side_effect=None):
+    geolocator = MagicMock()
+    getattr(geolocator, method).return_value = returns
+    getattr(geolocator, method).side_effect = side_effect
+    return patch("geopy.geocoders.Nominatim", return_value=geolocator)
+
+
+def _nominatim_hit(address, **fields):
+    result = MagicMock()
+    result.address = address
+    result.raw = {"address": fields}
+    return result
+
+
+def _geo_row(display_name, **fields):
+    row = {"display_name": display_name, "neighborhood": None, "suburb": None,
+           "road": None, "city": None}
+    row.update(fields)
+    return row
+
+
 # ===========================================================================
 # DB function tests
 # ===========================================================================
@@ -61,32 +161,27 @@ def _init_loc_db(tmp_path, name: str = "location.db"):
 
 @_needs_fastapi
 class TestPlaceNotesAPI:
-    def test_create_persists_notes(self, tmp_path):
+    @pytest.mark.parametrize("fields, stored", [
+        ({"radius_meters": 100, "category": "work", "notes": "side entrance, 4th floor"},
+         "side entrance, 4th floor"),
+        ({"notes": "   "}, None),
+    ], ids=["persists_notes", "empty_notes_stored_as_null"])
+    def test_create(self, tmp_path, fields, stored):
         from istota.web_app import _location_create_place, _location_query_places
 
         db_path = _init_loc_db(tmp_path)
         _location_create_place(str(db_path), {
-            "name": "office", "lat": 34.0, "lon": -118.0,
-            "radius_meters": 100, "category": "work",
-            "notes": "side entrance, 4th floor",
+            "name": "office", "lat": 34.0, "lon": -118.0, **fields,
         })
 
         result = _location_query_places(str(db_path))
-        assert result["places"][0]["notes"] == "side entrance, 4th floor"
+        assert result["places"][0]["notes"] == stored
 
-    def test_create_empty_notes_stored_as_null(self, tmp_path):
-        from istota.web_app import _location_create_place, _location_query_places
-
-        db_path = _init_loc_db(tmp_path)
-        _location_create_place(str(db_path), {
-            "name": "office", "lat": 34.0, "lon": -118.0,
-            "notes": "   ",
-        })
-
-        result = _location_query_places(str(db_path))
-        assert result["places"][0]["notes"] is None
-
-    def test_update_changes_notes(self, tmp_path):
+    @pytest.mark.parametrize("notes, stored", [
+        ("new", "new"),
+        ("", None),
+    ], ids=["changes_notes", "empty_notes_clears_field"])
+    def test_update(self, tmp_path, notes, stored):
         from istota.web_app import _location_create_place, _location_update_place
 
         db_path = _init_loc_db(tmp_path)
@@ -94,59 +189,32 @@ class TestPlaceNotesAPI:
             "name": "office", "lat": 34.0, "lon": -118.0, "notes": "old",
         })
 
-        result = _location_update_place(str(db_path), created["id"], {
-            "notes": "new"
-        })
-        assert result["notes"] == "new"
-
-    def test_update_empty_notes_clears_field(self, tmp_path):
-        from istota.web_app import _location_create_place, _location_update_place
-
-        db_path = _init_loc_db(tmp_path)
-        created = _location_create_place(str(db_path), {
-            "name": "office", "lat": 34.0, "lon": -118.0, "notes": "to be cleared",
-        })
-
-        result = _location_update_place(str(db_path), created["id"], {
-            "notes": ""
-        })
-        assert result["notes"] is None
+        result = _location_update_place(str(db_path), created["id"], {"notes": notes})
+        assert result["notes"] == stored
 
 
 @_needs_fastapi
 class TestDiscoverPlacesFiltersDismissed:
-    def _seed_cluster(self, conn, lat, lon, count=15):
-        for i in range(count):
-            ts = f"2026-01-10T09:{i:02d}:00Z"
-            # Tiny jitter so they share a rounded grid cell
-            location_db.insert_ping(
-                conn, ts, lat + (i % 3) * 0.00002, lon,
-                accuracy=5.0, activity_type="stationary",
-            )
-
-    def test_unknown_cluster_appears(self, tmp_path):
+    @pytest.mark.parametrize("dismissed, expected", [
+        (None, 1),
+        ((34.0, -118.0), 0),
+        ((40.0, -73.0), 1),  # a different city
+    ], ids=["unknown_cluster_appears", "dismissed_cluster_is_filtered",
+            "distant_dismissal_does_not_filter"])
+    def test_dismissal(self, tmp_path, dismissed, expected):
         from istota.web_app import _location_discover_places
 
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            self._seed_cluster(conn, 34.0, -118.0)
+            _seed_cluster(conn, 34.0, -118.0)
+            if dismissed:
+                location_db.dismiss_cluster(conn, *dismissed, 200)
             conn.commit()
 
         result = _location_discover_places(str(db_path), min_pings=10)
-        assert len(result["clusters"]) == 1
-        assert "radius_meters" in result["clusters"][0]
-
-    def test_dismissed_cluster_is_filtered(self, tmp_path):
-        from istota.web_app import _location_discover_places
-
-        db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            self._seed_cluster(conn, 34.0, -118.0)
-            location_db.dismiss_cluster(conn, 34.0, -118.0, 200)
-            conn.commit()
-
-        result = _location_discover_places(str(db_path), min_pings=10)
-        assert result["clusters"] == []
+        assert len(result["clusters"]) == expected
+        if expected:
+            assert "radius_meters" in result["clusters"][0]
 
     def test_dismissed_zone_only_affects_owner(self, tmp_path):
         from istota.web_app import _location_discover_places
@@ -156,28 +224,15 @@ class TestDiscoverPlacesFiltersDismissed:
         alice_db = _init_loc_db(tmp_path, name="alice.db")
         bob_db = _init_loc_db(tmp_path, name="bob.db")
         with location_db.connect(alice_db) as conn:
-            self._seed_cluster(conn, 34.0, -118.0)
+            _seed_cluster(conn, 34.0, -118.0)
             location_db.dismiss_cluster(conn, 34.0, -118.0, 200)
             conn.commit()
         with location_db.connect(bob_db) as conn:
-            self._seed_cluster(conn, 34.0, -118.0)
+            _seed_cluster(conn, 34.0, -118.0)
             conn.commit()
 
         assert _location_discover_places(str(alice_db), min_pings=10)["clusters"] == []
         assert len(_location_discover_places(str(bob_db), min_pings=10)["clusters"]) == 1
-
-    def test_distant_dismissal_does_not_filter(self, tmp_path):
-        from istota.web_app import _location_discover_places
-
-        db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            self._seed_cluster(conn, 34.0, -118.0)
-            # Dismissed zone in a different city
-            location_db.dismiss_cluster(conn, 40.0, -73.0, 200)
-            conn.commit()
-
-        result = _location_discover_places(str(db_path), min_pings=10)
-        assert len(result["clusters"]) == 1
 
 
 class TestVisitDB:
@@ -215,79 +270,42 @@ class TestVisitDB:
             assert visit.ping_count == 3  # 1 initial + 2 increments
 
 
+def _add_pings_at(conn, place_id, times, day="2026-01-10"):
+    """Insert stationary pings at a place, one per ``HH:MM`` in ``times``."""
+    for hhmm in times:
+        location_db.insert_ping(
+            conn, f"{day}T{hhmm}:00Z", 34.0, -118.0,
+            accuracy=5.0, activity_type="stationary",
+            place_id=place_id,
+        )
+
+
 @_needs_fastapi
 class TestPlaceStats:
-    def _add_pings(self, conn, place_id, timestamps):
-        """Insert pings at a place for given ISO timestamps."""
-        for ts in timestamps:
-            location_db.insert_ping(
-                conn, ts, 34.0, -118.0,
-                accuracy=5.0, activity_type="stationary",
-                place_id=place_id,
-            )
-
-    def test_no_pings(self, tmp_path):
+    @pytest.mark.parametrize("times, expected", [
+        ([], {"total_visits": 0, "first_visit": None}),
+        (["09:00", "09:05", "09:30", "10:00"],
+         {"total_visits": 1, "avg_duration_min": 60, "total_duration_min": 60}),
+        # 2-hour gap with no pings elsewhere does not split the visit: 09:00 to 11:20
+        (["09:00", "09:05", "09:10", "11:10", "11:15", "11:20"],
+         {"total_visits": 1, "total_duration_min": 140}),
+        # Fewer than 3 pings is a walk-by and does not count
+        (["09:00", "09:05"], {"total_visits": 0}),
+    ], ids=["no_pings", "single_visit_from_pings", "gap_without_elsewhere_is_same_visit",
+            "walkby_filtered"])
+    def test_stats(self, tmp_path, times, expected):
         from istota.web_app import _location_place_stats
 
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
             pid = location_db.add_place(
-                conn, "home", 34.0, -118.0,
-                radius_meters=150, category="home",
+                conn, "cafe", 34.0, -118.0, radius_meters=100, category="food",
             )
+            _add_pings_at(conn, pid, times)
             conn.commit()
 
         result = _location_place_stats(str(db_path), pid)
-        assert result is not None
-        assert result["total_visits"] == 0
-        assert result["first_visit"] is None
-
-    def test_single_visit_from_pings(self, tmp_path):
-        from istota.web_app import _location_place_stats
-
-        db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(
-                conn, "cafe", 34.0, -118.0,
-                radius_meters=100, category="food",
-            )
-            self._add_pings(conn, pid, [
-                "2026-01-10T09:00:00Z",
-                "2026-01-10T09:05:00Z",
-                "2026-01-10T09:30:00Z",
-                "2026-01-10T10:00:00Z",
-            ])
-            conn.commit()
-
-        result = _location_place_stats(str(db_path), pid)
-        assert result["total_visits"] == 1
-        assert result["avg_duration_min"] == 60
-        assert result["total_duration_min"] == 60
-
-    def test_gap_without_elsewhere_is_same_visit(self, tmp_path):
-        """A long gap with no pings at other places should NOT split the visit."""
-        from istota.web_app import _location_place_stats
-
-        db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(
-                conn, "cafe", 34.0, -118.0,
-                radius_meters=100, category="food",
-            )
-            self._add_pings(conn, pid, [
-                "2026-01-10T09:00:00Z",
-                "2026-01-10T09:05:00Z",
-                "2026-01-10T09:10:00Z",
-                # 2-hour gap — no pings elsewhere
-                "2026-01-10T11:10:00Z",
-                "2026-01-10T11:15:00Z",
-                "2026-01-10T11:20:00Z",
-            ])
-            conn.commit()
-
-        result = _location_place_stats(str(db_path), pid)
-        assert result["total_visits"] == 1
-        assert result["total_duration_min"] == 140  # 09:00 to 11:20
+        assert {k: result[k] for k in expected} == expected
 
     def test_two_visits_split_by_elsewhere(self, tmp_path):
         """Pings at another place during a gap should split into two visits."""
@@ -296,55 +314,20 @@ class TestPlaceStats:
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
             pid_cafe = location_db.add_place(
-                conn, "cafe", 34.0, -118.0,
-                radius_meters=100, category="food",
+                conn, "cafe", 34.0, -118.0, radius_meters=100, category="food",
             )
             pid_gym = location_db.add_place(
-                conn, "gym", 34.01, -118.01,
-                radius_meters=100, category="gym",
+                conn, "gym", 34.01, -118.01, radius_meters=100, category="gym",
             )
-            self._add_pings(conn, pid_cafe, [
-                "2026-01-10T09:00:00Z",
-                "2026-01-10T09:05:00Z",
-                "2026-01-10T09:10:00Z",
-                "2026-01-10T09:15:00Z",
-                "2026-01-10T09:20:00Z",
-            ])
-            self._add_pings(conn, pid_gym, [
-                "2026-01-10T10:00:00Z",
-                "2026-01-10T10:05:00Z",
-            ])
-            self._add_pings(conn, pid_cafe, [
-                "2026-01-10T11:20:00Z",
-                "2026-01-10T11:25:00Z",
-                "2026-01-10T11:30:00Z",
-                "2026-01-10T11:35:00Z",
-            ])
+            _add_pings_at(conn, pid_cafe, ["09:00", "09:05", "09:10", "09:15", "09:20"])
+            _add_pings_at(conn, pid_gym, ["10:00", "10:05"])
+            _add_pings_at(conn, pid_cafe, ["11:20", "11:25", "11:30", "11:35"])
             conn.commit()
 
         result = _location_place_stats(str(db_path), pid_cafe)
         assert result["total_visits"] == 2
         assert result["first_visit"] == "2026-01-10T09:00:00Z"
         assert result["last_visit"] == "2026-01-10T11:20:00Z"
-
-    def test_walkby_filtered(self, tmp_path):
-        """A visit with fewer than 3 pings (walk-by) should not count."""
-        from istota.web_app import _location_place_stats
-
-        db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(
-                conn, "cafe", 34.0, -118.0,
-                radius_meters=100, category="food",
-            )
-            self._add_pings(conn, pid, [
-                "2026-01-10T09:00:00Z",
-                "2026-01-10T09:05:00Z",
-            ])
-            conn.commit()
-
-        result = _location_place_stats(str(db_path), pid)
-        assert result["total_visits"] == 0
 
     def test_wrong_user_returns_none(self, tmp_path):
         """Per-user split: a place that doesn't exist in *this* db
@@ -354,22 +337,15 @@ class TestPlaceStats:
 
         alice_db = _init_loc_db(tmp_path, name="alice.db")
         bob_db = _init_loc_db(tmp_path, name="bob.db")
-        with location_db.connect(alice_db) as conn:
-            pid = location_db.add_place(
-                conn, "cafe", 34.0, -118.0,
-                radius_meters=100, category="food",
-            )
-            conn.commit()
+        pid = _add_place(alice_db, "cafe", radius_meters=100, category="food")
 
-        result = _location_place_stats(str(bob_db), pid)
-        assert result is None
+        assert _location_place_stats(str(bob_db), pid) is None
 
     def test_nonexistent_place_returns_none(self, tmp_path):
         from istota.web_app import _location_place_stats
 
         db_path = _init_loc_db(tmp_path)
-        result = _location_place_stats(str(db_path), 9999)
-        assert result is None
+        assert _location_place_stats(str(db_path), 9999) is None
 
 
 @_needs_fastapi
@@ -381,25 +357,15 @@ class TestPlaceUpdateReassignment:
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
             pid = location_db.add_place(
-                conn, "cafe", 34.0, -118.0,
-                radius_meters=50, category="food",
+                conn, "cafe", 34.0, -118.0, radius_meters=50, category="food",
             )
-            for ts in [
-                "2026-01-10T09:00:00Z",
-                "2026-01-10T09:05:00Z",
-                "2026-01-10T09:10:00Z",
-                "2026-01-10T09:15:00Z",
-            ]:
+            for ts in ["09:00", "09:05", "09:10", "09:15"]:
                 location_db.insert_ping(
-                    conn, ts, 34.0001, -118.0,
+                    conn, f"2026-01-10T{ts}:00Z", 34.0001, -118.0,
                     accuracy=5.0, place_id=pid,
                 )
-            for ts in [
-                "2026-02-10T10:00:00Z",
-                "2026-02-10T10:05:00Z",
-                "2026-02-10T10:10:00Z",
-            ]:
-                location_db.insert_ping(conn, ts, 34.001, -118.0, accuracy=5.0)
+            for ts in ["10:00", "10:05", "10:10"]:
+                location_db.insert_ping(conn, f"2026-02-10T{ts}:00Z", 34.001, -118.0, accuracy=5.0)
             conn.commit()
 
         stats = _location_place_stats(str(db_path), pid)
@@ -418,15 +384,10 @@ class TestPlaceUpdateReassignment:
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
             pid = location_db.add_place(
-                conn, "cafe", 34.0, -118.0,
-                radius_meters=25, category="food",
+                conn, "cafe", 34.0, -118.0, radius_meters=25, category="food",
             )
-            for ts in [
-                "2026-01-10T09:00:00Z",
-                "2026-01-10T09:05:00Z",
-                "2026-01-10T09:10:00Z",
-            ]:
-                location_db.insert_ping(conn, ts, 34.00035, -118.0, accuracy=5.0)
+            for ts in ["09:00", "09:05", "09:10"]:
+                location_db.insert_ping(conn, f"2026-01-10T{ts}:00Z", 34.00035, -118.0, accuracy=5.0)
             conn.commit()
 
         stats = _location_place_stats(str(db_path), pid)
@@ -470,8 +431,7 @@ class TestResolvePlace:
     def test_outside_radius(self):
         from istota.location.models import Place
         places = [Place(1, "home", 34.0, -118.0, 50, "home", "", None)]
-        result = resolve_place(35.0, -119.0, places)
-        assert result is None
+        assert resolve_place(35.0, -119.0, places) is None
 
     def test_nearest_wins(self):
         from istota.location.models import Place
@@ -479,8 +439,7 @@ class TestResolvePlace:
             Place(1, "far", 34.01, -118.0, 5000, "other", "", None),
             Place(2, "near", 34.0001, -118.0001, 5000, "other", "", None),
         ]
-        result = resolve_place(34.0, -118.0, places)
-        assert result.name == "near"
+        assert resolve_place(34.0, -118.0, places).name == "near"
 
     def test_empty_places(self):
         assert resolve_place(34.0, -118.0, []) is None
@@ -512,9 +471,7 @@ class TestStateMachine:
             state = location_db.get_location_state(conn)
             assert state.current_place_id == pid
             assert state.current_visit_id is not None
-
-            visit = location_db.get_open_visit(conn)
-            assert visit.place_name == "home"
+            assert location_db.get_open_visit(conn).place_name == "home"
 
     def test_first_ping_no_place(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
@@ -531,9 +488,8 @@ class TestStateMachine:
             pid = location_db.add_place(conn, "home", 34.0, -118.0)
             place = location_db.get_place_by_name(conn, "home")
 
-            self._process(conn, pid, place, "2026-02-20T10:00:00Z")
-            self._process(conn, pid, place, "2026-02-20T10:05:00Z")
-            self._process(conn, pid, place, "2026-02-20T10:10:00Z")
+            for minute in ("00", "05", "10"):
+                self._process(conn, pid, place, f"2026-02-20T10:{minute}:00Z")
 
             visits = location_db.get_visits(conn)
             assert len(visits) == 1  # still one visit
@@ -542,14 +498,10 @@ class TestStateMachine:
     def test_hysteresis_prevents_single_ping_transition(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            pid_home = location_db.add_place(conn, "home", 34.0, -118.0)
-            pid_gym = location_db.add_place(conn, "gym", 34.1, -118.1)
-            home = location_db.get_place_by_name(conn, "home")
-            gym = location_db.get_place_by_name(conn, "gym")
+            (pid_home, home), (pid_gym, gym) = _home_and_gym(conn)
 
             self._process(conn, pid_home, home, "2026-02-20T10:00:00Z")
             self._process(conn, pid_home, home, "2026-02-20T10:05:00Z")
-
             self._process(conn, pid_gym, gym, "2026-02-20T10:10:00Z")
 
             state = location_db.get_location_state(conn)
@@ -559,14 +511,10 @@ class TestStateMachine:
     def test_hysteresis_allows_transition_after_threshold(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            pid_home = location_db.add_place(conn, "home", 34.0, -118.0)
-            pid_gym = location_db.add_place(conn, "gym", 34.1, -118.1)
-            home = location_db.get_place_by_name(conn, "home")
-            gym = location_db.get_place_by_name(conn, "gym")
+            (pid_home, home), (pid_gym, gym) = _home_and_gym(conn)
 
             self._process(conn, pid_home, home, "2026-02-20T10:00:00Z")
             self._process(conn, pid_home, home, "2026-02-20T10:05:00Z")
-
             self._process(conn, pid_gym, gym, "2026-02-20T10:10:00Z")
             self._process(conn, pid_gym, gym, "2026-02-20T10:15:00Z")
 
@@ -588,29 +536,10 @@ class TestStateMachine:
 
             self._process(conn, pid_home, home, "2026-02-20T10:00:00Z")
             self._process(conn, pid_home, home, "2026-02-20T10:05:00Z")
-
             self._process(conn, None, None, "2026-02-20T10:10:00Z")
             self._process(conn, None, None, "2026-02-20T10:15:00Z")
 
-            state = location_db.get_location_state(conn)
-            assert state.current_place_id is None
-
-    def test_transition_fires_without_errors(self, tmp_path):
-        db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            pid_home = location_db.add_place(conn, "home", 34.0, -118.0)
-            pid_gym = location_db.add_place(conn, "gym", 34.1, -118.1)
-            home = location_db.get_place_by_name(conn, "home")
-            gym = location_db.get_place_by_name(conn, "gym")
-
-            self._process(conn, pid_home, home, "2026-02-20T10:00:00Z")
-            self._process(conn, pid_home, home, "2026-02-20T10:05:00Z")
-
-            self._process(conn, pid_gym, gym, "2026-02-20T10:10:00Z")
-            self._process(conn, pid_gym, gym, "2026-02-20T10:15:00Z")
-
-            state = location_db.get_location_state(conn)
-            assert state.current_place_id == pid_gym
+            assert location_db.get_location_state(conn).current_place_id is None
 
 
 # ===========================================================================
@@ -622,101 +551,55 @@ class TestStateMachine:
 class TestOverlandPayloadParsing:
     """Test that the receiver correctly parses Overland GeoJSON payloads."""
 
-    def test_parse_feature_coordinates(self):
+    def _ingest(self, tmp_path, coordinates, **properties):
+        """Process one GeoJSON Feature; return (all pings, latest ping)."""
+        from istota.webhook_receiver import _process_feature
+
+        feature = {
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": coordinates},
+            "properties": properties,
+        }
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            _process_feature(conn, feature, [])
+            conn.commit()
+            return location_db.get_pings(conn), location_db.get_latest_ping(conn)
+
+    def test_parse_feature_coordinates(self, tmp_path):
         """Verify coordinate extraction from GeoJSON Feature."""
-        from istota.webhook_receiver import _process_feature
+        pings, _ = self._ingest(
+            tmp_path, [-122.030581, 37.331800],
+            timestamp="2026-02-20T10:30:00-0700", altitude=80, speed=0,
+            horizontal_accuracy=5, motion=["stationary"], battery_level=0.92,
+            wifi="home-wifi",
+        )
 
-        feature = {
-            "type": "Feature",
-            "geometry": {
-                "type": "Point",
-                "coordinates": [-122.030581, 37.331800],
-            },
-            "properties": {
-                "timestamp": "2026-02-20T10:30:00-0700",
-                "altitude": 80,
-                "speed": 0,
-                "horizontal_accuracy": 5,
-                "motion": ["stationary"],
-                "battery_level": 0.92,
-                "wifi": "home-wifi",
-            },
-        }
+        assert len(pings) == 1
+        p = pings[0]
+        # GeoJSON: coordinates = [lon, lat]
+        assert p.lon == -122.030581
+        assert p.lat == 37.331800
+        assert p.accuracy == 5
+        assert p.activity_type == "stationary"
+        assert p.battery == 0.92
+        assert p.wifi == "home-wifi"
 
-        db_path = _init_loc_db(Path(pytest.importorskip("tempfile").mkdtemp()))
-        with location_db.connect(db_path) as conn:
-            _process_feature(conn, feature, [])
-            conn.commit()
+    def test_parse_negative_speed_becomes_none(self, tmp_path):
+        _, p = self._ingest(tmp_path, [0, 0], timestamp="2026-01-01T00:00:00Z",
+                            speed=-1, course=-1)
+        assert p.speed is None
+        assert p.course is None
 
-            pings = location_db.get_pings(conn)
-            assert len(pings) == 1
-            p = pings[0]
-            # GeoJSON: coordinates = [lon, lat]
-            assert p.lon == -122.030581
-            assert p.lat == 37.331800
-            assert p.accuracy == 5
-            assert p.activity_type == "stationary"
-            assert p.battery == 0.92
-            assert p.wifi == "home-wifi"
-
-    def test_parse_negative_speed_becomes_none(self):
-        from istota.webhook_receiver import _process_feature
-
-        feature = {
-            "type": "Feature",
-            "geometry": {"type": "Point", "coordinates": [0, 0]},
-            "properties": {
-                "timestamp": "2026-01-01T00:00:00Z",
-                "speed": -1,
-                "course": -1,
-            },
-        }
-
-        db_path = _init_loc_db(Path(pytest.importorskip("tempfile").mkdtemp()))
-        with location_db.connect(db_path) as conn:
-            _process_feature(conn, feature, [])
-            conn.commit()
-
-            p = location_db.get_latest_ping(conn)
-            assert p.speed is None
-            assert p.course is None
-
-    def test_feature_with_activity_string(self):
+    def test_feature_with_activity_string(self, tmp_path):
         """Overland can send activity as a string instead of motion array."""
-        from istota.webhook_receiver import _process_feature
+        _, p = self._ingest(tmp_path, [0, 0], timestamp="2026-01-01T00:00:00Z",
+                            activity="other_navigation")
+        assert p.activity_type == "other_navigation"
 
-        feature = {
-            "type": "Feature",
-            "geometry": {"type": "Point", "coordinates": [0, 0]},
-            "properties": {
-                "timestamp": "2026-01-01T00:00:00Z",
-                "activity": "other_navigation",
-            },
-        }
-
-        db_path = _init_loc_db(Path(pytest.importorskip("tempfile").mkdtemp()))
-        with location_db.connect(db_path) as conn:
-            _process_feature(conn, feature, [])
-            conn.commit()
-
-            p = location_db.get_latest_ping(conn)
-            assert p.activity_type == "other_navigation"
-
-    def test_empty_coordinates_skipped(self):
-        from istota.webhook_receiver import _process_feature
-
-        feature = {
-            "type": "Feature",
-            "geometry": {"type": "Point", "coordinates": []},
-            "properties": {"timestamp": "2026-01-01T00:00:00Z"},
-        }
-
-        db_path = _init_loc_db(Path(pytest.importorskip("tempfile").mkdtemp()))
-        with location_db.connect(db_path) as conn:
-            _process_feature(conn, feature, [])
-            conn.commit()
-
-            assert location_db.get_latest_ping(conn) is None
+    def test_empty_coordinates_skipped(self, tmp_path):
+        _, latest = self._ingest(tmp_path, [], timestamp="2026-01-01T00:00:00Z")
+        assert latest is None
 
 
 # ===========================================================================
@@ -724,315 +607,101 @@ class TestOverlandPayloadParsing:
 # ===========================================================================
 
 
+def _update_args(**overrides):
+    args = dict(name=None, id=None, rename=None, category=None, radius=None,
+                notes=None, lat=None, lon=None)
+    args.update(overrides)
+    return args
+
+
 class TestLocationCLI:
     def test_current_no_data(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_current
-            import io
-            from unittest.mock import MagicMock
-
-            args = MagicMock()
-            import sys
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                cmd_current(args)
-            finally:
-                sys.stdout = old_stdout
-
-            output = json.loads(captured.getvalue())
-            assert output["last_ping"] is None
-            assert output["current_visit"] is None
+        output = _run_cli(_skill().cmd_current, db_path)
+        assert output["last_ping"] is None
+        assert output["current_visit"] is None
 
     def test_places_lists_db(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            location_db.add_place(conn, "home", 34.0, -118.0, radius_meters=150, category="home")
-            conn.commit()
+        pid = _add_place(db_path, "home", radius_meters=150, category="home")
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_places
-            import io
-            import sys
-            from unittest.mock import MagicMock
-
-            args = MagicMock()
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                cmd_places(args)
-            finally:
-                sys.stdout = old_stdout
-
-            output = json.loads(captured.getvalue())
-            assert len(output) == 1
-            assert output[0]["name"] == "home"
-            assert output[0]["radius_meters"] == 150
-
-    def test_places_includes_id(self, tmp_path):
-        db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(conn, "home", 34.0, -118.0, radius_meters=150, category="home")
-            conn.commit()
-
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_places
-
-            args = MagicMock()
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                cmd_places(args)
-            finally:
-                sys.stdout = old_stdout
-
-            output = json.loads(captured.getvalue())
-            assert output[0]["id"] == pid
+        output = _run_cli(_skill().cmd_places, db_path)
+        assert len(output) == 1
+        assert output[0]["id"] == pid
+        assert output[0]["name"] == "home"
+        assert output[0]["radius_meters"] == 150
 
     def test_update_by_name(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
+        _add_place(db_path, "cafe", radius_meters=100, category="restaurant")
+
+        output = _run_cli(_skill().cmd_update, db_path,
+                          **_update_args(name="cafe", category="food"))
+        assert output["status"] == "ok"
+        assert output["place"]["category"] == "food"
+        assert output["place"]["name"] == "cafe"
+
         with location_db.connect(db_path) as conn:
-            location_db.add_place(conn, "cafe", 34.0, -118.0, radius_meters=100, category="restaurant")
-            conn.commit()
-
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_update
-
-            args = MagicMock()
-            args.name = "cafe"
-            args.id = None
-            args.category = "food"
-            args.rename = None
-            args.radius = None
-            args.notes = None
-            args.lat = None
-            args.lon = None
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                cmd_update(args)
-            finally:
-                sys.stdout = old_stdout
-
-            output = json.loads(captured.getvalue())
-            assert output["status"] == "ok"
-            assert output["place"]["category"] == "food"
-            assert output["place"]["name"] == "cafe"
-
-        # Verify DB
-        with location_db.connect(db_path) as conn:
-            place = location_db.get_place_by_name(conn, "cafe")
-            assert place.category == "food"
+            assert location_db.get_place_by_name(conn, "cafe").category == "food"
 
     def test_update_by_id(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(conn, "cafe", 34.0, -118.0, radius_meters=100, category="restaurant")
-            conn.commit()
+        pid = _add_place(db_path, "cafe", radius_meters=100, category="restaurant")
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_update
-
-            args = MagicMock()
-            args.name = None
-            args.id = pid
-            args.category = "food"
-            args.rename = None
-            args.radius = None
-            args.notes = None
-            args.lat = None
-            args.lon = None
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                cmd_update(args)
-            finally:
-                sys.stdout = old_stdout
-
-            output = json.loads(captured.getvalue())
-            assert output["status"] == "ok"
-            assert output["place"]["category"] == "food"
+        output = _run_cli(_skill().cmd_update, db_path, **_update_args(id=pid, category="food"))
+        assert output["status"] == "ok"
+        assert output["place"]["category"] == "food"
 
     def test_update_rename(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            location_db.add_place(conn, "old name", 34.0, -118.0, radius_meters=100, category="other")
-            conn.commit()
+        _add_place(db_path, "old name", radius_meters=100, category="other")
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_update
-
-            args = MagicMock()
-            args.name = "old name"
-            args.id = None
-            args.rename = "new name"
-            args.category = None
-            args.radius = None
-            args.notes = None
-            args.lat = None
-            args.lon = None
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                cmd_update(args)
-            finally:
-                sys.stdout = old_stdout
-
-            output = json.loads(captured.getvalue())
-            assert output["place"]["name"] == "new name"
+        output = _run_cli(_skill().cmd_update, db_path,
+                          **_update_args(name="old name", rename="new name"))
+        assert output["place"]["name"] == "new name"
 
         with location_db.connect(db_path) as conn:
             assert location_db.get_place_by_name(conn, "new name") is not None
             assert location_db.get_place_by_name(conn, "old name") is None
 
-    def test_update_not_found(self, tmp_path):
+    @pytest.mark.parametrize("seed, overrides", [
+        (False, {"name": "nonexistent", "category": "food"}),
+        (True, {"name": "cafe"}),
+    ], ids=["not_found", "no_changes"])
+    def test_update_fails(self, tmp_path, seed, overrides):
         db_path = _init_loc_db(tmp_path)
+        if seed:
+            _add_place(db_path, "cafe", radius_meters=100, category="food")
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_update
-
-            args = MagicMock()
-            args.name = "nonexistent"
-            args.id = None
-            args.category = "food"
-            args.rename = None
-            args.radius = None
-            args.notes = None
-            args.lat = None
-            args.lon = None
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                with pytest.raises(SystemExit):
-                    cmd_update(args)
-            finally:
-                sys.stdout = old_stdout
-
-            output = json.loads(captured.getvalue())
-            assert "error" in output
-
-    def test_update_no_changes(self, tmp_path):
-        db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            location_db.add_place(conn, "cafe", 34.0, -118.0, radius_meters=100, category="food")
-            conn.commit()
-
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_update
-
-            args = MagicMock()
-            args.name = "cafe"
-            args.id = None
-            args.category = None
-            args.rename = None
-            args.radius = None
-            args.notes = None
-            args.lat = None
-            args.lon = None
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                with pytest.raises(SystemExit):
-                    cmd_update(args)
-            finally:
-                sys.stdout = old_stdout
-
-            output = json.loads(captured.getvalue())
-            assert "error" in output
+        output = _run_cli(_skill().cmd_update, db_path, exit_code=1,
+                          **_update_args(**overrides))
+        assert "error" in output
 
     def test_delete_by_name(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            location_db.add_place(conn, "cafe", 34.0, -118.0, radius_meters=100, category="food")
-            conn.commit()
+        _add_place(db_path, "cafe", radius_meters=100, category="food")
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_delete
-
-            args = MagicMock()
-            args.name = "cafe"
-            args.id = None
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                cmd_delete(args)
-            finally:
-                sys.stdout = old_stdout
-
-            output = json.loads(captured.getvalue())
-            assert output["status"] == "ok"
-            assert output["deleted"] == "cafe"
+        output = _run_cli(_skill().cmd_delete, db_path, name="cafe", id=None)
+        assert output["status"] == "ok"
+        assert output["deleted"] == "cafe"
 
         with location_db.connect(db_path) as conn:
             assert location_db.get_place_by_name(conn, "cafe") is None
 
     def test_delete_by_id(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(conn, "cafe", 34.0, -118.0, radius_meters=100, category="food")
-            conn.commit()
+        pid = _add_place(db_path, "cafe", radius_meters=100, category="food")
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_delete
-
-            args = MagicMock()
-            args.name = None
-            args.id = pid
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                cmd_delete(args)
-            finally:
-                sys.stdout = old_stdout
-
-            output = json.loads(captured.getvalue())
-            assert output["status"] == "ok"
+        output = _run_cli(_skill().cmd_delete, db_path, name=None, id=pid)
+        assert output["status"] == "ok"
 
         with location_db.connect(db_path) as conn:
             assert location_db.get_places(conn) == []
 
     def test_delete_not_found(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
-
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_delete
-
-            args = MagicMock()
-            args.name = "nonexistent"
-            args.id = None
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                with pytest.raises(SystemExit):
-                    cmd_delete(args)
-            finally:
-                sys.stdout = old_stdout
-
-            output = json.loads(captured.getvalue())
-            assert "error" in output
+        output = _run_cli(_skill().cmd_delete, db_path, exit_code=1, name="nonexistent", id=None)
+        assert "error" in output
 
     def test_history_lists_pings(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
@@ -1042,80 +711,36 @@ class TestLocationCLI:
             )
             conn.commit()
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_history
-            import io
-            import sys
-            from unittest.mock import MagicMock
+        output = _run_cli(_skill().cmd_history, db_path, source=None, limit=10, date=None)
+        assert len(output) == 1
+        assert output[0]["lat"] == 34.0
 
-            args = MagicMock()
-            args.source = None
-            args.limit = 10
-            args.date = None
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                cmd_history(args)
-            finally:
-                sys.stdout = old_stdout
-
-            output = json.loads(captured.getvalue())
-            assert len(output) == 1
-            assert output[0]["lat"] == 34.0
+    def _history_for_mar16(self, db_path, limit):
+        return _run_cli(_skill().cmd_history, db_path, source=None, limit=limit,
+                        date="2026-03-16", tz="America/Los_Angeles")
 
     def test_history_date_uses_timezone_aware_boundaries(self, tmp_path):
         """history --date should convert local day boundaries to UTC."""
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
             # 2026-03-16 in Pacific = 2026-03-16T07:00:00Z to 2026-03-17T07:00:00Z (PDT)
-            # Ping at 2026-03-16T02:00:00Z = Mar 15 7pm Pacific — outside Mar 16 local
-            location_db.insert_ping(conn, "2026-03-16T02:00:00Z", 34.0, -118.0,
-                accuracy=5.0, activity_type="stationary",
-            )
-            # Ping at 2026-03-16T20:00:00Z = Mar 16 1pm Pacific — inside Mar 16 local
-            location_db.insert_ping(conn, "2026-03-16T20:00:00Z", 34.1, -118.1,
-                accuracy=5.0, activity_type="walking",
-            )
-            # Ping at 2026-03-17T03:00:00Z = Mar 16 8pm Pacific — inside Mar 16 local
-            location_db.insert_ping(conn, "2026-03-17T03:00:00Z", 34.2, -118.2,
-                accuracy=5.0, activity_type="walking",
-            )
-            # Ping at 2026-03-17T10:00:00Z = Mar 17 3am Pacific — outside Mar 16 local
-            location_db.insert_ping(conn, "2026-03-17T10:00:00Z", 34.3, -118.3,
-                accuracy=5.0, activity_type="stationary",
-            )
+            for ts, lat, lon, activity in [
+                ("2026-03-16T02:00:00Z", 34.0, -118.0, "stationary"),  # Mar 15 7pm Pacific — outside
+                ("2026-03-16T20:00:00Z", 34.1, -118.1, "walking"),     # Mar 16 1pm Pacific — inside
+                ("2026-03-17T03:00:00Z", 34.2, -118.2, "walking"),     # Mar 16 8pm Pacific — inside
+                ("2026-03-17T10:00:00Z", 34.3, -118.3, "stationary"),  # Mar 17 3am Pacific — outside
+            ]:
+                location_db.insert_ping(conn, ts, lat, lon, accuracy=5.0, activity_type=activity)
             conn.commit()
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_history
-
-            args = MagicMock()
-            args.source = None
-            args.limit = 0
-            args.date = "2026-03-16"
-            args.tz = "America/Los_Angeles"
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                cmd_history(args)
-            finally:
-                sys.stdout = old_stdout
-
-            output = json.loads(captured.getvalue())
-            # Should only include the two pings within Mar 16 Pacific
-            assert len(output) == 2
-            lats = {p["lat"] for p in output}
-            assert lats == {34.1, 34.2}
+        output = self._history_for_mar16(db_path, limit=0)
+        assert len(output) == 2
+        assert {p["lat"] for p in output} == {34.1, 34.2}
 
     def test_history_date_returns_all_pings_by_default(self, tmp_path):
         """history --date with no --limit should return all pings, not just 20."""
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            # Insert 30 pings spread across Mar 16 Pacific
             for i in range(30):
                 ts = f"2026-03-16T{15 + (i // 6):02d}:{(i % 6) * 10:02d}:00Z"
                 location_db.insert_ping(conn, ts, 34.0 + i * 0.001, -118.0,
@@ -1123,141 +748,73 @@ class TestLocationCLI:
                 )
             conn.commit()
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_history
-
-            args = MagicMock()
-            args.source = None
-            args.limit = 0
-            args.date = "2026-03-16"
-            args.tz = "America/Los_Angeles"
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                cmd_history(args)
-            finally:
-                sys.stdout = old_stdout
-
-            output = json.loads(captured.getvalue())
-            assert len(output) == 30
+        assert len(self._history_for_mar16(db_path, limit=0)) == 30
 
     def test_history_date_respects_explicit_limit(self, tmp_path):
         """history --date --limit N should cap results."""
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
             for i in range(10):
-                ts = f"2026-03-16T{15 + i}:00:00Z"
-                location_db.insert_ping(conn, ts, 34.0, -118.0,
+                location_db.insert_ping(conn, f"2026-03-16T{15 + i}:00:00Z", 34.0, -118.0,
                     accuracy=5.0, activity_type="stationary",
                 )
             conn.commit()
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_history
-
-            args = MagicMock()
-            args.source = None
-            args.limit = 5
-            args.date = "2026-03-16"
-            args.tz = "America/Los_Angeles"
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                cmd_history(args)
-            finally:
-                sys.stdout = old_stdout
-
-            output = json.loads(captured.getvalue())
-            assert len(output) == 5
+        assert len(self._history_for_mar16(db_path, limit=5)) == 5
 
 
-def _run_cmd(fn, **args):
-    """Call a location CLI command and return its parsed JSON stdout.
+def _seed_altitude(tmp_path):
+    db_path = _init_loc_db(tmp_path)
+    with location_db.connect(db_path) as conn:
+        # A climb: two pings inside 2026-03-16 Pacific, one with no vertical fix.
+        location_db.insert_ping(conn, "2026-03-16T20:00:00Z", 34.0, -118.0,
+            altitude=335.3, accuracy=5.0, activity_type="driving",
+        )
+        location_db.insert_ping(conn, "2026-03-16T21:00:00Z", 34.1, -118.1,
+            altitude=None, accuracy=5.0, activity_type="driving",
+        )
+        conn.commit()
+    return db_path
 
-    Args are a ``SimpleNamespace``, not a ``MagicMock``: a Mock answers every
-    attribute with a truthy Mock, so a command reading an option the test never
-    set silently takes a fallback branch instead of failing.
-    """
-    captured = io.StringIO()
-    old_stdout = sys.stdout
-    sys.stdout = captured
-    try:
-        fn(SimpleNamespace(**args))
-    finally:
-        sys.stdout = old_stdout
-    return json.loads(captured.getvalue())
+
+def _add_high_ping(db_path):
+    with location_db.connect(db_path) as conn:
+        location_db.insert_ping(conn, "2026-03-16T22:00:00Z", 34.2, -118.2,
+            altitude=1432.6, accuracy=5.0, activity_type="driving",
+        )
+        conn.commit()
 
 
 class TestAltitudeSurfacing:
     """ISSUE-218 — altitude is stored on every ping but was dropped by every reader."""
 
-    def _seed(self, tmp_path):
-        db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            # A climb: two pings inside 2026-03-16 Pacific, one with no vertical fix.
-            location_db.insert_ping(conn, "2026-03-16T20:00:00Z", 34.0, -118.0,
-                altitude=335.3, accuracy=5.0, activity_type="driving",
-            )
-            location_db.insert_ping(conn, "2026-03-16T21:00:00Z", 34.1, -118.1,
-                altitude=None, accuracy=5.0, activity_type="driving",
-            )
-            conn.commit()
-        return db_path
-
     def test_history_includes_altitude(self, tmp_path):
-        db_path = self._seed(tmp_path)
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_history
-
-            output = _run_cmd(cmd_history, limit=10, date=None)
+        """~5% of real pings carry a horizontal fix only; the key must still be present."""
+        db_path = _seed_altitude(tmp_path)
+        with _loc_env(db_path):
+            output = _run_cmd(_skill().cmd_history, limit=10, date=None)
 
         by_ts = {p["timestamp"]: p for p in output}
         assert by_ts["2026-03-16T20:00:00Z"]["altitude"] == 335.3
-
-    def test_history_altitude_is_null_when_no_vertical_fix(self, tmp_path):
-        """~5% of real pings carry a horizontal fix only; the key must still be present."""
-        db_path = self._seed(tmp_path)
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_history
-
-            output = _run_cmd(cmd_history, limit=10, date=None)
-
-        by_ts = {p["timestamp"]: p for p in output}
         assert by_ts["2026-03-16T21:00:00Z"]["altitude"] is None
 
     def test_history_date_branch_includes_altitude(self, tmp_path):
         """--date runs a second, separately-written SELECT — it must carry the column too."""
-        db_path = self._seed(tmp_path)
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_history
-
+        db_path = _seed_altitude(tmp_path)
+        with _loc_env(db_path):
             output = _run_cmd(
-                cmd_history, limit=0, date="2026-03-16", tz="America/Los_Angeles"
+                _skill().cmd_history, limit=0, date="2026-03-16", tz="America/Los_Angeles"
             )
 
         assert len(output) == 2
         assert {p["altitude"] for p in output} == {335.3, None}
 
     def test_current_includes_altitude(self, tmp_path):
-        db_path = self._seed(tmp_path)
-        with location_db.connect(db_path) as conn:
-            location_db.insert_ping(conn, "2026-03-16T22:00:00Z", 34.2, -118.2,
-                altitude=1432.6, accuracy=5.0, activity_type="driving",
-            )
-            conn.commit()
+        db_path = _seed_altitude(tmp_path)
+        _add_high_ping(db_path)
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_current
-
-            output = _run_cmd(cmd_current)
+        with _loc_env(db_path):
+            output = _run_cmd(_skill().cmd_current)
 
         assert output["last_ping"]["altitude"] == 1432.6
 
@@ -1266,22 +823,10 @@ class TestAltitudeSurfacing:
 class TestLocationPingsAPIAltitude:
     """The web pings endpoint feeds the map; it dropped altitude the same way."""
 
-    def _seed(self, tmp_path):
-        db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            location_db.insert_ping(conn, "2026-03-16T20:00:00Z", 34.0, -118.0,
-                altitude=335.3, accuracy=5.0, activity_type="driving",
-            )
-            location_db.insert_ping(conn, "2026-03-16T21:00:00Z", 34.1, -118.1,
-                altitude=None, accuracy=5.0, activity_type="driving",
-            )
-            conn.commit()
-        return db_path
-
     def test_date_range_query_includes_altitude(self, tmp_path):
         from istota.web_app import _location_query_pings
 
-        db_path = self._seed(tmp_path)
+        db_path = _seed_altitude(tmp_path)
         result = _location_query_pings(
             str(db_path), "America/Los_Angeles",
             date="2026-03-16", start=None, end=None, limit=0,
@@ -1294,7 +839,7 @@ class TestLocationPingsAPIAltitude:
         """The no-date branch is a separate SELECT and needs the column too."""
         from istota.web_app import _location_query_pings
 
-        db_path = self._seed(tmp_path)
+        db_path = _seed_altitude(tmp_path)
         result = _location_query_pings(
             str(db_path), "America/Los_Angeles",
             date=None, start=None, end=None, limit=10,
@@ -1307,102 +852,40 @@ class TestLocationPingsAPIAltitude:
         so the current-location reader has to send it too — not only the CLI twin."""
         from istota.web_app import _location_query_current
 
-        db_path = self._seed(tmp_path)
-        with location_db.connect(db_path) as conn:
-            location_db.insert_ping(conn, "2026-03-16T22:00:00Z", 34.2, -118.2,
-                altitude=1432.6, accuracy=5.0, activity_type="driving",
-            )
-            conn.commit()
+        db_path = _seed_altitude(tmp_path)
+        _add_high_ping(db_path)
 
-        result = _location_query_current(str(db_path))
-
-        assert result["last_ping"]["altitude"] == 1432.6
+        assert _location_query_current(str(db_path))["last_ping"]["altitude"] == 1432.6
 
 
 class TestLocationDiscoverDismissCLI:
-    """CLI wrappers for discover, dismiss-cluster, list-dismissed, restore-dismissed, place-stats."""
+    """CLI wrappers for discover, dismiss-cluster, list-dismissed, restore-dismissed, place-stats.
 
-    def _seed_cluster(self, conn, lat, lon, count=15):
-        for i in range(count):
-            ts = f"2026-01-10T09:{i:02d}:00Z"
-            location_db.insert_ping(conn, ts, lat + (i % 3) * 0.00002, lon,
-                accuracy=5.0, activity_type="stationary",
-            )
+    A not-found verb exits 1 (S10): a call naming a place or a cluster that
+    does not exist is a failed call, and a silent exit 0 behind an error
+    envelope is what the skill CLI facade exists to stop.
+    """
 
-    def _run(self, cmd, args):
-        captured = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured
-        try:
-            cmd(args)
-        finally:
-            sys.stdout = old_stdout
-        return json.loads(captured.getvalue())
-
-    def _run_failing(self, cmd, args):
-        """A not-found verb: the envelope, and the exit 1 that goes with it.
-
-        S10 made these exit 1 rather than 0 — a call naming a place or a
-        cluster that does not exist is a failed call, and a silent exit 0
-        behind an error envelope is what the skill CLI facade exists to stop.
-        """
-        captured = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured
-        try:
-            with pytest.raises(SystemExit) as exc:
-                cmd(args)
-        finally:
-            sys.stdout = old_stdout
-        assert exc.value.code == 1
-        return json.loads(captured.getvalue())
-
-    def test_discover_finds_unassigned_cluster(self, tmp_path):
+    @pytest.mark.parametrize("count, min_pings, expected", [
+        (15, 10, 1),
+        (8, 20, 0),
+    ], ids=["finds_unassigned_cluster", "respects_min_pings"])
+    def test_discover(self, tmp_path, count, min_pings, expected):
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            self._seed_cluster(conn, 34.0, -118.0)
+            _seed_cluster(conn, 34.0, -118.0, count=count)
             conn.commit()
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_discover
+        output = _run_cli(_skill().cmd_discover, db_path, min_pings=min_pings)
 
-            args = MagicMock()
-            args.min_pings = 10
-            output = self._run(cmd_discover, args)
-
-        assert len(output["clusters"]) == 1
-        assert "lat" in output["clusters"][0]
-        assert "radius_meters" in output["clusters"][0]
-
-    def test_discover_respects_min_pings(self, tmp_path):
-        db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            self._seed_cluster(conn, 34.0, -118.0, count=8)
-            conn.commit()
-
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_discover
-
-            args = MagicMock()
-            args.min_pings = 20
-            output = self._run(cmd_discover, args)
-
-        assert output["clusters"] == []
+        assert len(output["clusters"]) == expected
+        if expected:
+            assert "lat" in output["clusters"][0]
+            assert "radius_meters" in output["clusters"][0]
 
     def test_dismiss_cluster_inserts_row(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
-
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_dismiss_cluster
-
-            args = MagicMock()
-            args.lat = 34.0
-            args.lon = -118.0
-            args.radius = 200
-            output = self._run(cmd_dismiss_cluster, args)
+        output = _run_cli(_skill().cmd_dismiss_cluster, db_path, lat=34.0, lon=-118.0, radius=200)
 
         assert output["status"] == "ok"
         assert output["lat"] == 34.0
@@ -1411,8 +894,7 @@ class TestLocationDiscoverDismissCLI:
         assert isinstance(output["id"], int)
 
         with location_db.connect(db_path) as conn:
-            rows = location_db.list_dismissed_clusters(conn)
-            assert len(rows) == 1
+            assert len(location_db.list_dismissed_clusters(conn)) == 1
 
     def test_list_dismissed_returns_inserted_rows(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
@@ -1421,16 +903,10 @@ class TestLocationDiscoverDismissCLI:
             location_db.dismiss_cluster(conn, 40.0, -73.0, 150)
             conn.commit()
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_list_dismissed
-
-            args = MagicMock()
-            output = self._run(cmd_list_dismissed, args)
+        output = _run_cli(_skill().cmd_list_dismissed, db_path)
 
         assert len(output["dismissed"]) == 2
-        radii = sorted(r["radius_meters"] for r in output["dismissed"])
-        assert radii == [100, 150]
+        assert sorted(r["radius_meters"] for r in output["dismissed"]) == [100, 150]
 
     def test_restore_dismissed_deletes_row(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
@@ -1438,13 +914,7 @@ class TestLocationDiscoverDismissCLI:
             cid = location_db.dismiss_cluster(conn, 34.0, -118.0, 100)
             conn.commit()
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_restore_dismissed
-
-            args = MagicMock()
-            args.cluster_id = cid
-            output = self._run(cmd_restore_dismissed, args)
+        output = _run_cli(_skill().cmd_restore_dismissed, db_path, cluster_id=cid)
 
         assert output["status"] == "ok"
         with location_db.connect(db_path) as conn:
@@ -1452,42 +922,17 @@ class TestLocationDiscoverDismissCLI:
 
     def test_restore_dismissed_unknown_id(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
-
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_restore_dismissed
-
-            args = MagicMock()
-            args.cluster_id = 9999
-            output = self._run_failing(cmd_restore_dismissed, args)
-
+        output = _run_cli(_skill().cmd_restore_dismissed, db_path, exit_code=1, cluster_id=9999)
         assert output["status"] == "error"
 
     def test_place_stats_by_id(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
             pid = location_db.add_place(conn, "cafe", 34.0, -118.0, radius_meters=100, category="food")
-            for i, ts in enumerate([
-                "2026-01-10T09:00:00Z",
-                "2026-01-10T09:05:00Z",
-                "2026-01-10T09:30:00Z",
-                "2026-01-10T10:00:00Z",
-            ]):
-                location_db.insert_ping(conn, ts, 34.0, -118.0,
-                    accuracy=5.0, activity_type="stationary",
-                )
-                last_id = conn.execute("SELECT max(id) FROM location_pings").fetchone()[0]
-                conn.execute("UPDATE location_pings SET place_id = ? WHERE id = ?", (pid, last_id))
+            _add_pings_at(conn, pid, ["09:00", "09:05", "09:30", "10:00"])
             conn.commit()
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_place_stats
-
-            args = MagicMock()
-            args.name = None
-            args.id = pid
-            output = self._run(cmd_place_stats, args)
+        output = _run_cli(_skill().cmd_place_stats, db_path, name=None, id=pid)
 
         assert output["place_id"] == pid
         assert output["total_visits"] == 1
@@ -1495,34 +940,16 @@ class TestLocationDiscoverDismissCLI:
 
     def test_place_stats_by_name(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(conn, "home", 34.0, -118.0, radius_meters=150, category="home")
-            conn.commit()
+        pid = _add_place(db_path, "home", radius_meters=150, category="home")
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_place_stats
-
-            args = MagicMock()
-            args.name = "home"
-            args.id = None
-            output = self._run(cmd_place_stats, args)
+        output = _run_cli(_skill().cmd_place_stats, db_path, name="home", id=None)
 
         assert output["place_id"] == pid
         assert output["total_visits"] == 0
 
     def test_place_stats_unknown_name(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
-
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_place_stats
-
-            args = MagicMock()
-            args.name = "ghost"
-            args.id = None
-            output = self._run_failing(cmd_place_stats, args)
-
+        output = _run_cli(_skill().cmd_place_stats, db_path, exit_code=1, name="ghost", id=None)
         assert output["status"] == "error"
 
     def test_place_stats_other_user_cannot_read(self, tmp_path):
@@ -1530,21 +957,10 @@ class TestLocationDiscoverDismissCLI:
         # location.db; bob's process points at bob's empty location.db and
         # the place_id miss returns an error.
         alice_db = _init_loc_db(tmp_path / "alice", "location.db")
-        with location_db.connect(alice_db) as conn:
-            pid = location_db.add_place(conn, "home", 34.0, -118.0, radius_meters=150, category="home")
-            conn.commit()
-
+        pid = _add_place(alice_db, "home", radius_meters=150, category="home")
         bob_db = _init_loc_db(tmp_path / "bob", "location.db")
 
-        env = {"LOCATION_DB_PATH": str(bob_db), "ISTOTA_DB_PATH": str(bob_db)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_place_stats
-
-            args = MagicMock()
-            args.name = None
-            args.id = pid
-            output = self._run_failing(cmd_place_stats, args)
-
+        output = _run_cli(_skill().cmd_place_stats, bob_db, exit_code=1, name=None, id=pid)
         assert output["status"] == "error"
 
 
@@ -1565,8 +981,7 @@ class TestGeocodeCache:
             db.cache_geocode(conn, "123 Main St", 34.05, -118.4)
             conn.commit()
 
-            result = db.get_cached_geocode(conn, "123 Main St")
-            assert result == (34.05, -118.4)
+            assert db.get_cached_geocode(conn, "123 Main St") == (34.05, -118.4)
 
     def test_cache_upsert(self, tmp_path):
         db_path = _init_db(tmp_path)
@@ -1575,8 +990,7 @@ class TestGeocodeCache:
             db.cache_geocode(conn, "123 Main St", 35.0, -119.0)
             conn.commit()
 
-            result = db.get_cached_geocode(conn, "123 Main St")
-            assert result == (35.0, -119.0)
+            assert db.get_cached_geocode(conn, "123 Main St") == (35.0, -119.0)
 
 
 # ===========================================================================
@@ -1584,64 +998,32 @@ class TestGeocodeCache:
 # ===========================================================================
 
 
-class TestVirtualLocationDetection:
-    def test_zoom_link(self):
-        from istota.skills.location import _is_virtual_location
-        assert _is_virtual_location("https://zoom.us/j/12345") is True
-
-    def test_google_meet(self):
-        from istota.skills.location import _is_virtual_location
-        assert _is_virtual_location("meet.google.com/abc-def") is True
-
-    def test_teams(self):
-        from istota.skills.location import _is_virtual_location
-        assert _is_virtual_location("Microsoft Teams Meeting") is True
-
-    def test_physical_location(self):
-        from istota.skills.location import _is_virtual_location
-        assert _is_virtual_location("123 Main St, San Francisco") is False
-
-    def test_conference_room(self):
-        from istota.skills.location import _is_virtual_location
-        assert _is_virtual_location("Conference Room B") is False
+@pytest.mark.parametrize("location, virtual", [
+    ("https://zoom.us/j/12345", True),
+    ("meet.google.com/abc-def", True),
+    ("Microsoft Teams Meeting", True),
+    ("123 Main St, San Francisco", False),
+    ("Conference Room B", False),
+], ids=["zoom_link", "google_meet", "teams", "physical_location", "conference_room"])
+def test_virtual_location_detection(location, virtual):
+    from istota.skills.location import _is_virtual_location
+    assert _is_virtual_location(location) is virtual
 
 
-class TestPlaceMatching:
-    def test_exact_match(self):
-        from istota.skills.location import _match_place
-        places = [{"name": "gym", "lat": 34.0, "lon": -118.0, "radius_meters": 100}]
-        result = _match_place("gym", places)
-        assert result is not None
-        assert result["name"] == "gym"
-
-    def test_case_insensitive(self):
-        from istota.skills.location import _match_place
-        places = [{"name": "Downtown Gym", "lat": 34.0, "lon": -118.0, "radius_meters": 100}]
-        result = _match_place("downtown gym", places)
-        assert result is not None
-
-    def test_substring_match_location_in_place(self):
-        from istota.skills.location import _match_place
-        places = [{"name": "Downtown Gym", "lat": 34.0, "lon": -118.0, "radius_meters": 100}]
-        result = _match_place("gym", places)
-        assert result is not None
-        assert result["name"] == "Downtown Gym"
-
-    def test_substring_match_place_in_location(self):
-        from istota.skills.location import _match_place
-        places = [{"name": "gym", "lat": 34.0, "lon": -118.0, "radius_meters": 100}]
-        result = _match_place("The gym on 5th Ave", places)
-        assert result is not None
-
-    def test_no_match(self):
-        from istota.skills.location import _match_place
-        places = [{"name": "gym", "lat": 34.0, "lon": -118.0, "radius_meters": 100}]
-        result = _match_place("dentist office", places)
-        assert result is None
-
-    def test_empty_places(self):
-        from istota.skills.location import _match_place
-        assert _match_place("gym", []) is None
+@pytest.mark.parametrize("location, place_names, expected", [
+    ("gym", ["gym"], "gym"),
+    ("downtown gym", ["Downtown Gym"], "Downtown Gym"),
+    ("gym", ["Downtown Gym"], "Downtown Gym"),
+    ("The gym on 5th Ave", ["gym"], "gym"),
+    ("dentist office", ["gym"], None),
+    ("gym", [], None),
+], ids=["exact_match", "case_insensitive", "substring_location_in_place",
+        "substring_place_in_location", "no_match", "empty_places"])
+def test_place_matching(location, place_names, expected):
+    from istota.skills.location import _match_place
+    places = [{"name": n, "lat": 34.0, "lon": -118.0, "radius_meters": 100} for n in place_names]
+    result = _match_place(location, places)
+    assert (result["name"] if result else None) == expected
 
 
 class TestGeocodeLocation:
@@ -1652,55 +1034,28 @@ class TestGeocodeLocation:
             db.cache_geocode(conn, "123 Main St", 34.05, -118.4)
             conn.commit()
 
-            result = _geocode_location("123 Main St", conn)
-            assert result == (34.05, -118.4)
+            assert _geocode_location("123 Main St", conn) == (34.05, -118.4)
 
     @_needs_geopy
     def test_nominatim_called_on_miss(self, tmp_path):
         from istota.skills.location import _geocode_location
         db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            mock_result = MagicMock()
-            mock_result.latitude = 37.7749
-            mock_result.longitude = -122.4194
-
-            with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
-                mock_geolocator = MagicMock()
-                mock_geolocator.geocode.return_value = mock_result
-                mock_nom_cls.return_value = mock_geolocator
-
-                result = _geocode_location("San Francisco, CA", conn)
-                assert result == (37.7749, -122.4194)
-
-                # Should be cached now
-                cached = db.get_cached_geocode(conn, "San Francisco, CA")
-                assert cached == (37.7749, -122.4194)
+        hit = MagicMock(latitude=37.7749, longitude=-122.4194)
+        with db.get_db(db_path) as conn, _patch_nominatim("geocode", returns=hit):
+            assert _geocode_location("San Francisco, CA", conn) == (37.7749, -122.4194)
+            # Should be cached now
+            assert db.get_cached_geocode(conn, "San Francisco, CA") == (37.7749, -122.4194)
 
     @_needs_geopy
-    def test_nominatim_failure_returns_none(self, tmp_path):
+    @pytest.mark.parametrize("nominatim", [
+        {"returns": None},
+        {"side_effect": Exception("timeout")},
+    ], ids=["failure_returns_none", "exception_returns_none"])
+    def test_nominatim_miss_returns_none(self, tmp_path, nominatim):
         from istota.skills.location import _geocode_location
         db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
-                mock_geolocator = MagicMock()
-                mock_geolocator.geocode.return_value = None
-                mock_nom_cls.return_value = mock_geolocator
-
-                result = _geocode_location("nonexistent place xyz", conn)
-                assert result is None
-
-    @_needs_geopy
-    def test_nominatim_exception_returns_none(self, tmp_path):
-        from istota.skills.location import _geocode_location
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
-                mock_geolocator = MagicMock()
-                mock_geolocator.geocode.side_effect = Exception("timeout")
-                mock_nom_cls.return_value = mock_geolocator
-
-                result = _geocode_location("123 Main St", conn)
-                assert result is None
+        with db.get_db(db_path) as conn, _patch_nominatim("geocode", **nominatim):
+            assert _geocode_location("nonexistent place xyz", conn) is None
 
 
 # ===========================================================================
@@ -1733,6 +1088,9 @@ def _make_calendar_event(
         location=location,
         all_day=all_day,
     )
+
+
+_DENTIST = {"name": "dentist office", "lat": 34.05, "lon": -118.4, "radius_meters": 200}
 
 
 class TestCmdAttendance:
@@ -1773,59 +1131,38 @@ class TestCmdAttendance:
         args = MagicMock()
         args.date = "2026-03-01"
         args.event = None
-        if args_overrides:
-            for k, v in args_overrides.items():
-                setattr(args, k, v)
+        for k, v in (args_overrides or {}).items():
+            setattr(args, k, v)
 
-        mock_client = MagicMock()
         mock_calendars = [("Personal", "https://cal.example.com/personal")]
 
-        with patch.dict("os.environ", env):
-            with patch("istota.skills.calendar.get_caldav_client", return_value=mock_client):
-                with patch("istota.skills.calendar.list_calendars", return_value=mock_calendars):
-                    with patch("istota.skills.calendar.get_events", return_value=events):
-                        captured = io.StringIO()
-                        old_stdout = sys.stdout
-                        sys.stdout = captured
-                        try:
-                            cmd_attendance(args)
-                        finally:
-                            sys.stdout = old_stdout
-
-        return json.loads(captured.getvalue())
+        with patch.dict("os.environ", env), \
+                patch("istota.skills.calendar.get_caldav_client", return_value=MagicMock()), \
+                patch("istota.skills.calendar.list_calendars", return_value=mock_calendars), \
+                patch("istota.skills.calendar.get_events", return_value=events):
+            return _capture(cmd_attendance, args)
 
     def test_no_events(self, tmp_path):
         result = self._run_attendance(tmp_path, events=[])
         assert result["date"] == "2026-03-01"
         assert result["events"] == []
 
-    def test_all_day_event_filtered(self, tmp_path):
-        events = [_make_calendar_event(location="123 Main St", all_day=True)]
-        result = self._run_attendance(tmp_path, events=events)
-        assert result["events"] == []
-
-    def test_no_location_filtered(self, tmp_path):
-        events = [_make_calendar_event(location=None)]
-        result = self._run_attendance(tmp_path, events=events)
-        assert result["events"] == []
-
-    def test_virtual_location_filtered(self, tmp_path):
-        events = [_make_calendar_event(location="https://zoom.us/j/12345")]
-        result = self._run_attendance(tmp_path, events=events)
+    @pytest.mark.parametrize("event_kw", [
+        {"location": "123 Main St", "all_day": True},
+        {"location": None},
+        {"location": "https://zoom.us/j/12345"},
+    ], ids=["all_day_event_filtered", "no_location_filtered", "virtual_location_filtered"])
+    def test_event_filtered(self, tmp_path, event_kw):
+        result = self._run_attendance(tmp_path, events=[_make_calendar_event(**event_kw)])
         assert result["events"] == []
 
     def test_attendance_confirmed_with_nearby_pings(self, tmp_path):
-        events = [_make_calendar_event(
-            uid="dentist1",
-            summary="Dentist",
-            location="dentist office",
-        )]
-        places = [{"name": "dentist office", "lat": 34.05, "lon": -118.4, "radius_meters": 200}]
+        events = [_make_calendar_event(uid="dentist1", summary="Dentist", location="dentist office")]
         pings = [
             {"timestamp": "2026-03-01T17:45:00Z", "lat": 34.0501, "lon": -118.4001},  # 10:45 PT, within window
             {"timestamp": "2026-03-01T18:30:00Z", "lat": 34.0502, "lon": -118.3999},  # 11:30 PT, within window
         ]
-        result = self._run_attendance(tmp_path, events=events, pings=pings, places=places)
+        result = self._run_attendance(tmp_path, events=events, pings=pings, places=[_DENTIST])
         assert len(result["events"]) == 1
         ev = result["events"][0]
         assert ev["attended"] is True
@@ -1833,42 +1170,23 @@ class TestCmdAttendance:
         assert ev["nearby_ping_count"] == 2
 
     def test_no_pings_no_attendance(self, tmp_path):
-        events = [_make_calendar_event(
-            summary="Dentist",
-            location="dentist office",
-        )]
-        places = [{"name": "dentist office", "lat": 34.05, "lon": -118.4, "radius_meters": 200}]
-        result = self._run_attendance(tmp_path, events=events, pings=[], places=places)
+        events = [_make_calendar_event(summary="Dentist", location="dentist office")]
+        result = self._run_attendance(tmp_path, events=events, pings=[], places=[_DENTIST])
         assert len(result["events"]) == 1
-        ev = result["events"][0]
-        assert ev["attended"] is None
+        assert result["events"][0]["attended"] is None
 
     def test_pings_too_far_away(self, tmp_path):
-        events = [_make_calendar_event(
-            summary="Dentist",
-            location="dentist office",
-        )]
-        places = [{"name": "dentist office", "lat": 34.05, "lon": -118.4, "radius_meters": 100}]
-        # Pings far from the dentist
-        pings = [
-            {"timestamp": "2026-03-01T18:00:00Z", "lat": 35.0, "lon": -119.0},
-        ]
+        events = [_make_calendar_event(summary="Dentist", location="dentist office")]
+        places = [{**_DENTIST, "radius_meters": 100}]
+        pings = [{"timestamp": "2026-03-01T18:00:00Z", "lat": 35.0, "lon": -119.0}]
         result = self._run_attendance(tmp_path, events=events, pings=pings, places=places)
-        ev = result["events"][0]
-        assert ev["attended"] is None
+        assert result["events"][0]["attended"] is None
 
     @_needs_geopy
     def test_ungeocoded_event(self, tmp_path):
-        events = [_make_calendar_event(
-            summary="Meeting",
-            location="Some Unknown Place XYZ123",
-        )]
+        events = [_make_calendar_event(summary="Meeting", location="Some Unknown Place XYZ123")]
         # No places, geocoding will fail
-        with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
-            mock_geolocator = MagicMock()
-            mock_geolocator.geocode.return_value = None
-            mock_nom_cls.return_value = mock_geolocator
-
+        with _patch_nominatim("geocode", returns=None):
             result = self._run_attendance(tmp_path, events=events)
 
         assert len(result["events"]) == 1
@@ -1878,78 +1196,40 @@ class TestCmdAttendance:
 
     @_needs_geopy
     def test_geocoded_event_with_attendance(self, tmp_path):
-        from zoneinfo import ZoneInfo
-        tz = ZoneInfo("America/Los_Angeles")
-        events = [_make_calendar_event(
-            summary="Dentist",
-            location="123 Main St, LA",
-            start=datetime(2026, 3, 1, 10, 0, tzinfo=tz),
-            end=datetime(2026, 3, 1, 11, 0, tzinfo=tz),
-        )]
+        events = [_make_calendar_event(summary="Dentist", location="123 Main St, LA")]
         # Ping near geocoded location
-        pings = [
-            {"timestamp": "2026-03-01T18:00:00Z", "lat": 34.0501, "lon": -118.4001},
-        ]
+        pings = [{"timestamp": "2026-03-01T18:00:00Z", "lat": 34.0501, "lon": -118.4001}]
 
-        mock_result = MagicMock()
-        mock_result.latitude = 34.05
-        mock_result.longitude = -118.4
-
-        with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
-            mock_geolocator = MagicMock()
-            mock_geolocator.geocode.return_value = mock_result
-            mock_nom_cls.return_value = mock_geolocator
-
+        hit = MagicMock(latitude=34.05, longitude=-118.4)
+        with _patch_nominatim("geocode", returns=hit):
             result = self._run_attendance(tmp_path, events=events, pings=pings)
 
         ev = result["events"][0]
         assert ev["attended"] is True
         assert ev["resolution_source"] == "geocode"
 
-    def test_event_filter_by_title(self, tmp_path):
+    @pytest.mark.parametrize("uids, selector, field, expected", [
+        (("ev1", "ev2"), "dentist", "summary", "Dentist"),
+        (("abc123", "def456"), "abc123", "uid", "abc123"),
+    ], ids=["by_title", "by_uid"])
+    def test_event_filter(self, tmp_path, uids, selector, field, expected):
         events = [
-            _make_calendar_event(uid="ev1", summary="Dentist", location="dentist office"),
-            _make_calendar_event(uid="ev2", summary="Gym", location="gym"),
+            _make_calendar_event(uid=uids[0], summary="Dentist", location="dentist office"),
+            _make_calendar_event(uid=uids[1], summary="Gym", location="gym"),
         ]
-        places = [
-            {"name": "dentist office", "lat": 34.05, "lon": -118.4, "radius_meters": 200},
-            {"name": "gym", "lat": 34.1, "lon": -118.1, "radius_meters": 100},
-        ]
+        places = [_DENTIST, {"name": "gym", "lat": 34.1, "lon": -118.1, "radius_meters": 100}]
         result = self._run_attendance(
-            tmp_path, events=events, places=places,
-            args_overrides={"event": "dentist"},
+            tmp_path, events=events, places=places, args_overrides={"event": selector},
         )
         assert len(result["events"]) == 1
-        assert result["events"][0]["summary"] == "Dentist"
-
-    def test_event_filter_by_uid(self, tmp_path):
-        events = [
-            _make_calendar_event(uid="abc123", summary="Dentist", location="dentist office"),
-            _make_calendar_event(uid="def456", summary="Gym", location="gym"),
-        ]
-        places = [
-            {"name": "dentist office", "lat": 34.05, "lon": -118.4, "radius_meters": 200},
-            {"name": "gym", "lat": 34.1, "lon": -118.1, "radius_meters": 100},
-        ]
-        result = self._run_attendance(
-            tmp_path, events=events, places=places,
-            args_overrides={"event": "abc123"},
-        )
-        assert len(result["events"]) == 1
-        assert result["events"][0]["uid"] == "abc123"
+        assert result["events"][0][field] == expected
 
     def test_place_radius_used(self, tmp_path):
         """Place with large radius should detect pings that would be outside default 200m."""
-        events = [_make_calendar_event(
-            summary="Park",
-            location="big park",
-        )]
-        # Place with 2km radius
+        events = [_make_calendar_event(summary="Park", location="big park")]
         places = [{"name": "big park", "lat": 34.05, "lon": -118.4, "radius_meters": 2000}]
         # Ping ~500m away (would fail with 200m default, but passes with 2km)
-        pings = [
-            {"timestamp": "2026-03-01T18:00:00Z", "lat": 34.055, "lon": -118.4},
-        ]
+        pings = [{"timestamp": "2026-03-01T18:00:00Z", "lat": 34.055, "lon": -118.4}]
         result = self._run_attendance(tmp_path, events=events, pings=pings, places=places)
         ev = result["events"][0]
         assert ev["attended"] is True
@@ -1965,42 +1245,25 @@ class TestReverseGeocodeCache:
     def test_cache_miss_returns_none(self, tmp_path):
         db_path = _init_db(tmp_path)
         with db.get_db(db_path) as conn:
-            result = db.get_reverse_geocode(conn, 34.05, -118.25)
-            assert result is None
+            assert db.get_reverse_geocode(conn, 34.05, -118.25) is None
 
     def test_store_and_retrieve(self, tmp_path):
         db_path = _init_db(tmp_path)
+        data = _geo_row("123 Main St, Los Angeles, CA", neighborhood="Downtown",
+                        suburb="Central LA", road="Main St", city="Los Angeles")
         with db.get_db(db_path) as conn:
-            data = {
-                "display_name": "123 Main St, Los Angeles, CA",
-                "neighborhood": "Downtown",
-                "suburb": "Central LA",
-                "road": "Main St",
-                "city": "Los Angeles",
-            }
             db.cache_reverse_geocode(conn, 34.05, -118.25, data)
             conn.commit()
 
             result = db.get_reverse_geocode(conn, 34.05, -118.25)
-            assert result is not None
-            assert result["display_name"] == "123 Main St, Los Angeles, CA"
-            assert result["neighborhood"] == "Downtown"
-            assert result["suburb"] == "Central LA"
-            assert result["road"] == "Main St"
-            assert result["city"] == "Los Angeles"
+            assert {k: result[k] for k in data} == data
 
     def test_rounding_hits_same_entry(self, tmp_path):
         """Nearby coords (within ~11m) should hit the same cache entry."""
         db_path = _init_db(tmp_path)
         with db.get_db(db_path) as conn:
-            data = {
-                "display_name": "Test Place",
-                "neighborhood": None,
-                "suburb": None,
-                "road": "Test Rd",
-                "city": "Test City",
-            }
-            db.cache_reverse_geocode(conn, 34.05001, -118.25002, data)
+            db.cache_reverse_geocode(conn, 34.05001, -118.25002,
+                                     _geo_row("Test Place", road="Test Rd", city="Test City"))
             conn.commit()
 
             # Slightly different coords that round to the same 4-decimal value
@@ -2011,24 +1274,9 @@ class TestReverseGeocodeCache:
     def test_upsert_overwrites(self, tmp_path):
         db_path = _init_db(tmp_path)
         with db.get_db(db_path) as conn:
-            data1 = {
-                "display_name": "Old Name",
-                "neighborhood": None,
-                "suburb": None,
-                "road": None,
-                "city": None,
-            }
-            db.cache_reverse_geocode(conn, 34.05, -118.25, data1)
+            db.cache_reverse_geocode(conn, 34.05, -118.25, _geo_row("Old Name"))
             conn.commit()
-
-            data2 = {
-                "display_name": "New Name",
-                "neighborhood": "New Hood",
-                "suburb": None,
-                "road": None,
-                "city": None,
-            }
-            db.cache_reverse_geocode(conn, 34.05, -118.25, data2)
+            db.cache_reverse_geocode(conn, 34.05, -118.25, _geo_row("New Name", neighborhood="New Hood"))
             conn.commit()
 
             result = db.get_reverse_geocode(conn, 34.05, -118.25)
@@ -2047,13 +1295,9 @@ class TestReverseGeocode:
 
         db_path = _init_db(tmp_path)
         with db.get_db(db_path) as conn:
-            db.cache_reverse_geocode(conn, 34.05, -118.25, {
-                "display_name": "Cached Place",
-                "neighborhood": "Hood",
-                "suburb": "Sub",
-                "road": "Road",
-                "city": "City",
-            })
+            db.cache_reverse_geocode(conn, 34.05, -118.25, _geo_row(
+                "Cached Place", neighborhood="Hood", suburb="Sub", road="Road", city="City",
+            ))
             conn.commit()
 
             result = reverse_geocode(34.05, -118.25, conn)
@@ -2065,63 +1309,40 @@ class TestReverseGeocode:
         from istota.geo import reverse_geocode
 
         db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            mock_result = MagicMock()
-            mock_result.address = "456 Oak Ave, Pasadena, CA"
-            mock_result.raw = {
-                "address": {
-                    "road": "Oak Ave",
-                    "neighbourhood": "Old Town",
-                    "suburb": "South Pasadena",
-                    "city": "Pasadena",
-                }
-            }
+        hit = _nominatim_hit("456 Oak Ave, Pasadena, CA", road="Oak Ave",
+                             neighbourhood="Old Town", suburb="South Pasadena", city="Pasadena")
+        with db.get_db(db_path) as conn, _patch_nominatim("reverse", returns=hit):
+            result = reverse_geocode(34.15, -118.14, conn)
+            assert result["source"] == "nominatim"
+            assert result["display_name"] == "456 Oak Ave, Pasadena, CA"
+            assert result["road"] == "Oak Ave"
+            assert result["neighborhood"] == "Old Town"
 
-            with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
-                mock_geolocator = MagicMock()
-                mock_geolocator.reverse.return_value = mock_result
-                mock_nom_cls.return_value = mock_geolocator
-
-                result = reverse_geocode(34.15, -118.14, conn)
-                assert result["source"] == "nominatim"
-                assert result["display_name"] == "456 Oak Ave, Pasadena, CA"
-                assert result["road"] == "Oak Ave"
-                assert result["neighborhood"] == "Old Town"
-
-                # Should be cached now
-                cached = db.get_reverse_geocode(conn, 34.15, -118.14)
-                assert cached is not None
-                assert cached["display_name"] == "456 Oak Ave, Pasadena, CA"
+            # Should be cached now
+            cached = db.get_reverse_geocode(conn, 34.15, -118.14)
+            assert cached is not None
+            assert cached["display_name"] == "456 Oak Ave, Pasadena, CA"
 
     @_needs_geopy
     def test_nominatim_returns_none(self, tmp_path):
         from istota.geo import reverse_geocode
 
         db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
-                mock_geolocator = MagicMock()
-                mock_geolocator.reverse.return_value = None
-                mock_nom_cls.return_value = mock_geolocator
-
-                result = reverse_geocode(0.0, 0.0, conn)
-                assert result["source"] == "error"
-                assert "error" in result
+        with db.get_db(db_path) as conn, _patch_nominatim("reverse", returns=None):
+            result = reverse_geocode(0.0, 0.0, conn)
+            assert result["source"] == "error"
+            assert "error" in result
 
     @_needs_geopy
     def test_nominatim_exception(self, tmp_path):
         from istota.geo import reverse_geocode
 
         db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
-                mock_geolocator = MagicMock()
-                mock_geolocator.reverse.side_effect = Exception("timeout")
-                mock_nom_cls.return_value = mock_geolocator
-
-                result = reverse_geocode(34.05, -118.25, conn)
-                assert result["source"] == "error"
-                assert "timeout" in result["error"]
+        with db.get_db(db_path) as conn, \
+                _patch_nominatim("reverse", side_effect=Exception("timeout")):
+            result = reverse_geocode(34.05, -118.25, conn)
+            assert result["source"] == "error"
+            assert "timeout" in result["error"]
 
 
 # ===========================================================================
@@ -2129,17 +1350,17 @@ class TestReverseGeocode:
 # ===========================================================================
 
 
+def _cluster(lat, lon, first_ts, last_ts, ping_count):
+    return {
+        "lat": lat, "lon": lon,
+        "first_ts": first_ts, "last_ts": last_ts,
+        "ping_count": ping_count,
+        "place_name": None, "place_id": None,
+    }
+
+
 class TestFilterTransitClusters:
     """Direct unit tests for filter_transit_clusters() spatial absorption."""
-
-    def _make_cluster(self, lat, lon, first_ts, last_ts, ping_count,
-                      place_name=None, place_id=None):
-        return {
-            "lat": lat, "lon": lon,
-            "first_ts": first_ts, "last_ts": last_ts,
-            "ping_count": ping_count,
-            "place_name": place_name, "place_id": place_id,
-        }
 
     def test_absorbs_nearby_fragment_into_previous_stop(self):
         """Small cluster within merge radius of previous stop gets absorbed."""
@@ -2147,13 +1368,9 @@ class TestFilterTransitClusters:
 
         clusters = [
             # Big stop — survives filtering on its own
-            self._make_cluster(34.0836, -118.3101,
-                               "2026-04-08T19:07:00Z", "2026-04-08T19:21:00Z",
-                               ping_count=20),
+            _cluster(34.0836, -118.3101, "2026-04-08T19:07:00Z", "2026-04-08T19:21:00Z", 20),
             # Small fragment — same location, indoor GPS gap
-            self._make_cluster(34.0837, -118.3100,
-                               "2026-04-08T19:27:00Z", "2026-04-08T19:28:00Z",
-                               ping_count=2),
+            _cluster(34.0837, -118.3100, "2026-04-08T19:27:00Z", "2026-04-08T19:28:00Z", 2),
         ]
         stops, transit = filter_transit_clusters(clusters)
         assert len(stops) == 1
@@ -2167,14 +1384,9 @@ class TestFilterTransitClusters:
         from istota.geo import filter_transit_clusters
 
         clusters = [
-            # Stop at location A
-            self._make_cluster(34.0836, -118.3101,
-                               "2026-04-08T19:07:00Z", "2026-04-08T19:21:00Z",
-                               ping_count=20),
+            _cluster(34.0836, -118.3101, "2026-04-08T19:07:00Z", "2026-04-08T19:21:00Z", 20),
             # Small fragment at a different location (~1km away)
-            self._make_cluster(34.0920, -118.3101,
-                               "2026-04-08T19:27:00Z", "2026-04-08T19:28:00Z",
-                               ping_count=2),
+            _cluster(34.0920, -118.3101, "2026-04-08T19:27:00Z", "2026-04-08T19:28:00Z", 2),
         ]
         stops, transit = filter_transit_clusters(clusters)
         assert len(stops) == 1
@@ -2185,32 +1397,28 @@ class TestFilterTransitClusters:
         """First cluster is small with no preceding stop — discarded normally."""
         from istota.geo import filter_transit_clusters
 
-        clusters = [
-            # Small cluster, nothing to absorb into
-            self._make_cluster(34.0836, -118.3101,
-                               "2026-04-08T19:07:00Z", "2026-04-08T19:08:00Z",
-                               ping_count=2),
-        ]
+        clusters = [_cluster(34.0836, -118.3101, "2026-04-08T19:07:00Z", "2026-04-08T19:08:00Z", 2)]
         stops, transit = filter_transit_clusters(clusters)
         assert len(stops) == 0
         assert transit == 2
 
 
+def _stop(location, lat, lon, first_ts, last_ts, ping_count,
+          location_source="nominatim", transit_before=0):
+    return {
+        "location": location,
+        "location_source": location_source,
+        "lat": lat, "lon": lon,
+        "first_ts": first_ts, "last_ts": last_ts,
+        "first_ts_local": first_ts[-9:-4] if len(first_ts) > 9 else first_ts,
+        "last_ts_local": last_ts[-9:-4] if len(last_ts) > 9 else last_ts,
+        "ping_count": ping_count,
+        "_transit_pings_before": transit_before,
+    }
+
+
 class TestMergeConsecutiveStops:
     """Direct unit tests for merge_consecutive_stops() spatial proximity merge."""
-
-    def _make_stop(self, location, lat, lon, first_ts, last_ts, ping_count,
-                   location_source="nominatim", transit_before=0):
-        return {
-            "location": location,
-            "location_source": location_source,
-            "lat": lat, "lon": lon,
-            "first_ts": first_ts, "last_ts": last_ts,
-            "first_ts_local": first_ts[-9:-4] if len(first_ts) > 9 else first_ts,
-            "last_ts_local": last_ts[-9:-4] if len(last_ts) > 9 else last_ts,
-            "ping_count": ping_count,
-            "_transit_pings_before": transit_before,
-        }
 
     def test_merges_nearby_unnamed_stops_with_different_names(self):
         """Two consecutive stops ~20m apart with different reverse-geocoded names
@@ -2218,12 +1426,12 @@ class TestMergeConsecutiveStops:
         from istota.geo import merge_consecutive_stops
 
         stops = [
-            self._make_stop("East Live Oak Drive", 34.1086, -118.3099,
-                            "2026-04-10T01:58:00Z", "2026-04-10T03:56:00Z", 33),
-            self._make_stop("Tryon Road", 34.1087, -118.3100,
-                            "2026-04-10T04:09:00Z", "2026-04-10T04:41:00Z", 11),
-            self._make_stop("East Live Oak Drive", 34.1086, -118.3099,
-                            "2026-04-10T05:05:00Z", "2026-04-10T05:16:00Z", 18),
+            _stop("East Live Oak Drive", 34.1086, -118.3099,
+                  "2026-04-10T01:58:00Z", "2026-04-10T03:56:00Z", 33),
+            _stop("Tryon Road", 34.1087, -118.3100,
+                  "2026-04-10T04:09:00Z", "2026-04-10T04:41:00Z", 11),
+            _stop("East Live Oak Drive", 34.1086, -118.3099,
+                  "2026-04-10T05:05:00Z", "2026-04-10T05:16:00Z", 18),
         ]
         merged = merge_consecutive_stops(stops)
         assert len(merged) == 1
@@ -2231,61 +1439,41 @@ class TestMergeConsecutiveStops:
         # Should keep the name from the longest stop
         assert merged[0]["location"] == "East Live Oak Drive"
 
-    def test_does_not_merge_distant_unnamed_stops(self):
-        """Two consecutive unnamed stops far apart should not merge."""
+    @pytest.mark.parametrize("stops", [
+        pytest.param([
+            _stop("Elm Street", 34.05, -118.25, "2026-04-10T10:00:00Z", "2026-04-10T11:00:00Z", 20),
+            _stop("Oak Avenue", 34.06, -118.25, "2026-04-10T11:30:00Z", "2026-04-10T12:00:00Z", 15),
+        ], id="distant_unnamed_stops"),
+        pytest.param([
+            _stop("Home", 34.1025, -118.3059, "2026-04-10T10:00:00Z", "2026-04-10T11:00:00Z", 20,
+                  location_source="saved_place"),
+            _stop("Neighbor", 34.1026, -118.3060, "2026-04-10T11:30:00Z", "2026-04-10T12:00:00Z", 15,
+                  location_source="saved_place"),
+        ], id="nearby_saved_places_not_proximity_merged"),
+        pytest.param([
+            _stop("Road A", 34.1086, -118.3099, "2026-04-10T10:00:00Z", "2026-04-10T11:00:00Z", 20),
+            _stop("Road B", 34.1087, -118.3100, "2026-04-10T12:00:00Z", "2026-04-10T13:00:00Z", 15,
+                  transit_before=5),
+        ], id="nearby_but_separated_by_transit"),
+    ])
+    def test_does_not_merge(self, stops):
         from istota.geo import merge_consecutive_stops
 
-        stops = [
-            self._make_stop("Elm Street", 34.05, -118.25,
-                            "2026-04-10T10:00:00Z", "2026-04-10T11:00:00Z", 20),
-            self._make_stop("Oak Avenue", 34.06, -118.25,
-                            "2026-04-10T11:30:00Z", "2026-04-10T12:00:00Z", 15),
-        ]
-        merged = merge_consecutive_stops(stops)
-        assert len(merged) == 2
-
-    def test_does_not_proximity_merge_saved_places(self):
-        """Two different saved places nearby should not be merged by proximity."""
-        from istota.geo import merge_consecutive_stops
-
-        stops = [
-            self._make_stop("Home", 34.1025, -118.3059,
-                            "2026-04-10T10:00:00Z", "2026-04-10T11:00:00Z", 20,
-                            location_source="saved_place"),
-            self._make_stop("Neighbor", 34.1026, -118.3060,
-                            "2026-04-10T11:30:00Z", "2026-04-10T12:00:00Z", 15,
-                            location_source="saved_place"),
-        ]
-        merged = merge_consecutive_stops(stops)
-        assert len(merged) == 2
+        assert len(merge_consecutive_stops(stops)) == 2
 
     def test_proximity_merge_keeps_longer_stop_name(self):
         """When merging by proximity, the name from the longer stop is kept."""
         from istota.geo import merge_consecutive_stops
 
         stops = [
-            self._make_stop("Short Road", 34.1086, -118.3099,
-                            "2026-04-10T10:00:00Z", "2026-04-10T10:10:00Z", 5),
-            self._make_stop("Main Boulevard", 34.1087, -118.3100,
-                            "2026-04-10T10:15:00Z", "2026-04-10T12:00:00Z", 30),
+            _stop("Short Road", 34.1086, -118.3099,
+                  "2026-04-10T10:00:00Z", "2026-04-10T10:10:00Z", 5),
+            _stop("Main Boulevard", 34.1087, -118.3100,
+                  "2026-04-10T10:15:00Z", "2026-04-10T12:00:00Z", 30),
         ]
         merged = merge_consecutive_stops(stops)
         assert len(merged) == 1
         assert merged[0]["location"] == "Main Boulevard"
-
-    def test_proximity_merge_respects_transit_threshold(self):
-        """Even if nearby, stops separated by significant transit should not merge."""
-        from istota.geo import merge_consecutive_stops
-
-        stops = [
-            self._make_stop("Road A", 34.1086, -118.3099,
-                            "2026-04-10T10:00:00Z", "2026-04-10T11:00:00Z", 20),
-            self._make_stop("Road B", 34.1087, -118.3100,
-                            "2026-04-10T12:00:00Z", "2026-04-10T13:00:00Z", 15,
-                            transit_before=5),
-        ]
-        merged = merge_consecutive_stops(stops)
-        assert len(merged) == 2
 
 
 class TestClusterPings:
@@ -2326,26 +1514,7 @@ class TestClusterPings:
             {"lat": 34.10, "lon": -118.25, "timestamp": "2026-03-08T11:00:00Z"},
         ]
         result = cluster_pings(pings)
-        assert len(result) == 2
-        assert result[0]["ping_count"] == 1
-        assert result[1]["ping_count"] == 1
-
-    def test_cluster_carries_place_info(self):
-        from istota.geo import cluster_pings
-
-        # 3 tagged pings meets MIN_PLACE_PINGS threshold for attribution
-        pings = [
-            {"lat": 34.05, "lon": -118.25, "timestamp": "2026-03-08T10:00:00Z",
-             "place_id": 42, "place_name": "home"},
-            {"lat": 34.05001, "lon": -118.25001, "timestamp": "2026-03-08T10:05:00Z",
-             "place_id": 42, "place_name": "home"},
-            {"lat": 34.05002, "lon": -118.25002, "timestamp": "2026-03-08T10:10:00Z",
-             "place_id": 42, "place_name": "home"},
-        ]
-        result = cluster_pings(pings)
-        assert len(result) == 1
-        assert result[0]["place_id"] == 42
-        assert result[0]["place_name"] == "home"
+        assert [c["ping_count"] for c in result] == [1, 1]
 
     def test_centroid_drift_splits_route(self):
         """Many pings drifting slowly along a road should NOT merge into one cluster.
@@ -2356,9 +1525,6 @@ class TestClusterPings:
         """
         from istota.geo import cluster_pings
 
-        # 120 pings drifting ~4m each north (~480m total), like riding through
-        # an intersection over ~10 minutes. Each ping only ~4m from centroid
-        # so old code absorbs them all into one cluster.
         pings = [
             {"lat": 34.0500 + i * 0.000036, "lon": -118.25,
              "timestamp": f"2026-04-03T17:{i // 12:02d}:{(i % 12) * 5:02d}Z"}
@@ -2390,25 +1556,19 @@ class TestClusterPings:
         assert haversine(a["lat"], -118.25, c["lat"], -118.25) > 300
 
         result = cluster_pings([a, b1, b2, c], radius_m=200)
-        assert len(result) == 2
-        assert result[0]["ping_count"] == 3  # A + B1 + B2
-        assert result[1]["ping_count"] == 1  # C split off by origin anchor
+        # A + B1 + B2, then C split off by origin anchor
+        assert [c["ping_count"] for c in result] == [3, 1]
 
     def test_time_gap_splits_cluster(self):
         """Pings at the same location but >5 min apart should split."""
         from istota.geo import cluster_pings
 
         pings = [
-            {"lat": 34.05, "lon": -118.25, "timestamp": "2026-04-03T10:00:00Z"},
-            {"lat": 34.05, "lon": -118.25, "timestamp": "2026-04-03T10:01:00Z"},
-            # 10-minute gap
-            {"lat": 34.05, "lon": -118.25, "timestamp": "2026-04-03T10:11:00Z"},
-            {"lat": 34.05, "lon": -118.25, "timestamp": "2026-04-03T10:12:00Z"},
+            {"lat": 34.05, "lon": -118.25, "timestamp": f"2026-04-03T10:{m}:00Z"}
+            for m in ("00", "01", "11", "12")  # 10-minute gap after 10:01
         ]
         result = cluster_pings(pings, max_gap_seconds=300)
-        assert len(result) == 2
-        assert result[0]["ping_count"] == 2
-        assert result[1]["ping_count"] == 2
+        assert [c["ping_count"] for c in result] == [2, 2]
 
     def test_stationary_pings_cluster_normally(self):
         """Pings at the same spot with no time gaps stay in one cluster."""
@@ -2419,8 +1579,12 @@ class TestClusterPings:
             for i in range(20)
         ]
         result = cluster_pings(pings, radius_m=200)
-        assert len(result) == 1
-        assert result[0]["ping_count"] == 20
+        assert [c["ping_count"] for c in result] == [20]
+
+
+def _dp(time, accuracy, activity_type, lat=34.10, lon=-118.30):
+    return {"timestamp": f"2026-04-28T{time}Z", "lat": lat, "lon": lon,
+            "accuracy": accuracy, "activity_type": activity_type}
 
 
 class TestDedupeNearDuplicatePings:
@@ -2432,224 +1596,79 @@ class TestDedupeNearDuplicatePings:
     See ISSUE-059.
     """
 
-    def test_empty_input(self):
+    @pytest.mark.parametrize("pings, kept", [
+        pytest.param([], [], id="empty_input"),
+        pytest.param([_dp("03:23:53", 6.0, "walking", 34.1, -118.3)], [0],
+                     id="single_ping_passes_through"),
+        pytest.param([_dp("03:23:00", 60.0, None), _dp("03:23:10", 6.0, "walking")], [0, 1],
+                     id="pings_more_than_5s_apart_both_kept"),
+        # The most common case: cell/Wi-Fi ping has activity_type=None.
+        pytest.param([_dp("03:23:42", 63.0, "walking", 34.10434, -118.30830),
+                      _dp("03:23:43", 56.0, None, 34.10274, -118.30598)], [0],
+                     id="one_set_one_null_drops_null"),
+        pytest.param([_dp("03:23:42", 56.0, None, 34.10274, -118.30598),
+                      _dp("03:23:43", 63.0, "walking", 34.10434, -118.30830)], [1],
+                     id="one_null_one_set_drops_null_regardless_of_order"),
+        # activity_type wins over accuracy — confirmed by issue example
+        # 20061/20062: null had 40m, walking had 55m, but walking is the real fix.
+        pytest.param([_dp("03:27:21", 40.0, None, 34.10456, -118.30962),
+                      _dp("03:27:21", 55.0, "walking", 34.10436, -118.30992)], [1],
+                     id="one_set_keeps_tagged_even_if_accuracy_worse"),
+        pytest.param([_dp("03:23:42", 55.0, None), _dp("03:23:43", 14.0, None)], [1],
+                     id="both_null_picks_better_accuracy"),
+        # No way to distinguish — preserve raw data rather than guess.
+        pytest.param([_dp("03:23:42", 30.0, None), _dp("03:23:43", 30.0, None, 34.11, -118.31)],
+                     [0, 1], id="both_null_equal_accuracy_keeps_both"),
+        # Per design: rare case (18/204 in prod), keep both rather than drop a real fix.
+        pytest.param([_dp("03:23:42", 10.0, "driving"),
+                      _dp("03:23:43", 10.0, "driving", 34.11, -118.31)],
+                     [0, 1], id="both_set_equal_accuracy_keeps_both"),
+        pytest.param([_dp("03:23:42", 14.0, "walking"), _dp("03:23:43", 5.0, "walking")], [1],
+                     id="both_set_unequal_accuracy_keeps_better"),
+        # The first two collapse to walking; the third is 10s after the second,
+        # within 5s of nothing in the kept set, so it stays.
+        pytest.param([_dp("03:23:42", 63.0, "walking", 34.10434, -118.30830),
+                      _dp("03:23:43", 56.0, None, 34.10274, -118.30598),
+                      _dp("03:23:53", 6.0, "walking", 34.10428, -118.30889)], [0, 2],
+                     id="chain_of_three_within_window"),
+        pytest.param([_dp("03:23:00", 60.0, None), _dp("03:23:05", 6.0, "walking")], [1],
+                     id="window_boundary_5s_inclusive"),
+        pytest.param([_dp("03:23:00", 60.0, None), _dp("03:23:06", 6.0, "walking")], [0, 1],
+                     id="window_boundary_just_over_5s_keeps_both"),
+        # The 2026-04-27 issue example: real walking + cell/Wi-Fi anchor + real
+        # walking + a place-matched pair. One walking ping survives per
+        # timestamp cluster and the cell anchors are dropped.
+        pytest.param([_dp("03:23:42", 63.0, "walking", 34.1043368, -118.3082973),
+                      _dp("03:23:43", 56.0, None, 34.10274185, -118.30598),
+                      _dp("03:23:53", 6.0, "walking", 34.104277, -118.3088875),
+                      _dp("03:27:21", 40.0, None, 34.10456, -118.30962),
+                      _dp("03:27:21", 55.0, "walking", 34.10436, -118.30992)], [0, 2, 4],
+                     id="zigzag_walk_collapses_cleanly"),
+        # Both null-activity and one lacks accuracy: can't compare, keep both.
+        pytest.param([_dp("03:23:42", None, None), _dp("03:23:43", 14.0, None)], [0, 1],
+                     id="missing_accuracy_treated_as_tie"),
+    ])
+    def test_dedupe(self, pings, kept):
         from istota.geo import dedupe_near_duplicate_pings
 
-        assert dedupe_near_duplicate_pings([]) == []
-
-    def test_single_ping_passes_through(self):
-        from istota.geo import dedupe_near_duplicate_pings
-
-        pings = [{"timestamp": "2026-04-28T03:23:53Z", "lat": 34.1, "lon": -118.3,
-                  "accuracy": 6.0, "activity_type": "walking"}]
-        assert dedupe_near_duplicate_pings(pings) == pings
-
-    def test_pings_more_than_5s_apart_both_kept(self):
-        from istota.geo import dedupe_near_duplicate_pings
-
-        pings = [
-            {"timestamp": "2026-04-28T03:23:00Z", "lat": 34.1, "lon": -118.3,
-             "accuracy": 60.0, "activity_type": None},
-            {"timestamp": "2026-04-28T03:23:10Z", "lat": 34.1, "lon": -118.3,
-             "accuracy": 6.0, "activity_type": "walking"},
-        ]
-        result = dedupe_near_duplicate_pings(pings)
-        assert len(result) == 2
-
-    def test_one_set_one_null_drops_null(self):
-        """The most common case: cell/Wi-Fi ping has activity_type=None."""
-        from istota.geo import dedupe_near_duplicate_pings
-
-        pings = [
-            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10434, "lon": -118.30830,
-             "accuracy": 63.0, "activity_type": "walking"},
-            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10274, "lon": -118.30598,
-             "accuracy": 56.0, "activity_type": None},
-        ]
-        result = dedupe_near_duplicate_pings(pings)
-        assert len(result) == 1
-        assert result[0]["activity_type"] == "walking"
-
-    def test_one_null_one_set_drops_null_regardless_of_order(self):
-        from istota.geo import dedupe_near_duplicate_pings
-
-        pings = [
-            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10274, "lon": -118.30598,
-             "accuracy": 56.0, "activity_type": None},
-            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10434, "lon": -118.30830,
-             "accuracy": 63.0, "activity_type": "walking"},
-        ]
-        result = dedupe_near_duplicate_pings(pings)
-        assert len(result) == 1
-        assert result[0]["activity_type"] == "walking"
-
-    def test_one_set_keeps_tagged_even_if_accuracy_worse(self):
-        """activity_type wins over accuracy — confirmed by issue example
-        20061/20062: null had 40m, walking had 55m, but walking is the real fix."""
-        from istota.geo import dedupe_near_duplicate_pings
-
-        pings = [
-            {"timestamp": "2026-04-28T03:27:21Z", "lat": 34.10456, "lon": -118.30962,
-             "accuracy": 40.0, "activity_type": None},
-            {"timestamp": "2026-04-28T03:27:21Z", "lat": 34.10436, "lon": -118.30992,
-             "accuracy": 55.0, "activity_type": "walking"},
-        ]
-        result = dedupe_near_duplicate_pings(pings)
-        assert len(result) == 1
-        assert result[0]["activity_type"] == "walking"
-
-    def test_both_null_picks_better_accuracy(self):
-        from istota.geo import dedupe_near_duplicate_pings
-
-        pings = [
-            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10, "lon": -118.30,
-             "accuracy": 55.0, "activity_type": None},
-            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10, "lon": -118.30,
-             "accuracy": 14.0, "activity_type": None},
-        ]
-        result = dedupe_near_duplicate_pings(pings)
-        assert len(result) == 1
-        assert result[0]["accuracy"] == 14.0
-
-    def test_both_null_equal_accuracy_keeps_both(self):
-        """No way to distinguish — preserve raw data rather than guess."""
-        from istota.geo import dedupe_near_duplicate_pings
-
-        pings = [
-            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10, "lon": -118.30,
-             "accuracy": 30.0, "activity_type": None},
-            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.11, "lon": -118.31,
-             "accuracy": 30.0, "activity_type": None},
-        ]
-        result = dedupe_near_duplicate_pings(pings)
-        assert len(result) == 2
-
-    def test_both_set_equal_accuracy_keeps_both(self):
-        """Per design: rare case (18/204 in prod), keep both rather than drop a real fix."""
-        from istota.geo import dedupe_near_duplicate_pings
-
-        pings = [
-            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10, "lon": -118.30,
-             "accuracy": 10.0, "activity_type": "driving"},
-            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.11, "lon": -118.31,
-             "accuracy": 10.0, "activity_type": "driving"},
-        ]
-        result = dedupe_near_duplicate_pings(pings)
-        assert len(result) == 2
-
-    def test_both_set_unequal_accuracy_keeps_better(self):
-        from istota.geo import dedupe_near_duplicate_pings
-
-        pings = [
-            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10, "lon": -118.30,
-             "accuracy": 14.0, "activity_type": "walking"},
-            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10, "lon": -118.30,
-             "accuracy": 5.0, "activity_type": "walking"},
-        ]
-        result = dedupe_near_duplicate_pings(pings)
-        assert len(result) == 1
-        assert result[0]["accuracy"] == 5.0
-
-    def test_chain_of_three_within_window(self):
-        """Three pings each within 5s of the next — chain dedup."""
-        from istota.geo import dedupe_near_duplicate_pings
-
-        pings = [
-            # walking at the actual position
-            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10434, "lon": -118.30830,
-             "accuracy": 63.0, "activity_type": "walking"},
-            # cell/Wi-Fi anchor near home — 1s later
-            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10274, "lon": -118.30598,
-             "accuracy": 56.0, "activity_type": None},
-            # high-quality GPS — 11s after first, but only 10s after second
-            # (still within 5s of nothing in kept set; should be kept)
-            {"timestamp": "2026-04-28T03:23:53Z", "lat": 34.10428, "lon": -118.30889,
-             "accuracy": 6.0, "activity_type": "walking"},
-        ]
-        result = dedupe_near_duplicate_pings(pings)
-        # First two collapse to walking; third is 10s later → stays
-        assert len(result) == 2
-        assert all(p["activity_type"] == "walking" for p in result)
-
-    def test_window_boundary_5s_inclusive(self):
-        """A pair at exactly 5s apart should be deduped."""
-        from istota.geo import dedupe_near_duplicate_pings
-
-        pings = [
-            {"timestamp": "2026-04-28T03:23:00Z", "lat": 34.10, "lon": -118.30,
-             "accuracy": 60.0, "activity_type": None},
-            {"timestamp": "2026-04-28T03:23:05Z", "lat": 34.10, "lon": -118.30,
-             "accuracy": 6.0, "activity_type": "walking"},
-        ]
-        result = dedupe_near_duplicate_pings(pings)
-        assert len(result) == 1
-        assert result[0]["activity_type"] == "walking"
-
-    def test_window_boundary_just_over_5s_keeps_both(self):
-        from istota.geo import dedupe_near_duplicate_pings
-
-        pings = [
-            {"timestamp": "2026-04-28T03:23:00Z", "lat": 34.10, "lon": -118.30,
-             "accuracy": 60.0, "activity_type": None},
-            {"timestamp": "2026-04-28T03:23:06Z", "lat": 34.10, "lon": -118.30,
-             "accuracy": 6.0, "activity_type": "walking"},
-        ]
-        result = dedupe_near_duplicate_pings(pings)
-        assert len(result) == 2
-
-    def test_zigzag_walk_collapses_cleanly(self):
-        """Reproduces the 2026-04-27 issue example.
-
-        Five pings at LA: real walking + cell/Wi-Fi anchor + real walking +
-        place-matched ping pair. Expected: 3 walking pings survive (one per
-        timestamp cluster), the cell anchors are dropped.
-        """
-        from istota.geo import dedupe_near_duplicate_pings
-
-        pings = [
-            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.1043368,
-             "lon": -118.3082973, "accuracy": 63.0, "activity_type": "walking"},
-            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10274185,
-             "lon": -118.30598, "accuracy": 56.0, "activity_type": None},
-            {"timestamp": "2026-04-28T03:23:53Z", "lat": 34.104277,
-             "lon": -118.3088875, "accuracy": 6.0, "activity_type": "walking"},
-            {"timestamp": "2026-04-28T03:27:21Z", "lat": 34.10456,
-             "lon": -118.30962, "accuracy": 40.0, "activity_type": None},
-            {"timestamp": "2026-04-28T03:27:21Z", "lat": 34.10436,
-             "lon": -118.30992, "accuracy": 55.0, "activity_type": "walking"},
-        ]
-        result = dedupe_near_duplicate_pings(pings)
-        # Pair 1 (42-43): walking wins → 1 ping
-        # 53s ping: 10s after pair 1's winner → keeps standalone
-        # Pair 3 (27:21 dup): walking wins → 1 ping
-        assert len(result) == 3
-        assert all(p["activity_type"] == "walking" for p in result)
-
-    def test_missing_accuracy_treated_as_tie(self):
-        """If both are null-activity and one lacks accuracy, can't compare → keep both."""
-        from istota.geo import dedupe_near_duplicate_pings
-
-        pings = [
-            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10, "lon": -118.30,
-             "accuracy": None, "activity_type": None},
-            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10, "lon": -118.30,
-             "accuracy": 14.0, "activity_type": None},
-        ]
-        result = dedupe_near_duplicate_pings(pings)
-        assert len(result) == 2
+        assert dedupe_near_duplicate_pings(pings) == [pings[i] for i in kept]
 
     def test_does_not_mutate_input(self):
         from istota.geo import dedupe_near_duplicate_pings
 
-        pings = [
-            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10, "lon": -118.30,
-             "accuracy": 60.0, "activity_type": None},
-            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10, "lon": -118.30,
-             "accuracy": 6.0, "activity_type": "walking"},
-        ]
-        original_len = len(pings)
+        pings = [_dp("03:23:42", 60.0, None), _dp("03:23:43", 6.0, "walking")]
         dedupe_near_duplicate_pings(pings)
-        assert len(pings) == original_len
+        assert len(pings) == 2
+
+
+def _gym_ping(ts, lat=34.1000, **kw):
+    ping = {"lat": lat, "lon": -118.3000, "timestamp": ts}
+    ping.update(kw)
+    return ping
+
+
+def _tagged_gym(ts):
+    return _gym_ping(ts, place_id=7, place_name="Gym")
 
 
 class TestClusterPlaceAttribution:
@@ -2659,53 +1678,35 @@ class TestClusterPlaceAttribution:
     weeds out drive-by grazing pings via a minimum-count threshold.
     """
 
-    def test_single_tagged_ping_does_not_anchor_place(self):
-        """Drive-by: one grazing ping with place_id should not promote the
-        cluster to a place — that's the phantom-stop scenario."""
+    @pytest.mark.parametrize("tags, place_id, place_name", [
+        # Drive-by: one grazing tagged ping must not promote the cluster to a
+        # place — that's the phantom-stop scenario.
+        ([None, (7, "X")], None, None),
+        # Two grazing pings still below threshold — slow drive-by territory.
+        ([(7, "X"), (7, "X"), None], None, None),
+        # At MIN_PLACE_PINGS (3), the cluster takes on the place_id.
+        ([(7, "X"), (7, "X"), (7, "X")], 7, "X"),
+        # Different place_ids: the most-counted one wins, provided it meets the threshold.
+        ([(5, "Y"), (6, "Z"), (6, "Z"), (6, "Z")], 6, "Z"),
+        ([None, None], None, None),
+    ], ids=["single_tagged_ping_does_not_anchor_place", "two_tagged_pings_below_threshold",
+            "three_tagged_pings_meets_threshold", "majority_wins_when_multiple_places",
+            "no_place_when_no_pings_have_place"])
+    def test_attribution_threshold(self, tags, place_id, place_name):
         from istota.geo import cluster_pings
 
-        pings = [
-            {"lat": 34.10, "lon": -118.30, "timestamp": "2026-04-28T03:23:00Z"},
-            {"lat": 34.10001, "lon": -118.30001, "timestamp": "2026-04-28T03:23:30Z",
-             "place_id": 7, "place_name": "X"},
-        ]
+        pings = []
+        for i, tag in enumerate(tags):
+            ping = {"lat": 34.10 + 0.00001 * i, "lon": -118.30 + 0.00001 * i,
+                    "timestamp": f"2026-04-28T03:23:{10 * i:02d}Z"}
+            if tag:
+                ping["place_id"], ping["place_name"] = tag
+            pings.append(ping)
+
         result = cluster_pings(pings, radius_m=250)
         assert len(result) == 1
-        assert result[0]["place_id"] is None
-        assert result[0]["place_name"] is None
-
-    def test_two_tagged_pings_below_threshold(self):
-        """Two grazing pings still below threshold — slow drive-by territory."""
-        from istota.geo import cluster_pings
-
-        pings = [
-            {"lat": 34.10, "lon": -118.30, "timestamp": "2026-04-28T03:23:00Z",
-             "place_id": 7, "place_name": "X"},
-            {"lat": 34.10001, "lon": -118.30001, "timestamp": "2026-04-28T03:23:10Z",
-             "place_id": 7, "place_name": "X"},
-            {"lat": 34.10002, "lon": -118.30002, "timestamp": "2026-04-28T03:23:20Z"},
-        ]
-        result = cluster_pings(pings, radius_m=250)
-        assert len(result) == 1
-        assert result[0]["place_id"] is None
-        assert result[0]["place_name"] is None
-
-    def test_three_tagged_pings_meets_threshold(self):
-        """At MIN_PLACE_PINGS (3), the cluster takes on the place_id."""
-        from istota.geo import cluster_pings
-
-        pings = [
-            {"lat": 34.10, "lon": -118.30, "timestamp": "2026-04-28T03:23:00Z",
-             "place_id": 7, "place_name": "X"},
-            {"lat": 34.10001, "lon": -118.30001, "timestamp": "2026-04-28T03:23:10Z",
-             "place_id": 7, "place_name": "X"},
-            {"lat": 34.10002, "lon": -118.30002, "timestamp": "2026-04-28T03:23:20Z",
-             "place_id": 7, "place_name": "X"},
-        ]
-        result = cluster_pings(pings, radius_m=250)
-        assert len(result) == 1
-        assert result[0]["place_id"] == 7
-        assert result[0]["place_name"] == "X"
+        assert result[0]["place_id"] == place_id
+        assert result[0]["place_name"] == place_name
 
     def test_lazy_acres_scenario(self):
         """Walking legs contaminate the centroid past the place radius, but the
@@ -2719,20 +1720,17 @@ class TestClusterPlaceAttribution:
         # 19 walk-out pings drifting east, no place_id
         # Total: 41 pings, 17 tagged with Lazy Acres
         pings = []
-        # Walk-in
         for i in range(5):
             pings.append({
                 "lat": 34.1042, "lon": -118.3085 - 0.0001 * (5 - i),
                 "timestamp": f"2026-04-28T03:38:{i * 10:02d}Z",
             })
-        # At the store
         for i in range(17):
             pings.append({
                 "lat": 34.1044, "lon": -118.3097,
                 "timestamp": f"2026-04-28T03:39:{i * 10:02d}Z" if i < 6 else f"2026-04-28T03:{40 + (i - 6) // 6:02d}:{((i - 6) % 6) * 10:02d}Z",
                 "place_id": 1398, "place_name": "Lazy Acres",
             })
-        # Walk-out
         for i in range(19):
             pings.append({
                 "lat": 34.1041, "lon": -118.3085 - 0.0001 * i,
@@ -2746,53 +1744,13 @@ class TestClusterPlaceAttribution:
         attributed = [c for c in result if c["place_id"] == 1398]
         assert attributed, "expected at least one cluster attributed to Lazy Acres"
 
-    def test_majority_wins_when_multiple_places(self):
-        """If a cluster spans pings tagged with different place_ids, the
-        most-counted one wins — provided it meets the threshold."""
-        from istota.geo import cluster_pings
-
-        pings = [
-            {"lat": 34.10, "lon": -118.30, "timestamp": "2026-04-28T03:23:00Z",
-             "place_id": 5, "place_name": "Y"},
-            {"lat": 34.10001, "lon": -118.30001, "timestamp": "2026-04-28T03:23:10Z",
-             "place_id": 6, "place_name": "Z"},
-            {"lat": 34.10002, "lon": -118.30002, "timestamp": "2026-04-28T03:23:20Z",
-             "place_id": 6, "place_name": "Z"},
-            {"lat": 34.10003, "lon": -118.30003, "timestamp": "2026-04-28T03:23:30Z",
-             "place_id": 6, "place_name": "Z"},
-        ]
-        result = cluster_pings(pings, radius_m=250)
-        assert len(result) == 1
-        assert result[0]["place_id"] == 6
-        assert result[0]["place_name"] == "Z"
-
-    def test_no_place_when_no_pings_have_place(self):
-        from istota.geo import cluster_pings
-
-        pings = [
-            {"lat": 34.10, "lon": -118.30, "timestamp": "2026-04-28T03:23:00Z"},
-            {"lat": 34.10001, "lon": -118.30001, "timestamp": "2026-04-28T03:23:30Z"},
-        ]
-        result = cluster_pings(pings, radius_m=250)
-        assert len(result) == 1
-        assert result[0]["place_id"] is None
-        assert result[0]["place_name"] is None
-
     def test_stop_ends_when_reporting_resumes_outside_place(self):
         """A quiet tracker does not turn its last stationary ping into departure."""
         from istota.geo import cluster_pings
 
         pings = [
-            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:24:00Z",
-             "place_id": 7, "place_name": "Gym"},
-            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:29:00Z",
-             "place_id": 7, "place_name": "Gym"},
-            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:34:00Z",
-             "place_id": 7, "place_name": "Gym"},
-            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:38:33Z",
-             "place_id": 7, "place_name": "Gym"},
-            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T15:45:17Z",
-             "activity_type": "driving"},
+            *[_tagged_gym(f"2026-08-26T14:{t}Z") for t in ("24:00", "29:00", "34:00", "38:33")],
+            _gym_ping("2026-08-26T15:45:17Z", activity_type="driving"),
         ]
 
         result = cluster_pings(pings)
@@ -2805,14 +1763,8 @@ class TestClusterPlaceAttribution:
         from istota.geo import cluster_pings
 
         pings = [
-            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:00:00Z",
-             "place_id": 7, "place_name": "Gym"},
-            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:05:00Z",
-             "place_id": 7, "place_name": "Gym"},
-            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:10:00Z",
-             "place_id": 7, "place_name": "Gym"},
-            {"lat": 34.1720, "lon": -118.3000, "timestamp": "2026-08-26T15:10:00Z",
-             "speed": 20.0, "activity_type": "driving"},
+            *[_tagged_gym(f"2026-08-26T14:{m}:00Z") for m in ("00", "05", "10")],
+            _gym_ping("2026-08-26T15:10:00Z", lat=34.1720, speed=20.0, activity_type="driving"),
         ]
 
         result = cluster_pings(pings)
@@ -2827,13 +1779,8 @@ class TestClusterPlaceAttribution:
         from istota.geo import MAX_STOP_EXTENSION_SECONDS, cluster_pings
 
         pings = [
-            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:00:00Z",
-             "place_id": 7, "place_name": "Gym"},
-            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:05:00Z",
-             "place_id": 7, "place_name": "Gym"},
-            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:10:00Z",
-             "place_id": 7, "place_name": "Gym"},
-            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-27T08:00:00Z"},
+            *[_tagged_gym(f"2026-08-26T14:{m}:00Z") for m in ("00", "05", "10")],
+            _gym_ping("2026-08-27T08:00:00Z"),
         ]
 
         result = cluster_pings(pings)
@@ -2847,16 +1794,9 @@ class TestClusterPlaceAttribution:
         from istota.geo import cluster_pings
 
         pings = [
-            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:00:00Z",
-             "place_id": 7, "place_name": "Gym"},
-            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:01:00Z",
-             "place_id": 7, "place_name": "Gym"},
-            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:02:00Z",
-             "place_id": 7, "place_name": "Gym"},
-            {"lat": 34.1009, "lon": -118.3000, "timestamp": "2026-08-26T14:03:00Z",
-             "speed": 10.0, "activity_type": "driving"},
-            {"lat": 34.1012, "lon": -118.3000, "timestamp": "2026-08-26T14:04:00Z",
-             "speed": 10.0, "activity_type": "driving"},
+            *[_tagged_gym(f"2026-08-26T14:{m}:00Z") for m in ("00", "01", "02")],
+            _gym_ping("2026-08-26T14:03:00Z", lat=34.1009, speed=10.0, activity_type="driving"),
+            _gym_ping("2026-08-26T14:04:00Z", lat=34.1012, speed=10.0, activity_type="driving"),
         ]
 
         result = cluster_pings(pings)
@@ -2874,67 +1814,25 @@ class TestClusterPlaceAttribution:
 
 class TestCmdReverseGeocode:
     def test_returns_json(self, tmp_path):
-        from istota.skills.location import cmd_reverse_geocode
-
         db_path = _init_db(tmp_path)
         with db.get_db(db_path) as conn:
-            db.cache_reverse_geocode(conn, 34.05, -118.25, {
-                "display_name": "Test Place",
-                "neighborhood": "Hood",
-                "suburb": "Sub",
-                "road": "Road",
-                "city": "City",
-            })
+            db.cache_reverse_geocode(conn, 34.05, -118.25, _geo_row(
+                "Test Place", neighborhood="Hood", suburb="Sub", road="Road", city="City",
+            ))
             conn.commit()
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        args = MagicMock()
-        args.lat = 34.05
-        args.lon = -118.25
-
-        with patch.dict("os.environ", env, clear=False):
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                cmd_reverse_geocode(args)
-            finally:
-                sys.stdout = old_stdout
-
-        result = json.loads(captured.getvalue())
+        result = _run_cli(_skill().cmd_reverse_geocode, db_path, lat=34.05, lon=-118.25)
         assert result["source"] == "cache"
         assert result["display_name"] == "Test Place"
 
     @_needs_geopy
     def test_nominatim_fallback(self, tmp_path):
-        from istota.skills.location import cmd_reverse_geocode
-
         db_path = _init_db(tmp_path)
+        hit = _nominatim_hit("789 Pine St", road="Pine St", city="Glendale")
 
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        args = MagicMock()
-        args.lat = 34.15
-        args.lon = -118.14
+        with _patch_nominatim("reverse", returns=hit):
+            result = _run_cli(_skill().cmd_reverse_geocode, db_path, lat=34.15, lon=-118.14)
 
-        mock_result = MagicMock()
-        mock_result.address = "789 Pine St"
-        mock_result.raw = {"address": {"road": "Pine St", "city": "Glendale"}}
-
-        with patch.dict("os.environ", env, clear=False), \
-             patch("geopy.geocoders.Nominatim") as mock_nom_cls:
-            mock_geolocator = MagicMock()
-            mock_geolocator.reverse.return_value = mock_result
-            mock_nom_cls.return_value = mock_geolocator
-
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                cmd_reverse_geocode(args)
-            finally:
-                sys.stdout = old_stdout
-
-        result = json.loads(captured.getvalue())
         assert result["source"] == "nominatim"
         assert result["road"] == "Pine St"
 
@@ -2944,70 +1842,62 @@ class TestCmdReverseGeocode:
 # ===========================================================================
 
 
+def _run_day_summary(tmp_path, pings=None, places=None,
+                     date="2026-03-08", tz="America/Los_Angeles",
+                     nominatim_results=None):
+    """Run cmd_day_summary with a test DB and a mocked Nominatim.
+
+    Uses two DBs to mirror production: per-user location.db for
+    pings/places, framework istota.db for reverse_geocode_cache.
+    """
+    from istota.skills.location import cmd_day_summary
+
+    loc_db = _init_loc_db(tmp_path, "location.db")
+    framework_db = _init_db(tmp_path)  # for reverse_geocode_cache
+    with location_db.connect(loc_db) as conn:
+        for p in (places or []):
+            location_db.add_place(
+                conn, p["name"], p["lat"], p["lon"],
+                radius_meters=p.get("radius_meters", 100),
+                category=p.get("category", "other"),
+            )
+        for ping in (pings or []):
+            location_db.insert_ping(
+                conn, ping["timestamp"], ping["lat"], ping["lon"],
+                accuracy=ping.get("accuracy", 5.0),
+                speed=ping.get("speed"),
+                activity_type=ping.get("activity_type"),
+                place_id=ping.get("place_id"),
+                wifi_zone=ping.get("wifi_zone", False),
+                source=ping.get("source", "overland"),
+            )
+        conn.commit()
+
+    env = {
+        "LOCATION_DB_PATH": str(loc_db),
+        "ISTOTA_DB_PATH": str(framework_db),
+        "ISTOTA_USER_ID": "alice",
+        "TZ": tz,
+    }
+    args = MagicMock()
+    args.date = date
+    args.tz = tz
+
+    nominatim = ({"side_effect": nominatim_results} if nominatim_results
+                 else {"returns": None})
+    with patch.dict("os.environ", env, clear=False), _patch_nominatim("reverse", **nominatim):
+        return _capture(cmd_day_summary, args)
+
+
+def _pings_at(lat, lon, times, day="2026-03-08", **kw):
+    """One ping per ``HH:MM`` in ``times`` at a single spot."""
+    return [{"timestamp": f"{day}T{t}:00Z", "lat": lat, "lon": lon, **kw} for t in times]
+
+
 @_needs_geopy
 class TestCmdDaySummary:
-    def _run_day_summary(self, tmp_path, pings=None, places=None,
-                         date="2026-03-08", tz="America/Los_Angeles",
-                         nominatim_results=None):
-        """Helper to run cmd_day_summary with test DB and optional mocks.
-
-        Uses two DBs to mirror production: per-user location.db for
-        pings/places, framework istota.db for reverse_geocode_cache.
-        """
-        from istota.skills.location import cmd_day_summary
-
-        loc_db = _init_loc_db(tmp_path, "location.db")
-        framework_db = _init_db(tmp_path)  # for reverse_geocode_cache
-        with location_db.connect(loc_db) as conn:
-            for p in (places or []):
-                location_db.add_place(
-                    conn, p["name"], p["lat"], p["lon"],
-                    radius_meters=p.get("radius_meters", 100),
-                    category=p.get("category", "other"),
-                )
-            for ping in (pings or []):
-                place_id = ping.get("place_id")
-                location_db.insert_ping(
-                    conn, ping["timestamp"], ping["lat"], ping["lon"],
-                    accuracy=ping.get("accuracy", 5.0),
-                    speed=ping.get("speed"),
-                    activity_type=ping.get("activity_type"),
-                    place_id=place_id,
-                    wifi_zone=ping.get("wifi_zone", False),
-                    source=ping.get("source", "overland"),
-                )
-            conn.commit()
-
-        env = {
-            "LOCATION_DB_PATH": str(loc_db),
-            "ISTOTA_DB_PATH": str(framework_db),
-            "ISTOTA_USER_ID": "alice",
-            "TZ": tz,
-        }
-        args = MagicMock()
-        args.date = date
-        args.tz = tz
-
-        mock_nom = MagicMock()
-        if nominatim_results:
-            mock_nom.reverse.side_effect = nominatim_results
-        else:
-            mock_nom.reverse.return_value = None
-
-        with patch.dict("os.environ", env, clear=False), \
-             patch("geopy.geocoders.Nominatim", return_value=mock_nom):
-            captured = io.StringIO()
-            old_stdout = sys.stdout
-            sys.stdout = captured
-            try:
-                cmd_day_summary(args)
-            finally:
-                sys.stdout = old_stdout
-
-        return json.loads(captured.getvalue())
-
     def test_no_pings_empty_stops(self, tmp_path):
-        result = self._run_day_summary(tmp_path)
+        result = _run_day_summary(tmp_path)
         assert result["date"] == "2026-03-08"
         assert result["stops"] == []
         assert result["ping_count"] == 0
@@ -3022,7 +1912,7 @@ class TestCmdDaySummary:
             {"timestamp": "2026-03-08T16:02:00Z", "lat": 34.0501, "lon": -118.2501, "place_id": 1},
             {"timestamp": "2026-03-08T16:04:00Z", "lat": 34.0502, "lon": -118.2502, "place_id": 1},
         ]
-        result = self._run_day_summary(tmp_path, pings=pings, places=places)
+        result = _run_day_summary(tmp_path, pings=pings, places=places)
         assert len(result["stops"]) == 1
         assert result["stops"][0]["location"] == "home"
         assert result["stops"][0]["location_source"] == "saved_place"
@@ -3038,7 +1928,7 @@ class TestCmdDaySummary:
             # 1 ping far away (filtered as transit)
             {"timestamp": "2026-03-08T17:00:00Z", "lat": 34.15, "lon": -118.35},
         ]
-        result = self._run_day_summary(tmp_path, pings=pings)
+        result = _run_day_summary(tmp_path, pings=pings)
         assert len(result["stops"]) == 1
         assert result["transit_pings"] == 1
 
@@ -3051,32 +1941,21 @@ class TestCmdDaySummary:
             {"timestamp": "2026-03-08T16:05:00Z", "lat": 34.05027, "lon": -118.25001},
             {"timestamp": "2026-03-08T16:10:00Z", "lat": 34.05029, "lon": -118.25002},
         ]
-        result = self._run_day_summary(tmp_path, pings=pings, places=places)
+        result = _run_day_summary(tmp_path, pings=pings, places=places)
         assert len(result["stops"]) == 1
         assert result["stops"][0]["location"] == "cafe"
         assert result["stops"][0]["location_source"] == "saved_place_proximity"
 
     def test_reverse_geocode_fallback(self, tmp_path):
         """When no place match, reverse geocode should be used."""
-        mock_result = MagicMock()
-        mock_result.address = "789 Elm St, Burbank, CA"
-        mock_result.raw = {
-            "address": {
-                "road": "Elm St",
-                "suburb": "Magnolia Park",
-                "city": "Burbank",
-            }
-        }
-
+        hit = _nominatim_hit("789 Elm St, Burbank, CA", road="Elm St",
+                             suburb="Magnolia Park", city="Burbank")
         pings = [
             {"timestamp": "2026-03-08T16:00:00Z", "lat": 34.18, "lon": -118.33},
             {"timestamp": "2026-03-08T16:05:00Z", "lat": 34.1801, "lon": -118.3301},
             {"timestamp": "2026-03-08T16:10:00Z", "lat": 34.1802, "lon": -118.3302},
         ]
-        result = self._run_day_summary(
-            tmp_path, pings=pings,
-            nominatim_results=[mock_result],
-        )
+        result = _run_day_summary(tmp_path, pings=pings, nominatim_results=[hit])
         assert len(result["stops"]) == 1
         assert result["stops"][0]["location"] == "Magnolia Park"
         assert result["stops"][0]["suburb"] == "Magnolia Park"
@@ -3096,7 +1975,7 @@ class TestCmdDaySummary:
             {"timestamp": "2026-03-08T18:05:00Z", "lat": 34.0501, "lon": -118.2501, "place_id": 1},
             {"timestamp": "2026-03-08T18:10:00Z", "lat": 34.0502, "lon": -118.2502, "place_id": 1},
         ]
-        result = self._run_day_summary(tmp_path, pings=pings, places=places)
+        result = _run_day_summary(tmp_path, pings=pings, places=places)
         # Two clusters at "office" with transit filtered → should merge into one
         assert len(result["stops"]) == 1
         assert result["stops"][0]["location"] == "office"
@@ -3137,8 +2016,7 @@ class TestCmdDaySummary:
             {"timestamp": "2026-03-09T03:48:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
             {"timestamp": "2026-03-09T03:53:00Z", "lat": 34.1026, "lon": -118.3058, "place_id": 1},
         ]
-        result = self._run_day_summary(tmp_path, pings=pings, places=places,
-                                        date="2026-03-08", tz="America/Los_Angeles")
+        result = _run_day_summary(tmp_path, pings=pings, places=places)
         home_stops = [s for s in result["stops"] if s["location"] == "Home"]
         assert len(home_stops) == 2, (
             f"Expected 2 Home stops (left and returned), got {len(home_stops)}: {result['stops']}"
@@ -3146,25 +2024,13 @@ class TestCmdDaySummary:
 
     def test_same_location_merged_after_phone_sleep(self, tmp_path):
         """Home with phone sleep gap (no transit) should merge into one stop."""
-        places = [
-            {"name": "Home", "lat": 34.1025, "lon": -118.3059, "radius_meters": 100},
-        ]
+        places = [{"name": "Home", "lat": 34.1025, "lon": -118.3059, "radius_meters": 100}]
         # Each side needs ≥3 pings tagged with the place_id to get attributed
         # (MIN_PLACE_PINGS=3); ping spacing must be ≤300s for cluster_pings to
-        # keep them in one cluster on each side of the sleep gap.
-        pings = [
-            # Home cluster 1
-            {"timestamp": "2026-03-09T00:48:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
-            {"timestamp": "2026-03-09T00:50:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
-            {"timestamp": "2026-03-09T00:52:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
-            # 2-hour gap (phone sleeping, no pings at all)
-            # Home cluster 2
-            {"timestamp": "2026-03-09T02:46:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
-            {"timestamp": "2026-03-09T02:48:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
-            {"timestamp": "2026-03-09T02:50:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
-        ]
-        result = self._run_day_summary(tmp_path, pings=pings, places=places,
-                                        date="2026-03-08", tz="America/Los_Angeles")
+        # keep them in one cluster on each side of the 2-hour sleep gap.
+        pings = _pings_at(34.1025, -118.3059, ["00:48", "00:50", "00:52", "02:46", "02:48", "02:50"],
+                          day="2026-03-09", place_id=1)
+        result = _run_day_summary(tmp_path, pings=pings, places=places)
         home_stops = [s for s in result["stops"] if s["location"] == "Home"]
         assert len(home_stops) == 1, (
             f"Expected 1 merged Home stop (phone sleep, no transit), got {len(home_stops)}"
@@ -3195,8 +2061,7 @@ class TestCmdDaySummary:
                "lon": lon, "place_id": None}
               for i in range(5)],
         ]
-        result = self._run_day_summary(tmp_path, pings=pings,
-                                        date="2026-03-08", tz="America/Los_Angeles")
+        result = _run_day_summary(tmp_path, pings=pings)
         # All pings are at the same location — should be one stop
         assert len(result["stops"]) == 1, (
             f"Expected 1 stop (indoor GPS gaps), got {len(result['stops'])}: {result['stops']}"
@@ -3219,25 +2084,21 @@ class TestCmdDaySummary:
             }
             for i in range(25)  # 0, 5, 10, …, 120 minutes — 25 pings
         ]
-        result = self._run_day_summary(tmp_path, pings=pings, places=places)
+        result = _run_day_summary(tmp_path, pings=pings, places=places)
         assert len(result["stops"]) == 1
-        stop = result["stops"][0]
-        assert "duration_minutes" in stop
-        assert stop["duration_minutes"] == 120
+        assert result["stops"][0]["duration_minutes"] == 120
 
     def test_duration_uses_first_ping_after_stationary_reporting_gap(self, tmp_path):
         """Day summary counts the quiet part of a saved-place visit."""
         places = [{"name": "Gym", "lat": 34.10, "lon": -118.30, "radius_meters": 150}]
         pings = [
-            {"timestamp": "2026-03-08T14:24:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
-            {"timestamp": "2026-03-08T14:29:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
-            {"timestamp": "2026-03-08T14:34:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
+            *_pings_at(34.10, -118.30, ["14:24", "14:29", "14:34"], place_id=1),
             {"timestamp": "2026-03-08T14:38:33Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
             {"timestamp": "2026-03-08T15:45:17Z", "lat": 34.10, "lon": -118.30,
              "activity_type": "driving"},
         ]
 
-        result = self._run_day_summary(tmp_path, pings=pings, places=places)
+        result = _run_day_summary(tmp_path, pings=pings, places=places)
 
         assert len(result["stops"]) == 1
         assert result["stops"][0]["location"] == "Gym"
@@ -3247,28 +2108,22 @@ class TestCmdDaySummary:
     def test_duration_uses_recorded_speed_for_distant_closing_ping(self, tmp_path):
         places = [{"name": "Gym", "lat": 34.10, "lon": -118.30, "radius_meters": 150}]
         pings = [
-            {"timestamp": "2026-03-08T14:00:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
-            {"timestamp": "2026-03-08T14:05:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
-            {"timestamp": "2026-03-08T14:10:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
-            {"timestamp": "2026-03-08T15:10:00Z", "lat": 34.172, "lon": -118.30,
-             "speed": 20.0, "activity_type": "driving"},
+            *_pings_at(34.10, -118.30, ["14:00", "14:05", "14:10"], place_id=1),
+            *_pings_at(34.172, -118.30, ["15:10"], speed=20.0, activity_type="driving"),
         ]
 
-        result = self._run_day_summary(tmp_path, pings=pings, places=places)
+        result = _run_day_summary(tmp_path, pings=pings, places=places)
 
         assert result["stops"][0]["duration_minutes"] == 63
 
     def test_closing_ping_after_local_midnight_ends_stop(self, tmp_path):
         places = [{"name": "Home", "lat": 34.10, "lon": -118.30, "radius_meters": 150}]
         pings = [
-            {"timestamp": "2026-03-09T06:40:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
-            {"timestamp": "2026-03-09T06:45:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
-            {"timestamp": "2026-03-09T06:50:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
-            {"timestamp": "2026-03-09T07:10:00Z", "lat": 34.10, "lon": -118.30,
-             "activity_type": "driving"},
+            *_pings_at(34.10, -118.30, ["06:40", "06:45", "06:50"], day="2026-03-09", place_id=1),
+            *_pings_at(34.10, -118.30, ["07:10"], day="2026-03-09", activity_type="driving"),
         ]
 
-        result = self._run_day_summary(tmp_path, pings=pings, places=places)
+        result = _run_day_summary(tmp_path, pings=pings, places=places)
 
         assert result["ping_count"] == 3
         assert result["stops"][0]["ping_count"] == 3
@@ -3277,27 +2132,16 @@ class TestCmdDaySummary:
 
     def test_duration_minutes_for_nominatim_stop(self, tmp_path):
         """duration_minutes should work for reverse-geocoded stops too."""
-        mock_result = MagicMock()
-        mock_result.address = "Test Place"
-        mock_result.raw = {"address": {"suburb": "TestVille"}}
+        hit = _nominatim_hit("Test Place", suburb="TestVille")
 
         # 30-minute stop with pings close enough to avoid cluster splitting
         # (max_gap_seconds=300, so keep gaps under 5 min)
         pings = [
             {"timestamp": "2026-03-08T16:00:00Z", "lat": 34.18, "lon": -118.33},
-            {"timestamp": "2026-03-08T16:04:00Z", "lat": 34.1801, "lon": -118.3301},
-            {"timestamp": "2026-03-08T16:08:00Z", "lat": 34.1801, "lon": -118.3301},
-            {"timestamp": "2026-03-08T16:12:00Z", "lat": 34.1801, "lon": -118.3301},
-            {"timestamp": "2026-03-08T16:16:00Z", "lat": 34.1801, "lon": -118.3301},
-            {"timestamp": "2026-03-08T16:20:00Z", "lat": 34.1801, "lon": -118.3301},
-            {"timestamp": "2026-03-08T16:24:00Z", "lat": 34.1801, "lon": -118.3301},
-            {"timestamp": "2026-03-08T16:28:00Z", "lat": 34.1801, "lon": -118.3301},
+            *_pings_at(34.1801, -118.3301, [f"16:{m:02d}" for m in range(4, 29, 4)]),
             {"timestamp": "2026-03-08T16:30:00Z", "lat": 34.1802, "lon": -118.3302},
         ]
-        result = self._run_day_summary(
-            tmp_path, pings=pings,
-            nominatim_results=[mock_result],
-        )
+        result = _run_day_summary(tmp_path, pings=pings, nominatim_results=[hit])
         assert len(result["stops"]) == 1
         assert result["stops"][0]["duration_minutes"] == 30
 
@@ -3307,13 +2151,10 @@ class TestCmdDaySummary:
         Three clusters at nearly identical coordinates get different reverse-geocoded
         names. They should merge into a single stop via proximity check.
         """
-        # Three nominatim results returning different road names
-        results = []
-        for road in ["East Live Oak Drive", "Tryon Road", "East Live Oak Drive"]:
-            r = MagicMock()
-            r.address = f"{road}, Los Feliz, CA"
-            r.raw = {"address": {"road": road, "suburb": "Los Feliz"}}
-            results.append(r)
+        results = [
+            _nominatim_hit(f"{road}, Los Feliz, CA", road=road, suburb="Los Feliz")
+            for road in ["East Live Oak Drive", "Tryon Road", "East Live Oak Drive"]
+        ]
 
         # Three clusters ~110m apart (within 150m merge radius), separated by
         # time gaps that cause cluster splitting. Each cluster is big enough
@@ -3322,24 +2163,13 @@ class TestCmdDaySummary:
         # Coords differ enough that geocode cache gives different results.
         pings = [
             # Cluster 1: "East Live Oak Drive" — 5 pings over 10 min
-            *[{"timestamp": f"2026-03-09T01:{i*2:02d}:00Z",
-               "lat": 34.1086, "lon": -118.3099}
-              for i in range(5)],
-            # > 5min gap → new cluster
-            # Cluster 2: "Tryon Road" — ~110m from cluster 1, 5 pings over 10 min
-            *[{"timestamp": f"2026-03-09T01:{20+i*2:02d}:00Z",
-               "lat": 34.1096, "lon": -118.3099}
-              for i in range(5)],
-            # > 5min gap → new cluster
-            # Cluster 3: "East Live Oak Drive" again, 5 pings over 10 min
-            *[{"timestamp": f"2026-03-09T01:{40+i*2:02d}:00Z",
-               "lat": 34.1086, "lon": -118.3099}
-              for i in range(5)],
+            *_pings_at(34.1086, -118.3099, [f"01:{i*2:02d}" for i in range(5)], day="2026-03-09"),
+            # > 5min gap → Cluster 2: "Tryon Road" — ~110m from cluster 1
+            *_pings_at(34.1096, -118.3099, [f"01:{20+i*2:02d}" for i in range(5)], day="2026-03-09"),
+            # > 5min gap → Cluster 3: "East Live Oak Drive" again
+            *_pings_at(34.1086, -118.3099, [f"01:{40+i*2:02d}" for i in range(5)], day="2026-03-09"),
         ]
-        result = self._run_day_summary(
-            tmp_path, pings=pings, date="2026-03-08", tz="America/Los_Angeles",
-            nominatim_results=results,
-        )
+        result = _run_day_summary(tmp_path, pings=pings, nominatim_results=results)
         # All three clusters should merge into one stop
         assert len(result["stops"]) == 1, (
             f"Expected 1 merged stop, got {len(result['stops'])}: "
@@ -3357,87 +2187,45 @@ class TestCmdDaySummary:
 class TestAccuracyGate:
     """Low-accuracy pings must not be matched to places or move the state machine."""
 
-    def _feature(self, lat, lon, ts, accuracy):
-        return {
-            "geometry": {"type": "Point", "coordinates": [lon, lat]},
-            "properties": {"timestamp": ts, "horizontal_accuracy": accuracy},
+    @pytest.mark.parametrize("accuracy, assigned", [
+        (1336, False),
+        (15, True),
+        # Missing accuracy shouldn't cause us to drop the ping silently.
+        (None, True),
+    ], ids=["low_accuracy_ping_not_assigned_to_place", "good_accuracy_ping_is_assigned",
+            "null_accuracy_passes"])
+    def test_accuracy_gate(self, tmp_path, monkeypatch, accuracy, assigned):
+        from istota import webhook_receiver as wr
+        _location_config(monkeypatch)
+
+        properties = {"timestamp": "2026-04-21T08:20:00Z"}
+        if accuracy is not None:
+            properties["horizontal_accuracy"] = accuracy
+        feat = {
+            "geometry": {"type": "Point", "coordinates": [139.741, 35.629]},
+            "properties": properties,
         }
 
-    def test_low_accuracy_ping_not_assigned_to_place(self, tmp_path, monkeypatch):
-        from istota import webhook_receiver as wr
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            location_db.add_place(
-                conn, "home", 35.629, 139.741, radius_meters=200,
-            )
-            places = location_db.get_places(conn)
-
-            cfg = MagicMock()
-            cfg.location.accuracy_threshold_m = 100.0
-            cfg.location.visit_exit_minutes = 5.0
-            monkeypatch.setattr(wr, "_config", cfg)
-
-            feat = self._feature(35.629, 139.741, "2026-04-21T08:19:35Z", accuracy=1336)
-            wr._process_feature(conn, feat, places)
+            pid = location_db.add_place(conn, "home", 35.629, 139.741, radius_meters=200)
+            wr._process_feature(conn, feat, location_db.get_places(conn))
             conn.commit()
 
             pings = location_db.get_pings(conn)
             assert len(pings) == 1
-            assert pings[0].place_id is None, (
-                "1336m accuracy ping should not have been assigned to the place"
-            )
-            assert location_db.get_open_visit(conn) is None
-
-    def test_good_accuracy_ping_is_assigned(self, tmp_path, monkeypatch):
-        from istota import webhook_receiver as wr
-        db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(
-                conn, "home", 35.629, 139.741, radius_meters=200,
-            )
-            places = location_db.get_places(conn)
-
-            cfg = MagicMock()
-            cfg.location.accuracy_threshold_m = 100.0
-            cfg.location.visit_exit_minutes = 5.0
-            monkeypatch.setattr(wr, "_config", cfg)
-
-            feat = self._feature(35.629, 139.741, "2026-04-21T08:20:00Z", accuracy=15)
-            wr._process_feature(conn, feat, places)
-            conn.commit()
-
-            pings = location_db.get_pings(conn)
-            assert pings[0].place_id == pid
-
-    def test_null_accuracy_passes(self, tmp_path, monkeypatch):
-        """Missing accuracy shouldn't cause us to drop the ping silently."""
-        from istota import webhook_receiver as wr
-        db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(
-                conn, "home", 35.629, 139.741, radius_meters=200,
-            )
-            places = location_db.get_places(conn)
-
-            cfg = MagicMock()
-            cfg.location.accuracy_threshold_m = 100.0
-            cfg.location.visit_exit_minutes = 5.0
-            monkeypatch.setattr(wr, "_config", cfg)
-
-            feat = {
-                "geometry": {"type": "Point", "coordinates": [139.741, 35.629]},
-                "properties": {"timestamp": "2026-04-21T08:20:00Z"},
-            }
-            wr._process_feature(conn, feat, places)
-            conn.commit()
-
-            pings = location_db.get_pings(conn)
-            assert pings[0].place_id == pid
+            assert pings[0].place_id == (pid if assigned else None)
+            if not assigned:
+                assert location_db.get_open_visit(conn) is None
 
 
 @_needs_fastapi
 class TestDwellBasedExit:
     """Brief GPS flicker out of place radius must not close an open visit."""
+
+    @pytest.fixture(autouse=True)
+    def _config(self, monkeypatch):
+        _location_config(monkeypatch)
 
     def _process(self, conn, place_id, place, timestamp):
         from istota.webhook_receiver import _update_state_machine
@@ -3448,98 +2236,51 @@ class TestDwellBasedExit:
         _update_state_machine(conn, ping_id, place_id, place, timestamp)
         return ping_id
 
-    def test_flicker_does_not_close_visit(self, tmp_path, monkeypatch):
-        from istota import webhook_receiver as wr
-        cfg = MagicMock()
-        cfg.location.visit_exit_minutes = 5.0
-        cfg.location.accuracy_threshold_m = 100.0
-        monkeypatch.setattr(wr, "_config", cfg)
-
+    def _visit_home(self, tmp_path, steps):
+        """Feed ``(HH:MM:SS, at_home)`` steps for 2026-04-21; return (visits, state)."""
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
             pid = location_db.add_place(conn, "home", 35.629, 139.741)
             place = location_db.get_place_by_name(conn, "home")
+            for time, at_home in steps:
+                self._process(conn, pid if at_home else None, place if at_home else None,
+                              f"2026-04-21T{time}Z")
+            return location_db.get_visits(conn), location_db.get_location_state(conn)
 
-            self._process(conn, pid, place, "2026-04-21T10:00:00Z")
-            self._process(conn, pid, place, "2026-04-21T10:00:30Z")
+    def test_flicker_does_not_close_visit(self, tmp_path):
+        visits, _ = self._visit_home(tmp_path, [
+            ("10:00:00", True), ("10:00:30", True),
+            ("10:01:00", False), ("10:02:00", True), ("10:03:00", False),
+            ("10:04:00", True), ("10:05:00", False), ("10:06:00", True),
+        ])
+        assert len(visits) == 1, "Flicker should not create extra visits"
+        assert visits[0].exited_at is None, "Visit should still be open"
 
-            self._process(conn, None, None, "2026-04-21T10:01:00Z")
-            self._process(conn, pid, place, "2026-04-21T10:02:00Z")
-            self._process(conn, None, None, "2026-04-21T10:03:00Z")
-            self._process(conn, pid, place, "2026-04-21T10:04:00Z")
-            self._process(conn, None, None, "2026-04-21T10:05:00Z")
-            self._process(conn, pid, place, "2026-04-21T10:06:00Z")
+    def test_continuous_away_closes_after_threshold(self, tmp_path):
+        visits, _ = self._visit_home(tmp_path, [
+            ("10:00:00", True), ("10:05:00", True),
+            ("10:10:00", False), ("10:12:00", False), ("10:14:00", False), ("10:16:00", False),
+        ])
+        assert len(visits) == 1
+        assert visits[0].exited_at == "2026-04-21T10:10:00Z", (
+            "Exited_at should be the first away ping, not the last"
+        )
+        assert visits[0].duration_sec == 600
 
-            visits = location_db.get_visits(conn)
-            assert len(visits) == 1, "Flicker should not create extra visits"
-            assert visits[0].exited_at is None, "Visit should still be open"
+    def test_away_then_return_extends_visit(self, tmp_path):
+        visits, state = self._visit_home(tmp_path, [
+            ("10:00:00", True), ("10:05:00", True),
+            ("10:06:00", False), ("10:07:30", False),
+            ("10:08:00", True), ("10:20:00", True),
+        ])
+        assert len(visits) == 1
+        assert visits[0].exited_at is None, "Visit should still be open"
+        assert state.exit_started_at is None
 
-    def test_continuous_away_closes_after_threshold(self, tmp_path, monkeypatch):
-        from istota import webhook_receiver as wr
-        cfg = MagicMock()
-        cfg.location.visit_exit_minutes = 5.0
-        cfg.location.accuracy_threshold_m = 100.0
-        monkeypatch.setattr(wr, "_config", cfg)
-
+    def test_direct_place_to_place_closes_old_opens_new(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(conn, "home", 35.629, 139.741)
-            place = location_db.get_place_by_name(conn, "home")
-
-            self._process(conn, pid, place, "2026-04-21T10:00:00Z")
-            self._process(conn, pid, place, "2026-04-21T10:05:00Z")
-
-            self._process(conn, None, None, "2026-04-21T10:10:00Z")
-            self._process(conn, None, None, "2026-04-21T10:12:00Z")
-            self._process(conn, None, None, "2026-04-21T10:14:00Z")
-            self._process(conn, None, None, "2026-04-21T10:16:00Z")
-
-            visits = location_db.get_visits(conn)
-            assert len(visits) == 1
-            assert visits[0].exited_at == "2026-04-21T10:10:00Z", (
-                "Exited_at should be the first away ping, not the last"
-            )
-            assert visits[0].duration_sec == 600
-
-    def test_away_then_return_extends_visit(self, tmp_path, monkeypatch):
-        from istota import webhook_receiver as wr
-        cfg = MagicMock()
-        cfg.location.visit_exit_minutes = 5.0
-        cfg.location.accuracy_threshold_m = 100.0
-        monkeypatch.setattr(wr, "_config", cfg)
-
-        db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(conn, "home", 35.629, 139.741)
-            place = location_db.get_place_by_name(conn, "home")
-
-            self._process(conn, pid, place, "2026-04-21T10:00:00Z")
-            self._process(conn, pid, place, "2026-04-21T10:05:00Z")
-            self._process(conn, None, None, "2026-04-21T10:06:00Z")
-            self._process(conn, None, None, "2026-04-21T10:07:30Z")
-            self._process(conn, pid, place, "2026-04-21T10:08:00Z")
-            self._process(conn, pid, place, "2026-04-21T10:20:00Z")
-
-            visits = location_db.get_visits(conn)
-            assert len(visits) == 1
-            assert visits[0].exited_at is None, "Visit should still be open"
-
-            state = location_db.get_location_state(conn)
-            assert state.exit_started_at is None
-
-    def test_direct_place_to_place_closes_old_opens_new(self, tmp_path, monkeypatch):
-        from istota import webhook_receiver as wr
-        cfg = MagicMock()
-        cfg.location.visit_exit_minutes = 5.0
-        cfg.location.accuracy_threshold_m = 100.0
-        monkeypatch.setattr(wr, "_config", cfg)
-
-        db_path = _init_loc_db(tmp_path)
-        with location_db.connect(db_path) as conn:
-            pid_h = location_db.add_place(conn, "home", 34.0, -118.0)
-            pid_g = location_db.add_place(conn, "gym", 34.1, -118.1)
-            home = location_db.get_place_by_name(conn, "home")
-            gym = location_db.get_place_by_name(conn, "gym")
+            (pid_h, home), (pid_g, gym) = _home_and_gym(conn)
 
             self._process(conn, pid_h, home, "2026-04-21T10:00:00Z")
             self._process(conn, pid_h, home, "2026-04-21T10:05:00Z")
@@ -3554,32 +2295,40 @@ class TestDwellBasedExit:
             assert gym_visit.exited_at is None
 
 
+_APR21 = ("2026-04-21T00:00:00Z", "2026-04-22T00:00:00Z")
+
+
 class TestReconcileVisits:
     def _ping(self, conn, ts, place_id):
         location_db.insert_ping(
             conn, ts, 0.0, 0.0, accuracy=10.0, place_id=place_id,
         )
 
+    def _reconcile(self, conn, since, until, **kw):
+        n = location_db.reconcile_visits(
+            conn, since=since, until=until,
+            grace_minutes=10.0, min_pings=3, min_dwell_sec=60, **kw,
+        )
+        conn.commit()
+        return n
+
+    def _home(self, conn):
+        return location_db.add_place(conn, "home", 35.629, 139.741)
+
     def test_reconciles_fragmented_visit_into_one(self, tmp_path):
         """The Shinagawa case: flicker split a single stay into many short segments."""
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(conn, "home", 35.629, 139.741)
+            pid = self._home(conn)
             # 15 pings mostly at place, a handful briefly outside
-            at_place = [f"2026-04-21T10:{m:02d}:00Z" for m in range(0, 30, 2)]
-            for ts in at_place:
-                self._ping(conn, ts, pid)
+            for m in range(0, 30, 2):
+                self._ping(conn, f"2026-04-21T10:{m:02d}:00Z", pid)
             # sprinkle a few unassigned pings in between — gaps < grace
             for ts in ("2026-04-21T10:05:30Z", "2026-04-21T10:13:30Z", "2026-04-21T10:19:30Z"):
                 self._ping(conn, ts, None)
             conn.commit()
 
-            n = location_db.reconcile_visits(conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
-                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
-            )
-            conn.commit()
-
-            assert n == 1
+            assert self._reconcile(conn, *_APR21) == 1
             visits = location_db.get_visits(conn)
             assert len(visits) == 1
             assert visits[0].entered_at == "2026-04-21T10:00:00Z"
@@ -3591,31 +2340,17 @@ class TestReconcileVisits:
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
             pid = location_db.add_place(conn, "gym", 34.0, -118.0)
-            timestamps = [
-                "2026-01-10T09:00:00Z", "2026-01-10T09:01:00Z",
-                "2026-01-10T09:02:00Z", "2026-01-10T09:04:00Z",
-                "2026-01-10T09:06:00Z", "2026-01-10T09:07:00Z",
-                "2026-01-10T09:08:00Z", "2026-01-10T09:09:00Z",
-                "2026-01-10T09:33:00Z", "2026-01-10T09:34:00Z",
-                "2026-01-10T09:36:00Z", "2026-01-10T09:39:00Z",
-                "2026-01-10T09:41:00Z", "2026-01-10T09:44:00Z",
-                "2026-01-10T09:47:00Z", "2026-01-10T09:51:00Z",
-                "2026-01-10T10:20:00Z", "2026-01-10T10:21:00Z",
-                "2026-01-10T10:22:00Z", "2026-01-10T10:23:00Z",
-                "2026-01-10T10:24:00Z", "2026-01-10T10:25:00Z",
-                "2026-01-10T10:26:00Z", "2026-01-10T10:27:00Z",
-                "2026-01-10T10:29:00Z",
+            minutes = [
+                "09:00", "09:01", "09:02", "09:04", "09:06", "09:07", "09:08", "09:09",
+                "09:33", "09:34", "09:36", "09:39", "09:41", "09:44", "09:47", "09:51",
+                "10:20", "10:21", "10:22", "10:23", "10:24", "10:25", "10:26", "10:27",
+                "10:29",
             ]
-            for ts in timestamps:
-                self._ping(conn, ts, pid)
+            for hhmm in minutes:
+                self._ping(conn, f"2026-01-10T{hhmm}:00Z", pid)
             conn.commit()
 
-            n = location_db.reconcile_visits(conn, since="2026-01-10T00:00:00Z", until="2026-01-11T00:00:00Z",
-                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
-            )
-            conn.commit()
-
-            assert n == 1
+            assert self._reconcile(conn, "2026-01-10T00:00:00Z", "2026-01-11T00:00:00Z") == 1
             visits = location_db.get_visits(conn)
             assert len(visits) == 1
             assert visits[0].entered_at == "2026-01-10T09:00:00Z"
@@ -3627,13 +2362,9 @@ class TestReconcileVisits:
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
             pid = location_db.add_place(conn, "gym", 34.0, -118.0)
-            first_id = location_db.open_visit(
-                conn, pid, "gym", "2026-01-10T08:00:00Z",
-            )
+            first_id = location_db.open_visit(conn, pid, "gym", "2026-01-10T08:00:00Z")
             location_db.close_visit(conn, first_id, "2026-01-10T08:08:00Z")
-            second_id = location_db.open_visit(
-                conn, pid, "gym", "2026-01-10T10:00:00Z",
-            )
+            second_id = location_db.open_visit(conn, pid, "gym", "2026-01-10T10:00:00Z")
             location_db.close_visit(conn, second_id, "2026-01-10T10:08:00Z")
             for minute in (0, 4, 8):
                 location_db.insert_ping(
@@ -3646,15 +2377,7 @@ class TestReconcileVisits:
                 )
             conn.commit()
 
-            location_db.reconcile_visits(
-                conn,
-                since="2026-01-10T09:00:00Z",
-                until="2026-01-10T11:00:00Z",
-                grace_minutes=10.0,
-                min_pings=3,
-                min_dwell_sec=60,
-            )
-            conn.commit()
+            self._reconcile(conn, "2026-01-10T09:00:00Z", "2026-01-10T11:00:00Z")
 
             visits = location_db.get_visits(conn)
             assert len(visits) == 1
@@ -3665,16 +2388,13 @@ class TestReconcileVisits:
     def test_filters_walkby(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(conn, "home", 35.629, 139.741)
+            pid = self._home(conn)
             # Only 2 pings at place — below min_pings=3
             self._ping(conn, "2026-04-21T10:00:00Z", pid)
             self._ping(conn, "2026-04-21T10:01:00Z", pid)
             conn.commit()
 
-            n = location_db.reconcile_visits(conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
-                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
-            )
-            assert n == 0
+            assert self._reconcile(conn, *_APR21) == 0
             assert location_db.get_visits(conn) == []
 
     def test_splits_on_different_place(self, tmp_path):
@@ -3688,33 +2408,25 @@ class TestReconcileVisits:
                 self._ping(conn, f"2026-04-21T10:{m:02d}:00Z", pid_b)
             conn.commit()
 
-            n = location_db.reconcile_visits(conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
-                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
-            )
-            assert n == 2
+            assert self._reconcile(conn, *_APR21) == 2
             visits = sorted(location_db.get_visits(conn), key=lambda v: v.entered_at)
-            assert visits[0].place_name == "home"
-            assert visits[1].place_name == "gym"
+            assert [v.place_name for v in visits] == ["home", "gym"]
 
     def test_preserves_open_visit_outside_window(self, tmp_path):
         """An open visit started before `since` must be left alone."""
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(conn, "home", 35.629, 139.741)
+            pid = self._home(conn)
             # Open visit entered before reconcile window
             vid = location_db.open_visit(conn, pid, "home", "2026-04-20T23:00:00Z")
             for m in range(0, 10, 2):
                 self._ping(conn, f"2026-04-21T10:{m:02d}:00Z", pid)
             conn.commit()
 
-            location_db.reconcile_visits(conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
-                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
-            )
-            conn.commit()
+            self._reconcile(conn, *_APR21)
 
-            visits = location_db.get_visits(conn)
             # The open visit must still exist and be open
-            open_ones = [v for v in visits if v.exited_at is None]
+            open_ones = [v for v in location_db.get_visits(conn) if v.exited_at is None]
             assert len(open_ones) == 1
             assert open_ones[0].id == vid
 
@@ -3722,7 +2434,7 @@ class TestReconcileVisits:
         """Historical pings with accuracy > threshold are treated as unassigned."""
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(conn, "home", 35.629, 139.741)
+            pid = self._home(conn)
             # One early bad-accuracy ping pinned to the place (like the 1336m Shinagawa case)
             location_db.insert_ping(conn, "2026-04-21T08:00:00Z", 35.629, 139.741,
                 accuracy=1200.0, place_id=pid,
@@ -3735,11 +2447,7 @@ class TestReconcileVisits:
             conn.commit()
 
             # Without filter: the bad ping would anchor a visit starting at 08:00
-            location_db.reconcile_visits(conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
-                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
-                accuracy_threshold_m=100.0,
-            )
-            conn.commit()
+            self._reconcile(conn, *_APR21, accuracy_threshold_m=100.0)
 
             visits = location_db.get_visits(conn)
             assert len(visits) == 1
@@ -3752,7 +2460,7 @@ class TestReconcileVisits:
         """Existing closed visits in the window are dropped before re-derivation."""
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(conn, "home", 35.629, 139.741)
+            pid = self._home(conn)
             # Seed with an incorrect, short closed visit
             stale_id = location_db.open_visit(conn, pid, "home", "2026-04-21T10:05:00Z")
             location_db.close_visit(conn, stale_id, "2026-04-21T10:07:00Z")
@@ -3761,10 +2469,7 @@ class TestReconcileVisits:
                 self._ping(conn, f"2026-04-21T10:{m:02d}:00Z", pid)
             conn.commit()
 
-            location_db.reconcile_visits(conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
-                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
-            )
-            conn.commit()
+            self._reconcile(conn, *_APR21)
 
             visits = location_db.get_visits(conn)
             assert len(visits) == 1
@@ -3784,19 +2489,12 @@ class TestReconcileVisits:
             pid = location_db.add_place(conn, "lazy_acres", 32.78, -117.18)
             # 20 sparse pings over 11 minutes (Lazy Acres pattern)
             ping_times = [
-                "2026-04-29T03:38:00Z", "2026-04-29T03:38:30Z",
-                "2026-04-29T03:39:00Z", "2026-04-29T03:39:30Z",
-                "2026-04-29T03:40:15Z", "2026-04-29T03:40:50Z",
-                "2026-04-29T03:41:30Z", "2026-04-29T03:42:10Z",
-                "2026-04-29T03:42:50Z", "2026-04-29T03:43:30Z",
-                "2026-04-29T03:44:10Z", "2026-04-29T03:44:55Z",
-                "2026-04-29T03:45:40Z", "2026-04-29T03:46:20Z",
-                "2026-04-29T03:47:00Z", "2026-04-29T03:47:40Z",
-                "2026-04-29T03:48:10Z", "2026-04-29T03:48:40Z",
-                "2026-04-29T03:49:00Z", "2026-04-29T03:49:30Z",
+                "38:00", "38:30", "39:00", "39:30", "40:15", "40:50", "41:30",
+                "42:10", "42:50", "43:30", "44:10", "44:55", "45:40", "46:20",
+                "47:00", "47:40", "48:10", "48:40", "49:00", "49:30",
             ]
-            for ts in ping_times:
-                self._ping(conn, ts, pid)
+            for mmss in ping_times:
+                self._ping(conn, f"2026-04-29T03:{mmss}Z", pid)
             conn.commit()
 
             # Three reconciler runs with `since` sliding past the visit's
@@ -3806,11 +2504,7 @@ class TestReconcileVisits:
                 ("2026-04-29T03:40:00Z", "2026-04-29T03:56:00Z"),
                 ("2026-04-29T03:43:00Z", "2026-04-29T04:03:00Z"),
             ]:
-                location_db.reconcile_visits(conn, since=since, until=until,
-                    grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
-                    accuracy_threshold_m=100.0,
-                )
-                conn.commit()
+                self._reconcile(conn, since, until, accuracy_threshold_m=100.0)
 
             visits = location_db.get_visits(conn)
             assert len(visits) == 1, (
@@ -3825,7 +2519,7 @@ class TestReconcileVisits:
         """A visit whose first ping is before `since` must be reconstructed in full."""
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(conn, "home", 35.629, 139.741)
+            pid = self._home(conn)
             # Visit pings span 09:50 - 10:10; reconcile window starts at 10:00.
             for m in range(50, 60, 2):
                 self._ping(conn, f"2026-04-21T09:{m:02d}:00Z", pid)
@@ -3833,11 +2527,8 @@ class TestReconcileVisits:
                 self._ping(conn, f"2026-04-21T10:{m:02d}:00Z", pid)
             conn.commit()
 
-            location_db.reconcile_visits(conn, since="2026-04-21T10:00:00Z", until="2026-04-21T11:00:00Z",
-                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
-                accuracy_threshold_m=100.0,
-            )
-            conn.commit()
+            self._reconcile(conn, "2026-04-21T10:00:00Z", "2026-04-21T11:00:00Z",
+                            accuracy_threshold_m=100.0)
 
             visits = location_db.get_visits(conn)
             assert len(visits) == 1
@@ -3850,7 +2541,7 @@ class TestReconcileVisits:
         """A closed visit that ended before `since` must be left alone."""
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(conn, "home", 35.629, 139.741)
+            pid = self._home(conn)
             # Pre-existing closed visit from earlier in the day
             old_id = location_db.open_visit(conn, pid, "home", "2026-04-21T08:00:00Z")
             location_db.close_visit(conn, old_id, "2026-04-21T08:30:00Z")
@@ -3859,11 +2550,8 @@ class TestReconcileVisits:
                 self._ping(conn, f"2026-04-21T10:{m:02d}:00Z", pid)
             conn.commit()
 
-            location_db.reconcile_visits(conn, since="2026-04-21T09:00:00Z", until="2026-04-21T11:00:00Z",
-                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
-                accuracy_threshold_m=100.0,
-            )
-            conn.commit()
+            self._reconcile(conn, "2026-04-21T09:00:00Z", "2026-04-21T11:00:00Z",
+                            accuracy_threshold_m=100.0)
 
             visits = sorted(location_db.get_visits(conn), key=lambda v: v.entered_at)
             assert len(visits) == 2
@@ -3879,7 +2567,7 @@ class TestReconcileVisits:
         """
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(conn, "home", 35.629, 139.741)
+            pid = self._home(conn)
             old_visit_id = location_db.open_visit(conn, pid, "home", "2026-04-21T10:00:00Z")
             location_db.close_visit(conn, old_visit_id, "2026-04-21T10:28:00Z")
             # Pings with visit_id set — the realistic state after live ingest
@@ -3890,15 +2578,8 @@ class TestReconcileVisits:
                 )
             conn.commit()
 
-            n = location_db.reconcile_visits(
-                conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
-                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
-            )
-            conn.commit()
-
-            assert n == 1
-            visits = location_db.get_visits(conn)
-            assert len(visits) == 1
+            assert self._reconcile(conn, *_APR21) == 1
+            assert len(location_db.get_visits(conn)) == 1
 
     def test_cleans_up_phantoms_from_prior_buggy_runs(self, tmp_path):
         """Pre-existing duplicate visits (from the bug) must be replaced by one."""
@@ -3906,25 +2587,16 @@ class TestReconcileVisits:
         with location_db.connect(db_path) as conn:
             pid = location_db.add_place(conn, "lazy_acres", 32.78, -117.18)
             # Three phantom visits with staggered entries, identical exits, no pings linked
-            for entry in ("2026-04-29T03:38:00Z",
-                          "2026-04-29T03:40:15Z",
-                          "2026-04-29T03:43:30Z"):
-                vid = location_db.open_visit(conn, pid, "lazy_acres", entry)
+            for entry in ("38:00", "40:15", "43:30"):
+                vid = location_db.open_visit(conn, pid, "lazy_acres", f"2026-04-29T03:{entry}Z")
                 location_db.close_visit(conn, vid, "2026-04-29T03:49:30Z")
             # Real pings (would be linked to a different visit_id in production)
-            for ts in (
-                "2026-04-29T03:38:00Z", "2026-04-29T03:39:00Z",
-                "2026-04-29T03:42:00Z", "2026-04-29T03:45:00Z",
-                "2026-04-29T03:47:00Z", "2026-04-29T03:49:30Z",
-            ):
-                self._ping(conn, ts, pid)
+            for mmss in ("38:00", "39:00", "42:00", "45:00", "47:00", "49:30"):
+                self._ping(conn, f"2026-04-29T03:{mmss}Z", pid)
             conn.commit()
 
-            location_db.reconcile_visits(conn, since="2026-04-29T03:00:00Z", until="2026-04-29T04:30:00Z",
-                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
-                accuracy_threshold_m=100.0,
-            )
-            conn.commit()
+            self._reconcile(conn, "2026-04-29T03:00:00Z", "2026-04-29T04:30:00Z",
+                            accuracy_threshold_m=100.0)
 
             visits = location_db.get_visits(conn)
             assert len(visits) == 1
@@ -3954,28 +2626,21 @@ class TestGarminImportSkill:
     runs post-task."""
 
     def _run(self, args, env, monkeypatch):
-        import io
-        import sys
         from istota import secrets_store
         from istota.skills.location import cmd_import_garmin_tracks
 
         # Force the delegated path deterministically.
         monkeypatch.setattr(secrets_store, "secret_key_available", lambda: False)
-        with patch.dict("os.environ", env, clear=False):
-            captured = io.StringIO()
-            old = sys.stdout
-            sys.stdout = captured
+        captured = io.StringIO()
+        with patch.dict("os.environ", env, clear=False), patch.object(sys, "stdout", captured):
             try:
                 cmd_import_garmin_tracks(args)
                 code = 0
             except SystemExit as e:
                 code = e.code or 0
-            finally:
-                sys.stdout = old
         return code, captured.getvalue()
 
-    def test_delegated_write(self, tmp_path, monkeypatch):
-        from unittest.mock import MagicMock
+    def _task_env(self, tmp_path):
         deferred = tmp_path / "deferred"
         deferred.mkdir()
         env = {
@@ -3983,8 +2648,11 @@ class TestGarminImportSkill:
             "ISTOTA_DEFERRED_DIR": str(deferred),
             "ISTOTA_TASK_ID": "99",
         }
-        args = MagicMock(days_back=14, dry_run=False)
-        code, out = self._run(args, env, monkeypatch)
+        return deferred, env
+
+    def test_delegated_write(self, tmp_path, monkeypatch):
+        deferred, env = self._task_env(tmp_path)
+        code, out = self._run(MagicMock(days_back=14, dry_run=False), env, monkeypatch)
         assert code == 0
         payload = json.loads(out)
         assert payload["status"] == "ok" and payload["queued"] is True
@@ -3993,27 +2661,17 @@ class TestGarminImportSkill:
         assert json.loads(opfile.read_text()) == {"days_back": 14}
 
     def test_delegated_dry_run_rejected(self, tmp_path, monkeypatch):
-        from unittest.mock import MagicMock
-        deferred = tmp_path / "deferred"
-        deferred.mkdir()
-        env = {
-            "ISTOTA_USER_ID": "alice",
-            "ISTOTA_DEFERRED_DIR": str(deferred),
-            "ISTOTA_TASK_ID": "99",
-        }
-        args = MagicMock(days_back=7, dry_run=True)
-        code, out = self._run(args, env, monkeypatch)
+        deferred, env = self._task_env(tmp_path)
+        code, out = self._run(MagicMock(days_back=7, dry_run=True), env, monkeypatch)
         assert code == 1
         assert "dry-run is only available in direct mode" in json.loads(out)["error"]
         assert not (deferred / "task_99_garmin_import.json").exists()
 
     def test_no_task_context_errors(self, tmp_path, monkeypatch):
-        from unittest.mock import MagicMock
         # No ISTOTA_DEFERRED_DIR / ISTOTA_TASK_ID → can't delegate.
         env = {"ISTOTA_USER_ID": "alice",
                "ISTOTA_DEFERRED_DIR": "", "ISTOTA_TASK_ID": ""}
-        args = MagicMock(days_back=7, dry_run=False)
-        code, out = self._run(args, env, monkeypatch)
+        code, out = self._run(MagicMock(days_back=7, dry_run=False), env, monkeypatch)
         assert code == 1
         assert "web UI" in json.loads(out)["error"]
 
@@ -4097,13 +2755,27 @@ _RUN_DAY_PLACES = [
     {"name": "Friends", "lat": _FRIENDS[0], "lon": _FRIENDS[1], "radius_meters": 100},
 ]
 
+_HOME_AROUND_RUN = [("Home", "12:05", "14:34"), ("Home", "14:58", "16:23")]
+
+
+def _spans(result):
+    return [(s["location"], s["arrived"], s["departed"]) for s in result["stops"]]
+
+
+def _sorted_pings(*groups):
+    return sorted([p for group in groups for p in group], key=lambda p: p["timestamp"])
+
+
+def _without_garmin(pings):
+    return [p for p in pings if p.get("source") != "garmin"]
+
 
 class TestDaySummaryActivities:
     """A tracked activity that leaves a place and returns is its own segment."""
 
-    def _summary(self, tmp_path, **kw):
-        return TestCmdDaySummary._run_day_summary(
-            self, tmp_path, pings=_run_day_pings(**kw), places=_RUN_DAY_PLACES,
+    def _summary(self, tmp_path, pings=None, places=_RUN_DAY_PLACES, **kw):
+        return _run_day_summary(
+            tmp_path, pings=pings if pings is not None else _run_day_pings(**kw), places=places,
         )
 
     def test_the_run_is_reported_as_an_activity(self, tmp_path):
@@ -4124,16 +2796,8 @@ class TestDaySummaryActivities:
     def test_the_home_stop_is_split_around_the_run(self, tmp_path):
         result = self._summary(tmp_path)
 
-        spans = [(s["location"], s["arrived"], s["departed"]) for s in result["stops"]]
-        assert spans == [
-            ("Home", "12:05", "14:34"),
-            ("Home", "14:58", "16:23"),
-            ("Friends", "17:16", "17:52"),
-        ]
-
-    def test_run_pings_do_not_count_toward_the_stops(self, tmp_path):
-        result = self._summary(tmp_path)
-
+        assert _spans(result) == [*_HOME_AROUND_RUN, ("Friends", "17:16", "17:52")]
+        # The run's pings do not count toward the stops either side of it.
         assert result["stops"][0]["ping_count"] == 33
         assert result["stops"][1]["ping_count"] == 1
 
@@ -4141,8 +2805,7 @@ class TestDaySummaryActivities:
         """A phone left home declares home all through the run; the watch says otherwise."""
         result = self._summary(tmp_path, interleave_wifi_zone=True)
 
-        spans = [(s["location"], s["arrived"], s["departed"]) for s in result["stops"]]
-        assert spans[:2] == [("Home", "12:05", "14:34"), ("Home", "14:58", "16:23")]
+        assert _spans(result)[:2] == _HOME_AROUND_RUN
         assert len(result["activities"]) == 1
 
     def test_backfilled_watch_pings_near_the_door_still_end_the_stop(self, tmp_path):
@@ -4153,23 +2816,15 @@ class TestDaySummaryActivities:
                 p["place_id"] = 1
         assert any(p.get("source") == "garmin" and p["place_id"] == 1 for p in pings)
 
-        result = TestCmdDaySummary._run_day_summary(
-            self, tmp_path, pings=pings, places=_RUN_DAY_PLACES,
-        )
-
-        spans = [(s["location"], s["arrived"], s["departed"]) for s in result["stops"]]
-        assert spans[:2] == [("Home", "12:05", "14:34"), ("Home", "14:58", "16:23")]
+        assert _spans(self._summary(tmp_path, pings))[:2] == _HOME_AROUND_RUN
 
     def test_a_late_return_is_not_bridged_back_to_the_run(self, tmp_path):
         """A run ending home at 06:34, and the phone next heard at home ten hours later."""
         pings = [p for p in _run_day_pings() if not (
             p.get("source") == "garmin" or p["timestamp"] < "2026-03-08T21:30:00Z"
         )]
-        pings = sorted(pings + _run_from_home_pings(start="2026-03-08T13:10:00Z"),
-                       key=lambda p: p["timestamp"])
-
-        result = TestCmdDaySummary._run_day_summary(
-            self, tmp_path, pings=pings, places=_RUN_DAY_PLACES,
+        result = self._summary(
+            tmp_path, _sorted_pings(pings, _run_from_home_pings(start="2026-03-08T13:10:00Z")),
         )
 
         assert result["activities"][0]["end"] == "06:34"
@@ -4179,19 +2834,13 @@ class TestDaySummaryActivities:
         stray = {"timestamp": "2026-03-08T20:30:05Z", "lat": _HOME[0] + 0.0001,
                  "lon": _HOME[1], "place_id": None, "activity_type": "running",
                  "source": "garmin", "accuracy": None}
-        base = [p for p in _run_day_pings() if p.get("source") != "garmin"]
+        base = _without_garmin(_run_day_pings())
 
-        without = TestCmdDaySummary._run_day_summary(
-            self, tmp_path / "a", pings=base, places=_RUN_DAY_PLACES,
-        )
-        with_stray = TestCmdDaySummary._run_day_summary(
-            self, tmp_path / "b", pings=sorted(base + [stray], key=lambda p: p["timestamp"]),
-            places=_RUN_DAY_PLACES,
-        )
+        without = self._summary(tmp_path / "a", base)
+        with_stray = self._summary(tmp_path / "b", _sorted_pings(base, [stray]))
 
         assert with_stray["activities"] == []
-        spans = lambda r: [(s["location"], s["arrived"], s["departed"]) for s in r["stops"]]  # noqa: E731
-        assert spans(with_stray) == spans(without)
+        assert _spans(with_stray) == _spans(without)
 
     def test_the_run_ends_at_the_nearest_place_not_the_first_listed(self, tmp_path):
         """Ingest tags a ping with the nearest place; the reopen has to agree with it."""
@@ -4203,13 +2852,10 @@ class TestDaySummaryActivities:
             if p.get("place_id"):
                 p["place_id"] += 1
 
-        result = TestCmdDaySummary._run_day_summary(
-            self, tmp_path, pings=pings, places=places,
-        )
+        result = self._summary(tmp_path, pings, places)
 
         assert result["activities"][0]["end_place"] == "Home"
-        spans = [(s["location"], s["arrived"], s["departed"]) for s in result["stops"]]
-        assert spans[:2] == [("Home", "12:05", "14:34"), ("Home", "14:58", "16:23")]
+        assert _spans(result)[:2] == _HOME_AROUND_RUN
 
     def test_a_start_just_outside_a_tight_radius_takes_the_stop_it_leaves(self, tmp_path):
         """The run's first point is ~57 m from the door and its last ~51 m (#558 follow-up)."""
@@ -4218,11 +2864,7 @@ class TestDaySummaryActivities:
         assert haversine(run[0]["lat"], run[0]["lon"], *_HOME) > 54
         assert haversine(run[-1]["lat"], run[-1]["lon"], *_HOME) <= 54
 
-        result = TestCmdDaySummary._run_day_summary(
-            self, tmp_path, pings=_run_day_pings(), places=places,
-        )
-
-        activity = result["activities"][0]
+        activity = self._summary(tmp_path, places=places)["activities"][0]
         assert (activity["start_place"], activity["end_place"]) == ("Home", "Home")
 
     def test_a_start_far_from_the_stop_before_it_has_no_place(self, tmp_path):
@@ -4232,9 +2874,7 @@ class TestDaySummaryActivities:
             if p.get("source") == "garmin":
                 p["lon"] -= 0.012
 
-        result = TestCmdDaySummary._run_day_summary(
-            self, tmp_path, pings=pings, places=_RUN_DAY_PLACES,
-        )
+        result = self._summary(tmp_path, pings)
 
         assert result["stops"][0]["location"] == "Home"
         activity = result["activities"][0]
@@ -4258,11 +2898,9 @@ class TestDaySummaryActivities:
                      [-0.0015 + 0.0010 * i / 19 for i in range(20)], 0.0003)
         places = [{**_RUN_DAY_PLACES[0], "radius_meters": 54}, _RUN_DAY_PLACES[1]]
         assert 54 < haversine(second[0]["lat"], second[0]["lon"], *_HOME) <= 250
-        pings = [p for p in _run_day_pings() if p.get("source") != "garmin"]
 
-        result = TestCmdDaySummary._run_day_summary(
-            self, tmp_path, pings=sorted(pings + first + second, key=lambda p: p["timestamp"]),
-            places=places,
+        result = self._summary(
+            tmp_path, _sorted_pings(_without_garmin(_run_day_pings()), first, second), places,
         )
 
         a, b = result["activities"]
@@ -4281,10 +2919,7 @@ class TestDaySummaryActivities:
             for m in range(0, 21, 4)
         ]
 
-        result = TestCmdDaySummary._run_day_summary(
-            self, tmp_path, places=places,
-            pings=sorted(_run_day_pings() + later, key=lambda p: p["timestamp"]),
-        )
+        result = self._summary(tmp_path, _sorted_pings(_run_day_pings(), later), places)
 
         activity = result["activities"][0]
         assert (activity["start_place"], activity["end_place"]) == ("Home", None)
@@ -4297,19 +2932,13 @@ class TestDaySummaryActivities:
         for p in pings:
             p["place_id"] = 1 if p.get("place_id") == 2 else None
 
-        result = TestCmdDaySummary._run_day_summary(
-            self, tmp_path, pings=pings, places=[_RUN_DAY_PLACES[1]],
-        )
+        result = self._summary(tmp_path, pings, [_RUN_DAY_PLACES[1]])
 
         assert result["stops"][0]["location_source"] not in ("saved_place", "saved_place_proximity")
         assert result["activities"][0]["start_place"] is None
 
     def test_a_day_without_imported_tracks_has_no_activities(self, tmp_path):
-        pings = [p for p in _run_day_pings() if p.get("source") != "garmin"]
-        result = TestCmdDaySummary._run_day_summary(
-            self, tmp_path, pings=pings, places=_RUN_DAY_PLACES,
-        )
-
+        result = self._summary(tmp_path, _without_garmin(_run_day_pings()))
         assert result["activities"] == []
 
 
@@ -4325,28 +2954,19 @@ class TestHistoryCarriesSource:
         return db_path
 
     def test_each_ping_names_its_source(self, tmp_path):
-        db_path = self._seed(tmp_path)
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_history
+        with _loc_env(self._seed(tmp_path)):
+            output = _run_cmd(_skill().cmd_history, limit=10, date=None)
 
-            output = _run_cmd(cmd_history, limit=10, date=None)
-
-        by_ts = {p["timestamp"]: p["source"] for p in output}
-        assert by_ts == {
+        assert {p["timestamp"]: p["source"] for p in output} == {
             "2026-03-16T20:00:00Z": "garmin",
             "2026-03-16T20:01:00Z": "overland",
         }
 
     def test_source_filters_the_history(self, tmp_path):
-        db_path = self._seed(tmp_path)
-        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
-        with patch.dict("os.environ", env):
-            from istota.skills.location import cmd_history
-
-            dated = _run_cmd(cmd_history, limit=0, date="2026-03-16",
+        with _loc_env(self._seed(tmp_path)):
+            dated = _run_cmd(_skill().cmd_history, limit=0, date="2026-03-16",
                              tz="America/Los_Angeles", source="garmin")
-            undated = _run_cmd(cmd_history, limit=10, date=None, source="overland")
+            undated = _run_cmd(_skill().cmd_history, limit=10, date=None, source="overland")
 
         assert [p["source"] for p in dated] == ["garmin"]
         assert [p["source"] for p in undated] == ["overland"]
