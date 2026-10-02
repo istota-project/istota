@@ -157,6 +157,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `istota doctor` no longer warns that vault credentials are "bound without grants" when every one of them is granted. A KeePassXC entry is stored as one row per field but granted once, under the entry's name, and the check counted every `_url` and `_username` row as a separate ungranted credential. It now counts each entry once and names the user whose credentials are affected.
 - A WhatsApp or SMS room minted on a day that already had a dated memory no longer leaves the room migration stuck. The sweep now merges the two copies of `memories/YYYY-MM-DD.md` (older text first, both originals backed up) instead of refusing. Any other same-name file still refuses.
 - A room migration that leaves work outstanding no longer puts the auto-update in a two-minute loop that stops and restarts every service. The partial now counts as deployed, admins get a notice in the bell naming each room and file, and the next deploy retries.
 - Commits and merge requests the bot writes on the Claude Code brains no longer end with a Claude co-author trailer or a "Generated with Claude Code" footer. The skill told the model not to add them, but the CLI's own instructions told it to, and the CLI won. Those instructions are now switched off for every task, and the rule now covers merge request and pull request descriptions too.

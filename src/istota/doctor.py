@@ -3739,10 +3739,11 @@ def check_room_scope_confinement(config: "Config", probe: bool) -> CheckResult:
 
 def check_credential_broker(config: "Config", probe: bool) -> list[CheckResult]:
     """Read broker readiness without generating a CA or fetching secret values."""
-    import json
     import sqlite3
     from cryptography.hazmat.primitives import serialization
     from .credential_broker import ca
+    from .credential_broker.bindings import credential_groups, credential_name, get_entry_binding
+    from .credential_broker.grants import get_grant
     from . import peer_process
 
     prefix = "security.credential_broker"
@@ -3790,20 +3791,29 @@ def check_credential_broker(config: "Config", probe: bool) -> list[CheckResult]:
     ))
     try:
         conn = sqlite_util.connect_read_only(config.db_path)
+        conn.row_factory = sqlite3.Row
         try:
-            unbound = ungranted = 0
-            for hosts, granted in conn.execute(
-                "SELECT b.hosts, g.name FROM credential_bindings b LEFT JOIN credential_grants g "
-                "ON b.user_id=g.user_id AND b.name=g.name"
-            ):
-                if not json.loads(hosts):
-                    unbound += 1
-                elif granted is None:
-                    ungranted += 1
+            # A vault entry is one binding row per field but one grant, so
+            # count owning credentials through the broker's own lookups.
+            owners: dict[str, set[str]] = {}
+            for user_id, name in conn.execute("SELECT user_id, name FROM credential_bindings"):
+                owners.setdefault(user_id, set()).add(credential_name(conn, user_id, name))
+            gaps = []
+            for user_id in sorted(owners):
+                unbound = ungranted = 0
+                groups = credential_groups(conn, user_id)
+                for owner in owners[user_id]:
+                    binding = get_entry_binding(conn, user_id, owner, groups)
+                    if not binding or not binding["hosts"]:
+                        unbound += 1
+                    elif get_grant(conn, user_id, owner) is None:
+                        ungranted += 1
+                if unbound or ungranted:
+                    gaps.append(f"{user_id}: {unbound} unbound, {ungranted} bound without grants")
         finally:
             conn.close()
-        results.append(CheckResult(prefix + ".bindings", WARN if unbound or ungranted else OK,
-                                   f"{unbound} unbound; {ungranted} bound without grants"))
+        results.append(CheckResult(prefix + ".bindings", WARN if gaps else OK,
+                                   "; ".join(gaps) if gaps else "every bound credential is granted"))
     except (OSError, sqlite3.Error, ValueError):
         results.append(CheckResult(prefix + ".bindings", WARN, "binding counts unavailable; database not ready"))
     return results
