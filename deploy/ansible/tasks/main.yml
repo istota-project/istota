@@ -44,6 +44,29 @@
       without the skill, set istota_google_workspace_enabled=false.
   when: istota_google_workspace_enabled | bool
 
+# The pattern is config.WORDPRESS_PRIVATE_HOST_PATTERN, held equal by
+# tests/test_config_wordpress.py. The skill matches entries by exact name, so a
+# URL or a host:port here would render, load and lift nothing.
+- name: Assert WordPress settings are bare host names and an integer
+  vars:
+    wordpress_private_host_pattern: '^([A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.?|[0-9A-Fa-f.]*:[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*)$'
+  assert:
+    that:
+      # A string here (`-e istota_wordpress_private_hosts=host`) would be
+      # walked character by character, and None renders `null`, not TOML.
+      - istota_wordpress_private_hosts is sequence
+      - istota_wordpress_private_hosts is not string
+      - istota_wordpress_private_hosts | map('string') | map('trim')
+        | reject('match', wordpress_private_host_pattern) | list | length == 0
+      - istota_wordpress_max_upload_mb == (istota_wordpress_max_upload_mb | int)
+    fail_msg: |
+      istota_wordpress_private_hosts must be a list of bare host names or IP addresses,
+      such as "wp.internal.example.com": no scheme, port, path or wildcard. The
+      wordpress skill compares a site's host against each entry exactly, so a
+      URL there lifts the private-address refusal for no site. Got:
+      {{ istota_wordpress_private_hosts }}. istota_wordpress_max_upload_mb must
+      be a whole number of megabytes.
+
 # Deliberately ungated on istota_whatsapp_enabled. An unknown billing_policy
 # fails `load_config` on a *disabled* block too, and both values here are
 # rejected at load rather than reported by doctor — so without this the play

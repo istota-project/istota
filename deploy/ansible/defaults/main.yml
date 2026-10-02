@@ -639,6 +639,12 @@ istota_rclone_password_obscured: ""
 istota_use_nextcloud_mount: true
 istota_workspace_path: "/srv/mount/nextcloud/content"
 
+# WordPress skill. private_hosts lists exact host names (no scheme, port or path) a
+# site may resolve to a private address from this host, e.g. via split-horizon DNS.
+# Not istota_security_network_extra_hosts: the skill runs host-side, not sandboxed.
+istota_wordpress_private_hosts: []
+istota_wordpress_max_upload_mb: 25
+
 # Browser container settings (for web browsing skill)
 istota_browser_enabled: false
 istota_browser_api_port: 9223
