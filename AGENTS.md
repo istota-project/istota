@@ -80,6 +80,7 @@ src/istota/
 ├── shared_file_organizer.py
 ├── logging_setup.py
 ├── web_app.py, webhook_receiver.py, devbox_proxy.py  # Entry-point stubs for units rendered before the move; deleted after the next release
+├── tool_server.py, ocr_leaf.py  # Spawn-path stubs for a scheduler started before the move; deleted after the next release
 ├── transport/            # Transport seam: IncomingMessage, registry, ingest, routing, talk/ email/ sms/ whatsapp/ ntfy/ istota_file/ repl/ web/
 │   ├── participants.py   # Who wrote a turn: principal / guest / agent, and the one multi-human predicate → transport.md
 │   ├── whatsapp/groups.py  # A Baileys group as a room: roster, registration, addressing, D14 leave → whatsapp.md

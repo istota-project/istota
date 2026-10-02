@@ -216,6 +216,9 @@ ENTRY_POINT_STUBS: frozenset[str] = frozenset({
     "istota.web_app",
     "istota.webhook_receiver",
     "istota.devbox_proxy",
+    # A scheduler started before the move spawns these by name until it restarts.
+    "istota.tool_server",
+    "istota.ocr_leaf",
 })
 
 KEEP_MARKER = "move-modules: keep"

@@ -77,6 +77,7 @@ ROOT_ALLOWLIST = frozenset({
     "logging_setup",
     "module_loader",
     "modules",
+    "ocr_leaf",  # spawn-path stub: a scheduler started before the move spawns this path
     "scheduler",
     "scheduler_deferred",
     "serve",
@@ -87,6 +88,7 @@ ROOT_ALLOWLIST = frozenset({
     "status_writer",
     "storage",
     "tasks_file_poller",
+    "tool_server",  # spawn-path stub, as ocr_leaf
     "updater",
     "user_briefings",  # config.load_config, so every process (see "geo")
     "user_profiles",
