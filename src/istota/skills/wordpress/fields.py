@@ -341,6 +341,7 @@ def _context(result: dict) -> dict:
         "post_id": selector(result.get("post_id")),
         "post_status": selector(result.get("post_status")),
         "post_type": selector(result.get("post_type")),
+        "title": fence(result.get("title")) or None,
         "modified_gmt": selector(result.get("modified_gmt")),
         "locked_by": fence(result.get("locked_by")) or None,
     }
@@ -621,7 +622,9 @@ def _describe_op(op: dict, seen: dict, uploads: acf.Uploads) -> str:
     if verb == "insert":
         return f"insert at {path} {new}"
     if verb == "remove":
-        return f"remove {path}" + (f" (layout {quoted(seen['layout'])})" if seen["layout"] else "")
+        layout = f" (layout {quoted(seen['layout'])})" if seen["layout"] else ""
+        return (f"remove {path}{layout} for good, with no revision made, so WordPress "
+                f"keeps no copy of the row")
     return f"move {op['from']} to {path}"
 
 
@@ -629,6 +632,10 @@ def _subject(args, context: dict) -> str:
     if args.page is not None:
         return f"{args.top} on the options page {quoted(args.page)}"
     kind = context.get("post_type") or "post"
+    # A connector from before the title was added answers without one.
+    title = context.get("title")
+    if title:
+        return f"{args.top} of {title} ({kind} #{args.id})"
     return f"{args.top} of {kind} #{args.id}"
 
 
@@ -656,10 +663,6 @@ def _actions(args, context: dict, seen: list[dict]) -> list[str]:
             f"change {subject} while {locked} has it open in the editor; their next "
             f"save of it will overwrite this change"
         )
-    for op, s in removes:
-        layout = f" (layout {quoted(s['layout'])})" if s["layout"] else ""
-        actions.append(f"remove {op['path']}{layout} for good: no revision is made, so "
-                       f"WordPress keeps no copy of the row")
     for path, before, after in dropped:
         actions.append(f"drop rows for good, {path}: {before} rows → {after}; no revision "
                        f"is made, so WordPress keeps no copy of them")
@@ -783,6 +786,13 @@ def cmd_fields_edit(args) -> dict:
         out["missing_required_note"] = (
             "These required fields are empty. The edit stands; the editor asks for them "
             "on the next manual save unless conditional logic hides them there."
+        )
+    storage = result.get("storage")
+    if isinstance(storage, dict) and storage.get("skipped"):
+        out["storage_note"] = (
+            "The plugin could not match how this site stores the field, so sub-fields "
+            "the edit did not name may now hold an empty stored value where they held "
+            "none. The values read the same in `fields get`."
         )
     if report:
         out["uploads"] = report

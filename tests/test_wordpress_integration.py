@@ -20,9 +20,11 @@ Optional:
                                  needs the istota-connector plugin
     ISTOTA_WP_TEST_FIELDS_TYPE   a post type, and
     ISTOTA_WP_TEST_FIELDS_FIELD  a flexible content field on it with a layout
-                                 holding a repeater of a text sub-field, for
-                                 `fields get` / `fields edit`; needs
-                                 istota-connector 0.2.0
+                                 holding a repeater of a text sub-field, and a
+                                 layout whose REST read tells a stored empty
+                                 value from none (a select, a range with a
+                                 default), for `fields get` / `fields edit`;
+                                 needs istota-connector 0.2.0
 
 Point these at a local development copy of a site, never at production: the
 test writes. Make a local-only application password in wp-admin and revoke it
@@ -335,6 +337,17 @@ def pick_layouts(definition: dict) -> tuple[dict, dict, str, str, str]:
     raise AssertionError("no layout of the field has a text sub-field of its own")
 
 
+def rest_row(capsys, pid: str, field: str, name: str, text: str) -> dict:
+    """The core REST read of the flexible row whose `name` sub-field holds `text`."""
+    item = ok(capsys, "get", "--id", pid, "--type", FIELDS_TYPE, "--fields", "acf")["item"]
+    value = item["acf"][field]
+    # A disabled row is left out of the read, so the rows come keyed by index.
+    rows = [r for r in (value.values() if isinstance(value, dict) else value)
+            if isinstance(r, dict) and plain(r.get(name)) == text]
+    assert len(rows) == 1, value
+    return rows[0]
+
+
 @pytest.mark.skipif(not (FIELDS_TYPE and FIELDS_FIELD),
                     reason="ISTOTA_WP_TEST_FIELDS_TYPE and ISTOTA_WP_TEST_FIELDS_FIELD not set")
 def test_fields_edit_on_a_flexible_field(live, capsys):
@@ -362,14 +375,19 @@ def test_fields_edit_on_a_flexible_field(live, capsys):
         rows = f"{field}/0/{rep}"
 
         # Insert on a draft is not gated. The second row is disabled, as an
-        # editor might leave one, to see it survive edits of its sibling.
+        # editor might leave one, to see it survive edits of its sibling. The
+        # third gives one sub-field and leaves the rest with nothing stored.
         first = {"acf_fc_layout": lay["name"], rep: [{text: "one"}, {text: "two"}]}
         second = {"acf_fc_layout": other["name"], other_text: "kept",
                   "acf_fc_layout_disabled": True}
+        third = {"acf_fc_layout": other["name"], other_text: "sibling"}
         out = ok(capsys, *edit, "--token", read["token"],
                  "--insert", f"{field}/-={json.dumps(first)}",
-                 "--insert", f"{field}/-={json.dumps(second)}")
+                 "--insert", f"{field}/-={json.dumps(second)}",
+                 "--insert", f"{field}/-={json.dumps(third)}")
         assert out["readback"]["changed"] == [], out["readback"]
+        assert "storage_note" not in out, out
+        sibling = rest_row(capsys, pid, field, other_text, "sibling")
         assert out["previous_token"] == read["token"] and out["token"] != read["token"]
         stale, token = read["token"], out["token"]
         row1 = ok(capsys, "fields", "get", "--id", pid, "--path", f"{field}/1")["value"]
@@ -420,6 +438,20 @@ def test_fields_edit_on_a_flexible_field(live, capsys):
         row1 = ok(capsys, "fields", "get", "--id", pid, "--path", f"{field}/1")["value"]
         assert row1["acf_fc_layout_disabled"] is True and plain(row1[other_text]) == "kept", row1
 
+        # So did the third row's storage, down to the sub-fields with nothing
+        # stored, which a REST read shows apart from stored empty values
+        # (Decision 18). Writing the row whole stores all of them, which the
+        # same read then shows; if it does not, this layout cannot tell.
+        assert rest_row(capsys, pid, field, other_text, "sibling") == sibling
+        got = ok(capsys, "fields", "get", "--id", pid, "--path", f"{field}/2")
+        out = ok(capsys, *edit, "--token", got["token"],
+                 "--set", f"{field}/2={json.dumps(got['value'])}")
+        token = out["token"]
+        assert rest_row(capsys, pid, field, other_text, "sibling") != sibling, (
+            f"the insert stored values for sub-fields it left out, or the {other['name']} "
+            f"layout reads the same stored or not (then pick a field whose layouts hold a "
+            f"select, a range with a default or a relationship)")
+
         # A set that drops rows asks first, on a draft too, and writes nothing.
         shrink = ("--set", f"{rows}=[{json.dumps({text: 'only'})}]")
         code, out = cli(capsys, *edit, "--token", token, *shrink)
@@ -437,6 +469,7 @@ def test_fields_edit_on_a_flexible_field(live, capsys):
         assert out["previous"][0]["acf_fc_layout"] == other["name"], out["previous"]
         assert out["previous"][0]["acf_fc_layout_disabled"] is True
         got = ok(capsys, "fields", "get", "--id", pid, "--path", field)["value"]
-        assert len(got) == 1 and [plain(r[text]) for r in got[0][rep]] == ["only"], got
+        assert len(got) == 2 and [plain(r[text]) for r in got[0][rep]] == ["only"], got
+        assert plain(got[1][other_text]) == "sibling", got
     finally:
         cli(capsys, "delete", "--id", pid, "--type", FIELDS_TYPE, "--force", "--confirmed")

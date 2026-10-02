@@ -97,8 +97,11 @@ class Fields(Connector):
         FIELDS_EDIT: {"readonly": False, "destructive": False, "idempotent": False},
     }
 
-    def __init__(self, site, *, status="draft", locked_by=None):
+    def __init__(self, site, *, status="draft", locked_by=None, title="Example page"):
         super().__init__(site)
+        self.title = title
+        #: What the plugin's pass after the write reports (Decision 18).
+        self.storage = {"unstored": 0}
         self.values = _value()
         self.defs = {"blocks": BLOCKS, "hero": HERO}
         self.status = status
@@ -115,8 +118,8 @@ class Fields(Connector):
             return {"post_id": "options", "post_status": None, "post_type": None,
                     "modified_gmt": None, "locked_by": None}
         return {"post_id": str(target["post_id"]), "post_status": self.status,
-                "post_type": "page", "modified_gmt": "2026-10-01 08:00:00",
-                "locked_by": self.locked_by}
+                "post_type": "page", "title": self.title,
+                "modified_gmt": "2026-10-01 08:00:00", "locked_by": self.locked_by}
 
     def get_fields(self, request):
         self.runs.append(request)
@@ -178,7 +181,7 @@ class Fields(Connector):
         return httpx.Response(200, json={
             **self.context(given), "token": token_of(self.values[top]),
             "previous_token": token_of(before[top]), "changed": changed,
-            "previous": previous, "missing_required": self.missing})
+            "previous": previous, "missing_required": self.missing, "storage": self.storage})
 
 
 @pytest.fixture
@@ -588,20 +591,38 @@ class TestTheGate:
     def test_removing_a_row_is_gated_on_a_draft(self, env, capsys, site):
         _, out = run(edit("--remove", "blocks/1"), capsys)
         assert out["reason"] == "confirmation_required"
-        assert any('remove blocks/1 (layout "text") for good' in line for line in out["would"])
+        [line] = out["would"]
+        assert 'remove blocks/1 (layout "text") for good' in line
+        assert line.count("remove blocks/1") == 1, line
         assert writes(env.site) == []
         code, out = run(edit("--remove", "blocks/1", "--confirmed"), capsys)
         assert code == 0, out
         assert out["previous"][0]["acf_fc_layout"] == "text"
+
+    def test_the_would_line_names_the_post_by_its_title_fenced(self, env, capsys):
+        Fields(env.site, status="publish", title=HOSTILE)
+        _, out = run(edit("--set", 'blocks/0/title="Fresh"'), capsys)
+        [line] = out["would"]
+        head = line.split(": set ", 1)[0]
+        assert head.startswith("would change blocks of " + OPEN), head
+        assert head.count(OPEN) == 1 and head.count(CLOSE) == 1, head
+        assert head.endswith("(page #4580), which is live (publish)"), head
+
+    def test_a_connector_without_the_title_names_the_post_by_id(self, env, capsys):
+        Fields(env.site, status="publish", title=None)
+        _, out = run(edit("--set", 'blocks/0/title="Fresh"'), capsys)
+        assert out["would"][0].startswith("would change blocks of page #4580, which is live")
 
     def test_the_would_line_names_the_current_value_fenced_and_the_new_one(
             self, env, capsys):
         Fields(env.site, status="publish")
         _, out = run(edit("--set", 'blocks/0/title="Fresh"'), capsys)
         [line] = out["would"]
-        assert "set blocks/0/title from " in line
-        assert line.count(OPEN) == 1 and line.count(CLOSE) == 1
-        assert line.index(CLOSE) < line.index(' to "Fresh"')
+        # The title is fenced in the head; the op's part carries its own fence.
+        op = line[line.index(": set "):]
+        assert "set blocks/0/title from " in op
+        assert op.count(OPEN) == 1 and op.count(CLOSE) == 1
+        assert op.index(CLOSE) < op.index(' to "Fresh"')
 
     def test_a_long_current_value_keeps_its_fence_closed(self, env, capsys):
         fields = Fields(env.site, status="publish")
@@ -609,8 +630,9 @@ class TestTheGate:
         _, out = run(edit("--set", 'blocks/0/title="y"',
                           token=token_of(fields.values["blocks"])), capsys)
         [line] = out["would"]
-        assert line.count(OPEN) == 1 and line.count(CLOSE) == 1
-        assert line.index(CLOSE) < line.index(' to "y"')
+        op = line[line.index(": set "):]
+        assert op.count(OPEN) == 1 and op.count(CLOSE) == 1
+        assert op.index(CLOSE) < op.index(' to "y"')
 
 
 class TestTheWrite:
@@ -664,6 +686,15 @@ class TestTheWrite:
         code, out = run(edit(*ops), capsys)
         assert code == 0, out
         assert out["readback"] == {"changed": [], "notes": []}
+
+    def test_a_storage_pass_the_plugin_skipped_is_noted(self, env, capsys, site):
+        code, out = run(edit("--set", 'blocks/0/title="x"'), capsys)
+        assert code == 0 and "storage_note" not in out, out
+        site.storage = {"unstored": 0, "skipped": "naming"}
+        code, out = run(edit("--set", 'blocks/0/title="y"',
+                             token=token_of(site.values["blocks"])), capsys)
+        assert code == 0, out
+        assert "did not name" in out["storage_note"]
 
     def test_missing_required_is_passed_through_with_a_note(self, env, capsys, site):
         site.missing = ["blocks/0/items/2/label"]
