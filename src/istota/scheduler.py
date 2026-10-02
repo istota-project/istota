@@ -11,6 +11,7 @@ import re
 import signal
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
@@ -5325,10 +5326,18 @@ def cleanup_old_temp_files(config: Config, retention_days: int) -> int:
         count = 0
         for path in directory.iterdir():
             try:
-                if path.is_file() and path.stat().st_mtime < cutoff:
+                st = path.lstat()
+                # A task can plant a link in its own temp dir, and this runs
+                # as the daemon: unlink a stale link itself, never follow it
+                # (ISSUE-587).
+                if stat.S_ISLNK(st.st_mode):
+                    if st.st_mtime < cutoff:
+                        path.unlink()
+                        count += 1
+                elif stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
                     path.unlink()
                     count += 1
-                elif path.is_dir():
+                elif stat.S_ISDIR(st.st_mode):
                     # Recurse into user subdirectories
                     count += _cleanup_dir(path)
                     # Remove empty directories, but only once the directory

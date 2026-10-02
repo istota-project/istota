@@ -326,6 +326,33 @@ class TestCleanupOldTempFiles:
         assert deleted == 1
         assert not stale.exists()
 
+    def test_a_planted_directory_link_is_not_followed(self, tmp_path):
+        """A task can write a symlink into its own temp dir; the sweep runs
+        as the daemon and must not delete old files in whatever it names."""
+        config = self._config(tmp_path)
+        user_dir = config.temp_dir / "alice"
+        user_dir.mkdir(parents=True)
+        elsewhere = tmp_path / "someone-elses-files"
+        elsewhere.mkdir()
+        victim = elsewhere / "old.txt"
+        victim.write_text("x")
+        self._age(victim, 30)
+        link = user_dir / ".tmux-istota-99-0"
+        link.symlink_to(elsewhere)
+        file_link = user_dir / "task_5_result.txt"
+        file_link.symlink_to(victim)
+        os.utime(link, (time.time() - 30 * 86400,) * 2, follow_symlinks=False)
+        os.utime(file_link, (time.time() - 30 * 86400,) * 2, follow_symlinks=False)
+
+        deleted = cleanup_old_temp_files(config, retention_days=7)
+
+        assert victim.exists()
+        assert elsewhere.is_dir()
+        # The stale links themselves are removed; the targets never are.
+        assert not link.is_symlink()
+        assert not file_link.is_symlink()
+        assert deleted == 2
+
     def test_preserves_recent_files(self, tmp_path):
         config = self._config(tmp_path)
         user_dir = config.temp_dir / "alice"

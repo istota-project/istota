@@ -37,6 +37,7 @@ import itertools
 import json
 import logging
 import os
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -69,16 +70,127 @@ from .claude_code import (
 logger = logging.getLogger("istota.brain.tmux_claude")
 
 
-def prompt_file_text(req: BrainRequest) -> str:
-    """What goes into `prompt.txt`, which the bracketed paste then loads.
+def pasted_prompt_text(req: BrainRequest) -> str:
+    """What the bracketed paste submits as the session's one turn.
 
-    The image inspection directive belongs in the file rather than beside it:
+    The image inspection directive belongs in the paste rather than beside it:
     this brain submits one buffer per run and the session lifecycle is one turn,
     so a second paste would be a second turn. `build_image_prompt` is the
     headless brain's own composer — the two CLI brains speak to the same tool
     set, and a second wording for the same instruction is how they drift.
     """
     return build_image_prompt(req)
+
+
+# The per-attempt workdir sits in `{user_temp_dir}`, which every sandbox of the
+# same user can write (ISSUE-587). So the daemon gives it a name no task can
+# predict, creates it fresh, never adopts one, holds it open by descriptor, and
+# opens nothing in it by a name that could be a link a task planted.
+_CONFIG_DIRNAME = "config"
+_STOP_SENTINEL = "stop.json"
+_STARTED_SENTINEL = "started.json"
+
+
+def _workdir_name(session: str) -> str:
+    """The per-attempt directory name: the session label plus a random tail.
+
+    The label alone is ``istota-{task id}-{attempt}``, which a task can predict
+    for a later task and which a re-run at the same attempt count reuses
+    (`confirm_task`, a restart release); the tail makes it neither."""
+    return f".tmux-{session}-{secrets.token_hex(8)}"
+
+
+def _write_new_file(path: Path, text: str) -> None:
+    """Create ``path`` 0600 and write it; refuse anything already there.
+
+    ``O_EXCL`` refuses an existing file and a symlink alike, so a link planted
+    between the daemon's ``mkdir`` and this write fails the attempt instead of
+    being written through. The descriptor is closed by hand only where
+    ``os.fdopen`` itself raises, as in ``executor._write_control_file``.
+    """
+    fd = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+    )
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+    with handle:
+        handle.write(text)
+
+
+class _SessionDir:
+    """One attempt's workdir, pinned when the daemon created it.
+
+    The model can rename the workdir and put a symlink at its name, pointing at
+    another session's directory, before that session's Stop hook fires. Every
+    read by path would then follow the link and hand the other session's answer
+    back as this one's. So sentinels are read relative to a descriptor opened
+    at creation, and the transcript root is resolved once, then, and compared
+    against as a fixed string rather than re-resolved through the workdir.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.stop_sentinel = path / _STOP_SENTINEL
+        self.started_sentinel = path / _STARTED_SENTINEL
+        self.config_dir = path / _CONFIG_DIRNAME
+        self._fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            root = Path(os.path.realpath(self.config_dir, strict=True))
+            # The descriptor and the resolved root must name the same directory.
+            pinned = os.fstat(self._fd)
+            seen = os.stat(root.parent)
+            if (seen.st_dev, seen.st_ino) != (pinned.st_dev, pinned.st_ino):
+                raise OSError("tmux workdir changed while it was being opened")
+        except BaseException:
+            os.close(self._fd)
+            raise
+        self.config_root = root
+
+    def close(self) -> None:
+        if self._fd >= 0:
+            os.close(self._fd)
+            self._fd = -1
+
+    def read_sentinel(self, name: str) -> dict:
+        """Read a hook sentinel from the pinned directory, never through a link.
+
+        Raises ``OSError`` (a link raises ``ELOOP``) or ``json.JSONDecodeError``,
+        which every caller already treats as "not there yet"."""
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self._fd)
+        try:
+            handle = os.fdopen(fd, "r", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
+            data = json.loads(handle.read())
+        if not isinstance(data, dict):
+            raise json.JSONDecodeError("sentinel is not an object", "", 0)
+        return data
+
+    def transcript(self, raw: object) -> Path | None:
+        """The transcript a hook payload names, only if it is this session's own.
+
+        The CLI writes its transcript under ``CLAUDE_CONFIG_DIR``. A sentinel
+        is writable from inside the sandbox, so a path that does not resolve
+        under the pinned root is a request for the daemon to read some other
+        file, another user's transcript included, and is ignored."""
+        if not isinstance(raw, str) or not raw:
+            return None
+        try:
+            resolved = Path(raw).resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if resolved == self.config_root or not resolved.is_relative_to(self.config_root):
+            logger.warning(
+                "tmux_brain: ignoring a transcript path outside the session config dir",
+            )
+            return None
+        return resolved
+
 
 # Wide, fixed pane geometry reduces TUI reflow noise if pane scraping is needed.
 _PANE_WIDTH = 220
@@ -722,28 +834,49 @@ class TmuxClaudeBrain:
         # hook runs *inside* the sandbox and writes the sentinel; the brain reads
         # it from *outside*. Only ISTOTA_DEFERRED_DIR (= user_temp_dir) is
         # RW-bound at the same path inside and out AND is bwrap's --chdir target,
-        # so the sentinel, the prompt file, and the per-session config dir must
+        # so the sentinels and the per-session config dir must
         # live there. A private mkdtemp in /tmp would land on the sandbox's own
         # tmpfs — invisible to the brain. Off-sandbox (mac/dev/Docker)
         # ISTOTA_DEFERRED_DIR may be unset; fall back to req.cwd.
         base_dir = Path(req.env.get("ISTOTA_DEFERRED_DIR") or req.cwd)
-        workdir = base_dir / f".tmux-{session}"
-        sentinel = workdir / "stop.json"
-        started_sentinel = workdir / "started.json"
-        prompt_file = workdir / "prompt.txt"
+        workdir = base_dir / _workdir_name(session)
+        sentinel = workdir / _STOP_SENTINEL
+        started_sentinel = workdir / _STARTED_SENTINEL
         # Per-session CLAUDE_CONFIG_DIR — the clobber fix (§2). cwd-independent, so
         # it sidesteps the fixed bwrap --chdir target with no executor change.
-        config_dir = workdir / "config"
+        config_dir = workdir / _CONFIG_DIRNAME
 
         ready_ms = 0
         wait_ms = 0
         tools = 0
         outcome = "error"
         tailer: _TranscriptTailer | None = None
+        created_workdir = False
+        session_dir: _SessionDir | None = None
         try:
-            workdir.mkdir(parents=True, exist_ok=True)
-            config_dir.mkdir(parents=True, exist_ok=True)
-            prompt_file.write_text(prompt_file_text(req), encoding="utf-8")
+            base_dir.mkdir(parents=True, exist_ok=True)
+            # No exist_ok: a directory, file or link already at this name was
+            # put there by something other than this attempt (ISSUE-587).
+            try:
+                workdir.mkdir(mode=0o700)
+            except FileExistsError:
+                logger.error(
+                    "tmux_brain workdir_exists session=%s: refusing a "
+                    "pre-existing per-attempt directory", session,
+                )
+                outcome = "workdir_exists"
+                return (
+                    BrainResult(
+                        success=False,
+                        result_text="tmux session directory already existed",
+                        stop_reason="error",
+                    ),
+                    False,
+                )
+            created_workdir = True
+            config_dir.mkdir(mode=0o700)
+            # Pinned before anything in the sandbox can run (ISSUE-587).
+            session_dir = _SessionDir(workdir)
             self._write_hooks(config_dir, sentinel, started_sentinel)
             self._seed_onboarding(config_dir, base_dir)
 
@@ -813,12 +946,12 @@ class TmuxClaudeBrain:
                 )
             ready_ms = int((time.monotonic() - ready_t0) * 1000)
 
-            self._inject_prompt(session, prompt_file, started_sentinel)
+            self._inject_prompt(session, pasted_prompt_text(req), session_dir)
 
             # Stream surfaces: start the live tailer once we know the transcript
             # path (§10). Push/non-streaming tasks skip it (no behavior change).
             if req.streaming and req.on_progress is not None:
-                tpath = self._learn_transcript_path(started_sentinel, base_dir)
+                tpath = self._learn_transcript_path(session_dir)
                 if tpath is not None:
                     tailer = _TranscriptTailer(tpath, req.on_progress)
                     tailer.start()
@@ -901,7 +1034,9 @@ class TmuxClaudeBrain:
             # done — the tailer already forwarded progress events on stream
             # surfaces; tell _build_result not to re-forward them (avoid double
             # emission). On push/non-streaming, _build_result forwards as before.
-            result = self._build_result(sentinel, req, forward_progress=tailer is None)
+            result = self._build_result(
+                session_dir, req, forward_progress=tailer is None,
+            )
             tools = self._count_tools(result)
             outcome = "done" if result.success else "error"
             return (result, False)
@@ -929,7 +1064,10 @@ class TmuxClaudeBrain:
             if tailer is not None:
                 tailer.stop()
                 tailer.join(timeout=2.0)
-            shutil.rmtree(workdir, ignore_errors=True)
+            if session_dir is not None:
+                session_dir.close()
+            if created_workdir:
+                shutil.rmtree(workdir, ignore_errors=True)
             dialogs = self._last_dialogs
             logger.info(
                 "tmux_brain session=%s outcome=%s ready_ms=%d wait_ms=%d "
@@ -968,7 +1106,8 @@ class TmuxClaudeBrain:
         return parse_transcript(path)
 
     def _build_result(
-        self, sentinel: Path, req: BrainRequest, *, forward_progress: bool = True
+        self, session_dir: _SessionDir, req: BrainRequest, *,
+        forward_progress: bool = True,
     ) -> BrainResult:
         """Read the Stop-hook payload + transcript, emit progress events, and
         compose the BrainResult with the same actions/trace shapes ClaudeCodeBrain
@@ -978,7 +1117,7 @@ class TmuxClaudeBrain:
         turn's events to ``on_progress`` (stream surfaces) — re-forwarding here
         would double-emit. It stays True for push/non-streaming tasks."""
         try:
-            payload = json.loads(sentinel.read_text())
+            payload = session_dir.read_sentinel(_STOP_SENTINEL)
         except (OSError, json.JSONDecodeError) as e:
             return BrainResult(
                 success=False,
@@ -986,12 +1125,14 @@ class TmuxClaudeBrain:
                 stop_reason="error",
             )
 
-        transcript_path = payload.get("transcript_path")
+        transcript_path = session_dir.transcript(payload.get("transcript_path"))
         last_msg = payload.get("last_assistant_message")
+        if not isinstance(last_msg, str):
+            last_msg = None
 
         events: list[StreamEvent] = []
         if transcript_path:
-            events = self._parse_transcript_settled(Path(transcript_path))
+            events = self._parse_transcript_settled(transcript_path)
 
         # Forward whole-turn events to on_progress (no token-level streaming on
         # this path — the Stop hook fires at turn end). ResultEvent is the return
@@ -1029,7 +1170,7 @@ class TmuxClaudeBrain:
         # requested model when the transcript is missing/unparseable.
         model_used = ""
         if transcript_path:
-            model_used = _model_from_transcript(Path(transcript_path))
+            model_used = _model_from_transcript(transcript_path)
 
         # A limit that lands as the final assistant message (the Stop hook still
         # fired) reads as a usage_limit, not a completed turn — reroutes to the
@@ -1064,30 +1205,36 @@ class TmuxClaudeBrain:
             model_used=model_used or req.model,
         )
 
-    def _learn_transcript_path(self, started_sentinel: Path, base_dir: Path) -> Path | None:
+    def _learn_transcript_path(self, session_dir: _SessionDir) -> Path | None:
         """Read the early UserPromptSubmit/SessionStart sentinel for the
         transcript path so the tailer can start mid-turn (§10). Polls briefly for
-        the sentinel; on miss, falls back to globbing the project transcript dir
-        for the newest JSONL — a documented best-effort path."""
+        the sentinel; on miss, falls back to globbing this session's own project
+        transcript dir for the newest JSONL — a documented best-effort path.
+
+        The fallback globs ``<CLAUDE_CONFIG_DIR>/projects``, where this session's
+        CLI writes. It used to glob the daemon's ``~/.claude/projects``, which
+        holds every ``claude_code`` task's transcript for every user, and could
+        hand another user's live session to this one's tailer."""
         deadline = time.monotonic() + _STARTED_SENTINEL_WAIT_S
         while time.monotonic() < deadline:
-            if started_sentinel.exists():
-                try:
-                    payload = json.loads(started_sentinel.read_text())
-                    tpath = payload.get("transcript_path")
-                    if tpath:
-                        return Path(tpath)
-                except (OSError, json.JSONDecodeError):
-                    pass
+            try:
+                payload = session_dir.read_sentinel(_STARTED_SENTINEL)
+            except (OSError, json.JSONDecodeError):
+                payload = None
+            if payload is not None:
+                tpath = session_dir.transcript(payload.get("transcript_path"))
+                if tpath is not None:
+                    return tpath
             time.sleep(_SENTINEL_POLL_S)
-        # Glob fallback: newest *.jsonl under ~/.claude/projects (best-effort).
         try:
-            projects = Path.home() / ".claude" / "projects"
+            projects = session_dir.config_root / "projects"
             candidates = list(projects.rglob("*.jsonl"))
             if candidates:
                 newest = max(candidates, key=lambda p: p.stat().st_mtime)
-                logger.debug("tmux_brain transcript glob fallback: %s", newest)
-                return newest
+                contained = session_dir.transcript(str(newest))
+                if contained is not None:
+                    logger.debug("tmux_brain transcript glob fallback: %s", contained)
+                    return contained
         except OSError:
             pass
         logger.debug("tmux_brain: could not learn transcript path for live tailing")
@@ -1109,8 +1256,10 @@ class TmuxClaudeBrain:
 
         Living in the per-session CLAUDE_CONFIG_DIR (not a shared project
         ``.claude/``) is the clobber fix: concurrent same-user tasks get distinct
-        config dirs, so their Stop hooks can't cross-fire."""
-        config_dir.mkdir(parents=True, exist_ok=True)
+        config dirs, so their Stop hooks can't cross-fire.
+
+        The directory is the caller's fresh one; the file is created, never
+        overwritten (ISSUE-587)."""
         stop_cmd = f"cat > {shlex.quote(str(sentinel))}"
         start_cmd = f"cat > {shlex.quote(str(started_sentinel))}"
         settings = {
@@ -1120,7 +1269,7 @@ class TmuxClaudeBrain:
                 "SessionStart": [{"hooks": [{"type": "command", "command": start_cmd}]}],
             }
         }
-        (config_dir / "settings.json").write_text(json.dumps(settings))
+        _write_new_file(config_dir / "settings.json", json.dumps(settings))
 
     @staticmethod
     def _seed_onboarding(config_dir: Path, launch_cwd: Path) -> None:
@@ -1134,7 +1283,11 @@ class TmuxClaudeBrain:
         binary) mark the install + this project as already-onboarded. Best-effort
         + a documented fallback: ``_wait_ready`` still scripts past the dialogs if
         a CLI version renames a key, so a stale seed degrades to dialog-scripting
-        rather than a hang."""
+        rather than a hang.
+
+        Not best-effort about the write itself: a failure here means something
+        is already at that name in a directory the daemon just created, and a
+        ``.claude.json`` the CLI then reads is not one to start a session on."""
         cfg = {
             "theme": "dark",
             "hasCompletedOnboarding": True,
@@ -1146,10 +1299,7 @@ class TmuxClaudeBrain:
                 }
             },
         }
-        try:
-            (config_dir / ".claude.json").write_text(json.dumps(cfg))
-        except OSError:
-            logger.debug("tmux_brain: could not seed onboarding config", exc_info=True)
+        _write_new_file(config_dir / ".claude.json", json.dumps(cfg))
 
     @staticmethod
     def _cleanup_legacy_hook(req: BrainRequest) -> None:
@@ -1180,6 +1330,26 @@ class TmuxClaudeBrain:
                 ["tmux", *args], returncode=1, stdout="", stderr="tmux timeout"
             )
             return cp
+
+    def _load_buffer(self, buf: str, text: str) -> None:
+        """Load ``text`` into a tmux buffer over stdin.
+
+        The prompt used to go through ``<workdir>/prompt.txt``, a file in a
+        task-writable directory that the daemon wrote and tmux then read, both
+        following a symlink planted at the name (ISSUE-587). Over stdin there
+        is no file to plant."""
+        try:
+            subprocess.run(
+                ["tmux", "load-buffer", "-b", buf, "-"],
+                input=text,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                timeout=self._p.tmux_command_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("tmux_brain: tmux load-buffer timed out")
 
     def _new_session(self, name: str, env: dict[str, str]) -> None:
         # -e passes env into the session so the detached pane doesn't inherit a
@@ -1261,7 +1431,9 @@ class TmuxClaudeBrain:
             time.sleep(_READY_POLL_S)
         return False
 
-    def _inject_prompt(self, name: str, prompt_file: Path, started_sentinel: Path) -> None:
+    def _inject_prompt(
+        self, name: str, prompt_text: str, session_dir: _SessionDir,
+    ) -> None:
         # Buffer load+paste avoids shell-escaping / pipe-buffer hazards for large
         # prompts (mirrors ClaudeCodeBrain's stdin feeder rationale).
         #
@@ -1274,14 +1446,14 @@ class TmuxClaudeBrain:
         # blindly, so a slow-confirming successful submit can't get a stray empty
         # Enter on top of it.
         buf = f"istota-{name}"
-        self._tmux("load-buffer", "-b", buf, str(prompt_file))
+        self._load_buffer(buf, prompt_text)
         self._tmux("paste-buffer", "-t", name, "-b", buf, "-d")
         for attempt in range(_SUBMIT_MAX_ATTEMPTS):
             time.sleep(_SUBMIT_SETTLE_S)
             self._tmux("send-keys", "-t", name, "Enter")
             confirm_deadline = time.monotonic() + _SUBMIT_CONFIRM_S
             while time.monotonic() < confirm_deadline:
-                if self._turn_started(started_sentinel):
+                if self._turn_started(session_dir):
                     if attempt:
                         logger.info(
                             "tmux_brain: prompt submitted on Enter attempt %d (session=%s)",
@@ -1295,20 +1467,19 @@ class TmuxClaudeBrain:
         )
 
     @staticmethod
-    def _turn_started(started_sentinel: Path) -> bool:
+    def _turn_started(session_dir: _SessionDir) -> bool:
         """True once a turn has actually begun — the UserPromptSubmit hook fired
         (it overwrites the SessionStart payload, so hook_event_name flips), or the
         session transcript file exists (claude only creates it once a turn runs).
         Either is a definitive "the prompt submitted" signal that can't be faked
         by the pre-turn SessionStart sentinel."""
         try:
-            data = json.loads(started_sentinel.read_text())
+            data = session_dir.read_sentinel(_STARTED_SENTINEL)
         except (OSError, json.JSONDecodeError):
             return False
         if data.get("hook_event_name") == "UserPromptSubmit":
             return True
-        tpath = data.get("transcript_path")
-        return bool(tpath) and Path(tpath).exists()
+        return session_dir.transcript(data.get("transcript_path")) is not None
 
     def _wait_for_completion(
         self, name: str, sentinel: Path, deadline: float, cancel_check

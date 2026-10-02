@@ -101,8 +101,14 @@ class _Harness:
         def fake_wait_for_completion(name, sentinel, deadline, cancel_check):
             self.calls.append(("_wait_for_completion", (sentinel,), {}))
             if self._sentinel_status == "done":
+                # The CLI writes its transcript under CLAUDE_CONFIG_DIR, and
+                # the brain reads one nowhere else (ISSUE-587).
+                own = Path(sentinel).parent / "config" / "projects" / "p"
+                own.mkdir(parents=True, exist_ok=True)
+                transcript = own / Path(self.transcript).name
+                transcript.write_bytes(Path(self.transcript).read_bytes())
                 payload = {
-                    "transcript_path": str(self.transcript),
+                    "transcript_path": str(transcript),
                     "last_assistant_message": self.last_msg,
                 }
                 Path(sentinel).write_text(json.dumps(payload))
@@ -364,7 +370,7 @@ class TestSandboxInteraction:
         config_dir = tmp_path / "deferred" / ".tmux-s" / "config"
         sentinel = tmp_path / "deferred" / ".tmux-s" / "stop.json"
         started = tmp_path / "deferred" / ".tmux-s" / "started.json"
-        sentinel.parent.mkdir(parents=True)
+        config_dir.mkdir(parents=True)
         brain._write_hooks(config_dir, sentinel, started)
         cfg = json.loads((config_dir / "settings.json").read_text())
         stop_cmd = cfg["hooks"]["Stop"][0]["hooks"][0]["command"]
