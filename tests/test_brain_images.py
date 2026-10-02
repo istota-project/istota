@@ -456,7 +456,7 @@ class TestReissueWithoutImages:
 
 
 class TestTmuxPromptFile:
-    """The same directive, delivered through the prompt file the paste loads."""
+    """The same directive, delivered through the text the paste loads."""
 
     def test_the_prompt_file_carries_the_directive_before_the_request(self, tmp_path):
         from istota.brain import tmux_claude
@@ -464,7 +464,7 @@ class TestTmuxPromptFile:
         img = _image(tmp_path)
         req = _req(tmp_path, images=[img], prompt="MARKER-REQUEST")
 
-        text = tmux_claude.prompt_file_text(req)
+        text = tmux_claude.pasted_prompt_text(req)
 
         assert IMAGE_DIRECTIVE_HEADER in text
         assert text.index(IMAGE_DIRECTIVE_HEADER) < text.index("MARKER-REQUEST")
@@ -475,7 +475,7 @@ class TestTmuxPromptFile:
 
         req = _req(tmp_path, images=[], prompt="plain request")
 
-        assert tmux_claude.prompt_file_text(req) == "plain request"
+        assert tmux_claude.pasted_prompt_text(req) == "plain request"
 
     def test_the_brain_writes_that_text_to_the_prompt_file(self, tmp_path):
         """One file, one bracketed paste — the directive rides in, not beside."""
@@ -483,9 +483,9 @@ class TestTmuxPromptFile:
         from tests.support.drift import source_of
 
         src = source_of(tmux_claude.TmuxClaudeBrain)
-        assert "prompt_file.write_text(prompt_file_text(req)" in src
+        assert "self._inject_prompt(session, pasted_prompt_text(req)" in src
         # Still exactly one load-buffer submission per run.
-        assert src.count('self._tmux("load-buffer"') <= 1
+        assert src.count("self._load_buffer(") == 1
 
 
 @pytest.mark.parametrize("header", [
