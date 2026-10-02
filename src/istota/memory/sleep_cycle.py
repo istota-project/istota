@@ -437,13 +437,21 @@ def _append_dated_memory(path: Path, new_text: str) -> str:
             existing = path.read_text()
         except OSError as e:
             logger.warning("Could not read %s before appending: %s", path, e)
-    body = new_text.rstrip("\n")
-    if existing.strip():
-        file_text = existing.rstrip("\n") + "\n\n" + body + "\n"
-    else:
-        file_text = body + "\n"
+    file_text = join_dated_memory(existing, new_text)
     path.write_text(file_text)
     return file_text
+
+
+def join_dated_memory(existing: str, new_text: str) -> str:
+    """The append rule for a dated memory file, without the file.
+
+    Shared with the room mount sweep, which merges two copies of one day's file
+    (ISSUE-588) and must produce what appending would have.
+    """
+    body = new_text.rstrip("\n")
+    if existing.strip():
+        return existing.rstrip("\n") + "\n\n" + body + "\n"
+    return body + "\n"
 
 
 def _task_timestamp(created_at: str | None, tz: ZoneInfo) -> str:

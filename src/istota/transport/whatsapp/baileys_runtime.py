@@ -262,31 +262,15 @@ def _replaced_alert_body(level: int, count: int) -> str:
 
 
 def _unlink_readers(config: "Config") -> list[str]:
-    """Who is told. Admins, or everybody where that means everybody.
+    """Who is told: `task_alert.admin_readers`.
 
-    `load_admin_users()` returning an empty set is `Config.is_admin`'s "every
-    user is an admin", which is the single-user install's ordinary state — so
-    an empty set has to fan out rather than reach nobody. This is the fan-out
-    `_write_billing_alerts` declines to make, and the difference is that that
-    one has a recipient to fall back on: a charged message names the user who
-    received it, and a dead session names nobody at all.
+    This is the fan-out `_write_billing_alerts` declines to make, and the
+    difference is that that one has a recipient to fall back on: a charged
+    message names the user who received it, and a dead session names nobody.
     """
-    from ...config import load_admin_users  # noqa: PLC0415
+    from ...notification_resolvers.task_alert import admin_readers  # noqa: PLC0415
 
-    try:
-        admins = load_admin_users()
-    except Exception:
-        logger.warning("whatsapp.baileys.admins_unreadable", exc_info=True)
-        admins = set()
-    if admins:
-        # The intersection, falling back to **every configured user** rather
-        # than to the raw admin list: an admins file naming somebody who is
-        # not in `config.users` — a stale entry, a renamed account — would
-        # otherwise write a row and attempt a push for a user with no
-        # configuration at all. Same answer as the empty-admins arm below, and
-        # for the same reason.
-        return sorted(admins & set(config.users)) or sorted(config.users)
-    return sorted(config.users)
+    return admin_readers(config)
 
 
 def _alert_body(reason: str) -> str:
