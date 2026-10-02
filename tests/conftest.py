@@ -237,7 +237,7 @@ def _no_subscription_usage_lookups(monkeypatch):
     reinstates one and forgets the other still cannot reach the endpoint.
     """
     try:
-        from istota import subscription_usage
+        from istota.usage import subscription as subscription_usage
     except Exception:
         # Broad on purpose: this runs before every test in the suite, so
         # anything it raises fails thousands of unrelated tests with a

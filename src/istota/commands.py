@@ -37,10 +37,10 @@ from istota.rooms.surfaces import is_room_member
 # each other by a parity test; a third, inside a surface, is exactly what those
 # tests exist to prevent. `usage_render` is a stdlib-only leaf, so it costs this
 # module (imported on the Talk polling path) nothing to take at import time.
-from .usage_render import COST_PLACEHOLDER, fmt_int, render_cost
+from istota.usage.render import COST_PLACEHOLDER, fmt_int, render_cost
 
 if TYPE_CHECKING:
-    from .subscription_usage import Spend, UsageSnapshot, UsageWindow
+    from istota.usage.subscription import Spend, UsageSnapshot, UsageWindow
     from .transport.registry import TransportRegistry
 
 logger = logging.getLogger("istota.commands")
@@ -1792,7 +1792,7 @@ async def cmd_usage(ctx: CommandContext):
     if is_admin:
         # Imported here, not at module scope: `commands` is imported on the Talk
         # polling path and `subscription_usage` pulls in urllib and subprocess.
-        from . import subscription_usage
+        from istota.usage import subscription as subscription_usage
 
         # One clock for the fetch, the cache freshness and the age footer.
         now = time.time()

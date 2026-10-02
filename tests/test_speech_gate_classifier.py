@@ -326,7 +326,7 @@ class TestTheCompleterAndItsUsage:
 
 class TestTheDashboardCounter:
     def test_a_speech_gate_row_is_not_counted_as_unmeasured_context(self, config):
-        from istota.usage import BrainUsage
+        from istota.usage.telemetry import BrainUsage
 
         with db.get_db(config.db_path) as conn:
             db.insert_task_usage(

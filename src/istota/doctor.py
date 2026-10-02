@@ -68,7 +68,7 @@ from istota.sandbox.user_scope import is_within, paths_overlap
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; a runtime import is a cycle
     from .config import Config
-    from .subscription_usage import UsageSnapshot, UsageWindow
+    from istota.usage.subscription import UsageSnapshot, UsageWindow
 
 logger = logging.getLogger(__name__)
 
@@ -1919,7 +1919,7 @@ def check_subscription_usage(config: "Config", probe: bool) -> CheckResult:
             "utilization cannot be observed without a network request (probe disabled)",
         )
 
-    from . import subscription_usage
+    from istota.usage import subscription as subscription_usage
 
     # One clock for the fetch, the countdowns and the staleness age. Reading the
     # wall clock twice would let a cached snapshot's age be measured against a

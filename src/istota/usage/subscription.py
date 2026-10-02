@@ -62,13 +62,13 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping
 from istota.lib.retry_after import parse_retry_after as _parse_retry_after
 from istota.lib.retry_after import retry_after_from_headers as _retry_after_from_headers
 
-from . import __version__
+from istota import __version__
 from istota.lib.atomic_write import write_text_atomic
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from .config import Config
+    from istota.config import Config
 
-logger = logging.getLogger("istota.subscription_usage")
+logger = logging.getLogger("istota.usage.subscription")
 
 BASE_URL = "https://api.anthropic.com"
 USAGE_PATH = "/api/oauth/usage"

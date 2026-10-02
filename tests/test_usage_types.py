@@ -12,7 +12,7 @@ import json
 import pytest
 
 from istota.session.usage import TaskUsage
-from istota.usage import (
+from istota.usage.telemetry import (
     BrainUsage,
     ModelUsage,
     RequestUsage,

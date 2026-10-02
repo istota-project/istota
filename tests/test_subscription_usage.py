@@ -1,4 +1,4 @@
-"""Tests for ``istota.subscription_usage``.
+"""Tests for ``istota.usage.subscription``.
 
 Nothing here touches the network, the real macOS Keychain, or the real
 ``~/.claude/.credentials.json``. Every entry point takes its environment, its
@@ -29,7 +29,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from istota import subscription_usage as su
+from istota.usage import subscription as su
 
 # The root conftest neutralizes both of these for the whole suite, so a doctor
 # sweep on a developer's macOS laptop cannot read the real keychain or reach the

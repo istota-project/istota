@@ -39,7 +39,7 @@ from .tasks_file_poller import (
     discover_tasks_files,
     poll_user_tasks_file,
 )
-from .usage_render import (
+from istota.usage.render import (
     COST_PLACEHOLDER,
     fmt_context,
     fmt_int,

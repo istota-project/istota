@@ -22,7 +22,7 @@ import textwrap
 
 import pytest
 
-from istota import subscription_usage as su
+from istota.usage import subscription as su
 from istota.config import (
     ClaudeCodeBrainConfig,
     Config,
@@ -465,4 +465,4 @@ class TestOneSourceOfTruthForTheDefaults:
             [sys.executable, "-c", code], capture_output=True, text=True, check=True
         )
         loaded = set(json.loads(out.stdout))
-        assert "istota.subscription_usage" not in loaded
+        assert "istota.usage.subscription" not in loaded

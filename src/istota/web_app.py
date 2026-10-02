@@ -70,7 +70,7 @@ from .chat_files import ChatFileError, resolve_chat_file
 from .config import load_config
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
 from .ocs import OcsError, ocs_data
-from .usage import SYSTEM_USER_ID
+from istota.usage.telemetry import SYSTEM_USER_ID
 from .location_logic import (
     _location_discover_places,
     _location_dismiss_cluster,
@@ -2429,7 +2429,7 @@ def _admin_subscription_section(config, now: datetime) -> dict | None:
     this credential is not in the config, so the redaction pass that covers
     configured secrets has never seen it.
     """
-    from . import subscription_usage
+    from istota.usage import subscription as subscription_usage
 
     if not _claude_code_is_in_play(config):
         return None

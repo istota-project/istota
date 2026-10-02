@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Protocol
 from ._events import StreamEvent
 
 if TYPE_CHECKING:
-    from istota.usage import BrainUsage
+    from istota.usage.telemetry import BrainUsage
 
 
 @dataclass(frozen=True)
@@ -314,7 +314,7 @@ class BrainResult:
     stop_reason: str = "completed"
 
     # Per-attempt token + cost telemetry, normalized across brains
-    # (`istota.usage.BrainUsage`). Every brain that can measure sets this on
+    # (`istota.usage.telemetry.BrainUsage`). Every brain that can measure sets this on
     # *every* return, success or failure — tokens are spent either way.
     # ClaudeCodeBrain builds it from the CLI's terminal frame plus the
     # per-request `message_delta` frames; NativeBrain converts its `TaskUsage`

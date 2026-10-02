@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from istota import db, web_app
-from istota.usage import BrainUsage, ModelUsage
+from istota.usage.telemetry import BrainUsage, ModelUsage
 
 NOW = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -344,7 +344,7 @@ class TestSystemSpend:
         """A shared briefing block records against a sentinel, which is not a
         person. It belongs in the fleet pane's per-origin split, not beside
         real users in a table of people."""
-        from istota.usage import SYSTEM_USER_ID
+        from istota.usage.telemetry import SYSTEM_USER_ID
 
         _add_usage(
             conn, user=SYSTEM_USER_ID, at=NOW - timedelta(hours=2),
@@ -359,7 +359,7 @@ class TestSystemSpend:
         assert "alice" in usernames
 
     def test_it_is_still_in_the_fleet_totals(self, conn):
-        from istota.usage import SYSTEM_USER_ID
+        from istota.usage.telemetry import SYSTEM_USER_ID
 
         _add_usage(
             conn, user=SYSTEM_USER_ID, at=NOW - timedelta(hours=2),

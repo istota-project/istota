@@ -23,7 +23,8 @@ from pathlib import Path
 
 import pytest
 
-from istota import doctor, subscription_usage
+from istota import doctor
+from istota.usage import subscription as subscription_usage
 from istota.credentials import store as secrets_store
 from istota import executor as doctor_executor
 from istota.doctor import (
@@ -363,7 +364,7 @@ class TestConfigLoadPathStaysCheap:
             ("istota.static_dir", ("fastapi", "istota.web_app", "istota.config")),
             # `doctor` imports `subscription_usage` lazily, so it stays cheap
             # for the config-load path that imports `doctor` itself.
-            ("istota.doctor", ("istota.subscription_usage",)),
+            ("istota.doctor", ("istota.usage.subscription",)),
         ],
         ids=["forge_bin", "static_dir", "doctor"],
     )
@@ -1625,7 +1626,7 @@ def _drive_usage(
     through rather than frozen, since the check computes the staleness age
     against the same clock it hands the module.
     """
-    from istota import subscription_usage as su
+    from istota.usage import subscription as su
 
     if darwin_blob is not None:
         monkeypatch.setattr(su.platform, "system", lambda: "Darwin")
@@ -1866,7 +1867,7 @@ class TestSubscriptionUsage:
         """`get_snapshot` cannot return this today, so the never-FAIL guard is
         driven directly: unguarded it is an IndexError, which `run_checks`
         turns into the one status this check must never produce."""
-        from istota import subscription_usage as su
+        from istota.usage import subscription as su
 
         monkeypatch.setattr(
             su,
@@ -1879,7 +1880,7 @@ class TestSubscriptionUsage:
 
     def _seed_cache(self, config, age_seconds, percent=40):
         """Write a good cache entry `age_seconds` old, as a fetch would have."""
-        from istota import subscription_usage as su
+        from istota.usage import subscription as su
 
         now = time.time()
         windows, spend = su.parse_usage(json.loads(_usage_body(percent)), now_ts=now)

@@ -55,7 +55,7 @@ from istota.brain.claude_code import (  # noqa: E402
 from istota.executor import build_allowed_tools  # noqa: E402
 from istota.image_attachments import prepare_image_attachments  # noqa: E402
 from istota.sandbox.process_group import kill_group_if_live  # noqa: E402
-from istota.subscription_usage import resolve_token  # noqa: E402
+from istota.usage.subscription import resolve_token  # noqa: E402
 
 from .stream_json import (  # noqa: E402
     carries_image,

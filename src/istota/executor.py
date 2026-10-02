@@ -2451,7 +2451,7 @@ def _report_native_usage(on_usage, message, requested_model: str) -> None:
     saying the turn was free, which is a measurement.
     """
     try:
-        from istota import usage as usage_types
+        from istota.usage import telemetry as usage_types
         from istota.llm.catalog import get_model_info
         from istota.session.usage import TaskUsage
 

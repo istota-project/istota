@@ -406,7 +406,7 @@ class TestCooldownEndsAtTheQuotaReset:
         import time
         from datetime import datetime, timezone
 
-        import istota.subscription_usage as su
+        import istota.usage.subscription as su
 
         resets_at = datetime.fromtimestamp(
             time.time() + seconds, tz=timezone.utc

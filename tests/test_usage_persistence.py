@@ -11,7 +11,7 @@ import pytest
 
 from istota import db
 from istota.executor import _persist_task_usage, persist_brain_usage
-from istota.usage import BrainUsage, ModelUsage
+from istota.usage.telemetry import BrainUsage, ModelUsage
 
 
 def _usage(**kw):

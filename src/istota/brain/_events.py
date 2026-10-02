@@ -67,7 +67,7 @@ class ResultEvent:
     success: bool
     text: str
     # The whole terminal frame, uninterpreted. `_events` stays a parser and
-    # `istota.usage` owns the interpretation, so a CLI schema change touches one
+    # `istota.usage.telemetry` owns the interpretation, so a CLI schema change touches one
     # pure, unit-tested function rather than this module. The default keeps
     # `tmux_claude.py`'s keyword construction compiling.
     raw: dict | None = None
@@ -203,7 +203,7 @@ def make_stream_parser() -> Callable[[str], StreamEvent | None]:
     return parse
 
 
-# SQLite binds INTEGER as signed 64-bit; mirrors `istota.usage`'s own bound.
+# SQLite binds INTEGER as signed 64-bit; mirrors `istota.usage.telemetry`'s own bound.
 _SQLITE_INT_MIN = -(2**63)
 _SQLITE_INT_MAX = 2**63 - 1
 
@@ -246,7 +246,7 @@ def _usage_int(usage: dict, key: str) -> int:
         as_int = int(value)
     except (ValueError, OverflowError):
         return 0
-    # Same signed-64-bit bound `istota.usage._int` applies. Without it a nonsense
+    # Same signed-64-bit bound `istota.usage.telemetry._int` applies. Without it a nonsense
     # magnitude survives here and is rejected downstream, which turns an
     # unmeasurable context into a *measured* zero — and zero is the one value the
     # context columns must never hold, since NULL is what marks them unmeasured.

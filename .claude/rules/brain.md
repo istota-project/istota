@@ -73,7 +73,7 @@ Also `cwd`, `timeout_seconds`, `streaming`, `result_file`.
 ## BrainResult fields
 - `stop_reason`: `completed`/`cancelled`/`timeout`/`oom`/`terminated`/`transient_api_error`/`usage_limit`/`error`/`not_found`/`fallback` (native also `soft_timeout`). `usage_limit` = quota/billing, rerouted.
 - `execution_trace`: `{type: tool|text|cm_boundary}`; `tool` entries carry `raw` Bash (`_tool_invocation`) for playbooks (ISSUE-174).
-- `usage: BrainUsage | None` (`istota.usage`): retyped from `TaskUsage` because `input_tokens` there includes cache reads and `billed_input_tokens` does not; `from_task_usage` reconciles (`totals_source='derived'`). Set on every return; `None` on tmux (no result frame).
+- `usage: BrainUsage | None` (`istota.usage.telemetry`): retyped from `TaskUsage` because `input_tokens` there includes cache reads and `billed_input_tokens` does not; `from_task_usage` reconciles (`totals_source='derived'`). Set on every return; `None` on tmux (no result frame).
 - `effort_used`, `model_used`, `brain_kind`: stamped at each brain's `execute` seam (ISSUE-418), so correct on the fallback path. `brain_kind` in `KNOWN_BRAIN_KINDS`, empty for tmux.
 - `partial_text` (ISSUE-372), `work_committed` (vetoes in-brain retry).
 

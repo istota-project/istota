@@ -1896,7 +1896,7 @@ class ClaudeCodeBrainConfig:
     subscription deployment the dashboard's cost column is deliberately blank (a
     plan-equivalent list price is not spend), so the real budget is the
     rate-limit windows Anthropic reports at ``GET /api/oauth/usage``.
-    ``istota.subscription_usage`` fetches them; the doctor check, the ``/admin``
+    ``istota.usage.subscription`` fetches them; the doctor check, the ``/admin``
     card and ``!usage`` render them.
 
     Every field is defaulted, so an absent ``[brain.claude_code]`` block is the

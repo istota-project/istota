@@ -157,7 +157,7 @@ Sweep (ISSUE-317): `sandbox_cache_sweep_enabled`, `sandbox_cache_max_gb` (10/use
 - `warn_percent` (80) / `high_percent` (95) are ours, not the server's `severity`; never a FAIL. `stale_after_seconds` (3600): older readings SKIP.
 - Only endpoint-produced failures are shared; "no credential" (`resolve_token` → `None`) describes the calling process and is rate-limited process-locally.
 - `_validate_claude_code_brain` clamps percents to `[0,100]`, lowers `warn > high`, floors TTL and timeout at 1; non-finite → default (NaN would go amber forever, `inf` breaks `allow_nan=False` JSON). `stale_after_seconds` unfloored. No I/O.
-- `subscription_usage.py` copies three defaults, pinned by `tests/test_config_claude_code_brain.py::TestOneSourceOfTruthForTheDefaults`. `deploy/ansible/files/validate_config.py` allowlists `claude_code`.
+- `usage/subscription.py` copies three defaults, pinned by `tests/test_config_claude_code_brain.py::TestOneSourceOfTruthForTheDefaults`. `deploy/ansible/files/validate_config.py` allowlists `claude_code`.
 
 `[brain.native]` (brain.md "NativeBrain"):
 - `model_overrides`: partial `ModelInfo` via `llm.catalog.set_model_overrides` (NB-4).

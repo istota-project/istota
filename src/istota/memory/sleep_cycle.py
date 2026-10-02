@@ -15,7 +15,7 @@ from .. import db
 from ..brain import BrainRequest, make_brain
 from ..brain import primary_brain_unavailable, report_brain_result
 from ..config import Config
-from ..usage import SYSTEM_USER_ID
+from istota.usage.telemetry import SYSTEM_USER_ID
 from ..storage import (
     _get_mount_path,
     open_user_skill_overlays,

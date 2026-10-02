@@ -32,7 +32,7 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from istota import subscription_usage as su
+from istota.usage import subscription as su
 from tests.test_web_app import _needs_web_deps, _patch_app
 
 
