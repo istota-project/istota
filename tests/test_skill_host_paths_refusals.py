@@ -251,6 +251,77 @@ CASES: dict[tuple[str, str, str], Case] = {
         patch=("istota.skills.whisper.cli", "cmd_transcribe"),
     ),
 
+    ("wordpress", "describe", "output"): Case(
+        argv=lambda p: ["describe", "--type", "post", "--output", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "describe"),
+    ),
+    ("wordpress", "get", "output"): Case(
+        argv=lambda p: ["get", "--id", "1", "--output", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "get"),
+    ),
+    ("wordpress", "create", "content_file"): Case(
+        argv=lambda p: ["create", "--type", "post", "--title", "t", "--content-file", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "create"),
+    ),
+    ("wordpress", "create", "meta_file"): Case(
+        argv=lambda p: ["create", "--type", "post", "--title", "t", "--meta-file", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "create"),
+    ),
+    ("wordpress", "update", "content_file"): Case(
+        argv=lambda p: ["update", "--id", "1", "--content-file", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "update"),
+    ),
+    ("wordpress", "update", "meta_file"): Case(
+        argv=lambda p: ["update", "--id", "1", "--meta-file", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "update"),
+    ),
+    ("wordpress", "create", "acf_file"): Case(
+        argv=lambda p: ["create", "--type", "post", "--title", "t", "--acf-file", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "create"),
+    ),
+    ("wordpress", "create", "featured_image"): Case(
+        argv=lambda p: ["create", "--type", "post", "--title", "t", "--featured-image", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "create"),
+    ),
+    ("wordpress", "update", "acf_file"): Case(
+        argv=lambda p: ["update", "--id", "1", "--acf-file", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "update"),
+    ),
+    ("wordpress", "update", "featured_image"): Case(
+        argv=lambda p: ["update", "--id", "1", "--featured-image", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "update"),
+    ),
+    ("wordpress", "media.upload", "file"): Case(
+        argv=lambda p: ["media", "upload", "--file", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "media upload"),
+    ),
+    ("wordpress", "rest", "body_file"): Case(
+        argv=lambda p: ["rest", "POST", "acme/v1/thing", "--body-file", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "rest"),
+    ),
+    ("wordpress", "abilities.run", "input_file"): Case(
+        argv=lambda p: ["abilities", "run", "acme/do-thing", "--input-file", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "abilities run"),
+    ),
+    ("wordpress", "options.update", "acf_file"): Case(
+        argv=lambda p: ["options", "update", "--page", "acf-options", "--acf-file", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "options update"),
+    ),
+
     # -- Stage 6: the writes ------------------------------------------------ #
     ("email", "attachments", "dest"): Case(
         argv=lambda p: ["attachments", "17", "--dest", p],
@@ -267,7 +338,7 @@ CASES: dict[tuple[str, str, str], Case] = {
 #: How many resolving stamps this file expects to find at the very least.
 #: A parametrization that shrinks is a green run, so the count is asserted
 #: rather than trusted — the same reason the coverage walk asserts a floor.
-STAMP_FLOOR = 27
+STAMP_FLOOR = 39
 
 
 def _skill_parser_modules() -> dict[str, str]:
@@ -638,6 +709,31 @@ class TestTheModeDecidesTheRoots:
         source.write_bytes(b"payload")
         run, recorder = drive(key, source)
         assert recorder.called, run.envelope or run.stdout
+
+
+class TestTheDerivedEgressRoots:
+    """`egress_roots()` is the `EGRESS` mapping for a path read out of content.
+
+    `wordpress --acf-file` carries `$upload` paths the argv stamp never sees;
+    resolving them against anything but the stamp's own set would let a JSON
+    file name what the flag beside it could not.
+    """
+
+    def test_it_is_the_set_an_egress_stamp_resolves_against(self, mount):
+        from istota.skills import _hostpath
+
+        assert _hostpath.egress_roots() == _hostpath._roots_for(EGRESS, writable=False)
+
+    def test_it_admits_the_workspace_and_deferred_dir_and_nothing_shared(self, mount):
+        from istota.skill_host_paths import path_under_roots
+        from istota.skills._hostpath import egress_roots
+
+        roots = egress_roots()
+        assert path_under_roots(mount.real / "Users" / "alice" / "a.png", roots)
+        assert path_under_roots(mount.deferred.resolve() / "a.png", roots)
+        assert not path_under_roots(mount.real / "Talk" / "a.png", roots)
+        assert not path_under_roots(mount.real / "Channels" / "tok1" / "a.png", roots)
+        assert not path_under_roots(mount.real / "Users" / "bob" / "a.png", roots)
 
 
 # --------------------------------------------------------------------------- #

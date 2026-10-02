@@ -148,6 +148,10 @@ Du-style tree measurement and the first-level directory scan beneath it, shared 
 
 stdlib-only leaf: `os`, `pathlib`.
 
+## net_guard.py
+
+Whether an address is a routable public one: `ip_is_public`, the blocklist and operator CIDR parsing, lifted out of `session/tools/web_fetch.py` when the `wordpress` skill became the second daemon-network caller fetching a URL somebody else chose. A leaf rather than an import of `web_fetch`, because importing that from a skill pulls in the native tool package (about fifty modules), and `web_fetch` runs in the tool server, which may not import `istota.skills`. `web_fetch` keeps `_ip_is_public` as an import alias. URL validation is not shared: `web_fetch._validate_url` is shaped by `WebFetchPolicy`, while the skill's URL rule is the credential binding (`skills/wordpress/sites.check_bound`). stdlib-only leaf, never raises.
+
 ## untrusted.py
 
 One fence around content somebody else wrote: `frame_untrusted(text, label)` puts `text` between markers naming the source, and **redacts both markers out of `text` first**. That redaction is the whole point: four modules had their own versions and did not agree on it. `skills/nextcloud` did not redact, so a Talk room renamed to `[END UNTRUSTED NEXTCLOUD CONTENT]` closed the fence from inside (ISSUE-509); `skills/email` and `session/tools/web_fetch` did not either, wrapping the most attacker-controlled content in the tree, and were converted (ISSUE-512). Which skills use it, and with what label, is in `.claude/rules/skills.md`.

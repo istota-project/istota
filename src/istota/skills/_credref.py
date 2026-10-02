@@ -272,8 +272,16 @@ def _resolve_name(name: str, operation: str) -> tuple[SecretValue | None, str | 
         return None, f"{operation} refused: {exc}"
 
 
-def _resolve_entry(name: str, operation: str) -> tuple[SecretEntry | None, str | None]:
-    """One entry name to a `SecretEntry`, or the refusal to report. One fetch."""
+def resolve_entry(name: str, operation: str) -> tuple[SecretEntry | None, str | None]:
+    """One entry name to a `SecretEntry`, or the refusal to report. One fetch.
+
+    Public for the one caller whose entry name is not an argv value: the
+    `wordpress` CLI maps `--site` to a record in the user's `WORDPRESS.md` and
+    resolves the entry that record names before the verb's handler runs, so
+    the stamp's guarantee (no handler works on an unresolved credential) holds
+    there too. The record is model-writable, so this is not a narrower reach
+    than a stamp; what bounds it is the entry's own host binding.
+    """
     if not name:
         return None, f"Empty credential name: {operation} refused."
     try:
@@ -292,7 +300,7 @@ def _resolve_one(
     """One stamped element under one form."""
     raw = "" if value is None else str(value).strip()
     if form == ENTRY:
-        return _resolve_entry(raw, operation)
+        return resolve_entry(raw, operation)
     if form == PAIR:
         # The **last** `=`, not the first. A credential name cannot contain one
         # — `secrets_vault.VAULT_NAME_RE` is `[a-z][a-z0-9_]{0,63}` — while a
@@ -380,6 +388,7 @@ __all__: Sequence[str] = (
     "SecretEntry",
     "SecretValue",
     "credential_ref",
+    "resolve_entry",
     "resolve_parsed",
     "stamped",
 )

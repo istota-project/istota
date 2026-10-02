@@ -1,0 +1,299 @@
+"""Live smoke for the `wordpress` skill against a real WordPress site (spec §16.3).
+
+Skipped unless all three are set:
+
+    ISTOTA_WP_TEST_URL           the site's HTTPS address
+    ISTOTA_WP_TEST_USER          the WordPress login
+    ISTOTA_WP_TEST_APP_PASSWORD  an application password for that login
+
+Optional:
+
+    ISTOTA_WP_TEST_BLOG          a scratch subsite slug, when the site is a
+                                 subdirectory multisite network
+    ISTOTA_WP_TEST_PLUGIN        a harmless plugin (dir/file) to deactivate and
+                                 reactivate network-wide; needs a super admin
+                                 and ISTOTA_WP_TEST_BLOG's network (§14.3)
+    ISTOTA_WP_TEST_ACF_TYPE      a post type with ACF fields in REST, and
+    ISTOTA_WP_TEST_ACF_FIELD     a text field on it, for the ACF round trip
+    ISTOTA_WP_TEST_OPTIONS_PAGE  an ACF options page slug, and
+    ISTOTA_WP_TEST_OPTIONS_FIELD a text field on it, for the options round trip;
+                                 needs the istota-connector plugin
+
+Point these at a local development copy of a site, never at production: the
+test writes. Make a local-only application password in wp-admin and revoke it
+afterwards. A site on a local address works because its host is put in
+`[wordpress] private_hosts` for the run; for a locally signed certificate,
+export `SSL_CERT_FILE` at a bundle carrying that CA.
+
+The CLI runs end to end through `main`, with the real client, resolver and
+network. Only the vault is replaced, by a resolver answering with the three
+variables, so no credential is stored anywhere. Everything is made under a
+generated slug and removed again.
+
+    uv run pytest -m integration tests/test_wordpress_integration.py -n0 -v
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import struct
+import uuid
+import zlib
+from urllib.parse import urlsplit
+
+import pytest
+
+from istota import db
+from istota.config import Config, WordPressConfig
+from istota.skills import _credref
+from istota.skills import wordpress as wp
+
+URL = os.environ.get("ISTOTA_WP_TEST_URL", "").strip()
+USER = os.environ.get("ISTOTA_WP_TEST_USER", "").strip()
+APP_PASSWORD = os.environ.get("ISTOTA_WP_TEST_APP_PASSWORD", "").strip()
+BLOG = os.environ.get("ISTOTA_WP_TEST_BLOG", "").strip()
+PLUGIN = os.environ.get("ISTOTA_WP_TEST_PLUGIN", "").strip()
+ACF_TYPE = os.environ.get("ISTOTA_WP_TEST_ACF_TYPE", "").strip()
+ACF_FIELD = os.environ.get("ISTOTA_WP_TEST_ACF_FIELD", "").strip()
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not (URL and USER and APP_PASSWORD),
+        reason="ISTOTA_WP_TEST_URL, ISTOTA_WP_TEST_USER and ISTOTA_WP_TEST_APP_PASSWORD not set",
+    ),
+]
+
+USER_ID = "smoke"
+SITES = """\
+```toml
+[[sites]]
+name = "test"
+multisite = {multisite}
+default = true
+```
+"""
+
+
+def tiny_png() -> bytes:
+    """A real one-pixel PNG, so WordPress can make its thumbnails."""
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    pixels = zlib.compress(b"\x00\xff\x80\x00")
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", pixels)
+            + chunk(b"IEND", b""))
+
+
+@pytest.fixture
+def live(tmp_path, monkeypatch):
+    host = urlsplit(URL if "://" in URL else f"https://{URL}").hostname or ""
+    mount = tmp_path / "mount"
+    workspace = mount / "Users" / USER_ID
+    config_dir = workspace / "istota" / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "WORDPRESS.md").write_text(
+        SITES.replace("{multisite}", "true" if BLOG else "false"))
+    db_path = tmp_path / "istota.db"
+    db.init_db(db_path)
+    config = Config(workspace_path=mount, db_path=db_path,
+                    wordpress=WordPressConfig(private_hosts=[host]))
+    monkeypatch.setenv("ISTOTA_USER_ID", USER_ID)
+    monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
+    monkeypatch.delenv("ISTOTA_CRED_FD", raising=False)
+    monkeypatch.setattr(wp, "_load_config", lambda: config)
+
+    def fetch_entry(name, mode, *, credential_fd=None):
+        assert name == "wordpress_test"
+        return {"password": APP_PASSWORD, "username": USER, "url": URL}, [host]
+
+    monkeypatch.setattr(_credref, "fetch_entry", fetch_entry)
+    return workspace
+
+
+def cli(capsys, *argv, scoped: bool = True) -> tuple[int, dict]:
+    if scoped and BLOG:
+        argv = (*argv, "--blog", BLOG)
+    code = 0
+    try:
+        wp.main(list(argv))
+    except SystemExit as exc:
+        code = exc.code or 0
+    out = json.loads(capsys.readouterr().out)
+    assert APP_PASSWORD not in json.dumps(out)
+    return code, out
+
+
+def ok(capsys, *argv) -> dict:
+    code, out = cli(capsys, *argv)
+    assert code == 0 and out.get("status") == "ok", out
+    return out
+
+
+def test_sites_reads_no_network(live, capsys):
+    code, out = cli(capsys, "sites", scoped=False)
+    assert code == 0 and out["sites"][0]["name"] == "test"
+
+
+def test_describe(live, capsys):
+    out = ok(capsys, "describe", "--refresh")
+    assert "post" in {t["slug"] for t in out["types"]}
+    assert out["account"]["roles"]
+
+
+def test_a_draft_round_trip_with_a_term_and_an_image(live, capsys):
+    """Create, upload, attach, edit, publish, delete, and remove what was made."""
+    tag = uuid.uuid4().hex[:8]
+    slug = f"istota-smoke-{tag}"
+    term = f"Istota smoke {tag}"
+    image = live / f"smoke-{tag}.png"
+    image.write_bytes(tiny_png())
+    post_id = media_id = None
+    try:
+        out = ok(capsys, "create", "--type", "post", "--title", f"Smoke {tag}",
+                 "--slug", slug, "--content", "<!-- wp:paragraph --><p>x</p><!-- /wp:paragraph -->",
+                 "--terms", f"category={term}", "--create-terms", "--confirmed")
+        post_id = out["item"]["id"]
+        assert out["readback"]["dropped"] == [] and out["readback"]["changed"] == []
+
+        # §14.4: whether the upload alone keeps alt text and caption.
+        out = ok(capsys, "media", "upload", "--file", str(image), "--alt", "A square",
+                 "--caption", "Smoke caption")
+        media_id = out["item"]["id"]
+        print("metadata_kept:", out.get("metadata_kept"), "error:", out.get("metadata_error"))
+        assert "A square" in out["item"]["alt_text"]
+
+        out = ok(capsys, "update", "--id", str(post_id), "--title", f"Smoke {tag} edited",
+                 "--featured-media-id", str(media_id))
+        assert out["readback"]["changed"] == []
+
+        out = ok(capsys, "get", "--id", str(post_id), "--fields", "title,content,featured_media")
+        assert f"Smoke {tag} edited" in out["item"]["title"]
+        assert out["item"]["featured_media"] == media_id
+        assert "<!-- wp:paragraph -->" in out["item"]["content"]
+
+        code, out = cli(capsys, "publish", "--id", str(post_id))
+        assert out["reason"] == "confirmation_required"
+        ok(capsys, "publish", "--id", str(post_id), "--confirmed")
+    finally:
+        if post_id is not None:
+            cli(capsys, "delete", "--id", str(post_id), "--force", "--confirmed")
+        if media_id is not None:
+            cli(capsys, "rest", "DELETE", f"wp/v2/media/{media_id}", "--query", "force=true",
+                "--confirmed")
+        code, found = cli(capsys, "terms", "list", "--taxonomy", "category", "--search", term)
+        for item in found.get("items", []) if code == 0 else []:
+            cli(capsys, "rest", "DELETE", f"wp/v2/categories/{item['id']}",
+                "--query", "force=true", "--confirmed")
+
+
+@pytest.mark.skipif(not (ACF_TYPE and ACF_FIELD),
+                    reason="ISTOTA_WP_TEST_ACF_TYPE and ISTOTA_WP_TEST_ACF_FIELD not set")
+def test_an_acf_field_round_trip(live, capsys):
+    tag = uuid.uuid4().hex[:8]
+    post_id = None
+    try:
+        out = ok(capsys, "create", "--type", ACF_TYPE, "--title", f"ACF smoke {tag}",
+                 "--slug", f"istota-acf-smoke-{tag}",
+                 "--acf-set", f"{ACF_FIELD}={json.dumps('first ' + tag)}")
+        post_id = out["item"]["id"]
+        out = ok(capsys, "update", "--id", str(post_id), "--type", ACF_TYPE,
+                 "--acf-set", f"{ACF_FIELD}={json.dumps('second ' + tag)}")
+        assert out["readback"]["changed"] == [], out["readback"]
+        out = ok(capsys, "get", "--id", str(post_id), "--type", ACF_TYPE, "--fields", "acf")
+        assert f"second {tag}" in json.dumps(out["item"]["acf"])
+    finally:
+        if post_id is not None:
+            cli(capsys, "delete", "--id", str(post_id), "--type", ACF_TYPE, "--force",
+                "--confirmed")
+
+
+def test_admin_reads(live, capsys):
+    ok(capsys, "users", "get", "--id", "me")
+    ok(capsys, "settings", "get")
+    ok(capsys, "rest", "GET", "wp/v2/types")
+    code, out = cli(capsys, "plugins", "list")
+    assert code == 0 or out["reason"] == "permission_denied", out
+
+
+def test_a_setting_written_back_unchanged(live, capsys):
+    current = ok(capsys, "settings", "get")["settings"]["posts_per_page"]
+    out = ok(capsys, "settings", "update", "--set", f"posts_per_page={json.dumps(current)}",
+             "--confirmed")
+    assert out["readback"] == {"dropped": [], "changed": []}
+
+
+def test_abilities_list(live, capsys):
+    """§14.5: which abilities the site registers."""
+    code, out = cli(capsys, "abilities", "list")
+    assert code == 0 or out["reason"] == "unknown_route", out
+    print("abilities:", [item["name"] for item in out.get("items", [])])
+
+
+@pytest.mark.skipif(not (PLUGIN and BLOG),
+                    reason="ISTOTA_WP_TEST_PLUGIN and ISTOTA_WP_TEST_BLOG not set")
+def test_network_plugin_deactivate_and_reactivate(live, capsys):
+    """§14.3: does core REST network-activate? Main site, so no --blog.
+
+    The plugin must start network-active, and it is left that way: if REST
+    will not reactivate it, the test fails and says to do it by hand.
+    """
+    code, listed = cli(capsys, "plugins", "list", scoped=False)
+    assert code == 0, listed
+    status = {item["plugin"]: item["plugin_status"] for item in listed["items"]}
+    assert status.get(PLUGIN) == "network-active", (
+        f"{PLUGIN} must be network-active before this test; it is {status.get(PLUGIN)}")
+    code, out = cli(capsys, "plugins", "deactivate", "--plugin", PLUGIN, "--network",
+                    "--confirmed", scoped=False)
+    assert code == 0, out
+    code, out = cli(capsys, "plugins", "activate", "--plugin", PLUGIN, "--network",
+                    "--confirmed", scoped=False)
+    print("network activation:", out.get("reason", "ok"))
+    assert code == 0, (f"{PLUGIN} is now deactivated network-wide; network-activate it "
+                       f"again in the network admin. The skill answered: {out}")
+
+
+OPTIONS_PAGE = os.environ.get("ISTOTA_WP_TEST_OPTIONS_PAGE", "").strip()
+OPTIONS_FIELD = os.environ.get("ISTOTA_WP_TEST_OPTIONS_FIELD", "").strip()
+
+
+def unfenced(text: str) -> str:
+    """The site's own text out of its fence, to write an original value back."""
+    lines = text.split("\n")
+    assert lines[0].startswith("[UNTRUSTED") and lines[-1].startswith("[END UNTRUSTED"), text
+    return "\n".join(lines[1:-1])
+
+
+@pytest.mark.skipif(not (OPTIONS_PAGE and OPTIONS_FIELD),
+                    reason="ISTOTA_WP_TEST_OPTIONS_PAGE and ISTOTA_WP_TEST_OPTIONS_FIELD not set")
+def test_an_options_page_round_trip(live, capsys):
+    """§16.3 scenario 10: needs the istota-connector plugin on the site.
+
+    Writes a scratch value into a text field of the options page and puts
+    the original back, so the field must hold a string to begin with.
+    """
+    fields = ok(capsys, "options", "get", "--page", OPTIONS_PAGE)["fields"]
+    assert OPTIONS_FIELD in fields, sorted(fields)
+    original = fields[OPTIONS_FIELD]
+    assert isinstance(original, str), original
+    original = unfenced(original) if original else original
+    scratch = f"istota smoke {uuid.uuid4().hex[:8]}"
+    try:
+        out = ok(capsys, "options", "update", "--page", OPTIONS_PAGE,
+                 "--acf-set", f"{OPTIONS_FIELD}={json.dumps(scratch)}", "--confirmed")
+        assert out["readback"]["changed"] == [] and out["readback"]["dropped"] == [], out
+        again = ok(capsys, "options", "get", "--page", OPTIONS_PAGE)["fields"][OPTIONS_FIELD]
+        assert scratch in again
+    finally:
+        cli(capsys, "options", "update", "--page", OPTIONS_PAGE,
+            "--acf-set", f"{OPTIONS_FIELD}={json.dumps(original)}", "--confirmed")
+
+
+@pytest.mark.skipif(not BLOG, reason="ISTOTA_WP_TEST_BLOG not set (not a network)")
+def test_network_sites(live, capsys):
+    """Needs the istota-connector plugin network-activated, and a super admin."""
+    out = ok(capsys, "network", "sites")
+    assert out["count"] >= 2 and any(site["id"] == 1 for site in out["sites"]), out

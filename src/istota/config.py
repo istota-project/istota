@@ -232,6 +232,21 @@ class BrowserConfig:
 
 
 @dataclass
+class WordPressConfig:
+    """Operator settings for the `wordpress` skill.
+
+    ``private_hosts`` are exact host names a site may resolve to a non-public
+    address (a ddev or wp-env site on loopback). Operator-only on purpose: it
+    is exactly what the skill's SSRF rule protects, so no user file reaches it.
+
+    ``max_upload_mb`` caps one file a media upload sends, checked against the
+    open file's own size before any byte is read.
+    """
+    private_hosts: list[str] = field(default_factory=list)
+    max_upload_mb: int = 25
+
+
+@dataclass
 class DevboxConfig:
     """Per-user devbox container — persistent Linux workbench.
 
@@ -2091,6 +2106,7 @@ class Config:
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     devbox: DevboxConfig = field(default_factory=DevboxConfig)
+    wordpress: WordPressConfig = field(default_factory=WordPressConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     briefings: BriefingsModuleConfig = field(default_factory=BriefingsModuleConfig)
     health: HealthModuleConfig = field(default_factory=HealthModuleConfig)

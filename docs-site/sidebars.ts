@@ -50,6 +50,7 @@ const sidebars: SidebarsConfig = {
         'features/health',
         'features/nextcloud',
         'features/google-workspace',
+        'features/wordpress',
         'features/web-interface',
         'features/notifications',
         'features/relay',
