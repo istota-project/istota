@@ -79,6 +79,10 @@ class WordPressError(Exception):
         super().__init__(message)
         self.reason = reason
         self.extra = extra
+        #: The site's error body (``code``, ``message``, ``data``), never put in
+        #: the envelope: a verb that knows an ability's error params reads them
+        #: here and fences what it passes on.
+        self.wp_data: dict = {}
 
 
 def fence(text: object) -> str:
@@ -359,7 +363,9 @@ class WordPressClient:
                     "bad_response",
                 )
             return data
-        raise self._error_for(status, data if isinstance(data, dict) else {})
+        error = self._error_for(status, data if isinstance(data, dict) else {})
+        error.wp_data = data if isinstance(data, dict) else {}
+        raise error
 
     def _error_for(self, status: int, data: dict) -> WordPressError:
         code = data.get("code")

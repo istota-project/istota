@@ -30,6 +30,7 @@ from . import acf, media
 from .acf import Slot
 from .client import WordPressError, fence, fence_tree, selector
 from .common import gate, int_or_none, lookup, quoted
+from .discovery import FIELD_ABILITIES
 from .generic import annotations, fetch_ability, run_ability, shown_json
 
 OPTIONS_GET = "istota/options-get"
@@ -41,6 +42,11 @@ INSTALL = (
     "repository and upload it in wp-admin under Plugins, Add New, Upload Plugin "
     "(network-activate it on a multisite network). See docs/features/wordpress.md."
 )
+#: What a site with the 0.1 plugin answers for the field abilities.
+OUTDATED = (
+    "The istota-connector plugin on this site is older than 0.2.0 and has no field "
+    "editing. Rebuild the zip and upload it again (the install line)."
+)
 #: How many sites one `network sites` call asks for; the plugin caps it too.
 NETWORK_SITES_LIMIT = 1000
 #: An ACF options page's menu slug.
@@ -48,7 +54,7 @@ _PAGE_RE = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 _ACF_SELECTORS = frozenset({"acf_fc_layout"})
 
 
-def _connector_ability(ctx, name: str) -> dict:
+def connector_ability(ctx, name: str) -> dict:
     # `describe` caches whether the connector is there; when this read says
     # otherwise, the cache is dropped so the next `describe` agrees.
     cached = ctx.cache.get("describe")
@@ -65,6 +71,8 @@ def _connector_ability(ctx, name: str) -> dict:
                 "connector_missing", install=INSTALL,
             ) from None
         if exc.reason == "not_found":
+            if name in FIELD_ABILITIES and _has_ability(ctx, OPTIONS_GET):
+                raise WordPressError(OUTDATED, "connector_outdated", install=INSTALL) from None
             raise WordPressError(
                 f"The istota-connector plugin is not active on this site (it has no "
                 f"ability {name}).",
@@ -76,8 +84,16 @@ def _connector_ability(ctx, name: str) -> dict:
     return ability
 
 
-def _run(args, ctx, name: str, value, *, read: bool = False, **kwargs):
-    ability = _connector_ability(ctx, name)
+def _has_ability(ctx, name: str) -> bool:
+    try:
+        fetch_ability(ctx, name)
+    except WordPressError:
+        return False
+    return True
+
+
+def run_connector(args, ctx, name: str, value, *, read: bool = False, **kwargs):
+    ability = connector_ability(ctx, name)
     if read:
         notes = annotations(ability)
         # A read verb takes no --confirmed, so an ability that would need one
@@ -117,7 +133,7 @@ def check_page(args) -> None:
 
 def cmd_options_get(args) -> dict:
     ctx = args.wp
-    result = _run(args, ctx, OPTIONS_GET, {"page": args.page}, read=True)
+    result = run_connector(args, ctx, OPTIONS_GET, {"page": args.page}, read=True)
     return {
         "status": "ok",
         **ctx.envelope(),
@@ -164,7 +180,7 @@ def _readback(sent: dict, stored: dict) -> dict:
 def cmd_options_update(args) -> dict:
     ctx = args.wp
     page = args.page
-    current = _fields(_run(args, ctx, OPTIONS_GET, {"page": page}, read=True))
+    current = _fields(run_connector(args, ctx, OPTIONS_GET, {"page": page}, read=True))
     unknown = sorted(name for name in args.acf_values if name not in current)
     if unknown:
         raise WordPressError(
@@ -179,7 +195,7 @@ def cmd_options_update(args) -> dict:
         f"{shown_json(_shown(value, args.uploads))}"
         for name, value in args.acf_values.items()
     )
-    ability = _connector_ability(ctx, OPTIONS_UPDATE)
+    ability = connector_ability(ctx, OPTIONS_UPDATE)
     notes = annotations(ability)
     # The plugin marks its write neither readonly nor destructive, which keeps
     # it on POST with a JSON body and a would line that is not understated.
@@ -240,7 +256,7 @@ def _project_site(site: dict) -> dict:
 
 def cmd_network_sites(args) -> dict:
     ctx = args.wp
-    result = _run(args, ctx, NETWORK_SITES, {"number": NETWORK_SITES_LIMIT}, read=True)
+    result = run_connector(args, ctx, NETWORK_SITES, {"number": NETWORK_SITES_LIMIT}, read=True)
     sites = result.get("sites") if isinstance(result.get("sites"), list) else []
     rows = [_project_site(s) for s in sites if isinstance(s, dict)]
     return {

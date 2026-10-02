@@ -262,12 +262,15 @@ def _object_schema(schema) -> bool:
 
 def run_ability(args, ctx, name: str, ability: dict, value, *,
                 described: str | None = None, always_gate: bool = False,
-                hint: str | None = None):
+                hint: str | None = None, gated: bool | None = None):
     """Run `ability` with `value` as its input: ``(result, readonly, destructive)``.
 
     The ability's own annotations decide the gate and the method. `described`
     replaces the default `would` line, and `always_gate` gates whatever the
-    site claims, for a caller that knows its ability writes.
+    site claims, for a caller that knows its ability writes. ``gated=False``
+    skips the gate for a caller that has already run its own, with its own
+    rule (`fields edit` leaves a draft edit ungated); None leaves it to the
+    annotations.
     Never retried (spec §9.1), readonly included: the annotation is the
     site's own claim.
     """
@@ -283,7 +286,9 @@ def run_ability(args, ctx, name: str, ability: dict, value, *,
         )
     # An ability that calls itself both is gated: the annotation is the
     # site's own claim, and the cautious half wins.
-    if always_gate or not readonly or destructive:
+    if gated is None:
+        gated = always_gate or not readonly or destructive
+    if gated:
         if described is None:
             kind = "destructive ability" if destructive else "ability"
             given = f" with the input {shown_json(value)}" if value is not None else ""

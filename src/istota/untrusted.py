@@ -155,3 +155,36 @@ def frame_untrusted(text: object, label: str) -> str:
         body = pattern.sub(MARKER_REDACTION, body)
     open_marker, close_marker = _markers(label)
     return f"{open_marker}\n{body}\n{close_marker}"
+
+
+def unframe_untrusted(text: object, label: str) -> str | None:
+    """The body of ``text`` when it is exactly one fence ``frame_untrusted``
+    would write for ``label``, else None.
+
+    For content a model copies out of a fenced read and sends back: the markers
+    must not reach the place the content came from. The body is returned as
+    found, so a marker the fence redacted stays redacted, and a caller that
+    refuses ``MARKER_REDACTION`` and any leftover marker (``has_marker``)
+    cannot be made to write either.
+
+    A body that itself reads as a marker is not one fence (two fences joined,
+    or a fence with text around it), and answers None.
+    """
+    if not isinstance(text, str):
+        return None
+    label = _clean_label(label)
+    open_marker, close_marker = _markers(label)
+    head, tail = f"{open_marker}\n", f"\n{close_marker}"
+    if not (text.startswith(head) and text.endswith(tail)) or len(text) < len(head) + len(tail):
+        return None
+    body = text[len(head):len(text) - len(tail)]
+    if has_marker(body, label):
+        return None
+    return body
+
+
+def has_marker(text: object, label: str) -> bool:
+    """Whether ``text`` holds anything that reads as either marker for ``label``."""
+    if not isinstance(text, str):
+        return False
+    return any(pattern.search(text) for pattern in _redaction_patterns(_clean_label(label)))

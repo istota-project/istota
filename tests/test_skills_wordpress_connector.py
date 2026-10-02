@@ -388,10 +388,11 @@ class TestThePlugin:
     def test_it_registers_exactly_the_abilities_the_skill_names(self):
         # The 0.1 set is what `describe` calls `connector: true`; the field
         # editing pair arrived in 0.2.0.
-        from istota.skills.wordpress.discovery import CONNECTOR_ABILITIES
+        from istota.skills.wordpress.discovery import CONNECTOR_ABILITIES, FIELD_ABILITIES
 
         assert set(_registrations(PLUGIN.read_text())) == (
-            set(CONNECTOR_ABILITIES) | {FIELDS_GET, FIELDS_EDIT})
+            set(CONNECTOR_ABILITIES) | set(FIELD_ABILITIES))
+        assert set(FIELD_ABILITIES) == {FIELDS_GET, FIELDS_EDIT}
 
     @pytest.mark.parametrize("name,readonly,destructive,idempotent", [
         (OPTIONS_GET, "true", "false", "true"),
