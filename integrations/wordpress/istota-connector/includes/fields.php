@@ -10,7 +10,10 @@
  *
  * The normalized form is what fields-get returns and fields-edit accepts: keys
  * are field names, every defined sub-field is present, ids are integers and a
- * value nothing is stored for is null, never false. Layout-only types (tab,
+ * value nothing is stored for is null, never false. A flexible content row also
+ * carries acf_fc_layout_disabled and acf_fc_layout_custom_label beside
+ * acf_fc_layout, because ACF rebuilds its layout meta from them on every write
+ * and would otherwise clear both. Layout-only types (tab,
  * message, accordion) have no value and are skipped everywhere. A seamless
  * clone arrives already spliced into its parent by ACF's acf/get_fields filter,
  * so one that still reaches this module is refused rather than guessed at.
@@ -33,6 +36,12 @@ const ISTOTA_FIELDS_MAX_OPS      = 50;
 const ISTOTA_FIELDS_ROW_TAG = '#row';
 
 const ISTOTA_FIELDS_LAYOUT_TYPES = array( 'tab', 'message', 'accordion' );
+
+// A flexible content row's reserved keys, beside its sub-fields: ACF's own names,
+// which its update_value reads to rebuild the field's layout meta. Not addressable.
+const ISTOTA_FIELDS_DISABLED = 'acf_fc_layout_disabled';
+const ISTOTA_FIELDS_LABEL    = 'acf_fc_layout_custom_label';
+const ISTOTA_FIELDS_RESERVED = array( 'acf_fc_layout', 'acf_fc_layout_disabled', 'acf_fc_layout_custom_label' );
 
 const ISTOTA_FIELDS_STRING_TYPES = array(
 	'text',
@@ -143,7 +152,9 @@ function istota_fields_kind( array $def ) {
 		case 'taxonomy':
 			return istota_fields_ref_multiple( $def ) ? 'refs' : 'ref';
 		case 'link':
-			return ( isset( $def['return_format'] ) && 'url' === $def['return_format'] ) ? 'link_url' : 'link';
+			// The object whatever the return format: ACF stores all three for every
+			// format, and a url string would drop title and target on write.
+			return 'link';
 		case 'google_map':
 			return 'map';
 		case 'group':
@@ -409,16 +420,12 @@ function istota_fields_normalize( array $field, $raw ) {
 			return $out;
 
 		case 'link':
-		case 'link_url':
 			if ( is_string( $raw ) && '' !== $raw ) {
 				$raw = array( 'url' => $raw );
 			}
 			if ( ! is_array( $raw ) || empty( $raw['url'] ) ) {
 				// ACF stores a link with no url as "".
 				return null;
-			}
-			if ( 'link_url' === istota_fields_kind( $field ) ) {
-				return (string) $raw['url'];
 			}
 			return array(
 				'url'    => (string) $raw['url'],
@@ -433,7 +440,10 @@ function istota_fields_normalize( array $field, $raw ) {
 		case 'row':
 			$out = array();
 			if ( ! empty( $field['flexible'] ) ) {
-				$out['acf_fc_layout'] = $field['layout'];
+				$out['acf_fc_layout']         = $field['layout'];
+				$out[ ISTOTA_FIELDS_DISABLED ] = is_array( $raw ) && isset( $raw[ ISTOTA_FIELDS_DISABLED ] ) && istota_fields_normalize( array( 'type' => 'true_false' ), $raw[ ISTOTA_FIELDS_DISABLED ] );
+				$label                         = is_array( $raw ) && isset( $raw[ ISTOTA_FIELDS_LABEL ] ) ? $raw[ ISTOTA_FIELDS_LABEL ] : null;
+				$out[ ISTOTA_FIELDS_LABEL ]    = is_scalar( $label ) && '' !== (string) $label ? (string) $label : null;
 			}
 			foreach ( istota_fields_sub_fields( $field ) as $name => $sub ) {
 				$out[ $name ] = istota_fields_normalize( $sub, istota_fields_pick( $raw, $sub ) );
@@ -488,6 +498,9 @@ function istota_fields_denormalize( array $field, $value ) {
 			$out = array();
 			if ( ! empty( $field['flexible'] ) ) {
 				$out['acf_fc_layout'] = ( is_array( $value ) && isset( $value['acf_fc_layout'] ) ) ? $value['acf_fc_layout'] : $field['layout'];
+				// ACF reads both with empty(), so false and "" mean enabled and unlabelled.
+				$out[ ISTOTA_FIELDS_DISABLED ] = is_array( $value ) && ! empty( $value[ ISTOTA_FIELDS_DISABLED ] );
+				$out[ ISTOTA_FIELDS_LABEL ]    = ( is_array( $value ) && isset( $value[ ISTOTA_FIELDS_LABEL ] ) ) ? $value[ ISTOTA_FIELDS_LABEL ] : '';
 			}
 			foreach ( istota_fields_sub_fields( $field ) as $name => $sub ) {
 				$key         = isset( $sub['key'] ) ? $sub['key'] : $name;
@@ -519,15 +532,6 @@ function istota_fields_denormalize( array $field, $value ) {
 			}
 			break;
 
-		case 'link_url':
-			if ( is_string( $value ) && '' !== $value ) {
-				return array(
-					'url'    => $value,
-					'title'  => '',
-					'target' => '',
-				);
-			}
-			break;
 	}
 	return null === $value ? '' : $value;
 }
@@ -677,7 +681,6 @@ function istota_fields_shape_into( array $def, $value, $path, array &$errors ) {
 
 	switch ( $kind ) {
 		case 'string':
-		case 'link_url':
 			if ( ! is_string( $value ) ) {
 				$fail( 'Expects a string or null.' );
 			}
@@ -766,7 +769,12 @@ function istota_fields_shape_into( array $def, $value, $path, array &$errors ) {
 				}
 			}
 			foreach ( $value as $key => $item ) {
-				if ( 'acf_fc_layout' === $key && ! empty( $def['flexible'] ) ) {
+				if ( ! empty( $def['flexible'] ) && in_array( $key, ISTOTA_FIELDS_RESERVED, true ) ) {
+					if ( ISTOTA_FIELDS_DISABLED === $key && ! is_bool( $item ) ) {
+						$fail( 'Expects true or false.', $path . '/' . $key );
+					} elseif ( ISTOTA_FIELDS_LABEL === $key && null !== $item && ! is_string( $item ) ) {
+						$fail( 'Expects a string or null.', $path . '/' . $key );
+					}
 					continue;
 				}
 				if ( ! is_string( $key ) || ! isset( $subs[ $key ] ) ) {
@@ -809,7 +817,9 @@ function istota_fields_fill( array $def, $value ) {
 	if ( ( 'object' === $kind || 'row' === $kind ) && is_array( $value ) ) {
 		$out = array();
 		if ( ! empty( $def['flexible'] ) ) {
-			$out['acf_fc_layout'] = isset( $value['acf_fc_layout'] ) ? $value['acf_fc_layout'] : $def['layout'];
+			$out['acf_fc_layout']         = isset( $value['acf_fc_layout'] ) ? $value['acf_fc_layout'] : $def['layout'];
+			$out[ ISTOTA_FIELDS_DISABLED ] = array_key_exists( ISTOTA_FIELDS_DISABLED, $value ) ? $value[ ISTOTA_FIELDS_DISABLED ] : false;
+			$out[ ISTOTA_FIELDS_LABEL ]    = array_key_exists( ISTOTA_FIELDS_LABEL, $value ) ? $value[ ISTOTA_FIELDS_LABEL ] : null;
 		}
 		foreach ( istota_fields_sub_fields( $def ) as $name => $sub ) {
 			$out[ $name ] = array_key_exists( $name, $value ) ? istota_fields_fill( $sub, $value[ $name ] ) : istota_fields_normalize( $sub, null );
@@ -1006,7 +1016,16 @@ function istota_fields_apply( array $field, $value, array $ops ) {
 					'message' => 'Required; a set clears what it leaves out.',
 				);
 			}
-			istota_fields_put( $work, $path, istota_fields_inherit_tags( $def, $target['value'], istota_fields_fill( $def, $new ) ) );
+			$filled = istota_fields_fill( $def, $new );
+			if ( ! empty( $def['flexible'] ) && is_array( $filled ) && is_array( $new ) && is_array( $target['value'] ) ) {
+				// Replacing a row's content is not a request to re-enable or relabel it.
+				foreach ( array( ISTOTA_FIELDS_DISABLED, ISTOTA_FIELDS_LABEL ) as $reserved ) {
+					if ( ! array_key_exists( $reserved, $new ) && array_key_exists( $reserved, $target['value'] ) ) {
+						$filled[ $reserved ] = $target['value'][ $reserved ];
+					}
+				}
+			}
+			istota_fields_put( $work, $path, istota_fields_inherit_tags( $def, $target['value'], $filled ) );
 			$result['written'][] = array( 'op' => $i, 'path' => $where, 'field' => $def, 'value' => $new );
 		} else {
 			// insert, remove and move act on a row of a repeater or flexible content list.
@@ -1152,8 +1171,15 @@ function istota_fields_count_lists( array $def, $value, $id, $path, array &$out 
 	$kind = istota_fields_kind( $def );
 	if ( 'rows' === $kind ) {
 		$rows    = istota_fields_is_list( $value ) ? $value : array();
+		$enabled = array();
+		foreach ( $rows as $i => $row ) {
+			// A disabled row counts toward nothing, as in ACF's own validation.
+			if ( ! ( is_array( $row ) && ! empty( $row[ ISTOTA_FIELDS_DISABLED ] ) ) ) {
+				$enabled[ $i ] = $row;
+			}
+		}
 		$layouts = array();
-		foreach ( $rows as $row ) {
+		foreach ( $enabled as $row ) {
 			if ( is_array( $row ) && isset( $row['acf_fc_layout'] ) && is_string( $row['acf_fc_layout'] ) ) {
 				$layouts[ $row['acf_fc_layout'] ] = ( isset( $layouts[ $row['acf_fc_layout'] ] ) ? $layouts[ $row['acf_fc_layout'] ] : 0 ) + 1;
 			}
@@ -1161,10 +1187,10 @@ function istota_fields_count_lists( array $def, $value, $id, $path, array &$out 
 		$out[ $id ] = array(
 			'def'     => $def,
 			'path'    => $path,
-			'total'   => count( $rows ),
+			'total'   => count( $enabled ),
 			'layouts' => $layouts,
 		);
-		foreach ( $rows as $i => $row ) {
+		foreach ( $enabled as $i => $row ) {
 			$row_id = ( is_array( $row ) && isset( $row[ ISTOTA_FIELDS_ROW_TAG ] ) ) ? '#' . $row[ ISTOTA_FIELDS_ROW_TAG ] : $id . '/' . $i;
 			istota_fields_count_lists( istota_fields_row_def( $def, $i, $row ), $row, $row_id, $path . '/' . $i, $out );
 		}

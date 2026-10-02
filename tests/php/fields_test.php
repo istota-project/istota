@@ -244,7 +244,10 @@ function apply_ok( $field, $value, $ops ) {
 // update_value / load_value handlers this module's contract rests on: meta
 // stores scalars as strings, a group skips a sub-field isset() rejects, a
 // repeater writes array_key_exists sub-fields and reads back false for no
-// rows, an empty flexible content field is stored as "".
+// rows, an empty flexible content field is stored as "". A flexible row's
+// disabled flag and custom label go to the field's layout meta (ACF 6.5),
+// recorded only where empty() is false, and come back on the raw row in the
+// shape stage 2's raw read gives them.
 
 function fake_meta( $value ) {
 	if ( null === $value || false === $value ) {
@@ -289,6 +292,12 @@ function fake_store( array $field, $value ) {
 			foreach ( $value as $row ) {
 				$layout = istota_fields_layout( $field, $row['acf_fc_layout'] );
 				$stored = array( 'acf_fc_layout' => $row['acf_fc_layout'] );
+				if ( ! empty( $row['acf_fc_layout_disabled'] ) ) {
+					$stored['acf_fc_layout_disabled'] = true;
+				}
+				if ( ! empty( $row['acf_fc_layout_custom_label'] ) ) {
+					$stored['acf_fc_layout_custom_label'] = (string) $row['acf_fc_layout_custom_label'];
+				}
 				foreach ( istota_fields_sub_fields( $layout ) as $sub ) {
 					$stored[ $sub['key'] ] = array_key_exists( $sub['key'], $row ) ? fake_store( $sub, $row[ $sub['key'] ] ) : null;
 				}
@@ -442,8 +451,10 @@ test(
 		round_trips( $link, '', null );
 		round_trips( $link, null, null );
 		round_trips( $link, array( 'url' => '' ), null );
+		// The url return format is the same object: ACF stores all three either way.
 		$link_url = f( 'link', 'l', array( 'return_format' => 'url' ) );
-		round_trips( $link_url, $stored, 'https://example.test/' );
+		round_trips( $link_url, $stored, array( 'url' => 'https://example.test/', 'title' => 'Home', 'target' => '_blank' ) );
+		same( $stored['title'], istota_fields_denormalize( $link_url, istota_fields_normalize( $link_url, $stored ) )['title'], 'a url-format link keeps its stored title on write' );
 		round_trips( $link_url, '', null );
 
 		$edges = array( 'gallery' => array(), 'relationship' => array(), 'checkbox' => array() );
@@ -483,7 +494,9 @@ test(
 	'containers round-trip, keyed by name, every sub-field present',
 	function () {
 		$blocks = blocks_value();
-		same( array( 'acf_fc_layout', 'title', 'items', 'options' ), array_keys( $blocks[0] ), 'a flexible row carries its layout then every valued sub-field, tab and message skipped' );
+		same( array( 'acf_fc_layout', 'acf_fc_layout_disabled', 'acf_fc_layout_custom_label', 'title', 'items', 'options' ), array_keys( $blocks[0] ), 'a flexible row carries its reserved keys then every valued sub-field, tab and message skipped' );
+		same( false, $blocks[0]['acf_fc_layout_disabled'], 'a row with no layout meta is enabled' );
+		same( null, $blocks[0]['acf_fc_layout_custom_label'], 'and unlabelled' );
 		same(
 			array(
 				'background' => '#fff',
@@ -503,9 +516,11 @@ test(
 		);
 		same(
 			array(
-				'acf_fc_layout' => 'text',
-				'body'          => '<p>Hi</p>',
-				'image'         => null,
+				'acf_fc_layout'              => 'text',
+				'acf_fc_layout_disabled'     => false,
+				'acf_fc_layout_custom_label' => null,
+				'body'                       => '<p>Hi</p>',
+				'image'                      => null,
 			),
 			$blocks[1],
 			'an empty image is null'
@@ -515,9 +530,11 @@ test(
 		$sparse = istota_fields_normalize( blocks_field(), array( array( 'acf_fc_layout' => 'list' ) ) );
 		same(
 			array(
-				'acf_fc_layout' => 'list',
-				'title'         => null,
-				'items'         => array(),
+				'acf_fc_layout'              => 'list',
+				'acf_fc_layout_disabled'     => false,
+				'acf_fc_layout_custom_label' => null,
+				'title'                      => null,
+				'items'                      => array(),
 				'options'       => array(
 					'background' => null,
 					'spacing'    => null,
@@ -529,6 +546,21 @@ test(
 
 		$again = istota_fields_normalize( blocks_field(), fake_store( blocks_field(), istota_fields_denormalize( blocks_field(), $blocks ) ) );
 		same( $blocks, $again, 'flexible content round-trips' );
+
+		// A disabled, renamed row as stage 2's raw read returns it.
+		$raw                                  = raw_blocks();
+		$raw[1]['acf_fc_layout_disabled']     = '1';
+		$raw[1]['acf_fc_layout_custom_label'] = 'Intro';
+		$raw[2]['acf_fc_layout_disabled']     = '0';
+		$raw[2]['acf_fc_layout_custom_label'] = '';
+		$flagged                              = istota_fields_normalize( blocks_field(), $raw );
+		same( array( true, 'Intro' ), array( $flagged[1]['acf_fc_layout_disabled'], $flagged[1]['acf_fc_layout_custom_label'] ), 'a disabled, renamed row reads as true and its label' );
+		same( array( false, null ), array( $flagged[2]['acf_fc_layout_disabled'], $flagged[2]['acf_fc_layout_custom_label'] ), '"0" and "" read as enabled and unlabelled' );
+		$written = istota_fields_denormalize( blocks_field(), $flagged );
+		same( array( true, 'Intro' ), array( $written[1]['acf_fc_layout_disabled'], $written[1]['acf_fc_layout_custom_label'] ), 'denormalize passes both to ACF under its own keys' );
+		same( array( false, '' ), array( $written[2]['acf_fc_layout_disabled'], $written[2]['acf_fc_layout_custom_label'] ), 'an enabled, unlabelled row is written so ACF clears the meta' );
+		same( $flagged, istota_fields_normalize( blocks_field(), fake_store( blocks_field(), $written ) ), 'a disabled, renamed row round-trips' );
+		ok( istota_fields_token( $flagged ) !== istota_fields_token( blocks_value() ), 'the token covers the reserved keys' );
 		round_trips( blocks_field(), '', array() );
 		round_trips( blocks_field(), null, array() );
 		round_trips( people_field(), false, array() );
@@ -557,6 +589,8 @@ test(
 		same(
 			array(
 				'acf_fc_layout'                          => 'list',
+				'acf_fc_layout_disabled'                 => false,
+				'acf_fc_layout_custom_label'             => '',
 				'field_title'                            => 'T',
 				'field_items'                            => array(),
 				'field_64f0a1b2c3d4e_field_5f1e2d3c4b5a6' => array(
@@ -802,7 +836,9 @@ test(
 		ok( $e && 'validation_error' === $e->reason, 'insert acts only on repeater and flexible content lists' );
 
 		$flex = apply_ok( $field, $blocks, array( array( 'op' => 'insert', 'path' => 'blocks/1', 'value' => array( 'acf_fc_layout' => 'hero', 'image' => 5 ) ) ) );
-		same( array( 'acf_fc_layout' => 'hero', 'image' => 5 ), $flex['value'][1], 'insert a flexible content row' );
+		same( array( 'acf_fc_layout' => 'hero', 'acf_fc_layout_disabled' => false, 'acf_fc_layout_custom_label' => null, 'image' => 5 ), $flex['value'][1], 'insert a flexible content row: the reserved keys default to enabled and unlabelled' );
+		$hidden = apply_ok( $field, $blocks, array( array( 'op' => 'insert', 'path' => 'blocks/0', 'value' => array( 'acf_fc_layout' => 'hero', 'acf_fc_layout_disabled' => true, 'acf_fc_layout_custom_label' => 'Draft', 'image' => 5 ) ) ) );
+		same( array( true, 'Draft' ), array( $hidden['value'][0]['acf_fc_layout_disabled'], $hidden['value'][0]['acf_fc_layout_custom_label'] ), 'an insert may set both' );
 
 		$people = apply_ok( people_field(), people( array( 'Ann', 'Bo' ) ), array( array( 'op' => 'insert', 'path' => 'people/1', 'value' => array( 'name' => 'Cy', 'age' => 3 ) ) ) );
 		same( people( array( 'Ann', 'Cy', 'Bo' ) )[0], $people['value'][0], 'a top-level repeater insert' );
@@ -825,7 +861,30 @@ test(
 		same( array( 'background' => null, 'spacing' => 'lg' ), $group['value'][0]['options'], 'a group set whole: what it leaves out is cleared' );
 
 		$row = apply_ok( $field, $blocks, array( array( 'op' => 'set', 'path' => 'blocks/1', 'value' => array( 'body' => 'new' ) ) ) );
-		same( array( 'acf_fc_layout' => 'text', 'body' => 'new', 'image' => null ), $row['value'][1], 'a flexible row set without a layout keeps its own' );
+		same( array( 'acf_fc_layout' => 'text', 'acf_fc_layout_disabled' => false, 'acf_fc_layout_custom_label' => null, 'body' => 'new', 'image' => null ), $row['value'][1], 'a flexible row set without a layout keeps its own' );
+
+		// A whole-row set keeps the reserved keys it leaves out, and uses the ones it gives.
+		$flagged                                  = $blocks;
+		$flagged[1]['acf_fc_layout_disabled']     = true;
+		$flagged[1]['acf_fc_layout_custom_label'] = 'Intro';
+		$kept_flags = apply_ok( $field, $flagged, array( array( 'op' => 'set', 'path' => 'blocks/1', 'value' => array( 'body' => 'new' ) ) ) );
+		same( array( true, 'Intro' ), array( $kept_flags['value'][1]['acf_fc_layout_disabled'], $kept_flags['value'][1]['acf_fc_layout_custom_label'] ), 'a whole-row set that omits the reserved keys keeps them' );
+		$given = apply_ok( $field, $flagged, array( array( 'op' => 'set', 'path' => 'blocks/1', 'value' => array( 'acf_fc_layout_disabled' => false, 'body' => 'new' ) ) ) );
+		same( array( false, 'Intro' ), array( $given['value'][1]['acf_fc_layout_disabled'], $given['value'][1]['acf_fc_layout_custom_label'] ), 'a given one is used' );
+		$moved_flags = apply_ok( $field, $flagged, array( array( 'op' => 'move', 'from' => 'blocks/1', 'path' => 'blocks/2' ) ) );
+		same( array( true, 'Intro' ), array( $moved_flags['value'][2]['acf_fc_layout_disabled'], $moved_flags['value'][2]['acf_fc_layout_custom_label'] ), 'they move with their row' );
+		foreach ( array( 'acf_fc_layout_disabled', 'acf_fc_layout_custom_label' ) as $reserved ) {
+			$e = raised(
+				function () use ( $field, $blocks, $reserved ) {
+					istota_fields_apply( $field, $blocks, array( array( 'op' => 'set', 'path' => 'blocks/1/' . $reserved, 'value' => true ) ) );
+				}
+			);
+			ok( $e && 'unknown_path' === $e->reason && 'blocks/1' === $e->params['exists'], "$reserved is not addressable" );
+		}
+		$bad_flags = istota_fields_apply( $field, $blocks, array( array( 'op' => 'set', 'path' => 'blocks/1', 'value' => array( 'acf_fc_layout_disabled' => 'yes', 'acf_fc_layout_custom_label' => 3, 'body' => 'b' ) ) ) );
+		same( array( 'blocks/1/acf_fc_layout_disabled', 'blocks/1/acf_fc_layout_custom_label' ), array_column( $bad_flags['errors'], 'path' ), 'the reserved keys are shape-checked when written' );
+		$on_repeater = istota_fields_apply( $field, $blocks, array( array( 'op' => 'set', 'path' => 'blocks/0/items/0', 'value' => array( 'label' => 'x', 'acf_fc_layout_disabled' => true ) ) ) );
+		same( array( 'blocks/0/items/0/acf_fc_layout_disabled' ), array_column( $on_repeater['errors'], 'path' ), 'a repeater row has no reserved keys' );
 		same( $blocks[1], $row['previous'][0], 'previous for a row set is the row as read' );
 		$list = apply_ok( $field, $blocks, array( array( 'op' => 'set', 'path' => 'blocks', 'value' => array() ) ) );
 		same( $blocks, $list['previous'][0], 'previous for a whole list is the list as read' );
@@ -1045,6 +1104,20 @@ test(
 		$texts  = apply_ok( blocks_field(), $blocks, array( array( 'op' => 'insert', 'path' => 'blocks/0', 'value' => array( 'acf_fc_layout' => 'text', 'body' => 'x' ) ) ) );
 		$third  = istota_fields_apply( blocks_field(), $texts['value'], array( array( 'op' => 'insert', 'path' => 'blocks/0', 'value' => array( 'acf_fc_layout' => 'text', 'body' => 'y' ) ) ) );
 		ok( 1 === count( $third['errors'] ) && false !== strpos( $third['errors'][0]['message'], 'text' ), 'a layout above its max is refused' );
+
+		// A disabled row counts toward nothing.
+		$off = apply_ok( blocks_field(), $texts['value'], array( array( 'op' => 'insert', 'path' => 'blocks/0', 'value' => array( 'acf_fc_layout' => 'text', 'body' => 'z', 'acf_fc_layout_disabled' => true ) ) ) );
+		same( 3, count( array_keys( array_column( $off['value'], 'acf_fc_layout' ), 'text' ) ), 'a third text row, disabled, passes a layout max of 2' );
+		$five        = array_fill( 0, 5, array( 'acf_fc_layout' => 'hero', 'image' => 1 ) );
+		$full_blocks = istota_fields_apply( blocks_field(), array(), array( array( 'op' => 'set', 'path' => 'blocks', 'value' => $five ) ) );
+		same( array(), $full_blocks['errors'], 'five rows fit a max of 5' );
+		$six              = $five;
+		$six[]            = array( 'acf_fc_layout' => 'hero', 'image' => 1 );
+		$over_blocks      = istota_fields_apply( blocks_field(), array(), array( array( 'op' => 'set', 'path' => 'blocks', 'value' => $six ) ) );
+		ok( 1 === count( $over_blocks['errors'] ), 'six enabled rows do not' );
+		$six[5]['acf_fc_layout_disabled'] = true;
+		$with_disabled    = istota_fields_apply( blocks_field(), array(), array( array( 'op' => 'set', 'path' => 'blocks', 'value' => $six ) ) );
+		same( array(), $with_disabled['errors'], 'a sixth, disabled row counts toward nothing' );
 
 		// Nested lists keep their identity when their row moves.
 		$items = items_field();
