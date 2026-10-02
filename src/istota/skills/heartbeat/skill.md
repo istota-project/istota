@@ -44,7 +44,7 @@ timeout = 10
 
 ### file-watch
 Check file age or existence.
-- `path`: workspace-relative path to the file
+- `path`: path to the file inside your own folder, `/Users/<your id>/...`. A path anywhere else, one with `..` in it, or one that goes through a symlink reads as not found
 - `max_age_hours`: Maximum file age in hours (optional)
 
 ### shell-command
@@ -59,10 +59,10 @@ Run a command and evaluate the output.
 - `timeout`: Command timeout in seconds (default: 30)
 
 ### url-health
-HTTP health check.
+HTTP health check. Admin-only: for anyone else the check reports unhealthy without making a request.
 - `url`: URL to check
 - `expected_status`: Expected HTTP status code (default: 200)
-- `timeout`: Request timeout in seconds (default: 10)
+- `timeout`: Request timeout in seconds (default: 10, between 1 and 60)
 
 ### calendar-conflicts
 Find overlapping calendar events.

@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 import shutil
 import stat
-from pathlib import Path
 
 import pytest
 
@@ -46,6 +45,43 @@ def _write_briefings_md(mount, user_id, toml_body, bot_dir="istota"):
         "# Briefing Schedule\n\nSome prose.\n\n```toml\n" + toml_body + "```\n"
     )
     return path
+
+
+class TestTheImportDoesNotFollowALink:
+    """ISSUE-596: the boot import is a daemon read of a user-writable name."""
+
+    def test_a_symlinked_file_is_not_imported(self, db_path, tmp_path):
+        from istota import user_briefings
+        from istota.config import Config, UserConfig
+
+        mount = tmp_path / "mount"
+        bob = _write_briefings_md(
+            mount, "bob", '[[briefings]]\nname = "bobs"\ncron = "0 6 * * *"\n',
+        )
+        alice = mount / "Users/alice/istota/config"
+        alice.mkdir(parents=True)
+        (alice / "BRIEFINGS.md").symlink_to(bob)
+        config = Config(db_path=db_path, workspace_path=mount)
+        config.users["alice"] = UserConfig(briefings=[])
+
+        user_briefings.import_from_workspace_files(db_path, config)
+
+        assert user_briefings.list_briefings(db_path, "alice") == []
+
+    def test_a_fifo_does_not_hang_the_boot(self, db_path, tmp_path):
+        import os
+
+        from istota import user_briefings
+        from istota.config import Config, UserConfig
+
+        mount = tmp_path / "mount"
+        alice = mount / "Users/alice/istota/config"
+        alice.mkdir(parents=True)
+        os.mkfifo(alice / "BRIEFINGS.md")
+        config = Config(db_path=db_path, workspace_path=mount)
+        config.users["alice"] = UserConfig(briefings=[])
+
+        assert user_briefings.import_from_workspace_files(db_path, config) == 0
 
 
 class TestTheReadPathIgnoresTheFile:
@@ -739,9 +775,10 @@ class TestTheBootPath:
         config.users["bob"] = UserConfig(briefings=[])
 
         observed = []
-        real_read_text = Path.read_text
+        from istota.skills import _loader
+        real_read = _loader.read_overlay_bytes
 
-        def _spy(self, *a, **kw):
+        def _spy(*a, **kw):
             # A second writer must get through while the files are being read.
             other = sqlite3.connect(db_path, timeout=0.2)
             try:
@@ -755,10 +792,10 @@ class TestTheBootPath:
                 observed.append(False)
             finally:
                 other.close()
-            return real_read_text(self, *a, **kw)
+            return real_read(*a, **kw)
 
         import unittest.mock as _mock
-        with _mock.patch.object(Path, "read_text", _spy):
+        with _mock.patch.object(_loader, "read_overlay_bytes", _spy):
             assert user_briefings.import_from_workspace_files(db_path, config) == 2
 
         assert observed and all(observed), (

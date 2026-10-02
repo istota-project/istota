@@ -414,14 +414,30 @@ def _read_one_user(
     No database handle reaches this function, deliberately — see
     ``import_from_workspace_files`` for why.
     """
-    from .storage import get_user_briefings_path
+    from .skills._loader import read_overlay_bytes
+    from .storage import (
+        USER_CONFIG_READ_CAP_BYTES,
+        get_user_briefings_path,
+        resolve_user_config_dir,
+    )
 
-    path = mount / get_user_briefings_path(user_id, bot_dir).lstrip("/")
-    try:
-        present = path.exists()
-    except OSError as e:
-        logger.warning("BRIEFINGS.md unreadable for %s: %s", user_id, e)
+    # The hardened read every other reader of `{bot_dir}/config/` uses
+    # (ISSUE-339, ISSUE-596): the directory contained in the user's tree, the
+    # leaf opened `O_NOFOLLOW | O_NONBLOCK`, so a symlink planted at the name
+    # cannot import another file and a FIFO cannot hang the scheduler's start.
+    # A refusal is retried at the next start rather than marked done.
+    config_dir = resolve_user_config_dir(config, user_id)
+    if config_dir is None:
+        logger.warning("BRIEFINGS.md: %s's config dir is outside their tree", user_id)
         return None
+    name = Path(get_user_briefings_path(user_id, bot_dir)).name
+    data, reason, size = read_overlay_bytes(
+        config_dir / name, max_bytes=USER_CONFIG_READ_CAP_BYTES,
+    )
+    if reason is not None:
+        logger.warning("BRIEFINGS.md refused for %s: %s", user_id, reason)
+        return None
+    present = size is not None
 
     if not present:
         if not _workspace_is_live(config, mount, user_id, bot_dir):
@@ -434,16 +450,9 @@ def _read_one_user(
             return None
         return _PendingImport(user_id=user_id, entries=[], mark_done=True)
 
-    try:
-        # `errors="replace"` rather than the locale default: a container with
-        # LANG unset decodes as ASCII, and UnicodeDecodeError is a ValueError,
-        # so a single non-ASCII character in the user's own prose above the
-        # fence would fail every boot for ever without ever being imported.
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
-        # Transient fact about this boot; leave the sentinel unset and retry.
-        logger.warning("BRIEFINGS.md unreadable for %s: %s", user_id, e)
-        return None
+    # `errors="replace"`: a single non-ASCII byte in the user's own prose above
+    # the fence must not fail every boot for ever without being imported.
+    text = data.decode("utf-8", errors="replace")
 
     entries = parse_briefings_md(text)
     if entries is None:

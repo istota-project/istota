@@ -376,6 +376,24 @@ def fence_definition(definition):
     return out
 
 
+def _names(items) -> list:
+    if not isinstance(items, list):
+        return []
+    return [selector(item.get("name")) for item in items if isinstance(item, dict)]
+
+
+def summarize_definition(definition) -> dict | None:
+    """What `--output` leaves on stdout in place of a definition that can be as large as the value."""
+    if not isinstance(definition, dict):
+        return None
+    summary = {"type": selector(definition.get("type"))}
+    if definition.get("type") == "flexible_content":
+        summary["layouts"] = _names(definition.get("layouts"))
+    elif isinstance(definition.get("sub_fields"), list):
+        summary["sub_fields"] = _names(definition.get("sub_fields"))
+    return summary
+
+
 # --------------------------------------------------------------------------- #
 # fields get
 # --------------------------------------------------------------------------- #
@@ -405,6 +423,8 @@ def cmd_fields_get(args) -> dict:
                   "value": fenced, "definition": out["definition"]}
         data = json.dumps(record, indent=2, ensure_ascii=False).encode()
         write_resolved(Path(args.output), data)
+        del out["definition"]
+        out["definition_summary"] = summarize_definition(result.get("definition"))
         out["written_to"] = str(args.output)
         out["bytes"] = len(data)
         return out

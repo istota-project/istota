@@ -2,11 +2,12 @@
 
 import json
 import logging
+import os
 import re
+import stat
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -70,11 +71,6 @@ class CheckResult:
     #: exactly today's behaviour, which is why this is safe to add here rather
     #: than in a `self-check`-only branch of `should_alert`.
     alert_signature: str | None = None
-
-
-def _get_mount_path(config: "Config", path: str) -> Path:
-    """Get the local mount path for a Nextcloud path."""
-    return config.workspace_path / path.lstrip("/")
 
 
 def load_heartbeat_config(
@@ -208,25 +204,58 @@ def is_quiet_hours(user_tz_str: str, quiet_hours: list[str]) -> bool:
 # ============================================================================
 
 
-def _check_file_watch(check: HeartbeatCheck, config: "Config") -> CheckResult:
+def _watched_stat(config: "Config", user_id: str, file_path: str) -> os.stat_result | None:
+    """``lstat`` of a ``file-watch`` path in the owner's own tree, else None.
+
+    The check runs in the daemon and answers whether a path exists and how old
+    it is, which for another user's file or anything outside the mount is an
+    oracle the HEARTBEAT.md author has no claim to (ISSUE-596). So the path
+    takes the same rule as a CRON.md ``prompt_file``: ``/Users/<owner>/...``,
+    every directory walked ``O_NOFOLLOW``, and a symlink at the leaf reported
+    as itself rather than followed. None covers both "refused" and "absent",
+    and the message says not found either way, so a refusal discloses nothing.
+    """
+    from .skill_host_paths import owner_path_parts  # noqa: PLC0415
+    from .skills._loader import open_overlay_dir  # noqa: PLC0415 - import cycle
+
+    parts = owner_path_parts(file_path, user_id)
+    root = config.workspace_root(user_id)
+    if parts is None or root is None:
+        return None
+    *dirs, leaf = parts
+    fd = open_overlay_dir(root, *dirs)
+    if fd is None:
+        return None
+    try:
+        st = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if stat.S_ISLNK(st.st_mode):
+        return None
+    return st
+
+
+def _check_file_watch(check: HeartbeatCheck, config: "Config", user_id: str) -> CheckResult:
     """
     Check file age or existence.
 
     Config fields:
-        path: Nextcloud path to file
+        path: Nextcloud path to file, inside ``/Users/<you>/``
         max_age_hours: Maximum age in hours (optional)
     """
     file_path = check.config.get("path", "")
     max_age_hours = check.config.get("max_age_hours")
 
-    if not file_path:
+    if not file_path or not isinstance(file_path, str):
         return CheckResult(healthy=False, message="No path configured")
 
     if not config.has_workspace:
         return CheckResult(healthy=False, message="File watch requires mount")
 
-    local_path = _get_mount_path(config, file_path)
-    if not local_path.exists():
+    st = _watched_stat(config, user_id, file_path)
+    if st is None:
         return CheckResult(
             healthy=False,
             message=f"File not found: {file_path}",
@@ -235,7 +264,7 @@ def _check_file_watch(check: HeartbeatCheck, config: "Config") -> CheckResult:
 
     if max_age_hours is not None:
         try:
-            mtime = local_path.stat().st_mtime
+            mtime = st.st_mtime
             age_hours = (datetime.now().timestamp() - mtime) / 3600
             if age_hours > max_age_hours:
                 return CheckResult(
@@ -439,6 +468,18 @@ def _check_shell_command(check: HeartbeatCheck, config: "Config", user_id: str |
     )
 
 
+#: Bounds on a ``url-health`` timeout, which HEARTBEAT.md sets and which runs
+#: on the heartbeat tick.
+_URL_TIMEOUT_MIN = 1.0
+_URL_TIMEOUT_MAX = 60.0
+
+
+def _clamped_timeout(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 10.0
+    return min(max(float(value), _URL_TIMEOUT_MIN), _URL_TIMEOUT_MAX)
+
+
 def _check_url_health(check: HeartbeatCheck, config: "Config") -> CheckResult:
     """
     HTTP health check.
@@ -450,24 +491,27 @@ def _check_url_health(check: HeartbeatCheck, config: "Config") -> CheckResult:
     """
     url = check.config.get("url", "")
     expected_status = check.config.get("expected_status", 200)
-    timeout = check.config.get("timeout", 10)
+    timeout = _clamped_timeout(check.config.get("timeout", 10))
 
     if not url:
         return CheckResult(healthy=False, message="No URL configured")
 
     try:
-        response = httpx.get(url, timeout=timeout, follow_redirects=True)
-        if response.status_code == expected_status:
+        # Streamed and never read: only the status matters, and buffering a
+        # body the far end chooses the size of is a memory bound left open.
+        with httpx.stream("GET", url, timeout=timeout, follow_redirects=True) as response:
+            status_code = response.status_code
+        if status_code == expected_status:
             return CheckResult(
                 healthy=True,
                 message=f"URL healthy: {url}",
-                details={"status_code": response.status_code},
+                details={"status_code": status_code},
             )
         else:
             return CheckResult(
                 healthy=False,
-                message=f"URL returned {response.status_code}, expected {expected_status}",
-                details={"url": url, "status_code": response.status_code, "expected": expected_status},
+                message=f"URL returned {status_code}, expected {expected_status}",
+                details={"url": url, "status_code": status_code, "expected": expected_status},
             )
     except httpx.TimeoutException:
         return CheckResult(
@@ -835,12 +879,25 @@ def run_check(
             healthy=False,
             message="shell-command checks are admin-only",
         )
+    # A GET from the daemon's own network namespace, outside the sandbox's
+    # CONNECT allowlist, to a URL the HEARTBEAT.md author chose: for anyone
+    # else that is a probe of every internal address the host can reach, with
+    # the status or error read back in the alert (ISSUE-596). An admin can
+    # already run any command through shell-command.
+    if check.type == "url-health" and not config.is_admin(user_id):
+        return CheckResult(
+            healthy=False,
+            message="url-health checks are admin-only",
+        )
 
     try:
         # Some handlers need user_id (calendar, task-deadline, self-check,
         # shell-command — the latter so subprocesses spawned from the check
         # can resolve the user's context the same way scheduler tasks do).
-        if check.type in ("calendar-conflicts", "task-deadline", "self-check", "shell-command"):
+        if check.type in (
+            "calendar-conflicts", "task-deadline", "self-check", "shell-command",
+            "file-watch",
+        ):
             return handler(check, config, user_id)
         else:
             return handler(check, config)

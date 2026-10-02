@@ -217,8 +217,8 @@ Some footer text"""
 
 
 class TestPollUserTasksFile:
-    @patch("istota.tasks_file_poller.write_text")
-    @patch("istota.tasks_file_poller.read_text")
+    @patch("istota.tasks_file_poller._write_tasks_file")
+    @patch("istota.tasks_file_poller._read_tasks_file")
     def test_creates_tasks_for_pending(self, mock_read, mock_write, make_config):
         config = make_config()
         mock_read.return_value = "- [ ] Send email\n- [ ] Read calendar"
@@ -236,8 +236,8 @@ class TestPollUserTasksFile:
         # Verify write was called to update file with in-progress markers
         mock_write.assert_called_once()
 
-    @patch("istota.tasks_file_poller.write_text")
-    @patch("istota.tasks_file_poller.read_text")
+    @patch("istota.tasks_file_poller._write_tasks_file")
+    @patch("istota.tasks_file_poller._read_tasks_file")
     def test_skips_tracked_tasks(self, mock_read, mock_write, make_config):
         config = make_config()
         mock_read.return_value = "- [ ] Send email"
@@ -250,8 +250,8 @@ class TestPollUserTasksFile:
         task_ids_2 = poll_user_tasks_file(config, "alice", "/Users/alice/istota/config/TASKS.md")
         assert len(task_ids_2) == 0
 
-    @patch("istota.tasks_file_poller.write_text")
-    @patch("istota.tasks_file_poller.read_text")
+    @patch("istota.tasks_file_poller._write_tasks_file")
+    @patch("istota.tasks_file_poller._read_tasks_file")
     def test_skips_non_pending(self, mock_read, mock_write, make_config):
         config = make_config()
         mock_read.return_value = "- [~] In progress...\n- [x] 2025-01-26 12:34 | Done | Result: ok"
@@ -260,7 +260,7 @@ class TestPollUserTasksFile:
         assert len(task_ids) == 0
         mock_write.assert_not_called()
 
-    @patch("istota.tasks_file_poller.read_text")
+    @patch("istota.tasks_file_poller._read_tasks_file")
     def test_handles_read_error(self, mock_read, make_config):
         config = make_config()
         mock_read.side_effect = OSError("File not found")
@@ -268,8 +268,8 @@ class TestPollUserTasksFile:
         task_ids = poll_user_tasks_file(config, "alice", "/Users/alice/istota/config/TASKS.md")
         assert task_ids == []
 
-    @patch("istota.tasks_file_poller.write_text")
-    @patch("istota.tasks_file_poller.read_text")
+    @patch("istota.tasks_file_poller._write_tasks_file")
+    @patch("istota.tasks_file_poller._read_tasks_file")
     def test_updates_file_with_in_progress(self, mock_read, mock_write, make_config):
         config = make_config()
         mock_read.return_value = "- [ ] Send email"
@@ -318,8 +318,8 @@ class TestHandleTasksFileCompletion:
         conn.close()
         return task
 
-    @patch("istota.tasks_file_poller.write_text")
-    @patch("istota.tasks_file_poller.read_text")
+    @patch("istota.tasks_file_poller._write_tasks_file")
+    @patch("istota.tasks_file_poller._read_tasks_file")
     def test_success_updates_file_and_db(self, mock_read, mock_write, make_config):
         config = make_config()
         task = self._setup_task_and_istota_entry(config)
@@ -344,8 +344,8 @@ class TestHandleTasksFileCompletion:
         assert row["result_summary"] == "Email sent successfully"
         conn.close()
 
-    @patch("istota.tasks_file_poller.write_text")
-    @patch("istota.tasks_file_poller.read_text")
+    @patch("istota.tasks_file_poller._write_tasks_file")
+    @patch("istota.tasks_file_poller._read_tasks_file")
     def test_failure_updates_file_and_db(self, mock_read, mock_write, make_config):
         config = make_config()
         task = self._setup_task_and_istota_entry(config)
@@ -367,8 +367,8 @@ class TestHandleTasksFileCompletion:
         assert row["error_message"] == "SMTP timeout"
         conn.close()
 
-    @patch("istota.tasks_file_poller.write_text")
-    @patch("istota.tasks_file_poller.read_text")
+    @patch("istota.tasks_file_poller._write_tasks_file")
+    @patch("istota.tasks_file_poller._read_tasks_file")
     def test_sends_email_notification(self, mock_read, mock_write, make_config):
         config = make_config(
             email=EmailConfig(enabled=True, bot_email="istota@example.com",
@@ -390,8 +390,8 @@ class TestHandleTasksFileCompletion:
             assert call_kwargs.kwargs.get("to") == "alice@example.com" or \
                    call_kwargs[1].get("to") == "alice@example.com"
 
-    @patch("istota.tasks_file_poller.write_text")
-    @patch("istota.tasks_file_poller.read_text")
+    @patch("istota.tasks_file_poller._write_tasks_file")
+    @patch("istota.tasks_file_poller._read_tasks_file")
     def test_skips_email_when_not_configured(self, mock_read, mock_write, make_config):
         config = make_config(email=EmailConfig(enabled=False))
         task = self._setup_task_and_istota_entry(config)
@@ -401,8 +401,8 @@ class TestHandleTasksFileCompletion:
             handle_tasks_file_completion(config, task, success=True, result="Done")
             mock_send.assert_not_called()
 
-    @patch("istota.tasks_file_poller.write_text")
-    @patch("istota.tasks_file_poller.read_text")
+    @patch("istota.tasks_file_poller._write_tasks_file")
+    @patch("istota.tasks_file_poller._read_tasks_file")
     def test_no_istota_task_found(self, mock_read, mock_write, make_config):
         config = make_config()
         # Task with no corresponding istota_file_tasks entry
@@ -468,3 +468,59 @@ class TestTasksFilePattern:
         assert not TASKS_FILE_PATTERN.match("TASKS.txt")
         assert not TASKS_FILE_PATTERN.match("ISTOTA.md")
         assert not TASKS_FILE_PATTERN.match("_TASKS.md")
+
+
+# --- TestTasksFileIsNotFollowed (ISSUE-596) ---
+
+
+class TestTasksFileIsNotFollowed:
+    """The poller reads and writes TASKS.md in the daemon, so no symlink, no FIFO."""
+
+    def _config_dir(self, tmp_path):
+        d = tmp_path / "mount/Users/alice/istota/config"
+        d.mkdir(parents=True)
+        return d
+
+    def test_a_symlinked_tasks_file_creates_nothing_and_is_not_written(
+        self, tmp_path, make_config, db_path,
+    ):
+        config = make_config()
+        bob = tmp_path / "mount/Users/bob/istota/config/TASKS.md"
+        bob.parent.mkdir(parents=True)
+        bob.write_text("- [ ] SECRET bob item\n")
+        (self._config_dir(tmp_path) / "TASKS.md").symlink_to(bob)
+
+        created = poll_user_tasks_file(
+            config, "alice", "/Users/alice/istota/config/TASKS.md")
+
+        assert created == []
+        assert bob.read_text() == "- [ ] SECRET bob item\n"
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+    def test_a_fifo_does_not_block_the_poll(self, tmp_path, make_config):
+        import os
+        config = make_config()
+        os.mkfifo(self._config_dir(tmp_path) / "TASKS.md")
+        assert poll_user_tasks_file(
+            config, "alice", "/Users/alice/istota/config/TASKS.md") == []
+
+    def test_a_plain_tasks_file_still_round_trips(self, tmp_path, make_config):
+        config = make_config()
+        f = self._config_dir(tmp_path) / "TASKS.md"
+        f.write_text("- [ ] real item\n")
+        created = poll_user_tasks_file(
+            config, "alice", "/Users/alice/istota/config/TASKS.md")
+        assert len(created) == 1
+        assert f.read_text().startswith("- [~]")
+
+    def test_a_path_outside_the_users_config_dir_is_refused(
+        self, tmp_path, make_config,
+    ):
+        config = make_config()
+        bob = tmp_path / "mount/Users/bob/istota/config/TASKS.md"
+        bob.parent.mkdir(parents=True)
+        bob.write_text("- [ ] bob item\n")
+        assert poll_user_tasks_file(
+            config, "alice", "/Users/bob/istota/config/TASKS.md") == []
+        assert bob.read_text() == "- [ ] bob item\n"
