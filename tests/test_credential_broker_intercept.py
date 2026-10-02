@@ -11,10 +11,11 @@ from contextlib import contextmanager, nullcontext
 import h11
 import pytest
 from cryptography.hazmat.primitives import serialization
-from istota import db, secrets_store
+from istota import db
+from istota.credentials import store as secrets_store
 from istota.config import Config
-from istota.credential_broker import ca, grants
-from istota.credential_broker.bindings import parse_binding
+from istota.credentials.broker import ca, grants
+from istota.credentials.broker.bindings import parse_binding
 from istota.sandbox.network_proxy import NetworkProxy
 
 VALUE = b"fixture-broker-password"
@@ -120,7 +121,7 @@ def broker(tmp_path, monkeypatch, request, broker_responder, broker_scheme):
             threading.Thread(target=serve, args=(conn,), daemon=True).start()
     thread = threading.Thread(target=accept, daemon=True)
     thread.start()
-    from istota.credential_broker.intercept import Broker
+    from istota.credentials.broker.intercept import Broker
     socket_dir = tempfile.TemporaryDirectory(prefix="broker-", dir="/tmp")
     proxy = NetworkProxy(Path(socket_dir.name) / "p.sock", {host}, trusted_roots=[os.getpid()],
                          broker=Broker(config, task_id, "alice", authority))
@@ -175,7 +176,7 @@ def exchange(tls, host, *, method=b"GET", header=b"authorization", value=PLACEHO
 
 
 def test_substitution_scrub_and_keepalive(broker, caplog):
-    caplog.set_level("INFO", logger="istota.credential_broker")
+    caplog.set_level("INFO", logger="istota.credentials.broker")
     with connect(broker) as tls:
         for _ in range(2):
             response, body = exchange(tls, broker[5], value=b"Bearer " + PLACEHOLDER)
@@ -335,7 +336,7 @@ def test_expect_continue_does_not_deadlock_upload(broker):
 
 
 def test_substitution_is_audited_when_upstream_disconnects(broker, caplog):
-    caplog.set_level("INFO", logger="istota.credential_broker")
+    caplog.set_level("INFO", logger="istota.credentials.broker")
     with connect(broker) as tls:
         response, _ = exchange(tls, broker[5], target=b"/disconnect")
     assert response.status_code == 502

@@ -35,9 +35,10 @@ from pathlib import Path
 
 import pytest
 
-from istota import secrets_store, storage
+from istota import storage
+from istota.credentials import store as secrets_store
 from istota.config import Config, UserConfig
-from istota.secrets_vault import VAULT_ENTRY_SERVICE
+from istota.credentials.vault import VAULT_ENTRY_SERVICE
 
 PASSPHRASE = "sync-fixture-passphrase-not-a-real-one"
 ROTATED_PASSPHRASE = "sync-fixture-passphrase-after-rotation"
@@ -61,7 +62,7 @@ def _clean_sync_state():
     first cycle a skip, and a leftover outcome suppresses a transition the next
     test is asserting on.
     """
-    from istota import secrets_vault
+    from istota.credentials import vault as secrets_vault
 
     secrets_vault.reset_sync_state()
     yield
@@ -144,7 +145,7 @@ class _ParseCounter:
     """
 
     def __init__(self, monkeypatch):
-        from istota import secrets_vault
+        from istota.credentials import vault as secrets_vault
 
         self.calls = 0
         real = secrets_vault.parse_vault
@@ -170,7 +171,7 @@ class TestTheDigestCache:
     """An unchanged file costs a read and nothing else."""
 
     def test_a_first_sync_parses_and_applies(self, ready, parse_calls):
-        from istota.secrets_vault import OUTCOME_OK, sync_user
+        from istota.credentials.vault import OUTCOME_OK, sync_user
 
         config, _path = ready
         result = sync_user(config, "alice")
@@ -189,7 +190,7 @@ class TestTheDigestCache:
 
     def test_an_unchanged_digest_does_no_work(self, ready, parse_calls):
         """The property §7 rests on: no Argon2id, no DB writes, no log lines."""
-        from istota.secrets_vault import OUTCOME_UNCHANGED, sync_user
+        from istota.credentials.vault import OUTCOME_UNCHANGED, sync_user
 
         config, _path = ready
         first = sync_user(config, "alice")
@@ -205,7 +206,7 @@ class TestTheDigestCache:
 
     def test_a_changed_file_parses_again(self, ready, parse_calls):
         """The control for the skip above: a moved digest is not a skip."""
-        from istota.secrets_vault import OUTCOME_OK, sync_user
+        from istota.credentials.vault import OUTCOME_OK, sync_user
 
         config, path = ready
         sync_user(config, "alice")
@@ -218,15 +219,15 @@ class TestTheDigestCache:
 
     def test_an_unchanged_file_does_not_re_log(self, ready, caplog):
         """A vault that is fine says so once, not once per interval."""
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         config, _path = ready
         sync_user(config, "alice")
         caplog.clear()
-        with caplog.at_level(logging.DEBUG, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.DEBUG, logger="istota.credentials.vault"):
             sync_user(config, "alice")
         records = [
-            r for r in caplog.records if r.name == "istota.secrets_vault"
+            r for r in caplog.records if r.name == "istota.credentials.vault"
         ]
         assert records == [], [r.getMessage() for r in records]
 
@@ -244,7 +245,7 @@ class TestWhichFailuresCacheTheirDigest:
     def test_a_corrupt_digest_is_cached_so_the_next_cycle_neither_parses_nor_relogs(
         self, tmp_path, secret_key, parse_calls, caplog
     ):
-        from istota.secrets_vault import OUTCOME_UNCHANGED, VaultCorrupt, sync_user
+        from istota.credentials.vault import OUTCOME_UNCHANGED, VaultCorrupt, sync_user
 
         config = _vault_config(
             tmp_path, vault_path="config/vault.kdbx"
@@ -262,11 +263,11 @@ class TestWhichFailuresCacheTheirDigest:
         assert parse_calls.calls == 1
 
         caplog.clear()
-        with caplog.at_level(logging.DEBUG, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.DEBUG, logger="istota.credentials.vault"):
             second = sync_user(config, "alice")
         assert second.outcome == OUTCOME_UNCHANGED
         assert parse_calls.calls == 1
-        assert [r for r in caplog.records if r.name == "istota.secrets_vault"] == []
+        assert [r for r in caplog.records if r.name == "istota.credentials.vault"] == []
 
     def test_a_locked_digest_is_not_cached_and_provisioning_ends_it(
         self, tmp_path, secret_key, parse_calls
@@ -276,7 +277,7 @@ class TestWhichFailuresCacheTheirDigest:
         Two cycles over **identical bytes**, with the remedy performed between
         them and nothing at all done to the file.
         """
-        from istota.secrets_vault import OUTCOME_OK, VaultLocked, sync_user
+        from istota.credentials.vault import OUTCOME_OK, VaultLocked, sync_user
 
         config = _vault_config(
             tmp_path, vault_path="config/vault.kdbx"
@@ -310,7 +311,7 @@ class TestWhichFailuresCacheTheirDigest:
         self, tmp_path, secret_key, parse_calls
     ):
         """The same for the class that never reaches the unlock at all."""
-        from istota.secrets_vault import (
+        from istota.credentials.vault import (
             OUTCOME_OK,
             VaultPassphraseMissing,
             sync_user,
@@ -337,7 +338,7 @@ class TestWhichFailuresCacheTheirDigest:
     def test_a_new_digest_after_a_cached_failure_retries(
         self, tmp_path, secret_key, parse_calls
     ):
-        from istota.secrets_vault import OUTCOME_OK, VaultCorrupt, sync_user
+        from istota.credentials.vault import OUTCOME_OK, VaultCorrupt, sync_user
 
         config = _vault_config(
             tmp_path, vault_path="config/vault.kdbx"
@@ -364,7 +365,7 @@ class TestWhichFailuresCacheTheirDigest:
         corrupt would send the operator to check their mount when what they need
         is `istota secret ensure`.
         """
-        from istota.secrets_vault import OUTCOME_OK, VaultLocked, sync_user
+        from istota.credentials.vault import OUTCOME_OK, VaultLocked, sync_user
 
         config = _vault_config(
             tmp_path, vault_path="config/vault.kdbx"
@@ -381,8 +382,8 @@ class TestWhichFailuresCacheTheirDigest:
         assert sync_user(config, "alice").outcome == OUTCOME_OK
 
     def test_a_missing_library_is_not_cached(self, ready, monkeypatch, parse_calls):
-        from istota import secrets_vault
-        from istota.secrets_vault import (
+        from istota.credentials import vault as secrets_vault
+        from istota.credentials.vault import (
             OUTCOME_OK,
             VaultLibraryMissing,
             sync_user,
@@ -429,7 +430,7 @@ class TestTheMasterKeyIsUnusable:
         return config
 
     def test_no_master_key_at_all(self, tmp_path, secret_key, monkeypatch, parse_calls):
-        from istota.secrets_vault import VaultKeyUnusable, sync_user
+        from istota.credentials.vault import VaultKeyUnusable, sync_user
 
         config = self._configured(tmp_path)
         _provision_passphrase(config)
@@ -444,7 +445,7 @@ class TestTheMasterKeyIsUnusable:
     def test_a_master_key_below_the_stores_floor(
         self, tmp_path, secret_key, monkeypatch, parse_calls
     ):
-        from istota.secrets_vault import VaultKeyUnusable, sync_user
+        from istota.credentials.vault import VaultKeyUnusable, sync_user
 
         config = self._configured(tmp_path)
         _provision_passphrase(config)
@@ -463,7 +464,7 @@ class TestTheMasterKeyIsUnusable:
         `istota secret ensure`, a command that cannot help and that would
         overwrite a perfectly good row.
         """
-        from istota.secrets_vault import VaultKeyUnusable, sync_user
+        from istota.credentials.vault import VaultKeyUnusable, sync_user
 
         config = self._configured(tmp_path)
         _provision_passphrase(config)
@@ -476,7 +477,7 @@ class TestTheMasterKeyIsUnusable:
     def test_it_is_not_cached_so_fixing_the_key_ends_it(
         self, tmp_path, secret_key, monkeypatch, parse_calls
     ):
-        from istota.secrets_vault import OUTCOME_OK, VaultKeyUnusable, sync_user
+        from istota.credentials.vault import OUTCOME_OK, VaultKeyUnusable, sync_user
 
         config = self._configured(tmp_path)
         _provision_passphrase(config)
@@ -499,7 +500,7 @@ class TestTheMasterKeyIsUnusable:
         deployment-level fact about the master key and does not belong on a
         per-user surface. It goes to the daemon log instead.
         """
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         config = self._configured(tmp_path)
         _provision_passphrase(config)
@@ -522,7 +523,7 @@ class TestTheSkipCarriesTheSettledClass:
     def test_a_skip_after_a_corrupt_cycle_says_what_it_settled_on(
         self, tmp_path, secret_key
     ):
-        from istota.secrets_vault import OUTCOME_UNCHANGED, VaultCorrupt, sync_user
+        from istota.credentials.vault import OUTCOME_UNCHANGED, VaultCorrupt, sync_user
 
         config = _vault_config(
             tmp_path, vault_path="config/vault.kdbx"
@@ -538,7 +539,7 @@ class TestTheSkipCarriesTheSettledClass:
         assert second.last_outcome == VaultCorrupt.__name__
 
     def test_a_skip_after_a_healthy_cycle_says_so_too(self, ready):
-        from istota.secrets_vault import OUTCOME_OK, OUTCOME_UNCHANGED, sync_user
+        from istota.credentials.vault import OUTCOME_OK, OUTCOME_UNCHANGED, sync_user
 
         config, _path = ready
         assert sync_user(config, "alice").outcome == OUTCOME_OK
@@ -555,14 +556,14 @@ class TestTheTransitionRule:
     def test_a_repeated_uncached_failure_reports_once(
         self, tmp_path, secret_key, caplog
     ):
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         config = _vault_config(
             tmp_path, vault_path="config/vault.kdbx"
         )
         _write_vault(_user_root(config) / "config" / "vault.kdbx")
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             first = sync_user(config, "alice")
             second = sync_user(config, "alice")
             third = sync_user(config, "alice")
@@ -572,14 +573,14 @@ class TestTheTransitionRule:
         warnings = [
             r
             for r in caplog.records
-            if r.name == "istota.secrets_vault" and r.levelno >= logging.WARNING
+            if r.name == "istota.credentials.vault" and r.levelno >= logging.WARNING
         ]
         assert len(warnings) == 1, [r.getMessage() for r in warnings]
 
     def test_a_change_of_failure_class_is_a_transition(
         self, tmp_path, secret_key
     ):
-        from istota.secrets_vault import (
+        from istota.credentials.vault import (
             VaultLocked,
             VaultPassphraseMissing,
             sync_user,
@@ -598,7 +599,7 @@ class TestTheTransitionRule:
         assert second.transition is True
 
     def test_recovery_is_a_transition_too(self, tmp_path, secret_key):
-        from istota.secrets_vault import OUTCOME_OK, sync_user
+        from istota.credentials.vault import OUTCOME_OK, sync_user
 
         config = _vault_config(
             tmp_path, vault_path="config/vault.kdbx"
@@ -638,7 +639,7 @@ class TestTheEdgeTriggeredProperty:
         not "fix" it by parsing on every cycle; that is a design change with §7's
         Argon2id cost behind it.
         """
-        from istota.secrets_vault import OUTCOME_UNCHANGED, sync_user
+        from istota.credentials.vault import OUTCOME_UNCHANGED, sync_user
 
         config, _path = ready
         sync_user(config, "alice")
@@ -663,7 +664,7 @@ class TestTheEdgeTriggeredProperty:
         row changed out of band — is the applying half's, and the change
         landing beside this one restores it. The name and this docstring say
         what is asserted here rather than what the pair asserts together."""
-        from istota.secrets_vault import OUTCOME_OK, sync_user
+        from istota.credentials.vault import OUTCOME_OK, sync_user
 
         config, path = ready
         sync_user(config, "alice")
@@ -692,7 +693,7 @@ class TestTheEdgeTriggeredProperty:
 
 class TestForce:
     def test_force_parses_a_digest_a_previous_cycle_cached(self, ready, parse_calls):
-        from istota.secrets_vault import OUTCOME_OK, sync_user
+        from istota.credentials.vault import OUTCOME_OK, sync_user
 
         config, _path = ready
         sync_user(config, "alice")
@@ -705,7 +706,7 @@ class TestForce:
 
     def test_force_re_reports_rather_than_suppressing(self, ready, parse_calls):
         """`vault-sync` is what an operator runs to find out; it must answer."""
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         config, _path = ready
         sync_user(config, "alice")
@@ -728,7 +729,7 @@ class TestARefusedPath:
         invisible-failure class §8 exists to close, in the one place it matters
         most.
         """
-        from istota.secrets_vault import VaultPathRefused, sync_user
+        from istota.credentials.vault import VaultPathRefused, sync_user
 
         config = _vault_config(tmp_path, vault_path="")
         bob = Path(config.workspace_path) / "Users" / "bob" / "config"
@@ -749,7 +750,7 @@ class TestARefusedPath:
         There are no bytes to hash either, which is why this is in §7's uncached
         set by construction as well as by decision.
         """
-        from istota.secrets_vault import VaultPathRefused, sync_user
+        from istota.credentials.vault import VaultPathRefused, sync_user
 
         config = _vault_config(tmp_path, vault_path="")
         config.users["alice"].vault_path = "../bob/vault.kdbx"
@@ -760,7 +761,7 @@ class TestARefusedPath:
         assert second.outcome == VaultPathRefused.__name__
 
     def test_an_unconfigured_user_is_not_a_failure(self, tmp_path, secret_key):
-        from istota.secrets_vault import OUTCOME_NOT_CONFIGURED, sync_user
+        from istota.credentials.vault import OUTCOME_NOT_CONFIGURED, sync_user
 
         config = _vault_config(tmp_path, vault_path="")
         result = sync_user(config, "alice")
@@ -821,7 +822,7 @@ class TestTheDescriptorLifetime:
     def test_the_descriptor_is_closed_on_the_success_path(
         self, ready, monkeypatch
     ):
-        from istota.secrets_vault import OUTCOME_OK, sync_user
+        from istota.credentials.vault import OUTCOME_OK, sync_user
 
         config, _path = ready
         seen, closed = self._capture(monkeypatch, config)
@@ -833,7 +834,7 @@ class TestTheDescriptorLifetime:
     def test_the_descriptor_is_closed_on_a_failure_path(
         self, tmp_path, secret_key, monkeypatch
     ):
-        from istota.secrets_vault import VaultLocked, sync_user
+        from istota.credentials.vault import VaultLocked, sync_user
 
         config = _vault_config(
             tmp_path, vault_path="config/vault.kdbx"
@@ -849,7 +850,7 @@ class TestTheDescriptorLifetime:
     def test_the_descriptor_is_closed_when_the_skip_short_circuits(
         self, ready, monkeypatch
     ):
-        from istota.secrets_vault import OUTCOME_UNCHANGED, sync_user
+        from istota.credentials.vault import OUTCOME_UNCHANGED, sync_user
 
         config, _path = ready
         sync_user(config, "alice")
@@ -868,7 +869,7 @@ class TestTheDescriptorLifetime:
 class TestSyncAll:
     def test_one_users_failure_does_not_cost_the_rest(self, tmp_path, secret_key):
         from istota import db
-        from istota.secrets_vault import OUTCOME_OK, sync_all
+        from istota.credentials.vault import OUTCOME_OK, sync_all
 
         mount = tmp_path / "mount"
         for name in ("alice", "bob"):
@@ -911,7 +912,7 @@ class TestSyncAll:
 
 
     def test_a_raising_user_is_contained(self, ready, monkeypatch):
-        from istota import secrets_vault
+        from istota.credentials import vault as secrets_vault
 
         config, _path = ready
 
@@ -949,7 +950,7 @@ class TestTheEnableGate:
     ):
         """Half the pair is not a vault, and reporting it as a broken one
         would notify a user who has not finished switching it on."""
-        from istota.secrets_vault import OUTCOME_NOT_CONFIGURED, sync_user
+        from istota.credentials.vault import OUTCOME_NOT_CONFIGURED, sync_user
 
         config = _vault_config(tmp_path, vault_path="")
         _write_vault(self._folder(config) / "personal.kdbx")
@@ -962,7 +963,7 @@ class TestTheEnableGate:
         self, tmp_path, secret_key, monkeypatch,
     ):
         """Every user by default, on every tick."""
-        from istota import secrets_vault
+        from istota.credentials import vault as secrets_vault
 
         config = _vault_config(tmp_path, vault_path="")
 
@@ -978,7 +979,7 @@ class TestTheEnableGate:
     ):
         """The whole of the happy path: drop the file in, generate a
         passphrase, and nothing is stored to select anything."""
-        from istota.secrets_vault import OUTCOME_OK, sync_user
+        from istota.credentials.vault import OUTCOME_OK, sync_user
 
         config = _vault_config(tmp_path, vault_path="")
         _write_vault(self._folder(config) / "personal.kdbx")
@@ -1000,7 +1001,7 @@ class TestTheEnableGate:
         self, tmp_path, secret_key,
     ):
         """The user had a vault and the file went away, which is worth saying."""
-        from istota.secrets_vault import VaultMissing, sync_user
+        from istota.credentials.vault import VaultMissing, sync_user
 
         config = _vault_config(tmp_path, vault_path="")
         self._folder(config)
@@ -1016,7 +1017,7 @@ class TestTheEnableGate:
         Reporting it as one would push a notification at a user whose answer is
         one dropdown away, every cycle until they answer it.
         """
-        from istota.secrets_vault import OUTCOME_NOT_CONFIGURED, sync_user
+        from istota.credentials.vault import OUTCOME_NOT_CONFIGURED, sync_user
 
         config = _vault_config(tmp_path, vault_path="")
         folder = self._folder(config)
@@ -1031,7 +1032,7 @@ class TestTheEnableGate:
     def test_the_stored_choice_decides_which_one_is_read(
         self, tmp_path, secret_key,
     ):
-        from istota.secrets_vault import OUTCOME_OK, sync_user
+        from istota.credentials.vault import OUTCOME_OK, sync_user
 
         config = _vault_config(tmp_path, vault_path="")
         folder = self._folder(config)
@@ -1057,7 +1058,7 @@ class TestTheEnableGate:
 
 class TestNoValueIsLogged:
     def test_no_sync_log_record_carries_a_value(self, ready, caplog):
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         config, path = ready
         with caplog.at_level(logging.DEBUG):
@@ -1073,7 +1074,8 @@ class TestNoValueIsLogged:
 
 
 def test_multi_user_policy_blocks_cached_credentials_and_sync(ready, monkeypatch):
-    from istota import doctor, secrets_vault
+    from istota import doctor
+    from istota.credentials import vault as secrets_vault
     from istota.sandbox import task_env
 
     config, _ = ready
@@ -1118,7 +1120,8 @@ LOCAL_VALUE = "lc-sync-fixture-value"
 
 
 def _local(db_path, name, *, url="api.example.com", access=True):
-    from istota import db, local_credentials
+    from istota import db
+    from istota.credentials import local as local_credentials
 
     with db.get_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -1132,7 +1135,7 @@ def _local(db_path, name, *, url="api.example.com", access=True):
 
 def _local_state(db_path, name):
     from istota import db
-    from istota.credential_broker import bindings, grants
+    from istota.credentials.broker import bindings, grants
 
     with db.get_db(db_path) as conn:
         return (
@@ -1148,7 +1151,7 @@ class TestTheSyncLeavesLocalCredentialsAlone:
     def test_a_local_credential_absent_from_the_file_survives_a_sync(self, ready):
         """The regression test for the web-credentials spec: before it, the
         sweep deleted every `vault_entries` row the file did not produce."""
-        from istota.secrets_vault import OUTCOME_OK, sync_user
+        from istota.credentials.vault import OUTCOME_OK, sync_user
 
         config, _path = ready
         _local(config.db_path, "openrouter_key")
@@ -1163,7 +1166,7 @@ class TestTheSyncLeavesLocalCredentialsAlone:
         )
 
     def test_a_file_entry_with_a_local_name_is_skipped_and_counted(self, ready):
-        from istota.secrets_vault import (
+        from istota.credentials.vault import (
             OUTCOME_OK, SKIP_NAME_TAKEN, sync_user, vault_status,
         )
 
@@ -1186,7 +1189,7 @@ class TestTheSyncLeavesLocalCredentialsAlone:
     def test_a_derived_name_clash_is_skipped_too(self, ready):
         """A local `x` owns `x_url`; a file entry producing `x_url` must not
         overwrite it."""
-        from istota.secrets_vault import SKIP_NAME_TAKEN, sync_user
+        from istota.credentials.vault import SKIP_NAME_TAKEN, sync_user
 
         config, _path = ready
         _local(config.db_path, "karakeep_base", url="karakeep.example.org")
@@ -1206,8 +1209,8 @@ class TestTheSyncLeavesLocalCredentialsAlone:
         field carrying `credential: foo` would otherwise join the local `foo`'s
         group and its grant, bound to the file's hosts."""
         from istota import db
-        from istota.credential_broker import bindings, grants
-        from istota.secrets_vault import SKIP_NAME_TAKEN, VaultRead, apply_vault
+        from istota.credentials.broker import bindings, grants
+        from istota.credentials.vault import SKIP_NAME_TAKEN, VaultRead, apply_vault
 
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
@@ -1233,8 +1236,8 @@ class TestTheSyncLeavesLocalCredentialsAlone:
             assert bindings.get_binding(conn, "alice", "foo_username") is None
 
     def test_renaming_ends_the_conflict_and_the_count(self, ready):
-        from istota import local_credentials
-        from istota.secrets_vault import sync_user, vault_status
+        from istota.credentials import local as local_credentials
+        from istota.credentials.vault import sync_user, vault_status
 
         config, path = ready
         _local(config.db_path, "karakeep_api_key")
@@ -1253,7 +1256,7 @@ class TestTheSyncLeavesLocalCredentialsAlone:
     def test_a_row_with_no_binding_is_still_swept(self, ready):
         """Legacy rows predate bindings; the only writer that produced one was
         the sync, so they count as `vault`."""
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         config, _path = ready
         secrets_store.set_secret(
@@ -1268,7 +1271,7 @@ class TestTheSyncLeavesLocalCredentialsAlone:
         ) is None
 
     def test_a_vault_row_the_file_dropped_is_still_swept(self, ready):
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         config, path = ready
         _local(config.db_path, "openrouter_key")
@@ -1284,8 +1287,8 @@ class TestTheSyncLeavesLocalCredentialsAlone:
         """`read.held & stored` rebinds held names; a local one is not the
         file's to rebind."""
         from istota import db
-        from istota.credential_broker import bindings
-        from istota.secrets_vault import VaultRead, apply_vault
+        from istota.credentials.broker import bindings
+        from istota.credentials.vault import VaultRead, apply_vault
 
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
@@ -1305,7 +1308,7 @@ class TestTheSyncLeavesLocalCredentialsAlone:
             }
 
     def test_an_older_sync_record_reads_as_no_conflicts(self):
-        from istota.secrets_vault import decode_sync_state, encode_sync_state
+        from istota.credentials.vault import decode_sync_state, encode_sync_state
 
         body = encode_sync_state("ok", "", now="2026-10-01T00:00:00Z", previous=None)
         assert decode_sync_state(body)["name_conflicts"] == 0

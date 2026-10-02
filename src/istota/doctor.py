@@ -440,7 +440,7 @@ def _native_key_holders(config: "Config") -> int:
     """
     conn = None
     try:
-        from . import secrets_store
+        from istota.credentials import store as secrets_store
 
         if not secrets_store.secret_key_available():
             return 0
@@ -2656,7 +2656,7 @@ def check_secret_key(config: "Config", probe: bool) -> CheckResult:
     value or any prefix of it: a ``CheckResult`` is rendered into the boot log
     and the admin dashboard.
     """
-    from . import secrets_store  # noqa: PLC0415
+    from istota.credentials import store as secrets_store  # noqa: PLC0415
 
     name = "security.secret_key"
     var = "ISTOTA_SECRET_KEY"
@@ -2903,7 +2903,8 @@ def _vault_users(config: "Config") -> dict[str, str]:
     False for that user, which is the same direction the gate it mirrors
     degrades in.
     """
-    from . import secrets_store, secrets_vault  # noqa: PLC0415
+    from istota.credentials import store as secrets_store  # noqa: PLC0415
+    from istota.credentials import vault as secrets_vault  # noqa: PLC0415
 
     users = getattr(config, "users", None) or {}
     found: dict[str, str] = {}
@@ -3009,7 +3010,9 @@ def check_credential_vault(config: "Config", probe: bool) -> list[CheckResult]:
             )
         ]
 
-    from . import secrets_store, secrets_vault, storage  # noqa: PLC0415
+    from istota import storage  # noqa: PLC0415
+    from istota.credentials import store as secrets_store  # noqa: PLC0415
+    from istota.credentials import vault as secrets_vault  # noqa: PLC0415
 
     return [
         _vault_library_result(prefix),
@@ -3116,7 +3119,7 @@ def check_vault_contents(config: "Config", probe: bool) -> CheckResult:
             "(see security.credential_vault.library)",
         )
 
-    from . import secrets_vault  # noqa: PLC0415
+    from istota.credentials import vault as secrets_vault  # noqa: PLC0415
 
     return _vault_contents_result(config, secrets_vault, name, users)
 
@@ -3678,7 +3681,7 @@ def _ptrace_scope(path: Path = _PTRACE_SCOPE) -> int | None:
 
 def check_vault_isolation(config: "Config", probe: bool) -> CheckResult:
     """Report existing vaults blocked by the multi-user isolation policy."""
-    from . import secrets_vault
+    from istota.credentials import vault as secrets_vault
 
     name = "security.vault_isolation"
     if not secrets_vault.vault_has_other_users(config) or not config.any_vault_configured():
@@ -3742,9 +3745,9 @@ def check_credential_broker(config: "Config", probe: bool) -> list[CheckResult]:
     """Read broker readiness without generating a CA or fetching secret values."""
     import sqlite3
     from cryptography.hazmat.primitives import serialization
-    from .credential_broker import ca
-    from .credential_broker.bindings import credential_groups, credential_name, get_entry_binding
-    from .credential_broker.grants import AUTO_GRANT_DECLINED, auto_grant_marker, get_grant
+    from istota.credentials.broker import ca
+    from istota.credentials.broker.bindings import credential_groups, credential_name, get_entry_binding
+    from istota.credentials.broker.grants import AUTO_GRANT_DECLINED, auto_grant_marker, get_grant
     from istota.sandbox import peer_process
 
     prefix = "security.credential_broker"

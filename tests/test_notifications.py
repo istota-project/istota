@@ -27,7 +27,7 @@ from istota.transport import Destination
 def _ntfy_secrets(**values: str):
     """Build a fake ``secrets_store.get_service_secrets`` returning the given values.
 
-    Patched onto ``istota.secrets_store.get_service_secrets`` (the bulk
+    Patched onto ``istota.credentials.store.get_service_secrets`` (the bulk
     helper) — a single SELECT is the production path, so tests mirror it.
     Empty values are dropped to mirror the real "row missing" behaviour.
     """
@@ -269,7 +269,7 @@ class TestSendNtfyShim:
         opts = call[0][3]
         assert opts.title == "T" and opts.priority == 5 and opts.tags == "x"
 
-    @patch("istota.secrets_store.get_service_secrets")
+    @patch("istota.credentials.store.get_service_secrets")
     def test_returns_false_when_topic_unset(self, mock_get_secrets):
         mock_get_secrets.return_value = {}
         config = Config(users={"alice": UserConfig()})

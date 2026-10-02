@@ -20,9 +20,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import db, secrets_store, secrets_vault
-from .credential_broker import bindings as _bindings
-from .credential_broker import grants as _grants
+from istota import db
+from istota.credentials import store as secrets_store
+from istota.credentials import vault as secrets_vault
+from istota.credentials.broker import bindings as _bindings
+from istota.credentials.broker import grants as _grants
 
 SOURCE = "local"
 

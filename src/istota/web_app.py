@@ -1886,7 +1886,8 @@ def _google_scope_selection(username: str) -> dict[str, str]:
     if not _config:
         return {}
     try:
-        from . import google_scopes, user_profiles
+        from istota import user_profiles
+        from istota.credentials import google_scopes
         profile = user_profiles.get_profile(_config.db_path, username)
         if profile is None:
             return {}
@@ -1903,7 +1904,7 @@ def _google_requested_scopes(username: str) -> list[str]:
     """What a connect for this user would ask Google for, ceiling-clamped."""
     if not _config or not _config.google_workspace:
         return []
-    from . import google_scopes
+    from istota.credentials import google_scopes
     return google_scopes.resolve_selection(
         _google_scope_selection(username), _config.google_workspace.scopes,
     )
@@ -11264,7 +11265,7 @@ def _google_status_payload(username: str) -> dict:
       would now ask for. Nothing revalidates a grant at startup, so this is
       the state behind "the bot can't see my calendar" and it was invisible.
     """
-    from . import google_scopes
+    from istota.credentials import google_scopes
 
     if not _config or not _config.google_workspace.enabled:
         return {
@@ -11354,7 +11355,8 @@ async def google_set_scopes(
     """
     from fastapi import HTTPException
 
-    from . import google_scopes, user_profiles
+    from istota import user_profiles
+    from istota.credentials import google_scopes
 
     if _config is None:
         raise HTTPException(status_code=503, detail="config not loaded")
@@ -11462,7 +11464,7 @@ async def google_disconnect(
 # values are never returned — the UI only sees a "configured" badge per
 # (service, key) pair.
 
-from .secret_schema import (
+from istota.credentials.schema import (
     CONNECTED_SERVICE_SCHEMA as _CONNECTED_SERVICE_SCHEMA,
     MODULE_SERVICE_SCHEMA as _MODULE_SERVICE_SCHEMA,
     all_known_services as _all_known_services,
@@ -11535,7 +11537,7 @@ async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
     services live on their per-module settings pages and are reachable via
     ``/settings/module-services/{module}``.
     """
-    from . import secrets_store
+    from istota.credentials import store as secrets_store
 
     if not _config:
         return {"services": []}
@@ -11571,7 +11573,7 @@ def _validate_grant_payload(conn, username: str, payload) -> dict:
     on field ``access``; the grant save maps it to a plain 400.
     """
     from . import db
-    from .local_credentials import LocalCredentialError
+    from istota.credentials.local import LocalCredentialError
 
     if payload is None:
         payload = {}
@@ -11589,8 +11591,10 @@ def _validate_grant_payload(conn, username: str, payload) -> dict:
 
 def _credential_settings(username: str, action="list", name="", payload=None):
     """Read metadata or edit the signed-in user's grants in one transaction."""
-    from . import db, local_credentials, secrets_vault
-    from .credential_broker import bindings, grants
+    from istota import db
+    from istota.credentials import local as local_credentials
+    from istota.credentials import vault as secrets_vault
+    from istota.credentials.broker import bindings, grants
     from .executor import effective_sandboxing
 
     if _config is None or not _config.db_path:
@@ -11667,7 +11671,7 @@ async def _read_credential_body(request: Request) -> object:
     refused too.
     """
     from .avatars import AvatarError
-    from .local_credentials import LocalCredentialError
+    from istota.credentials.local import LocalCredentialError
 
     try:
         raw = await _read_bounded_body(request, _CREDENTIAL_BODY_LIMIT)
@@ -11681,7 +11685,7 @@ async def _read_credential_body(request: Request) -> object:
 
 def _check_credential_body(body: object, fields: dict, required: tuple) -> dict:
     """Keys and types only; the content rules are ``local_credentials``'."""
-    from .local_credentials import LocalCredentialError
+    from istota.credentials.local import LocalCredentialError
 
     if not isinstance(body, dict):
         raise LocalCredentialError("", "the request body must be an object")
@@ -11709,7 +11713,8 @@ def _check_credential_body(body: object, fields: dict, required: tuple) -> dict:
 
 
 def _create_local_credential(user_id: str, fields: dict) -> dict:
-    from . import db, local_credentials
+    from istota import db
+    from istota.credentials import local as local_credentials
 
     with db.get_db(_config.db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -11726,7 +11731,8 @@ def _create_local_credential(user_id: str, fields: dict) -> dict:
 
 
 def _update_local_credential(user_id: str, name: str, fields: dict) -> dict:
-    from . import db, local_credentials
+    from istota import db
+    from istota.credentials import local as local_credentials
 
     with db.get_db(_config.db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -11739,7 +11745,8 @@ def _update_local_credential(user_id: str, name: str, fields: dict) -> dict:
 
 async def _write_local_credential(request: Request, user_id: str, name: str | None):
     """Create (``name is None``) or update a credential added in Istota."""
-    from . import local_credentials, secrets_vault
+    from istota.credentials import local as local_credentials
+    from istota.credentials import vault as secrets_vault
 
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
@@ -11823,7 +11830,8 @@ async def settings_credential_delete(
     brings back if the entry is still in the file. For one added in Istota it is
     a real deletion: no source writes it again.
     """
-    from . import secrets_store, secrets_vault
+    from istota.credentials import store as secrets_store
+    from istota.credentials import vault as secrets_vault
 
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
@@ -11880,7 +11888,8 @@ def _vault_settings_payload(username: str) -> dict:
     `last_success_at` is the field to render as a sync time. `last_sync_at`
     moves on a failed cycle too.
     """
-    from . import secrets_vault, storage
+    from istota import storage
+    from istota.credentials import vault as secrets_vault
 
     report = secrets_vault.vault_status(_config, username, parse=False)
     files = storage.list_vault_files(_config, username) if _config else []
@@ -12045,7 +12054,8 @@ def _vault_passphrase_present(username: str) -> bool:
     if _config is None or not _config.db_path:
         return False
     try:
-        from . import secrets_store, secrets_vault
+        from istota.credentials import store as secrets_store
+        from istota.credentials import vault as secrets_vault
         return secrets_store.secret_exists(
             _config.db_path, username,
             secrets_vault.VAULT_PASSPHRASE_SERVICE,
@@ -12090,7 +12100,7 @@ def _vault_entries(username: str) -> _VaultEntries:
         return _VaultEntries(0, (), False)
     try:
         from . import db
-        from .credential_broker.bindings import credential_groups
+        from istota.credentials.broker.bindings import credential_groups
         with db.get_db(_config.db_path) as conn:
             names = sorted(credential_groups(conn, username))
     except Exception:  # pragma: no cover - defensive
@@ -12235,7 +12245,8 @@ async def settings_vault_passphrase(
     """
     from fastapi import HTTPException
 
-    from . import secrets_store, secrets_vault
+    from istota.credentials import store as secrets_store
+    from istota.credentials import vault as secrets_vault
 
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be an object")
@@ -12407,7 +12418,7 @@ async def settings_module_services(
     config UI.
     """
     from fastapi import HTTPException
-    from . import secrets_store
+    from istota.credentials import store as secrets_store
     from .modules import MODULE_NAMES
 
     if module not in MODULE_NAMES:
@@ -12448,7 +12459,7 @@ async def settings_set_secret(
     Body: ``{"value": "<plaintext>"}``. Empty value deletes the row.
     Service + key must match the schema (rejects typos and unknown services).
     """
-    from . import secrets_store
+    from istota.credentials import store as secrets_store
     from fastapi import HTTPException
 
     schema = _all_known_services().get(service)
@@ -12521,7 +12532,7 @@ async def settings_generate_ingest_token(
     """
     import secrets as _secrets
 
-    from . import secrets_store
+    from istota.credentials import store as secrets_store
     from fastapi import HTTPException
 
     if not _config:
@@ -12621,7 +12632,7 @@ async def money_monarch_login(
     """
     from fastapi import HTTPException
 
-    from . import secrets_store
+    from istota.credentials import store as secrets_store
     from .money._vendor.monarch_client import (
         MonarchAuthError, MonarchCaptchaRequired, MonarchClient,
         MonarchClientOutdated, MonarchCloudflareBlocked,
@@ -12722,7 +12733,7 @@ async def settings_delete_secret(
     _csrf: None = Depends(_verify_origin),
 ) -> dict:
     """Delete a single (service, key) secret for the current user."""
-    from . import secrets_store
+    from istota.credentials import store as secrets_store
     from fastapi import HTTPException
 
     schema = _all_known_services().get(service)
@@ -14119,7 +14130,7 @@ async def api_map_basemap(user: dict = Depends(_require_api_auth)):
     user_key = ""
     if _config is not None:
         try:
-            from . import secrets_store
+            from istota.credentials import store as secrets_store
 
             # Stripped once, at the read, so `select_provider` and the
             # `api_key=` below cannot disagree about whether this user has a

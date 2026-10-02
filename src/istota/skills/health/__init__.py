@@ -920,7 +920,7 @@ def cmd_garmin_sync(args: argparse.Namespace) -> None:
        through ``_run_garmin_sync_inprocess``, which runs in the daemon
        process where the key naturally lives.
     """
-    from istota import secrets_store
+    from istota.credentials import store as secrets_store
 
     if secrets_store.secret_key_available():
         _cmd_garmin_sync_direct(args)

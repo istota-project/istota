@@ -9,10 +9,11 @@ import threading
 
 import pytest
 
-from istota import db, secrets_store
+from istota import db
+from istota.credentials import store as secrets_store
 from istota.config import Config
-from istota.credential_broker import grants
-from istota.credential_broker.bindings import parse_binding
+from istota.credentials.broker import grants
+from istota.credentials.broker.bindings import parse_binding
 from istota.sandbox.skill_proxy import SkillProxy
 from tests import test_skill_credential_fd as _credential_fd
 from tests import test_vault_credential_fetch as _vault_fetch

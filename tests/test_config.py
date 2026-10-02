@@ -3091,7 +3091,7 @@ class TestCleanupObsoleteResources:
 
         # The credential was migrated into the secrets table during the
         # same load — webhook_receiver.reload_config picks it up from there.
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         assert secrets_store.get_secret(
             db_path, "alice", "overland", "ingest_token",
         ) == "tok-xyz"

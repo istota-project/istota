@@ -25,7 +25,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from istota.credential_broker.bindings import credential_host
+from istota.credentials.broker.bindings import credential_host
 
 #: A site's vault entry is this prefix plus the site name.
 ENTRY_PREFIX = "wordpress_"

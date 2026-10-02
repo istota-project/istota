@@ -452,7 +452,7 @@ class TestSecretKey:
     """
 
     def test_the_env_file_carries_a_usable_key(self, tmp_path):
-        from istota.secrets_store import _MIN_KEY_LEN
+        from istota.credentials.store import _MIN_KEY_LEN
 
         args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
         _run(args, tmp_path, which_result="/usr/bin/claude")
@@ -492,7 +492,7 @@ class TestSecretKey:
     def test_a_blank_or_short_prior_key_is_replaced(self, tmp_path):
         """Preservation is for a usable key. An empty or truncated line must
         not be carried forward, or the guard would pin the broken state."""
-        from istota.secrets_store import _MIN_KEY_LEN
+        from istota.credentials.store import _MIN_KEY_LEN
 
         args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
         _run(args, tmp_path, which_result="/usr/bin/claude")

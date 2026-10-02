@@ -569,7 +569,8 @@ _EXPECTED = {
 
 def _openers():
     from istota import db as framework_db
-    from istota import secrets_store, user_briefings, user_profiles, web_tokens
+    from istota import user_briefings, user_profiles, web_tokens
+    from istota.credentials import store as secrets_store
     from istota.briefings import db as briefings_db
     from istota.feeds import db as feeds_db
     from istota.health import db as health_db
@@ -860,7 +861,7 @@ class TestNoSecondCopy:
         "db.py",
         "doctor.py",
         "web_app.py",
-        "secrets_store.py",
+        "credentials/store.py",
         "user_briefings.py",
         "user_profiles.py",
         "web_tokens.py",

@@ -38,7 +38,8 @@ from pathlib import Path
 
 import pytest
 
-from istota import db, secrets_store
+from istota import db
+from istota.credentials import store as secrets_store
 from istota.config import Config, UserConfig
 from istota.notification_resolvers import connected_service
 
@@ -67,7 +68,7 @@ def _clean_sync_state():
     A leftover digest makes a later test's first cycle a skip; a leftover
     outcome suppresses the transition a later test is asserting on.
     """
-    from istota import secrets_vault
+    from istota.credentials import vault as secrets_vault
 
     secrets_vault.reset_sync_state()
     yield
@@ -199,7 +200,7 @@ def _only_row(config: Config, user_id: str = "alice") -> dict:
 
 class TestOneRaisePerTransition:
     def test_a_failing_sync_raises_a_row_and_delivers_it(self, broken, sends):
-        from istota.secrets_vault import VaultCorrupt, sync_user
+        from istota.credentials.vault import VaultCorrupt, sync_user
 
         config, _path = broken
         result = sync_user(config, "alice")
@@ -219,7 +220,7 @@ class TestOneRaisePerTransition:
         daemon restart looks like: §7 says a restart re-reports once, on purpose,
         so the raise fires again. What must *not* fire again is the delivery.
         """
-        from istota.secrets_vault import reset_sync_state, sync_user
+        from istota.credentials.vault import reset_sync_state, sync_user
 
         config, _path = broken
         sync_user(config, "alice")
@@ -242,7 +243,7 @@ class TestOneRaisePerTransition:
         Paired with the test above rather than standing alone: between them they
         say the raise fires once per *transition* and not once per cycle.
         """
-        from istota.secrets_vault import OUTCOME_UNCHANGED, sync_user
+        from istota.credentials.vault import OUTCOME_UNCHANGED, sync_user
 
         config, _path = broken
         sync_user(config, "alice")
@@ -270,7 +271,7 @@ class TestOneRaisePerTransition:
         Removing the gate leaves all of them green, which is how this test came
         to be written.
         """
-        from istota.secrets_vault import OUTCOME_UNCHANGED, VaultLocked, sync_user
+        from istota.credentials.vault import OUTCOME_UNCHANGED, VaultLocked, sync_user
 
         config = _vault_config(
             tmp_path, vault_path="config/vault.kdbx"
@@ -295,7 +296,7 @@ class TestOneRaisePerTransition:
         assert second.digest == first.digest
         # The *cache* is what holds None for this class; the result carries the
         # digest that was read. Conflating the two reads as "nothing happened".
-        from istota import secrets_vault
+        from istota.credentials import vault as secrets_vault
 
         assert secrets_vault._SYNC_STATE["alice"] == (None, VaultLocked.__name__)
 
@@ -309,8 +310,8 @@ class TestOneRaisePerTransition:
         The panel then shows the latest class rather than the first, which is
         §8's stated trade: the log is where the sequence lives.
         """
-        from istota import secrets_vault
-        from istota.secrets_vault import VaultCorrupt, VaultLocked, sync_user
+        from istota.credentials import vault as secrets_vault
+        from istota.credentials.vault import VaultCorrupt, VaultLocked, sync_user
 
         config = _vault_config(
             tmp_path, vault_path="config/vault.kdbx"
@@ -348,7 +349,7 @@ class TestOneRaisePerTransition:
 
 class TestCloseOnRecovery:
     def test_a_successful_sync_closes_the_row(self, broken, sends):
-        from istota.secrets_vault import OUTCOME_OK, sync_user
+        from istota.credentials.vault import OUTCOME_OK, sync_user
 
         config, path = broken
         sync_user(config, "alice")
@@ -373,7 +374,7 @@ class TestCloseOnRecovery:
         `OUTCOME_OK` closes a warning about a vault that is still broken, with
         nothing to raise it again until the file moves.
         """
-        from istota.secrets_vault import OUTCOME_UNCHANGED, VaultCorrupt, sync_user
+        from istota.credentials.vault import OUTCOME_UNCHANGED, VaultCorrupt, sync_user
 
         config, _path = broken
         sync_user(config, "alice")
@@ -395,7 +396,7 @@ class TestCloseOnRecovery:
         the close were gated on the *previous class having been a failure*, a
         row raised by the daemon that then restarted would stand open for ever.
         """
-        from istota.secrets_vault import OUTCOME_OK, reset_sync_state, sync_user
+        from istota.credentials.vault import OUTCOME_OK, reset_sync_state, sync_user
 
         config, path = broken
         sync_user(config, "alice")
@@ -424,7 +425,7 @@ class TestTheReasonIsCodeOwned:
         that `read_vault_bytes` raises on a symlink, a FIFO or an oversize file.
         Walking the subclasses is what stops a ninth arriving unnoticed.
         """
-        from istota import secrets_vault
+        from istota.credentials import vault as secrets_vault
 
         classes = {
             cls.__name__ for cls in secrets_vault.VaultError.__subclasses__()
@@ -443,8 +444,8 @@ class TestTheReasonIsCodeOwned:
         one — which `VaultKeyUnusable` is the live example of, since the store's
         own message for a too-short master key names its length.
         """
-        from istota import secrets_vault
-        from istota.secrets_vault import VaultCorrupt, sync_user
+        from istota.credentials import vault as secrets_vault
+        from istota.credentials.vault import VaultCorrupt, sync_user
 
         config, _path = broken
         result = sync_user(config, "alice")
@@ -456,7 +457,7 @@ class TestTheReasonIsCodeOwned:
         assert stored != result.reason
 
     def test_no_row_carries_a_value_a_path_or_the_passphrase(self, tmp_path, secret_key, sends):
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         config = _vault_config(
             tmp_path, vault_path="config/vault.kdbx"
@@ -487,7 +488,7 @@ class TestTheDeliveryFork:
     """
 
     def test_a_cli_sync_writes_the_row_and_pushes_nothing(self, broken, sends):
-        from istota.secrets_vault import sync_all
+        from istota.credentials.vault import sync_all
 
         config, _path = broken
         sync_all(config, users=["alice"], force=True, deliver=False)
@@ -499,7 +500,7 @@ class TestTheDeliveryFork:
 
     def test_the_daemon_still_pushes(self, broken, sends):
         """The control. Without it the assertion above is true of everything."""
-        from istota.secrets_vault import sync_all
+        from istota.credentials.vault import sync_all
 
         config, _path = broken
         sync_all(config, users=["alice"], force=True)
@@ -508,7 +509,7 @@ class TestTheDeliveryFork:
 
     def test_a_cli_sync_still_closes_on_recovery(self, broken, sends):
         """The close is not forked, and must not be: it delivers nothing anyway."""
-        from istota.secrets_vault import sync_all
+        from istota.credentials.vault import sync_all
 
         config, path = broken
         sync_all(config, users=["alice"], force=True, deliver=False)
@@ -528,13 +529,13 @@ class TestTheDurableRecord:
     """
 
     def _record(self, config):
-        from istota.secrets_vault import read_sync_state
+        from istota.credentials.vault import read_sync_state
 
         with db.get_db(config.db_path) as conn:
             return read_sync_state(conn, "alice")
 
     def test_a_settled_cycle_writes_one(self, broken, sends):
-        from istota.secrets_vault import VaultCorrupt, sync_user
+        from istota.credentials.vault import VaultCorrupt, sync_user
 
         config, _path = broken
         sync_user(config, "alice")
@@ -552,7 +553,7 @@ class TestTheDurableRecord:
         A skip runs every interval for as long as the file sits still, so a
         write here would be one per user per 300 seconds for ever.
         """
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         config, _path = broken
         sync_user(config, "alice")
@@ -567,7 +568,7 @@ class TestTheDurableRecord:
         A failure that erased it would make a vault broken for an hour
         indistinguishable from one that has never worked at all.
         """
-        from istota.secrets_vault import OUTCOME_OK, VaultLocked, sync_user
+        from istota.credentials.vault import OUTCOME_OK, VaultLocked, sync_user
 
         config, path = broken
         _write_vault(path)
@@ -613,7 +614,8 @@ class TestTheDurableRecord:
         """
         from contextlib import contextmanager
 
-        from istota import db, secrets_vault
+        from istota import db
+        from istota.credentials import vault as secrets_vault
 
         config, _path = broken
         statements: list[str] = []
@@ -665,8 +667,8 @@ class TestTheDurableRecord:
         Same rule as the notification body, and for a sharper reason: a backup
         of it lands in the user's own Nextcloud tree.
         """
-        from istota import secrets_vault
-        from istota.secrets_vault import VaultCorrupt, sync_user
+        from istota.credentials import vault as secrets_vault
+        from istota.credentials.vault import VaultCorrupt, sync_user
 
         config, _path = broken
         result = sync_user(config, "alice")
@@ -711,7 +713,7 @@ class TestTheResolver:
 
     def test_a_broken_vault_still_renders(self, broken, sends):
         config, _path = broken
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         sync_user(config, "alice")
         row = self._row(config)
@@ -732,8 +734,8 @@ class TestTheResolver:
         for: a vault is a path *or* a stored passphrase now, since a user who
         chose their file out of the folder has no path anywhere.
         """
-        from istota import secrets_store
-        from istota.secrets_vault import (
+        from istota.credentials import store as secrets_store
+        from istota.credentials.vault import (
             VAULT_PASSPHRASE_KEY,
             VAULT_PASSPHRASE_SERVICE,
             sync_user,
@@ -761,7 +763,7 @@ class TestTheResolver:
         only on a class *transition*, so nothing would raise it again.
         """
         config, _path = broken
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         sync_user(config, "alice")
         row = self._row(config)
@@ -784,8 +786,8 @@ class TestTheResolver:
         acted on, permanently and with nothing to raise it again until the vault
         next changes. Removing the record must leave the row exactly as it was.
         """
-        from istota import secrets_vault
-        from istota.secrets_vault import sync_user
+        from istota.credentials import vault as secrets_vault
+        from istota.credentials.vault import sync_user
 
         config, _path = broken
         sync_user(config, "alice")
@@ -802,8 +804,8 @@ class TestTheResolver:
 
     def test_an_unparseable_record_still_renders(self, broken, sends):
         """The same rule one step further in: unreadable is not recovered."""
-        from istota import secrets_vault
-        from istota.secrets_vault import sync_user
+        from istota.credentials import vault as secrets_vault
+        from istota.credentials.vault import sync_user
 
         config, _path = broken
         sync_user(config, "alice")
@@ -826,7 +828,7 @@ class TestTheResolver:
         user's own laptop or phone, and the link only takes them to where the
         failure is described.
         """
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         config, _path = broken
         sync_user(config, "alice")
@@ -849,7 +851,7 @@ class TestTheResolver:
         deployment: the operator turned the feature off and kept its warning.
         """
         config, _path = broken
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         sync_user(config, "alice")
         row = self._row(config)
@@ -864,7 +866,7 @@ class TestTheResolver:
     ):
         """The control. Without it the arm above could be answering True always."""
         config, _path = broken
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         sync_user(config, "alice")
         row = self._row(config)
@@ -882,7 +884,7 @@ class TestTheResolver:
         could only ever answer "still broken".
         """
         config, path = broken
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         sync_user(config, "alice")
         row = self._row(config)
@@ -957,7 +959,7 @@ class TestTheFirstUnscopedSync:
         it. Two tests agreeing that nothing was pushed is not evidence either
         way; one of them has to observe a push.
         """
-        from istota.secrets_vault import OUTCOME_OK, sync_user
+        from istota.credentials.vault import OUTCOME_OK, sync_user
 
         config, path = unscoped
 
@@ -972,7 +974,7 @@ class TestTheFirstUnscopedSync:
         in-memory latch would re-notify on every daemon restart, which for a
         deployment that updates every few minutes is a push every few minutes.
         """
-        from istota.secrets_vault import reset_sync_state, sync_user
+        from istota.credentials.vault import reset_sync_state, sync_user
 
         config, path = unscoped
         sync_user(config, "alice")
@@ -990,7 +992,7 @@ class TestTheFirstUnscopedSync:
     def test_the_body_carries_a_count_and_no_name_and_no_value(
         self, unscoped, sends
     ):
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         config, _path = unscoped
         sync_user(config, "alice")
@@ -1008,7 +1010,7 @@ class TestTheFirstUnscopedSync:
 
     def test_a_scoped_vault_raises_nothing(self, tmp_path, secret_key, sends):
         """The control: without it the notice could be firing on every sync."""
-        from istota.secrets_vault import OUTCOME_OK, sync_user
+        from istota.credentials.vault import OUTCOME_OK, sync_user
 
         config = _vault_config(
             tmp_path, vault_path="config/vault.kdbx"
@@ -1031,7 +1033,7 @@ class TestTheFirstUnscopedSync:
         for the reason `ok_at` is: a failed read is not evidence the file grew
         an `istota` group. Without the carry the latch would be re-armed by any
         transient failure and the push would repeat."""
-        from istota.secrets_vault import reset_sync_state, sync_user
+        from istota.credentials.vault import reset_sync_state, sync_user
 
         config, path = unscoped
         sync_user(config, "alice")
@@ -1050,7 +1052,7 @@ class TestTheFirstUnscopedSync:
         """`deliver=False` is what `istota secret vault-sync` passes: the
         operator is reading the warning off their own terminal as it prints,
         and a push out of a one-shot CLI means standing an `AsyncRuntime` up."""
-        from istota.secrets_vault import sync_user
+        from istota.credentials.vault import sync_user
 
         config, _path = unscoped
 

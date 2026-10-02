@@ -71,7 +71,7 @@ def load_user_secrets(user_id: str, istota_config) -> dict:
 
     if len(monarch) < len(env_vars):
         try:
-            from istota import secrets_store  # noqa: PLC0415
+            from istota.credentials import store as secrets_store  # noqa: PLC0415
 
             db_path = getattr(istota_config, "db_path", None)
             if db_path is not None:

@@ -9,7 +9,7 @@ import pytest
 from istota import db
 from istota.executor import SandboxProfile, _bwrap_available, build_bwrap_cmd
 from istota.sandbox.network_proxy import write_bridge_script
-from istota.credential_broker import ca
+from istota.credentials.broker import ca
 from tests.test_credential_broker_intercept import broker as tls_broker, broker_responder, broker_scheme, VALUE, PLACEHOLDER  # noqa: F401 - shared fixture
 from .test_sandbox_real import _can_unshare_net, _unavailable
 
@@ -69,7 +69,7 @@ def test_sandbox_contains_value_and_authenticates(broker, tmp_path):
 @pytest.mark.xfail(strict=True, raises=SubstitutionOracleFailure, reason="substitution-disabled upstream oracle must fail")
 def test_substitution_disabled_negative_control(broker, tmp_path):
     # Preserve both TLS legs and request handling; only suppress replacement.
-    from istota.credential_broker import intercept
+    from istota.credentials.broker import intercept
     original = intercept._headers
     def no_substitution(state, request, host):
         _, replacements, names = original(state, request, host)

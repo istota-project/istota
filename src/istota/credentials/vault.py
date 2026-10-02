@@ -69,7 +69,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from istota import secrets_store
+from istota.credentials import store as secrets_store
 from istota.lib import file_lock
 
 logger = logging.getLogger(__name__)
@@ -524,7 +524,7 @@ def read_vault_bytes(path: Path, *, dir_fd: int | None = None) -> tuple[bytes, s
     ``NotImplementedError``. Both are the caller naming a path this read cannot
     make, so both are a refusal.
     """
-    from .skills._loader import OVERLAY_UNREADABLE, read_overlay_bytes
+    from istota.skills._loader import OVERLAY_UNREADABLE, read_overlay_bytes
 
     try:
         data, refusal, size = read_overlay_bytes(
@@ -1017,9 +1017,9 @@ def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResul
 
     # A held value stays stored, but an edited URL or removed reveal tag must
     # still revoke its old policy. Ambiguous names are unbound by the parser.
-    from . import db
-    from .credential_broker.bindings import put_binding
-    from .credential_broker.grants import auto_grant_vault_entries
+    from istota import db
+    from istota.credentials.broker.bindings import put_binding
+    from istota.credentials.broker.grants import auto_grant_vault_entries
     owners = {read.bindings.get(name, {}).get("credential", name) for name in written}
     with db.get_db(db_path) as conn:
         if not conn.in_transaction:
@@ -1085,7 +1085,7 @@ def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResul
     # `read.truncated` return above so a later refactor cannot move the closure
     # into the prefix-read path and permanently shut an address off.
     if not read.truncated:
-        from . import db
+        from istota import db
         with db.get_db(db_path) as conn:
             db.close_missing_signup_tags(conn, user_id, set(read.services) | read.held)
     return result
@@ -1114,9 +1114,9 @@ def _baseline_auto_grants(db_path: Path, user_id: str, names) -> None:
     Its own transaction ahead of the upserts, so a pass that fails part-way
     leaves the entries it created unmarked, and the next pass still grants them.
     """
-    from . import db
-    from .credential_broker.bindings import credential_name
-    from .credential_broker.grants import baseline_auto_grants
+    from istota import db
+    from istota.credentials.broker.bindings import credential_name
+    from istota.credentials.broker.grants import baseline_auto_grants
     with db.get_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         baseline_auto_grants(conn, user_id, {credential_name(conn, user_id, name) for name in names})
@@ -1130,7 +1130,7 @@ def _stored_entry_sources(db_path: Path, user_id: str) -> dict[str, str]:
     sync is the only writer that ever stored one without a binding, so a
     legacy row stays the sweep's to remove.
     """
-    from . import db  # noqa: PLC0415 - see `sync_user` for the import rule
+    from istota import db  # noqa: PLC0415 - see `sync_user` for the import rule
 
     with db.get_db(db_path) as conn:
         rows = conn.execute(
@@ -1584,7 +1584,7 @@ def _take_entry(walk: _Walk, entry, group_path: tuple[str, ...]) -> None:
         )
         return
 
-    from .credential_broker.bindings import parse_binding
+    from istota.credentials.broker.bindings import parse_binding
     attributes = entry.custom_properties
     binding = parse_binding(entry.url, attributes, entry.tags)
     # A task's `vault_create` writes under `generated/`, and its later tasks
@@ -1833,7 +1833,7 @@ def vault_isolation_refusal(config, user_id: str) -> str | None:
         return None
     if config.security.allow_unsandboxed_multi_user_vaults is True:
         return None
-    from .executor import effective_sandboxing
+    from istota.executor import effective_sandboxing
 
     if effective_sandboxing(config):
         return None
@@ -2010,7 +2010,7 @@ def resolution_reason(refusal: str | None) -> str:
     if exc is not None:
         return notification_reason(type(exc).__name__)
 
-    from . import storage  # noqa: PLC0415 - see `sync_user`
+    from istota import storage  # noqa: PLC0415 - see `sync_user`
 
     if refusal == storage.VAULT_DIR_UNCHOSEN:
         return (
@@ -2133,7 +2133,7 @@ def read_sync_state(conn, user_id: str) -> dict | None:
     one underneath it is the thirty-second busy-timeout hazard
     ``.claude/rules/notifications.md`` opens with.
     """
-    from . import db  # noqa: PLC0415 - see `sync_user` for the import rule
+    from istota import db  # noqa: PLC0415 - see `sync_user` for the import rule
 
     try:
         return decode_sync_state(
@@ -2189,7 +2189,7 @@ def _record_sync_state(
     a user would act on. ``BEGIN IMMEDIATE`` takes the write lock before the
     read, which is what ``handle_whatsapp_batch`` does for the same shape.
     """
-    from . import db  # noqa: PLC0415
+    from istota import db  # noqa: PLC0415
 
     try:
         with db.get_db(db_path, busy_timeout_ms=_RECORD_BUSY_TIMEOUT_MS) as conn:
@@ -2483,7 +2483,7 @@ def _resolution_outcome(refusal: str | None) -> VaultError | None:
     - Any ``VAULT_PATH_*`` id is :class:`VaultPathRefused`, unchanged — a
       configured path the daemon may not open is an operator's to fix.
     """
-    from . import storage  # noqa: PLC0415 - see `sync_user`
+    from istota import storage  # noqa: PLC0415 - see `sync_user`
 
     if refusal is None or refusal == storage.VAULT_DIR_UNCHOSEN:
         return None
@@ -2535,7 +2535,7 @@ def sync_user(
     # validator already function-scopes its import of *this* module to keep
     # `secret_schema` and `secrets_store` out of every `load_config`. A module
     # scope import here would hand that cost straight back.
-    from . import storage  # noqa: PLC0415
+    from istota import storage  # noqa: PLC0415
 
     if force:
         reset_sync_state(user_id)
@@ -2728,7 +2728,7 @@ def _report(
     """
     import asyncio  # noqa: PLC0415 - for the exception type alone
 
-    from .notification_resolvers import connected_service  # noqa: PLC0415
+    from istota.notification_resolvers import connected_service  # noqa: PLC0415
 
     try:
         if outcome == OUTCOME_OK:
@@ -2868,9 +2868,9 @@ def _report_unscoped(config, user_id: str, names: int, *, deliver: bool) -> None
     """
     import asyncio  # noqa: PLC0415 - for the exception type alone
 
-    from . import db  # noqa: PLC0415
-    from .notification_resolvers import task_alert  # noqa: PLC0415
-    from .notification_store import deliver_pending  # noqa: PLC0415
+    from istota import db  # noqa: PLC0415
+    from istota.notification_resolvers import task_alert  # noqa: PLC0415
+    from istota.notification_store import deliver_pending  # noqa: PLC0415
 
     try:
         with db.get_db(config.db_path) as conn:
@@ -3062,8 +3062,8 @@ def vault_status(
     invocation is a different process again, so ``last_outcome`` is empty for
     both and always has been.
     """
-    from . import db  # noqa: PLC0415 - see `sync_user`
-    from . import storage  # noqa: PLC0415
+    from istota import db  # noqa: PLC0415 - see `sync_user`
+    from istota import storage  # noqa: PLC0415
 
     last = _SYNC_STATE.get(user_id, (None, ""))[1]
     # `configured` is the enable itself — `_vault_is_enabled`, the predicate

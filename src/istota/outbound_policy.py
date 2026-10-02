@@ -65,7 +65,7 @@ def effective_policy(config: "Config", user_id: str) -> str:
     """``max(operator floor, user setting)`` on the ``off < untrusted < all``
     ordering.
 
-    Same shape as the Google scope ceiling (:mod:`istota.google_scopes`), in the
+    Same shape as the Google scope ceiling (:mod:`istota.credentials.google_scopes`), in the
     other direction: there the operator caps what a user may grant, here the
     operator sets a minimum a user may only raise. An unset user value (``""``,
     the column default) resolves to the floor, which is what makes raising the

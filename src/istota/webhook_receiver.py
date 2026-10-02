@@ -166,7 +166,7 @@ def reload_config() -> None:
     The three dicts are rebound under ``_lock`` as a single block so any
     reader holding the lock sees a consistent snapshot.
     """
-    from . import secrets_store  # noqa: PLC0415
+    from istota.credentials import store as secrets_store  # noqa: PLC0415
     from .location import ingest_signal  # noqa: PLC0415
 
     global _config, _sms_providers, _token_map, _user_contexts, _places_cache, _sentinel_stamp

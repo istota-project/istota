@@ -228,8 +228,8 @@ class NetworkProxy:
 
     def _handle_http(self, client, url, data):
         from urllib.parse import urlsplit
-        from istota.credential_broker.bindings import credential_host
-        from istota.credential_broker.intercept import _requests
+        from istota.credentials.broker.bindings import credential_host
+        from istota.credentials.broker.intercept import _requests
         try:
             parsed = urlsplit(url)
             if parsed.scheme != "http" or parsed.fragment:
@@ -256,8 +256,8 @@ class NetworkProxy:
             return
 
         if self.broker is not None:
-            from istota.credential_broker.bindings import https_host
-            from istota.credential_broker.intercept import intercept
+            from istota.credentials.broker.bindings import https_host
+            from istota.credentials.broker.intercept import intercept
             if self.broker.covers(https_host(f"https://{host}:{port}")):
                 intercept(self.broker, client, host, port)
                 return

@@ -1,8 +1,9 @@
 """Broker readiness reports metadata, with no writes or credential values."""
-from istota import db, doctor, secrets_store
+from istota import db, doctor
+from istota.credentials import store as secrets_store
 from istota.config import Config
-from istota.credential_broker import ca
-from istota.credential_broker.bindings import parse_binding
+from istota.credentials.broker import ca
+from istota.credentials.broker.bindings import parse_binding
 
 
 def test_disabled_does_not_create_state(tmp_path):
@@ -85,7 +86,7 @@ def _store_entry(config, user_id, entry, host):
 
 
 def _grant(config, user_id, entry):
-    from istota.credential_broker.grants import put_grant
+    from istota.credentials.broker.grants import put_grant
     with db.get_db(config.db_path) as conn:
         put_grant(conn, user_id, entry)
 

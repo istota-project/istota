@@ -72,7 +72,7 @@ def parse_binding(url, attributes, tags, *, source="vault"):
 
 def put_binding(conn, user_id, name, binding):
     """Caller owns the transaction, including the credential value write."""
-    from .. import db
+    from istota import db
     owner = binding.get("credential", name)
     previous = credential_name(conn, user_id, name)
     if previous != owner:

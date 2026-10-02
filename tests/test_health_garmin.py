@@ -539,7 +539,7 @@ class TestGarminRouteMove:
             assert "HealthContext" not in src, route.path
 
     def test_garmin_in_connected_service_schema(self):
-        from istota.secret_schema import CONNECTED_SERVICE_SCHEMA
+        from istota.credentials.schema import CONNECTED_SERVICE_SCHEMA
         assert "garmin" in CONNECTED_SERVICE_SCHEMA
         entry = CONNECTED_SERVICE_SCHEMA["garmin"]
         assert entry.get("custom_ui") is True

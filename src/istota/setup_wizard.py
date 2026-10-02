@@ -901,7 +901,7 @@ def _carry_forward_secrets(a: Answers, env_path: Path, out=print) -> None:
     unknown names through would resurrect variables the wizard has stopped
     writing; the file's own comment says only that these are preserved.
     """
-    from .secrets_store import _MIN_KEY_LEN
+    from istota.credentials.store import _MIN_KEY_LEN
 
     existing = _read_env_values(env_path)
 

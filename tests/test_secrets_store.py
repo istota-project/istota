@@ -8,7 +8,7 @@ from unittest import mock
 
 import pytest
 
-from istota import secrets_store
+from istota.credentials import store as secrets_store
 from istota.config import ResourceConfig, UserConfig
 
 

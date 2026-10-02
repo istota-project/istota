@@ -184,7 +184,7 @@ A bare `[sleep_cycle]` header keeps `enabled = True` (the old loader made it fal
 
 - **Resources**: only `folder` is declarable (operator-only, `istota resource ensure -t folder`); `shared_file` is organizer state. Calendars are CalDAV-discovered; todo/reminders/notes sources read their own `path`. Inert: `todo_file`, `reminders_file`. `ResourceConfig.base_url`/`api_key` live in `extra`.
 - **Modules**: on by default, opt-out via `disabled_modules`, one gate `is_module_enabled`.
-- **Connected services**: per-user credentials in `secrets` (Fernet over scrypt from `ISTOTA_SECRET_KEY`), schema in `secret_schema.py`. `garmin` is cross-module: auth in `garmin_routes.py`, and `health.garmin.acquire_client` is the only sanctioned client (re-persists rotated tokens under a per-user lock).
+- **Connected services**: per-user credentials in `secrets` (Fernet over scrypt from `ISTOTA_SECRET_KEY`), schema in `credentials/schema.py`. `garmin` is cross-module: auth in `garmin_routes.py`, and `health.garmin.acquire_client` is the only sanctioned client (re-persists rotated tokens under a per-user lock).
 - Settings: `_CONNECTED_SERVICE_SCHEMA` (`GET /settings/services`) and `_MODULE_SERVICE_SCHEMA` (`GET /settings/module-services/{module}`); `_all_known_services()` validates secret writes. `ServiceCard`'s generic OAuth branch is gone, so a new OAuth service needs its own card. `POST /settings/secrets/overland/ingest_token/generate` is the only endpoint returning a secret, once, and 409s with a blank `[site] hostname` (a relative webhook URL would fail the phone's decoder).
 
 ## Money and briefings

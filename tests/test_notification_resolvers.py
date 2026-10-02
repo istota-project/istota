@@ -957,7 +957,7 @@ class TestConnectedServiceResolver:
         self, config, conn, _secret_key,
     ):
         """The backstop: the blob came back behind the store's back."""
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         from istota.health import garmin as gm
 
         _expired_garmin(conn)

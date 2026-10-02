@@ -243,7 +243,7 @@ _NOT_A_COPY = {
     # parsed back and verified before the rename, and the rename is refused if
     # the live file changed underneath it. `atomic_writer` takes a path and
     # publishes whatever the body wrote.
-    "secrets_vault.py",
+    "credentials/vault.py",
 }
 
 

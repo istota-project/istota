@@ -126,10 +126,11 @@ def test_channel_closed_after_invocation(sock_path, monkeypatch, failure):
 
 
 def test_private_channel_preserves_live_binding_and_value(tmp_path, sock_path, monkeypatch):
-    from istota import db, secrets_store
+    from istota import db
+    from istota.credentials import store as secrets_store
     from istota.sandbox import credential_shim
     from istota.config import Config
-    from istota.credential_broker.bindings import parse_binding
+    from istota.credentials.broker.bindings import parse_binding
 
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
     config = Config(db_path=tmp_path / "data.db")

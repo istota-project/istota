@@ -2626,7 +2626,7 @@ class TestGarminImportSkill:
     runs post-task."""
 
     def _run(self, args, env, monkeypatch):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         from istota.skills.location import cmd_import_garmin_tracks
 
         # Force the delegated path deterministically.

@@ -170,7 +170,7 @@ class TestGoogleTokenDB:
         db_path = _init_db(tmp_path)
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("ISTOTA_SECRET_KEY", None)
-            from istota.secrets_store import SecretKeyMissingError
+            from istota.credentials.store import SecretKeyMissingError
             with db.get_db(db_path) as conn, pytest.raises(SecretKeyMissingError):
                 db.upsert_google_token(conn, "alice", "a", "r", "2025-01-01T00:00:00+00:00")
 

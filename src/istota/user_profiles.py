@@ -106,7 +106,7 @@ class UserProfile:
     # Per-user Google Workspace scope selection: {service -> off|readonly|full},
     # clamped at connect time to the operator's [google_workspace] scopes
     # ceiling. Empty is "unset" and resolves to the whole ceiling, which is
-    # what every user had before the picker existed. See istota.google_scopes.
+    # what every user had before the picker existed. See istota.credentials.google_scopes.
     google_scopes: dict[str, str] = field(default_factory=dict)
 
 

@@ -47,10 +47,10 @@ from unittest import mock
 
 import pytest
 
-from istota import secrets_store
-from istota import secrets_vault as secrets_vault_module
+from istota.credentials import store as secrets_store
+from istota.credentials import vault as secrets_vault_module
 from istota.config import UserConfig, load_config
-from istota.secrets_vault import (
+from istota.credentials.vault import (
     SKIP_DUPLICATE_NAME,
     SKIP_OVERSIZE_VALUE,
     SKIP_UNREADABLE_ROW,
@@ -97,7 +97,7 @@ def _ours(caplog):
     satisfied by a third party's output and stayed green with all three
     warnings deleted.
     """
-    return [r.getMessage() for r in caplog.records if r.name == "istota.secrets_vault"]
+    return [r.getMessage() for r in caplog.records if r.name == "istota.credentials.vault"]
 
 
 def _new_db(tmp_path, *, password=PASSPHRASE, name="vault.kdbx"):
@@ -307,7 +307,7 @@ class TestRead:
         kp.add_entry(root, "Acme", USERNAME_VALUE, "")
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             read, _ = _read(path)
 
         assert read.services == {"acme_username": USERNAME_VALUE}
@@ -358,7 +358,7 @@ class TestRead:
         kp.add_entry(root, "Acme", "", "")
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             read, _ = _read(path)
 
         assert read.services == {}
@@ -377,7 +377,7 @@ class TestRead:
         kp.add_entry(root, "Other", "", API_KEY_VALUE)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             read, _ = _read(path)
 
         assert read.services == {"other": API_KEY_VALUE}
@@ -422,7 +422,7 @@ class TestRead:
         kp.add_entry(root, "AWS Key", "", "ak-from-the-flat-entry")
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             read, _ = _read(path)
 
         assert "aws_key" not in read.services
@@ -455,7 +455,7 @@ class TestRead:
         kp.add_entry(root, "AWS Key", "", "")
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             read, _ = _read(path)
 
         assert "aws_key" not in read.services
@@ -608,7 +608,7 @@ class TestRead:
         kp.add_entry(root, "!!!", "", API_KEY_VALUE)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             read, _ = _read(path)
 
         assert read.services == {}
@@ -697,7 +697,7 @@ class TestRead:
 
         Every call site warns for itself, because only the caller knows which
         entry and which field produced the name."""
-        from istota.secrets_vault import slug_name
+        from istota.credentials.vault import slug_name
 
         assert slug_name(["GitHub PAT"]) == "github_pat"
         assert slug_name(["Home Assistant", "Token"]) == "home_assistant_token"
@@ -738,7 +738,7 @@ class TestRead:
         kp.add_entry(kp.add_group(shallow, "deeper"), "key", "", BASE_URL_VALUE)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             read, _ = _read(path)
 
         assert read.services == {"aws_key": API_KEY_VALUE}
@@ -768,7 +768,7 @@ class TestRead:
             kp.add_entry(root, f"entry{index}", "", f"value-{index}")
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             read, _ = _read(path)
 
         assert set(read.services) == {"entry0", "entry1"}
@@ -790,7 +790,7 @@ class TestRead:
         kp.add_entry(root, "Other", "", TOPIC_VALUE)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             read, _ = _read(path)
 
         assert read.services == {"acme": API_KEY_VALUE, "acme_username": USERNAME_VALUE}
@@ -817,7 +817,7 @@ class TestRead:
         kp.add_entry(root, "Other", "", BASE_URL_VALUE)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             read, _ = _read(path)
 
         # Four fields: the password, the username, the URL, and one custom
@@ -852,7 +852,7 @@ class TestRead:
         kp.add_group(kp.root_group, "istota")
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             read, _ = _read(path)
 
         assert read.services == {} and read.held == frozenset()
@@ -1247,7 +1247,7 @@ class TestRead:
         kp.add_entry(root, "", "", "untitled-value")
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             _read(path)
 
         said = _ours(caplog)
@@ -1269,7 +1269,7 @@ class TestRead:
             kp.add_entry(karakeep, "", "", API_KEY_VALUE, force_creation=True)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             _read(path)
 
         assert _ours(caplog) == ["vault: 4 entries had no title, skipped"]
@@ -1286,7 +1286,7 @@ class TestRead:
         kp.add_entry(kp.add_group(root, "x" * 400), "api_key", "", API_KEY_VALUE)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             read, _ = _read(path)
 
         assert _ours(caplog), "the fixture reached no warning at all"
@@ -1336,7 +1336,7 @@ class TestRead:
             rendered = f"{record.getMessage()} {record.args!r} {record.exc_text!r}"
             assert API_KEY_VALUE not in rendered
         said = [r.getMessage() for r in caplog.records
-                if r.name == "istota.secrets_vault"]
+                if r.name == "istota.credentials.vault"]
         assert said == ["vault: parse failed (tests.test_secrets_vault._Boom)"]
 
     def test_a_truncated_file_takes_the_catch_all_and_says_so(
@@ -1353,23 +1353,23 @@ class TestRead:
         _, path = _standard_vault(tmp_path)
         whole = path.read_bytes()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             with pytest.raises(VaultCorrupt):
                 parse_vault(whole[: len(whole) // 2], PASSPHRASE)
 
         said = [r.getMessage() for r in caplog.records
-                if r.name == "istota.secrets_vault"]
+                if r.name == "istota.credentials.vault"]
         assert said == ["vault: parse failed (construct.core.StreamError)"]
 
     def test_bytes_that_are_not_a_kdbx_take_the_mapped_arm(self, tmp_path, caplog):
         """The control for the one above: a bad *header* is mapped, so it logs
         nothing. Without this the assertion there is about a string rather than
         about which branch ran."""
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             with pytest.raises(VaultCorrupt):
                 parse_vault(b"# just some text\n" * 20, PASSPHRASE)
 
-        assert [r for r in caplog.records if r.name == "istota.secrets_vault"] == []
+        assert [r for r in caplog.records if r.name == "istota.credentials.vault"] == []
 
 
 class TestScope:
@@ -1433,7 +1433,7 @@ class TestScope:
         kp.add_entry(kp.add_group(kp.root_group, "aws"), "key", "", API_KEY_VALUE)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
             read, _ = _read(path)
 
         messages = _ours(caplog)
@@ -1585,7 +1585,7 @@ class TestTheLibraryStaysOutOfTheImportGraph:
         a test asserting against source text executes none of the lines it
         reads, so testmon would otherwise never run this one."""
 
-        from istota import secrets_vault
+        from istota.credentials import vault as secrets_vault
 
         source = source_of(secrets_vault)
         for line in source.splitlines():
@@ -1896,7 +1896,7 @@ class TestApply:
 
     def test_no_log_record_carries_a_value(self, db_path, secret_key_env, caplog):
         apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE}))
-        with caplog.at_level(logging.DEBUG, logger="istota.secrets_vault"):
+        with caplog.at_level(logging.DEBUG, logger="istota.credentials.vault"):
             apply_vault(
                 db_path, "alice", _vault_read({"b": TOPIC_VALUE}, truncated="entry")
             )
@@ -2152,7 +2152,7 @@ class TestNoSkillManifestDeclaresThePassphrase:
         a manifest at all, and a comparison that let one spelling through would
         be relitigated the first time the store's matching changed.
         """
-        from istota.secrets_vault import VAULT_PASSPHRASE_KEY, VAULT_PASSPHRASE_SERVICE
+        from istota.credentials.vault import VAULT_PASSPHRASE_KEY, VAULT_PASSPHRASE_SERVICE
 
         declared = [
             f"{skill}: {spec.var or '<unnamed>'}"

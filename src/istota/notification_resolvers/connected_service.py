@@ -469,7 +469,7 @@ def _vault_is_working(
     direction and it covers the case that matters most — a record this cannot
     parse, or none at all, must not read as recovery.
     """
-    from .. import secrets_vault
+    from istota.credentials import vault as secrets_vault
 
     # Two halves, because either one on its own is a vault. The passphrase is
     # what a user who chose a file out of their own vault folder has instead of
@@ -509,7 +509,7 @@ def _has_vault_passphrase(user_id: str, conn: "sqlite3.Connection") -> bool:
     the row *open* rather than closing it — the safe direction, and the same
     one the arms above take.
     """
-    from .. import secrets_vault
+    from istota.credentials import vault as secrets_vault
 
     try:
         row = conn.execute(

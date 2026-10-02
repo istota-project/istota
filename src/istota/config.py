@@ -2672,8 +2672,8 @@ class Config:
         if self.db_path is None or not Path(self.db_path).exists():
             return False
         try:
-            from . import secrets_store  # noqa: PLC0415 - import cost
-            from .secrets_vault import (  # noqa: PLC0415 - import cost
+            from istota.credentials import store as secrets_store  # noqa: PLC0415 - import cost
+            from istota.credentials.vault import (  # noqa: PLC0415 - import cost
                 VAULT_PASSPHRASE_KEY,
                 VAULT_PASSPHRASE_SERVICE,
             )
@@ -5668,7 +5668,7 @@ def _migrate_obsolete_resources(config: "Config") -> None:
     """
     try:
         from . import db as _db  # noqa: PLC0415
-        from . import secrets_store as _ss  # noqa: PLC0415
+        from istota.credentials import store as _ss  # noqa: PLC0415
     except Exception:  # pragma: no cover - defensive
         return
 

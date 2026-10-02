@@ -9024,7 +9024,7 @@ def get_google_token(conn: sqlite3.Connection, user_id: str) -> dict | None:
     if not row:
         return None
 
-    from istota import secrets_store
+    from istota.credentials import store as secrets_store
 
     if not secrets_store.secret_key_available():
         logger.warning(
@@ -9066,7 +9066,7 @@ def upsert_google_token(
     $ISTOTA_SECRET_KEY. Raises if the key is unavailable -- writing plaintext
     is exactly what this table no longer tolerates.
     """
-    from istota import secrets_store
+    from istota.credentials import store as secrets_store
 
     fernet = secrets_store._get_fernet()
     access_ct = fernet.encrypt(access_token.encode("utf-8"))
@@ -9119,7 +9119,7 @@ def _migrate_google_oauth_encryption(conn: sqlite3.Connection) -> int:
     if not rows:
         return 0
 
-    from istota import secrets_store
+    from istota.credentials import store as secrets_store
 
     if not secrets_store.secret_key_available():
         logger.info(

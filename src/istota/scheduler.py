@@ -8656,7 +8656,7 @@ def vault_sync_enabled(config: Config) -> bool:
     branch exists for `backup-stale-alert`'s deliberate every-tick shape, so a
     negative value here would spawn a background sync roughly twice a second.
     """
-    from . import secrets_vault  # noqa: PLC0415 - keeps `config` load-time light
+    from istota.credentials import vault as secrets_vault  # noqa: PLC0415 - keeps `config` load-time light
 
     # The interval half is `secrets_vault.sync_is_scheduled`, not a second copy:
     # the notification resolver needs the same rule and cannot import this
@@ -8857,7 +8857,7 @@ def build_interval_gates(
         )
 
     def _vault_sync(now: float) -> None:
-        from . import secrets_vault
+        from istota.credentials import vault as secrets_vault
 
         secrets_vault.sync_all(config)
 
@@ -9789,7 +9789,7 @@ def run_daemon(
     # secrets table so the web UI can read them. Skipped when ISTOTA_SECRET_KEY
     # is unset; later starts skip rows that already exist.
     try:
-        from . import secrets_store  # noqa: PLC0415
+        from istota.credentials import store as secrets_store  # noqa: PLC0415
 
         secrets_store.import_from_user_configs(config.db_path, config.users)
     except Exception as e:  # noqa: BLE001
@@ -9813,7 +9813,7 @@ def run_daemon(
     # raises, and a restart over an already-open row bumps, so this is one
     # delivery at the first failure rather than one per boot.
     try:
-        from . import secrets_vault  # noqa: PLC0415
+        from istota.credentials import vault as secrets_vault  # noqa: PLC0415
 
         if vault_sync_enabled(config):
             secrets_vault.sync_all(config)

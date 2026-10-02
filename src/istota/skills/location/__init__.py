@@ -708,7 +708,7 @@ def cmd_import_garmin_tracks(args):
       ``istota-skill`` call runs host-side through the proxy, and location.db
       is not in the sandbox at all.)
     """
-    from istota import secrets_store
+    from istota.credentials import store as secrets_store
 
     user_id = os.environ.get("ISTOTA_USER_ID", "")
     if not user_id:

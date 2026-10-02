@@ -18,12 +18,13 @@ import ssl
 
 import h11
 
-from .. import db, secrets_store
+from istota import db
+from istota.credentials import store as secrets_store
 from . import ca
 from .bindings import get_entry_binding, https_host, credential_host
 from .grants import check_credential_grant
 
-logger = logging.getLogger("istota.credential_broker")
+logger = logging.getLogger("istota.credentials.broker")
 PLACEHOLDER = re.compile(rb"\{\{cred:([A-Za-z0-9_.-]+)\}\}")
 STRUCTURAL = {b"host", b"content-length", b"transfer-encoding", b"connection",
               b"trailer", b"upgrade", b"expect", b"proxy-authorization"}

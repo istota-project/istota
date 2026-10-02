@@ -7,7 +7,7 @@ same transaction as the caller's credential lookup before substitution.
 
 import json
 
-from .. import db
+from istota import db
 from .bindings import get_binding, forge_bindings, credential_name, get_entry_binding
 
 NAMESPACE = "_credential_grants"

@@ -35,7 +35,8 @@ from unittest import mock
 
 import pytest
 
-from istota import db, doctor, secrets_store
+from istota import db, doctor
+from istota.credentials import store as secrets_store
 from istota.config import UserConfig
 from istota.doctor import DEPLOYMENT, FAIL, OK, SKIP, WARN
 from istota.skills._loader import (
@@ -391,7 +392,7 @@ class TestThePathArm:
         assert OVERLAY_NOT_A_REGULAR_FILE in result.detail
 
     def test_an_oversize_file_is_reported_against_the_cap(self, vault_config):
-        from istota.secrets_vault import VAULT_READ_CAP_BYTES
+        from istota.credentials.vault import VAULT_READ_CAP_BYTES
 
         path = (
             Path(vault_config.workspace_path)
@@ -768,7 +769,7 @@ class TestTheContentsCheck:
     def test_a_raise_out_of_the_read_is_contained(
         self, vault_config, secret_key_env, monkeypatch
     ):
-        from istota import secrets_vault
+        from istota.credentials import vault as secrets_vault
 
         def _boom(*_a, **_k):
             raise RuntimeError("unexpected")

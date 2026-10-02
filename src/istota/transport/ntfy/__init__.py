@@ -46,7 +46,7 @@ def ntfy_settings(config: "Config", user_id: str) -> dict[str, str] | None:
     SELECT fetches all ntfy keys at once — heartbeat polling fires this on every
     check, and 5× separate connections per send adds real WAL contention.
     """
-    from ... import secrets_store
+    from istota.credentials import store as secrets_store
 
     db_path = config.db_path
     if not db_path:

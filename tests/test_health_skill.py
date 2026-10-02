@@ -420,7 +420,7 @@ class TestGarminSyncRouting:
         from istota.skills.health import cmd_garmin_sync
 
         with patch(
-            "istota.secrets_store.secret_key_available", return_value=True,
+            "istota.credentials.store.secret_key_available", return_value=True,
         ), patch(
             "istota.skills.health._cmd_garmin_sync_direct",
         ) as direct, patch(
@@ -434,7 +434,7 @@ class TestGarminSyncRouting:
         from istota.skills.health import cmd_garmin_sync
 
         with patch(
-            "istota.secrets_store.secret_key_available", return_value=False,
+            "istota.credentials.store.secret_key_available", return_value=False,
         ), patch(
             "istota.skills.health._cmd_garmin_sync_direct",
         ) as direct, patch(

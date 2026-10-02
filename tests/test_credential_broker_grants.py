@@ -1,9 +1,10 @@
 """Grants freeze the first attempt, including an empty first attempt."""
 
 import pytest
-from istota import db, secrets_store
-from istota.credential_broker import grants
-from istota.credential_broker.bindings import parse_binding
+from istota import db
+from istota.credentials import store as secrets_store
+from istota.credentials.broker import grants
+from istota.credentials.broker.bindings import parse_binding
 
 
 @pytest.fixture
@@ -163,7 +164,7 @@ def test_task_retention_explicitly_removes_snapshots(database):
 
 def test_forge_uses_live_config_on_every_check(database):
     from istota.config import Config, DeveloperConfig
-    from istota.credential_broker.bindings import sync_forge_bindings
+    from istota.credentials.broker.bindings import sync_forge_bindings
     developer = DeveloperConfig(enabled=True, github_token="fixture-token")
     config = Config(developer=developer)
     with db.get_db(database) as conn:
@@ -205,7 +206,7 @@ def test_room_deletion_removes_task_snapshot(database):
 
 def test_live_forge_check_rechecks_admin_and_enabled(database):
     from istota.config import Config, DeveloperConfig
-    from istota.credential_broker.bindings import sync_forge_bindings
+    from istota.credentials.broker.bindings import sync_forge_bindings
     config = Config(developer=DeveloperConfig(enabled=True, github_token="fixture-token"),
                     admin_users={"alice"})
     with db.get_db(database) as conn:

@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 from . import db
 from . import email_support
-from . import secrets_vault
+from istota.credentials import vault as secrets_vault
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox import task_env
 from istota.rooms.scopes import CHANNEL_NOTES_LABEL as CHANNEL_MEMORY_LABEL
@@ -1439,7 +1439,7 @@ def _native_with_user_key(native_config, config: Config, user_id: str):
     import dataclasses
 
     try:
-        from . import secrets_store
+        from istota.credentials import store as secrets_store
 
         key = secrets_store.get_secret(
             config.db_path, user_id, "native_brain", "api_key"

@@ -892,8 +892,8 @@ def cmd_secret(args):
     Everywhere else ``ensure`` prints the decision (created / updated / noop)
     and ``list`` prints (service, key, last_updated) tuples only.
     """
-    from . import secrets_store
-    from .secret_schema import all_known_services, known_service_keys
+    from istota.credentials import store as secrets_store
+    from istota.credentials.schema import all_known_services, known_service_keys
 
     config = load_config(Path(args.config) if args.config else None)
     db_path = config.db_path
@@ -951,7 +951,7 @@ def cmd_secret(args):
         sys.exit(1)
 
     if args.action == "ensure":
-        from . import secrets_vault
+        from istota.credentials import vault as secrets_vault
 
         if args.service == "vault" and args.key == "passphrase":
             refusal = secrets_vault.vault_isolation_refusal(config, args.user)
@@ -1008,7 +1008,8 @@ def _secret_ensure_value(config, args) -> str:
     one command the documentation tells every operator to run, and the failure
     would look exactly like the floor working.
     """
-    from . import secrets_store, secrets_vault
+    from istota.credentials import store as secrets_store
+    from istota.credentials import vault as secrets_vault
 
     is_vault_passphrase = (
         args.service == secrets_vault.VAULT_PASSPHRASE_SERVICE
@@ -1087,7 +1088,8 @@ def _secret_ensure_value(config, args) -> str:
 
 def _cmd_secret_vault_new(config, args) -> None:
     """Create one vault entry from an operator shell without printing values."""
-    from . import secrets_vault, storage
+    from istota import storage
+    from istota.credentials import vault as secrets_vault
 
     if not args.user or args.user not in config.users or not args.slug:
         print("Error: vault-new needs a configured --user and --slug", file=sys.stderr)
@@ -1152,7 +1154,7 @@ def _cmd_secret_vault(config, args) -> None:
     prints a credential value: counts, service names, key names and group names
     only, which is the same rule the sync's own log lines follow.
     """
-    from . import secrets_vault
+    from istota.credentials import vault as secrets_vault
 
     if args.user and args.user not in config.users:
         # Otherwise a typo'd id reaches `config.users.get(...)` -> None and is
@@ -1195,7 +1197,7 @@ def _cmd_secret_vault(config, args) -> None:
 
 def _print_vault_sync(result) -> None:
     """One user's sync, as lines. Counts and names, never a value."""
-    from . import secrets_vault
+    from istota.credentials import vault as secrets_vault
 
     if result.outcome == secrets_vault.OUTCOME_NOT_CONFIGURED:
         print(f"{result.user_id}: no vault configured")
@@ -1268,7 +1270,7 @@ def _print_vault_sync(result) -> None:
 
 def _print_vault_status(report) -> None:
     """One user's vault, as lines. Names and counts, never a value."""
-    from . import secrets_vault
+    from istota.credentials import vault as secrets_vault
 
     if not report.configured:
         print(f"{report.user_id}: no vault configured")

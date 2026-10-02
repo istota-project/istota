@@ -10,9 +10,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from istota import db, secrets_store
-from istota.credential_broker import grants
-from istota.credential_broker.bindings import get_binding, parse_binding
+from istota import db
+from istota.credentials import store as secrets_store
+from istota.credentials.broker import grants
+from istota.credentials.broker.bindings import get_binding, parse_binding
 from tests.test_web_app import app, client, config  # noqa: F401 -- shared web fixtures
 
 BASE = "/istota/api/settings/credentials"
@@ -234,7 +235,7 @@ async def test_the_secret_never_appears_in_a_response_or_a_log(signed_client, ca
 
 
 async def test_unexpected_errors_are_logged_by_type_only(signed_client, monkeypatch, caplog):
-    import istota.local_credentials as local
+    import istota.credentials.local as local
 
     def boom(*args, **kwargs):
         raise RuntimeError(MARKER)
@@ -271,7 +272,7 @@ async def test_writes_need_origin_login_and_a_bounded_body(signed_client, client
 
 
 async def test_isolation_refusal_closes_every_write(signed_client, config, monkeypatch):  # noqa: F811
-    from istota import secrets_vault
+    from istota.credentials import vault as secrets_vault
     secrets_store.set_secret(config.db_path, "alice", "vault_entries", "portal", MARKER,
                              binding={**parse_binding("https://portal.example", {}, [],
                                                       source="local"), "credential": "portal"})

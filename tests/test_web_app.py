@@ -2509,7 +2509,7 @@ class TestSettingsEndpoints:
         # The web surface is gone, but CLI/runtime validation must still
         # accept native_brain so `istota secret ensure -s native_brain` and
         # the executor's per-user-key overlay keep working.
-        from istota import secret_schema
+        from istota.credentials import schema as secret_schema
 
         assert "native_brain" in secret_schema.all_known_services()
         assert "api_key" in secret_schema.known_service_keys()["native_brain"]
@@ -2590,7 +2590,7 @@ class TestSettingsEndpoints:
     async def test_services_never_returns_plaintext(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         secrets_store.set_secret(self._db_path, "alice", "monarch", "session_id", "secret-sid-x")
         cookies = await self._login_alice(client, app)
         resp = await client.get("/istota/api/settings/services", cookies=cookies)
@@ -2609,7 +2609,7 @@ class TestSettingsEndpoints:
         )
         assert resp.status_code == 200
         assert resp.json()["configured"] is True
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         assert secrets_store.get_secret(self._db_path, "alice", "monarch", "session_id") == "SID-alice"
 
     async def test_set_secret_rejects_unknown_service(self, tmp_path, client, app):
@@ -2662,7 +2662,7 @@ class TestSettingsEndpoints:
     async def test_delete_secret(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         secrets_store.set_secret(self._db_path, "alice", "monarch", "session_id", "SID-x")
         cookies = await self._login_alice(client, app)
         resp = await client.delete(
@@ -2698,7 +2698,7 @@ class TestSettingsEndpoints:
             cookies=cookies,
             headers={"origin": "https://example.com"},
         )
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         assert secrets_store.get_secret(self._db_path, "alice", "monarch", "session_id") == "SID-alice"
         assert secrets_store.get_secret(self._db_path, "bob", "monarch", "session_id") is None
 
@@ -2769,7 +2769,7 @@ class TestVaultOwnedServices:
     async def test_put_on_a_service_the_vault_used_to_own_writes(
         self, tmp_path, client, app,
     ):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._vault_config(tmp_path))
         cookies = await self._login_alice(client, app)
@@ -2795,7 +2795,7 @@ class TestVaultOwnedServices:
         writes into a typed service any more, so there is nothing for a refusal
         to protect.
         """
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         secrets_store.set_secret(
             self._db_path, "alice", "karakeep", "api_key", "already-stored",
@@ -2818,7 +2818,7 @@ class TestVaultOwnedServices:
         self, tmp_path, client, app,
     ):
         """The control. Without it the refusal could be refusing everything."""
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._vault_config(tmp_path))
         cookies = await self._login_alice(client, app)
@@ -2842,7 +2842,7 @@ class TestVaultOwnedServices:
         vault owns the same service name.
         """
         import istota.web_app as mod
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._vault_config(tmp_path))
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
@@ -2872,7 +2872,7 @@ class TestVaultOwnedServices:
         resolves to nothing is a refusal with no remedy behind it — the file
         they would be told to edit is one the daemon cannot read either.
         """
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         cfg = self._vault_config(tmp_path)
         cfg.users["alice"].vault_path = "no-such-dir/vault.kdbx"
@@ -3032,7 +3032,7 @@ class TestTheVaultWriteEndpoints:
 
     @pytest.mark.parametrize("allowed", [False, True])
     async def test_multi_user_vault_opt_in(self, tmp_path, client, app, monkeypatch, allowed):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         config = self._config(tmp_path, vault_path="config/vault.kdbx")
         config.users["bob"] = UserConfig()
@@ -3055,7 +3055,7 @@ class TestTheVaultWriteEndpoints:
 
     @pytest.mark.parametrize("allowed", [False, True])
     async def test_generic_vault_policy(self, tmp_path, client, app, monkeypatch, allowed):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         config = self._config(tmp_path)
         config.users["bob"] = UserConfig()
@@ -3138,7 +3138,9 @@ class TestTheVaultWriteEndpoints:
         the `secrets` table. Both would be unanswerable any other way, and a
         parse in the web process is an Argon2id unlock on the event loop.
         """
-        from istota import db, secrets_store, secrets_vault
+        from istota import db
+        from istota.credentials import store as secrets_store
+        from istota.credentials import vault as secrets_vault
 
         cookies = await self._setup(tmp_path, client, app)
         self._folder(tmp_path, "personal.kdbx")
@@ -3180,7 +3182,9 @@ class TestTheVaultWriteEndpoints:
         """The control. Without it `unscoped` could be hardcoded True, and a
         record predating the field reads as False — which is right, since
         nothing was ever notified for it."""
-        from istota import db, secrets_store, secrets_vault
+        from istota import db
+        from istota.credentials import store as secrets_store
+        from istota.credentials import vault as secrets_vault
 
         cookies = await self._setup(tmp_path, client, app)
         self._folder(tmp_path, "personal.kdbx")
@@ -3214,7 +3218,8 @@ class TestTheVaultWriteEndpoints:
         what makes it add up.
         """
         import istota.web_app as mod
-        from istota import secrets_store, secrets_vault
+        from istota.credentials import store as secrets_store
+        from istota.credentials import vault as secrets_vault
 
         cookies = await self._setup(tmp_path, client, app)
         self._folder(tmp_path, "personal.kdbx")
@@ -3362,7 +3367,8 @@ class TestTheVaultWriteEndpoints:
     async def test_generate_returns_the_value_once_and_stores_it(
         self, tmp_path, client, app,
     ):
-        from istota import secrets_store, secrets_vault
+        from istota.credentials import store as secrets_store
+        from istota.credentials import vault as secrets_vault
 
         cookies = await self._setup(tmp_path, client, app)
         resp = await client.put(
@@ -3388,7 +3394,8 @@ class TestTheVaultWriteEndpoints:
     async def test_a_typed_passphrase_is_held_to_the_cli_floor(
         self, tmp_path, client, app,
     ):
-        from istota import secrets_store, secrets_vault
+        from istota.credentials import store as secrets_store
+        from istota.credentials import vault as secrets_vault
 
         cookies = await self._setup(tmp_path, client, app)
         short = "x" * (secrets_vault.VAULT_PASSPHRASE_MIN_CHARS - 1)
@@ -3429,7 +3436,7 @@ class TestTheVaultWriteEndpoints:
         --generate` refuses that without `--force`; a click that did it silently
         would be the one irreversible thing on the settings page.
         """
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         cookies = await self._setup(tmp_path, client, app)
         first = (await client.put(
@@ -3465,7 +3472,7 @@ class TestTheVaultWriteEndpoints:
         "I rotated the file, here is the new passphrase" flow take a
         confirmation about losing a value the user has in front of them.
         """
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         cookies = await self._setup(tmp_path, client, app)
         await client.put(
@@ -3543,7 +3550,7 @@ class TestTheVaultWriteEndpoints:
     async def test_generate_and_a_typed_value_together_are_refused(
         self, tmp_path, client, app,
     ):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         cookies = await self._setup(tmp_path, client, app)
         resp = await client.put(
@@ -3614,7 +3621,8 @@ class TestTheVaultSettingsEndpoint:
         the web unit is not the scheduler unit, so this is the only way the fact
         crosses. Writing it directly also keeps this class off `pykeepass`.
         """
-        from istota import db, secrets_vault
+        from istota import db
+        from istota.credentials import vault as secrets_vault
 
         with db.get_db(self._db_path) as conn:
             db.kv_set(
@@ -3630,7 +3638,7 @@ class TestTheVaultSettingsEndpoint:
     async def test_it_counts_created_vault_credentials_without_opening_the_file(
         self, tmp_path, client, app,
     ):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         secrets_store.set_secret(self._db_path, "alice", "vault", "passphrase", "x" * 40)
         secrets_store.set_secret(
@@ -3689,7 +3697,7 @@ class TestTheVaultSettingsEndpoint:
         the assertion is about its absence, because an empty list is what a
         reintroduced field would carry on the first render too.
         """
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         secrets_store.set_secret(
             self._db_path, "alice", "vault", "passphrase", "x" * 40,
@@ -3712,7 +3720,7 @@ class TestTheVaultSettingsEndpoint:
         self, tmp_path, client, app,
     ):
         """`_SYNC_STATE` is per-process and this process never runs a sync."""
-        from istota.secrets_vault import OUTCOME_OK
+        from istota.credentials.vault import OUTCOME_OK
 
         self._record(OUTCOME_OK)
         _patch_app(self._config(tmp_path))
@@ -3736,7 +3744,8 @@ class TestTheVaultSettingsEndpoint:
         A failure that erased the last-success stamp would make a vault broken
         for an hour indistinguishable from one that has never worked.
         """
-        from istota import db, secrets_vault
+        from istota import db
+        from istota.credentials import vault as secrets_vault
 
         self._record(secrets_vault.OUTCOME_OK)
         with db.get_db(self._db_path) as conn:
@@ -3811,7 +3820,7 @@ class TestTheVaultSettingsEndpoint:
         return — so nothing else here would go red if somebody dropped the flag
         and put a one-second key derivation on the web process's event loop.
         """
-        from istota import secrets_vault
+        from istota.credentials import vault as secrets_vault
 
         calls = []
 
@@ -3825,7 +3834,7 @@ class TestTheVaultSettingsEndpoint:
         cfg = self._config(tmp_path)
         vault = Path(cfg.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
         vault.write_bytes(b"not a KeePass database, but forty-odd real bytes")
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         secrets_store.set_secret(
             self._db_path, "alice", "vault", "passphrase", "x" * 40,
         )
@@ -3849,7 +3858,7 @@ class TestTheVaultSettingsEndpoint:
         remembering to extend the sweep, which is the opposite of how the field
         list would have to be maintained.
         """
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         passphrase = "endpoint-fixture-passphrase-not-a-real-one"
         secrets_store.set_secret(
@@ -3875,7 +3884,7 @@ class TestTheVaultSettingsEndpoint:
     ):
         """The shape every new user gets: a file in the folder and a
         passphrase, with nothing typed and nothing stored to select it."""
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         cfg = self._config(tmp_path, vault_path="")
         folder = (
@@ -3907,7 +3916,8 @@ class TestTheVaultSettingsEndpoint:
         what the dropdown is for. `problem` gated on `outcome` renders this as
         a working vault, which is the one thing it must not do.
         """
-        from istota import secrets_store, storage
+        from istota import storage
+        from istota.credentials import store as secrets_store
 
         cfg = self._config(tmp_path, vault_path="")
         folder = (
@@ -3996,7 +4006,7 @@ class TestGenerateIngestToken:
         # than pinning an exact length.
         assert len(token) >= 32
 
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         assert secrets_store.get_secret(
             self._db_path, "alice", "overland", "ingest_token",
         ) == token
@@ -4045,7 +4055,7 @@ class TestGenerateIngestToken:
 
     async def test_a_refused_generate_does_not_rotate_the_token(self, tmp_path, client, app):
         """Refusing after minting would cut off working devices for nothing."""
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         secrets_store.set_secret(
             self._db_path, "alice", "overland", "ingest_token", "still-working",
@@ -4057,7 +4067,7 @@ class TestGenerateIngestToken:
         ) == "still-working"
 
     async def test_generate_rotates_an_existing_token(self, tmp_path, client, app):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         secrets_store.set_secret(
             self._db_path, "alice", "overland", "ingest_token", "old-token",
         )
@@ -4129,7 +4139,7 @@ class TestGenerateIngestToken:
         )
         assert resp.status_code == 409
 
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         assert secrets_store.get_secret(
             self._db_path, "bob", "overland", "ingest_token",
         ) is None
@@ -4205,7 +4215,7 @@ class TestMonarchLoginRoute:
     async def test_login_persists_cookies_on_success(
         self, monkeypatch, tmp_path, client, app,
     ):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         from istota.money._vendor.monarch_client import MonarchCookieAuth
 
         cfg = self._make_test_config(tmp_path)
@@ -6420,7 +6430,7 @@ class TestBasemapEndpoint:
         self, tmp_path, client, app,
     ):
         """The whole point of the settings input: paste a key, get a map."""
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._cfg(tmp_path))
         secrets_store.set_secret(self._db_path, "alice", "carto", "api_key", "alicekey")
@@ -6434,7 +6444,7 @@ class TestBasemapEndpoint:
         self, tmp_path, client, app,
     ):
         """The secrets store stays write-only to the browser as a *value*."""
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._cfg(tmp_path))
         secrets_store.set_secret(self._db_path, "alice", "carto", "api_key", "alicekey")
@@ -6445,7 +6455,7 @@ class TestBasemapEndpoint:
     async def test_one_users_key_does_not_reach_another_user(
         self, tmp_path, client, app,
     ):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._cfg(tmp_path))
         secrets_store.set_secret(self._db_path, "bob", "carto", "api_key", "bobkey")
@@ -6476,7 +6486,7 @@ class TestBasemapEndpoint:
     async def test_a_whitespace_key_does_not_override_a_working_deployment_key(
         self, tmp_path, client, app,
     ):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._cfg(tmp_path, provider="carto", api_key="deploykey"))
         secrets_store.set_secret(self._db_path, "alice", "carto", "api_key", "   ")
@@ -6489,7 +6499,7 @@ class TestBasemapEndpoint:
         self, tmp_path, client, app, monkeypatch,
     ):
         """A basemap that 500s is a blank rectangle, which is the failure again."""
-        import istota.secrets_store as store
+        import istota.credentials.store as store
 
         def _boom(*args, **kwargs):
             raise RuntimeError("db is gone")
@@ -6520,7 +6530,7 @@ class TestBasemapEndpoint:
         self, tmp_path, client, app,
     ):
         """A second field on `overland` would have flipped it to partial."""
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._cfg(tmp_path))
         secrets_store.set_secret(

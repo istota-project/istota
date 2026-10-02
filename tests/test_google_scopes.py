@@ -6,7 +6,7 @@ display and the docs. Everything here is pure: no DB, no network.
 
 import pytest
 
-from istota import google_scopes as gs
+from istota.credentials import google_scopes as gs
 
 
 DRIVE_RO = "https://www.googleapis.com/auth/drive.readonly"

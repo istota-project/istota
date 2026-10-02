@@ -34,7 +34,9 @@ from pathlib import Path
 
 import pytest
 
-from istota import executor, secrets_store, secrets_vault
+from istota import executor
+from istota.credentials import store as secrets_store
+from istota.credentials import vault as secrets_vault
 from istota.sandbox import credential_shim
 from istota.sandbox import task_env
 from istota.config import Config, DevboxConfig, SecurityConfig
@@ -1146,7 +1148,7 @@ class TestThePromptStatesTheFetchBudget:
 
 def test_placeholder_prints_only_inert_text_and_host_metadata(sock_path, tmp_path, monkeypatch, capsys):
     from istota import db
-    from istota.credential_broker.bindings import parse_binding
+    from istota.credentials.broker.bindings import parse_binding
     config = Config(db_path=tmp_path / "data.db")
     db.init_db(config.db_path)
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)

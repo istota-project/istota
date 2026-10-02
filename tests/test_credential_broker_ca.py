@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID
 import pytest
 
-from istota.credential_broker import ca
+from istota.credentials.broker import ca
 from istota.config import Config, load_config
 
 

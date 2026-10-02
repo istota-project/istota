@@ -2,8 +2,9 @@
 
 from unittest.mock import AsyncMock
 import pytest
-from istota import db, secrets_store
-from istota.credential_broker.bindings import parse_binding
+from istota import db
+from istota.credentials import store as secrets_store
+from istota.credentials.broker.bindings import parse_binding
 from tests.test_web_app import app, client, config  # noqa: F401 -- shared web fixtures
 
 
@@ -64,9 +65,9 @@ async def test_credentials_require_login(client):  # noqa: F811 -- imported fixt
 
 
 async def test_vault_bare_domain_sync_delete_and_resync(signed_client, config, tmp_path):  # noqa: F811
-    from istota import secrets_vault
-    from istota.credential_broker.bindings import get_binding
-    from istota.credential_broker.grants import get_grant
+    from istota.credentials import vault as secrets_vault
+    from istota.credentials.broker.bindings import get_binding
+    from istota.credentials.broker.grants import get_grant
     from tests.test_secrets_vault import _new_db, _read
 
     kp, path = _new_db(tmp_path)
@@ -113,7 +114,7 @@ async def test_delete_unbound_credential_requires_csrf(signed_client, config):  
 
 
 async def test_delete_cannot_remove_deployment_credentials(signed_client, config):  # noqa: F811
-    from istota.credential_broker.bindings import get_binding
+    from istota.credentials.broker.bindings import get_binding
     config.developer.enabled = True
     config.developer.github_token = "fixture-token"
     base = "/istota/api/settings/credentials"
@@ -165,8 +166,8 @@ async def test_deleted_room_can_be_removed_from_grant(signed_client, config):  #
 
 
 async def test_entry_fields_share_grant_and_http_override(signed_client, config, tmp_path):  # noqa: F811
-    from istota import secrets_vault
-    from istota.credential_broker import grants
+    from istota.credentials import vault as secrets_vault
+    from istota.credentials.broker import grants
     from tests.test_secrets_vault import _new_db, _read
     kp, path = _new_db(tmp_path)
     kp.add_entry(kp.root_group, "portal", "alice", "fixture-password",
@@ -205,7 +206,7 @@ async def test_entry_fields_share_grant_and_http_override(signed_client, config,
 
 
 async def test_grouping_uses_entry_identity_with_custom_fields_and_no_password(signed_client, config, tmp_path):  # noqa: F811
-    from istota import secrets_vault
+    from istota.credentials import vault as secrets_vault
     from tests.test_secrets_vault import _new_db, _read
     kp, path = _new_db(tmp_path)
     entry = kp.add_entry(kp.root_group, "service", "alice", "", url="https://service.example")
@@ -226,7 +227,7 @@ async def test_grouping_uses_entry_identity_with_custom_fields_and_no_password(s
 
 
 async def test_vault_status_counts_entries_instead_of_fields(signed_client, config, tmp_path):  # noqa: F811
-    from istota import secrets_vault
+    from istota.credentials import vault as secrets_vault
     from istota.config import UserConfig
     from tests.test_secrets_vault import _new_db, _read
 
@@ -273,7 +274,7 @@ async def test_grant_save_refuses_through_the_shared_validator(signed_client):
 
 
 async def test_vault_payload_carries_name_conflicts(signed_client, config):  # noqa: F811
-    from istota import secrets_vault
+    from istota.credentials import vault as secrets_vault
     from istota.config import UserConfig
 
     config.users["alice"] = UserConfig(vault_path="config/vault.kdbx")

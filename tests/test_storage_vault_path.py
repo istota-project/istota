@@ -39,7 +39,7 @@ from pathlib import Path
 import pytest
 
 from istota.config import Config, UserConfig
-from istota.secrets_vault import VaultUnreadable, read_vault_bytes
+from istota.credentials.vault import VaultUnreadable, read_vault_bytes
 from istota.skills._loader import OVERLAY_IS_A_SYMLINK, OVERLAY_NOT_A_REGULAR_FILE
 from istota.storage import (
     VAULT_DIR_EMPTY,

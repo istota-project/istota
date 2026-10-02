@@ -23,7 +23,8 @@ from pathlib import Path
 
 import pytest
 
-from istota import doctor, secrets_store, subscription_usage
+from istota import doctor, subscription_usage
+from istota.credentials import store as secrets_store
 from istota import executor as doctor_executor
 from istota.doctor import (
     CHECKS,

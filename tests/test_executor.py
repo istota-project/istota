@@ -1040,7 +1040,7 @@ class TestKarakeepEnvVars:
     """
 
     def _make_config(self, tmp_path, monkeypatch, secrets):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "x" * 64)
         config = _skills_config(

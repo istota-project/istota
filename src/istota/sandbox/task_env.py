@@ -92,8 +92,8 @@ def _vault_credentials(config: Config, user_id: str) -> dict[str, str]:
     if not config.db_path or not user_id:
         return {}
     try:
-        from istota import secrets_store
-        from istota.secrets_vault import VAULT_ENTRY_SERVICE, vault_isolation_refusal
+        from istota.credentials import store as secrets_store
+        from istota.credentials.vault import VAULT_ENTRY_SERVICE, vault_isolation_refusal
 
         if vault_isolation_refusal(config, user_id):
             return {}
@@ -593,8 +593,8 @@ def build_task_runtime(
 
     if config.db_path and Path(config.db_path).is_file():
         from istota import db
-        from istota.credential_broker.bindings import sync_forge_bindings
-        from istota.credential_broker.grants import ensure_credential_grants
+        from istota.credentials.broker.bindings import sync_forge_bindings
+        from istota.credentials.broker.grants import ensure_credential_grants
         # A caller holding a write transaction (execute_task_interactive) would
         # deadlock a second connection's BEGIN IMMEDIATE, so join it instead.
         with db.get_db_if_present(config.db_path, conn) as c:
@@ -707,12 +707,12 @@ def build_task_runtime(
 
     sandbox_env = {}
     if config.security.credential_broker.enabled:
-        from istota.credential_broker.ca import load_or_create_ca, state_directory, write_trust_bundle
+        from istota.credentials.broker.ca import load_or_create_ca, state_directory, write_trust_bundle
 
         authority = load_or_create_ca(state_directory(config))
         sandbox_env = write_trust_bundle(authority, control_dir / "trust")
         if _net_proxy_ctx is not None:
-            from istota.credential_broker.intercept import Broker
+            from istota.credentials.broker.intercept import Broker
             _net_proxy_ctx.broker = Broker(config, task.id, task.user_id, authority)
         else:
             logger.warning("Credential broker enabled without a network proxy: placeholders cannot authenticate")

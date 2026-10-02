@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from istota import secrets_store
+from istota.credentials import store as secrets_store
 
 
 logger = logging.getLogger(__name__)

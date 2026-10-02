@@ -168,7 +168,7 @@ def upsert_secret(
     if state != "noop":
         set_secret(db_path, user_id, service, key, value, binding=binding)
     elif binding is not None:
-        from .credential_broker.bindings import put_binding
+        from istota.credentials.broker.bindings import put_binding
         with _connect(db_path) as conn:
             put_binding(conn, user_id, key, binding)
     return state
@@ -206,7 +206,7 @@ def set_secret(
             (user_id, service, key, token),
         )
         if binding is not None:
-            from .credential_broker.bindings import put_binding
+            from istota.credentials.broker.bindings import put_binding
             put_binding(conn, user_id, key, binding)
 
 
@@ -264,7 +264,7 @@ def get_secret(
         except sqlite3.OperationalError as e:
             logger.debug("skipped last_accessed_at update (locked?): %s", e)
         if binding:
-            from .credential_broker.bindings import get_binding
+            from istota.credentials.broker.bindings import get_binding
             metadata = get_binding(conn, user_id, key)
             return {"value": plaintext, "bound_hosts": (metadata or {}).get("hosts", [])}
         return plaintext
@@ -278,9 +278,9 @@ def delete_secret(
     ``connection`` has :func:`set_secret`'s meaning.
     """
     with (nullcontext(connection) if connection is not None else _connect(db_path)) as conn:
-        from .credential_broker.bindings import credential_groups, credential_name
-        from .credential_broker.grants import delete_grant
-        from . import db
+        from istota.credentials.broker.bindings import credential_groups, credential_name
+        from istota.credentials.broker.grants import delete_grant
+        from istota import db
         keys = [key]
         if service == "vault_entries" and all_fields:
             keys = credential_groups(conn, user_id).get(credential_name(conn, user_id, key), [key])

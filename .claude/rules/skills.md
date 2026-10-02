@@ -172,7 +172,7 @@ The query pipeline is `istota.location_logic`, shared with the web routes; `test
 - `calendar/`, `markets/`, `memory_search/`: plain CLIs.
 - `bookmarks/`: Karakeep; `_paginate` sends `includeContent=False` only for bookmarks.
 - `feeds/`: in-process facade over `istota.feeds.cli` via `CliRunner`. Per-user `{workspace}/feeds/data/feeds.db` is the sole source of truth; legacy `feeds.toml` imported once by `migrate_legacy_toml`. The scheduler seeds `_module.feeds.run_scheduled` (`*/5 * * * *`) and `_module.money.run_scheduled` (`0 8 * * *`) for enabled users.
-- `google_workspace/`: `gws` passthrough with `GOOGLE_WORKSPACE_CLI_TOKEN` from `setup_env`. `[google_workspace] scopes` is a ceiling; users pick `{service: off|readonly|full}` on `user_profiles.google_scopes` (empty means the ceiling; non-empty is authoritative, so widening the ceiling never widens a request), resolved by `istota.google_scopes`. Unmapped ceiling scopes are appended and reported as `unoffered_scopes`.
+- `google_workspace/`: `gws` passthrough with `GOOGLE_WORKSPACE_CLI_TOKEN` from `setup_env`. `[google_workspace] scopes` is a ceiling; users pick `{service: off|readonly|full}` on `user_profiles.google_scopes` (empty means the ceiling; non-empty is authoritative, so widening the ceiling never widens a request), resolved by `istota.credentials.google_scopes`. Unmapped ceiling scopes are appended and reported as `unoffered_scopes`.
 - Library-only: `files/`, `markets/finviz.py`.
 
 ### `money/` - accounting (in-process)

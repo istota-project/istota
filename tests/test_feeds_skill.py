@@ -248,7 +248,7 @@ class TestLoaderEnvFirst:
         monkeypatch.setenv("TUMBLR_API_KEY", "from-env")
         called = []
         monkeypatch.setattr(
-            "istota.secrets_store.get_secret",
+            "istota.credentials.store.get_secret",
             lambda *a, **kw: called.append(a) or "from-store",
         )
         ctx = _loader.resolve_for_user("alice", istota_config)
@@ -260,7 +260,7 @@ class TestLoaderEnvFirst:
         from istota.feeds import _loader
         monkeypatch.delenv("TUMBLR_API_KEY", raising=False)
         monkeypatch.setattr(
-            "istota.secrets_store.get_secret",
+            "istota.credentials.store.get_secret",
             lambda db, u, s, k: "from-store" if (s, k) == ("feeds", "tumblr_api_key") else None,
         )
         ctx = _loader.resolve_for_user("alice", istota_config)

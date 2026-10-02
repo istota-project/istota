@@ -26,7 +26,7 @@ import re
 from pathlib import Path
 
 from istota import config as config_module
-from istota import secret_schema
+from istota.credentials import schema as secret_schema
 from istota.transport import registry as registry_module
 from tests.support.drift import source_of
 

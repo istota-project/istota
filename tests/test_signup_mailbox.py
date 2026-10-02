@@ -10,7 +10,7 @@ from istota.config import Config, EmailConfig, UserConfig
 from istota.skills.email import Email, EmailEnvelope
 from istota.skills.email import cmd_signup_inbox
 from istota.scheduler import process_one_task
-from istota.secrets_vault import VaultRead, apply_vault
+from istota.credentials.vault import VaultRead, apply_vault
 from istota.transport.email.inbound import poll_emails
 
 
