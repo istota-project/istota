@@ -55,6 +55,26 @@ def _by_name(results):
     return {r.name: r for r in results}
 
 
+def _which_only(monkeypatch, name, path):
+    """`shutil.which` as doctor sees it: `path` for `name`, nothing for anything else."""
+    monkeypatch.setattr(
+        doctor.shutil, "which", lambda n: str(path) if n == name else None
+    )
+
+
+def _spawn_spy(monkeypatch, *names):
+    """Record, then refuse, every call to the named `subprocess` functions."""
+    spawns = []
+
+    def _spy(*args, **kwargs):
+        spawns.append(args[0] if args else kwargs.get("args"))
+        raise OSError("no subprocesses in this test")
+
+    for name in names or ("run",):
+        monkeypatch.setattr(subprocess, name, _spy)
+    return spawns
+
+
 #: What `runtime.model_execution` asks the model to echo. Restated rather than
 #: imported, so a rename of the private constant cannot silently disarm the
 #: sentinel below by making it match nothing.
@@ -82,22 +102,17 @@ def _dev_config(make_config, tmp_path, **developer_overrides):
 class TestRegistry:
     """Invariants the layers above doctor depend on."""
 
-    def test_names_are_unique(self):
+    def test_names_are_unique_dotted_and_stable(self):
         names = [name for name, _ in CHECKS]
         assert len(names) == len(set(names))
-
-    def test_names_are_dotted_and_stable(self):
-        for name, _ in CHECKS:
+        for name in names:
             assert "." in name, f"{name} is not a dotted id"
             assert name == name.strip()
             assert name.islower()
 
-    def test_deep_checks_are_registered(self):
+    def test_deep_and_live_checks_are_registered(self):
         names = {name for name, _ in CHECKS}
         assert DEEP_CHECKS <= names
-
-    def test_live_checks_are_registered(self):
-        names = {name for name, _ in CHECKS}
         assert LIVE_CHECKS <= names
 
     def test_every_result_name_matches_its_registry_entry(self, make_config, tmp_path):
@@ -139,22 +154,16 @@ class TestRegistry:
         assert [r.status for r in results] == [SKIP]
         assert sentinel.calls == []
 
-    def test_every_result_has_a_detail(self, make_config, tmp_path):
+    def test_every_result_is_well_formed(self, make_config, tmp_path):
+        """A detail on every result, a known status and scope, and a remedy on
+        every WARN and FAIL."""
         config = _dev_config(make_config, tmp_path)
         for r in run_checks(config, deep=True):
             assert r.detail.strip(), f"{r.name} returned an empty detail"
-
-    def test_warn_and_fail_carry_a_remedy(self, make_config, tmp_path):
-        config = _dev_config(make_config, tmp_path)
-        for r in run_checks(config, deep=True):
-            if r.status in (WARN, FAIL):
-                assert r.remedy.strip(), f"{r.name} is {r.status} with no remedy"
-
-    def test_every_result_has_a_known_status_and_scope(self, make_config, tmp_path):
-        config = _dev_config(make_config, tmp_path)
-        for r in run_checks(config, deep=True):
             assert r.status in (OK, WARN, FAIL, SKIP)
             assert r.scope in (IMAGE, DEPLOYMENT)
+            if r.status in (WARN, FAIL):
+                assert r.remedy.strip(), f"{r.name} is {r.status} with no remedy"
 
     def test_only_selects_before_invoking(self, make_config, tmp_path, monkeypatch):
         """Filtering after the fact would run every check to discard most."""
@@ -280,15 +289,7 @@ class TestRegistry:
         every exception per check and turns it into a FAIL result, so a raising
         stub is swallowed and the test passes no matter what the checks do.
         """
-        spawns = []
-
-        def _spy(*args, **kwargs):
-            spawns.append(args[0] if args else kwargs.get("args"))
-            raise OSError("no subprocesses in this test")
-
-        monkeypatch.setattr(subprocess, "run", _spy)
-        monkeypatch.setattr(subprocess, "Popen", _spy)
-        monkeypatch.setattr(subprocess, "check_output", _spy)
+        spawns = _spawn_spy(monkeypatch, "run", "Popen", "check_output")
         config = _dev_config(make_config, tmp_path)
         _fake_bin(tmp_path / "bin" / "gh", "gh version 2.98.0 (2026-01-01)")
         _fake_bin(tmp_path / "bin" / "glab", "glab 1.114.0")
@@ -300,20 +301,13 @@ class TestRegistry:
         assert raised == [], [(r.name, r.detail) for r in raised]
 
     def test_the_spy_would_catch_a_spawn(self, make_config, tmp_path, monkeypatch):
-        """Positive control for the test above.
+        """Positive control for the test above: a check that spawns is seen.
 
         A guard that cannot fail is not a guard, and the previous version of
         this pair could not: it asserted by raising into a `try/except` that
-        exists precisely to swallow. Register a check that spawns, and confirm
-        the technique sees it.
+        exists precisely to swallow.
         """
-        spawns = []
-
-        def _spy(*args, **kwargs):
-            spawns.append(args[0] if args else kwargs.get("args"))
-            raise OSError("no subprocesses in this test")
-
-        monkeypatch.setattr(subprocess, "run", _spy)
+        spawns = _spawn_spy(monkeypatch)
 
         def _spawning_check(config, probe):
             subprocess.run(["/bin/true"], capture_output=True)
@@ -348,7 +342,8 @@ class TestConfigLoadPathStaysCheap:
     which module gets imported.
     """
 
-    def _import_graph(self, module: str) -> set[str]:
+    @staticmethod
+    def _import_graph(module: str) -> set[str]:
         """Modules pulled in by importing `module` in a fresh interpreter."""
         code = (
             "import json, sys\n"
@@ -360,16 +355,21 @@ class TestConfigLoadPathStaysCheap:
         )
         return set(json.loads(out.stdout))
 
-    def test_forge_bin_is_a_stdlib_only_leaf(self):
-        loaded = self._import_graph("istota.forge_bin")
-        assert "istota.skills" not in loaded
-        assert "istota.config" not in loaded
-
-    def test_static_dir_is_a_stdlib_only_leaf(self):
-        loaded = self._import_graph("istota.static_dir")
-        assert "fastapi" not in loaded
-        assert "istota.web_app" not in loaded
-        assert "istota.config" not in loaded
+    @pytest.mark.parametrize(
+        "module,absent",
+        [
+            ("istota.forge_bin", ("istota.skills", "istota.config")),
+            ("istota.static_dir", ("fastapi", "istota.web_app", "istota.config")),
+            # `doctor` imports `subscription_usage` lazily, so it stays cheap
+            # for the config-load path that imports `doctor` itself.
+            ("istota.doctor", ("istota.subscription_usage",)),
+        ],
+        ids=["forge_bin", "static_dir", "doctor"],
+    )
+    def test_a_leaf_stays_off_the_heavy_imports(self, module, absent):
+        loaded = self._import_graph(module)
+        for name in absent:
+            assert name not in loaded
 
     def _run_in_fresh_interpreter(
         self, tmp_path, body: str
@@ -521,34 +521,26 @@ class TestConfigLoadPathStaysCheap:
 
 
 class TestPlatform:
-    def test_linux_is_ok(self, make_config, monkeypatch):
-        monkeypatch.setattr(doctor.platform, "system", lambda: "Linux")
-        monkeypatch.setattr(doctor.platform, "machine", lambda: "x86_64")
-        r = run_checks(make_config(), only=("runtime.platform",))[0]
-        assert r.status == OK
-        assert "x86_64" in r.detail
-
-    def test_non_linux_with_sandbox_enabled_fails(self, make_config, monkeypatch):
+    @pytest.mark.parametrize(
+        "system,machine,sandbox,status,named",
+        [
+            ("Linux", "x86_64", True, OK, "x86_64"),
+            ("Darwin", "arm64", True, FAIL, "Darwin"),
+            ("Darwin", "arm64", False, WARN, "Darwin"),
+        ],
+        ids=["linux", "non-linux-sandboxed", "non-linux-unsandboxed"],
+    )
+    def test_status_follows_platform_and_sandbox(
+        self, make_config, monkeypatch, system, machine, sandbox, status, named
+    ):
         from istota.config import SecurityConfig
 
-        monkeypatch.setattr(doctor.platform, "system", lambda: "Darwin")
-        monkeypatch.setattr(doctor.platform, "machine", lambda: "arm64")
-        config = make_config(security=SecurityConfig(sandbox_enabled=True))
+        monkeypatch.setattr(doctor.platform, "system", lambda: system)
+        monkeypatch.setattr(doctor.platform, "machine", lambda: machine)
+        config = make_config(security=SecurityConfig(sandbox_enabled=sandbox))
         r = run_checks(config, only=("runtime.platform",))[0]
-        assert r.status == FAIL
-        assert "Darwin" in r.detail
-
-    def test_non_linux_without_sandbox_warns(self, make_config, monkeypatch):
-        from istota.config import SecurityConfig
-
-        monkeypatch.setattr(doctor.platform, "system", lambda: "Darwin")
-        monkeypatch.setattr(doctor.platform, "machine", lambda: "arm64")
-        config = make_config(security=SecurityConfig(sandbox_enabled=False))
-        r = run_checks(config, only=("runtime.platform",))[0]
-        assert r.status == WARN
-
-    def test_scope_is_image(self, make_config):
-        r = run_checks(make_config(), only=("runtime.platform",))[0]
+        assert r.status == status
+        assert named in r.detail
         assert r.scope == IMAGE
 
 
@@ -566,25 +558,24 @@ class TestBwrap:
         assert r.status == FAIL
         assert r.remedy
 
-    def test_present_and_runnable_is_ok(self, make_config, tmp_path, monkeypatch):
-        fake = _fake_bin(tmp_path / "bin" / "bwrap", "bubblewrap 0.8.0")
-        monkeypatch.setattr(doctor.shutil, "which", lambda name: str(fake) if name == "bwrap" else None)
-        r = run_checks(make_config(), only=("runtime.bwrap",))[0]
-        assert r.status == OK
-
-    def test_unrunnable_bwrap_fails(self, make_config, tmp_path, monkeypatch):
-        fake = _fake_bin(tmp_path / "bin" / "bwrap", "nope", exit_code=1)
-        monkeypatch.setattr(doctor.shutil, "which", lambda name: str(fake) if name == "bwrap" else None)
-        r = run_checks(make_config(), only=("runtime.bwrap",))[0]
-        assert r.status == FAIL
-
-    def test_probe_false_answers_from_the_filesystem(self, make_config, tmp_path, monkeypatch):
-        """A binary that exists and is executable is OK without running it —
-        even one that would exit non-zero."""
-        fake = _fake_bin(tmp_path / "bin" / "bwrap", "nope", exit_code=1)
-        monkeypatch.setattr(doctor.shutil, "which", lambda name: str(fake) if name == "bwrap" else None)
-        r = run_checks(make_config(), only=("runtime.bwrap",), probe=False)[0]
-        assert r.status == OK
+    @pytest.mark.parametrize(
+        "output,exit_status,probe,status",
+        [
+            ("bubblewrap 0.8.0", 0, True, OK),
+            ("nope", 1, True, FAIL),
+            # A binary that exists and is executable is OK without running it,
+            # even one that would exit non-zero.
+            ("nope", 1, False, OK),
+        ],
+        ids=["runnable", "unrunnable", "probe-false-answers-from-the-filesystem"],
+    )
+    def test_a_present_binary(
+        self, make_config, tmp_path, monkeypatch, output, exit_status, probe, status
+    ):
+        fake = _fake_bin(tmp_path / "bin" / "bwrap", output, exit_code=exit_status)
+        _which_only(monkeypatch, "bwrap", fake)
+        r = run_checks(make_config(), only=("runtime.bwrap",), probe=probe)[0]
+        assert r.status == status
 
 
 class TestModelCli:
@@ -602,95 +593,63 @@ class TestModelCli:
         assert r.status == FAIL
 
     def test_present_claude_is_ok(self, make_config, tmp_path, monkeypatch):
-        fake = _fake_bin(tmp_path / "bin" / "claude", "2.1.168 (Claude Code)")
-        monkeypatch.setattr(doctor.shutil, "which", lambda name: str(fake) if name == "claude" else None)
+        _which_only(monkeypatch, "claude", _fake_bin(tmp_path / "bin" / "claude", "2.1.168 (Claude Code)"))
         r = run_checks(make_config(), only=("runtime.model_cli",))[0]
         assert r.status == OK
         assert "2.1.168" in r.detail
 
 
 class TestTmux:
-    def test_skips_unless_tmux_brain(self, make_config):
-        r = run_checks(make_config(), only=("runtime.tmux",))[0]
-        assert r.status == SKIP
-
-    def test_missing_tmux_fails_under_the_tmux_brain(self, make_config, monkeypatch):
-        from istota.config import BrainConfig
-
-        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
-        config = make_config(brain=BrainConfig(kind="tmux_claude"))
-        r = run_checks(config, only=("runtime.tmux",))[0]
-        assert r.status == FAIL
-
     @staticmethod
     def _tmux_brain(make_config):
         from istota.config import BrainConfig
 
         return make_config(brain=BrainConfig(kind="tmux_claude"))
 
-    @staticmethod
-    def _which_tmux(monkeypatch, path):
-        monkeypatch.setattr(
-            doctor.shutil, "which",
-            lambda name: str(path) if name == "tmux" else None,
-        )
+    def test_skips_unless_tmux_brain(self, make_config):
+        r = run_checks(make_config(), only=("runtime.tmux",))[0]
+        assert r.status == SKIP
 
-    @staticmethod
-    def _unrunnable_tmux(tmp_path):
+    def test_missing_tmux_fails_under_the_tmux_brain(self, make_config, monkeypatch):
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        r = run_checks(self._tmux_brain(make_config), only=("runtime.tmux",))[0]
+        assert r.status == FAIL
+
+    @pytest.mark.parametrize(
+        "probe,wrong_reason",
+        [(False, "exists and is executable"), (True, "could not be executed")],
+        ids=["probe-false", "probe-true"],
+    )
+    def test_an_unrunnable_tmux_names_the_missing_bit(
+        self, make_config, tmp_path, monkeypatch, probe, wrong_reason
+    ):
         """A tmux on disk with no execute bit for anyone.
 
-        `shutil.which` filters on that bit, so the arm below is reached when it
-        goes away between the lookup and the check rather than on a first pass,
-        which is why these patch `which` instead of putting a file on PATH.
-        `os.access(X_OK)` answers False for a mode with no execute bit set even
-        as root, so neither case needs a `requires_dac` marker.
+        The inlined copy of `_binary_status` this replaced answered `OK if
+        _executable(path) else FAIL` under one fixed detail, so under
+        `probe=False` it reported FAIL beneath "exists and is executable" — the
+        opposite of the fault. That is a shipped caller's mode: `setup_wizard`
+        runs the registry with `probe=False`. With probing on it tried the spawn
+        and reported what the spawn said, so an operator was sent to reinstall
+        a tmux that is installed.
+
+        `shutil.which` filters on the execute bit, so the arm is reached when it
+        goes away between the lookup and the check, which is why `which` is
+        patched rather than a file put on PATH. `os.access(X_OK)` answers False
+        for a mode with no execute bit even as root, so no `requires_dac`.
         """
         tmux = tmp_path / "bin" / "tmux"
         tmux.parent.mkdir(parents=True, exist_ok=True)
         tmux.write_text("#!/bin/sh\necho 'tmux 3.4'\n")
         tmux.chmod(0o644)
-        return tmux
+        _which_only(monkeypatch, "tmux", tmux)
 
-    def test_an_unrunnable_tmux_is_not_reported_as_executable(
-        self, make_config, tmp_path, monkeypatch
-    ):
-        """The exact sentence the inlined copy of `_binary_status` got wrong.
-
-        That copy answered `OK if _executable(path) else FAIL` under one fixed
-        detail, so on this path it reported FAIL beneath "exists and is
-        executable" — the opposite of the fault. **`probe=False` is the mode
-        that reaches it**: with probing on, the old code never consulted
-        `_executable` at all and answered "could not be executed" off a
-        `PermissionError`, which is poorly worded rather than contradictory. It
-        is also a shipped caller's mode — `setup_wizard` runs the registry with
-        `probe=False` — and no other case in this file exercises `runtime.tmux`
-        that way.
-        """
-        self._which_tmux(monkeypatch, self._unrunnable_tmux(tmp_path))
-
-        r = run_checks(
-            self._tmux_brain(make_config), only=("runtime.tmux",), probe=False
-        )[0]
+        r = run_checks(self._tmux_brain(make_config), only=("runtime.tmux",), probe=probe)[0]
 
         assert r.status == FAIL
         assert "present but not executable" in r.detail
-        assert "exists and is executable" not in r.detail
+        assert wrong_reason not in r.detail
         assert r.remedy == "Install a working tmux."
-
-    def test_an_unrunnable_tmux_names_the_bit_rather_than_the_spawn(
-        self, make_config, tmp_path, monkeypatch
-    ):
-        """The same file with probing on. The status was right before and the
-        reason was not: the old code tried to spawn it and reported what the
-        spawn said, so an operator was sent to reinstall a tmux that is
-        installed."""
-        self._which_tmux(monkeypatch, self._unrunnable_tmux(tmp_path))
-
-        r = run_checks(self._tmux_brain(make_config), only=("runtime.tmux",))[0]
-
-        assert r.status == FAIL
-        assert "present but not executable" in r.detail
-        assert "could not be executed" not in r.detail
 
     def test_the_version_probe_asks_tmux_for_dash_v(
         self, make_config, tmp_path, monkeypatch
@@ -705,7 +664,7 @@ class TestTmux:
         tmux.parent.mkdir(parents=True, exist_ok=True)
         tmux.write_text('#!/bin/sh\ntest "$1" = "-V" || exit 64\necho "tmux 3.4"\n')
         tmux.chmod(0o755)
-        self._which_tmux(monkeypatch, tmux)
+        _which_only(monkeypatch, "tmux", tmux)
 
         r = run_checks(self._tmux_brain(make_config), only=("runtime.tmux",))[0]
 
@@ -719,8 +678,7 @@ class TestTmux:
         executed" for a binary that executed perfectly well and answered
         non-zero, which sends an operator to reinstall rather than to read the
         status."""
-        fake = _fake_bin(tmp_path / "bin" / "tmux", "nope", exit_code=3)
-        self._which_tmux(monkeypatch, fake)
+        _which_only(monkeypatch, "tmux", _fake_bin(tmp_path / "bin" / "tmux", "nope", exit_code=3))
 
         r = run_checks(self._tmux_brain(make_config), only=("runtime.tmux",))[0]
 
@@ -735,87 +693,47 @@ class TestTheBinaryChecksFollowTheReachableSet:
     Both halves are here on purpose. A test that only asserts the widening
     passes just as happily against a check that widened unconditionally — which
     would report a missing `claude` on every native-only deployment in the
-    estate — so the negative is what says the answer tracks the allowlist.
+    estate — so the negative is what says the answer tracks the allowlist. The
+    allowlist is not a free-text widener either: a name no brain answers to
+    must not turn a check on, and allowlisting `claude_code` widens
+    `runtime.model_cli` and nothing else. Routing a lane or a fallback to a CLI
+    brain has always put tasks on the binary too.
     """
 
-    def _native(self, make_config, **brain_fields):
+    @pytest.mark.parametrize(
+        "check,brain_fields,status,named",
+        [
+            ("runtime.model_cli", {"room_selectable": ["claude_code"]}, FAIL, "claude_code"),
+            ("runtime.model_cli", {"room_selectable": []}, SKIP, None),
+            ("runtime.model_cli", {"room_selectable": ["claude_kode"]}, SKIP, None),
+            ("runtime.tmux", {"room_selectable": ["tmux_claude"]}, FAIL, "tmux_claude"),
+            ("runtime.tmux", {"room_selectable": []}, SKIP, None),
+            ("runtime.tmux", {"room_selectable": ["claude_code"]}, SKIP, None),
+            ("runtime.model_cli", {"source_type_overrides": {"scheduled": "claude_code"}}, FAIL, None),
+            ("runtime.model_cli", {"fallback": "claude_code"}, FAIL, None),
+        ],
+        ids=[
+            "model_cli-room-may-pin-claude_code",
+            "model_cli-empty-allowlist",
+            "model_cli-unbuildable-allowlist-entry",
+            "tmux-room-may-pin-tmux_claude",
+            "tmux-empty-allowlist",
+            "tmux-unmoved-by-another-kind",
+            "model_cli-source-type-route",
+            "model_cli-configured-fallback",
+        ],
+    )
+    def test_a_native_base_kind(
+        self, make_config, monkeypatch, check, brain_fields, status, named
+    ):
         from istota.config import BrainConfig
 
-        return make_config(brain=BrainConfig(kind="native", **brain_fields))
-
-    def test_model_cli_runs_when_a_room_may_pin_claude_code(
-        self, make_config, monkeypatch,
-    ):
         monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
-        config = self._native(make_config, room_selectable=["claude_code"])
-        r = run_checks(config, only=("runtime.model_cli",))[0]
-        assert r.status == FAIL
-        assert "claude_code" in r.detail
-
-    def test_model_cli_still_skips_with_an_empty_allowlist(
-        self, make_config, monkeypatch,
-    ):
-        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
-        config = self._native(make_config, room_selectable=[])
-        r = run_checks(config, only=("runtime.model_cli",))[0]
-        assert r.status == SKIP
-
-    def test_model_cli_ignores_an_unbuildable_allowlist_entry(
-        self, make_config, monkeypatch,
-    ):
-        """The allowlist is not a free-text widener: a name no brain answers to
-        must not turn a check on."""
-        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
-        config = self._native(make_config, room_selectable=["claude_kode"])
-        r = run_checks(config, only=("runtime.model_cli",))[0]
-        assert r.status == SKIP
-
-    def test_tmux_runs_when_a_room_may_pin_tmux_claude(
-        self, make_config, monkeypatch,
-    ):
-        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
-        config = self._native(make_config, room_selectable=["tmux_claude"])
-        r = run_checks(config, only=("runtime.tmux",))[0]
-        assert r.status == FAIL
-        assert "tmux_claude" in r.detail
-
-    def test_tmux_still_skips_with_an_empty_allowlist(
-        self, make_config, monkeypatch,
-    ):
-        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
-        config = self._native(make_config, room_selectable=[])
-        r = run_checks(config, only=("runtime.tmux",))[0]
-        assert r.status == SKIP
-
-    def test_tmux_is_unmoved_by_an_allowlist_naming_another_kind(
-        self, make_config, monkeypatch,
-    ):
-        """Allowlisting `claude_code` widens `runtime.model_cli` and nothing
-        else; each check reads its own kinds out of the same set."""
-        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
-        config = self._native(make_config, room_selectable=["claude_code"])
-        r = run_checks(config, only=("runtime.tmux",))[0]
-        assert r.status == SKIP
-
-    def test_a_source_type_route_also_widens_the_cli_check(
-        self, make_config, monkeypatch,
-    ):
-        """Not a room-allowlist property: routing a lane to a CLI brain has
-        always put tasks on the binary, and the check SKIPped through it."""
-        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
-        config = self._native(
-            make_config, source_type_overrides={"scheduled": "claude_code"},
-        )
-        r = run_checks(config, only=("runtime.model_cli",))[0]
-        assert r.status == FAIL
-
-    def test_a_configured_fallback_also_widens_the_cli_check(
-        self, make_config, monkeypatch,
-    ):
-        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
-        config = self._native(make_config, fallback="claude_code")
-        r = run_checks(config, only=("runtime.model_cli",))[0]
-        assert r.status == FAIL
+        config = make_config(brain=BrainConfig(kind="native", **brain_fields))
+        r = run_checks(config, only=(check,))[0]
+        assert r.status == status
+        if named:
+            assert named in r.detail
 
 
 class TestNativeBrainCredential:
@@ -826,6 +744,10 @@ class TestNativeBrainCredential:
     a room where every turn failed at the provider with nothing in the registry
     naming it.
     """
+
+    @pytest.fixture(autouse=True)
+    def _no_env_key(self, monkeypatch):
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
 
     def _native(self, make_config, **brain_fields):
         from istota.config import BrainConfig, NativeBrainConfig
@@ -839,76 +761,95 @@ class TestNativeBrainCredential:
             brain=BrainConfig(kind="native", native=native, **brain_fields)
         )
 
-    def test_skips_where_native_is_unreachable(self, make_config, monkeypatch):
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
-        r = run_checks(make_config(), only=("runtime.native_brain",))[0]
-        assert r.status == SKIP
+    def _run(self, config):
+        return run_checks(config, only=("runtime.native_brain",))[0]
 
-    def test_fails_with_no_key_anywhere(self, make_config, monkeypatch):
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
-        config = self._native(make_config)
-        r = run_checks(config, only=("runtime.native_brain",))[0]
-        assert r.status == FAIL
-        assert r.remedy
-
-    def test_the_instance_key_satisfies_it(self, make_config, monkeypatch):
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
-        config = self._native(make_config, api_key="sk-test")
-        r = run_checks(config, only=("runtime.native_brain",))[0]
-        assert r.status == OK
-
-    def test_a_whitespace_only_key_does_not(self, make_config, monkeypatch):
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
-        config = self._native(make_config, api_key="   ")
-        r = run_checks(config, only=("runtime.native_brain",))[0]
-        assert r.status == FAIL
+    @pytest.mark.parametrize(
+        "brain_fields,status,named",
+        [
+            ({}, FAIL, None),
+            ({"api_key": "sk-test"}, OK, None),
+            ({"api_key": "   "}, FAIL, None),
+            # The provider merges `extra_headers` over the Authorization header
+            # it builds, so an operator can authenticate entirely through them.
+            # The check cannot confirm one is a credential, so it says so.
+            ({"extra_headers": {"x-api-key": "v"}}, WARN, "extra_headers"),
+            ({"extra_headers": {}}, FAIL, None),
+            # An Ollama / vLLM / llama.cpp endpoint takes no key, and a FAIL is
+            # not inert: the start-up report, the scheduler sweep and the
+            # self-check heartbeat each alert on FAIL and none on WARN.
+            ({"base_url": "http://localhost:11434/v1"}, WARN, None),
+            ({"base_url": "http://127.0.0.1:11434/v1"}, WARN, None),
+            ({"base_url": "http://192.168.1.5:11434/v1"}, WARN, None),
+            ({"base_url": "http://ollama:11434/v1"}, WARN, None),
+            ({"base_url": "http://box.lan:11434/v1"}, WARN, None),
+            # The converse: without it the WARN above would be every deployment.
+            ({"base_url": "https://openrouter.ai/api/v1"}, FAIL, None),
+        ],
+        ids=[
+            "no-key-anywhere", "instance-key", "whitespace-key",
+            "extra-headers", "empty-extra-headers",
+            "localhost", "loopback-ip", "private-ip", "bare-hostname", "lan-name",
+            "public-endpoint",
+        ],
+    )
+    def test_the_instance_configuration(self, make_config, brain_fields, status, named):
+        r = self._run(self._native(make_config, **brain_fields))
+        assert r.status == status
+        if status != OK:
+            assert r.remedy
+        if named:
+            assert named in r.detail
 
     def test_the_env_var_satisfies_it(self, make_config, monkeypatch):
         """Asked separately from the field: `load_config` folds the variable
         into `api_key`, but a Config assembled any other way holds one and not
         the other."""
         monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "sk-env")
-        config = self._native(make_config)
-        r = run_checks(config, only=("runtime.native_brain",))[0]
-        assert r.status == OK
+        assert self._run(self._native(make_config)).status == OK
 
-    def test_a_per_user_secret_satisfies_it(self, make_config, monkeypatch, tmp_path):
-        """The executor overlays this per task, so a deployment where every
-        user brings their own key needs no instance-wide one."""
-        from istota import db, secrets_store
+    def _stored(self, make_config, monkeypatch, tmp_path, owner="alice", service="native_brain"):
+        """A native-brain config whose only key may be a stored secret row."""
+        from istota import db
         from istota.config import UserConfig
 
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
-        db_path = tmp_path / "secrets.db"
+        db_path = tmp_path / "istota.db"
         db.init_db(db_path)
-        secrets_store.set_secret(db_path, "alice", "native_brain", "api_key", "sk-u")
-
+        secrets_store.set_secret(db_path, owner, service, "api_key", "sk-u")
         config = self._native(make_config)
         config.db_path = db_path
         config.users = {"alice": UserConfig()}
-        r = run_checks(config, only=("runtime.native_brain",))[0]
-        assert r.status == OK
-        assert "1 user" in r.detail
+        return config
 
-    def test_another_users_secret_is_not_confused_for_one(
+    @pytest.mark.parametrize(
+        "owner,service,status",
+        [
+            # The executor overlays this per task, so a deployment where every
+            # user brings their own key needs no instance-wide one.
+            ("alice", "native_brain", OK),
+            # A row for a service that is not the native brain must not count.
+            ("alice", "ntfy", FAIL),
+            # A row left behind by a removed user is not a credential any
+            # current user has.
+            ("gone", "native_brain", FAIL),
+        ],
+        ids=["own-native-key", "another-service", "unlisted-user"],
+    )
+    def test_a_per_user_secret(self, make_config, monkeypatch, tmp_path, owner, service, status):
+        r = self._run(self._stored(make_config, monkeypatch, tmp_path, owner, service))
+        assert r.status == status
+        if status == OK:
+            assert "1 user" in r.detail
+
+    def test_a_stored_key_needs_the_store_key_to_be_readable(
         self, make_config, monkeypatch, tmp_path,
     ):
-        """A row for a service that is not the native brain must not count."""
-        from istota import db, secrets_store
-        from istota.config import UserConfig
-
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
-        monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
-        db_path = tmp_path / "secrets.db"
-        db.init_db(db_path)
-        secrets_store.set_secret(db_path, "alice", "ntfy", "token", "t")
-
-        config = self._native(make_config)
-        config.db_path = db_path
-        config.users = {"alice": UserConfig()}
-        r = run_checks(config, only=("runtime.native_brain",))[0]
-        assert r.status == FAIL
+        """Without `ISTOTA_SECRET_KEY` no stored row can be decrypted, so
+        counting one would report a credential the daemon cannot use."""
+        config = self._stored(make_config, monkeypatch, tmp_path)
+        monkeypatch.delenv("ISTOTA_SECRET_KEY", raising=False)
+        assert self._run(config).status == FAIL
 
     def test_a_missing_database_is_no_key_rather_than_a_traceback(
         self, make_config, monkeypatch, tmp_path,
@@ -926,15 +867,13 @@ class TestNativeBrainCredential:
         """
         from istota.config import UserConfig
 
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
         root = tmp_path / "empty"
         root.mkdir()
         config = self._native(make_config)
         config.db_path = root / "absent.db"
         config.users = {"alice": UserConfig()}
-        r = run_checks(config, only=("runtime.native_brain",))[0]
-        assert r.status == FAIL
+        assert self._run(config).status == FAIL
         assert list(root.iterdir()) == []
 
     def test_it_opens_the_database_read_only(
@@ -961,14 +900,7 @@ class TestNativeBrainCredential:
         """
         import sqlite3
 
-        from istota import db, secrets_store
-        from istota.config import UserConfig
-
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
-        monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
-        db_path = tmp_path / "istota.db"
-        db.init_db(db_path)
-        secrets_store.set_secret(db_path, "alice", "native_brain", "api_key", "sk-u")
+        config = self._stored(make_config, monkeypatch, tmp_path)
 
         opens: list[tuple[tuple, dict]] = []
         statements: list[str] = []
@@ -984,11 +916,7 @@ class TestNativeBrainCredential:
             return real_connect(*args, factory=_Recording, **kwargs)
 
         monkeypatch.setattr(sqlite3, "connect", _recording)
-
-        config = self._native(make_config)
-        config.db_path = db_path
-        config.users = {"alice": UserConfig()}
-        r = run_checks(config, only=("runtime.native_brain",))[0]
+        r = self._run(config)
 
         assert r.status == OK
         assert opens, "the check reached no database at all"
@@ -1003,139 +931,57 @@ class TestNativeBrainCredential:
                 "query_only" in s.lower() for s in statements
             ), f"the write was never withheld: {statements}"
 
-    def test_a_secret_for_a_user_the_config_does_not_list_does_not_count(
-        self, make_config, monkeypatch, tmp_path,
-    ):
-        """A row left behind by a removed user is not a credential any current
-        user has."""
-        from istota import db, secrets_store
-        from istota.config import UserConfig
-
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
-        monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
-        db_path = tmp_path / "secrets.db"
-        db.init_db(db_path)
-        secrets_store.set_secret(db_path, "gone", "native_brain", "api_key", "sk-u")
-
-        config = self._native(make_config)
-        config.db_path = db_path
-        config.users = {"alice": UserConfig()}
-        r = run_checks(config, only=("runtime.native_brain",))[0]
-        assert r.status == FAIL
-
-    def test_a_stored_key_needs_the_store_key_to_be_readable(
-        self, make_config, monkeypatch, tmp_path,
-    ):
-        """Without `ISTOTA_SECRET_KEY` no stored row can be decrypted, so
-        counting one would report a credential the daemon cannot use."""
-        from istota import db, secrets_store
-        from istota.config import UserConfig
-
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
-        monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
-        db_path = tmp_path / "secrets.db"
-        db.init_db(db_path)
-        secrets_store.set_secret(db_path, "alice", "native_brain", "api_key", "sk-u")
-        monkeypatch.delenv("ISTOTA_SECRET_KEY", raising=False)
-
-        config = self._native(make_config)
-        config.db_path = db_path
-        config.users = {"alice": UserConfig()}
-        r = run_checks(config, only=("runtime.native_brain",))[0]
-        assert r.status == FAIL
-
-    def test_a_local_endpoint_warns_rather_than_fails(self, make_config, monkeypatch):
-        """An Ollama / vLLM / llama.cpp endpoint takes no key, and a FAIL is not
-        inert — it reaches the start-up report, the scheduler sweep and the
-        self-check heartbeat, each of which alerts on FAIL and none on WARN."""
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
-        for url in (
-            "http://localhost:11434/v1",
-            "http://127.0.0.1:11434/v1",
-            "http://192.168.1.5:11434/v1",
-            "http://ollama:11434/v1",
-            "http://box.lan:11434/v1",
-        ):
-            config = self._native(make_config, base_url=url)
-            r = run_checks(config, only=("runtime.native_brain",))[0]
-            assert r.status == WARN, url
-
-    def test_a_public_endpoint_still_fails(self, make_config, monkeypatch):
-        """The converse: without it the WARN above would be every deployment."""
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
-        for url in ("https://api.anthropic.com/v1", "https://openrouter.ai/api/v1"):
-            config = self._native(make_config, base_url=url)
-            r = run_checks(config, only=("runtime.native_brain",))[0]
-            assert r.status == FAIL, url
-
-    def test_extra_headers_warns_rather_than_fails(self, make_config, monkeypatch):
-        """The provider merges `extra_headers` over the Authorization header it
-        builds, so an operator can authenticate entirely through them. This
-        check cannot confirm one of them is a credential, so it says so."""
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
-        config = self._native(make_config, extra_headers={"x-api-key": "v"})
-        r = run_checks(config, only=("runtime.native_brain",))[0]
-        assert r.status == WARN
-        assert "extra_headers" in r.detail
-
-    def test_an_empty_extra_headers_table_does_not_soften_it(
-        self, make_config, monkeypatch,
-    ):
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
-        config = self._native(make_config, extra_headers={})
-        r = run_checks(config, only=("runtime.native_brain",))[0]
-        assert r.status == FAIL
-
-    def test_a_room_allowlisting_native_is_enough_to_run_it(
-        self, make_config, monkeypatch,
-    ):
-        """The D11 case: the base kind is a CLI brain and native is reachable
-        only because a room may pin it."""
+    @pytest.mark.parametrize(
+        "brain_fields,status",
+        [
+            # The D11 case: the base kind is a CLI brain and native is reachable
+            # only because a room may pin it.
+            ({"room_selectable": ["native"]}, FAIL),
+            ({}, SKIP),
+            (None, SKIP),
+        ],
+        ids=["room-allowlists-native", "claude_code-without-allowlist", "default-config"],
+    )
+    def test_a_cli_base_kind(self, make_config, brain_fields, status):
         from istota.config import BrainConfig
 
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
-        config = make_config(
-            brain=BrainConfig(kind="claude_code", room_selectable=["native"])
-        )
-        r = run_checks(config, only=("runtime.native_brain",))[0]
-        assert r.status == FAIL
+        if brain_fields is None:
+            config = make_config()
+        else:
+            config = make_config(brain=BrainConfig(kind="claude_code", **brain_fields))
+        assert self._run(config).status == status
 
-    def test_and_stays_silent_without_the_allowlist(self, make_config, monkeypatch):
-        from istota.config import BrainConfig
 
-        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
-        config = make_config(brain=BrainConfig(kind="claude_code"))
-        r = run_checks(config, only=("runtime.native_brain",))[0]
-        assert r.status == SKIP
+def _sqlite_with_table(db_path, ddl="CREATE TABLE t (a INTEGER)"):
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(ddl)
+    conn.commit()
+    conn.close()
+    return db_path
 
 
 class TestFrameworkDb:
+    def _run(self, make_config, db_path):
+        return run_checks(make_config(db_path=db_path), only=("runtime.framework_db",))[0]
+
     def test_missing_db_warns(self, make_config, tmp_path):
-        config = make_config(db_path=tmp_path / "absent.db")
-        r = run_checks(config, only=("runtime.framework_db",))[0]
+        r = self._run(make_config, tmp_path / "absent.db")
         assert r.status == WARN
         assert r.remedy
+        assert r.scope == DEPLOYMENT
 
     def test_clean_db_is_ok(self, make_config, tmp_path):
-        import sqlite3
-
-        db_path = tmp_path / "istota.db"
-        conn = sqlite3.connect(db_path)
-        conn.execute("CREATE TABLE t (a INTEGER)")
-        conn.commit()
-        conn.close()
-        config = make_config(db_path=db_path)
-        r = run_checks(config, only=("runtime.framework_db",))[0]
+        r = self._run(make_config, _sqlite_with_table(tmp_path / "istota.db"))
         assert r.status == OK
 
     def test_a_zero_length_db_warns_rather_than_reading_clean(self, make_config, tmp_path):
         """SQLite treats a zero-length file as a valid empty database, so
-        `quick_check` returns no issues and the check used to report
-        `quick_check clean` about a file with nothing in it (ISSUE-412)."""
+        `quick_check` used to report `quick_check clean` about it (ISSUE-412)."""
         db_path = tmp_path / "istota.db"
         db_path.touch()
-        assert db_path.stat().st_size == 0
-        r = run_checks(make_config(db_path=db_path), only=("runtime.framework_db",))[0]
+        r = self._run(make_config, db_path)
         assert r.status == WARN
         assert "0 bytes" in r.detail
         assert "no schema" in r.detail
@@ -1143,10 +989,8 @@ class TestFrameworkDb:
         assert "istota init" in r.remedy
 
     def test_a_header_only_db_warns_too(self, make_config, tmp_path):
-        """The property is "has this file a schema", and size is only a proxy
-        for it. A header-only file is what an interrupted `istota init` or a
-        bare `PRAGMA journal_mode=WAL` leaves: non-zero, passes `quick_check`,
-        and has no more schema than an empty one. A size test misses it."""
+        """Size is only a proxy for "has a schema": an interrupted `istota init`
+        or a bare `PRAGMA journal_mode=WAL` leaves a non-zero file with none."""
         import sqlite3
 
         db_path = tmp_path / "istota.db"
@@ -1154,7 +998,7 @@ class TestFrameworkDb:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.close()
         assert db_path.stat().st_size > 0, "this test needs a non-empty file"
-        r = run_checks(make_config(db_path=db_path), only=("runtime.framework_db",))[0]
+        r = self._run(make_config, db_path)
         assert r.status == WARN
         assert "no schema" in r.detail
         assert "istota init" in r.remedy
@@ -1162,32 +1006,20 @@ class TestFrameworkDb:
     def test_unopenable_db_fails(self, make_config, tmp_path):
         db_path = tmp_path / "istota.db"
         db_path.write_bytes(b"this is definitely not a sqlite database")
-        config = make_config(db_path=db_path)
-        r = run_checks(config, only=("runtime.framework_db",))[0]
-        assert r.status == FAIL
-
-    def test_is_deployment_scoped(self, make_config, tmp_path):
-        config = make_config(db_path=tmp_path / "absent.db")
-        assert run_checks(config, only=("runtime.framework_db",))[0].scope == DEPLOYMENT
+        assert self._run(make_config, db_path).status == FAIL
 
     def test_does_not_repair(self, make_config, tmp_path, monkeypatch):
         """Doctor is a diagnostic. `check_db_health` owns the REINDEX."""
-        import sqlite3
-
         from istota import db_health
 
-        db_path = tmp_path / "istota.db"
-        conn = sqlite3.connect(db_path)
-        conn.execute("CREATE TABLE t (a INTEGER)")
-        conn.commit()
-        conn.close()
+        db_path = _sqlite_with_table(tmp_path / "istota.db")
 
         def _fail(*args, **kwargs):
             raise AssertionError("doctor must not repair the database")
 
         monkeypatch.setattr(db_health, "reindex", _fail)
         monkeypatch.setattr(db_health, "check_and_repair", _fail)
-        run_checks(make_config(db_path=db_path), only=("runtime.framework_db",))
+        self._run(make_config, db_path)
 
 
 class TestTaskFailureRate:
@@ -1213,31 +1045,33 @@ class TestTaskFailureRate:
     def _run(self, make_config, db_path):
         return run_checks(make_config(db_path=db_path), only=("runtime.task_failure_rate",))[0]
 
-    def test_warns_when_failures_match_or_beat_completions(self, make_config, tmp_path):
-        db_path = self._db(tmp_path, ["failed", "failed", "completed"])
-        r = self._run(make_config, db_path)
-        assert r.status == WARN
-        assert r.remedy.strip()
+    @pytest.mark.parametrize(
+        "statuses,status",
+        [
+            (["failed", "failed", "completed"], WARN),
+            # `failed >= completed`, not `>`: one and one is the predicate.
+            (["failed", "completed"], WARN),
+            (["failed", "failed"], WARN),
+            (["failed", "completed", "completed"], OK),
+            (["completed", "completed"], OK),
+            # `SUM` over no rows is NULL, not 0; a naive port raises here, on
+            # the commonest deployment state.
+            ([], OK),
+        ],
+        ids=["majority-failed", "boundary", "all-failed", "minority-failed", "none-failed", "empty-window"],
+    )
+    def test_the_rate(self, make_config, tmp_path, statuses, status):
+        r = self._run(make_config, self._db(tmp_path, statuses))
+        assert r.status == status
+        # A symptom, not a broken deployment: it never fails the start-up
+        # report or `istota doctor`'s exit code.
+        assert exit_code([r]) == 0
+        if status == WARN:
+            assert r.remedy.strip()
+
+    def test_the_warning_names_both_counts(self, make_config, tmp_path):
+        r = self._run(make_config, self._db(tmp_path, ["failed", "failed", "completed"]))
         assert "2" in r.detail and "1" in r.detail
-
-    def test_warns_at_the_boundary(self, make_config, tmp_path):
-        """`failed >= completed`, not `>`. One and one is the existing predicate."""
-        r = self._run(make_config, self._db(tmp_path, ["failed", "completed"]))
-        assert r.status == WARN
-
-    def test_ok_when_failures_are_a_minority(self, make_config, tmp_path):
-        r = self._run(make_config, self._db(tmp_path, ["failed", "completed", "completed"]))
-        assert r.status == OK
-
-    def test_ok_when_nothing_failed(self, make_config, tmp_path):
-        r = self._run(make_config, self._db(tmp_path, ["completed", "completed"]))
-        assert r.status == OK
-
-    def test_ok_on_an_empty_window(self, make_config, tmp_path):
-        """`SUM` over no rows is NULL, not 0. Both copies coalesce before
-        comparing; a naive port raises here, on the commonest deployment state."""
-        r = self._run(make_config, self._db(tmp_path, []))
-        assert r.status == OK
 
     def test_old_rows_are_outside_the_window(self, make_config, tmp_path):
         from istota import db
@@ -1245,38 +1079,24 @@ class TestTaskFailureRate:
         db_path = self._db(tmp_path, ["failed", "failed"])
         with db.get_db(db_path) as conn:
             conn.execute("UPDATE tasks SET created_at = datetime('now', '-2 hours')")
-        r = self._run(make_config, db_path)
-        assert r.status == OK
-
-    def test_never_fails_on_a_high_rate(self, make_config, tmp_path):
-        """A symptom, not a broken deployment: it must not fail the daemon's
-        start-up report or `istota doctor`'s exit code."""
-        r = self._run(make_config, self._db(tmp_path, ["failed", "failed"]))
-        assert r.status != FAIL
-        assert exit_code([r]) == 0
+        assert self._run(make_config, db_path).status == OK
 
     def test_skips_with_no_database(self, make_config, tmp_path):
         r = self._run(make_config, tmp_path / "absent.db")
         assert r.status == SKIP
+        assert r.scope == DEPLOYMENT
 
     def test_fails_with_no_tasks_table(self, make_config, tmp_path):
-        """`check_framework_db` runs `quick_check` and never touches `tasks`, so
-        a schema-less database passes it. This is where that surfaces."""
-        import sqlite3
-
-        db_path = tmp_path / "istota.db"
-        conn = sqlite3.connect(db_path)
-        conn.execute("CREATE TABLE unrelated (a INTEGER)")
-        conn.commit()
-        conn.close()
+        """`check_framework_db` never touches `tasks`, so a schema-less database
+        passes it. This is where that surfaces."""
+        db_path = _sqlite_with_table(tmp_path / "istota.db", "CREATE TABLE unrelated (a INTEGER)")
         r = self._run(make_config, db_path)
         assert r.status == FAIL
         assert "init" in r.remedy
 
     def test_a_corrupt_file_gets_the_restore_remedy_not_init(self, make_config, tmp_path):
-        """The URI form opens lazily, so a file that is not a database connects
-        and raises on the first execute — in the same branch a missing table
-        lands in. `istota init` is the wrong advice for corruption."""
+        """The URI form opens lazily, so a non-database connects and raises on
+        the first execute, in the branch a missing table lands in."""
         db_path = tmp_path / "istota.db"
         db_path.write_bytes(b"this is definitely not a sqlite database")
         r = self._run(make_config, db_path)
@@ -1289,20 +1109,12 @@ class TestTaskFailureRate:
     ):
         """`sudo istota doctor` must not write to the database it inspects.
 
-        Asserted on the URI rather than on a directory listing, and the reason
-        is the fixture: `db.init_db` leaves a connection open, so this tree has
-        a hot WAL and its `-wal` / `-shm` pair already — which is also why the
-        read-only branch is the one taken here. A before/after listing would be
-        equal under every implementation, including one that opened nothing, so
-        it is deliberately not asserted; `.claude/rules/testbed.md` catalogues
-        that shape. The guarantees themselves — no strays beside a cold
-        database, no checkpoint into a hot one — are owned by
-        `tests/test_sqlite_util.py::TestConnectReadOnly`, which controls the
-        fixture. What this pins is that the check goes through that helper.
-
-        Either mode is accepted because ISSUE-458 made it a per-database
-        choice. What may never appear is the default `rwc`, which would create
-        a missing database.
+        Asserted on the URI, not a directory listing: `db.init_db` leaves a hot
+        WAL here, so a listing is equal under every implementation. The
+        no-strays and no-checkpoint guarantees belong to
+        `tests/test_sqlite_util.py::TestConnectReadOnly`; this pins that the
+        check goes through that helper. Either mode is accepted (ISSUE-458);
+        never the default `rwc`, which would create a missing database.
         """
         import sqlite3
 
@@ -1324,9 +1136,6 @@ class TestTaskFailureRate:
             for t in seen
         ), seen
 
-    def test_is_deployment_scoped(self, make_config, tmp_path):
-        assert self._run(make_config, tmp_path / "absent.db").scope == DEPLOYMENT
-
     def test_is_not_live_or_deep(self):
         """It opens a file and spawns nothing, so it runs for every caller."""
         assert "runtime.task_failure_rate" not in doctor.LIVE_CHECKS
@@ -1334,14 +1143,9 @@ class TestTaskFailureRate:
 
 
 class _ModelReached(BaseException):
-    """Deliberately not an ``Exception``.
-
-    Both `check_model_execution` and `run_checks` catch `Exception` and turn it
-    into a FAIL result, so a sentinel raising `AssertionError` is swallowed
-    twice over: the test that spent the money goes green unless it happens to
-    assert on the sentinel's own call list. A `BaseException` passes through
-    both and ends the test where the call happened.
-    """
+    """Deliberately not an ``Exception``: both `check_model_execution` and
+    `run_checks` catch `Exception` and turn it into a FAIL result, so a sentinel
+    raising `AssertionError` would be swallowed twice over."""
 
 
 #: Captured before any test can patch it, so the stand-in below can delegate.
@@ -1352,12 +1156,8 @@ class _NoModel:
     """A `subprocess.run` stand-in that fails the test if the *model probe* runs.
 
     It discriminates on the probe's own marker rather than refusing everything,
-    because a blanket refusal cannot be installed across a whole-registry run:
-    `runtime.model_cli`, `runtime.tmux` and the forge checks all spawn a real
-    `--version`, and turning those into a "reached a model" failure would
-    report the hazard where there is none while saying nothing about the one
-    that matters. Everything else is delegated to the real function, which is
-    what those checks would have called anyway.
+    because `runtime.model_cli`, `runtime.tmux` and the forge checks all spawn a
+    real `--version` in a whole-registry run. Everything else is delegated.
     """
 
     def __init__(self):
@@ -1377,19 +1177,19 @@ class TestModelExecution:
     the one invoked, so no case can bill the account by accident.
     """
 
-    def _config(self, make_config, make_user_config, tmp_path, **overrides):
+    def _config(self, make_config, make_user_config, **overrides):
         fields = {"users": {"alice": make_user_config()}, "admin_users": {"alice"}}
         fields.update(overrides)
         return make_config(**fields)
 
-    def _stub(self, monkeypatch, *, stdout="healthcheck-ok\n", stderr="", raises=None):
+    def _stub(self, monkeypatch, *, stdout="healthcheck-ok\n", stderr="", raises=None, returncode=0):
         calls = []
 
         def _run_stub(cmd, **kwargs):
             calls.append((cmd, kwargs))
             if raises is not None:
                 raise raises
-            return subprocess.CompletedProcess(cmd, 0, stdout, stderr)
+            return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
 
         monkeypatch.setattr(subprocess, "run", _run_stub)
         return calls
@@ -1400,200 +1200,124 @@ class TestModelExecution:
 
         monkeypatch.setattr(executor, "effective_sandboxing", lambda config: False)
 
+    def _sandboxed(self, monkeypatch, wrap=lambda cmd, *a, **kw: list(cmd)):
+        from istota import executor
+
+        monkeypatch.setattr(executor, "effective_sandboxing", lambda config: True)
+        monkeypatch.setattr(executor, "build_bwrap_cmd", wrap)
+
     def _run(self, config, **kwargs):
         kwargs.setdefault("live", True)
         return run_checks(config, only=("runtime.model_execution",), **kwargs)[0]
 
     def test_skips_under_probe_false_even_when_live(
-        self, make_config, make_user_config, tmp_path, monkeypatch
+        self, make_config, make_user_config, monkeypatch
     ):
         """The no-spawn constraint at the top of doctor.py is unconditional,
         and this is the most expensive possible way to violate it."""
         monkeypatch.setattr(subprocess, "run", _NoModel())
-        config = self._config(make_config, make_user_config, tmp_path)
-        r = self._run(config, probe=False)
+        r = self._run(self._config(make_config, make_user_config), probe=False)
         assert r.status == SKIP
 
-    def test_skips_on_a_native_brain(
-        self, make_config, make_user_config, tmp_path, monkeypatch
-    ):
+    def test_skips_on_a_native_brain(self, make_config, make_user_config, monkeypatch):
         from istota.config import BrainConfig
 
         monkeypatch.setattr(subprocess, "run", _NoModel())
-        config = self._config(
-            make_config, make_user_config, tmp_path, brain=BrainConfig(kind="native")
-        )
-        r = self._run(config)
+        r = self._run(self._config(make_config, make_user_config, brain=BrainConfig(kind="native")))
         assert r.status == SKIP
         assert "native" in r.detail
 
-    def test_skips_with_no_user_to_run_as(self, make_config, tmp_path, monkeypatch):
-        monkeypatch.setattr(subprocess, "run", _NoModel())
+    def test_skips_with_no_user_to_run_as(self, make_config, monkeypatch):
+        sentinel = _NoModel()
+        monkeypatch.setattr(subprocess, "run", sentinel)
         r = self._run(make_config())
         assert r.status == SKIP
         assert "user" in r.detail
+        assert r.scope == DEPLOYMENT
+        # A scope assertion is true of the FAIL a swallowed sentinel would
+        # produce as well, so it cannot stand alone on this check.
+        assert sentinel.calls == []
 
-    def test_ok_when_the_echo_comes_back(
-        self, make_config, make_user_config, tmp_path, monkeypatch
-    ):
+    def test_ok_when_the_echo_comes_back(self, make_config, make_user_config, monkeypatch):
         self._unsandboxed(monkeypatch)
         calls = self._stub(monkeypatch)
-        r = self._run(self._config(make_config, make_user_config, tmp_path))
+        r = self._run(self._config(make_config, make_user_config))
         assert r.status == OK
         assert len(calls) == 1
         cmd, kwargs = calls[0]
         assert cmd[0] == "claude" and "healthcheck-ok" in " ".join(cmd)
         assert kwargs["timeout"] == doctor.MODEL_PROBE_TIMEOUT
 
-    def test_fails_when_the_output_is_wrong(
-        self, make_config, make_user_config, tmp_path, monkeypatch
-    ):
+    @pytest.mark.parametrize(
+        "stub,named",
+        [
+            # The excerpt is what makes the finding actionable; without
+            # asserting it the `observed` chain could return "" and pass.
+            ({"stdout": "something else", "stderr": "boom"}, ("boom",)),
+            ({"stdout": "only on stdout", "returncode": 7}, ("only on stdout", "7")),
+            ({"stdout": "", "stderr": ""}, ("no output",)),
+            ({"raises": subprocess.TimeoutExpired(cmd=["claude"], timeout=30)}, ("timed out",)),
+            ({"raises": FileNotFoundError("no claude")}, ()),
+        ],
+        ids=["wrong-output", "stdout-fallback-and-exit-status", "no-output", "timeout", "missing-binary"],
+    )
+    def test_fails_and_says_why(self, make_config, make_user_config, monkeypatch, stub, named):
         self._unsandboxed(monkeypatch)
-        self._stub(monkeypatch, stdout="something else", stderr="boom")
-        r = self._run(self._config(make_config, make_user_config, tmp_path))
+        calls = self._stub(monkeypatch, **stub)
+        r = self._run(self._config(make_config, make_user_config))
         assert r.status == FAIL
         assert r.remedy.strip()
-        # The excerpt is what makes the finding actionable; without asserting it
-        # the whole `observed` chain could return "" and this would still pass.
-        assert "boom" in r.detail
-
-    def test_the_detail_falls_back_to_stdout_and_names_the_exit_status(
-        self, make_config, make_user_config, tmp_path, monkeypatch
-    ):
-        self._unsandboxed(monkeypatch)
-        calls = []
-
-        def _run_stub(cmd, **kwargs):
-            calls.append(cmd)
-            return subprocess.CompletedProcess(cmd, 7, "only on stdout", "")
-
-        monkeypatch.setattr(subprocess, "run", _run_stub)
-        r = self._run(self._config(make_config, make_user_config, tmp_path))
-        assert r.status == FAIL
-        assert "only on stdout" in r.detail
-        assert "7" in r.detail
         assert calls
+        for text in named:
+            assert text in r.detail
 
-    def test_the_detail_bounds_a_long_stream(
-        self, make_config, make_user_config, tmp_path, monkeypatch
-    ):
+    def test_the_detail_bounds_a_long_stream(self, make_config, make_user_config, monkeypatch):
         """A subprocess stream is unbounded; a rendered check line is not."""
         self._unsandboxed(monkeypatch)
         self._stub(monkeypatch, stdout="nope", stderr="x " * 5000)
-        r = self._run(self._config(make_config, make_user_config, tmp_path))
+        r = self._run(self._config(make_config, make_user_config))
         assert len(r.detail) < 400, len(r.detail)
 
-    def test_the_detail_says_so_when_there_was_no_output_at_all(
-        self, make_config, make_user_config, tmp_path, monkeypatch
+    @pytest.mark.parametrize(
+        "users,admins,expected",
+        [
+            # The probe answers about the deployment, so which user it ran as
+            # belongs in the detail.
+            (("alice", "bob"), {"bob"}, "bob"),
+            # An empty `admin_users` means everyone is admin, so it names
+            # nobody and the user list decides.
+            (("alice",), set(), "alice"),
+            # With several admins it must still run in an admin's sandbox
+            # shape; the first configured user here is a non-admin.
+            (("alice", "bob", "carol"), {"bob", "carol"}, "bob"),
+            # `admin_users` comes from /etc/istota/admins and has no relation
+            # to `config.users`; an admin with nothing behind it would get a
+            # namespace around a workspace that does not exist.
+            (("alice",), {"ghost"}, "alice"),
+        ],
+        ids=["single-admin", "everyone-admin", "admin-who-is-a-user", "admin-with-no-user-config"],
+    )
+    def test_which_user_it_runs_as(
+        self, make_config, make_user_config, monkeypatch, users, admins, expected
     ):
-        self._unsandboxed(monkeypatch)
-        self._stub(monkeypatch, stdout="", stderr="")
-        r = self._run(self._config(make_config, make_user_config, tmp_path))
-        assert r.status == FAIL
-        assert "no output" in r.detail
-
-    def test_fails_on_a_timeout(
-        self, make_config, make_user_config, tmp_path, monkeypatch
-    ):
-        self._unsandboxed(monkeypatch)
-        self._stub(
-            monkeypatch, raises=subprocess.TimeoutExpired(cmd=["claude"], timeout=30)
-        )
-        r = self._run(self._config(make_config, make_user_config, tmp_path))
-        assert r.status == FAIL
-        assert "timed out" in r.detail
-
-    def test_fails_when_the_binary_is_missing(
-        self, make_config, make_user_config, tmp_path, monkeypatch
-    ):
-        self._unsandboxed(monkeypatch)
-        self._stub(monkeypatch, raises=FileNotFoundError("no claude"))
-        r = self._run(self._config(make_config, make_user_config, tmp_path))
-        assert r.status == FAIL
-
-    def test_resolves_the_single_admin_and_says_so(
-        self, make_config, make_user_config, tmp_path, monkeypatch
-    ):
-        """The probe answers a question about the deployment, not about a
-        caller, so which user it ran as belongs in the detail."""
         self._unsandboxed(monkeypatch)
         self._stub(monkeypatch)
         config = self._config(
-            make_config,
-            make_user_config,
-            tmp_path,
-            users={"alice": make_user_config(), "bob": make_user_config()},
-            admin_users={"bob"},
+            make_config, make_user_config,
+            users={u: make_user_config() for u in users}, admin_users=admins,
         )
-        assert "bob" in self._run(config).detail
-
-    def test_falls_through_to_a_configured_user_when_everyone_is_admin(
-        self, make_config, make_user_config, tmp_path, monkeypatch
-    ):
-        """An empty `admin_users` means everyone is admin (`Config.is_admin`),
-        so it names nobody in particular and the user list decides."""
-        self._unsandboxed(monkeypatch)
-        self._stub(monkeypatch)
-        config = self._config(
-            make_config,
-            make_user_config,
-            tmp_path,
-            users={"alice": make_user_config()},
-            admin_users=set(),
-        )
-        assert "alice" in self._run(config).detail
-
-    def test_prefers_an_admin_who_is_also_a_configured_user(
-        self, make_config, make_user_config, tmp_path, monkeypatch
-    ):
-        """With several admins, the probe must still run in an admin's sandbox
-        shape — that is the deployment the operator asked about. Picking the
-        first configured user would answer as `alice`, a non-admin, and
-        `build_bwrap_cmd` would build the scoped namespace instead."""
-        self._unsandboxed(monkeypatch)
-        self._stub(monkeypatch)
-        config = self._config(
-            make_config,
-            make_user_config,
-            tmp_path,
-            users={
-                "alice": make_user_config(),
-                "bob": make_user_config(),
-                "carol": make_user_config(),
-            },
-            admin_users={"bob", "carol"},
-        )
-        assert "bob" in self._run(config).detail
-
-    def test_an_admin_with_no_user_config_does_not_displace_a_real_user(
-        self, make_config, make_user_config, tmp_path, monkeypatch
-    ):
-        """`admin_users` comes from /etc/istota/admins and has no relationship
-        to `config.users`, so an admin id with nothing behind it would get a
-        namespace around a workspace that does not exist — a failure about the
-        user list wearing a model-failure label."""
-        self._unsandboxed(monkeypatch)
-        self._stub(monkeypatch)
-        config = self._config(
-            make_config,
-            make_user_config,
-            tmp_path,
-            users={"alice": make_user_config()},
-            admin_users={"ghost"},
-        )
-        assert "alice" in self._run(config).detail
+        assert expected in self._run(config).detail
 
     def test_refuses_rather_than_creating_the_per_user_temp_dir(
-        self, make_config, make_user_config, tmp_path, monkeypatch
+        self, make_config, make_user_config, monkeypatch
     ):
-        """Doctor is a diagnostic and one of its entry points is an operator
-        shell, so creating this directory means `sudo istota doctor` leaves a
-        root-owned one every later task binds read-write and cannot write to."""
+        """Created by `sudo istota doctor`, this directory would be root-owned,
+        and every later task binds it read-write and cannot write to it."""
         from istota import executor
 
         monkeypatch.setattr(executor, "effective_sandboxing", lambda config: True)
         monkeypatch.setattr(subprocess, "run", _NoModel())
-        config = self._config(make_config, make_user_config, tmp_path)
+        config = self._config(make_config, make_user_config)
         user_temp = Path(config.temp_dir) / "alice"
         assert not user_temp.exists()
 
@@ -1603,18 +1327,13 @@ class TestModelExecution:
         assert not user_temp.exists(), "the check created the directory it was asked about"
 
     def test_reads_user_resources_without_writing(
-        self, make_config, make_user_config, tmp_path, monkeypatch
+        self, make_config, make_user_config, monkeypatch
     ):
-        """`db.get_db` connects read-write and *commits*; this must not.
-
-        The sidecars are no longer the reason — ISSUE-458 measured that a
-        read-write open is the one that removes them, and `connect_read_only`
-        now opens `mode=rw` for exactly that. What is left of the rule is the
-        commit and the refusal to create a missing database.
-        """
+        """`db.get_db` connects read-write and *commits*; this must not, nor
+        create a missing database (ISSUE-458 dropped the sidecar reason)."""
         import sqlite3
 
-        from istota import db, executor
+        from istota import db
 
         seen = []
         real_connect = sqlite3.connect
@@ -1623,12 +1342,11 @@ class TestModelExecution:
             seen.append(str(target))
             return real_connect(target, *args, **kwargs)
 
-        config = self._config(make_config, make_user_config, tmp_path)
+        config = self._config(make_config, make_user_config)
         db.init_db(Path(config.db_path))
         (Path(config.temp_dir) / "alice").mkdir(parents=True)
 
-        monkeypatch.setattr(executor, "effective_sandboxing", lambda config: True)
-        monkeypatch.setattr(executor, "build_bwrap_cmd", lambda cmd, *a, **kw: list(cmd))
+        self._sandboxed(monkeypatch)
         self._stub(monkeypatch)
         monkeypatch.setattr(sqlite3, "connect", _spy)
 
@@ -1637,37 +1355,26 @@ class TestModelExecution:
         assert all(("?mode=ro" in t or "?mode=rw" in t) for t in seen), seen
 
     def test_an_absent_database_yields_no_resources_and_creates_nothing(
-        self, make_config, make_user_config, tmp_path, monkeypatch
+        self, make_config, make_user_config, monkeypatch
     ):
-        """This is the one read-only call site with no `exists()` guard.
-
-        The other four check the path first; `_read_user_resources` relies
-        entirely on `connect_read_only` naming a mode rather than defaulting to
-        `rwc`, so a missing database raises and its bare `except` returns `[]`.
-        Nothing tested that, and the failure it guards against is silent: a
-        zero-byte database created under `sudo` beside a stopped daemon, which
-        a later read reports as corruption rather than absence.
-        """
-        from istota import executor
-
-        config = self._config(make_config, make_user_config, tmp_path)
+        """The one read-only call site with no `exists()` guard: it relies on
+        `connect_read_only` naming a mode rather than defaulting to `rwc`, so a
+        missing database raises and its bare `except` returns `[]`."""
+        config = self._config(make_config, make_user_config)
         db_path = Path(config.db_path)
         assert not db_path.exists()
         (Path(config.temp_dir) / "alice").mkdir(parents=True)
-
-        monkeypatch.setattr(executor, "effective_sandboxing", lambda config: True)
-        monkeypatch.setattr(executor, "build_bwrap_cmd", lambda cmd, *a, **kw: list(cmd))
+        self._sandboxed(monkeypatch)
         self._stub(monkeypatch)
 
         assert doctor._read_user_resources(config, "alice") == []
         assert not db_path.exists(), "the check created the database it was reading"
 
     def test_wraps_under_effective_sandboxing_not_the_flag(
-        self, make_config, make_user_config, tmp_path, monkeypatch
+        self, make_config, make_user_config, monkeypatch
     ):
         """On the shipped Docker stack `sandbox_enabled` is true and the
-        namespace cannot be created, so the copies' spelling builds a wrap that
-        dies for the wrong reason."""
+        namespace cannot be created, so a wrap there dies for the wrong reason."""
         from istota import executor
 
         def _must_not_wrap(*args, **kwargs):
@@ -1676,14 +1383,12 @@ class TestModelExecution:
         monkeypatch.setattr(executor, "effective_sandboxing", lambda config: False)
         monkeypatch.setattr(executor, "build_bwrap_cmd", _must_not_wrap)
         calls = self._stub(monkeypatch)
-        config = self._config(make_config, make_user_config, tmp_path)
-        assert self._run(config).status == OK
+        assert self._run(self._config(make_config, make_user_config)).status == OK
         assert calls[0][0][0] == "claude"
 
     def test_wraps_when_the_sandbox_is_effective(
-        self, make_config, make_user_config, tmp_path, monkeypatch
+        self, make_config, make_user_config, monkeypatch
     ):
-        from istota import executor
         from istota.executor import SandboxProfile
 
         seen = {}
@@ -1691,13 +1396,11 @@ class TestModelExecution:
         def _wrap(cmd, config, task, is_admin, user_resources, user_temp_dir, *a, **kw):
             seen["profile"] = kw.get("profile")
             seen["task"] = task
-            seen["temp"] = user_temp_dir
             return ["bwrap", "--", *cmd]
 
-        monkeypatch.setattr(executor, "effective_sandboxing", lambda config: True)
-        monkeypatch.setattr(executor, "build_bwrap_cmd", _wrap)
+        self._sandboxed(monkeypatch, _wrap)
         calls = self._stub(monkeypatch)
-        config = self._config(make_config, make_user_config, tmp_path)
+        config = self._config(make_config, make_user_config)
         # The check refuses to create this itself; the daemon owns that.
         (Path(config.temp_dir) / "alice").mkdir(parents=True)
         assert self._run(config).status == OK
@@ -1706,7 +1409,7 @@ class TestModelExecution:
         assert seen["task"].user_id == "alice"
 
     def test_env_comes_from_build_model_cli_env(
-        self, make_config, make_user_config, tmp_path, monkeypatch
+        self, make_config, make_user_config, monkeypatch
     ):
         """A daemon-side model call with no task behind it: its env is that
         function's business, not `os.environ`'s."""
@@ -1715,49 +1418,41 @@ class TestModelExecution:
         self._unsandboxed(monkeypatch)
         monkeypatch.setattr(executor, "build_model_cli_env", lambda config: {"MARKER": "1"})
         calls = self._stub(monkeypatch)
-        self._run(self._config(make_config, make_user_config, tmp_path))
+        self._run(self._config(make_config, make_user_config))
         assert calls[0][1]["env"] == {"MARKER": "1"}
-
-    def test_is_deployment_scoped(self, make_config, tmp_path, monkeypatch):
-        sentinel = _NoModel()
-        monkeypatch.setattr(subprocess, "run", sentinel)
-        assert self._run(make_config()).scope == DEPLOYMENT
-        # A scope assertion is true of the FAIL a swallowed sentinel would
-        # produce as well, so it cannot stand alone on this check.
-        assert sentinel.calls == []
 
 
 class TestLiveChecks:
     """The second opt-in axis. `DEEP_CHECKS` means "spawns a namespace";
     `LIVE_CHECKS` means "costs money", and no caller wants one flag for both."""
 
-    def test_live_checks_are_registered(self):
-        assert doctor.LIVE_CHECKS <= {name for name, _ in CHECKS}
-
     def test_the_two_axes_are_disjoint(self):
         assert not (doctor.LIVE_CHECKS & DEEP_CHECKS)
 
     def test_the_sentinel_matches_the_probes_own_marker(self):
         """`_NoModel` discriminates on this string. A rename in doctor.py that
-        did not reach here would disarm every guard in this file at once, and
-        every one of them would keep passing."""
+        did not reach here would disarm every guard in this file at once."""
         assert doctor._MODEL_PROBE_MARKER == _MODEL_MARKER
 
     def test_deep_checks_is_exactly_the_mask_probe(self):
         """A budget guard for `web_app._doctor_deep_timeout`, which is
-        `DEEP_TIMEOUT` plus headroom for exactly one deep check. It lives here
-        because the file that pays for a violation cannot see it."""
+        `DEEP_TIMEOUT` plus headroom for exactly one deep check."""
         assert DEEP_CHECKS == frozenset({"sandbox.masks"})
 
-    def test_deep_does_not_select_a_live_check(self, make_config, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        "flags,present,absent",
+        [
+            ({"deep": True}, None, "runtime.model_execution"),
+            ({"live": True}, "runtime.model_execution", "sandbox.masks"),
+        ],
+        ids=["deep-selects-no-live-check", "live-selects-it-and-not-deep"],
+    )
+    def test_each_flag_selects_only_its_own_axis(self, make_config, monkeypatch, flags, present, absent):
         monkeypatch.setattr(subprocess, "run", _NoModel())
-        names = {r.name for r in run_checks(make_config(), deep=True)}
-        assert "runtime.model_execution" not in names
-
-    def test_live_selects_it(self, make_config, tmp_path, monkeypatch):
-        monkeypatch.setattr(subprocess, "run", _NoModel())
-        names = {r.name for r in run_checks(make_config(), live=True)}
-        assert "runtime.model_execution" in names
+        names = {r.name for r in run_checks(make_config(), **flags)}
+        assert absent not in names
+        if present:
+            assert present in names
 
     def test_live_filters_before_invoking(self, make_config, tmp_path, monkeypatch):
         """A live check discarded after the fact is a live check that already
@@ -1779,20 +1474,16 @@ class TestLiveChecks:
         assert called == []
         assert [r.name for r in results] == ["runtime.platform"]
 
-    def test_live_does_not_imply_deep(self, make_config, tmp_path, monkeypatch):
-        monkeypatch.setattr(subprocess, "run", _NoModel())
-        names = {r.name for r in run_checks(make_config(), live=True)}
-        assert "sandbox.masks" not in names
-
 
 class TestWritableDirs:
-    def test_writable_dirs_are_ok(self, make_config, tmp_path):
-        config = make_config()
-        results = run_checks(config, only=("runtime.writable_dirs",))
-        assert results
+    def test_writable_dirs_are_ok_one_result_per_directory(self, make_config, tmp_path):
+        results = run_checks(make_config(), only=("runtime.writable_dirs",))
         assert all(r.status == OK for r in results), [
             (r.name, r.status, r.detail) for r in results if r.status != OK
         ]
+        names = {r.name for r in results}
+        assert "runtime.writable_dirs.temp_dir" in names
+        assert "runtime.writable_dirs.module_db_root" in names
 
     @pytest.mark.requires_dac
     def test_unwritable_dir_fails(self, make_config, tmp_path):
@@ -1808,11 +1499,6 @@ class TestWritableDirs:
         finally:
             temp.chmod(0o700)
 
-    def test_one_result_per_directory(self, make_config):
-        names = {r.name for r in run_checks(make_config(), only=("runtime.writable_dirs",))}
-        assert "runtime.writable_dirs.temp_dir" in names
-        assert "runtime.writable_dirs.module_db_root" in names
-
 
 class TestMountLiveness:
     @staticmethod
@@ -1823,13 +1509,11 @@ class TestMountLiveness:
             nextcloud=NextcloudConfig(url="https://cloud.example"), **overrides
         )
 
-    def test_skips_when_no_mount_configured(self, make_config):
-        config = make_config(nextcloud_mount_path=None)
-        r = run_checks(config, only=("runtime.mount_liveness",))[0]
-        assert r.status == SKIP
+    @pytest.mark.parametrize("url", ["", "https://cloud.example"], ids=["local", "nextcloud-url"])
+    def test_skips_when_no_mount_configured(self, make_config, url):
+        from istota.config import NextcloudConfig
 
-    def test_nextcloud_url_without_mount_still_skips(self, make_config):
-        config = self._nextcloud_backed(make_config, nextcloud_mount_path=None)
+        config = make_config(nextcloud=NextcloudConfig(url=url), nextcloud_mount_path=None)
         r = run_checks(config, only=("runtime.mount_liveness",))[0]
         assert r.status == SKIP
 
@@ -1862,6 +1546,7 @@ _REAL_GET_SNAPSHOT = subscription_usage.get_snapshot
 # would catch it if it were a configured secret — it is not one, which is the
 # point: the check must keep it out of the report on its own.
 _TOKEN_SENTINEL = "sk-ant-oat01-" + "z" * 40
+_TOKEN_ENV = {"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL}
 
 
 class _UsageTransport:
@@ -1892,10 +1577,8 @@ _RESETS_IN = 3870
 def _usage_body(*percents, resets_in=_RESETS_IN):
     """A `limits[]` payload with one window per percentage, resetting soon.
 
-    `resets_at` is built from the wall clock rather than a frozen constant
-    because the check passes its own `time.time()` all the way through — to the
-    fetch, to the countdown, and to the staleness age — and a fixed timestamp
-    would drift into the past as the year goes on.
+    `resets_at` comes from the wall clock because the check passes its own
+    `time.time()` through to the fetch, the countdown and the staleness age.
     """
     kinds = ["session", "weekly_all"]
     resets_at = datetime.fromtimestamp(time.time() + resets_in, tz=timezone.utc).isoformat()
@@ -1934,16 +1617,12 @@ def _drive_usage(
 ):
     """Reinstate the real `get_snapshot` with only the host substituted.
 
-    The check calls `get_snapshot(config, now_ts=...)` and has nowhere to pass a
-    transport, an environment or a home — right for production, useless for a
-    test, because the resolver would then read the developer's own keychain and
-    the fetch would be a live request. Supplying those three behind a wrapper
-    runs the whole real policy (resolution, TTL, cache, fetch, stale fallback)
-    against a stub host.
-
-    `now_ts` is passed through rather than frozen: the check computes the
-    staleness age against the same clock it hands the module, and overriding one
-    half of that pair would make every reading look hours old.
+    The check has nowhere to pass a transport, an environment or a home, so the
+    resolver would read the developer's own keychain and fetch live. Supplying
+    those three behind a wrapper runs the whole real policy (resolution, TTL,
+    cache, fetch, stale fallback) against a stub host. `now_ts` is passed
+    through rather than frozen, since the check computes the staleness age
+    against the same clock it hands the module.
     """
     from istota import subscription_usage as su
 
@@ -1987,9 +1666,8 @@ class TestSubscriptionUsage:
 
     On a subscription deployment the dashboard's cost column is deliberately
     blank, so the rate-limit windows are the only budget there is. Every test
-    here asserts the check did not SKIP before asserting anything else: the
-    module docstring's warning applies with full force to a check whose natural
-    resting state on an unconfigured host is exactly SKIP.
+    here asserts the check did not SKIP before asserting anything else, since a
+    SKIP is this check's natural resting state on an unconfigured host.
     """
 
     def _result(self, config, **kwargs):
@@ -1997,23 +1675,18 @@ class TestSubscriptionUsage:
         assert len(results) == 1
         return results[0]
 
+    def _drive(self, monkeypatch, *percents, status=200, body=None):
+        """Drive the check against a stub endpoint, authenticated from the env."""
+        transport = _UsageTransport(
+            status=status, body=_usage_body(*percents) if body is None else body
+        )
+        _drive_usage(monkeypatch, transport=transport, env=_TOKEN_ENV)
+        return transport
+
     def test_it_is_registered_as_a_deployment_check_and_is_not_deep(self):
         """It reads a network endpoint, not the image, and spawns no namespace."""
         assert doctor.CHECK_SCOPES["runtime.subscription_usage"] == DEPLOYMENT
         assert "runtime.subscription_usage" not in DEEP_CHECKS
-
-    def test_doctor_does_not_import_the_module_at_module_scope(self):
-        """The import is lazy, so `doctor` stays cheap for the config-load path.
-
-        `_validate_forge_clis` imports `doctor` inside every `load_config`, which
-        runs in every CLI invocation and every host-side skill CLI the proxy
-        spawns per call. Same technique as `TestConfigLoadPathStaysCheap`.
-        """
-        code = "import json, sys\nimport istota.doctor\nprint(json.dumps(sorted(sys.modules)))"
-        out = subprocess.run(
-            [sys.executable, "-c", code], capture_output=True, text=True, check=True
-        )
-        assert "istota.subscription_usage" not in set(json.loads(out.stdout))
 
     def test_disabled_by_config_skips(self, make_config, monkeypatch):
         transport = _UsageTransport(body=_usage_body(40))
@@ -2024,15 +1697,10 @@ class TestSubscriptionUsage:
         assert transport.calls == []
 
     def test_probe_false_skips_without_a_network_call(self, make_config, monkeypatch):
-        """`TestRegistry` already proves no check spawns a process under
-        probe=False. This one must clear the network bar too, and a check that
-        merely skipped *rendering* while still fetching would pass that test."""
+        """`TestRegistry` proves no check spawns under probe=False; this one
+        must clear the network bar too, without even asking for a snapshot."""
         transport = _UsageTransport(body=_usage_body(40))
-        snapshots = _drive_usage(
-            monkeypatch,
-            transport=transport,
-            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
-        )
+        snapshots = _drive_usage(monkeypatch, transport=transport, env=_TOKEN_ENV)
         r = self._result(_usage_config(make_config), probe=False)
         assert r.status == SKIP
         assert "probe disabled" in r.detail
@@ -2048,17 +1716,9 @@ class TestSubscriptionUsage:
         assert transport.calls == [], "nothing to authenticate with, so nothing to send"
 
     def test_a_healthy_plan_is_ok_and_names_every_window(self, make_config, monkeypatch):
-        """Worst first, and *all* of them.
-
-        "5-hour at 12%, weekly at 94%" and "5-hour at 94%, weekly at 12%" call
-        for different operator responses, and this one line is the whole of what
-        a terminal reader sees.
-        """
-        _drive_usage(
-            monkeypatch,
-            transport=_UsageTransport(body=_usage_body(12, 40)),
-            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
-        )
+        """Worst first, and *all* of them: "5-hour at 12%, weekly at 94%" and
+        the reverse call for different operator responses."""
+        self._drive(monkeypatch, 12, 40)
         r = self._result(_usage_config(make_config))
         assert r.status == OK
         assert "5-hour at 12%" in r.detail
@@ -2071,117 +1731,67 @@ class TestSubscriptionUsage:
         [(0, False), (79.9, False), (80, True), (94.9, True), (95, True), (100, True)],
     )
     def test_the_thresholds(self, make_config, monkeypatch, percent, expect_warn):
-        _drive_usage(
-            monkeypatch,
-            transport=_UsageTransport(body=_usage_body(percent)),
-            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
-        )
+        self._drive(monkeypatch, percent)
         r = self._result(_usage_config(make_config))
         assert r.status == (WARN if expect_warn else OK)
         if expect_warn:
             assert r.remedy, "a WARN an operator cannot act on is a log line"
 
-    @pytest.mark.parametrize("percent,expect_warn", [(45, False), (55, True)])
+    @pytest.mark.parametrize(
+        "warn,high,percent,expect_warn",
+        [
+            (50.0, 60.0, 45, False),
+            (50.0, 60.0, 55, True),
+            # `warn` above `high` would otherwise make the band unreachable.
+            # The loader corrects the pair; this is the second line. 75% sits
+            # below the default warn of 80 too.
+            (90.0, 70.0, 75, True),
+        ],
+        ids=["configured-below", "configured-above", "inverted-pair-still-warns"],
+    )
     def test_the_configured_thresholds_are_the_ones_that_are_read(
-        self, make_config, monkeypatch, percent, expect_warn
+        self, make_config, monkeypatch, warn, high, percent, expect_warn
     ):
-        """Every other threshold case sets the value the dataclass already has.
-
-        A check that ignored `[brain.claude_code]` entirely and used its own
-        hardcoded 80/95 would pass all of them. This is the case that fails on
-        such a check: 55% is a WARN only if the configured 50 was read, and 45%
-        is an OK only if the hardcoded 80 was not.
-        """
+        """A check that ignored `[brain.claude_code]` and used a hardcoded 80/95
+        would pass every case above; it fails these."""
         config = _usage_config(
             make_config,
-            subscription_usage_warn_percent=50.0,
-            subscription_usage_high_percent=60.0,
+            subscription_usage_warn_percent=warn,
+            subscription_usage_high_percent=high,
         )
-        _drive_usage(
-            monkeypatch,
-            transport=_UsageTransport(body=_usage_body(percent)),
-            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
-        )
-        r = self._result(config)
-        assert r.status == (WARN if expect_warn else OK)
+        self._drive(monkeypatch, percent)
+        assert self._result(config).status == (WARN if expect_warn else OK)
 
-    def test_an_inverted_threshold_pair_still_warns_in_the_gap(
-        self, make_config, monkeypatch
+    @pytest.mark.parametrize(
+        "fallback,present,absent",
+        [
+            ("native", "native", "No [brain] fallback"),
+            ("", "No [brain] fallback is configured", "fail over"),
+        ],
+        ids=["configured-fallback", "no-fallback"],
+    )
+    def test_the_busy_remedy_names_the_fallback_or_its_absence(
+        self, make_config, monkeypatch, fallback, present, absent
     ):
-        """`warn` above `high` would otherwise make the band unreachable.
-
-        The loader corrects the pair, so this is the second line: a config that
-        reached the dataclass some other way must not silently stop warning.
-
-        75% is chosen to sit below the *default* warn of 80 as well, so a check
-        that ignored the configured pair entirely would answer OK here.
-        """
-        config = _usage_config(
-            make_config,
-            subscription_usage_warn_percent=90.0,
-            subscription_usage_high_percent=70.0,
-        )
-        _drive_usage(
-            monkeypatch,
-            transport=_UsageTransport(body=_usage_body(75)),
-            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
-        )
-        assert self._result(config).status == WARN
-
-    def test_the_busy_remedy_names_the_configured_fallback(
-        self, make_config, monkeypatch
-    ):
-        """ISSUE-362: the remedy used to promise a failover unconditionally.
-
-        `claude_code` has never had an implicit fallback and since ISSUE-362 no
-        kind has, so on a deployment with none the old fixed literal told the
-        operator their tasks would reroute when they will simply fail.
-        """
+        """ISSUE-362: the remedy used to promise a failover unconditionally,
+        and no kind has an implicit fallback."""
         from istota.config import BrainConfig, ClaudeCodeBrainConfig
 
-        _drive_usage(
-            monkeypatch,
-            transport=_UsageTransport(body=_usage_body(97)),
-            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
-        )
+        self._drive(monkeypatch, 97)
+        brain = {"fallback": fallback} if fallback else {}
         config = make_config(
-            brain=BrainConfig(
-                kind="claude_code",
-                fallback="native",
-                claude_code=ClaudeCodeBrainConfig(),
-            )
+            brain=BrainConfig(kind="claude_code", claude_code=ClaudeCodeBrainConfig(), **brain)
         )
         r = self._result(config)
         assert r.status == WARN
-        assert "native" in r.remedy
-        assert "No [brain] fallback" not in r.remedy
-
-    def test_the_busy_remedy_says_so_when_there_is_no_fallback(
-        self, make_config, monkeypatch
-    ):
-        _drive_usage(
-            monkeypatch,
-            transport=_UsageTransport(body=_usage_body(97)),
-            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
-        )
-        r = self._result(_usage_config(make_config))
-        assert r.status == WARN
-        assert "No [brain] fallback is configured" in r.remedy
-        assert "fail over" not in r.remedy
+        assert present in r.remedy
+        assert absent not in r.remedy
 
     @pytest.mark.parametrize("percent", [0, 79.9, 80, 94.9, 95, 100, 150])
     def test_no_utilization_ever_fails(self, make_config, monkeypatch, percent):
-        """A plan at 97% is a fact about the plan, not a defect in the host.
-
-        `doctor.exit_code` returns 1 on any FAIL and `scheduler._alert_doctor_failures`
-        messages every admin on the transition into failure. Neither is a
-        reasonable response to a busy week.
-        """
-        _drive_usage(
-            monkeypatch,
-            transport=_UsageTransport(body=_usage_body(percent)),
-            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
-        )
+        """A plan at 97% is a fact about the plan, not a defect in the host;
+        a FAIL would set the exit code and message every admin."""
+        self._drive(monkeypatch, percent)
         r = self._result(_usage_config(make_config))
         assert r.status != FAIL
         assert r.status != SKIP, "a SKIP here would pass this test on a broken check"
@@ -2190,17 +1800,10 @@ class TestSubscriptionUsage:
     def test_a_rejected_credential_skips_naming_which_one(
         self, make_config, tmp_path, monkeypatch, source
     ):
-        """Three credential sources resolve, and only the source name is fit to print.
-
-        Which one the endpoint refused is the whole diagnostic: a setup token in
-        the environment and an interactive login in the keychain fail for
-        completely different reasons and have different repairs.
-
-        SKIP rather than WARN, and no remedy. The endpoint does not serve the
-        long-lived setup-token credential both server shapes deploy, so on those
-        hosts this row was a permanent warning naming no action anyone could
-        take. The reason is still carried; only the severity changed.
-        """
+        """Which source the endpoint refused is the whole diagnostic, and only
+        its name is fit to print. SKIP with no remedy: the endpoint does not
+        serve the setup-token credential both server shapes deploy, so a WARN
+        was permanent there and named no action anyone could take."""
         transport = _UsageTransport(status=403, body=b'{"error":"forbidden"}')
         _drive_usage(monkeypatch, transport=transport, **self._sources(tmp_path, source))
         r = self._result(_usage_config(make_config))
@@ -2215,19 +1818,13 @@ class TestSubscriptionUsage:
     def test_the_token_value_is_never_in_the_report(
         self, make_config, tmp_path, monkeypatch, source, status
     ):
-        """Doctor's `redact()` is a backstop, not the plan.
-
-        It scans against `config_secrets`, and this credential is not in the
-        config at all — it comes from the environment, a file in `~/.claude`, or
-        the keychain. Nothing downstream would catch a leak here.
-        """
+        """Doctor's `redact()` scans `config_secrets`, and this credential is not
+        in the config at all, so nothing downstream would catch a leak."""
         transport = _UsageTransport(status=status, body=_usage_body(40))
         _drive_usage(monkeypatch, transport=transport, **self._sources(tmp_path, source))
         r = self._result(_usage_config(make_config))
-        # Not `status != SKIP` any more: a refused credential is a legitimate
-        # SKIP now. The guard that check-level tests must not pass on a check
-        # that never ran still holds, so it is spelled against evidence the
-        # check reached the endpoint and reported what came back.
+        # A refused credential is a legitimate SKIP, so "the check ran" is
+        # spelled against evidence it reached the endpoint and reported back.
         assert transport.calls, "the check never issued a request"
         assert ("403" in r.detail) if status == 403 else ("40" in r.detail)
         assert _TOKEN_SENTINEL not in r.detail + r.remedy
@@ -2240,53 +1837,34 @@ class TestSubscriptionUsage:
         """Resolver inputs that make exactly `source` the winning branch."""
         blob = json.dumps({"claudeAiOauth": {"accessToken": _TOKEN_SENTINEL}})
         if source == "env":
-            return {"env": {"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL}, "home": tmp_path / "no"}
+            return {"env": _TOKEN_ENV, "home": tmp_path / "no"}
         if source == "file":
             return {"env": {}, "home": _credential_file(tmp_path, _TOKEN_SENTINEL)}
         return {"env": {"USER": "someone"}, "home": tmp_path / "no", "darwin_blob": blob}
 
-    def test_an_unreachable_endpoint_with_no_cache_skips(self, make_config, monkeypatch):
-        transport = _UsageTransport(status=500, body=b"")
-        _drive_usage(
-            monkeypatch,
-            transport=transport,
-            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
-        )
+    @pytest.mark.parametrize(
+        "status,body,named",
+        [
+            (500, b"", "500"),
+            # A shipped shape change reads as "nothing to check", not as 0%,
+            # and the detail keeps that the request itself succeeded.
+            (200, b'{"limits": [], "quince": null}', "no recognizable rate-limit windows"),
+        ],
+        ids=["unreachable-no-cache", "no-recognizable-windows"],
+    )
+    def test_no_reading_skips(self, make_config, monkeypatch, status, body, named):
+        self._drive(monkeypatch, status=status, body=body)
         r = self._result(_usage_config(make_config))
         assert r.status == SKIP
-        assert "500" in r.detail
-        assert not r.remedy
-
-    def test_an_endpoint_with_no_recognizable_windows_skips(self, make_config, monkeypatch):
-        """A shipped shape change reads as "nothing to check", not as 0%.
-
-        It reported WARN with a "the parser needs updating" remedy until the
-        whole no-data family became SKIP. The distinction that remedy drew — the
-        request succeeded, so do not go hunting for an egress fault — is worth
-        keeping, and it survives in the detail, which still says the endpoint
-        named no window this reader understands.
-        """
-        _drive_usage(
-            monkeypatch,
-            transport=_UsageTransport(body=b'{"limits": [], "quince": null}'),
-            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
-        )
-        r = self._result(_usage_config(make_config))
-        assert r.status == SKIP
-        assert "no recognizable rate-limit windows" in r.detail
+        assert named in r.detail
         assert not r.remedy
 
     def test_a_windowless_success_skips_rather_than_raising(
         self, make_config, monkeypatch
     ):
-        """The guard behind the never-FAIL promise, driven directly.
-
-        `get_snapshot` cannot return this today — an error-free snapshot always
-        carries windows — so the only way to exercise the guard is to hand the
-        check one. It is worth exercising because the failure mode is an
-        IndexError, and `run_checks` converts a raising check into the one status
-        this check must never produce.
-        """
+        """`get_snapshot` cannot return this today, so the never-FAIL guard is
+        driven directly: unguarded it is an IndexError, which `run_checks`
+        turns into the one status this check must never produce."""
         from istota import subscription_usage as su
 
         monkeypatch.setattr(
@@ -2310,85 +1888,45 @@ class TestSubscriptionUsage:
             su.UsageSnapshot(fetched_at=now - age_seconds, windows=windows, spend=spend),
         )
 
-    def test_a_stale_reading_within_the_window_still_reports_its_numbers(
-        self, make_config, monkeypatch
+    @pytest.mark.parametrize(
+        "stale_after,age,status,named,absent",
+        [
+            # An old-but-real reading is worth more than nothing, but says it
+            # is old: the countdown is recomputed against now and the
+            # percentage is not.
+            (3600, 900, OK, ("5-hour at 40%", "last successful reading is 15m old", "500"), ()),
+            # The same reading against a 60s window instead of the default.
+            (60, 900, SKIP, (), ("5-hour at 40%",)),
+            (3600, 7300, SKIP, ("last successful reading is 2h 01m old", "500"), ()),
+        ],
+        ids=["within-the-window", "configured-window-is-read", "past-the-window"],
+    )
+    def test_a_stale_reading(
+        self, make_config, monkeypatch, stale_after, age, status, named, absent
     ):
-        """An old-but-real reading is worth more than nothing — but say it is old.
-
-        The status stays OK below `stale_after`; that threshold is the whole
-        point of the setting. What must not happen is an hour-long outage reading
-        as a plain OK, because the countdown beside the percentage is recomputed
-        against the current clock while the percentage is not, and that pair is
-        the most misleading line this check could print.
-        """
-        # TTL pinned below the seeded age for the same reason as the test below:
-        # at the shipping 1800s default a 900s reading is fresh, no fetch fires,
-        # and the stale branch this test exists for is never reached.
+        # The TTL is pinned below the seeded age: at the shipping 1800s default
+        # a 900s reading is fresh, nothing fetches and no stale branch runs.
         config = _usage_config(
             make_config,
-            subscription_usage_stale_after_seconds=3600,
+            subscription_usage_stale_after_seconds=stale_after,
             subscription_usage_cache_ttl_seconds=300,
         )
-        self._seed_cache(config, age_seconds=900)
-        _drive_usage(
-            monkeypatch,
-            transport=_UsageTransport(status=500, body=b""),
-            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
-        )
+        self._seed_cache(config, age_seconds=age)
+        self._drive(monkeypatch, status=500, body=b"")
         r = self._result(config)
-        assert r.status == OK
-        assert "5-hour at 40%" in r.detail
-        assert "last successful reading is 15m old" in r.detail
-        assert "500" in r.detail
-
-    def test_the_configured_stale_window_is_the_one_that_is_read(
-        self, make_config, monkeypatch
-    ):
-        """The same 900s reading, against a 60s window instead of the default."""
-        # The cache TTL is pinned below the seeded age: at the shipping default
-        # of 1800 a 900s reading is still *fresh*, so nothing would fetch and
-        # there would be no stale branch under test at all.
-        config = _usage_config(
-            make_config,
-            subscription_usage_stale_after_seconds=60,
-            subscription_usage_cache_ttl_seconds=300,
-        )
-        self._seed_cache(config, age_seconds=900)
-        _drive_usage(
-            monkeypatch,
-            transport=_UsageTransport(status=500, body=b""),
-            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
-        )
-        r = self._result(config)
-        assert r.status == SKIP
-        assert "5-hour at 40%" not in r.detail, "past the window it is not a reading"
-
-    def test_a_reading_older_than_stale_after_skips_with_its_age(
-        self, make_config, monkeypatch
-    ):
-        config = _usage_config(make_config, subscription_usage_stale_after_seconds=3600)
-        self._seed_cache(config, age_seconds=7300)
-        _drive_usage(
-            monkeypatch,
-            transport=_UsageTransport(status=500, body=b""),
-            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
-        )
-        r = self._result(config)
-        assert r.status == SKIP
-        assert "last successful reading is 2h 01m old" in r.detail
-        assert "500" in r.detail
-        assert not r.remedy
+        assert r.status == status
+        for text in named:
+            assert text in r.detail
+        for text in absent:
+            assert text not in r.detail, "past the window it is not a reading"
+        if status == SKIP:
+            assert not r.remedy
 
     def test_a_fresh_cache_is_served_without_a_request(self, make_config, monkeypatch):
         """The TTL is deployment-wide: doctor, the dashboard and `!usage` share it."""
         config = _usage_config(make_config, subscription_usage_cache_ttl_seconds=300)
         self._seed_cache(config, age_seconds=40, percent=90)
-        transport = _UsageTransport(body=_usage_body(1))
-        _drive_usage(
-            monkeypatch,
-            transport=transport,
-            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
-        )
+        transport = self._drive(monkeypatch, 1)
         r = self._result(config)
         assert r.status == WARN
         assert "5-hour at 90%" in r.detail
@@ -2396,52 +1934,43 @@ class TestSubscriptionUsage:
 
 
 class TestSkillProxy:
+    def _run(self, config):
+        return _by_name(run_checks(config, only=("security.skill_proxy",)))
+
     def test_resolvable_is_ok(self, make_config, tmp_path, monkeypatch):
-        fake = _fake_bin(tmp_path / "bin" / "istota-skill")
-        monkeypatch.setattr(
-            doctor.shutil, "which", lambda name: str(fake) if name == "istota-skill" else None
-        )
-        results = _by_name(run_checks(make_config(), only=("security.skill_proxy",)))
-        assert results["security.skill_proxy"].status == OK
+        _which_only(monkeypatch, "istota-skill", _fake_bin(tmp_path / "bin" / "istota-skill"))
+        assert self._run(make_config())["security.skill_proxy"].status == OK
 
     def test_unresolvable_fails(self, make_config, monkeypatch):
         monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
-        results = _by_name(run_checks(make_config(), only=("security.skill_proxy",)))
-        assert results["security.skill_proxy"].status == FAIL
+        assert self._run(make_config())["security.skill_proxy"].status == FAIL
 
     def test_skips_when_the_proxy_is_disabled(self, make_config):
         from istota.config import SecurityConfig
 
         config = make_config(security=SecurityConfig(skill_proxy_enabled=False))
-        results = _by_name(run_checks(config, only=("security.skill_proxy",)))
-        assert results["security.skill_proxy"].status == SKIP
+        assert self._run(config)["security.skill_proxy"].status == SKIP
 
-    def test_forge_posture_warns_when_tokens_configured_and_proxy_off(
-        self, make_config, tmp_path
-    ):
-        """Wording preserved from `_validate_forge_clis`: the tokens still work,
-        but they sit in the environment the model's own shell inherits."""
+    @pytest.mark.parametrize(
+        "tokens,proxy,status",
+        [
+            # Wording preserved from `_validate_forge_clis`: the tokens still
+            # work, but they sit in the environment the model's shell inherits.
+            ({}, False, WARN),
+            ({"gitlab_token": "", "github_token": ""}, False, SKIP),
+            ({}, True, SKIP),
+        ],
+        ids=["tokens-proxy-off", "no-tokens", "proxy-on"],
+    )
+    def test_forge_posture(self, make_config, tmp_path, tokens, proxy, status):
         from istota.config import SecurityConfig
 
-        config = _dev_config(make_config, tmp_path)
-        config.security = SecurityConfig(skill_proxy_enabled=False)
-        results = _by_name(run_checks(config, only=("security.skill_proxy",)))
-        posture = results["security.skill_proxy.forge_posture"]
-        assert posture.status == WARN
-        assert "readable by anything else the task runs" in posture.detail
-
-    def test_forge_posture_skips_without_tokens(self, make_config, tmp_path):
-        from istota.config import SecurityConfig
-
-        config = _dev_config(make_config, tmp_path, gitlab_token="", github_token="")
-        config.security = SecurityConfig(skill_proxy_enabled=False)
-        results = _by_name(run_checks(config, only=("security.skill_proxy",)))
-        assert results["security.skill_proxy.forge_posture"].status == SKIP
-
-    def test_forge_posture_skips_when_the_proxy_is_on(self, make_config, tmp_path):
-        config = _dev_config(make_config, tmp_path)
-        results = _by_name(run_checks(config, only=("security.skill_proxy",)))
-        assert results["security.skill_proxy.forge_posture"].status == SKIP
+        config = _dev_config(make_config, tmp_path, **tokens)
+        config.security = SecurityConfig(skill_proxy_enabled=proxy)
+        posture = self._run(config)["security.skill_proxy.forge_posture"]
+        assert posture.status == status
+        if status == WARN:
+            assert "readable by anything else the task runs" in posture.detail
 
 
 class TestProxyPeerCheck:
@@ -2465,10 +1994,13 @@ class TestProxyPeerCheck:
         assert result.status == FAIL
         assert "refuses every connection" in result.detail
 
-    def test_ok_under_the_sandbox(self, make_config, monkeypatch):
-        monkeypatch.setattr(doctor, "_deployment_sandboxing", lambda c, p: (True, ""))
+    @pytest.mark.parametrize(
+        "sandboxed,users", [(True, 3), (False, 1)], ids=["sandboxed", "unsandboxed-one-user"]
+    )
+    def test_ok(self, make_config, monkeypatch, sandboxed, users):
+        monkeypatch.setattr(doctor, "_deployment_sandboxing", lambda c, p: (sandboxed, ""))
         monkeypatch.setattr(doctor, "_ptrace_scope", lambda: 0)
-        assert self._run(self._users(make_config, 3)).status == OK
+        assert self._run(self._users(make_config, users)).status == OK
 
     @pytest.mark.parametrize("scope", [0, 1, None])
     def test_warns_unsandboxed_multi_user_whatever_ptrace_says(
@@ -2482,11 +2014,6 @@ class TestProxyPeerCheck:
         assert result.status == WARN
         assert "best-effort" in result.detail
         assert ("read its memory" in result.detail) == (scope == 0)
-
-    def test_ok_unsandboxed_with_one_user(self, make_config, monkeypatch):
-        monkeypatch.setattr(doctor, "_deployment_sandboxing", lambda c, p: (False, ""))
-        monkeypatch.setattr(doctor, "_ptrace_scope", lambda: 0)
-        assert self._run(self._users(make_config, 1)).status == OK
 
     def test_skips_with_the_proxy_off(self, make_config):
         from istota.config import SecurityConfig
@@ -2508,15 +2035,26 @@ class TestProxyPeerCheck:
         assert doctor._ptrace_scope(tmp_path / "scope") == 2
 
 
+#: The three variables istota's own env builders set in a non-daemon process.
+_NON_DAEMON_MARKERS = ("ISTOTA_TASK_ID", "ISTOTA_SANDBOXED", "PRECOMMIT_SCANS_REQUIRED")
+_MODEL_CREDENTIALS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
+def _clear_env(monkeypatch, *names):
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+
+
 class TestSkillModelCredential:
     """`security.skill_model_credential` — ISSUE-409.
 
-    The failure this covers was invisible to the deployment: `code_review`'s
-    reviewers had no credential while the daemon's own brain worked, so the
-    only way to find out was to run a review and read the envelope. Both halves
-    are driven here with the daemon environment controlled, since a check that
-    passed because the developer had a token exported is asserting nothing.
+    `code_review`'s reviewers had no credential while the daemon's own brain
+    worked, so the only way to find out was to run a review. Both halves are
+    driven with the daemon environment controlled.
     """
+
+    WIRING = "security.skill_model_credential.wiring"
+    VALUE = "security.skill_model_credential.value"
 
     def _run(self, config):
         return _by_name(
@@ -2526,10 +2064,10 @@ class TestSkillModelCredential:
     def test_wiring_ok_and_value_ok(self, make_config, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
         results = self._run(make_config())
-        wiring = results["security.skill_model_credential.wiring"]
+        wiring = results[self.WIRING]
         assert wiring.status == OK
         assert "code_review" in wiring.detail
-        value = results["security.skill_model_credential.value"]
+        value = results[self.VALUE]
         assert value.status == OK
         # The name, never the value: a CheckResult is rendered into the boot
         # log and the admin dashboard.
@@ -2537,185 +2075,150 @@ class TestSkillModelCredential:
         assert "sk-ant-oat-test" not in value.detail
 
     def test_a_renamed_skill_fails_the_wiring(self, make_config, monkeypatch):
-        """The drift guard, and the only one of these that catches a *re*-
-        regression. `SKILL_MODEL_CALLERS` matches skill names against the index
-        at task-build time, so a rename silently stops the injection — no
-        import breaks and nothing on a deployment goes red."""
+        """The drift guard, and the only one that catches a *re*-regression:
+        `SKILL_MODEL_CALLERS` matches skill names at task-build time, so a
+        rename silently stops the injection with no import to break."""
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
         monkeypatch.setattr(
             doctor_executor, "SKILL_MODEL_CALLERS", frozenset({"code_reviewe"}),
         )
         results = self._run(make_config())
-        wiring = results["security.skill_model_credential.wiring"]
+        wiring = results[self.WIRING]
         assert wiring.status == FAIL
         assert "code_reviewe" in wiring.detail
         # Nothing to say about a credential for a skill that does not resolve.
-        assert "security.skill_model_credential.value" not in results
+        assert self.VALUE not in results
 
-    def test_no_credential_fails(self, make_config, monkeypatch):
-        """The positive control for the whole `.value` half.
-
-        The markers are deleted explicitly rather than left to the suite's
-        environment scrub: this is the one case that must reach FAIL, and every
-        skip below is a way for it to stop doing so quietly.
-        """
-        for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
-                     "ANTHROPIC_AUTH_TOKEN", "ISTOTA_TASK_ID",
-                     "ISTOTA_SANDBOXED", "PRECOMMIT_SCANS_REQUIRED"):
-            monkeypatch.delenv(name, raising=False)
+    @pytest.mark.parametrize(
+        "extra_env",
+        [
+            {},
+            # The negative control for the marker set: the daemon's own
+            # environment carries `ISTOTA_*` variables too, so a namespace test
+            # rather than named markers would swallow the FAIL everywhere.
+            {"ISTOTA_CONFIG_PATH": "/etc/istota/config.toml", "ISTOTA_ADMINS_FILE": "/etc/istota/admins"},
+        ],
+        ids=["clean-env", "unrelated-istota-variables"],
+    )
+    def test_no_credential_fails(self, make_config, monkeypatch, extra_env):
+        """The positive control for the whole `.value` half. The markers are
+        deleted explicitly: every skip below is a way for this to stop
+        reaching FAIL quietly."""
+        _clear_env(monkeypatch, *_MODEL_CREDENTIALS, *_NON_DAEMON_MARKERS)
+        for name, value in extra_env.items():
+            monkeypatch.setenv(name, value)
         results = self._run(make_config())
-        assert results["security.skill_model_credential.wiring"].status == OK
-        assert results["security.skill_model_credential.value"].status == FAIL
+        assert results[self.WIRING].status == OK
+        assert results[self.VALUE].status == FAIL
 
     def test_an_api_key_counts(self, make_config, monkeypatch):
-        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        _clear_env(monkeypatch, "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-test")
-        results = self._run(make_config())
-        value = results["security.skill_model_credential.value"]
+        value = self._run(make_config())[self.VALUE]
         assert value.status == OK
         assert "ANTHROPIC_API_KEY" in value.detail
 
     def test_the_value_half_skips_with_the_proxy_off(self, make_config, monkeypatch):
         """No injection and no strip: the CLI is re-exec'd with the daemon's
-        own environment, so whatever authenticates the daemon authenticates it.
-        Reporting a FAIL there would call a shape broken for a boundary it does
-        not have."""
+        own environment, so whatever authenticates the daemon authenticates it."""
         from istota.config import SecurityConfig
 
-        for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
-                     "ANTHROPIC_AUTH_TOKEN"):
-            monkeypatch.delenv(name, raising=False)
+        _clear_env(monkeypatch, *_MODEL_CREDENTIALS)
         config = make_config(security=SecurityConfig(skill_proxy_enabled=False))
-        results = self._run(config)
-        assert results["security.skill_model_credential.value"].status == SKIP
+        assert self._run(config)[self.VALUE].status == SKIP
 
-    @pytest.mark.parametrize(
-        "marker",
-        ["ISTOTA_TASK_ID", "ISTOTA_SANDBOXED", "PRECOMMIT_SCANS_REQUIRED"],
-    )
+    @pytest.mark.parametrize("marker", _NON_DAEMON_MARKERS)
     def test_the_value_half_cannot_answer_from_a_task_env(
         self, make_config, monkeypatch, marker
     ):
-        """The `.value` half reads `os.environ`, and doctor runs in six places.
-
-        Four are the daemon and one is the web unit, but `istota doctor` is
-        also a command a task can run, and a task's environment is the one
-        ISSUE-390 deliberately strips the Claude credential out of, so absence
-        there is by design and says nothing about the daemon. Reading it as the
-        daemon's answer reported FAIL, and exited 1, about a deployment whose
-        reviews worked.
-        """
-        for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
-                     "ANTHROPIC_AUTH_TOKEN", "ISTOTA_TASK_ID",
-                     "ISTOTA_SANDBOXED", "PRECOMMIT_SCANS_REQUIRED"):
-            monkeypatch.delenv(name, raising=False)
+        """`istota doctor` is also a command a task can run, and a task's env is
+        the one ISSUE-390 strips the Claude credential out of, so absence there
+        says nothing about the daemon. Reading it as the daemon's answer
+        reported FAIL, and exited 1, about a deployment whose reviews worked."""
+        _clear_env(monkeypatch, *_MODEL_CREDENTIALS, *_NON_DAEMON_MARKERS)
         monkeypatch.setenv(marker, "1")
-        results = self._run(make_config())
-        value = results["security.skill_model_credential.value"]
+        value = self._run(make_config())[self.VALUE]
         assert value.status == SKIP
-        # The detail says what was observed, which is the marker rather than a
-        # verdict about the daemon.
+        # What was observed, which is the marker rather than a verdict.
         assert marker in value.detail
 
     def test_the_wiring_half_still_answers_from_a_task_env(
         self, make_config, monkeypatch
     ):
         """The drift guard reads the skill index and the config, never the
-        environment, so it is sound wherever it runs, and it is the half that
-        catches a renamed skill directory."""
-        for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
-                     "ANTHROPIC_AUTH_TOKEN"):
-            monkeypatch.delenv(name, raising=False)
+        environment, so it is sound wherever it runs."""
+        _clear_env(monkeypatch, *_MODEL_CREDENTIALS)
         monkeypatch.setenv("ISTOTA_TASK_ID", "4213")
-        results = self._run(make_config())
-        assert results["security.skill_model_credential.wiring"].status == OK
+        assert self._run(make_config())[self.WIRING].status == OK
 
         monkeypatch.setattr(
             doctor_executor, "SKILL_MODEL_CALLERS", frozenset({"code_reviewe"}),
         )
-        results = self._run(make_config())
-        assert results["security.skill_model_credential.wiring"].status == FAIL
+        assert self._run(make_config())[self.WIRING].status == FAIL
 
     def test_a_credential_present_in_a_task_env_still_counts(
         self, make_config, monkeypatch
     ):
-        """Presence is positive evidence wherever it is read.
-
-        `build_clean_env` copies the token out of the daemon's own environment
-        into every task's, so seeing it inside a task says the daemon has it.
-        Only *absence* is the unanswerable direction, so the skip must not
-        outrank a credential that is right there.
-        """
+        """`build_clean_env` copies the token into every task's env, so presence
+        is positive evidence wherever it is read; only absence is unanswerable."""
         monkeypatch.setenv("ISTOTA_TASK_ID", "4213")
         monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
-        results = self._run(make_config())
-        value = results["security.skill_model_credential.value"]
+        value = self._run(make_config())[self.VALUE]
         assert value.status == OK
         assert "sk-ant-oat-test" not in value.detail
-
-    def test_an_unrelated_istota_variable_is_not_a_marker(
-        self, make_config, monkeypatch
-    ):
-        """The negative control for the marker set: the daemon's own
-        environment carries `ISTOTA_*` variables too, so a namespace test
-        rather than named markers would swallow the FAIL everywhere."""
-        for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
-                     "ANTHROPIC_AUTH_TOKEN", "ISTOTA_TASK_ID",
-                     "ISTOTA_SANDBOXED", "PRECOMMIT_SCANS_REQUIRED"):
-            monkeypatch.delenv(name, raising=False)
-        monkeypatch.setenv("ISTOTA_CONFIG_PATH", "/etc/istota/config.toml")
-        monkeypatch.setenv("ISTOTA_ADMINS_FILE", "/etc/istota/admins")
-        results = self._run(make_config())
-        assert results["security.skill_model_credential.value"].status == FAIL
 
     def test_a_disabled_skill_skips(self, make_config, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
         config = make_config()
         config.disabled_skills = ["code_review"]
         results = self._run(config)
-        assert results["security.skill_model_credential.wiring"].status == SKIP
-        assert "security.skill_model_credential.value" not in results
+        assert results[self.WIRING].status == SKIP
+        assert self.VALUE not in results
 
 
 class TestSecretKey:
     """`security.secret_key` — the master Fernet key for the secrets store.
 
-    The gap this closes was silent in the worst way: with no
-    ``ISTOTA_SECRET_KEY`` every stored credential is unreachable, and
+    With no ``ISTOTA_SECRET_KEY`` every stored credential is unreachable, and
     `_native_key_holders` reports *0 holders* rather than an error, so the
-    absence read as "nobody has configured a credential". The standalone
-    wizard generated none at all for seven weeks and nothing anywhere said so.
+    absence read as "nobody has configured a credential". The standalone wizard
+    generated none for seven weeks and nothing said so.
     """
 
     NAME = "security.secret_key"
 
+    @pytest.fixture(autouse=True)
+    def _clear(self, monkeypatch):
+        _clear_env(monkeypatch, "ISTOTA_SECRET_KEY", *_NON_DAEMON_MARKERS)
+
     def _run(self, config):
         return _by_name(run_checks(config, only=(self.NAME,)))[self.NAME]
 
-    def _clear(self, monkeypatch):
-        for name in ("ISTOTA_SECRET_KEY", "ISTOTA_TASK_ID", "ISTOTA_SANDBOXED",
-                     "PRECOMMIT_SCANS_REQUIRED"):
-            monkeypatch.delenv(name, raising=False)
-
-    def test_absent_fails(self, make_config, monkeypatch):
-        """The positive control for the whole check. The markers are deleted
-        explicitly rather than left to the suite's scrub: this is the one case
-        that must reach FAIL, and every skip below is a way for it to stop
-        doing so quietly."""
-        self._clear(monkeypatch)
+    @pytest.mark.parametrize(
+        "extra_env",
+        [
+            {},
+            # The daemon's own environment carries `ISTOTA_*` variables, so a
+            # namespace test would skip everywhere and never fail.
+            {"ISTOTA_CONFIG_PATH": "/etc/istota/config.toml"},
+        ],
+        ids=["clean-env", "unrelated-istota-variable"],
+    )
+    def test_absent_fails(self, make_config, monkeypatch, extra_env):
+        """The positive control for the whole check: every skip below is a way
+        for it to stop reaching FAIL quietly."""
+        for name, value in extra_env.items():
+            monkeypatch.setenv(name, value)
         result = self._run(make_config())
         assert result.status == FAIL
         assert result.remedy
-        # The consequence, not just the absence: it is the thing that made the
-        # gap invisible.
+        # The consequence, not just the absence: it is what made the gap invisible.
         assert "credential" in result.detail.lower()
 
     def test_too_short_fails_naming_the_floor_and_the_length(
         self, make_config, monkeypatch
     ):
-        self._clear(monkeypatch)
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "changeme")
         result = self._run(make_config())
         assert result.status == FAIL
@@ -2728,28 +2231,22 @@ class TestSecretKey:
     def test_present_is_ok_and_never_reports_the_value(
         self, make_config, monkeypatch
     ):
-        self._clear(monkeypatch)
         key = "0" * 31 + "sentinelkeymaterial" + "1" * 20
         monkeypatch.setenv("ISTOTA_SECRET_KEY", key)
         result = self._run(make_config())
         assert result.status == OK
-        # Never the value, and never a prefix of it: a CheckResult is rendered
-        # into the boot log and the admin dashboard.
+        # Never the value, and never a prefix of it.
         assert "sentinelkeymaterial" not in result.detail
         assert "sentinelkeymaterial" not in result.remedy
         assert key[:8] not in result.detail
 
-    @pytest.mark.parametrize(
-        "marker",
-        ["ISTOTA_TASK_ID", "ISTOTA_SANDBOXED", "PRECOMMIT_SCANS_REQUIRED"],
-    )
+    @pytest.mark.parametrize("marker", _NON_DAEMON_MARKERS)
     def test_absence_in_a_non_daemon_env_skips(
         self, make_config, monkeypatch, marker
     ):
-        """`build_clean_env` strips this name from every task env by design and
+        """`build_clean_env` strips this name from every task env and
         `_PROXY_LOOKUP_BLOCKED` blocks it from the proxy, so absence inside a
         task is guaranteed and says nothing about the daemon."""
-        self._clear(monkeypatch)
         monkeypatch.setenv(marker, "1")
         result = self._run(make_config())
         assert result.status == SKIP
@@ -2758,90 +2255,56 @@ class TestSecretKey:
     def test_presence_still_answers_from_a_non_daemon_env(
         self, make_config, monkeypatch
     ):
-        """Ordering control: only absence is the unanswerable direction, so a
-        key that is right there must not be swallowed by the skip."""
-        self._clear(monkeypatch)
+        """Ordering control: a key that is right there must not be swallowed by
+        the skip."""
         monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
         assert self._run(make_config()).status == OK
 
-    def test_an_unrelated_istota_variable_is_not_a_marker(
-        self, make_config, monkeypatch
-    ):
-        """Negative control for the marker set: the daemon's own environment
-        carries `ISTOTA_*` variables, so a namespace test would skip
-        everywhere and the check could never fail."""
-        self._clear(monkeypatch)
-        monkeypatch.setenv("ISTOTA_CONFIG_PATH", "/etc/istota/config.toml")
-        assert self._run(make_config()).status == FAIL
-
-    def test_the_standalone_remedy_names_the_env_file(
-        self, make_config, monkeypatch
-    ):
+    def test_the_standalone_remedy_names_the_env_file(self, make_config):
         from istota.config import WebConfig
 
-        self._clear(monkeypatch)
         config = make_config(web=WebConfig(auth="none"))
         assert config.is_standalone is True
         result = self._run(config)
         assert result.status == FAIL
         assert "istota.env" in result.remedy
 
-    def _standalone(self, make_config, tmp_path):
+    def _standalone(self, make_config, tmp_path, env_file=None):
         from istota.config import WebConfig
 
         config_path = tmp_path / "cfg" / "config.toml"
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text("")
+        if env_file is not None:
+            (config_path.parent / "istota.env").write_text(env_file)
         return make_config(web=WebConfig(auth="none"), config_path=config_path)
 
-    def test_a_key_only_in_the_env_file_is_ok(
-        self, make_config, monkeypatch, tmp_path
-    ):
-        """`cmd_serve` is the only thing in the tree that sources istota.env,
-        so `istota doctor` in an operator's shell is a process that carries
-        none of the markers *and* has never read the file. Taking its own
-        environment as the answer failed a correctly configured install and
-        told the operator to add a line already in the file."""
-        self._clear(monkeypatch)
-        config = self._standalone(make_config, tmp_path)
-        env_file = Path(config.config_path).parent / "istota.env"
-        env_file.write_text("ISTOTA_SECRET_KEY=" + "h" * 64 + "\n")
+    def test_a_key_only_in_the_env_file_is_ok(self, make_config, tmp_path):
+        """`cmd_serve` is the only thing that sources istota.env, so `istota
+        doctor` in an operator's shell carries no marker and never read the
+        file; taking its own env as the answer failed a correct install."""
+        config = self._standalone(make_config, tmp_path, "ISTOTA_SECRET_KEY=" + "h" * 64 + "\n")
         result = self._run(config)
         assert result.status == OK
         assert "istota.env" in result.detail
         assert "h" * 8 not in result.detail
 
-    def test_a_short_key_in_the_env_file_fails(
-        self, make_config, monkeypatch, tmp_path
-    ):
-        self._clear(monkeypatch)
-        config = self._standalone(make_config, tmp_path)
-        env_file = Path(config.config_path).parent / "istota.env"
-        env_file.write_text("ISTOTA_SECRET_KEY=tooshort\n")
-        result = self._run(config)
+    def test_a_short_key_in_the_env_file_fails(self, make_config, tmp_path):
+        result = self._run(self._standalone(make_config, tmp_path, "ISTOTA_SECRET_KEY=tooshort\n"))
         assert result.status == FAIL
         assert str(secrets_store._MIN_KEY_LEN) in result.detail
         assert "tooshort" not in result.detail
 
-    def test_an_env_file_without_the_key_still_fails(
-        self, make_config, monkeypatch, tmp_path
-    ):
-        """The positive control for the arm above: the fallback must not turn
-        a genuinely missing key into a pass just because a file is there."""
-        self._clear(monkeypatch)
-        config = self._standalone(make_config, tmp_path)
-        env_file = Path(config.config_path).parent / "istota.env"
-        env_file.write_text("ISTOTA_WEB_INSECURE_COOKIES=1\n")
+    def test_an_env_file_without_the_key_still_fails(self, make_config, tmp_path):
+        """The fallback must not turn a missing key into a pass just because a
+        file is there."""
+        config = self._standalone(make_config, tmp_path, "ISTOTA_WEB_INSECURE_COOKIES=1\n")
         assert self._run(config).status == FAIL
 
-    def test_the_remedy_names_the_configs_own_env_file(
-        self, make_config, monkeypatch, tmp_path
-    ):
+    def test_the_remedy_names_the_configs_own_env_file(self, make_config, tmp_path):
         """`istota setup -c` puts the env file beside whatever config it was
-        given, so a hardcoded default sends the operator to a path that does
-        not exist on their install."""
-        self._clear(monkeypatch)
+        given, so a hardcoded default names a path that may not exist."""
         config = self._standalone(make_config, tmp_path)
         result = self._run(config)
         assert result.status == FAIL
@@ -2850,35 +2313,22 @@ class TestSecretKey:
     def test_the_floor_is_read_from_the_secrets_store(
         self, make_config, monkeypatch
     ):
-        """The drift guard. A second copy of the floor is exactly what this
-        check exists to catch, so a raised floor must move the verdict here
-        without any edit to doctor."""
-        self._clear(monkeypatch)
+        """The drift guard: a raised floor must move the verdict here without
+        any edit to doctor."""
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 40)
         assert self._run(make_config()).status == OK
         monkeypatch.setattr(secrets_store, "_MIN_KEY_LEN", 64)
         assert self._run(make_config()).status == FAIL
 
     def test_scope_is_deployment(self):
-        """A key is a property of an install; a bare `docker run` has none and
-        would report a missing key about nothing."""
+        """A key is a property of an install; a bare `docker run` has none."""
         assert doctor.CHECK_SCOPES[self.NAME] == DEPLOYMENT
 
-    # --- What an absent key actually costs, which is not one answer -------
-    #
-    # `[defaults] istota_secret_key` documents an empty value as *disabling*
-    # the secrets store, so a bare-metal deployment can legitimately run
-    # without one — and a check that pages that operator on every scheduler
-    # sweep is a warning wearing a failure's label. But the same absence on a
-    # deployment that has stored something is the original defect: those rows
-    # cannot be decrypted and every connected service built on them reports as
-    # unconfigured rather than as broken.
-    #
-    # So the discriminator is the `secrets` table itself, and the split is
-    # deliberately asymmetric: only an *observed* empty table softens the
-    # verdict. A table that could not be read has not established that nothing
-    # is stored, so it keeps the FAIL — the same "never pass on a question you
-    # could not settle" rule the sandbox and session-log checks follow.
+    # An empty `istota_secret_key` documents the secrets store as disabled, so
+    # a deployment can legitimately run without one; the same absence on a
+    # deployment that has stored something is the original defect. Only an
+    # *observed* empty `secrets` table softens the verdict: a table that could
+    # not be read has not established that nothing is stored.
 
     def _db_with_secrets(self, config, rows: int):
         """Create the framework DB and put `rows` rows in `secrets`."""
@@ -2905,75 +2355,38 @@ class TestSecretKey:
         finally:
             conn.close()
 
-    def test_absence_with_stored_credentials_fails_naming_the_count(
-        self, make_config, monkeypatch
-    ):
-        """The original defect, stated as a number. Two rows exist and neither
-        can be decrypted; `_native_key_holders` would report nought holders and
-        the deployment would read as one nobody had configured."""
-        self._clear(monkeypatch)
+    @pytest.mark.parametrize(
+        "rows,status,healthy",
+        [
+            # Two rows exist and neither can be decrypted.
+            (2, FAIL, False),
+            (1, FAIL, False),
+            # The documented opt-out: nothing is unreachable now, but every
+            # future `istota secret ensure` will raise. `verdict` is unmoved by
+            # a WARN, which keeps it out of the boot alert and every sweep.
+            (0, WARN, True),
+        ],
+        ids=["two-stored", "one-stored", "observed-empty"],
+    )
+    def test_absence_against_the_store(self, make_config, rows, status, healthy):
         config = make_config()
-        self._db_with_secrets(config, 2)
+        self._db_with_secrets(config, rows)
         result = self._run(config)
-        assert result.status == FAIL
-        assert "2" in result.detail
+        assert result.status == status
         assert result.remedy
+        if rows:
+            assert str(rows) in result.detail
+        assert doctor.verdict([result])[0] is healthy
 
-    def test_absence_with_an_observed_empty_store_warns(
-        self, make_config, monkeypatch
-    ):
-        """The documented opt-out. Nothing is stored, so nothing is currently
-        unreachable — but every future `istota secret ensure` will raise, so
-        this is reported rather than passed."""
-        self._clear(monkeypatch)
+    def test_an_unreadable_database_keeps_the_failure_and_creates_nothing(self, make_config):
+        """Absence of the table is not evidence of an empty store. The count goes
+        through `connect_read_only`, so a missing file is not created as a
+        zero-byte database that later reads as corruption (ISSUE-458 dropped
+        the backwards `-wal`/`-shm` half of that reason)."""
         config = make_config()
-        self._db_with_secrets(config, 0)
-        result = self._run(config)
-        assert result.status == WARN
-        assert result.remedy
-
-    def test_an_empty_store_does_not_page(self, make_config, monkeypatch):
-        """The point of the WARN. `verdict` is False on any FAIL and unmoved by
-        a WARN, so this is what keeps a deliberate posture out of the daemon's
-        boot alert and off every scheduler sweep."""
-        self._clear(monkeypatch)
-        config = make_config()
-        self._db_with_secrets(config, 0)
-        healthy, _ = doctor.verdict([self._run(config)])
-        assert healthy is True
-
-    def test_a_populated_store_does_page(self, make_config, monkeypatch):
-        """The control for the test above: the softening must not reach the
-        case the check was written for."""
-        self._clear(monkeypatch)
-        config = make_config()
-        self._db_with_secrets(config, 1)
-        healthy, _ = doctor.verdict([self._run(config)])
-        assert healthy is False
-
-    def test_an_unreadable_database_keeps_the_failure(
-        self, make_config, monkeypatch
-    ):
-        """`make_config` names a database that does not exist. Absence of the
-        table is not evidence of an empty store, so the verdict stays FAIL —
-        softening on an unanswered question is how a check stops working."""
-        self._clear(monkeypatch)
-        config = make_config()
-        assert not Path(config.db_path).exists()
-        assert self._run(config).status == FAIL
-
-    def test_the_row_count_query_leaves_no_sidecars_and_no_database(
-        self, make_config, monkeypatch
-    ):
-        """Through `connect_read_only`, like every other database-touching
-        check here: an ordinary read-write open would, against a missing file,
-        create a zero-byte database that later reads as corruption rather than
-        as absence. The `-wal`/`-shm` half of that reason was backwards and is
-        gone (ISSUE-458) — a read-write open removes those on last close."""
-        self._clear(monkeypatch)
-        config = make_config()
-        self._run(config)
         db_path = Path(config.db_path)
+        assert not db_path.exists()
+        assert self._run(config).status == FAIL
         assert not db_path.exists()
         assert not db_path.with_suffix(db_path.suffix + "-wal").exists()
         assert not db_path.with_suffix(db_path.suffix + "-shm").exists()
@@ -2981,234 +2394,140 @@ class TestSecretKey:
     def test_a_present_key_never_reads_the_database(
         self, make_config, monkeypatch
     ):
-        """Ordering: the store's rows only matter once the key is absent. A
-        deployment with a usable key is OK whatever is in the table, and the
-        check must not pay for a query to say so."""
-        self._clear(monkeypatch)
+        """The store's rows matter only once the key is absent."""
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
         config = make_config()
         self._db_with_secrets(config, 3)
         assert self._run(config).status == OK
 
 
+def _bwrap(monkeypatch, available, checked=None):
+    """Answer the sandbox-availability axis: the probe and the memo
+    `effective_sandboxing_if_known` reads, which is a process global."""
+    from istota import executor
+
+    if available is not None:
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: available)
+    monkeypatch.setattr(executor, "_bwrap_checked", available if checked is None else checked)
+
+
+def _broken_availability(monkeypatch):
+    from istota import executor
+
+    def _boom(config):
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(executor, "effective_sandboxing", _boom)
+
+
 class TestSandboxCredentials:
     """`security.sandbox_credentials` — ISSUE-396.
 
     `load_config` warns on the sandbox-on/proxy-off pairing (ISSUE-393), but the
-    boot log is read once at install. The Health pane and `istota doctor` are
-    the surfaces an operator returns to, and before this check they reported the
-    pairing as a bare `SKIP` on `security.skill_proxy` carrying only a
-    restatement of the setting.
-
-    The class holds two things apart: that the finding fires at all, and that it
-    keeps firing on the shape where the sandbox turns out not to be in force —
-    which is the shape a check written around `effective_sandboxing` would most
-    naturally go quiet on, and the one where the operator has neither half of
-    what they asked for.
+    boot log is read once at install; the Health pane and `istota doctor` are
+    what an operator returns to. The finding must keep firing where the sandbox
+    turns out not to be in force, the shape a check written around
+    `effective_sandboxing` would most naturally go quiet on.
     """
 
     NAME = "security.sandbox_credentials"
 
-    def _config(self, make_config, *, sandbox, proxy):
+    def _run(self, make_config, *, sandbox=True, proxy=False, **kwargs):
         from istota.config import SecurityConfig
 
-        return make_config(
-            security=SecurityConfig(
-                sandbox_enabled=sandbox, skill_proxy_enabled=proxy
-            )
+        config = make_config(
+            security=SecurityConfig(sandbox_enabled=sandbox, skill_proxy_enabled=proxy)
         )
-
-    def _run(self, config, **kwargs):
         return run_checks(config, only=(self.NAME,), **kwargs)[0]
 
-    @pytest.fixture
-    def bwrap_works(self, monkeypatch):
-        """Answer the availability axis rather than letting the host answer it.
+    def test_the_pairing_warns_and_names_the_credentials(self, make_config, monkeypatch):
+        """The finding ISSUE-396 was filed for. Before the check existed the
+        `only=` run came back empty and the indexing raised — the negative
+        control for the whole class.
 
-        `effective_sandboxing` is False on any non-Linux host, so without this
-        every "sandbox in force" case would take the bwrap-unavailable branch on
-        a developer machine. Both the function's probe and the memo
-        `effective_sandboxing_if_known` reads, since the check reaches them by
-        two routes and the memo is a process global the suite's other tests
-        also set — see `TestSessionLogDir._bwrap_works_here`.
+        The remedy is asserted here because `TestRegistry`'s sweep runs over
+        `_dev_config`, which leaves the proxy on, so it never sees this WARN.
         """
-        from istota import executor
-
-        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
-        monkeypatch.setattr(executor, "_bwrap_checked", True)
-
-    # -- the regression assertion ------------------------------------------
-
-    def test_the_pairing_warns_and_names_the_credentials(
-        self, make_config, bwrap_works
-    ):
-        """The finding ISSUE-396 was filed for.
-
-        Before the check existed this name produced no result at all, so the
-        `only=` run came back empty and the indexing below raised — which is
-        the negative control for the whole class.
-        """
-        r = self._run(self._config(make_config, sandbox=True, proxy=False))
+        _bwrap(monkeypatch, True)
+        r = self._run(make_config)
 
         assert r.status == WARN
         assert "every configured service credential" in r.detail
         assert "readable by the model" in r.detail
-
-    def test_the_warning_carries_a_remedy(self, make_config, bwrap_works):
-        """`TestRegistry.test_warn_and_fail_carry_a_remedy` cannot see this one.
-
-        That guard runs over `_dev_config`, which leaves the proxy on, so this
-        WARN never fires under it. A finding an operator cannot act on is a
-        line of noise, and the image tier asserts the same property over
-        `--scope image`, which this check is deliberately outside of.
-        """
-        r = self._run(self._config(make_config, sandbox=True, proxy=False))
-
+        assert "the sandbox is in force" in r.detail
         assert r.remedy.strip()
         assert "skill_proxy_enabled" in r.remedy
+        # `tests/test_config.py` filters `caplog` on the load_config warning's
+        # opening phrase, so this detail must not contain it.
+        assert "sandbox_enabled with skill_proxy_enabled = false" not in r.detail
+        assert "skill_proxy_enabled" in r.detail
+        assert "sandbox_enabled" in r.detail
 
-    # -- and the shapes it must stay quiet on ------------------------------
-
-    def test_both_switches_off_is_silent(self, make_config):
-        """The single-user install's deliberate trust decision.
-
-        `setup_wizard` writes the pair. The task then runs unconfined as the
-        daemon user and can read `config.toml`, the secrets database or
-        `/proc/<daemon>/environ`, so removing a variable from its environment
-        is decorative rather than a boundary. ISSUE-393 put this shape out of
-        scope for the warning and it is out of scope here for the same reason.
-        """
-        r = self._run(self._config(make_config, sandbox=False, proxy=False))
-
-        assert r.status == SKIP
-        assert "unconfined by design" in r.detail
-
-    def test_the_proxy_being_on_is_ok_not_a_warning(self, make_config):
-        # No `bwrap_works`: this branch returns before anything reaches
-        # `executor`, and taking the fixture would imply an availability
-        # dependency the code does not have.
-        r = self._run(self._config(make_config, sandbox=True, proxy=True))
-
-        assert r.status == OK
-        assert "injected per call" in r.detail
-
-    def test_the_sandbox_being_off_skips_even_with_the_proxy_on(self, make_config):
-        r = self._run(self._config(make_config, sandbox=False, proxy=True))
-
-        assert r.status == SKIP
-
-    # -- the in-force clause, which is a clause and not a condition --------
-
-    def test_it_says_the_sandbox_is_in_force(self, make_config, bwrap_works):
-        r = self._run(self._config(make_config, sandbox=True, proxy=False))
-
-        assert "the sandbox is in force" in r.detail
+    @pytest.mark.parametrize(
+        "sandbox,proxy,status,named",
+        [
+            # The single-user install's deliberate trust decision: the task runs
+            # unconfined as the daemon user, so removing a variable from its env
+            # is decorative rather than a boundary (ISSUE-393).
+            (False, False, SKIP, "unconfined by design"),
+            (True, True, OK, "injected per call"),
+            (False, True, SKIP, None),
+        ],
+        ids=["both-off", "proxy-on", "sandbox-off-proxy-on"],
+    )
+    def test_the_shapes_it_stays_quiet_on(self, make_config, sandbox, proxy, status, named):
+        # No availability patch: these return before anything reaches `executor`.
+        r = self._run(make_config, sandbox=sandbox, proxy=proxy)
+        assert r.status == status
+        if named:
+            assert named in r.detail
 
     def test_it_still_warns_where_bubblewrap_does_not_work(
         self, make_config, monkeypatch
     ):
-        """The shape a check gated on `effective_sandboxing` would go quiet on.
-
-        The shipped Docker stack grants neither `seccomp:unconfined` nor
-        `systempaths=unconfined`, so the probe fails and every task runs
-        unconfined while `sandbox_enabled` still reads true. The credentials are
-        in the task environment on the strength of `skill_proxy_enabled` alone
-        — `_split_credential_env` runs only inside the proxy branch of
-        `execute_task` — so the finding is established whatever bubblewrap does,
-        and the operator there has neither half of what they configured.
-        """
-        from istota import executor
-
-        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
-        monkeypatch.setattr(executor, "_bwrap_checked", False)
-        r = self._run(self._config(make_config, sandbox=True, proxy=False))
+        """The shipped Docker stack: the probe fails and every task runs
+        unconfined while `sandbox_enabled` reads true. The credentials are in
+        the task env on the strength of `skill_proxy_enabled` alone, so the
+        operator has neither half of what they configured."""
+        _bwrap(monkeypatch, False)
+        r = self._run(make_config)
 
         assert r.status == WARN
         assert "every configured service credential" in r.detail
         assert "runtime.bwrap" in r.detail
 
-    def test_an_unprobed_run_says_the_sandbox_state_is_unestablished(
-        self, make_config, monkeypatch
-    ):
-        """`probe=False` with a cold memo must not assert either answer.
-
-        `runtime.session_log_dir` set the precedent: a check whose subject is a
-        boundary may not report a protection it did not look for. Here only the
-        clause is in doubt — the WARN itself still stands.
-        """
-        from istota import executor
-
-        monkeypatch.setattr(executor, "_bwrap_checked", None)
-        r = self._run(
-            self._config(make_config, sandbox=True, proxy=False), probe=False
-        )
-
-        assert r.status == WARN
-        assert "unestablished" in r.detail
-
-    def test_a_broken_availability_lookup_still_warns(self, make_config, monkeypatch):
-        """A diagnostic must not raise, and must not lose its finding either."""
-        from istota import executor
-
-        def _boom(config):
-            raise RuntimeError("probe exploded")
-
-        monkeypatch.setattr(executor, "effective_sandboxing", _boom)
-        r = self._run(self._config(make_config, sandbox=True, proxy=False))
+    @pytest.mark.parametrize("cause", ["unprobed-cold-memo", "broken-lookup"])
+    def test_an_unanswered_sandbox_state_keeps_the_warning(self, make_config, monkeypatch, cause):
+        """A check whose subject is a boundary may not report a protection it
+        did not look for (`runtime.session_log_dir` set the precedent), must not
+        raise, and must not lose its finding: only the clause is in doubt."""
+        if cause == "broken-lookup":
+            _broken_availability(monkeypatch)
+            r = self._run(make_config)
+        else:
+            _bwrap(monkeypatch, None, checked=None)
+            r = self._run(make_config, probe=False)
 
         assert r.status == WARN
         assert "every configured service credential" in r.detail
         assert "unestablished" in r.detail
 
-    # -- what registration must not change ---------------------------------
-
-    def test_it_does_not_collide_with_the_load_config_warning(self, make_config):
-        """`tests/test_config.py` filters `caplog` on the warning's opening phrase.
-
-        The two messages say nearly the same thing, so the doctor detail naming
-        the settings in the same order would be a substring of that filter. It
-        breaks nothing while this check stays off the config-load path, but it
-        would turn those filters from an assertion into an `any(...)` over two
-        records the day it moved onto it.
-        """
-        r = self._run(self._config(make_config, sandbox=True, proxy=False))
-
-        assert "sandbox_enabled with skill_proxy_enabled = false" not in r.detail
-        # Both settings still named, so an operator greps either one and finds it.
-        assert "skill_proxy_enabled" in r.detail
-        assert "sandbox_enabled" in r.detail
-
-    def test_it_is_deployment_scoped(self):
-        """`--scope image` must not select it.
-
-        The image tier asserts no check fails and every WARN carries a remedy
-        over `doctor --scope image`. This reports a posture an operator chose in
-        a rendered config, which is not a property of the image.
-        """
-        assert doctor.CHECK_SCOPES[self.NAME] == DEPLOYMENT
-
-    def test_it_does_not_run_inside_load_config(self):
-        """Two reasons, both consequences of `CONFIG_LOAD_CHECKS` being hot.
-
-        It reaches `istota.executor` for the bwrap probe, which
-        `TestConfigLoadPathStaysCheap` forbids on that path; and
-        `_validate_forge_clis` logs every WARN those checks return, which would
-        print this finding beside the ISSUE-393 warning already emitted a few
-        lines above it, on every `load_config`.
-        """
+    def test_it_is_deployment_scoped_and_off_the_config_load_path(self):
+        """`--scope image` must not select a posture an operator chose in a
+        rendered config. Nor may `load_config` run it: it reaches
+        `istota.executor`, which `TestConfigLoadPathStaysCheap` forbids there,
+        and its WARN would be logged beside ISSUE-393's on every load."""
         from istota.config import CONFIG_LOAD_CHECKS
 
+        assert doctor.CHECK_SCOPES[self.NAME] == DEPLOYMENT
         assert self.NAME not in CONFIG_LOAD_CHECKS
 
     def test_the_skill_proxy_check_is_unchanged(self, make_config):
-        """ISSUE-396 considered widening the existing SKIP and rejected it.
+        """ISSUE-396 rejected widening the existing SKIP, which reads as "not
+        applicable" for a live exposure; the old result keeps its status."""
+        from istota.config import SecurityConfig
 
-        A `SKIP` reads as "not applicable here", which is the wrong status for a
-        live exposure. The finding moved to a result of its own instead, and
-        this pins that the old one kept its status rather than being quietly
-        repurposed.
-        """
-        config = self._config(make_config, sandbox=True, proxy=False)
+        config = make_config(security=SecurityConfig(sandbox_enabled=True, skill_proxy_enabled=False))
         results = _by_name(run_checks(config, only=("security.skill_proxy",)))
 
         assert results["security.skill_proxy"].status == SKIP
@@ -3218,22 +2537,15 @@ class TestSandboxCredentials:
 class TestSandboxEffective:
     """`security.sandbox_effective` — the flag versus what the deployment got.
 
-    `runtime.bwrap` answers "is bubblewrap installed and runnable", which is a
-    property of the *image* and is why it stays `IMAGE`-scoped. Whether a
-    namespace can actually be created here is a property of the *deployment*:
-    the shipped `docker/docker-compose.yml` grants neither `seccomp:unconfined`
-    nor `systempaths=unconfined`, so the probe fails and every task runs
-    unsandboxed while `sandbox_enabled` still reads true (ISSUE-381). Both
-    hand-rolled health probes report `Sandbox (bwrap): PASS` on exactly that
-    deployment.
-
-    Two properties of the class are load-bearing rather than decorative. The
-    scope exclusion is asserted directly, because folding this answer onto
-    `runtime.bwrap` would turn `tests/image/test_istota_image.py` red for a
-    reason that has nothing to do with the image under test. And the
-    `probe=False` case is asserted to be neither a pass nor a FAIL: a boundary
-    check must not report a protection it did not look for, nor assert an
-    exposure it did not observe. `runtime.session_log_dir` set that precedent.
+    `runtime.bwrap` asks whether bubblewrap is installed and runnable, a
+    property of the *image*. Whether a namespace can be created is a property of
+    the *deployment*: the shipped compose file grants neither
+    `seccomp:unconfined` nor `systempaths=unconfined`, so every task runs
+    unsandboxed while `sandbox_enabled` reads true (ISSUE-381). The scope
+    exclusion is asserted directly, since folding this onto `runtime.bwrap`
+    would turn `tests/image/test_istota_image.py` red. The `probe=False` case is
+    neither a pass nor a FAIL: a boundary check must not report a protection it
+    did not look for, nor an exposure it did not observe.
     """
 
     NAME = "security.sandbox_effective"
@@ -3246,130 +2558,75 @@ class TestSandboxEffective:
     def _run(self, config, **kwargs):
         return run_checks(config, only=(self.NAME,), **kwargs)[0]
 
-    # -- the three answers under a probing run -----------------------------
+    @pytest.mark.parametrize(
+        "env,probe",
+        [
+            ({}, True),
+            # The daemon probes at start-up, so `probe=False` with a warm memo
+            # is not blind.
+            ({}, False),
+            # `ISTOTA_SANDBOXED` is set only where the sandbox really was in
+            # force, so a task on the ISSUE-381 shape carries `ISTOTA_TASK_ID`
+            # without it and its probe is valid; skipping on the whole marker
+            # set would hide the deployment this check exists to report.
+            ({"ISTOTA_TASK_ID": "1234"}, True),
+        ],
+        ids=["probed", "unprobed-warm-memo", "task-on-unconfined-deployment"],
+    )
+    def test_a_namespace_that_cannot_be_created_fails(self, make_config, monkeypatch, env, probe):
+        """The ISSUE-381 shape. Before the check existed the `only=` run came
+        back empty and `_run` raised — the negative control for the class.
 
-    def test_a_namespace_that_cannot_be_created_fails(self, make_config, monkeypatch):
-        """The ISSUE-381 shape, and the finding this check exists for.
-
-        Before the check existed this name produced no result at all, so the
-        `only=` run came back empty and `_run`'s indexing raised — the negative
-        control for the whole class.
+        The remedy names both halves, since a container wants the two
+        `security_opt` settings and a bare-metal host wants user namespaces.
         """
-        from istota import executor
-
-        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
-        monkeypatch.setattr(executor, "_bwrap_checked", False)
-        r = self._run(self._config(make_config))
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        _bwrap(monkeypatch, False)
+        r = self._run(self._config(make_config), probe=probe)
 
         assert r.status == FAIL
         assert "unsandboxed" in r.detail
-        assert r.remedy.strip()
-
-    def test_the_remedy_names_both_halves(self, make_config, monkeypatch):
-        """An operator meets this on one of two hosts and the fix differs.
-
-        A container wants the two `security_opt` settings; a bare-metal host
-        wants unprivileged user namespaces enabled. A remedy naming only one
-        sends half the readers to the wrong file.
-        """
-        from istota import executor
-
-        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
-        monkeypatch.setattr(executor, "_bwrap_checked", False)
-        r = self._run(self._config(make_config))
-
         assert "seccomp:unconfined" in r.remedy
         assert "systempaths=unconfined" in r.remedy
         assert "unprivileged_userns_clone" in r.remedy
 
     def test_a_working_namespace_is_ok(self, make_config, monkeypatch):
-        from istota import executor
-
-        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
-        monkeypatch.setattr(executor, "_bwrap_checked", True)
+        _bwrap(monkeypatch, True)
         r = self._run(self._config(make_config))
 
         assert r.status == OK
         assert not r.remedy
 
     def test_the_sandbox_being_off_skips(self, make_config):
-        """The operator turned it off and knows. `check_bwrap` SKIPs here too.
-
-        No availability patch: this branch must return before anything reaches
-        `executor`, and taking one would imply a dependency the code does not
-        have.
-        """
+        """The operator turned it off and knows. No availability patch: this
+        branch returns before anything reaches `executor`."""
         r = self._run(self._config(make_config, sandbox=False))
 
         assert r.status == SKIP
         assert "sandbox_enabled" in r.detail
 
-    # -- the third state, which is the reason it is not a bool -------------
-
-    def test_an_unprobed_run_with_a_cold_memo_settles_nothing(
+    def test_an_unprobed_run_with_a_cold_memo_settles_nothing_and_spawns_nothing(
         self, make_config, monkeypatch
     ):
-        """`probe=False` may not spawn, so a cold memo has no answer to give.
-
-        The requirement is symmetric and both halves are asserted: not a FAIL,
-        because nothing observed an exposure; and not a silent OK, because
-        nothing observed the boundary either. The detail has to say so.
-        """
-        from istota import executor
-
-        monkeypatch.setattr(executor, "_bwrap_checked", None)
+        """Not a FAIL, since nothing observed an exposure, and not a silent OK,
+        since nothing observed the boundary. The memo is read directly: the
+        registry-wide no-spawn sweep runs with whatever memo state the worker
+        carries, and a cold memo is the state that would spawn."""
+        _bwrap(monkeypatch, None, checked=None)
+        spawns = _spawn_spy(monkeypatch)
         r = self._run(self._config(make_config), probe=False)
 
+        assert spawns == []
         assert r.status != FAIL
         assert r.status != OK
         assert "not probed on this run" in r.detail
         assert "unknown" in r.detail
         assert r.remedy.strip()
 
-    def test_an_unprobed_run_with_a_warm_memo_answers(self, make_config, monkeypatch):
-        """The daemon probes at start-up, so `probe=False` there is not blind.
-
-        Without this, "unestablished" would be the answer on the one process
-        whose start-up report and hourly sweep are the check's main consumers.
-        """
-        from istota import executor
-
-        monkeypatch.setattr(executor, "_bwrap_checked", False)
-        r = self._run(self._config(make_config), probe=False)
-
-        assert r.status == FAIL
-        assert "unsandboxed" in r.detail
-
-    def test_probe_false_spawns_nothing(self, make_config, monkeypatch):
-        """The memo is read directly rather than through `_bwrap_available`.
-
-        `TestRegistry.test_probe_false_spawns_no_subprocess` sweeps the whole
-        registry for this, but only with whatever memo state the worker happens
-        to carry. A cold memo is the state that would spawn.
-        """
-        from istota import executor
-
-        spawns = []
-
-        def _spy(*args, **kwargs):
-            spawns.append(args[0] if args else kwargs.get("args"))
-            raise OSError("no subprocesses in this test")
-
-        monkeypatch.setattr(executor, "_bwrap_checked", None)
-        monkeypatch.setattr(subprocess, "run", _spy)
-        self._run(self._config(make_config), probe=False)
-
-        assert spawns == []
-
     def test_a_broken_availability_lookup_does_not_raise(self, make_config, monkeypatch):
-        """A diagnostic must not raise, and must not pass on a question it
-        could not ask either."""
-        from istota import executor
-
-        def _boom(config):
-            raise RuntimeError("probe exploded")
-
-        monkeypatch.setattr(executor, "effective_sandboxing", _boom)
+        """A diagnostic must not raise, nor pass on a question it could not ask."""
+        _broken_availability(monkeypatch)
         r = self._run(self._config(make_config))
 
         assert r.status != OK
@@ -3377,116 +2634,36 @@ class TestSandboxEffective:
         assert "could not be determined" in r.detail
         assert "unknown" in r.detail
 
-    # -- run from inside a task's own sandbox ------------------------------
-
-    def test_a_probe_from_inside_a_sandbox_settles_nothing(
+    def test_a_probe_from_inside_a_sandbox_settles_nothing_and_asks_nothing(
         self, make_config, monkeypatch
     ):
-        """The reported defect, and the reason `_deployment_sandboxing` exists.
+        """The reported defect. A task's namespace is built with
+        `--disable-userns`, so bwrap in there fails whatever the deployment can
+        do; `istota doctor` run by a task reported every task unsandboxed, and
+        exited 1, from inside a task whose masks were in place.
 
-        A task's own namespace is built with `--disable-userns`, so bwrap in
-        there fails on the nesting depth whatever the deployment can do. This
-        check read that as the deployment's answer: `istota doctor` run by a
-        task on the production host reported every task unsandboxed, and exited
-        1, from inside a task whose database masks were demonstrably in place.
-
-        The availability patch is what makes it a reproduction rather than a
-        tautology — it is the answer a real nested probe gives, and against the
-        pre-change code this asserted a FAIL.
+        The failing availability answer is what a real nested probe gives,
+        which makes the first half a reproduction. The marker is read before
+        either route to that answer, since a probe run and discarded would
+        keep the failure one refactor from being read again.
         """
-        from istota import executor
-
         monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
-        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
-        monkeypatch.setattr(executor, "_bwrap_checked", False)
+        _bwrap(monkeypatch, False)
         r = self._run(self._config(make_config))
 
         assert r.status == SKIP
         assert "ISTOTA_SANDBOXED" in r.detail
         assert "unsandboxed" not in r.detail
 
-    def test_it_asks_nothing_from_inside_a_sandbox(self, make_config, monkeypatch):
-        """The marker is read before either route to the availability answer.
-
-        Not a performance point: a nested probe spawns a `bwrap` that is going
-        to fail, and a check that ran it and then discarded the answer would
-        keep the failure one refactor away from being read again.
-        """
         asked = self._record_availability(monkeypatch)
-        monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
-
-        r = self._run(self._config(make_config))
-
-        assert r.status == SKIP
+        assert self._run(self._config(make_config)).status == SKIP
         assert asked == []
-
-    def test_a_task_on_an_unconfined_deployment_still_fails(
-        self, make_config, monkeypatch
-    ):
-        """The boundary control on the skip, and the reason it is not
-        `_non_daemon_env_markers`.
-
-        `ISTOTA_SANDBOXED` is set only where the sandbox was really in force, so
-        a task on the ISSUE-381 shape carries `ISTOTA_TASK_ID` without it and its
-        probe is a valid one. Skipping on the whole marker set would hide the one
-        deployment this check exists to report from the surface an operator
-        actually reaches — a task run of `istota doctor`.
-        """
-        from istota import executor
-
-        monkeypatch.setenv("ISTOTA_TASK_ID", "1234")
-        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
-        monkeypatch.setattr(executor, "_bwrap_checked", False)
-        r = self._run(self._config(make_config))
-
-        assert r.status == FAIL
-        assert "unsandboxed" in r.detail
-
-    # -- the scope guarantee, which is the whole reason for a separate check -
-
-    def test_scope_image_never_selects_it(self, make_config, monkeypatch):
-        """`tests/image/test_istota_image.py::test_no_check_fails` runs
-        `istota doctor --json --scope image` in a bare `docker run` with no
-        `security_opt`, and `cmd_doctor` passes `probe=True`. A capability arm
-        on `runtime.bwrap` would turn that red across all three shapes.
-
-        Asserted before invocation, not after: the availability lookup is the
-        first thing the check reaches past the `sandbox_enabled` gate, so a
-        recorder there catches a run that happened and was filtered out of the
-        results afterwards.
-        """
-        asked = self._record_availability(monkeypatch)
-        config = self._config(make_config)
-
-        results = run_checks(config, scope=IMAGE)
-
-        assert self.NAME not in {r.name for r in results}
-        assert asked == [], "the check ran and was discarded rather than filtered"
-
-    def test_the_scope_exclusion_control(self, make_config, monkeypatch):
-        """Positive control for the test above.
-
-        Both of its assertions pass against a check that was deleted, so the
-        unscoped run has to show the same recorder firing and the same name
-        present.
-        """
-        asked = self._record_availability(monkeypatch)
-        config = self._config(make_config)
-
-        results = run_checks(config, only=(self.NAME,))
-
-        assert self.NAME in {r.name for r in results}
-        assert asked == ["probed"]
 
     @staticmethod
     def _record_availability(monkeypatch):
-        """Record every route the check has to the availability answer.
-
-        Both of them, which is the point: the check calls `effective_sandboxing`
+        """Record both routes to the availability answer: `effective_sandboxing`
         under `probe=True` and `effective_sandboxing_if_known` under
-        `probe=False`, so a recorder on one leaves the other blind and a
-        filtering test built on it would pass while the check ran.
-        """
+        `probe=False`. A recorder on one would leave the other blind."""
         from istota import executor
 
         asked = []
@@ -3503,49 +2680,40 @@ class TestSandboxEffective:
         monkeypatch.setattr(executor, "effective_sandboxing_if_known", _memo)
         return asked
 
-    def test_the_recorder_sees_the_unprobed_route_too(self, make_config, monkeypatch):
-        """Positive control for `_record_availability`'s second half.
-
-        Without this, the `probe=False` recorder is an untested claim and the
-        filtering tests above rest on it.
-        """
+    def test_scope_image_never_selects_it(self, make_config, monkeypatch):
+        """`tests/image/test_istota_image.py::test_no_check_fails` runs
+        `doctor --scope image` with `probe=True` in a bare `docker run`. The
+        recorder catches a run that happened and was filtered out afterwards."""
         asked = self._record_availability(monkeypatch)
+        results = run_checks(self._config(make_config), scope=IMAGE)
 
-        self._run(self._config(make_config), probe=False)
+        assert self.NAME not in {r.name for r in results}
+        assert asked == [], "the check ran and was discarded rather than filtered"
 
-        assert asked == ["memo"]
+    @pytest.mark.parametrize("probe,route", [(True, "probed"), (False, "memo")])
+    def test_the_recorder_sees_each_route(self, make_config, monkeypatch, probe, route):
+        """Positive controls for the test above, whose assertions also pass
+        against a deleted check."""
+        asked = self._record_availability(monkeypatch)
+        results = run_checks(self._config(make_config), only=(self.NAME,), probe=probe)
 
-    def test_it_is_registered_deployment_scoped(self):
+        assert self.NAME in {r.name for r in results}
+        assert asked == [route]
+
+    def test_it_is_registered_deployment_scoped_and_neither_deep_nor_live(self):
+        """`effective_sandboxing` memoizes its probe and the daemon has paid for
+        it at start-up, so this needs no opt-in axis."""
         assert doctor.CHECK_SCOPES[self.NAME] == DEPLOYMENT
         assert self.NAME in {name for name, _ in CHECKS}
-
-    def test_it_is_neither_deep_nor_live(self):
-        """`effective_sandboxing` memoizes its probe and the daemon has already
-        paid for it at start-up, so this needs no opt-in axis. `DEEP_CHECKS`
-        must also keep exactly one member — `web_app._doctor_deep_timeout`
-        budgets for its contents and cannot see a change here."""
         assert self.NAME not in DEEP_CHECKS
         assert self.NAME not in LIVE_CHECKS
-        assert DEEP_CHECKS == frozenset({"sandbox.masks"})
 
     def test_the_bwrap_check_is_unchanged(self, make_config, tmp_path, monkeypatch):
-        """The capability answer moved to a check of its own rather than onto
-        this one.
-
-        An installed, runnable bwrap on a host where the namespace is refused —
-        the ISSUE-381 shape exactly — must still leave `runtime.bwrap` `OK` and
-        `IMAGE`-scoped. That is what the image tier depends on, and softening
-        it here is the failure `doctor.py`'s own scope comment warns about, in
-        reverse.
-        """
-        from istota import executor
-
-        fake = _fake_bin(tmp_path / "bin" / "bwrap", "bubblewrap 0.11.0")
-        monkeypatch.setattr(
-            doctor.shutil, "which", lambda name: str(fake) if name == "bwrap" else None
-        )
-        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
-        monkeypatch.setattr(executor, "_bwrap_checked", False)
+        """An installed, runnable bwrap on a host where the namespace is refused
+        must still leave `runtime.bwrap` OK and IMAGE-scoped, which the image
+        tier depends on; the finding lands on the deployment-scoped check."""
+        _which_only(monkeypatch, "bwrap", _fake_bin(tmp_path / "bin" / "bwrap", "bubblewrap 0.11.0"))
+        _bwrap(monkeypatch, False)
         results = _by_name(
             run_checks(self._config(make_config), only=("runtime.bwrap", self.NAME))
         )
@@ -3553,7 +2721,6 @@ class TestSandboxEffective:
         assert results["runtime.bwrap"].status == OK
         assert results["runtime.bwrap"].scope == IMAGE
         assert doctor.CHECK_SCOPES["runtime.bwrap"] == IMAGE
-        # And the deployment-scoped one is where the finding landed instead.
         assert results[self.NAME].status == FAIL
 
 
@@ -3571,95 +2738,85 @@ class TestForgeGating:
         results = run_checks(config, only=("developer.",))
         assert all(r.status == SKIP for r in results)
 
-    def test_binary_checks_skip_without_a_token(self, make_config, tmp_path):
+    def test_without_a_token_the_binary_checks_skip_and_the_policy_check_runs(
+        self, make_config, tmp_path
+    ):
+        """`forge_cli_permit` validation is about the config file, not about
+        whether a credential happens to be wired yet."""
         config = _dev_config(make_config, tmp_path, gitlab_token="", github_token="")
         results = _by_name(run_checks(config, only=("developer.",)))
         assert results["developer.forge_binaries.gh"].status == SKIP
         assert results["developer.forge_config_drift.gh"].status == SKIP
-
-    def test_policy_check_runs_without_a_token(self, make_config, tmp_path):
-        """`forge_cli_permit` validation is about the config file, not about
-        whether a credential happens to be wired yet."""
-        config = _dev_config(make_config, tmp_path, gitlab_token="", github_token="")
-        results = _by_name(run_checks(config, only=("developer.forge_policy",)))
         assert results["developer.forge_policy"].status != SKIP
 
 
 class TestForgeBinaries:
-    def test_present_and_executable_is_ok(self, make_config, tmp_path):
+    def _run(self, config, **kwargs):
+        return _by_name(run_checks(config, only=("developer.forge_binaries",), **kwargs))
+
+    def test_present_and_executable_is_ok_one_image_scoped_result_per_binary(
+        self, make_config, tmp_path
+    ):
         _fake_bin(tmp_path / "bin" / "gh", "gh version 2.98.0 (2026-01-01)")
         _fake_bin(tmp_path / "bin" / "glab", "glab 1.114.0")
-        config = _dev_config(make_config, tmp_path)
-        results = _by_name(run_checks(config, only=("developer.forge_binaries",)))
-        assert results["developer.forge_binaries.gh"].status == OK
-        assert results["developer.forge_binaries.glab"].status == OK
+        results = self._run(_dev_config(make_config, tmp_path))
+        assert set(results) == {"developer.forge_binaries.gh", "developer.forge_binaries.glab"}
+        for r in results.values():
+            assert r.status == OK
+            assert r.scope == IMAGE
 
     def test_missing_binary_fails(self, make_config, tmp_path):
         """The ISSUE-263 shape: `os.execve` onto a path that does not exist."""
-        config = _dev_config(make_config, tmp_path)
-        results = _by_name(run_checks(config, only=("developer.forge_binaries",)))
-        assert results["developer.forge_binaries.gh"].status == FAIL
-        assert str(tmp_path / "bin" / "gh") in results["developer.forge_binaries.gh"].detail
-        assert results["developer.forge_binaries.gh"].remedy
+        gh = self._run(_dev_config(make_config, tmp_path))["developer.forge_binaries.gh"]
+        assert gh.status == FAIL
+        assert str(tmp_path / "bin" / "gh") in gh.detail
+        assert gh.remedy
 
-    def test_a_binary_that_exits_nonzero_fails(self, make_config, tmp_path):
-        """The half of this check that actually runs the thing. `check_forge_versions`
-        used to do this too and was deleted as redundant, which is only true while
-        `_binary_status` keeps executing `--version` under probe — so pin it here
-        rather than leaving the property resting on a docstring."""
+    @pytest.mark.parametrize(
+        "probe,status,named",
+        [
+            # `check_forge_versions` was deleted as redundant, which is only
+            # true while `_binary_status` executes `--version` under probe.
+            (True, FAIL, "exited 1"),
+            # Nothing may shell out on the probe-disabled path, and the result
+            # has to say that nothing ran.
+            (False, OK, "not executed"),
+        ],
+        ids=["probe", "no-probe"],
+    )
+    def test_a_binary_that_exits_nonzero(self, make_config, tmp_path, probe, status, named):
         _fake_bin(tmp_path / "bin" / "gh", "boom", exit_code=1)
         _fake_bin(tmp_path / "bin" / "glab", "glab 1.114.0")
-        config = _dev_config(make_config, tmp_path)
-        results = _by_name(run_checks(config, only=("developer.forge_binaries",)))
-        assert results["developer.forge_binaries.gh"].status == FAIL
-        assert "exited 1" in results["developer.forge_binaries.gh"].detail
+        results = self._run(_dev_config(make_config, tmp_path), probe=probe)
+        assert results["developer.forge_binaries.gh"].status == status
+        assert named in results["developer.forge_binaries.gh"].detail
         assert results["developer.forge_binaries.glab"].status == OK
-
-    def test_a_binary_is_not_executed_when_probe_is_off(self, make_config, tmp_path):
-        """Nothing may shell out on the probe-disabled path; an operator reading
-        the result has to be able to tell that nothing ran."""
-        _fake_bin(tmp_path / "bin" / "gh", "boom", exit_code=1)
-        _fake_bin(tmp_path / "bin" / "glab", "glab 1.114.0")
-        config = _dev_config(make_config, tmp_path)
-        results = _by_name(
-            run_checks(config, only=("developer.forge_binaries",), probe=False)
-        )
-        assert results["developer.forge_binaries.gh"].status == OK
-        assert "not executed" in results["developer.forge_binaries.gh"].detail
 
     def test_present_but_not_executable_fails(self, make_config, tmp_path):
         path = tmp_path / "bin" / "gh"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("#!/bin/sh\n")
         path.chmod(0o644)
-        config = _dev_config(make_config, tmp_path)
-        results = _by_name(run_checks(config, only=("developer.forge_binaries",)))
-        assert results["developer.forge_binaries.gh"].status == FAIL
-        assert "not executable" in results["developer.forge_binaries.gh"].detail
-
-    def test_one_result_per_binary(self, make_config, tmp_path):
-        config = _dev_config(make_config, tmp_path)
-        names = {r.name for r in run_checks(config, only=("developer.forge_binaries",))}
-        assert names == {"developer.forge_binaries.gh", "developer.forge_binaries.glab"}
-
-    def test_is_image_scoped(self, make_config, tmp_path):
-        config = _dev_config(make_config, tmp_path)
-        for r in run_checks(config, only=("developer.forge_binaries",)):
-            assert r.scope == IMAGE
+        gh = self._run(_dev_config(make_config, tmp_path))["developer.forge_binaries.gh"]
+        assert gh.status == FAIL
+        assert "not executable" in gh.detail
 
 
 class TestForgeConfigDrift:
     """`_resolve_real_bin`'s fallback is correct and load-bearing, and it hides
-    the stale-config condition. This check restores that signal."""
+    the stale-config condition. This check restores that signal. It never fails."""
+
+    def _drift(self, config):
+        results = run_checks(config, only=("developer.forge_config_drift",))
+        assert all(r.status != FAIL for r in results)
+        return _by_name(results)["developer.forge_config_drift.gh"]
 
     def test_configured_path_that_exists_and_resolves_to_itself_is_ok(
         self, make_config, tmp_path
     ):
         _fake_bin(tmp_path / "bin" / "gh")
         _fake_bin(tmp_path / "bin" / "glab")
-        config = _dev_config(make_config, tmp_path)
-        results = _by_name(run_checks(config, only=("developer.forge_config_drift",)))
-        assert results["developer.forge_config_drift.gh"].status == OK
+        assert self._drift(_dev_config(make_config, tmp_path)).status == OK
 
     def test_stale_configured_path_warns_naming_both(self, make_config, tmp_path, monkeypatch):
         """The retained-volume upgrade: `config.toml` predates the binaries, so
@@ -3680,29 +2837,21 @@ class TestForgeConfigDrift:
             lambda path: False if str(path) == stale else original_exists(doctor.Path(path)),
         )
         monkeypatch.setitem(developer_skill._IMAGE_BIN, "gh", str(shipped))
-        config = _dev_config(make_config, tmp_path, gh_bin_path=str(stale))
-        results = _by_name(run_checks(config, only=("developer.forge_config_drift",)))
-        drift = results["developer.forge_config_drift.gh"]
+        drift = self._drift(_dev_config(make_config, tmp_path, gh_bin_path=str(stale)))
         assert drift.status == WARN
         assert stale in drift.detail
         assert str(shipped) in drift.detail
         assert drift.remedy
 
     def test_an_explicit_missing_path_does_not_contradict_itself(self, make_config, tmp_path):
-        """`_resolve_real_bin` returns an explicitly chosen path as given, so
-        configured == resolved while nothing exists there. One combined message
-        would read "x but the wrapper will exec x"."""
-        config = _dev_config(make_config, tmp_path, gh_bin_path=str(tmp_path / "nowhere" / "gh"))
-        results = _by_name(run_checks(config, only=("developer.forge_config_drift",)))
-        drift = results["developer.forge_config_drift.gh"]
+        """`_resolve_real_bin` returns an explicitly chosen path as given, so one
+        combined message would read "x but the wrapper will exec x"."""
+        drift = self._drift(
+            _dev_config(make_config, tmp_path, gh_bin_path=str(tmp_path / "nowhere" / "gh"))
+        )
         assert drift.status == WARN
         assert "nothing exists there" in drift.detail
         assert "but the wrapper will exec" not in drift.detail
-
-    def test_never_fails(self, make_config, tmp_path):
-        config = _dev_config(make_config, tmp_path)
-        for r in run_checks(config, only=("developer.forge_config_drift",)):
-            assert r.status != FAIL
 
 
 class TestWrapperShadowing:
@@ -3710,11 +2859,13 @@ class TestWrapperShadowing:
     real forge binary on PATH" — the latter is true by design on the Ansible
     shape, which is what production runs."""
 
+    def _gh(self, config):
+        results = run_checks(config, only=("developer.forge_wrapper_shadowing",))
+        return _by_name(results)["developer.forge_wrapper_shadowing.gh"]
+
     def test_nothing_on_path_is_ok(self, make_config, tmp_path, monkeypatch):
         monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
-        config = _dev_config(make_config, tmp_path)
-        results = _by_name(run_checks(config, only=("developer.forge_wrapper_shadowing",)))
-        assert results["developer.forge_wrapper_shadowing.gh"].status == OK
+        assert self._gh(_dev_config(make_config, tmp_path)).status == OK
 
     def test_an_unexpected_real_binary_on_path_fails(self, make_config, tmp_path, monkeypatch):
         """Someone apt-installed gh onto the image shape: the model's shell finds
@@ -3723,40 +2874,26 @@ class TestWrapperShadowing:
         real.parent.mkdir(parents=True, exist_ok=True)
         real.write_bytes(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 64)
         real.chmod(0o755)
-        monkeypatch.setattr(
-            doctor.shutil, "which", lambda name: str(real) if name == "gh" else None
-        )
+        _which_only(monkeypatch, "gh", real)
         # The deployment resolved something else entirely.
         _fake_bin(tmp_path / "bin" / "gh")
-        config = _dev_config(make_config, tmp_path)
-        results = _by_name(run_checks(config, only=("developer.forge_wrapper_shadowing",)))
-        gh = results["developer.forge_wrapper_shadowing.gh"]
+        gh = self._gh(_dev_config(make_config, tmp_path))
         assert gh.status == FAIL
         assert str(real) in gh.detail
         assert gh.remedy
 
     def test_the_ansible_shape_is_ok(self, make_config, tmp_path, monkeypatch):
         """The role installs the real binaries into /usr/bin and renders those
-        paths into config.toml, so `which` finding them is correct. A FAIL here
-        would alert the admin allowlist on every boot of a healthy host."""
+        paths into config.toml, so `which` finding them is correct."""
         installed = _fake_bin(tmp_path / "usr-bin" / "gh")
-        monkeypatch.setattr(
-            doctor.shutil, "which", lambda name: str(installed) if name == "gh" else None
-        )
-        config = _dev_config(make_config, tmp_path, gh_bin_path=str(installed))
-        results = _by_name(run_checks(config, only=("developer.forge_wrapper_shadowing",)))
-        gh = results["developer.forge_wrapper_shadowing.gh"]
+        _which_only(monkeypatch, "gh", installed)
+        gh = self._gh(_dev_config(make_config, tmp_path, gh_bin_path=str(installed)))
         assert gh.status == OK
         assert "Ansible shape" in gh.detail
 
     def test_the_real_wrapper_on_path_is_ok(self, make_config, tmp_path, monkeypatch):
-        """Copied from `forge_cli.py` itself, not hand-written to match.
-
-        The wrapper the daemon writes per task *is* a verbatim copy of that
-        file, so a hand-written stand-in could satisfy the identity test while
-        the real article failed it — which is how the previous docstring-prose
-        matching would have broken on a reworded comment.
-        """
+        """Copied from `forge_cli.py` itself, not hand-written to match: the
+        per-task wrapper *is* a verbatim copy of that file."""
         import shutil as _shutil
 
         from istota import forge_cli
@@ -3765,23 +2902,15 @@ class TestWrapperShadowing:
         wrapper.parent.mkdir(parents=True, exist_ok=True)
         _shutil.copy(forge_cli.__file__, wrapper)
         wrapper.chmod(0o755)
-        monkeypatch.setattr(
-            doctor.shutil, "which", lambda name: str(wrapper) if name == "gh" else None
-        )
-        config = _dev_config(make_config, tmp_path)
-        results = _by_name(run_checks(config, only=("developer.forge_wrapper_shadowing",)))
-        assert results["developer.forge_wrapper_shadowing.gh"].status == OK
+        _which_only(monkeypatch, "gh", wrapper)
+        assert self._gh(_dev_config(make_config, tmp_path)).status == OK
 
-    def test_the_sentinel_is_near_the_top_of_the_wrapper(self):
-        """`_looks_like_the_wrapper` reads only the file's head."""
+    def test_the_sentinel_is_near_the_top_of_both_copies_of_the_wrapper(self):
+        """`_looks_like_the_wrapper` reads only the file's head, and the devbox
+        image ships a byte-identical copy under another name."""
         from istota import forge_cli
 
-        head = Path(forge_cli.__file__).read_bytes()[:8192]
-        assert doctor._WRAPPER_SENTINEL in head
-
-    def test_the_devbox_copy_carries_the_sentinel_too(self):
-        """The devbox image ships a byte-identical copy under another name; it
-        is the one shape where the wrapper really is on PATH."""
+        assert doctor._WRAPPER_SENTINEL in Path(forge_cli.__file__).read_bytes()[:8192]
         copy = Path(__file__).resolve().parents[1] / "docker/devbox/lib/istota_forge_cli.py"
         assert doctor._WRAPPER_SENTINEL in copy.read_bytes()[:8192]
 
@@ -3794,275 +2923,167 @@ class TestWrapperShadowing:
         opaque.parent.mkdir(parents=True, exist_ok=True)
         opaque.write_text("whatever")
         opaque.chmod(0o311)
-        monkeypatch.setattr(
-            doctor.shutil, "which", lambda name: str(opaque) if name == "gh" else None
-        )
-        config = _dev_config(make_config, tmp_path)
+        _which_only(monkeypatch, "gh", opaque)
         try:
-            results = _by_name(run_checks(config, only=("developer.forge_wrapper_shadowing",)))
+            gh = self._gh(_dev_config(make_config, tmp_path))
         finally:
             opaque.chmod(0o644)
-        gh = results["developer.forge_wrapper_shadowing.gh"]
         assert gh.status == WARN
         assert gh.remedy
 
 
 class TestForgePolicy:
-    def test_clean_permits_are_ok(self, make_config, tmp_path):
-        config = _dev_config(make_config, tmp_path, forge_cli_permit=[])
+    @pytest.mark.parametrize(
+        "permits,status",
+        [([], OK), (["gh not-a-real-verb-at-all"], WARN), (["gh nonsense"], WARN)],
+    )
+    def test_permits(self, make_config, tmp_path, permits, status):
+        config = _dev_config(make_config, tmp_path, forge_cli_permit=permits)
         r = run_checks(config, only=("developer.forge_policy",))[0]
-        assert r.status == OK
-
-    def test_unmatched_permit_warns_naming_the_entry(self, make_config, tmp_path):
-        config = _dev_config(
-            make_config, tmp_path, forge_cli_permit=["gh not-a-real-verb-at-all"]
-        )
-        r = run_checks(config, only=("developer.forge_policy",))[0]
-        assert r.status == WARN
-        assert "not-a-real-verb-at-all" in r.detail
-
-    def test_never_fails(self, make_config, tmp_path):
-        config = _dev_config(make_config, tmp_path, forge_cli_permit=["gh nonsense"])
-        assert run_checks(config, only=("developer.forge_policy",))[0].status != FAIL
+        assert r.status == status
+        for permit in permits:
+            assert permit.split(" ", 1)[1] in r.detail
 
 
 class TestGitlabReviewer:
     """ISSUE-289. The setting was silent in both directions: a numeric value
     produced `failed to find user by name` inside the task, and an unset one
-    produced nothing at all. Neither reached the operator, so every MR for
-    weeks opened with no reviewer on it. A boot-time line is the only thing
-    that closes that loop."""
+    produced nothing at all, so every MR for weeks opened with no reviewer. A
+    boot-time line is the only thing that closes that loop. It never fails."""
 
-    def test_a_username_is_ok(self, make_config, tmp_path):
-        config = _dev_config(make_config, tmp_path, gitlab_reviewer="reviewer-user")
+    def _run(self, config):
         r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
-        assert r.status == OK
+        assert r.status != FAIL
+        return r
 
-    def test_an_all_digits_username_warns_naming_the_value(self, make_config, tmp_path):
-        """`glab mr create --reviewer` resolves by username. A GitLab username
-        cannot be all digits, so this value can only be the numeric user id."""
-        config = _dev_config(make_config, tmp_path, gitlab_reviewer="1234567")
-        r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
+    @pytest.mark.parametrize(
+        "fields,status",
+        [
+            ({"gitlab_reviewer": "reviewer-user"}, OK),
+            # Not configuring a reviewer is a choice, not a misconfiguration.
+            ({"gitlab_reviewer": ""}, OK),
+            ({"gitlab_reviewer": "reviewer-user", "gitlab_reviewer_id": "1234567"}, OK),
+            # TOML types its scalars, so an unquoted value arrives as an int; a
+            # crash would page the operator, since a raising check is a FAIL.
+            ({"gitlab_reviewer": "", "gitlab_reviewer_id": 1234567}, WARN),
+        ],
+        ids=["username", "unset", "id-beside-username", "int-in-old-key"],
+    )
+    def test_status(self, make_config, tmp_path, fields, status):
+        assert self._run(_dev_config(make_config, tmp_path, **fields)).status == status
+
+    @pytest.mark.parametrize(
+        "fields,in_detail,in_remedy",
+        [
+            # `glab mr create --reviewer` resolves by username, and a GitLab
+            # username cannot be all digits, so this can only be the user id.
+            ({"gitlab_reviewer": "1234567"}, ("1234567",), ()),
+            ({"gitlab_reviewer": 1234567}, ("user id",), ()),
+            # The upgrade shape: only `gitlab_reviewer_id` set used to build a
+            # reviewer flag and now builds none.
+            ({"gitlab_reviewer": "", "gitlab_reviewer_id": "1234567"}, ("gitlab_reviewer",), ("username",)),
+            # `gitlab_reviewer_id` was documented as a username for one day, so
+            # a host may have a working username in the retired key; calling it
+            # "the id" sends that operator looking for something they have.
+            ({"gitlab_reviewer": "", "gitlab_reviewer_id": "reviewer-user"}, (), ("reviewer-user", "copy it verbatim")),
+            # The recipe expands `--reviewer $GITLAB_REVIEWER` unquoted.
+            ({"gitlab_reviewer": "First Last"}, ("whitespace",), ()),
+        ],
+        ids=["all-digits", "int", "old-id-key-alone", "username-in-old-key", "whitespace"],
+    )
+    def test_warns(self, make_config, tmp_path, fields, in_detail, in_remedy):
+        r = self._run(_dev_config(make_config, tmp_path, **fields))
         assert r.status == WARN
-        assert "1234567" in r.detail
         assert r.remedy
-
-    def test_the_old_id_key_alone_warns(self, make_config, tmp_path):
-        """The upgrade shape. A host that set only `gitlab_reviewer_id` used to
-        get a reviewer flag built from it; it now gets none, and the operator
-        has no other way to find out."""
-        config = _dev_config(
-            make_config, tmp_path, gitlab_reviewer="", gitlab_reviewer_id="1234567"
-        )
-        r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
-        assert r.status == WARN
-        assert "gitlab_reviewer" in r.detail
-        assert "username" in r.remedy
-
-    def test_a_username_left_in_the_old_key_is_named_as_one(self, make_config, tmp_path):
-        """The narrow population the remedy would otherwise mislead.
-
-        `gitlab_reviewer_id` was documented as a username for one day before
-        ISSUE-289 was filed, so a host that followed those docs has a working
-        username sitting in the retired key. Telling that operator the value is
-        "the id" and to go find the username sends them looking for something
-        they already have.
-        """
-        config = _dev_config(
-            make_config, tmp_path, gitlab_reviewer="", gitlab_reviewer_id="reviewer-user"
-        )
-        r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
-        assert r.status == WARN
-        assert "reviewer-user" in r.remedy
-        assert "copy it verbatim" in r.remedy
-
-    def test_a_non_string_value_does_not_crash_the_check(self, make_config, tmp_path):
-        """TOML types its scalars, so an unquoted `gitlab_reviewer = 1234567`
-        arrives as an int. `run_checks` reports a raising check as FAIL — the
-        one status that alerts — so a crash here would page the operator in
-        precisely the misconfiguration the check exists to describe."""
-        config = _dev_config(make_config, tmp_path, gitlab_reviewer=1234567)
-        r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
-        assert r.status == WARN
-        assert "user id" in r.detail
-
-    def test_a_non_string_value_in_the_old_key_does_not_crash_either(
-        self, make_config, tmp_path
-    ):
-        config = _dev_config(
-            make_config, tmp_path, gitlab_reviewer="", gitlab_reviewer_id=1234567
-        )
-        r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
-        assert r.status == WARN
-
-    def test_a_value_with_whitespace_warns(self, make_config, tmp_path):
-        """The recipe expands `--reviewer $GITLAB_REVIEWER` unquoted, so a
-        display name hands `glab` a stray positional argument."""
-        config = _dev_config(make_config, tmp_path, gitlab_reviewer="First Last")
-        r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
-        assert r.status == WARN
-        assert "whitespace" in r.detail
+        for text in in_detail:
+            assert text in r.detail
+        for text in in_remedy:
+            assert text in r.remedy
 
     def test_non_ascii_digits_are_not_called_a_user_id(self, make_config, tmp_path):
-        """`str.isdigit` is Unicode-wide. Arabic-Indic digits are not a GitLab
-        user id, so the WARN must not claim they are — it may still warn, but
-        not with that wording."""
-        config = _dev_config(make_config, tmp_path, gitlab_reviewer="\u0661\u0662\u0663")
-        r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
+        """`str.isdigit` is Unicode-wide; Arabic-Indic digits are no user id."""
+        r = self._run(_dev_config(make_config, tmp_path, gitlab_reviewer="\u0661\u0662\u0663"))
         assert "user id" not in r.detail
-
-    def test_neither_key_set_is_ok(self, make_config, tmp_path):
-        """Not configuring a reviewer is a choice, not a misconfiguration."""
-        config = _dev_config(make_config, tmp_path, gitlab_reviewer="")
-        assert run_checks(config, only=("developer.gitlab_reviewer",))[0].status == OK
-
-    def test_an_id_recorded_beside_a_username_is_ok(self, make_config, tmp_path):
-        config = _dev_config(
-            make_config,
-            tmp_path,
-            gitlab_reviewer="reviewer-user",
-            gitlab_reviewer_id="1234567",
-        )
-        assert run_checks(config, only=("developer.gitlab_reviewer",))[0].status == OK
 
     def test_skips_when_the_developer_skill_is_off(self, make_config):
         from istota.config import DeveloperConfig
 
         config = make_config(developer=DeveloperConfig(enabled=False))
-        assert run_checks(config, only=("developer.gitlab_reviewer",))[0].status == SKIP
-
-    def test_never_fails(self, make_config, tmp_path):
-        config = _dev_config(make_config, tmp_path, gitlab_reviewer="1234567")
-        assert run_checks(config, only=("developer.gitlab_reviewer",))[0].status != FAIL
+        assert self._run(config).status == SKIP
 
 
 class TestForgeTransport:
     """A forge token sent over plain HTTP.
 
-    This became reachable when the developer skill started seeding glab's
-    `api_protocol` for an `http://` forge URL — before that a plain-HTTP forge
-    simply failed at the TLS handshake, so no token ever left. It works now,
-    and a working plaintext credential transport is worth one line in the
-    report rather than silence.
+    Reachable since the developer skill seeds glab's `api_protocol` for an
+    `http://` forge URL; before that a plain-HTTP forge failed at the TLS
+    handshake. A working plaintext credential transport is worth one line in
+    the report. It never fails.
     """
 
-    def test_https_is_ok(self, make_config, tmp_path):
-        config = _dev_config(make_config, tmp_path, gitlab_url="https://gitlab.com")
-        r = run_checks(config, only=("developer.forge_transport",))[0]
-        assert r.status == OK
+    def _run(self, make_config, tmp_path, **fields):
+        r = run_checks(_dev_config(make_config, tmp_path, **fields), only=("developer.forge_transport",))[0]
+        assert r.status != FAIL, r.detail
+        return r
 
-    def test_plain_http_with_a_token_warns_naming_the_url(self, make_config, tmp_path):
-        config = _dev_config(
-            make_config, tmp_path, gitlab_url="http://gitlab.internal:8080"
+    def test_https_is_ok(self, make_config, tmp_path):
+        assert self._run(make_config, tmp_path, gitlab_url="https://gitlab.com").status == OK
+
+    def test_plain_http_with_a_token_warns_naming_the_url_and_not_the_token(
+        self, make_config, tmp_path
+    ):
+        r = self._run(
+            make_config, tmp_path,
+            gitlab_url="http://gitlab.internal:8080", gitlab_token="glpat-" + "s" * 20,
         )
-        r = run_checks(config, only=("developer.forge_transport",))[0]
         assert r.status == WARN
         assert "http://gitlab.internal:8080" in r.detail
         assert r.remedy
-
-    def test_the_token_value_is_never_in_the_report(self, make_config, tmp_path):
-        """The detail names the URL, and a URL can carry userinfo."""
-        config = _dev_config(
-            make_config,
-            tmp_path,
-            gitlab_url="http://gitlab.internal:8080",
-            gitlab_token="glpat-" + "s" * 20,
-        )
-        r = run_checks(config, only=("developer.forge_transport",))[0]
+        # The detail names the URL, and a URL can carry userinfo.
         assert "glpat-" not in (r.detail + (r.remedy or ""))
 
-    def test_loopback_still_warns(self, make_config, tmp_path):
-        """No carve-out for localhost.
-
-        A loopback forge URL in a real deployment is a proxy or a tunnel, and
-        what is on the far side of it is not knowable from here. The check is
-        cheap and a WARN costs nothing; guessing wrong is a silently plaintext
-        credential.
-        """
-        config = _dev_config(make_config, tmp_path, gitlab_url="http://127.0.0.1:18080")
-        assert run_checks(config, only=("developer.forge_transport",))[0].status == WARN
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            # No carve-out for localhost: a loopback forge URL in a deployment
+            # is a proxy or a tunnel, and its far side is not knowable here.
+            {"gitlab_url": "http://127.0.0.1:18080"},
+            # gh refuses a scheme inside `GH_HOST`, so the token never leaves,
+            # but the operator still wrote `http://`.
+            {"gitlab_url": "https://gitlab.com", "github_url": "http://ghe.internal", "github_token": "g" * 20},
+        ],
+        ids=["loopback", "github"],
+    )
+    def test_still_warns(self, make_config, tmp_path, fields):
+        assert self._run(make_config, tmp_path, **fields).status == WARN
 
     def test_skips_without_a_token(self, make_config, tmp_path):
-        config = _dev_config(
-            make_config,
-            tmp_path,
-            gitlab_url="http://gitlab.internal:8080",
-            gitlab_token="",
-            github_token="",
+        r = self._run(
+            make_config, tmp_path,
+            gitlab_url="http://gitlab.internal:8080", gitlab_token="", github_token="",
         )
-        assert run_checks(config, only=("developer.forge_transport",))[0].status == SKIP
+        assert r.status == SKIP
 
-    def test_a_plain_http_github_url_warns_too(self, make_config, tmp_path):
-        """Both forges, and for gh the scheme is the whole problem.
-
-        gh refuses a scheme inside `GH_HOST`, so a plain-HTTP `github_url`
-        cannot connect however it is spelled — the token never leaves, but the
-        operator still wrote `http://` and a check that stayed quiet about it
-        would be reporting on the deployment it wished it had. The port is a
-        separate matter and is no longer broken (`forge_cli._gh_host`,
-        ISSUE-279).
-        """
-        config = _dev_config(
-            make_config,
-            tmp_path,
-            gitlab_url="https://gitlab.com",
-            github_url="http://ghe.internal",
-            github_token="g" * 20,
-        )
-        assert run_checks(config, only=("developer.forge_transport",))[0].status == WARN
-
-    def test_a_url_carrying_a_credential_is_warned_about(self, make_config, tmp_path):
-        """A forge URL is not where a credential belongs.
-
-        The token goes in `gitlab_token`, and `git_remote_scrub` exists to
-        strip exactly this out of URLs. It matters more since the plain-HTTP
-        entry landed: `_plain_http_host_entry` refuses to write an entry for
-        such a URL — writing one would mean putting the password in a file the
-        sandbox can read — so the call fails, and without this check nothing
-        says why.
-        """
-        config = _dev_config(
-            make_config, tmp_path, gitlab_url="https://bot:sekritvalue@gitlab.internal"
-        )
-        r = run_checks(config, only=("developer.forge_transport",))[0]
+    def test_a_url_carrying_a_credential_is_warned_about_and_redacted_visibly(
+        self, make_config, tmp_path
+    ):
+        """The token belongs in `gitlab_token`; `_plain_http_host_entry` refuses
+        to write an entry for such a URL, so without this nothing says why the
+        call fails. Removing the userinfo silently would hide that the
+        configured value carried a credential at all."""
+        r = self._run(make_config, tmp_path, gitlab_url="https://bot:sekritvalue@gitlab.internal")
 
         assert r.status == WARN
         assert "gitlab.internal" in r.detail
         assert "sekritvalue" not in (r.detail + (r.remedy or "")), r.detail
-
-    def test_the_redacted_url_still_shows_a_credential_was_there(
-        self, make_config, tmp_path
-    ):
-        """Removing the userinfo silently is its own failure.
-
-        An operator reading `https://gitlab.internal` cannot tell the
-        configured value carried a credential at all, which is the single most
-        useful thing this check could tell them.
-        """
-        config = _dev_config(
-            make_config, tmp_path, gitlab_url="https://bot:sekritvalue@gitlab.internal"
-        )
-        r = run_checks(config, only=("developer.forge_transport",))[0]
-
         assert "@gitlab.internal" in r.detail, r.detail
 
     def test_a_malformed_url_does_not_turn_a_warning_into_a_failure(
         self, make_config, tmp_path
     ):
-        """`urlsplit` raises on some inputs — `http://[::1` is `Invalid IPv6 URL`.
-
-        Unguarded, `run_checks` catches it and reports FAIL with the remedy
-        "this is a defect in the check": a WARN-only check emitting a FAIL, and
-        blaming itself for the operator's typo.
-        """
-        config = _dev_config(make_config, tmp_path, gitlab_url="http://[::1")
-        r = run_checks(config, only=("developer.forge_transport",))[0]
-
-        assert r.status != FAIL, r.detail
-
-    def test_never_fails(self, make_config, tmp_path):
-        config = _dev_config(make_config, tmp_path, gitlab_url="http://gitlab.internal")
-        assert run_checks(config, only=("developer.forge_transport",))[0].status != FAIL
+        """`urlsplit` raises on `http://[::1`; unguarded, `run_checks` reports a
+        FAIL blaming the check for the operator's typo."""
+        self._run(make_config, tmp_path, gitlab_url="http://[::1")
 
 
 class TestWebStatic:
@@ -4070,56 +3091,35 @@ class TestWebStatic:
         r = run_checks(make_config(), only=("web.static",))[0]
         assert r.status == SKIP
 
-    def test_missing_build_fails(self, make_config, tmp_path, monkeypatch):
-        from istota.config import WebConfig
-
-        monkeypatch.setenv("ISTOTA_WEB_STATIC_DIR", str(tmp_path / "nope"))
-        config = make_config(web=WebConfig(enabled=True))
-        r = run_checks(config, only=("web.static",))[0]
-        assert r.status == FAIL
-        assert r.remedy
-
-    def test_empty_index_fails(self, make_config, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        "index,status",
+        [(None, FAIL), ("", FAIL), ("<!doctype html><html></html>", OK)],
+        ids=["missing-build", "empty-index", "present-build"],
+    )
+    def test_the_build(self, make_config, tmp_path, monkeypatch, index, status):
         from istota.config import WebConfig
 
         build = tmp_path / "build"
-        build.mkdir()
-        (build / "index.html").write_text("")
+        if index is not None:
+            build.mkdir()
+            (build / "index.html").write_text(index)
         monkeypatch.setenv("ISTOTA_WEB_STATIC_DIR", str(build))
-        config = make_config(web=WebConfig(enabled=True))
-        r = run_checks(config, only=("web.static",))[0]
-        assert r.status == FAIL
-
-    def test_present_build_is_ok(self, make_config, tmp_path, monkeypatch):
-        from istota.config import WebConfig
-
-        build = tmp_path / "build"
-        build.mkdir()
-        (build / "index.html").write_text("<!doctype html><html></html>")
-        monkeypatch.setenv("ISTOTA_WEB_STATIC_DIR", str(build))
-        config = make_config(web=WebConfig(enabled=True))
-        r = run_checks(config, only=("web.static",))[0]
-        assert r.status == OK
+        r = run_checks(make_config(web=WebConfig(enabled=True)), only=("web.static",))[0]
+        assert r.status == status
+        if status == FAIL:
+            assert r.remedy
 
 
 class TestWebBuildCurrent:
     """ISSUE-428: whether the served bundle is current for this checkout's `web/`.
 
-    `web.static` asks only whether `index.html` exists and is non-empty, and
-    both stay true across a stale bundle — which is the condition the issue
+    `web.static` stays true across a stale bundle, which is what the issue
     reported: a frontend-only commit landed, every unit restarted, and the
-    browser kept running old code with nothing on the host saying so.
-
-    The predicate is **"has `web/` changed since the build"**, not "is the
-    stamp HEAD". The cron rebuilds only when a commit touches `web/`, so on a
-    branch taking mostly Python commits the stamp trails HEAD nearly always
-    while the bundle is exactly the one this checkout would produce. Equality
-    would warn on every ordinary deploy and make the stale case indetectable
-    among the noise; `test_head_moving_without_web_is_not_stale` is that arm.
-
-    These drive a real git repository rather than hand-written `.git` files,
-    because the check now shells out to `git diff` and a fixture that only
-    looks like a repository would answer nothing.
+    browser kept running old code. The predicate is "has `web/` changed since
+    the build", not "is the stamp HEAD": the cron rebuilds only on a `web/`
+    change, so the stamp trails HEAD nearly always and equality would warn on
+    every ordinary deploy. These drive a real git repository, since the check
+    shells out to `git diff`.
     """
 
     @staticmethod
@@ -4162,36 +3162,45 @@ class TestWebBuildCurrent:
         monkeypatch.setenv("ISTOTA_WEB_STATIC_DIR", str(build))
         return build
 
-    def _config(self, make_config):
-        from istota.config import WebConfig
-
-        return make_config(web=WebConfig(enabled=True))
+    def _checkout(self, tmp_path, monkeypatch, then=None):
+        """A real repository wired in as the checkout, with a bundle stamped at
+        its first commit; `then` names a file to change in a second commit."""
+        repo = tmp_path / "repo"
+        git = self._repo(repo)
+        self._bundle(tmp_path, monkeypatch, git("rev-parse", "HEAD"))
+        if then is not None:
+            (repo / then).write_text("changed\n")
+            git("add", "-A")
+            git("commit", "-m", "later")
+        monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
+        return git
 
     def _run(self, make_config, **kwargs):
-        return run_checks(self._config(make_config), only=("web.build_current",), **kwargs)[0]
+        from istota.config import WebConfig
 
-    # -- the arms that need no repository ---------------------------------
+        config = make_config(web=WebConfig(enabled=True))
+        return run_checks(config, only=("web.build_current",), **kwargs)[0]
 
     def test_skips_when_no_web_surface(self, make_config):
         r = run_checks(make_config(), only=("web.build_current",))[0]
         assert r.status == SKIP
 
-    def test_skips_when_the_bundle_carries_no_version(self, make_config, tmp_path, monkeypatch):
-        self._bundle(tmp_path, monkeypatch, None)
-        assert self._run(make_config).status == SKIP
-
-    def test_skips_when_the_bundle_was_not_stamped_with_a_commit(
-        self, make_config, tmp_path, monkeypatch
-    ):
-        """SvelteKit's default version is a build timestamp.
-
-        A container image and a developer's own build both produce one, and
-        neither is evidence of anything about a deployment.
-        """
-        self._bundle(tmp_path, monkeypatch, "1788110322364")
+    @pytest.mark.parametrize(
+        "version,named",
+        [
+            (None, None),
+            # SvelteKit's default version is a build timestamp, which a
+            # container image and a developer's own build both produce.
+            ("1788110322364", "not stamped"),
+        ],
+        ids=["no-version", "not-stamped-with-a-commit"],
+    )
+    def test_skips_on_an_unusable_version(self, make_config, tmp_path, monkeypatch, version, named):
+        self._bundle(tmp_path, monkeypatch, version)
         r = self._run(make_config)
         assert r.status == SKIP
-        assert "not stamped" in r.detail
+        if named:
+            assert named in r.detail
 
     def test_a_malformed_version_file_skips(self, make_config, tmp_path, monkeypatch):
         """Never raises: one caller is the daemon's boot sequence."""
@@ -4208,21 +3217,11 @@ class TestWebBuildCurrent:
     def test_skips_under_probe_false_rather_than_guessing(
         self, make_config, tmp_path, monkeypatch
     ):
-        """The comparison needs git, and `probe=False` forbids spawning.
-
-        It must not fall back to comparing the two shas for equality, which is
-        the wrong question — see `test_head_moving_without_web_is_not_stale`.
-
-        The repository is **real** here on purpose: against a path that does
-        not exist the no-checkout arm returns SKIP before reaching the spawn,
-        so removing the probe gate left this passing. `run_checks` turns a
-        raising check into a FAIL rather than propagating, which is what makes
-        the spy assertion visible in the result at all.
-        """
-        repo = tmp_path / "repo"
-        git = self._repo(repo)
-        self._bundle(tmp_path, monkeypatch, git("rev-parse", "HEAD"))
-        monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
+        """The comparison needs git, and `probe=False` forbids spawning; it must
+        not fall back to comparing shas for equality. The repository is real on
+        purpose: against a missing path the no-checkout arm SKIPs before the
+        spawn, so removing the probe gate left this passing."""
+        self._checkout(tmp_path, monkeypatch)
 
         def _fail(*args, **kwargs):
             raise AssertionError("spawned under probe=False")
@@ -4242,75 +3241,34 @@ class TestWebBuildCurrent:
         assert r.status == SKIP
         assert "could not compare" in r.detail
 
-    # -- the two that are the point ---------------------------------------
-
-    def test_head_moving_without_web_is_not_stale(self, make_config, tmp_path, monkeypatch):
-        """The false positive this check must not have.
-
-        The cron rebuilds only on a `web/` change, so after any Python-only
-        commit the stamp trails HEAD while the bundle is byte-correct. On a
-        host whose cron fires every two minutes that is nearly always, and a
-        permanently amber check hides the one it exists to report.
-        """
-        repo = tmp_path / "repo"
-        git = self._repo(repo)
-        built_at = git("rev-parse", "HEAD")
-        (repo / "app.py").write_text("x = 2\n")
-        git("add", "-A")
-        git("commit", "-m", "python only")
-        assert git("rev-parse", "HEAD") != built_at
-
-        self._bundle(tmp_path, monkeypatch, built_at)
-        monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
+    @pytest.mark.parametrize(
+        "then", [None, "app.py"], ids=["built-from-head", "head-moved-without-web"]
+    )
+    def test_a_current_bundle_is_ok(self, make_config, tmp_path, monkeypatch, then):
+        """The false positive this check must not have: after a Python-only
+        commit the stamp trails HEAD while the bundle is byte-correct."""
+        self._checkout(tmp_path, monkeypatch, then)
         r = self._run(make_config)
         assert r.status == OK, r.detail
 
     def test_a_web_change_since_the_build_warns(self, make_config, tmp_path, monkeypatch):
         """The reported condition, and the whole reason this check exists."""
-        repo = tmp_path / "repo"
-        git = self._repo(repo)
-        built_at = git("rev-parse", "HEAD")
-        (repo / "web" / "app.svelte").write_text("<p>b</p>\n")
-        git("add", "-A")
-        git("commit", "-m", "frontend")
-
-        self._bundle(tmp_path, monkeypatch, built_at)
-        monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
+        self._checkout(tmp_path, monkeypatch, "web/app.svelte")
         r = self._run(make_config)
         assert r.status == WARN, r.detail
         assert r.remedy
         # A WARN must not page anyone: the next auto-update tick clears it.
         assert doctor.verdict([r])[0] is True
 
-    def test_a_bundle_built_from_head_is_ok(self, make_config, tmp_path, monkeypatch):
-        repo = tmp_path / "repo"
-        git = self._repo(repo)
-        self._bundle(tmp_path, monkeypatch, git("rev-parse", "HEAD"))
-        monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
-        assert self._run(make_config).status == OK
-
     def test_the_git_call_carries_the_hardening_overrides(
         self, make_config, tmp_path, monkeypatch
     ):
-        """Asserted on the argv, because behaviourally it cannot be observed.
-
-        A repository's own config can name a program for `git` to run, and
-        under a deployment that config is written by whoever can write the
-        checkout. It happens that `git diff --quiet` generates no diff and so
-        runs no `diff.external` — measured, by setting one on a real
-        repository and watching the canary never appear, with and without
-        these overrides. So this guards the argv against a future change (a
-        dropped `--quiet`, a different subcommand) rather than a live hole,
-        and it is written against the argv precisely because a behavioural
-        version of it passes whatever the code does.
-        """
+        """Asserted on the argv, because behaviourally it cannot be observed:
+        `git diff --quiet` runs no `diff.external` (measured), so this guards
+        against a future change such as a dropped `--quiet`."""
         from istota.git_hardening import GIT_HARDENING
 
-        repo = tmp_path / "repo"
-        git = self._repo(repo)
-        self._bundle(tmp_path, monkeypatch, git("rev-parse", "HEAD"))
-        monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
-
+        self._checkout(tmp_path, monkeypatch)
         seen = []
         real = doctor._run
         monkeypatch.setattr(doctor, "_run", lambda argv, **kw: seen.append(argv) or real(argv, **kw))
@@ -4354,23 +3312,14 @@ class TestSandboxMasks:
 
 
 class TestRendering:
-    def test_exit_code_is_one_on_any_fail(self):
-        results = [
-            CheckResult("a.b", OK, "fine"),
-            CheckResult("c.d", FAIL, "broken", remedy="fix it"),
-        ]
-        assert exit_code(results) == 1
-
-    def test_exit_code_is_zero_without_a_fail(self):
-        results = [
-            CheckResult("a.b", OK, "fine"),
-            CheckResult("c.d", WARN, "iffy", remedy="look at it"),
-            CheckResult("e.f", SKIP, "n/a"),
-        ]
-        assert exit_code(results) == 0
-
-    def test_exit_code_of_nothing_is_zero(self):
-        assert exit_code([]) == 0
+    @pytest.mark.parametrize(
+        "statuses,code",
+        [((OK, FAIL), 1), ((OK, WARN, SKIP), 0), ((), 0)],
+        ids=["any-fail", "no-fail", "nothing"],
+    )
+    def test_exit_code(self, statuses, code):
+        results = [CheckResult(f"c.{i}", s, "x", remedy="fix it") for i, s in enumerate(statuses)]
+        assert exit_code(results) == code
 
     def test_render_json_round_trips(self):
         results = [
@@ -4393,21 +3342,21 @@ class TestRendering:
         json.loads(render_json(run_checks(config), secrets=doctor.config_secrets(config)))
 
     def test_secrets_is_required_so_the_boundary_cannot_be_fail_open(self):
-        """`render_json` crosses an HTTP boundary to the admin dashboard. A
-        caller that simply forgot the argument must not get unredacted output —
-        omitting it has to be a decision, spelled `secrets=()`."""
+        """`render_json` crosses an HTTP boundary to the admin dashboard, so
+        omitting `secrets` has to be a decision, spelled `secrets=()`."""
         results = [CheckResult("a.b", OK, "fine")]
         with pytest.raises(TypeError):
             render_json(results)
         with pytest.raises(TypeError):
             render_text(results)
 
-    def test_render_json_redacts_a_credential_in_a_detail(self):
+    @pytest.mark.parametrize("render", [render_json, render_text], ids=["json", "text"])
+    def test_a_credential_in_a_detail_or_remedy_is_redacted(self, render):
         """Check authors are forbidden from putting credentials in `detail`;
         the renderer does not take their word for it."""
         secret = "NOT-A-REAL-TOKEN-aaaaaaaa"
         results = [CheckResult("x.y", FAIL, f"token {secret} rejected", remedy=f"rotate {secret}")]
-        rendered = render_json(results, secrets=[secret])
+        rendered = render(results, secrets=[secret])
         assert secret not in rendered
         assert "[redacted]" in rendered
 
@@ -4428,19 +3377,11 @@ class TestRendering:
         remedy_line = [ln for ln in text.splitlines() if "install gh" in ln][0]
         assert remedy_line.startswith(" ")
 
-    def test_render_text_redacts_too(self):
-        secret = "NOT-A-REAL-TOKEN-bbbbbbbb"
-        results = [CheckResult("x.y", FAIL, f"saw {secret}", remedy="rotate")]
-        assert secret not in render_text(results, secrets=[secret])
-
 
 class TestConfigSecrets:
-    def test_collects_configured_credentials(self, make_config, tmp_path):
+    def test_collects_configured_credentials_but_no_empty_value(self, make_config, tmp_path):
         config = _dev_config(make_config, tmp_path, gitlab_token="NOT-A-REAL-TOKEN-zzzzzzzz")
-        secrets = doctor.config_secrets(config)
-        assert "NOT-A-REAL-TOKEN-zzzzzzzz" in secrets
-
-    def test_ignores_short_and_empty_values(self, make_config, tmp_path):
+        assert "NOT-A-REAL-TOKEN-zzzzzzzz" in doctor.config_secrets(config)
         config = _dev_config(make_config, tmp_path, gitlab_token="")
         assert "" not in doctor.config_secrets(config)
 
@@ -4456,20 +3397,21 @@ class TestConfigSecrets:
             config.users = {"alice": user}
             assert "hunter2-hunter2-hunter2" in doctor.config_secrets(config)
 
-    def test_collects_the_always_secret_header_dict(self, make_config):
-        """`brain.native.extra_headers` is a dict `admin_config_view` marks
-        always-secret, because it is where a non-Anthropic deployment puts its
-        provider key."""
+    @pytest.mark.parametrize(
+        "header,value",
+        [
+            ("Authorization", "NOT-A-REAL-HEADER-VALUE-1"),
+            # The whole field is an auth channel by construction, so a header
+            # spelling nobody anticipated must not escape redaction.
+            ("x-goog-api-client", "zzzzzzzzzzzzzzzzzz"),
+        ],
+    )
+    def test_collects_the_always_secret_header_dict(self, make_config, header, value):
+        """`brain.native.extra_headers` is where a non-Anthropic deployment puts
+        its provider key, and `admin_config_view` marks it always-secret."""
         config = make_config()
-        config.brain.native.extra_headers = {"Authorization": "NOT-A-REAL-HEADER-VALUE-1"}
-        assert "NOT-A-REAL-HEADER-VALUE-1" in doctor.config_secrets(config)
-
-    def test_collects_a_header_whose_name_is_not_obviously_a_credential(self, make_config):
-        """The whole field is an auth channel by construction, so a header spelling
-        nobody anticipated must not be the thing that escapes redaction."""
-        config = make_config()
-        config.brain.native.extra_headers = {"x-goog-api-client": "zzzzzzzzzzzzzzzzzz"}
-        assert "zzzzzzzzzzzzzzzzzz" in doctor.config_secrets(config)
+        config.brain.native.extra_headers = {header: value}
+        assert value in doctor.config_secrets(config)
 
     def test_terminates_on_a_self_referential_config(self, make_config):
         """A cycle must not hang the boot path."""
@@ -4557,75 +3499,58 @@ class TestTheReposLayoutCheck:
     `repos_dir` became a per-user root on *every* backend, and the bind is
     skipped when its source does not exist — so a host whose clones still sit
     flat has an unusable developer skill and no error anywhere naming a path.
-    This is what says so.
     """
 
-    def _config(self, make_config, tmp_path, users=("alice",)):
+    def _check(self, make_config, tmp_path, bare=(), users=("alice",)):
         from istota.config import DeveloperConfig, UserConfig
 
         repos = tmp_path / "repos"
         repos.mkdir(exist_ok=True)
-        return make_config(
+        for rel in bare:
+            path = repos / rel
+            path.mkdir(parents=True, exist_ok=True)
+            for marker in ("HEAD", "config"):
+                (path / marker).write_text("")
+            (path / "objects").mkdir(exist_ok=True)
+        config = make_config(
             developer=DeveloperConfig(enabled=True, repos_dir=str(repos)),
             users={u: UserConfig(display_name=u) for u in users},
         )
-
-    @staticmethod
-    def _bare(path):
-        path.mkdir(parents=True, exist_ok=True)
-        for marker in ("HEAD", "config"):
-            (path / marker).write_text("")
-        (path / "objects").mkdir(exist_ok=True)
+        return doctor.check_repos_layout(config, probe=False)
 
     def test_the_flat_layout_fails_and_names_what_it_found(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path)
-        self._bare(tmp_path / "repos" / "namespace" / "project.git")
-
-        result = doctor.check_repos_layout(config, probe=False)
-
+        result = self._check(make_config, tmp_path, ["namespace/project.git"])
         assert result.status == FAIL
         assert "namespace" in result.detail
         assert result.remedy
 
-    def test_the_per_user_layout_is_ok(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path)
-        self._bare(tmp_path / "repos" / "alice" / "namespace" / "project.git")
-
-        result = doctor.check_repos_layout(config, probe=False)
-
-        assert result.status == OK
-
     def test_a_half_migrated_host_still_fails(self, make_config, tmp_path):
         """One user moved and another not is the shape a partial play leaves."""
-        config = self._config(make_config, tmp_path, users=("alice", "bob"))
-        self._bare(tmp_path / "repos" / "alice" / "ns" / "project.git")
-        self._bare(tmp_path / "repos" / "leftover" / "project.git")
-
-        result = doctor.check_repos_layout(config, probe=False)
-
+        result = self._check(
+            make_config, tmp_path,
+            ["alice/ns/project.git", "leftover/project.git"], users=("alice", "bob"),
+        )
         assert result.status == FAIL
         assert "leftover" in result.detail
 
-    def test_an_empty_root_is_ok(self, make_config, tmp_path):
-        result = doctor.check_repos_layout(self._config(make_config, tmp_path), probe=False)
-
-        assert result.status == OK
+    @pytest.mark.parametrize(
+        "bare", [["alice/namespace/project.git"], []], ids=["per-user-layout", "empty-root"]
+    )
+    def test_ok(self, make_config, tmp_path, bare):
+        assert self._check(make_config, tmp_path, bare).status == OK
 
     def test_a_directory_holding_no_repository_is_not_a_finding(
         self, make_config, tmp_path
     ):
         """`repos_dir` is a directory an operator may put other things in."""
-        config = self._config(make_config, tmp_path)
-        (tmp_path / "repos" / "notes").mkdir()
+        (tmp_path / "repos" / "notes").mkdir(parents=True)
         (tmp_path / "repos" / "notes" / "README").write_text("hi")
-
-        assert doctor.check_repos_layout(config, probe=False).status == OK
+        assert self._check(make_config, tmp_path).status == OK
 
     def test_it_skips_when_the_skill_is_off(self, make_config, tmp_path):
         from istota.config import DeveloperConfig
 
         config = make_config(developer=DeveloperConfig(enabled=False))
-
         assert doctor.check_repos_layout(config, probe=False).status == SKIP
 
     def test_it_spawns_nothing_under_probe_false(self, make_config, tmp_path, monkeypatch):
@@ -4634,10 +3559,14 @@ class TestTheReposLayoutCheck:
             doctor, "_run",
             lambda *a, **k: pytest.fail("the repos layout check spawned a process"),
         )
-        config = self._config(make_config, tmp_path)
-        self._bare(tmp_path / "repos" / "namespace" / "project.git")
+        self._check(make_config, tmp_path, ["namespace/project.git"])
 
-        doctor.check_repos_layout(config, probe=False)
+
+def _container_results(monkeypatch, config, reply=None, probe=True):
+    """Run `check_developer_container`, answering every socket with `reply`."""
+    if reply is not None:
+        monkeypatch.setattr(doctor, "_exec_transport_request", reply)
+    return _by_name(doctor.check_developer_container(config, probe=probe))
 
 
 class TestTheDeveloperContainerChecks:
@@ -4659,51 +3588,33 @@ class TestTheDeveloperContainerChecks:
     def test_all_five_are_produced_whatever_happens(self, make_config, tmp_path):
         """A caller asserts on a name, never on a count — a check that vanishes
         under some configuration is a check nothing can require."""
+        assert self.GROUP in {name for name, _ in CHECKS}
         for devbox in (False, True):
             config = _container_config(make_config, tmp_path, devbox=devbox)
             results = doctor.check_developer_container(config, probe=False)
             assert {r.name for r in results} == self.NAMES
 
-    def test_the_group_is_in_the_registry(self):
-        assert self.GROUP in {name for name, _ in CHECKS}
-
-    def test_the_backend_being_off_skips_the_three_that_need_a_container(
-        self, make_config, tmp_path
+    def test_the_backend_being_off_skips_the_ones_that_need_a_container(
+        self, make_config, tmp_path, monkeypatch
     ):
+        """The skip's detail says which derivation input holds the transport off
+        (this used to warn about a pair that is no longer configurable)."""
         config = _container_config(make_config, tmp_path, devbox=False)
-
-        by_name = _by_name(doctor.check_developer_container(config, probe=True))
+        by_name = _container_results(monkeypatch, config)
 
         for name in self.NAMES - {"developer.container.backend"}:
             assert by_name[name].status == SKIP
-
-    def test_the_skip_names_whichever_input_is_off(self, make_config, tmp_path):
-        """This used to warn about a pair — the devbox skill offered while
-        `backend = none` meant every verb but `reset` refused. That state is
-        no longer configurable, so the detail's job is now to say which of the
-        three derivation inputs is the one holding the transport off.
-        """
-        config = _container_config(make_config, tmp_path, devbox=False)
-
-        transport = _by_name(doctor.check_developer_container(config, probe=True))[
-            "developer.container.transport"
-        ]
-
-        assert transport.status == SKIP
-        assert "[devbox] enabled is false" in transport.detail
+        assert "[devbox] enabled is false" in by_name["developer.container.transport"].detail
 
     def test_the_skip_names_the_developer_skill_when_that_is_what_is_off(
-        self, make_config, tmp_path
+        self, make_config, tmp_path, monkeypatch
     ):
         """Control for the test above: a different input off has to produce a
-        different sentence, or the detail is decoration rather than a
-        diagnosis."""
+        different sentence, or the detail is decoration rather than a diagnosis."""
         config = _container_config(make_config, tmp_path, devbox=True)
         config.developer.enabled = False
 
-        transport = _by_name(doctor.check_developer_container(config, probe=True))[
-            "developer.container.transport"
-        ]
+        transport = _container_results(monkeypatch, config)["developer.container.transport"]
 
         assert transport.status == SKIP
         assert "the developer skill is off" in transport.detail
@@ -4714,96 +3625,94 @@ class TestTheDeveloperContainerChecks:
         """Doctor runs on the daemon's start-up path; `probe=False` must connect
         to nothing."""
         called = []
-        monkeypatch.setattr(
-            doctor, "_exec_transport_request",
-            lambda *a, **k: (called.append(a), ([], "unreachable"))[1],
-        )
+        reply = lambda *a, **k: (called.append(a), ([], "unreachable"))[1]  # noqa: E731
         config = _container_config(make_config, tmp_path)
 
-        by_name = _by_name(doctor.check_developer_container(config, probe=False))
+        by_name = _container_results(monkeypatch, config, reply, probe=False)
 
         assert not called
         assert by_name["developer.container.transport"].status == SKIP
 
-    def test_a_user_with_no_devbox_is_not_a_failure(self, make_config, tmp_path):
-        """Which users have a devbox is not in the daemon's config — the list
-        lives in Ansible. Counting every configured user as unreachable would
-        FAIL this check permanently on the reference shape (one admin with a
-        container, several other users without) and alert every admin hourly."""
+    def test_a_user_with_no_devbox_is_not_a_failure(self, make_config, tmp_path, monkeypatch):
+        """Which users have a devbox lives in Ansible, not the daemon's config.
+        Counting every user as unreachable would FAIL permanently on the
+        reference shape and alert every admin hourly."""
         config = _container_config(
             make_config, tmp_path, users=("alice", "bob"), no_socket_dirs=True
         )
 
-        by_name = _by_name(doctor.check_developer_container(config, probe=True))
+        transport = _container_results(monkeypatch, config)["developer.container.transport"]
 
-        assert by_name["developer.container.transport"].status == SKIP
-        assert "no devbox socket directory" in by_name["developer.container.transport"].detail
+        assert transport.status == SKIP
+        assert "no devbox socket directory" in transport.detail
 
     def test_a_dead_container_is_a_fail_naming_the_socket(
         self, make_config, tmp_path, monkeypatch
     ):
-        monkeypatch.setattr(
-            doctor, "_exec_transport_request",
-            lambda socket_path, payload, timeout: ([], f"could not connect to {socket_path}"),
-        )
         config = _container_config(make_config, tmp_path)
-
-        transport = _by_name(doctor.check_developer_container(config, probe=True))[
-            "developer.container.transport"
-        ]
+        transport = _container_results(
+            monkeypatch, config,
+            lambda socket_path, payload, timeout: ([], f"could not connect to {socket_path}"),
+        )["developer.container.transport"]
 
         assert transport.status == FAIL
         assert "alice" in transport.detail
         assert transport.remedy
 
     def test_a_live_container_that_agrees_is_ok(self, make_config, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            doctor, "_exec_transport_request",
-            _agreeing_container(str(tmp_path / "repos" / "alice")),
-        )
         config = _container_config(
             make_config, tmp_path,
             security={"sandbox_cache_dir": str(tmp_path / "cache")},
         )
-
-        by_name = _by_name(doctor.check_developer_container(config, probe=True))
-
-        assert by_name["developer.container.transport"].status == OK
-        assert by_name["developer.container.identity"].status == OK
-        assert by_name["developer.container.uv_cache"].status == OK
-        assert by_name["developer.container.command_reaper"].status == OK
-
-    def test_a_uid_mismatch_fails_and_says_what_it_costs(
-        self, make_config, tmp_path, monkeypatch
-    ):
-        """Untreated, uid drift ends in worktrees that can never be reaped, and
-        there is no error message anywhere that says so."""
-        monkeypatch.setattr(
-            doctor, "_exec_transport_request",
-            _agreeing_container(str(tmp_path / "repos" / "alice"), uid_offset=1),
+        by_name = _container_results(
+            monkeypatch, config, _agreeing_container(str(tmp_path / "repos" / "alice"))
         )
-        config = _container_config(make_config, tmp_path)
 
-        identity = _by_name(doctor.check_developer_container(config, probe=True))[
-            "developer.container.identity"
-        ]
+        for name in self.NAMES - {"developer.container.backend"}:
+            assert by_name[name].status == OK
 
-        assert identity.status == FAIL
-        assert "uid" in identity.detail
-        assert "reap" in identity.remedy
+    @pytest.mark.parametrize(
+        "agreement,result,status,in_detail,in_remedy",
+        [
+            # Untreated, uid drift ends in worktrees that can never be reaped,
+            # and no error message anywhere says so.
+            ({"uid_offset": 1}, "identity", FAIL, ("uid",), ("reap",)),
+            ({"cache_exit": 1}, "uv_cache", WARN, ("alice",), ()),
+            # The transport works and every command is still killed on its own
+            # exit path; what is gone is the backstop, so the cost is a leak
+            # rather than an outage.
+            ({"reaper": False}, "command_reaper", WARN, ("alice",), ("docker logs",)),
+            # A missing field and a `false` are different facts; reading the
+            # first as the second warns on every container not yet rebuilt.
+            ({"reaper": None}, "command_reaper", SKIP, (), ()),
+        ],
+        ids=["uid-mismatch", "missing-cache-mount", "no-reaper", "too-old-to-answer"],
+    )
+    def test_a_container_that_disagrees(
+        self, make_config, tmp_path, monkeypatch, agreement, result, status, in_detail, in_remedy
+    ):
+        config = _container_config(
+            make_config, tmp_path,
+            security={"sandbox_cache_dir": str(tmp_path / "cache")},
+        )
+        r = _container_results(
+            monkeypatch, config,
+            _agreeing_container(str(tmp_path / "repos" / "alice"), **agreement),
+        )[f"developer.container.{result}"]
+
+        assert r.status == status
+        for text in in_detail:
+            assert text in r.detail
+        for text in in_remedy:
+            assert text in r.remedy
 
     def test_a_repos_root_mismatch_fails(self, make_config, tmp_path, monkeypatch):
-        """The two sides must spell the tree identically: the shim sends
-        `os.getcwd()` and the server checks it with `realpath` against its own
-        root, so a disagreement refuses every real working directory."""
-        monkeypatch.setattr(
-            doctor, "_exec_transport_request", _agreeing_container("/somewhere/else"),
-        )
+        """The shim sends `os.getcwd()` and the server checks it with `realpath`
+        against its own root, so a disagreement refuses every working directory."""
         config = _container_config(make_config, tmp_path)
-
-        identity = _by_name(doctor.check_developer_container(config, probe=True))[
-            "developer.container.identity"
-        ]
+        identity = _container_results(
+            monkeypatch, config, _agreeing_container("/somewhere/else")
+        )["developer.container.identity"]
 
         assert identity.status == FAIL
         assert "/somewhere/else" in identity.detail
@@ -4811,156 +3720,59 @@ class TestTheDeveloperContainerChecks:
     def test_an_unset_repos_dir_skips_rather_than_warning(
         self, make_config, tmp_path, monkeypatch
     ):
-        """The inverse of what this test used to assert, and the inversion is
-        the point.
-
-        It used to WARN when `security.sandbox_cache_dir` was unset. That key
-        stopped being the cache root: the cache is derived at
-        `{repos_dir}/{user_id}/.package-caches`, the key is read only where
-        `repos_dir` is unset, and its Ansible default is blank — so the old
-        assertion would fire on every correctly configured deployment, which is
-        worse than no check at all. With no `repos_dir` there is no subtree and
-        no derived cache, so there is nothing to look for and SKIP is honest.
-        """
-        monkeypatch.setattr(doctor, "_exec_transport_request", _ping_reply)
+        """This used to WARN when `security.sandbox_cache_dir` was unset, which
+        stopped being the cache root: the cache is derived under `repos_dir`, so
+        the old assertion fired on every correct deployment. With no `repos_dir`
+        there is nothing to look for."""
         config = _container_config(make_config, tmp_path, repos_dir="")
-
-        cache = _by_name(doctor.check_developer_container(config, probe=True))[
-            "developer.container.uv_cache"
-        ]
+        cache = _container_results(monkeypatch, config, _ping_reply)["developer.container.uv_cache"]
 
         assert cache.status == SKIP
-
-    def test_a_missing_cache_mount_warns(self, make_config, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            doctor, "_exec_transport_request",
-            _agreeing_container(str(tmp_path / "repos" / "alice"), cache_exit=1),
-        )
-        config = _container_config(
-            make_config, tmp_path,
-            security={"sandbox_cache_dir": str(tmp_path / "cache")},
-        )
-
-        cache = _by_name(doctor.check_developer_container(config, probe=True))[
-            "developer.container.uv_cache"
-        ]
-
-        assert cache.status == WARN
-        assert "alice" in cache.detail
-
-    def test_a_server_with_no_reaper_warns_rather_than_failing(
-        self, make_config, tmp_path, monkeypatch
-    ):
-        """The transport works and every command is still killed on its own exit
-        path. What is gone is the backstop for the death that skips those paths,
-        so the cost is a leak rather than an outage — and the whole reason this
-        check exists is that a ping and a stat both answered happily while a
-        24-hour-old build ran against the repos mount."""
-        monkeypatch.setattr(
-            doctor, "_exec_transport_request",
-            _agreeing_container(str(tmp_path / "repos" / "alice"), reaper=False),
-        )
-        config = _container_config(make_config, tmp_path)
-
-        result = _by_name(doctor.check_developer_container(config, probe=True))[
-            "developer.container.command_reaper"
-        ]
-
-        assert result.status == WARN
-        assert "alice" in result.detail
-        assert "docker logs" in result.remedy
-
-    def test_a_server_too_old_to_answer_is_not_reported_as_broken(
-        self, make_config, tmp_path, monkeypatch
-    ):
-        """A missing field and a `false` are different facts. Reading the first
-        as the second warns on every container that has not been rebuilt yet,
-        which is a check an operator learns to scroll past."""
-        monkeypatch.setattr(
-            doctor, "_exec_transport_request",
-            _agreeing_container(str(tmp_path / "repos" / "alice"), reaper=None),
-        )
-        config = _container_config(make_config, tmp_path)
-
-        result = _by_name(doctor.check_developer_container(config, probe=True))[
-            "developer.container.command_reaper"
-        ]
-
-        assert result.status == SKIP
 
 
 class TestTheDevboxResultsKeepTheirPerCallerDifferences:
     """The four devbox results reduce through one three-arm helper, and three of
-    them differ from each other in a way that fold could flatten silently.
-
-    Each case here names one of those differences. The existing cases above pin
-    the statuses and nothing pins the wording, the skip predicate's subject or
-    the separator — so a helper that took the majority answer for any of the
-    three would leave every one of them green.
+    them differ in a way that fold could flatten silently. Nothing above pins
+    the wording, the skip predicate's subject or the separator.
     """
 
     def test_the_reaper_skip_tells_unanswered_from_unreachable(
         self, make_config, tmp_path, monkeypatch
     ):
-        """`command_reaper` skips on `not ok`, where its three siblings skip on
-        `not reachable`, and the two reasons read differently on purpose: one
-        sends an operator to the container's version, the other to whether it is
-        running at all."""
-        monkeypatch.setattr(
-            doctor, "_exec_transport_request",
-            _agreeing_container(str(tmp_path / "repos" / "alice"), reaper=None),
-        )
+        """`command_reaper` skips on `not ok`, its siblings on `not reachable`,
+        and the reasons send an operator to different places."""
         config = _container_config(make_config, tmp_path)
-
-        answered = _by_name(doctor.check_developer_container(config, probe=True))[
-            "developer.container.command_reaper"
-        ]
+        answered = _container_results(
+            monkeypatch, config,
+            _agreeing_container(str(tmp_path / "repos" / "alice"), reaper=None),
+        )["developer.container.command_reaper"]
         assert answered.status == SKIP
         assert "no container reported whether" in answered.detail
 
-        monkeypatch.setattr(
-            doctor, "_exec_transport_request", lambda *a, **k: ([], "unreachable")
-        )
-        silent = _by_name(doctor.check_developer_container(config, probe=True))[
-            "developer.container.command_reaper"
-        ]
+        silent = _container_results(
+            monkeypatch, config, lambda *a, **k: ([], "unreachable")
+        )["developer.container.command_reaper"]
         assert silent.status == SKIP
         assert "nothing was asked" in silent.detail
 
     def test_the_reaper_separates_users_with_a_comma(
         self, make_config, tmp_path, monkeypatch
     ):
-        """It lists bare user ids; its three siblings list `user: sentence`
-        pairs and separate those with a semicolon. Joining this one the same way
-        would read as one finding per clause."""
-        monkeypatch.setattr(
-            doctor, "_exec_transport_request",
-            _agreeing_container(str(tmp_path / "repos" / "alice"), reaper=False),
-        )
+        """It lists bare user ids; its siblings list `user: sentence` pairs
+        separated by semicolons."""
         config = _container_config(make_config, tmp_path, users=("alice", "bob"))
-
-        result = _by_name(doctor.check_developer_container(config, probe=True))[
-            "developer.container.command_reaper"
-        ]
+        result = _container_results(
+            monkeypatch, config,
+            _agreeing_container(str(tmp_path / "repos" / "alice"), reaper=False),
+        )["developer.container.command_reaper"]
 
         assert result.status == WARN
         assert "alice, bob" in result.detail
 
     def test_the_uv_cache_skip_names_the_configuration_or_the_container(self):
-        """`uv_cache` has two skip reasons where its siblings have one, and the
-        two send an operator to different places.
-
-        **Driven against the reducer directly, because the first reason cannot
-        be reached through `check_developer_container` at all.**
-        `devbox_container_backend` has `developer.repos_dir` in its conjunction,
-        so an empty one derives `backend = none` and the outer gate returns five
-        SKIPs about the host before any socket is opened —
-        `TestTheDeveloperContainerCheck::test_an_unset_repos_dir_skips_rather_
-        than_warning` asserts on that outer gate under a docstring reasoning
-        about this arm, so it is green whatever this arm says. The arm stays as
-        a guard on a private reducer whose caller could relax; this is what
-        stops it rotting into the other reason's wording.
-        """
+        """Driven against the reducer, because the unset-`repos_dir` reason is
+        unreachable through `check_developer_container`: an empty `repos_dir`
+        derives `backend = none` and the outer gate SKIPs first."""
         unconfigured = doctor._uv_cache_result("", [], [], [])
         assert unconfigured.status == SKIP
         assert "developer.repos_dir is unset" in unconfigured.detail
@@ -4969,124 +3781,85 @@ class TestTheDevboxResultsKeepTheirPerCallerDifferences:
         assert unreached.status == SKIP
         assert "no container answered" in unreached.detail
 
-        # The ordering, which is the half a fold gets wrong: the precondition
-        # outranks a finding, so an unset repos_dir cannot be answered with a
-        # remedy naming a path derived from it. The shared reducer checks
-        # findings first, which is why this arm is not one of its arguments.
+        # The precondition outranks a finding, so an unset repos_dir is never
+        # answered with a remedy naming a path derived from it.
         contradicted = doctor._uv_cache_result("", [], ["alice: no such dir"], [])
         assert contradicted.status == SKIP
         assert "developer.repos_dir is unset" in contradicted.detail
 
 
 class TestTheBackendAgreementCheck:
-    """Design 1 asks for this and an earlier draft put it in a unit test, which
-    is the wrong place for a property an operator needs to see on the host that
-    has the problem."""
+    """An operator needs to see on the affected host that the file and the
+    running daemon disagree. The check re-derives from the file for the same
+    reason the daemon does; reading `[developer.container] backend` would report
+    OK forever, since nothing writes that key any more."""
 
-    def _write(self, tmp_path, *, devbox, retired=None):
-        """A rendered config, described by its inputs rather than by a key.
-
-        The check has to re-derive from the file for the same reason the daemon
-        does; a version that read `[developer.container] backend` would report
-        OK on every deployment forever, since nothing writes that key any more.
-        """
+    def _result(self, make_config, tmp_path, *, running, file_devbox=True, repos_dir=None, retired=None):
+        config = _container_config(make_config, tmp_path, devbox=running)
         path = tmp_path / "config.toml"
+        repos = str(tmp_path / "repos") if repos_dir is None else repos_dir
         body = (
-            "[developer]\nenabled = true\n"
-            f'repos_dir = "{tmp_path / "repos"}"\n\n'
-            f"[devbox]\nenabled = {str(bool(devbox)).lower()}\n"
+            f'[developer]\nenabled = true\nrepos_dir = "{repos}"\n\n'
+            f"[devbox]\nenabled = {str(bool(file_devbox)).lower()}\n"
         )
         if retired is not None:
             body += f'\n[developer.container]\nbackend = "{retired}"\n'
         path.write_text(body)
-        return path
-
-    def _backend_result(self, config):
+        config.config_path = path
+        if repos_dir is not None:
+            config.developer.repos_dir = repos_dir
         return _by_name(doctor.check_developer_container(config, probe=False))[
             "developer.container.backend"
         ]
 
     def test_agreement_is_ok(self, make_config, tmp_path):
-        config = _container_config(make_config, tmp_path, devbox=True)
-        config.config_path = self._write(tmp_path, devbox=True)
-
-        assert self._backend_result(config).status == OK
+        """Also the control for the retired-key WARN below: the ordinary
+        rendering must not trip it."""
+        assert self._result(make_config, tmp_path, running=True).status == OK
 
     def test_a_daemon_running_the_old_value_fails(self, make_config, tmp_path):
-        """The file says one thing and the running process another, which is
-        what an operator sees after editing config.toml and not restarting: a
-        feature that was switched on and did not switch on."""
-        config = _container_config(make_config, tmp_path, devbox=False)
-        config.config_path = self._write(tmp_path, devbox=True)
-
-        result = self._backend_result(config)
+        """What an operator sees after editing config.toml and not restarting: a
+        feature switched on that did not switch on."""
+        result = self._result(make_config, tmp_path, running=False)
 
         assert result.status == FAIL
         assert "devbox" in result.detail and "none" in result.detail
         assert result.remedy
 
-    def test_the_drift_check_reads_every_input_not_just_the_devbox_switch(
-        self, make_config, tmp_path
-    ):
-        """The derivation is a conjunction, so the re-derivation has to be one
-        too. Reading `[devbox] enabled` alone would call a file with the devbox
-        on and no `repos_dir` a devbox deployment, and then report drift against
-        a daemon that correctly decided otherwise."""
-        config = _container_config(make_config, tmp_path, devbox=False)
-        path = tmp_path / "config.toml"
-        path.write_text(
-            '[developer]\nenabled = true\nrepos_dir = ""\n\n'
-            "[devbox]\nenabled = true\n"
-        )
-        config.config_path = path
-
-        assert self._backend_result(config).status == OK
+    @pytest.mark.parametrize(
+        "running,repos_dir",
+        [
+            # The derivation is a conjunction, so the re-derivation has to be
+            # one too: the devbox on with no `repos_dir` is not a devbox host.
+            (False, ""),
+            # Both derivations strip, so neither calls a blank path a root; a
+            # mismatch here would be a permanent FAIL telling the operator to
+            # restart a daemon already running the right answer.
+            (True, "   "),
+        ],
+        ids=["empty-repos-dir", "whitespace-repos-dir"],
+    )
+    def test_every_input_is_read(self, make_config, tmp_path, running, repos_dir):
+        assert self._result(make_config, tmp_path, running=running, repos_dir=repos_dir).status == OK
 
     def test_a_file_still_carrying_the_retired_key_is_reported(
         self, make_config, tmp_path
     ):
-        """The one case where intent and behaviour differ with no drift present.
-
-        An operator who wrote `backend = "none"` had builds on the host until
-        this release. The derivation now ignores the key, so a deployment can be
-        doing exactly the opposite of what its config file appears to say while
-        the file and the daemon agree perfectly.
-        """
-        config = _container_config(make_config, tmp_path, devbox=True)
-        config.config_path = self._write(tmp_path, devbox=True, retired="none")
-
-        result = self._backend_result(config)
+        """An operator who wrote `backend = "none"` had builds on the host until
+        this release; the derivation now ignores the key, so the deployment can
+        do the opposite of what the file appears to say."""
+        result = self._result(make_config, tmp_path, running=True, retired="none")
 
         assert result.status == WARN
         assert "retired" in result.detail
         assert result.remedy
 
-    def test_a_file_without_the_retired_key_does_not_warn(
-        self, make_config, tmp_path
-    ):
-        """Control: the WARN above must key on the stale key rather than on
-        anything the ordinary rendering also produces."""
-        config = _container_config(make_config, tmp_path, devbox=True)
-        config.config_path = self._write(tmp_path, devbox=True)
-
-        assert self._backend_result(config).status == OK
-
     def test_the_retired_key_does_not_suppress_a_real_drift(
         self, make_config, tmp_path
     ):
-        """The ordering, and the reason it is not the obvious one.
-
-        Reporting the stale key and returning makes this check dead on exactly
-        the hosts most likely to have one: the Ansible template stopped
-        emitting it, so a managed host loses it on the next deploy, while a
-        hand-maintained `/etc/istota/config.toml` keeps it for ever. A WARN
-        about a key would then stand in, permanently, for a FAIL about a daemon
-        running the wrong thing.
-        """
-        config = _container_config(make_config, tmp_path, devbox=False)
-        config.config_path = self._write(tmp_path, devbox=True, retired="devbox")
-
-        result = self._backend_result(config)
+        """A hand-maintained config keeps the stale key for ever, so a WARN
+        about the key must never stand in for a FAIL about the daemon."""
+        result = self._result(make_config, tmp_path, running=False, retired="devbox")
 
         assert result.status == FAIL
         assert "restart" in result.remedy.lower()
@@ -5094,41 +3867,16 @@ class TestTheBackendAgreementCheck:
         assert "retired" in result.detail
         assert "not the cause" in result.detail
 
-    def test_a_whitespace_repos_dir_is_not_drift(self, make_config, tmp_path):
-        """Both derivations strip, so neither calls a blank path a root.
-
-        A mismatch here is the worst shape a check can take: a permanent FAIL
-        whose remedy is to restart a daemon that is already running the right
-        answer.
-        """
-        config = _container_config(make_config, tmp_path, devbox=True)
-        config.developer.repos_dir = "   "
-        path = tmp_path / "config.toml"
-        path.write_text(
-            '[developer]\nenabled = true\nrepos_dir = "   "\n\n'
-            "[devbox]\nenabled = true\n"
-        )
-        config.config_path = path
-
-        assert self._backend_result(config).status == OK
-
-    def test_a_config_built_in_memory_skips(self, make_config, tmp_path):
+    @pytest.mark.parametrize("path,status", [(None, SKIP), ("gone.toml", WARN)], ids=["in-memory", "unreadable"])
+    def test_no_file_to_compare(self, make_config, tmp_path, path, status):
         config = _container_config(make_config, tmp_path)
-        config.config_path = None
-
-        assert self._backend_result(config).status == SKIP
-
-    def test_an_unreadable_file_warns_rather_than_claiming_agreement(
-        self, make_config, tmp_path
-    ):
-        config = _container_config(make_config, tmp_path)
-        config.config_path = tmp_path / "gone.toml"
-
-        result = self._backend_result(config)
-
-        assert result.status == WARN
-        assert result.remedy
-
+        config.config_path = None if path is None else tmp_path / path
+        result = _by_name(doctor.check_developer_container(config, probe=False))[
+            "developer.container.backend"
+        ]
+        assert result.status == status
+        if status == WARN:
+            assert result.remedy
 
 
 class TestSkillOverlays:
@@ -5164,102 +3912,115 @@ class TestSkillOverlays:
         assert len(results) == 1
         return results[0]
 
-    # ------------------------------------------------------------ the gates
+    def _with(self, make_config, tmp_path, files, **overrides):
+        """Run the check over alice's overlay directory holding `files`."""
+        config = self._config(make_config, tmp_path, **overrides)
+        d = self._overlays(config)
+        for name, text in files.items():
+            (d / name).write_text(text)
+        return self._run(config)
 
     def test_it_skips_without_a_mount(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path, workspace_path=None)
-        r = self._run(config)
+        r = self._run(self._config(make_config, tmp_path, workspace_path=None))
         assert r.status == SKIP
         assert "mount" in r.detail
 
     def test_it_skips_when_there_are_no_user_trees_yet(self, make_config, tmp_path):
-        r = self._run(self._config(make_config, tmp_path))
-        assert r.status == SKIP
+        assert self._run(self._config(make_config, tmp_path)).status == SKIP
 
-    def test_no_overlays_anywhere_is_ok_and_not_a_skip(self, make_config, tmp_path):
+    def test_no_overlays_anywhere_is_ok(self, make_config, tmp_path):
         config = self._config(make_config, tmp_path)
         (Path(config.workspace_path) / "Users" / "alice").mkdir(parents=True)
-        r = self._run(config)
-        assert r.status == OK
-        assert r.status != SKIP
+        assert self._run(config).status == OK
 
-    # ---------------------------------------------------------- the findings
+    @pytest.mark.parametrize(
+        "files,overrides",
+        [
+            ({"developer.md": "- one rule\n"}, {}),
+            # A disabled skill's overlay binds again the moment it is switched
+            # back on, so it is configuration, not a defect in the file.
+            ({"browse.md": "- a rule\n"}, {"disabled_skills": ["browse"]}),
+        ],
+        ids=["good-overlay", "disabled-skill"],
+    )
+    def test_ok(self, make_config, tmp_path, files, overrides):
+        assert self._with(make_config, tmp_path, files, **overrides).status == OK
 
-    def test_a_good_overlay_is_ok(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path)
-        (self._overlays(config) / "developer.md").write_text("- one rule\n")
-        r = self._run(config)
-        assert r.status == OK
-        assert r.status != SKIP
-
-    def test_a_misspelled_skill_name_fails(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path)
-        (self._overlays(config) / "develper.md").write_text("- a rule\n")
-        r = self._run(config)
+    @pytest.mark.parametrize(
+        "files,named",
+        [
+            ({"develper.md": "- a rule\n"}, ("develper.md", "unknown_skill", "did you mean developer")),
+            ({"Developer.md": "- a rule\n"}, ("did you mean developer",)),
+            ({"sensitive_actions.md": "- planted\n"}, ("denylisted",)),
+            # A misspelling of a denylisted name is still a file its author
+            # believed was live; the note must not suggest renaming to it.
+            ({"sensitive_action.md": "- a rule\n"}, ("sensitive_actions", "takes no overlay")),
+            ({"develper.md": "- a rule\n", "notes.md": "## heading\n- a rule\n"}, ()),
+            ({"zzz.md": "- scratch\n", "develper.md": "- a rule\n"}, ("develper.md",)),
+            ({"zzz.md": "- scratch\n", "sensitive_actions.md": "- planted\n"}, ("denylisted",)),
+        ],
+        ids=[
+            "misspelled", "case-difference", "denylisted", "typo-of-denylisted",
+            "fail-outranks-warning", "stray-does-not-hide-typo", "stray-does-not-mask-denylisted",
+        ],
+    )
+    def test_fails(self, make_config, tmp_path, files, named):
+        """A typo keeps FAIL, and the suggestion makes the report actionable
+        without opening a shell on the deployment."""
+        r = self._with(make_config, tmp_path, files)
         assert r.status == FAIL
-        assert "develper.md" in r.detail
-        assert "unknown_skill" in r.detail
         assert r.remedy
+        for text in named:
+            assert text in r.detail
 
-    def test_a_denylisted_skill_fails(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path)
-        (self._overlays(config) / "sensitive_actions.md").write_text("- planted\n")
-        r = self._run(config)
-        assert r.status == FAIL
-        assert "denylisted" in r.detail
-
-    def test_an_over_cap_overlay_fails(self, make_config, tmp_path):
-        from istota.skills._loader import OVERLAY_MAX_BYTES
-
-        config = self._config(make_config, tmp_path)
-        (self._overlays(config) / "developer.md").write_text(
-            "- x\n" * (OVERLAY_MAX_BYTES // 4 + 4)
-        )
-        r = self._run(config)
-        assert r.status == FAIL
-        assert "over_cap" in r.detail
-
-    def test_an_oversized_overlay_warns(self, make_config, tmp_path):
-        from istota.skills._loader import OVERLAY_WARN_BYTES
-
-        config = self._config(make_config, tmp_path)
-        (self._overlays(config) / "developer.md").write_text(
-            "- x\n" * (OVERLAY_WARN_BYTES // 4 + 4)
-        )
-        r = self._run(config)
+    @pytest.mark.parametrize(
+        "files,named",
+        [
+            ({"notes.md": "## My rules\n\n- a rule\n"}, ("shallow_heading",)),
+            # It loads as nothing, but FAIL is reserved for the misfiling a
+            # person fixes by renaming or shrinking.
+            ({"developer.md": ""}, ("empty",)),
+            # Any task can create a file here with one `touch`, and a FAIL an
+            # ordinary task can pin red is an alert an operator learns to skip.
+            ({"zzz.md": "- scratch\n"}, ("zzz.md", "unknown_skill")),
+            # `<skill>2`, `<skill>~` and `<skill>.bak` are what an editor and a
+            # task leave behind, each one edit from the name it copies.
+            (
+                {"developer2.md": "- a copy\n", "developer~.md": "- a copy\n", "notes.bak.md": "- a copy\n"},
+                ("developer2.md",),
+            ),
+            # `nte` is two edits from `notes`, which the short-name budget
+            # does not accept; see `TestOverlayNearMiss`.
+            ({"nte.md": "- scratch\n"}, ()),
+        ],
+        ids=["shallow-heading", "empty-file", "stray-file", "backup-copies", "short-stray-name"],
+    )
+    def test_warns(self, make_config, tmp_path, files, named):
+        r = self._with(make_config, tmp_path, files)
         assert r.status == WARN
-        assert "over_warn_bytes" in r.detail
         assert r.remedy
+        for text in named:
+            assert text in r.detail
+        if "zzz.md" in files:
+            assert "unknown_skill" in r.remedy
 
-    def test_a_shallow_heading_warns(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path)
-        (self._overlays(config) / "notes.md").write_text("## My rules\n\n- a rule\n")
-        r = self._run(config)
-        assert r.status == WARN
-        assert "shallow_heading" in r.detail
+    @pytest.mark.parametrize(
+        "size_attr,status,label",
+        [("OVERLAY_MAX_BYTES", FAIL, "over_cap"), ("OVERLAY_WARN_BYTES", WARN, "over_warn_bytes")],
+    )
+    def test_an_oversized_overlay(self, make_config, tmp_path, size_attr, status, label):
+        from istota.skills import _loader
 
-    def test_a_fail_outranks_a_warning(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path)
-        d = self._overlays(config)
-        (d / "develper.md").write_text("- a rule\n")
-        (d / "notes.md").write_text("## heading\n- a rule\n")
-        r = self._run(config)
-        assert r.status == FAIL
-
-    def test_a_disabled_skill_is_deliberately_not_reported(self, make_config, tmp_path):
-        """Its overlay binds again the moment the skill is switched back on, so
-        it is a fact about the configuration and not a defect in the file.
-        `skills overlays` still says so for the user asking about their own."""
-        config = self._config(make_config, tmp_path, disabled_skills=["browse"])
-        (self._overlays(config) / "browse.md").write_text("- a rule\n")
-        r = self._run(config)
-        assert r.status == OK
+        size = getattr(_loader, size_attr)
+        r = self._with(make_config, tmp_path, {"developer.md": "- x\n" * (size // 4 + 4)})
+        assert r.status == status
+        assert label in r.detail
+        assert r.remedy
 
     def test_it_walks_every_user_tree_not_just_the_configured_ones(
         self, make_config, tmp_path
     ):
-        """A user whose config block was removed still has files on disk, and
-        one left there is exactly what nothing else would report."""
+        """A user whose config block was removed still has files on disk."""
         config = self._config(make_config, tmp_path)
         (self._overlays(config, "alice") / "developer.md").write_text("- ok\n")
         (self._overlays(config, "bob") / "develper.md").write_text("- broken\n")
@@ -5269,65 +4030,38 @@ class TestSkillOverlays:
         assert "alice" not in r.detail
 
     def test_the_detail_names_at_most_a_handful(self, make_config, tmp_path):
-        # `developer` with one character dropped, nine ways. Each is a typo, so
-        # the list being truncated is the FAIL list. Deliberately not
-        # `developer{i}` — a trailing digit reads as a numbered copy and WARNs.
-        config = self._config(make_config, tmp_path)
-        d = self._overlays(config)
+        # `developer` with one character dropped, nine ways, so the truncated
+        # list is the FAIL list. Not `developer{i}`: a trailing digit WARNs.
         name = "developer"
         typos = [name[:i] + name[i + 1:] for i in range(len(name))]
         assert len(set(typos)) == 9
-        for typo in typos:
-            (d / f"{typo}.md").write_text("- a rule\n")
-        r = self._run(config)
+        r = self._with(make_config, tmp_path, {f"{t}.md": "- a rule\n" for t in typos})
         assert r.status == FAIL
         assert "9 of 9" in r.detail
         assert "and 4 more" in r.detail
 
-    def test_an_empty_file_warns_rather_than_failing(self, make_config, tmp_path):
-        """It loads as nothing and belongs in the report, but FAIL is reserved
-        for the misfiling a person fixes by renaming or shrinking."""
-        config = self._config(make_config, tmp_path)
-        (self._overlays(config) / "developer.md").write_text("")
-        r = self._run(config)
-        assert r.status == WARN
-        assert "empty" in r.detail
-
     def test_a_control_character_in_a_filename_cannot_forge_a_second_line(
         self, make_config, tmp_path
     ):
-        """A filename here is text the model wrote, and a name may hold anything
-        but `/` and NUL. The detail is one line, printed to a terminal and
-        rendered into the admin dashboard."""
-        config = self._config(make_config, tmp_path)
-        overlays = self._overlays(config)
-        (overlays / "bad\nname\x1b[31m.md").write_text("- a rule\n")
-        r = self._run(config)
-        # WARN rather than FAIL: nothing this shape is within a typo's distance
-        # of a real skill name. Both statuses render the name through the same
-        # `_overlay_label`, which is what is under test.
+        """A filename here is text the model wrote, and the detail is one line
+        printed to a terminal and rendered into the admin dashboard. WARN, since
+        nothing this shape is a typo's distance from a skill name."""
+        r = self._with(make_config, tmp_path, {"bad\nname\x1b[31m.md": "- a rule\n"})
         assert r.status == WARN
         assert "\n" not in r.detail
         assert "\x1b" not in r.detail
 
     def test_a_very_long_filename_is_truncated(self, make_config, tmp_path):
-        # WARN for the same reason as the control-character case above: 200
-        # characters is not a typo of any skill name.
-        config = self._config(make_config, tmp_path)
-        (self._overlays(config) / ("z" * 200 + ".md")).write_text("- a rule\n")
-        r = self._run(config)
+        r = self._with(make_config, tmp_path, {"z" * 200 + ".md": "- a rule\n"})
         assert r.status == WARN
         assert len(r.detail) < 200
         assert "..." in r.detail
-
-    # --------------------------------------------------- the plantable tree
 
     def test_a_symlinked_user_entry_is_not_descended_into(
         self, make_config, tmp_path
     ):
         """Every component under `{mount}/Users/{user_id}` is model-writable, so
-        a link planted at another name must not make the walk descend elsewhere
-        and report a file against the wrong user."""
+        a planted link must not report a file against the wrong user."""
         config = self._config(make_config, tmp_path)
         (self._overlays(config, "alice") / "develper.md").write_text("- broken\n")
         users = Path(config.workspace_path) / "Users"
@@ -5341,17 +4075,10 @@ class TestSkillOverlays:
     def test_an_overlay_dir_redirected_out_of_the_user_tree_is_named_not_followed(
         self, make_config, tmp_path
     ):
-        """`config/` and `skills/` are ordinary entries a task can replace with
-        a link. Following one would report — and open — files anywhere the
-        daemon can read.
-
-        That property is unchanged; the status is not. This used to be skipped
-        outright and so reported by nothing, which left the most clear-cut
-        plant of the set as the one case an operator never heard about
-        (ISSUE-344). It is now named at WARN — WARN rather than FAIL because a
-        sandboxed task can create the link at will, and a deployment-scope red
-        an attacker can raise on demand is the aimable alert ISSUE-340 split
-        this check to avoid.
+        """Following a replaced `config/` or `skills/` would open files anywhere
+        the daemon can read. It used to be skipped and so reported by nothing
+        (ISSUE-344); WARN rather than FAIL, because a sandboxed task can create
+        the link at will and an aimable red is what ISSUE-340 split this to avoid.
         """
         config = self._config(make_config, tmp_path)
         elsewhere = tmp_path / "elsewhere"
@@ -5367,8 +4094,7 @@ class TestSkillOverlays:
         r = self._run(config)
         assert r.status == WARN
         assert "dir_outside_user_tree" in r.detail
-        # The half that matters and has not moved: nothing behind the link was
-        # opened, so the planted filename appears nowhere in the report.
+        # Nothing behind the link was opened, so the planted name is absent.
         assert "develper" not in r.detail
 
     def test_a_symlinked_overlay_file_is_reported_and_never_read(
@@ -5380,8 +4106,6 @@ class TestSkillOverlays:
         (self._overlays(config) / "developer.md").symlink_to(secret)
 
         r = self._run(config)
-        # WARN, not FAIL: the file loads as nothing and belongs in the report,
-        # but it is not the misfiling a person fixes by renaming or shrinking.
         assert r.status == WARN
         assert "overlay_is_a_symlink" in r.detail
         assert "TOP SECRET" not in r.detail + r.remedy
@@ -5400,115 +4124,20 @@ class TestSkillOverlays:
     def test_no_overlay_content_ever_leaves_the_users_directory(
         self, make_config, tmp_path
     ):
-        """The same result is rendered into the admin dashboard, which every
-        admin reads. A filename is the most that may cross out of one user's
-        tree."""
-        config = self._config(make_config, tmp_path)
-        (self._overlays(config) / "develper.md").write_text(
-            "- alice's private rule about her doctor\n"
-        )
-        r = self._run(config)
+        """The result is rendered into the admin dashboard every admin reads; a
+        filename is the most that may cross out of one user's tree."""
+        r = self._with(make_config, tmp_path, {"develper.md": "- alice's private rule about her doctor\n"})
         assert "private rule" not in r.detail + r.remedy
-
-    # ------------------------------------------------- typo versus scratch file
-
-    def test_a_stray_file_warns_rather_than_failing(self, make_config, tmp_path):
-        """The overlay directory is inside the tree `build_bwrap_cmd` binds
-        read-write into the user's sandbox, so any task can create a file here
-        with one `touch`. A deployment-scope FAIL an ordinary task can pin red
-        is an alert an operator learns to skip past."""
-        config = self._config(make_config, tmp_path)
-        (self._overlays(config) / "zzz.md").write_text("- scratch\n")
-        r = self._run(config)
-        assert r.status == WARN
-        assert "zzz.md" in r.detail
-        assert "unknown_skill" in r.detail
-        assert "unknown_skill" in r.remedy
-
-    def test_a_near_miss_names_the_skill_it_probably_meant(
-        self, make_config, tmp_path
-    ):
-        """A typo is the case the check exists for, so it keeps FAIL — and the
-        suggestion is what makes the report actionable without opening a shell
-        on the deployment."""
-        config = self._config(make_config, tmp_path)
-        (self._overlays(config) / "develper.md").write_text("- a rule\n")
-        r = self._run(config)
-        assert r.status == FAIL
-        assert "did you mean developer" in r.detail
-
-    def test_a_typo_of_a_denylisted_name_still_fails(self, make_config, tmp_path):
-        """`sensitive_actions` takes no overlay, but a misspelling of it is
-        still a file its author believed was live. The note must not suggest
-        renaming to it — that name is refused by the write path and FAILs here
-        as `denylisted`."""
-        config = self._config(make_config, tmp_path)
-        (self._overlays(config) / "sensitive_action.md").write_text("- a rule\n")
-        r = self._run(config)
-        assert r.status == FAIL
-        assert "sensitive_actions" in r.detail
-        assert "takes no overlay" in r.detail
-
-    def test_a_stray_file_does_not_hide_a_typo_beside_it(
-        self, make_config, tmp_path
-    ):
-        config = self._config(make_config, tmp_path)
-        d = self._overlays(config)
-        (d / "zzz.md").write_text("- scratch\n")
-        (d / "develper.md").write_text("- a rule\n")
-        r = self._run(config)
-        assert r.status == FAIL
-        assert "develper.md" in r.detail
-
-    def test_a_stray_file_does_not_mask_a_denylisted_one(
-        self, make_config, tmp_path
-    ):
-        config = self._config(make_config, tmp_path)
-        d = self._overlays(config)
-        (d / "zzz.md").write_text("- scratch\n")
-        (d / "sensitive_actions.md").write_text("- planted\n")
-        r = self._run(config)
-        assert r.status == FAIL
-        assert "denylisted" in r.detail
-
-    def test_a_case_difference_alone_is_a_typo(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path)
-        (self._overlays(config) / "Developer.md").write_text("- a rule\n")
-        r = self._run(config)
-        assert r.status == FAIL
-        assert "did you mean developer" in r.detail
-
-    def test_a_backup_of_a_real_overlay_warns_rather_than_failing(
-        self, make_config, tmp_path
-    ):
-        """`<skill>2`, `<skill>~` and `<skill>.bak` are what an editor and a
-        task leave behind, and every one of them is one edit from the name it
-        was copied from — so the distance test alone reads the whole class as
-        misspellings and this is the largest hole in the fix."""
-        config = self._config(make_config, tmp_path)
-        d = self._overlays(config)
-        for name in ("developer2.md", "developer~.md", "notes.bak.md"):
-            (d / name).write_text("- a copy\n")
-        r = self._run(config)
-        assert r.status == WARN
-        assert "developer2.md" in r.detail
 
     def test_a_fail_never_hides_the_files_that_only_warn(
         self, make_config, tmp_path
     ):
-        """One planted typo must not suppress the rest of the report. Before
-        the severity split every unknown name was fatal, so every one was
-        named; afterwards a FAIL branch that returned without rendering
-        `warned` reported "1 of 21" and hid twenty files that also reach no
-        prompt — a count that reads in the reassuring direction, and a
-        suppression an attacker can aim with a single `touch`."""
-        config = self._config(make_config, tmp_path)
-        d = self._overlays(config)
-        (d / "develper.md").write_text("- a rule\n")
-        for i in range(20):
-            (d / f"projectnotes{i}.md").write_text("- scratch\n")
-
-        r = self._run(config)
+        """One planted typo must not suppress the rest of the report: a FAIL
+        branch that skipped `warned` reported "1 of 21" and hid twenty files
+        that reach no prompt, a suppression aimable with a single `touch`."""
+        files = {"develper.md": "- a rule\n"}
+        files.update({f"projectnotes{i}.md": "- scratch\n" for i in range(20)})
+        r = self._with(make_config, tmp_path, files)
         assert r.status == FAIL
         assert "1 of 21" in r.detail
         assert "20 more" in r.detail
@@ -5519,30 +4148,17 @@ class TestSkillOverlays:
     def test_a_fail_does_not_hide_an_overlay_near_the_loading_cap(
         self, make_config, tmp_path
     ):
-        """The pointed version of the case above: the file being hidden is a
-        real, loading overlay a few KB from the cliff past which it silently
-        stops reaching any prompt."""
+        """The file being hidden is a real overlay a few KB from the cliff past
+        which it silently stops reaching any prompt."""
         from istota.skills._loader import OVERLAY_WARN_BYTES
 
-        config = self._config(make_config, tmp_path)
-        d = self._overlays(config)
-        (d / "developer.md").write_text("- x\n" * (OVERLAY_WARN_BYTES // 4 + 4))
-        (d / "notse.md").write_text("- planted\n")
-
-        r = self._run(config)
+        r = self._with(make_config, tmp_path, {
+            "developer.md": "- x\n" * (OVERLAY_WARN_BYTES // 4 + 4),
+            "notse.md": "- planted\n",
+        })
         assert r.status == FAIL
         assert "over_warn_bytes" in r.detail
         assert "developer.md" in r.detail
-
-    def test_a_short_stray_name_is_not_read_as_a_typo(self, make_config, tmp_path):
-        """`nte` is two edits from `notes`, which the long budget would accept
-        and the short one does not — the shorter the name, the more of it two
-        edits are, and the more a loose budget turns a scratch file into an
-        alert. The predicate itself is pinned in `TestOverlayNearMiss`."""
-        config = self._config(make_config, tmp_path)
-        (self._overlays(config) / "nte.md").write_text("- scratch\n")
-        r = self._run(config)
-        assert r.status == WARN
 
 
 class TestOverlayNearMiss:
@@ -5550,32 +4166,32 @@ class TestOverlayNearMiss:
 
     KNOWN = ("developer", "notes", "browse", "sensitive_actions")
 
-    def _near(self, stem):
+    @pytest.mark.parametrize(
+        "stem,expected",
+        [
+            # The caller only asks about rejected names, but the predicate must
+            # not claim a name is a typo of itself.
+            ("developer", None),
+            ("develper", "developer"),
+            ("developerr", "developer"),
+            ("dveloper", "developer"),
+            ("sensitiveactons", "sensitive_actions"),
+            ("develo", None),
+            # A short name gets a tighter budget. The singular is the commonest
+            # misspelling there is, and `note.md` reaches no prompt at all.
+            ("note", "notes"),
+            ("nots", "notes"),
+            ("nte", None),
+            ("NOTES", "notes"),
+            ("zzz", None),
+            ("scratch", None),
+            ("", None),
+        ],
+    )
+    def test_against_the_known_names(self, stem, expected):
         from istota.doctor import _overlay_near_miss
 
-        return _overlay_near_miss(stem, self.KNOWN)
-
-    def test_an_exact_name_is_not_a_near_miss(self):
-        # The caller only asks about names the index already rejected, but the
-        # predicate must not claim a name is a typo of itself.
-        assert self._near("developer") is None
-
-    def test_one_edit_on_a_long_name_is_a_typo(self):
-        assert self._near("develper") == "developer"
-        assert self._near("developerr") == "developer"
-        assert self._near("dveloper") == "developer"
-
-    def test_two_edits_on_a_long_name_are_a_typo(self):
-        assert self._near("sensitiveactons") == "sensitive_actions"
-
-    def test_three_edits_are_not(self):
-        assert self._near("develo") is None
-
-    def test_a_short_name_gets_a_tighter_budget(self):
-        assert self._near("note") == "notes"
-        assert self._near("nots") == "notes"
-        # Two edits, which the long budget accepts and the short one does not.
-        assert self._near("nte") is None
+        assert _overlay_near_miss(stem, self.KNOWN) == expected
 
     def test_the_budget_switches_at_the_stated_length(self):
         from istota.doctor import _OVERLAY_TYPO_SHORT_NAME_CHARS, _overlay_near_miss
@@ -5586,36 +4202,23 @@ class TestOverlayNearMiss:
         # Five characters, two edits from `browser`: long budget, so yes.
         assert _overlay_near_miss("brwse", ("browse",)) == "browse"
 
-    def test_case_is_ignored(self):
-        assert self._near("NOTES") == "notes"
-
-    def test_an_unrelated_name_is_not_a_typo(self):
-        assert self._near("zzz") is None
-        assert self._near("scratch") is None
-        assert self._near("") is None
-
-    # ------------------------------------------------ copies, not misspellings
-
-    def test_the_closest_candidate_wins_over_a_further_one(self):
+    @pytest.mark.parametrize(
+        "stem,expected,known",
+        [
+            # One edit from `notes`, two from `notest`: the closest wins, not
+            # the first sorted match.
+            ("notez", "notes", ("notest", "notes")),
+            ("notez", "notes", ("notes", "notest")),
+            # Both one edit away: only the sort makes the answer independent
+            # of the caller's order.
+            ("noteX", "notea", ("noteb", "notea")),
+            ("noteX", "notea", ("notea", "noteb")),
+        ],
+    )
+    def test_the_choice_between_candidates(self, stem, expected, known):
         from istota.doctor import _overlay_near_miss
 
-        # `notez` is one edit from `notes` and two from `notest`. Returning the
-        # first sorted match rather than the closest would answer `notest`.
-        assert _overlay_near_miss("notez", ("notest", "notes")) == "notes"
-        assert _overlay_near_miss("notez", ("notes", "notest")) == "notes"
-
-    def test_a_tie_is_broken_by_name_not_by_iteration_order(self):
-        from istota.doctor import _overlay_near_miss
-
-        # Both are exactly one edit away, so only the sort makes the answer
-        # the same for two callers holding the same names in a different order.
-        assert _overlay_near_miss("noteX", ("noteb", "notea")) == "notea"
-        assert _overlay_near_miss("noteX", ("notea", "noteb")) == "notea"
-
-    def test_a_singular_of_a_real_skill_is_still_a_typo(self):
-        """The plural slip is the most common misspelling there is, and a file
-        named `note.md` for the `notes` skill reaches no prompt at all."""
-        assert self._near("note") == "notes"
+        assert _overlay_near_miss(stem, known) == expected
 
 
 class TestClassifyUnknownOverlay:
@@ -5642,13 +4245,9 @@ class TestClassifyUnknownOverlay:
     )
     def test_a_copy_of_a_real_overlay_warns_and_says_what_it_copies(self, stem):
         """Each is one or two edits from the name it was made from, so distance
-        alone reads the whole class as misspellings. Whoever made it misspelled
-        nothing — and the label has to say that, or the WARN remedy tells the
-        operator the name is 'not close enough to a skill to be a typo', which
-        for `notes2` is arithmetically false."""
-        fails, note = self._classify(stem)
-        assert fails is False
-        assert note == "unknown_skill, a copy of notes.md"
+        alone reads the class as misspellings; the label has to say it is a
+        copy, or the remedy calls `notes2` "not close enough to be a typo"."""
+        assert self._classify(stem) == (False, "unknown_skill, a copy of notes.md")
 
     def test_a_copy_marker_on_a_name_that_is_not_a_skill_is_still_a_typo(self):
         # Strips to `develper`, which is not a skill, so it falls through.
@@ -5656,19 +4255,26 @@ class TestClassifyUnknownOverlay:
         assert fails is True
         assert "did you mean developer" in note
 
-    def test_a_bare_copy_marker_is_not_a_skill_name_plus_a_suffix(self):
-        for stem in ("2", "~", "bak"):
-            assert self._classify(stem) == (False, "unknown_skill")
-
-    def test_a_typo_is_fatal_and_names_the_skill(self):
-        assert self._classify("develper") == (
-            True, "unknown_skill, did you mean developer?"
-        )
+    @pytest.mark.parametrize(
+        "stem,expected",
+        [
+            ("2", (False, "unknown_skill")),
+            ("~", (False, "unknown_skill")),
+            ("bak", (False, "unknown_skill")),
+            ("zzz", (False, "unknown_skill")),
+            ("scratch", (False, "unknown_skill")),
+            ("develper", (True, "unknown_skill, did you mean developer?")),
+            # `developer2` names `developer` and is also a copy of it; the copy
+            # reading is the quieter and the correct one.
+            ("developer2", (False, "unknown_skill, a copy of developer.md")),
+        ],
+    )
+    def test_exact_classification(self, stem, expected):
+        assert self._classify(stem) == expected
 
     def test_a_typo_of_a_denylisted_name_does_not_suggest_a_rename(self):
-        """`sensitive_actions` takes no overlay and the write path refuses it,
-        so `did you mean sensitive_actions?` would walk the operator from this
-        FAIL straight into the next one."""
+        """The write path refuses `sensitive_actions`, so suggesting it would
+        walk the operator from this FAIL straight into the next one."""
         fails, note = self._classify("sensitive_action")
         assert fails is True
         assert "takes no overlay" in note
@@ -5680,9 +4286,8 @@ class TestClassifyUnknownOverlay:
          "my-developer-rules"],
     )
     def test_a_name_built_around_a_real_skill_is_fatal(self, stem):
-        """Distance is blind in exactly this direction: the more deliberately a
-        name is decorated the further it gets from the skill, while its author's
-        belief that the file was live only gets more obvious."""
+        """The more deliberately a name is decorated the further it gets from the
+        skill, while its author's belief that it was live gets more obvious."""
         fails, note = self._classify(stem)
         assert fails is True
         assert "names the developer skill but is not developer.md" in note
@@ -5691,35 +4296,18 @@ class TestClassifyUnknownOverlay:
         assert self._classify("sensitive-actions-old")[0] is True
         assert self._classify("actions-only")[0] is False
 
-    def test_a_scratch_name_is_neither(self):
-        assert self._classify("zzz") == (False, "unknown_skill")
-        assert self._classify("scratch") == (False, "unknown_skill")
-
-    def test_a_copy_beats_a_containment_match(self):
-        # `developer2` names `developer` and is also a copy of it. The copy
-        # reading is the quieter and the correct one.
-        assert self._classify("developer2") == (
-            False, "unknown_skill, a copy of developer.md"
-        )
-
-
 
 def _now_iso() -> str:
     """A timestamp the staleness bound reads as fresh."""
-    from datetime import datetime, timezone
-
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class TestAvatarImport:
     """`web.avatar_import` — configuration and recorded state, and no socket.
 
-    Stage 4 of the profile-icons spec. The check runs on the daemon's start-up
-    path, on a scheduler interval, from `istota doctor` and from the admin
-    dashboard's Health pane, so a live Nextcloud call here would hang the admin
-    page behind a remote timeout. That is the same reasoning that keeps
-    `web.basemap` from making a request, and it gets an assertion rather than a
-    docstring.
+    The check runs on the daemon's start-up path, on a scheduler interval, from
+    `istota doctor` and from the admin Health pane, so a live Nextcloud call
+    would hang the admin page behind a remote timeout (as for `web.basemap`).
     """
 
     @staticmethod
@@ -5739,125 +4327,67 @@ class TestAvatarImport:
     def _run(config):
         return run_checks(config, only=("web.avatar_import",))[0]
 
+    @staticmethod
+    def _record(db_path, header, **counts):
+        from istota import avatars
+        from istota import db as db_module
+
+        state = {"at": _now_iso(), "users": 1, "imported": 0, "no_custom": 0,
+                 "unchanged": 0, "failed": 0, "header": getattr(avatars, header)}
+        state.update(counts)
+        with db_module.get_db(db_path) as conn:
+            avatars.write_import_state(conn, state)
+
     def test_skips_on_a_local_storage_backend(self, make_config, db_path):
         from istota.config import NextcloudConfig
 
-        r = self._run(self._config(make_config, db_path,
-                                   nextcloud=NextcloudConfig(url="")))
+        r = self._run(self._config(make_config, db_path, nextcloud=NextcloudConfig(url="")))
         assert r.status == SKIP
         assert "nextcloud" in r.detail.lower()
 
-    def test_skips_when_the_import_is_switched_off(self, make_config, db_path):
-        from istota.config import WebConfig
+    def test_skips_when_switched_off(self, make_config, db_path):
+        from istota.config import SchedulerConfig, WebConfig
 
-        r = self._run(self._config(
-            make_config, db_path,
-            web=WebConfig(enabled=True, avatar_import_from_nextcloud=False),
-        ))
-        assert r.status == SKIP
-
-    def test_skips_when_the_interval_is_zero(self, make_config, db_path):
-        from istota.config import SchedulerConfig
-
-        r = self._run(self._config(
-            make_config, db_path, scheduler=SchedulerConfig(avatar_import_interval=0),
-        ))
-        assert r.status == SKIP
+        off = WebConfig(enabled=True, avatar_import_from_nextcloud=False)
+        assert self._run(self._config(make_config, db_path, web=off)).status == SKIP
+        no_interval = SchedulerConfig(avatar_import_interval=0)
+        assert self._run(self._config(make_config, db_path, scheduler=no_interval)).status == SKIP
 
     def test_reports_that_no_tick_has_run_yet_without_paging_anyone(
         self, make_config, db_path
     ):
-        """The daemon runs the first tick seconds after boot, and doctor's own
-        boot run comes before it. A WARN here would fire on every restart."""
+        """The daemon runs the first tick seconds after boot, after doctor's own
+        boot run. A WARN here would fire on every restart."""
         r = self._run(self._config(make_config, db_path))
         assert r.status == OK
         assert "no import tick" in r.detail.lower()
 
-    def test_a_tick_every_user_failed_is_not_an_ok(self, make_config, db_path):
-        """`failed` used to be rendered and gate nothing, so a deployment whose
-        every fetch raised — wrong username, expired app password, uids that
-        match no Nextcloud account — printed its failure count inside a green
-        line. Reading the row and ignoring the one column that says it is not
-        working gives up the only thing this socket-free check has."""
-        from istota import avatars
-        from istota import db as db_module
-
-        with db_module.get_db(db_path) as conn:
-            avatars.write_import_state(
-                conn,
-                {"at": _now_iso(), "users": 5, "imported": 0, "no_custom": 0,
-                 "unchanged": 0, "failed": 5,
-                 "header": avatars.HEADER_UNOBSERVED},
-            )
-
+    @pytest.mark.parametrize(
+        "header,counts,status,named",
+        [
+            # `failed` used to be rendered and gate nothing, so a deployment
+            # whose every fetch raised printed its failure count in a green line.
+            ("HEADER_UNOBSERVED", {"users": 5, "failed": 5}, WARN, "every user"),
+            # The control: one unreachable account among many must not warn.
+            ("HEADER_SEEN", {"users": 5, "imported": 2, "no_custom": 2, "failed": 1}, OK, None),
+            # A wedged fetch or an unreadable probe state stops the job silently
+            # and leaves the last good row standing.
+            ("HEADER_SEEN", {"at": "2019-01-01T00:00:00Z", "users": 2, "imported": 1, "no_custom": 1}, WARN, "may have stopped"),
+            # `at` is a JSON value out of a KV table; a shape change must not
+            # turn a healthy import into a warning.
+            ("HEADER_SEEN", {"at": "not-a-timestamp", "imported": 1}, OK, None),
+            ("HEADER_UNOBSERVED", {}, OK, None),
+        ],
+        ids=["every-user-failed", "failures-with-progress", "stale-tick", "unreadable-timestamp", "observed-nothing"],
+    )
+    def test_the_recorded_tick(self, make_config, db_path, header, counts, status, named):
+        self._record(db_path, header, **counts)
         r = self._run(self._config(make_config, db_path))
-
-        assert r.status == WARN
-        assert "every user" in r.detail
-        assert r.remedy
-
-    def test_a_tick_with_failures_but_progress_is_still_ok(
-        self, make_config, db_path
-    ):
-        """The control: one unreachable account among many must not warn, or
-        the check cries wolf on every deployment with a stale user in [users]."""
-        from istota import avatars
-        from istota import db as db_module
-
-        with db_module.get_db(db_path) as conn:
-            avatars.write_import_state(
-                conn,
-                {"at": _now_iso(), "users": 5, "imported": 2, "no_custom": 2,
-                 "unchanged": 0, "failed": 1, "header": avatars.HEADER_SEEN},
-            )
-
-        r = self._run(self._config(make_config, db_path))
-
-        assert r.status == OK
-
-    def test_a_tick_that_has_not_run_in_days_is_not_an_ok(
-        self, make_config, db_path
-    ):
-        """Two documented paths stop this job silently and leave the last good
-        row standing: a wedged fetch means `_spawn_background_check` never
-        starts another run, and an unreadable probe state returns without
-        recording anything."""
-        from istota import avatars
-        from istota import db as db_module
-
-        with db_module.get_db(db_path) as conn:
-            avatars.write_import_state(
-                conn,
-                {"at": "2019-01-01T00:00:00Z", "users": 2, "imported": 1,
-                 "no_custom": 1, "unchanged": 0, "failed": 0,
-                 "header": avatars.HEADER_SEEN},
-            )
-
-        r = self._run(self._config(make_config, db_path))
-
-        assert r.status == WARN
-        assert "may have stopped" in r.detail
-
-    def test_an_unreadable_timestamp_is_not_reported_as_stale(
-        self, make_config, db_path
-    ):
-        """A check never raises, and it does not invent a fault either. `at` is
-        a JSON value out of a KV table; a shape change must not turn a healthy
-        import into a warning."""
-        from istota import avatars
-        from istota import db as db_module
-
-        with db_module.get_db(db_path) as conn:
-            avatars.write_import_state(
-                conn,
-                {"at": "not-a-timestamp", "users": 1, "imported": 1,
-                 "no_custom": 0, "unchanged": 0, "failed": 0,
-                 "header": avatars.HEADER_SEEN},
-            )
-
-        r = self._run(self._config(make_config, db_path))
-
-        assert r.status == OK
+        assert r.status == status
+        if status == WARN:
+            assert r.remedy
+        if named:
+            assert named in r.detail
 
     def test_reports_the_recorded_state(self, make_config, db_path):
         from istota import avatars
@@ -5871,79 +4401,39 @@ class TestAvatarImport:
                 remote_etag='"e1"',
             )
             avatars.touch_import_probe(conn, "bob", remote_etag='"g"')
-            avatars.write_import_state(
-                conn,
-                {"at": recorded_at, "users": 5, "imported": 1,
-                 "no_custom": 1, "unchanged": 3, "failed": 0,
-                 "header": avatars.HEADER_SEEN},
-            )
+        self._record(db_path, "HEADER_SEEN", at=recorded_at, users=5, imported=1,
+                     no_custom=1, unchanged=3)
 
         r = self._run(self._config(make_config, db_path))
 
         assert r.status == OK
         assert recorded_at in r.detail
-        # Every counter the tick records is rendered. `unchanged` is the steady
-        # state, so omitting it made a healthy deployment report numbers that
-        # did not add up to the user count printed beside them.
-        assert "5 users" in r.detail
-        assert "1 imported" in r.detail
-        assert "1 with no custom avatar" in r.detail
-        assert "3 unchanged" in r.detail
-        assert "0 failed" in r.detail
-        assert "1 imported" in r.detail
-        assert "1 with no custom" in r.detail
+        # Every counter is rendered: without `unchanged`, the steady state, a
+        # healthy deployment's numbers did not add up to its user count.
+        for text in ("5 users", "1 imported", "1 with no custom avatar", "3 unchanged", "0 failed"):
+            assert text in r.detail
 
     def test_a_missing_custom_avatar_header_warns_with_a_remedy(
         self, make_config, db_path
     ):
-        """The one finding here that is worth an operator's attention: the
-        header is how a user-set picture is told from the coloured letter
+        """The header is how a user-set picture is told from the coloured letter
         Nextcloud generates, so without it nothing will ever be imported."""
-        from istota import avatars
-        from istota import db as db_module
-
-        with db_module.get_db(db_path) as conn:
-            avatars.write_import_state(
-                conn,
-                {"at": "2026-08-30T09:00:00Z", "users": 2, "imported": 0,
-                 "no_custom": 2, "failed": 0, "header": avatars.HEADER_ABSENT},
-            )
-
+        self._record(db_path, "HEADER_ABSENT", at="2026-08-30T09:00:00Z", users=2, no_custom=2)
         r = self._run(self._config(make_config, db_path))
 
         assert r.status == WARN
-        assert r.remedy
         assert "avatar_import_from_nextcloud" in r.remedy
-
-    def test_a_tick_that_observed_nothing_is_not_reported_as_a_missing_header(
-        self, make_config, db_path
-    ):
-        from istota import avatars
-        from istota import db as db_module
-
-        with db_module.get_db(db_path) as conn:
-            avatars.write_import_state(
-                conn,
-                {"at": _now_iso(), "users": 1, "imported": 0,
-                 "no_custom": 0, "failed": 0, "header": avatars.HEADER_UNOBSERVED},
-            )
-
-        r = self._run(self._config(make_config, db_path))
-        assert r.status == OK
 
     def test_an_unreadable_database_is_reported_rather_than_raised(
         self, make_config, tmp_path
     ):
-        missing = tmp_path / "nothing" / "istota.db"
-        r = self._run(self._config(make_config, missing))
-        # WARN specifically, not "WARN or SKIP": with this fixture's config
-        # every SKIP branch in the check is unreachable, so accepting SKIP
-        # would pass a future regression in the gates.
+        # WARN specifically: with this config every SKIP branch is unreachable,
+        # so accepting SKIP would pass a future regression in the gates.
+        r = self._run(self._config(make_config, tmp_path / "nothing" / "istota.db"))
         assert r.status == WARN
 
     def test_it_opens_no_socket(self, make_config, db_path, monkeypatch):
-        """`doctor` runs on the daemon's boot path and behind the admin Health
-        pane. A remote call here hangs both."""
+        """A remote call here hangs the daemon's boot and the admin Health pane."""
         import socket
 
         attempts: list[str] = []
@@ -5972,20 +4462,21 @@ class TestSessionLogDir:
 
     The check must ask `_mask_dir`'s own question rather than a copy of it. "Is
     the resolved directory under `db_path.parent`" answers True on the
-    standalone install, where the mask is refused — so a checker with its own
-    copy of the rule would report the property holding while the directory sat
-    outside every mask. That is the `map_basemap` two-consumers failure, and the
-    WARN/OK pair below is what proves the predicate is the real one.
+    standalone install, where the mask is refused — the `map_basemap`
+    two-consumers failure — and the WARN/OK pair below proves the predicate is
+    the real one.
     """
 
     NAME = "runtime.session_log_dir"
 
-    def _config(self, make_config, tmp_path, **session_log_kwargs):
+    def _config(self, make_config, tmp_path, *, logs=False, **session_log_kwargs):
         from istota.config import BrainConfig, NativeBrainConfig, SessionLogConfig
 
         home = tmp_path / "srv"
         (home / "data").mkdir(parents=True, exist_ok=True)
         (home / "data" / "istota.db").touch()
+        if logs:
+            (home / "data" / "logs").mkdir()
         temp = tmp_path / "tmp" / "istota"
         temp.mkdir(parents=True, exist_ok=True)
         return make_config(
@@ -5999,95 +4490,68 @@ class TestSessionLogDir:
             ),
         )
 
-    def _run(self, config):
-        return run_checks(config, only=(self.NAME,))[0]
+    def _run(self, config, **kwargs):
+        return run_checks(config, only=(self.NAME,), **kwargs)[0]
 
     @pytest.fixture(autouse=True)
     def _bwrap_works_here(self, monkeypatch):
-        """Every test in this class runs as if bubblewrap works.
-
-        The check consults `executor.effective_sandboxing`, which is False on
-        any non-Linux host and on a Linux host without a usable bwrap. Without
-        this the whole class would answer on the availability axis on a
-        developer machine and never reach the mask reasoning it exists to pin —
-        and the OK cases would pass or fail depending on who ran them. The
-        tests that are *about* that axis patch it back themselves.
-
-        **Both the function and the memo**, because the check reads each by a
-        different route: `effective_sandboxing` calls the function,
-        `effective_sandboxing_if_known` reads `_bwrap_checked` directly. That
-        global is set once per process and never invalidated, so leaving it
-        alone would make this class's answer depend on whatever ran earlier in
-        the same xdist worker — and the suite runs `-n auto`.
+        """Every test runs as if bubblewrap works, or the class would answer on
+        the availability axis on a developer machine and never reach the mask
+        reasoning. Both the function and the memo, because the check reads each
+        by a different route, and the memo is a process global set by whatever
+        ran earlier in the same xdist worker. Tests about that axis patch it back.
         """
-        from istota import executor
-
-        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
-        monkeypatch.setattr(executor, "_bwrap_checked", True)
+        _bwrap(monkeypatch, True)
 
     # -- when it does not apply -------------------------------------------
 
-    def test_skips_when_no_routing_reaches_the_native_brain(self, make_config, tmp_path):
-        config = self._config(
-            make_config, tmp_path, retention_days=0, max_total_gb=0,
-        )
-        config.brain.kind = "claude_code"
+    @pytest.mark.parametrize(
+        "brain,session_log",
+        [({"kind": "claude_code"}, {}), ({}, {"enabled": False})],
+        ids=["no-routing-reaches-native", "feature-off"],
+    )
+    def test_skips_unless_a_sweep_rule_is_on(self, make_config, tmp_path, brain, session_log):
+        config = self._config(make_config, tmp_path, retention_days=0, max_total_gb=0, **session_log)
+        for name, value in brain.items():
+            setattr(config.brain, name, value)
         r = self._run(config)
         assert r.status == SKIP
-        assert "native" in r.detail
+        if brain:
+            assert "native" in r.detail
 
-    def test_checks_retention_when_no_routing_reaches_native(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path)
-        config.brain.kind = "claude_code"
-        (config.db_path.parent / "logs").mkdir(parents=True)
+        # With the retention rules on, the sweep's own finding still reports.
+        config = self._config(make_config, tmp_path, logs=True, **session_log)
+        for name, value in brain.items():
+            setattr(config.brain, name, value)
         self._record_sweep(config, still_over=True)
         assert self._run(config).status == WARN
 
-    def test_a_native_fallback_is_not_a_skip(self, make_config, tmp_path):
-        # `brain/native.py` builds the writer from `session_log` alone and
-        # consults `brain.kind` nowhere, so a `claude_code` primary with
-        # `fallback = "native"` writes a transcript on every availability
-        # failover. Gating on `kind` SKIPs on exactly the mixed-brain deployment
-        # nobody would think to look at.
+    @pytest.mark.parametrize(
+        "routing",
+        [{"fallback": "native"}, {"source_type_overrides": {"scheduled": "native"}}],
+        ids=["native-fallback", "source-type-override"],
+    )
+    def test_a_route_onto_native_is_not_a_skip(self, make_config, tmp_path, routing):
+        # `brain/native.py` builds the writer from `session_log` alone, so a
+        # `claude_code` primary writes a transcript whenever a task reaches
+        # native. Gating on `kind` SKIPs on the mixed-brain deployment.
         config = self._config(make_config, tmp_path)
         config.brain.kind = "claude_code"
-        config.brain.fallback = "native"
+        for name, value in routing.items():
+            setattr(config.brain, name, value)
         assert self._run(config).status != SKIP
-
-    def test_a_source_type_override_onto_native_is_not_a_skip(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path)
-        config.brain.kind = "claude_code"
-        config.brain.source_type_overrides = {"scheduled": "native"}
-        assert self._run(config).status != SKIP
-
-    def test_skips_when_the_feature_is_off(self, make_config, tmp_path):
-        config = self._config(
-            make_config, tmp_path, enabled=False, retention_days=0, max_total_gb=0,
-        )
-        r = self._run(config)
-        assert r.status == SKIP
-
-    def test_checks_retention_when_the_feature_is_off(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path, enabled=False)
-        (config.db_path.parent / "logs").mkdir(parents=True)
-        self._record_sweep(config, still_over=True)
-        assert self._run(config).status == WARN
 
     # -- the healthy shape -------------------------------------------------
 
     def test_ok_on_the_default_directory(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path)
-        log_dir = config.db_path.parent / "logs"
-        log_dir.mkdir(parents=True)
+        config = self._config(make_config, tmp_path, logs=True)
         r = self._run(config)
         assert r.status == OK
-        assert str(log_dir) in r.detail
+        assert str(config.db_path.parent / "logs") in r.detail
 
     def test_ok_before_the_directory_exists(self, make_config, tmp_path):
-        # Nothing creates it until the first native task, so an install that has
-        # not run one yet is healthy rather than broken.
-        r = self._run(self._config(make_config, tmp_path))
-        assert r.status == OK
+        # Nothing creates it until the first native task.
+        assert self._run(self._config(make_config, tmp_path)).status == OK
 
     def test_the_ok_line_reports_the_size_against_the_ceiling(self, make_config, tmp_path):
         config = self._config(make_config, tmp_path, max_total_gb=5.0)
@@ -6104,21 +4568,16 @@ class TestSessionLogDir:
     def test_warns_when_the_directory_is_outside_the_masked_one(self, make_config, tmp_path):
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
-        config = self._config(make_config, tmp_path, dir=str(elsewhere))
-        r = self._run(config)
+        r = self._run(self._config(make_config, tmp_path, dir=str(elsewhere)))
         assert r.status == WARN
         assert str(elsewhere) in r.detail
         assert r.remedy
 
     def _workspace_shape(self, make_config, tmp_path, *, sandbox_enabled):
         """`setup_wizard`'s layout: db_path.parent *is* the workspace and the
-        temp dir is inside it, so `_mask_dir` refuses.
-
-        `sandbox_enabled` is passed explicitly in both directions because the
-        two halves are different findings and the review found the test asserting
-        one while naming the other: `setup_wizard` ships `sandbox_enabled = false`,
-        so the shape it writes never reaches the mask reasoning at all.
-        """
+        temp dir is inside it, so `_mask_dir` refuses. `sandbox_enabled` is
+        explicit both ways because `setup_wizard` ships it false, which never
+        reaches the mask reasoning at all."""
         from istota.config import (
             BrainConfig,
             NativeBrainConfig,
@@ -6140,13 +4599,15 @@ class TestSessionLogDir:
             ),
         )
 
-    def test_warns_on_the_standalone_shape_where_the_mask_is_refused(
+    def test_the_two_shapes_disagree_which_is_the_point_of_the_check(
         self, make_config, tmp_path,
     ):
-        # "Under db_path.parent" answers True here, which is why the check cannot
-        # be written that way.
-        config = self._workspace_shape(make_config, tmp_path, sandbox_enabled=True)
-        r = self._run(config)
+        # Both have the sandbox on, so only the mask refusal separates them;
+        # an "under db_path.parent" copy would answer the same for both.
+        ansible = self._config(make_config, tmp_path / "a")
+        assert self._run(ansible).status == OK
+
+        r = self._run(self._workspace_shape(make_config, tmp_path / "b", sandbox_enabled=True))
         assert r.status == WARN
         assert "unbound" in r.detail.lower()
         assert "workspace" in r.detail.lower()
@@ -6155,11 +4616,9 @@ class TestSessionLogDir:
     def test_warns_when_the_sandbox_is_switched_off_entirely(
         self, make_config, tmp_path,
     ):
-        # On a layout whose mask would otherwise be *emitted*, so the only thing
-        # that can produce a finding is the sandbox being off. Writing this
-        # against the workspace shape — which `setup_wizard` really ships, and
-        # which is the tempting way to phrase it — passes on the mask-refusal
-        # reason instead, and stays green with this arm deleted. Measured.
+        # On a layout whose mask would otherwise be emitted. Written against the
+        # workspace shape it passes on the mask-refusal reason instead and stays
+        # green with this arm deleted. Measured.
         from istota.config import SecurityConfig
 
         config = self._config(make_config, tmp_path)
@@ -6173,51 +4632,26 @@ class TestSessionLogDir:
         self, make_config, tmp_path,
     ):
         # `setup_wizard` writes the workspace layout *and* `sandbox_enabled =
-        # false`, so both conditions hold at once. Whichever reason is reported,
-        # the finding must be there — gating the mask arm on `sandbox_enabled`
-        # made this shape report a plain OK.
-        config = self._workspace_shape(make_config, tmp_path, sandbox_enabled=False)
-        r = self._run(config)
+        # false`; gating the mask arm on `sandbox_enabled` made this a plain OK.
+        # Both reasons are named, availability first: whether a mask exists at
+        # all outranks where it would land.
+        r = self._run(self._workspace_shape(make_config, tmp_path, sandbox_enabled=False))
         assert r.status == WARN
         assert "unbound" in r.detail.lower()
         assert r.remedy
-        # Both, by name. "Whichever reason is reported" was as much as the
-        # early-return version could promise; the one shipped shape that fails
-        # both axes is now pinned at both rather than at "some finding".
         assert "switched off on this deployment" in r.detail
         assert "workspace" in r.detail.lower()
-
-    def test_the_two_shapes_disagree_which_is_the_point_of_the_check(
-        self, make_config, tmp_path,
-    ):
-        # The pair, side by side: the Ansible shape is OK and the standalone one
-        # WARNs, on a predicate that would answer the same for both if it were
-        # the "under db_path.parent" copy. Both have the sandbox on, so the only
-        # thing separating them is the mask refusal.
-        ansible = self._config(make_config, tmp_path / "a")
-        standalone = self._workspace_shape(
-            make_config, tmp_path / "b", sandbox_enabled=True,
-        )
-        assert self._run(ansible).status == OK
-        assert self._run(standalone).status == WARN
+        assert r.detail.index("switched off") < r.detail.index("workspace")
 
     # -- the availability axis ---------------------------------------------
 
     def test_warns_when_bubblewrap_does_not_work_on_this_deployment(
         self, make_config, tmp_path, monkeypatch,
     ):
-        # The shipped Docker stack: `docker-compose.yml` grants neither
-        # `seccomp:unconfined` nor `systempaths=unconfined`, so the probe fails,
-        # `build_bwrap_cmd` never runs and no mask is emitted — while
-        # `sandbox_enabled` still reads true. On the layout whose mask *would*
-        # cover the directory, so the only thing that can produce a finding here
-        # is the sandbox not actually being in place.
-        from istota import executor
-
-        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
-        config = self._config(make_config, tmp_path)
-        (config.db_path.parent / "logs").mkdir(parents=True)
-        r = self._run(config)
+        # The shipped Docker stack: no mask is emitted while `sandbox_enabled`
+        # reads true, on the layout whose mask *would* cover the directory.
+        _bwrap(monkeypatch, False, checked=True)
+        r = self._run(self._config(make_config, tmp_path, logs=True))
         assert r.status == WARN
         assert "unbound" in r.detail.lower()
         assert "bubblewrap" in r.detail.lower()
@@ -6226,21 +4660,12 @@ class TestSessionLogDir:
     def test_a_nested_probe_is_unknown_rather_than_an_exposure(
         self, make_config, tmp_path, monkeypatch,
     ):
-        """Run inside a task's own sandbox the availability probe answers
-        nothing, and this check must not read that as the logs being unbound.
-
-        Same defect as `security.sandbox_effective`, one prefix along: the
-        finding here is phrased as an observation about the deployment, and a
-        nested probe observed only its own namespace. Both halves are asserted,
-        because the reason text alone would satisfy either prefix.
-        """
-        from istota import executor
-
+        """Inside a task's own sandbox the probe observed only its own
+        namespace, so the logs must not be reported unbound — the
+        `security.sandbox_effective` defect, one prefix along."""
         monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
-        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
-        config = self._config(make_config, tmp_path)
-        (config.db_path.parent / "logs").mkdir(parents=True)
-        r = self._run(config)
+        _bwrap(monkeypatch, False, checked=True)
+        r = self._run(self._config(make_config, tmp_path, logs=True))
 
         assert "could not be established" in r.detail
         assert "unbound rather than masked" not in r.detail
@@ -6249,42 +4674,22 @@ class TestSessionLogDir:
     def test_an_unavailable_sandbox_and_a_refused_mask_are_both_reported(
         self, make_config, tmp_path, monkeypatch,
     ):
-        # Precedent: `test_the_standalone_install_as_shipped_warns_on_both_counts`
-        # below. Neither reason pre-empts the other, because an operator who
-        # reads one and fixes it would otherwise be told nothing about the
-        # second and would still have unmasked transcripts.
-        from istota import executor
-
-        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
-        config = self._workspace_shape(make_config, tmp_path, sandbox_enabled=True)
-        r = self._run(config)
+        # Neither reason pre-empts the other, or an operator who fixes one is
+        # told nothing about the second. Availability leads on this arm too.
+        _bwrap(monkeypatch, False, checked=True)
+        r = self._run(self._workspace_shape(make_config, tmp_path, sandbox_enabled=True))
         assert r.status == WARN
         assert "bubblewrap" in r.detail.lower()
         assert "workspace" in r.detail.lower()
-        # Availability leads, on this arm as on the switched-off one. Asserted
-        # here rather than only there because the ordering test below drives the
-        # *pre-existing* branch, so it stays green with this arm deleted.
         assert r.detail.index("bubblewrap") < r.detail.index("workspace")
-
-    def test_the_availability_reason_is_reported_before_the_mask_shape(
-        self, make_config, tmp_path,
-    ):
-        # Order pinned rather than left to whichever arm happens to run first:
-        # whether a mask exists at all outranks where it would land if it did.
-        config = self._workspace_shape(make_config, tmp_path, sandbox_enabled=False)
-        r = self._run(config)
-        assert r.detail.index("switched off") < r.detail.index("workspace")
 
     def _recording_probe(self, monkeypatch, *, cached, answer=True):
         """Stand in for the bwrap probe, recording whether it was invoked.
 
-        The spawn question cannot be asked of `subprocess` here. Two things
-        answer it before a process is created — `_bwrap_available` returns False
-        at its `sys.platform` check on this developer machine, and it memoizes
-        in `_bwrap_checked` after the first call anywhere in the process — so a
-        `subprocess` spy stays empty whether or not the gate exists. Measured:
-        with the `probe` gate deleted, the spy is still empty and this recorder
-        fires.
+        A `subprocess` spy cannot answer the spawn question here:
+        `_bwrap_available` returns at its `sys.platform` check on a developer
+        machine and memoizes afterwards, so the spy stays empty with the
+        `probe` gate deleted while this recorder fires. Measured.
         """
         from istota import executor
 
@@ -6301,44 +4706,25 @@ class TestSessionLogDir:
     def test_probe_false_does_not_claim_a_mask_it_could_not_verify(
         self, make_config, tmp_path, monkeypatch,
     ):
-        # `probe=False` forbids spawning and the bwrap probe is a spawn, so with
-        # a cold memo the availability axis cannot be answered at all. The cheap
-        # half alone cannot tell the Ansible shape from the Docker one, and
-        # reporting OK there is the defect this check had.
+        # With a cold memo the availability axis cannot be answered, and the
+        # cheap half cannot tell the Ansible shape from the Docker one. The
+        # finding must not assert the exposure in one clause and disclaim it in
+        # the next on a deployment whose mask is fine.
         calls = self._recording_probe(monkeypatch, cached=None)
-        config = self._config(make_config, tmp_path)
-        (config.db_path.parent / "logs").mkdir(parents=True)
-        r = run_checks(config, only=(self.NAME,), probe=False)[0]
+        r = self._run(self._config(make_config, tmp_path, logs=True), probe=False)
         assert calls == [], "probe=False invoked the bwrap probe"
         assert r.status == WARN
         assert "not probed" in r.detail
-
-    def test_an_unestablished_answer_does_not_assert_that_the_logs_are_unbound(
-        self, make_config, tmp_path, monkeypatch,
-    ):
-        # The finding prefix used to be fixed, so an unanswerable availability
-        # question rendered as "the logs are unbound rather than masked — [it]
-        # was not probed": a sentence asserting the exposure in its first clause
-        # and disclaiming it in the second, on a deployment whose mask is fine.
-        self._recording_probe(monkeypatch, cached=None)
-        config = self._config(make_config, tmp_path)
-        (config.db_path.parent / "logs").mkdir(parents=True)
-        r = run_checks(config, only=(self.NAME,), probe=False)[0]
         assert "could not be established" in r.detail
         assert "unbound" not in r.detail.lower()
 
     def test_probe_false_answers_from_a_warm_memo_rather_than_declining_to_look(
         self, make_config, tmp_path, monkeypatch,
     ):
-        # The daemon probes at start-up (`_log_startup_status`), so inside that
-        # process the answer is free. Saying "not probed" while `_bwrap_checked`
-        # holds it is a statement about the world that is wrong — and it would
-        # be the one that mattered, since a warm memo of False is the Docker
-        # shape this issue is about.
+        # The daemon probes at start-up, and a warm memo of False is the Docker
+        # shape this is about, so "not probed" there would be wrong.
         calls = self._recording_probe(monkeypatch, cached=False)
-        config = self._config(make_config, tmp_path)
-        (config.db_path.parent / "logs").mkdir(parents=True)
-        r = run_checks(config, only=(self.NAME,), probe=False)[0]
+        r = self._run(self._config(make_config, tmp_path, logs=True), probe=False)
         assert calls == []
         assert r.status == WARN
         assert "bubblewrap does not work" in r.detail
@@ -6348,26 +4734,16 @@ class TestSessionLogDir:
         self, make_config, tmp_path, monkeypatch,
     ):
         # Swallowing to `True` reinstated ISSUE-381 in miniature: an answer
-        # nobody could get, reported as a protection in place, with only a debug
-        # line behind it. `effective_sandboxing` catches nothing itself and
-        # `_bwrap_available` catches only OSError and TimeoutExpired.
-        from istota import executor
-
-        def _boom(_config):
-            raise RuntimeError("no answer available")
-
-        monkeypatch.setattr(executor, "effective_sandboxing", _boom)
-        config = self._config(make_config, tmp_path)
-        (config.db_path.parent / "logs").mkdir(parents=True)
-        r = self._run(config)
+        # nobody could get, reported as a protection in place.
+        _broken_availability(monkeypatch)
+        r = self._run(self._config(make_config, tmp_path, logs=True))
         assert r.status == WARN
         assert "could not be determined" in r.detail
 
     @pytest.mark.requires_dac
     def test_fails_on_an_unwritable_directory(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path)
+        config = self._config(make_config, tmp_path, logs=True)
         log_dir = config.db_path.parent / "logs"
-        log_dir.mkdir(parents=True)
         os.chmod(log_dir, 0o500)
         try:
             r = self._run(config)
@@ -6397,43 +4773,39 @@ class TestSessionLogDir:
                 "test",
             )
 
-    def test_warns_when_the_last_sweep_evicted_by_size(self, make_config, tmp_path):
-        # `deleted_size > 0` means the effective retention is a function of load
-        # rather than `retention_days`. An operator who wanted 14 days and is
-        # getting 3 should be told, not left to infer it from a listing.
-        config = self._config(make_config, tmp_path)
-        (config.db_path.parent / "logs").mkdir(parents=True)
-        self._record_sweep(config, deleted_size=7)
+    @pytest.mark.parametrize(
+        "sweep,session_log,status,named",
+        [
+            # `deleted_size > 0` means retention is a function of load rather
+            # than `retention_days`; an operator wanting 14 days and getting 3
+            # should be told.
+            ({"deleted_size": 7}, {}, WARN, "retention"),
+            ({"deleted_age": 12}, {}, OK, None),
+            # The worse condition: over the ceiling with everything inside the
+            # live window, so nothing is reclaiming it at all.
+            ({"deleted_size": 3, "still_over": True}, {}, WARN, "nothing it could evict"),
+            # With both rules off nothing rewrites the row, so a stale
+            # `deleted_size` would warn for ever about a rule that never runs.
+            ({"deleted_size": 9}, {"retention_days": 0, "max_total_gb": 0}, OK, None),
+        ],
+        ids=["evicted-by-size", "evicted-by-age", "still-over", "stale-row-both-rules-off"],
+    )
+    def test_the_last_sweep(self, make_config, tmp_path, sweep, session_log, status, named):
+        config = self._config(make_config, tmp_path, logs=True, **session_log)
+        self._record_sweep(config, **sweep)
         r = self._run(config)
-        assert r.status == WARN
-        assert "retention" in r.detail.lower()
-        assert r.remedy
-
-    def test_a_sweep_that_evicted_only_by_age_is_ok(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path)
-        (config.db_path.parent / "logs").mkdir(parents=True)
-        self._record_sweep(config, deleted_age=12)
-        assert self._run(config).status == OK
-
-    def test_still_over_outranks_an_eviction_by_size(self, make_config, tmp_path):
-        # The worse condition: the tree is over its ceiling and everything left
-        # is inside the live window, so nothing is reclaiming it at all. Recorded
-        # by the sweep since Stage 1 and read by nobody until now.
-        config = self._config(make_config, tmp_path)
-        (config.db_path.parent / "logs").mkdir(parents=True)
-        self._record_sweep(config, deleted_size=3, still_over=True)
-        r = self._run(config)
-        assert r.status == WARN
-        assert "nothing it could evict" in r.detail
-        assert r.remedy
+        assert r.status == status
+        if status == WARN:
+            assert r.remedy
+        if named:
+            assert named in r.detail.lower() or named in r.detail
 
     def test_the_exposure_and_the_retention_findings_are_composed_not_raced(
         self, make_config, tmp_path,
     ):
-        # Returning at the first made the retention arm unreachable on exactly
-        # the deployments that need it: an operator-set `dir` and the standalone
-        # shape are both *permanent* exposure conditions, so the check could
-        # never go on to say the ceiling was what actually bound.
+        # An operator-set `dir` and the standalone shape are permanent exposure
+        # conditions, so returning at the first finding made the retention arm
+        # unreachable on exactly the deployments that need it.
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
         config = self._config(make_config, tmp_path, dir=str(elsewhere))
@@ -6443,55 +4815,33 @@ class TestSessionLogDir:
         assert "unbound" in r.detail.lower()
         assert "retention" in r.detail.lower()
 
-    def test_a_stale_row_stops_warning_once_both_sweep_rules_are_off(
-        self, make_config, tmp_path,
-    ):
-        # With both rules off the scheduler's gate is false and nothing rewrites
-        # the row, so a `deleted_size` from before they were switched off would
-        # warn for ever about a rule that no longer runs.
-        config = self._config(make_config, tmp_path, retention_days=0, max_total_gb=0)
-        (config.db_path.parent / "logs").mkdir(parents=True)
-        self._record_sweep(config, deleted_size=9)
-        assert self._run(config).status == OK
-
     def test_an_infinite_ceiling_reads_as_no_ceiling(self, make_config, tmp_path):
-        # TOML spells `inf` and the sweep reads it as no ceiling. This is the one
-        # place the two consumers of the setting could disagree about what an
-        # operator is being told.
-        config = self._config(make_config, tmp_path, max_total_gb=float("inf"))
-        (config.db_path.parent / "logs").mkdir(parents=True)
-        r = self._run(config)
+        # TOML spells `inf` and the sweep reads it as no ceiling; the two
+        # consumers of the setting must agree.
+        r = self._run(self._config(make_config, tmp_path, logs=True, max_total_gb=float("inf")))
         assert "of inf GB" not in r.detail
         assert "no ceiling configured" in r.detail
 
-    def test_a_stray_file_at_the_root_is_not_counted(self, make_config, tmp_path):
-        # The sweep measures per-user directories, so a file sitting in the root
-        # is in no user's tree and its bytes reach neither `bytes_after` nor the
-        # ceiling. Counting it here would inflate the figure reported *against*
-        # that ceiling.
+    @pytest.mark.parametrize(
+        "files",
+        [("alice/a.jsonl", "stray.jsonl"), ("alice/deep/a.jsonl",)],
+        ids=["stray-file-at-the-root", "nested-file-in-a-user-tree"],
+    )
+    def test_the_file_count_matches_what_the_sweep_measures(self, make_config, tmp_path, files):
+        # The sweep measures per-user directories recursively, so a stray file
+        # at the root is in no user's tree and a nested one is counted.
         config = self._config(make_config, tmp_path)
-        log_dir = config.db_path.parent / "logs"
-        (log_dir / "alice").mkdir(parents=True)
-        (log_dir / "alice" / "a.jsonl").write_bytes(b"x" * 4096)
-        (log_dir / "stray.jsonl").write_bytes(b"y" * 4096)
-        r = self._run(config)
-        assert "1 file" in r.detail
-
-    def test_a_nested_file_inside_a_user_directory_is_counted(self, make_config, tmp_path):
-        # The other half: the sweep walks a user's tree recursively, so the
-        # measurement has to as well or the two disagree the other way.
-        config = self._config(make_config, tmp_path)
-        nested = config.db_path.parent / "logs" / "alice" / "deep"
-        nested.mkdir(parents=True)
-        (nested / "a.jsonl").write_bytes(b"x" * 4096)
+        for rel in files:
+            path = config.db_path.parent / "logs" / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x" * 4096)
         assert "1 file" in self._run(config).detail
 
     def test_an_unreadable_state_row_is_not_a_finding(self, make_config, tmp_path):
         from istota import db as _db
         from istota.session.session_log import SWEEP_STATE_KEY, SWEEP_STATE_NAMESPACE
 
-        config = self._config(make_config, tmp_path)
-        (config.db_path.parent / "logs").mkdir(parents=True)
+        config = self._config(make_config, tmp_path, logs=True)
         _db.init_db(config.db_path)
         with _db.get_db(config.db_path) as conn:
             _db.shared_kv_set(
@@ -6500,14 +4850,12 @@ class TestSessionLogDir:
         assert self._run(config).status == OK
 
     def test_the_check_never_raises_on_a_broken_config(self, make_config, tmp_path):
-        # It runs on the daemon's start-up path. A `dir` that names a file, not
-        # a directory, must come back as a finding rather than an exception.
+        # A `dir` that names a file must come back as a finding, not an exception.
         config = self._config(make_config, tmp_path)
         blocker = tmp_path / "afile"
         blocker.write_text("x")
         config.brain.native.session_log.dir = str(blocker)
-        r = self._run(config)
-        assert r.status in (WARN, FAIL)
+        assert self._run(config).status in (WARN, FAIL)
 
 
 class TestTaskControlDir:
@@ -6515,18 +4863,13 @@ class TestTaskControlDir:
     each task's prompt halves, briefing metadata and prepared image attachments
     into.
 
-    Two independent questions, both answered on every run, in the shape
-    `runtime.session_log_dir` set: is the tree itself a directory the daemon
-    owns at 0700, and is anything model-writable at or above it. The second is
-    what the whole change rests on — the tree is a *sibling* of the per-user
-    workspaces rather than a child of one — and it is a property of the
-    rendered config, which is exactly the class of fact the suite cannot see
-    and doctor exists to name.
-
-    The mask axis runs the other way from `runtime.session_log_dir`'s. There a
-    mask over the directory is defence in depth and its absence is the finding;
-    here a mask *over* the control tree takes away a file the task must open,
-    so the finding is the mask existing.
+    Two independent questions, both answered on every run: is the tree itself a
+    directory the daemon owns at 0700, and is anything model-writable at or
+    above it. The second is what the layout rests on — the tree is a *sibling*
+    of the per-user workspaces — and it is a property of the rendered config,
+    the class of fact the suite cannot see. The mask axis runs the other way
+    from `runtime.session_log_dir`'s: a mask *over* the control tree takes away
+    a file the task must open, so the finding is the mask existing.
     """
 
     NAME = "runtime.task_control_dir"
@@ -6540,10 +4883,8 @@ class TestTaskControlDir:
         data.mkdir(parents=True, exist_ok=True)
         (data / "istota.db").touch()
         # A mapping is taken as written, so a test that needs resources on a
-        # user can pass one. Binding `users` as a named parameter and then
-        # rebuilding it from the keys is how the first draft of the two
-        # resource tests silently ran against a `UserConfig()` with no rows and
-        # passed on an OK that meant nothing.
+        # user can pass one; rebuilding it from the keys once ran the resource
+        # tests against users with no rows, passing on an OK that meant nothing.
         if not isinstance(users, dict):
             users = {u: UserConfig() for u in users}
         kwargs = {
@@ -6557,16 +4898,19 @@ class TestTaskControlDir:
     def _run(self, config, **kwargs):
         return run_checks(config, only=(self.NAME,), **kwargs)[0]
 
-    def _root(self, config):
+    def _root(self, config, mode=None):
+        """The control root; with `mode`, created and chmod'd to it (after the
+        `mkdir`, so the umask cannot decide the mode under test)."""
         from istota.executor import CONTROL_DIR_NAME
 
-        return Path(config.temp_dir).resolve() / CONTROL_DIR_NAME
-
-    # -- when it does not apply --------------------------------------------
+        root = Path(config.temp_dir).resolve() / CONTROL_DIR_NAME
+        if mode is not None:
+            root.mkdir(parents=True)
+            os.chmod(root, mode)
+        return root
 
     def test_skips_when_no_users_are_configured(self, make_config, tmp_path):
-        # Nothing names a control directory until a task runs for somebody, and
-        # a check with no subject must not report a property holding.
+        # Nothing names a control directory until a task runs for somebody.
         r = self._run(self._config(make_config, tmp_path, users=()))
         assert r.status == SKIP
         assert "user" in r.detail
@@ -6574,93 +4918,63 @@ class TestTaskControlDir:
     # -- the healthy shape -------------------------------------------------
 
     def test_ok_before_the_tree_exists(self, make_config, tmp_path):
-        # `ensure_task_control_dir` creates it on the first task, so an install
-        # that has not run one is healthy rather than broken.
-        config = self._config(make_config, tmp_path)
-        r = self._run(config)
-        assert r.status == OK
-        assert str(self._root(config)) in r.detail
-
-    def test_ok_on_a_well_formed_tree(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path)
-        root = self._root(config)
-        root.mkdir(parents=True)
-        os.chmod(root, 0o700)
-        (root / "alice").mkdir()
-        os.chmod(root / "alice", 0o700)
-        r = self._run(config)
-        assert r.status == OK
-        assert not r.remedy
-
-    def test_the_ok_line_names_the_root_and_the_users_it_resolved_for(
-        self, make_config, tmp_path,
-    ):
+        # `ensure_task_control_dir` creates it on the first task. The OK line
+        # names the root and how many users it resolved for.
         config = self._config(make_config, tmp_path, users=("alice", "bob"))
         r = self._run(config)
         assert r.status == OK
         assert str(self._root(config)) in r.detail
         assert "2" in r.detail
 
+    def test_ok_on_a_well_formed_tree(self, make_config, tmp_path):
+        """Also the control for the uid finding below, which would otherwise pass
+        on a check that reported a uid line unconditionally."""
+        config = self._config(make_config, tmp_path)
+        root = self._root(config, 0o700)
+        (root / "alice").mkdir()
+        os.chmod(root / "alice", 0o700)
+        r = self._run(config)
+        assert r.status == OK
+        assert not r.remedy
+        assert "uid" not in r.detail
+
     # -- question one: is the tree itself ours ------------------------------
 
     def test_reports_a_widened_root(self, make_config, tmp_path):
-        # `ensure_task_control_dir` re-asserts 0700 on the next task, so this
-        # heals itself — but only while the daemon still owns the directory,
-        # and until then every other local account can walk into it.
-        #
-        # `chmod` after the `mkdir` rather than `mode=`, here and below: the
-        # umask subtracts from a `mkdir` mode, so the mode under test would be
-        # whatever the ambient umask left of it.
+        # Self-healing on the next task, but only while the daemon still owns
+        # the directory; until then every local account can walk into it.
         config = self._config(make_config, tmp_path)
-        root = self._root(config)
-        root.mkdir(parents=True)
-        os.chmod(root, 0o755)
+        self._root(config, 0o755)
         r = self._run(config)
         assert r.status == WARN
         assert "0755" in r.detail
         assert r.remedy
 
-    def test_fails_when_a_regular_file_sits_at_the_root(self, make_config, tmp_path):
-        # `_ensure_control_level` refuses this with ENOTDIR, so every task of
-        # every user fails at start-up until it is moved aside.
+    @pytest.mark.parametrize("shape", ["file", "symlink"])
+    def test_fails_when_the_root_is_not_a_directory(self, make_config, tmp_path, shape):
+        # `_ensure_control_level` refuses either with ENOTDIR or on its
+        # containment equality, so every task of every user fails at start-up.
         config = self._config(make_config, tmp_path)
-        self._root(config).write_text("not a directory")
+        if shape == "file":
+            self._root(config).write_text("not a directory")
+        else:
+            elsewhere = tmp_path / "elsewhere"
+            elsewhere.mkdir()
+            self._root(config).symlink_to(elsewhere)
         r = self._run(config)
         assert r.status == FAIL
-        assert "not a directory" in r.detail
-        assert r.remedy
-
-    def test_fails_when_the_root_is_a_symlink(self, make_config, tmp_path):
-        # A symlink is what `get_task_control_dir`'s containment equality is
-        # resolving through when it refuses; the daemon owns the parent, so
-        # this is a corrupt-state report rather than a boundary.
-        config = self._config(make_config, tmp_path)
-        elsewhere = tmp_path / "elsewhere"
-        elsewhere.mkdir()
-        self._root(config).symlink_to(elsewhere)
-        r = self._run(config)
-        assert r.status == FAIL
-        assert "symlink" in r.detail
+        assert ("not a directory" if shape == "file" else "symlink") in r.detail
         assert r.remedy
 
     def test_reports_a_root_owned_by_another_account(
         self, make_config, tmp_path, monkeypatch,
     ):
-        # `_ensure_control_level` fails closed on a uid mismatch, so this
-        # predicts every task under the level failing. It is still a WARN: the
-        # only uid available is this process's, `istota doctor` is commonly run
-        # from an operator's own account, and a FAIL sets `exit_code` and mails
-        # every admin from the scheduler's sweep — the same reason
-        # `check_subscription_usage` never fails on a busy plan.
-        #
-        # The daemon's own uid is what moves, since a test cannot chown to
-        # another account, and the real one is read *before* the patch, because
-        # `doctor.os` is the `os` module itself and a lambda calling through it
-        # recurses.
+        # Every task under the level would fail, but WARN: the only uid
+        # available is this process's, `istota doctor` is often run from an
+        # operator's own account, and a FAIL mails every admin from the sweep.
+        # The real uid is read *before* the patch, since `doctor.os` is `os`.
         config = self._config(make_config, tmp_path)
-        root = self._root(config)
-        root.mkdir(parents=True)
-        os.chmod(root, 0o700)
+        self._root(config, 0o700)
         mine = os.geteuid()
         monkeypatch.setattr(doctor.os, "geteuid", lambda: mine + 1)
         r = self._run(config)
@@ -6670,57 +4984,33 @@ class TestTaskControlDir:
         assert f"runs as uid {mine + 1}" in r.detail
         assert r.remedy
 
-    def test_a_correctly_owned_tree_is_not_reported(self, make_config, tmp_path):
-        # The other half of the pair. Without it the arm above would pass on a
-        # check that reported a uid line unconditionally.
+    @pytest.mark.parametrize("shape", ["widened", "file"])
+    def test_reports_a_per_user_level(self, make_config, tmp_path, shape):
+        # `_ensure_control_level` checks all three levels and fails the task
+        # from any of them, so inspecting only the root reports a healthy
+        # deployment while every task of one user fails.
         config = self._config(make_config, tmp_path)
-        root = self._root(config)
-        root.mkdir(parents=True)
-        os.chmod(root, 0o700)
+        root = self._root(config, 0o700)
+        if shape == "widened":
+            (root / "alice").mkdir()
+            os.chmod(root / "alice", 0o755)
+        else:
+            (root / "alice").write_text("not a directory")
         r = self._run(config)
-        assert r.status == OK
-        assert "uid" not in r.detail
-
-    def test_reports_a_per_user_level_the_daemon_does_not_own(
-        self, make_config, tmp_path, monkeypatch,
-    ):
-        # `_ensure_control_level` asserts type, ownership and mode at all three
-        # levels and fails the task from any of them, so inspecting only the
-        # root reports a healthy deployment while every task of one user fails.
-        # `get_task_control_dir`'s containment equality does not cover it: it
-        # compares paths and says nothing about who owns one.
-        config = self._config(make_config, tmp_path)
-        root = self._root(config)
-        (root / "alice").mkdir(parents=True)
-        os.chmod(root, 0o700)
-        os.chmod(root / "alice", 0o755)
-        r = self._run(config)
-        assert r.status == WARN
+        assert r.status == (WARN if shape == "widened" else FAIL)
         assert "control directory of user 'alice'" in r.detail
-        assert "0755" in r.detail
-        assert r.remedy
-
-    def test_fails_when_a_per_user_level_is_a_regular_file(
-        self, make_config, tmp_path,
-    ):
-        config = self._config(make_config, tmp_path)
-        root = self._root(config)
-        root.mkdir(parents=True)
-        os.chmod(root, 0o700)
-        (root / "alice").write_text("not a directory")
-        r = self._run(config)
-        assert r.status == FAIL
-        assert "control directory of user 'alice'" in r.detail
+        if shape == "widened":
+            assert "0755" in r.detail
+            assert r.remedy
 
     # -- question two: is anything model-writable above it ------------------
 
     def test_reports_a_user_workspace_at_or_above_the_control_tree(
         self, make_config, tmp_path,
     ):
-        # `{temp_dir}/{user}` is bound read-write into that user's own sandbox
-        # and is the model's working directory. A link making it resolve to the
-        # shared temp root puts every user's control tree inside that bind,
-        # which is the one thing the sibling layout exists to prevent.
+        # `{temp_dir}/{user}` is bound read-write into that user's sandbox; a
+        # link resolving it to the shared temp root puts every user's control
+        # tree inside that bind.
         config = self._config(make_config, tmp_path, users=("alice", "bob"))
         temp = Path(config.temp_dir)
         (temp / "bob").symlink_to(temp)
@@ -6733,119 +5023,37 @@ class TestTaskControlDir:
     def test_reports_the_user_id_that_collides_with_the_control_directory(
         self, make_config, tmp_path,
     ):
-        # `get_user_temp_dir` is a plain join, so a user of this name would put
-        # their model-writable scratch directory exactly where the control root
-        # goes. `get_task_control_dir` refuses the name; this is what says so
-        # out loud, because the refusal alone is a user whose every task fails
-        # with nothing in the config pointing at why.
-        config = self._config(make_config, tmp_path, users=("alice", ".control"))
-        r = self._run(config)
+        # `get_user_temp_dir` is a plain join, so this user's scratch directory
+        # is exactly where the control root goes. `get_task_control_dir`
+        # refuses the name; this says so out loud.
+        r = self._run(self._config(make_config, tmp_path, users=("alice", ".control")))
         assert r.status == FAIL
-        # Both arms by name, because the refusal alone satisfies a loose
-        # `".control" in detail` and the test would then stay green with the
-        # overlap comparison deleted — the branch its comment is about.
+        # Both arms by name: the refusal alone satisfies a loose `".control"`
+        # check and would stay green with the overlap comparison deleted.
         assert "no control directory can be named for '.control'" in r.detail
         assert "the workspace of user '.control'" in r.detail
         assert "overlaps the control tree" in r.detail
         assert r.remedy
 
-    def test_reports_a_resource_row_that_would_bind_the_control_tree(
-        self, make_config, tmp_path,
-    ):
-        # The gap Stage 3's review recorded and `native_fs_roots`' docstring
-        # names: a `user_resources` row resolves to `mount / resource_path`,
-        # bounded by the workspace root and nothing else, so on a layout where
-        # `temp_dir` sits under it a row is a second route into the
-        # whole tree that neither guard covers. No shipped shape produces the
-        # layout; this is what would say so if one did.
-        from istota.config import ResourceConfig, SecurityConfig, UserConfig
-
-        mount = tmp_path / "mount"
-        temp = mount / "tmp"
-        temp.mkdir(parents=True)
-        config = self._config(
-            make_config, tmp_path,
-            temp_dir=temp,
-            workspace_path=mount,
-            security=SecurityConfig(sandbox_enabled=True),
-            users={
-                "alice": UserConfig(
-                    resources=[
-                        ResourceConfig(
-                            type="folder", path="tmp/.control",
-                            permissions="readwrite",
-                        ),
-                    ],
-                ),
-            },
-        )
-        r = self._run(config)
-        assert r.status == WARN
-        assert "overlaps the control tree" in r.detail
-        assert "readwrite" in r.detail
-        assert r.remedy
-
-    def test_a_read_only_resource_row_over_the_tree_is_reported_too(
-        self, make_config, tmp_path,
-    ):
-        # Read-only is the read exposure rather than the write vector, which is
-        # the same thing `sandbox_ro_paths` warns about at load: one task
-        # reading every other task of that user's assembled prompt.
-        from istota.config import ResourceConfig, SecurityConfig, UserConfig
-
-        mount = tmp_path / "mount"
-        temp = mount / "tmp"
-        temp.mkdir(parents=True)
-        config = self._config(
-            make_config, tmp_path,
-            temp_dir=temp,
-            workspace_path=mount,
-            security=SecurityConfig(sandbox_enabled=True),
-            users={
-                "alice": UserConfig(
-                    resources=[
-                        ResourceConfig(type="folder", path="tmp", permissions="read"),
-                    ],
-                ),
-            },
-        )
-        r = self._run(config)
-        assert r.status == WARN
-        assert "overlaps the control tree" in r.detail
-
-    def test_a_resource_row_is_not_reported_with_the_sandbox_switched_off(
-        self, make_config, tmp_path,
-    ):
-        # Nothing is bound at all with the sandbox off, so there is no bind for
-        # a row to widen. Same gate `config._warn_ro_paths_over_control_tree`
-        # takes, and for the same reason: the *requested* flag, because the
-        # effective one spawns.
-        from istota.config import ResourceConfig, SecurityConfig, UserConfig
-
-        mount = tmp_path / "mount"
-        temp = mount / "tmp"
-        temp.mkdir(parents=True)
-        config = self._config(
-            make_config, tmp_path,
-            temp_dir=temp,
-            workspace_path=mount,
-            security=SecurityConfig(sandbox_enabled=False),
-            users={
-                "alice": UserConfig(
-                    resources=[
-                        ResourceConfig(
-                            type="folder", path="tmp/.control",
-                            permissions="readwrite",
-                        ),
-                    ],
-                ),
-            },
-        )
-        assert self._run(config).status == OK
-
-    def test_a_resource_row_elsewhere_under_the_mount_is_not_a_finding(
-        self, make_config, tmp_path,
-    ):
+    @pytest.mark.parametrize(
+        "path,permissions,sandbox,status",
+        [
+            # A `user_resources` row resolves to `mount / resource_path`,
+            # bounded by the workspace root alone, so where `temp_dir` sits
+            # under it a row is a second route into the tree. No shipped shape
+            # produces the layout; this would say so if one did.
+            ("tmp/.control", "readwrite", True, WARN),
+            # Read-only is the read exposure: one task reading every other task
+            # of that user's assembled prompt.
+            ("tmp", "read", True, WARN),
+            # Nothing is bound with the sandbox off, so there is no bind to
+            # widen. The *requested* flag, because the effective one spawns.
+            ("tmp/.control", "readwrite", False, OK),
+            ("Docs", "readwrite", True, OK),
+        ],
+        ids=["readwrite-row", "read-only-row", "sandbox-off", "row-elsewhere"],
+    )
+    def test_a_resource_row(self, make_config, tmp_path, path, permissions, sandbox, status):
         from istota.config import ResourceConfig, SecurityConfig, UserConfig
 
         mount = tmp_path / "mount"
@@ -6856,26 +5064,25 @@ class TestTaskControlDir:
             make_config, tmp_path,
             temp_dir=temp,
             workspace_path=mount,
-            security=SecurityConfig(sandbox_enabled=True),
+            security=SecurityConfig(sandbox_enabled=sandbox),
             users={
                 "alice": UserConfig(
-                    resources=[
-                        ResourceConfig(
-                            type="folder", path="Docs", permissions="readwrite",
-                        ),
-                    ],
+                    resources=[ResourceConfig(type="folder", path=path, permissions=permissions)],
                 ),
             },
         )
-        assert self._run(config).status == OK
+        r = self._run(config)
+        assert r.status == status
+        if status == WARN:
+            assert "overlaps the control tree" in r.detail
+            assert permissions in r.detail
+            assert r.remedy
 
     def test_reports_a_repos_subtree_that_holds_the_control_tree(
         self, make_config, tmp_path,
     ):
-        # Measured during review: with `temp_dir` under `{repos_dir}/{user}`
-        # the whole control tree sits inside a read-write bind and the check
-        # reported `ok`. `build_bwrap_cmd` binds that subtree for an admin
-        # developer task, so it belongs on this axis with the other binds.
+        # Measured in review: with `temp_dir` under `{repos_dir}/{user}`, a
+        # read-write bind for an admin developer task, the check said `ok`.
         from istota.config import DeveloperConfig, SecurityConfig
 
         repos = tmp_path / "repos"
@@ -6895,11 +5102,8 @@ class TestTaskControlDir:
     def test_reports_a_sandbox_ro_paths_entry_over_the_control_tree(
         self, make_config, tmp_path,
     ):
-        # `config._warn_ro_paths_over_control_tree` already says this at load,
-        # once per process, into a log. Doctor is the surface an operator
-        # reads, and the axis already reports a read-only resource row, so
-        # leaving the one entry that is bound verbatim off it was inconsistent
-        # with its own rule.
+        # `load_config` already logs this once per process; doctor is the
+        # surface an operator reads, and this entry is bound verbatim.
         from istota.config import SecurityConfig
 
         config = self._config(make_config, tmp_path)
@@ -6915,12 +5119,8 @@ class TestTaskControlDir:
 
     def _bwrap(self, monkeypatch, *, available=True, cached=True):
         """Stand in for the bwrap capability probe, recording each invocation.
-
-        `subprocess` cannot answer the spawn question here: `_bwrap_available`
-        returns False at its `sys.platform` check on a macOS host and memoizes
-        in `_bwrap_checked` after the first call anywhere in the process, so a
-        `subprocess` spy stays empty whether or not the gate exists.
-        """
+        A `subprocess` spy cannot see the spawn: `_bwrap_available` returns at
+        its platform check on macOS and memoizes after its first call."""
         from istota import executor
 
         calls: list[str] = []
@@ -6933,85 +5133,62 @@ class TestTaskControlDir:
         monkeypatch.setattr(executor, "_bwrap_checked", cached)
         return calls
 
-    def _masked_shape(self, make_config, tmp_path):
-        """`db_path.parent` *is* the control root, so the mask lands on it.
-
-        The one layout where the tree is swallowed: a mask anywhere above
-        `temp_dir` shadows the workspace and `_mask_dir` refuses it, so the
-        only candidate that reaches the tree is one at or inside it.
-        """
+    def _masked(self, make_config, tmp_path, user=None):
+        """Put `db_path` at the control root, or inside `user`'s level, so the
+        database mask lands on the tree. A mask anywhere above `temp_dir`
+        shadows the workspace and is refused, so only these reach it."""
         config = self._config(make_config, tmp_path)
-        root = self._root(config)
-        root.mkdir(mode=0o700, parents=True)
-        config.db_path = root / "istota.db"
+        target = self._root(config, 0o700)
+        if user is not None:
+            target = target / user
+            target.mkdir()
+        config.db_path = target / "istota.db"
         config.db_path.touch()
-        return config
+        return config, target
 
-    def test_reports_a_mask_that_swallows_the_control_tree(
-        self, make_config, tmp_path, monkeypatch,
+    @pytest.mark.parametrize("user", [None, "alice"], ids=["over-the-tree", "inside-one-level"])
+    def test_reports_a_mask_that_reaches_the_control_tree(
+        self, make_config, tmp_path, monkeypatch, user,
     ):
-        # The database mask is the last mount operation and cannot be worked
-        # around, so a control directory under it could never be opened inside
-        # the namespace — the composed system prompt would be named by the
-        # request and unreadable, and every Claude Code task would fail at
-        # start-up. `## Design` claims this holds on all three shipped shapes;
-        # this is what checks the claim against a rendered config.
+        # The mask is the last mount operation, so a control directory under it
+        # could never be opened and every Claude Code task would fail at
+        # start-up. A mask inside the tree takes one user's and is emitted
+        # rather than refused; a one-directional test reported nothing there.
         self._bwrap(monkeypatch, available=True)
-        r = self._run(self._masked_shape(make_config, tmp_path))
-        assert r.status == WARN
-        # The established prefix by name. "masked out of every sandbox" alone
-        # is a substring of the "would be" prefix too, so it cannot separate
-        # the two states the constants exist to keep apart.
-        assert doctor._CONTROL_MASKED in r.detail
-        assert r.remedy
-
-    def test_reports_a_mask_that_lands_inside_the_control_tree(
-        self, make_config, tmp_path, monkeypatch,
-    ):
-        # The other direction. A mask above the tree takes every user's away; a
-        # mask inside it takes one user's, and it is emitted rather than
-        # refused, since `{temp_dir}/.control/{user}` shadows nothing in
-        # `mask_protected_paths`. A one-directional test reported nothing here.
-        self._bwrap(monkeypatch, available=True)
-        config = self._config(make_config, tmp_path)
-        inside = self._root(config) / "alice"
-        inside.mkdir(parents=True)
-        config.db_path = inside / "istota.db"
-        config.db_path.touch()
+        config, target = self._masked(make_config, tmp_path, user)
         r = self._run(config)
         assert r.status == WARN
+        # The established prefix by name: "masked out of every sandbox" alone
+        # is a substring of the "would be" prefix too.
         assert doctor._CONTROL_MASKED in r.detail
-        assert str(inside) in r.detail
+        assert str(target) in r.detail
+        assert r.remedy
 
     def test_a_mask_that_is_refused_does_not_produce_a_finding(
         self, make_config, tmp_path, monkeypatch,
     ):
-        # `mask_shadowed_by` is the sandbox builder's own predicate rather than
-        # a copy: "is the tree under db_path.parent" answers True on the
-        # standalone install, where db_path.parent is the workspace and the
-        # mask is refused, so a copy would report a mask that is never emitted.
+        # `mask_shadowed_by` is the sandbox builder's own predicate: "is the
+        # tree under db_path.parent" answers True on the standalone install,
+        # where the mask is refused and never emitted.
+        from istota.config import UserConfig
+
         self._bwrap(monkeypatch, available=True)
         workspace = tmp_path / "istota-home"
         (workspace / "tmp").mkdir(parents=True)
         (workspace / "istota.db").touch()
-        from istota.config import UserConfig
-
         config = make_config(
             db_path=workspace / "istota.db",
             temp_dir=workspace / "tmp",
             workspace_path=workspace,
             users={"alice": UserConfig()},
         )
-        r = self._run(config)
-        assert "masked" not in r.detail
+        assert "masked" not in self._run(config).detail
 
     def test_the_healthy_layout_asks_no_availability_question_at_all(
         self, make_config, tmp_path, monkeypatch,
     ):
-        # The availability answer cannot change the verdict where no mask would
-        # reach the tree, and asking it spawns. `probe` exists to stop exactly
-        # that, so the shape question is asked first and the probe is reached
-        # only where its answer matters.
+        # The answer cannot change the verdict where no mask would reach the
+        # tree, and asking it spawns, so the shape question is asked first.
         calls = self._bwrap(monkeypatch, available=True, cached=None)
         assert self._run(self._config(make_config, tmp_path)).status == OK
         assert calls == []
@@ -7019,74 +5196,53 @@ class TestTaskControlDir:
     def test_probe_false_does_not_spawn_for_the_mask_question(
         self, make_config, tmp_path, monkeypatch,
     ):
+        # And it must not assert, in an unestablished answer, that the tree is
+        # masked: neither pass on an unsettled question nor assert an
+        # unobserved condition.
         calls = self._bwrap(monkeypatch, cached=None)
-        r = self._run(self._masked_shape(make_config, tmp_path), probe=False)
+        r = self._run(self._masked(make_config, tmp_path)[0], probe=False)
         assert calls == [], "probe=False invoked the bwrap probe"
         assert r.status == WARN
-        assert "could not be established" in r.detail
-
-    def test_an_unestablished_answer_does_not_assert_the_tree_is_masked(
-        self, make_config, tmp_path, monkeypatch,
-    ):
-        # The session-log check's lesson: a fixed prefix rendered a sentence
-        # asserting the exposure in its first clause and disclaiming it in the
-        # second. A boundary check must neither pass on a question it could not
-        # settle nor assert a condition it did not observe.
-        self._bwrap(monkeypatch, cached=None)
-        r = self._run(self._masked_shape(make_config, tmp_path), probe=False)
         assert "could not be established" in r.detail
         assert "is masked out of every sandbox" not in r.detail
 
     def test_a_warm_memo_answers_without_probing(
         self, make_config, tmp_path, monkeypatch,
     ):
-        # The daemon probes at start-up, so inside that process the answer is
-        # free. Saying "could not be established" while `_bwrap_checked` holds
-        # it is a statement about the world that is wrong.
+        # The daemon probes at start-up, so "could not be established" while
+        # `_bwrap_checked` holds the answer would be wrong.
         calls = self._bwrap(monkeypatch, available=False, cached=False)
-        r = self._run(self._masked_shape(make_config, tmp_path), probe=False)
+        r = self._run(self._masked(make_config, tmp_path)[0], probe=False)
         assert calls == []
         assert "would be masked" in r.detail
         assert "could not be established" not in r.detail
 
-    # -- both answers, not the first ---------------------------------------
-
     def test_both_questions_are_reported_rather_than_the_first(
         self, make_config, tmp_path,
     ):
-        # The property the stage is named for. An operator who reads one reason
-        # and fixes it would otherwise be told nothing about the second and
-        # would still have the tree reachable.
+        # An operator who fixes one reason would otherwise hear nothing about
+        # the second and still have the tree reachable.
         config = self._config(make_config, tmp_path, users=("alice", "bob"))
-        root = self._root(config)
-        root.mkdir(parents=True)
-        os.chmod(root, 0o755)
+        self._root(config, 0o755)
         temp = Path(config.temp_dir)
         (temp / "bob").symlink_to(temp)
         r = self._run(config)
         assert r.status == WARN
-        # `"0755"` alone appears in the unconditional `observed` prefix, so it
-        # is satisfied with the mode finding deleted — which is the half this
-        # test is named for. Assert on wording only the finding produces.
+        # `"0755"` alone appears in the unconditional `observed` prefix, so
+        # assert on wording only the mode finding produces.
         assert "rather than 0700" in r.detail
         assert "overlaps the control tree" in r.detail
 
-    # -- it never raises ----------------------------------------------------
-
-    def test_never_raises_on_a_relative_temp_dir(self, make_config, tmp_path):
+    @pytest.mark.parametrize("broken", ["relative-temp-dir", "empty-db-path"])
+    def test_never_raises(self, make_config, tmp_path, broken):
         # Called directly rather than through `run_checks`, which catches every
         # exception and would report a raise as a plain FAIL.
         config = self._config(make_config, tmp_path)
-        config.temp_dir = Path("relative/tmp")
-        r = doctor.check_task_control_dir(config, True)
-        assert r.status in (OK, WARN, FAIL, SKIP)
-
-    def test_never_raises_on_a_config_whose_paths_are_broken(
-        self, make_config, tmp_path,
-    ):
-        config = self._config(make_config, tmp_path)
-        config.db_path = Path("")
-        config.workspace_path = None
+        if broken == "relative-temp-dir":
+            config.temp_dir = Path("relative/tmp")
+        else:
+            config.db_path = Path("")
+            config.workspace_path = None
         r = doctor.check_task_control_dir(config, True)
         assert r.status in (OK, WARN, FAIL, SKIP)
 
@@ -7096,14 +5252,11 @@ class TestSandboxMasksUsesTheNativeProfile:
 
     It moved to `SandboxProfile.NATIVE` with the profile split, so a diagnostic
     no longer builds a namespace holding the subscription credential. The claim
-    that came with that move is that its *verdict* is unchanged, and this is
-    where that is checked rather than assumed: everything the probe reads — the
-    two database masks, and the system binds that make `/bin/sh` resolve — is
-    part of the generic plan and identical under both profiles.
-
-    The verdict itself is asserted end to end on the Linux tier
-    (`tests/linux/test_sandbox_profiles_real.py`), which is the only place a
-    namespace is actually entered.
+    that came with that move is that its *verdict* is unchanged: everything the
+    probe reads — the two database masks, and the system binds that make
+    `/bin/sh` resolve — is part of the generic plan and identical under both
+    profiles. The verdict is asserted end to end only on the Linux tier
+    (`tests/linux/test_sandbox_profiles_real.py`).
     """
 
     @pytest.fixture
@@ -7136,20 +5289,20 @@ class TestSandboxMasksUsesTheNativeProfile:
             return _Result()
 
         monkeypatch.setattr(doctor.subprocess, "run", _capture)
-        # The database in a directory of its own: `make_config` puts it beside
-        # the Nextcloud mount, and a mask there is refused (it would shadow a
-        # path the sandbox needs), which would make every assertion below about
-        # the refusal rather than about the profile.
+        # The database in a directory of its own: beside the mount a mask is
+        # refused, which would make every assertion about the refusal.
         config = make_config(db_path=tmp_path / "data" / "istota.db")
         Path(config.db_path).parent.mkdir(parents=True, exist_ok=True)
         Path(config.db_path).touch()
         verdict = run_checks(config, only=("sandbox.masks",), deep=True)[0]
         return verdict, seen["cmd"], config
 
-    def test_the_probe_is_built_under_the_native_profile(
+    def test_the_probe_is_built_under_the_native_profile_and_still_masks(
         self, make_config, monkeypatch, claude_home, tmp_path,
     ):
-        verdict, cmd, _ = self._run_and_capture(make_config, monkeypatch, tmp_path)
+        """The mask half is the control: a NATIVE probe that had lost the masks
+        would satisfy "no Claude paths" perfectly."""
+        verdict, cmd, config = self._run_and_capture(make_config, monkeypatch, tmp_path)
 
         assert verdict.status == OK
         assert cmd[0] == "bwrap"
@@ -7157,15 +5310,19 @@ class TestSandboxMasksUsesTheNativeProfile:
             assert str(claude_home / ".claude") not in token
             assert str(claude_home / ".local") not in token
 
+        masked = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--tmpfs"]
+        db_dir = Path(config.db_path).parent.resolve()
+        assert str(db_dir) in masked
+        # `_mask_dir` skips a candidate an earlier mask already covers, so the
+        # module root is asserted covered rather than masked on its own.
+        assert config.module_db_root().resolve().is_relative_to(db_dir)
+
     def test_everything_the_probe_reads_is_identical_under_both_profiles(
         self, make_config, monkeypatch, claude_home, tmp_path,
     ):
-        """The masks it asserts on, and the `/bin/sh` it runs them with.
-
-        Rebuilds the same argv under CLAUDE and compares the two things the
-        verdict depends on. If a future change made a mask or a system bind
-        profile-dependent, this is what would say so before the Linux tier did.
-        """
+        """Rebuilds the same argv under CLAUDE and compares the masks and the
+        system binds, so a profile-dependent change shows here before the
+        Linux tier."""
         import tempfile
 
         from istota import db
@@ -7186,12 +5343,9 @@ class TestSandboxMasksUsesTheNativeProfile:
             )
 
         def _masks(argv):
-            """The database masks: every tmpfs/remount-ro after the last bind.
-
-            Not every `--tmpfs` in the argv — `/tmp` is mounted early beside
-            `--proc`, and under CLAUDE so is the `~/.claude` base, which is part
-            of the block this profile deliberately drops.
-            """
+            """Every tmpfs/remount-ro after the last bind. Not every `--tmpfs`:
+            `/tmp` is mounted early, and under CLAUDE so is the `~/.claude`
+            base this profile deliberately drops."""
             last_bind = max(
                 (i for i, a in enumerate(argv) if a in ("--bind", "--ro-bind")),
                 default=-1,
@@ -7209,110 +5363,62 @@ class TestSandboxMasksUsesTheNativeProfile:
                 and argv[i + 1].startswith(("/usr", "/bin", "/lib", "/sbin", "/etc"))
             ]
 
-        # The user temp dir differs (a fresh TemporaryDirectory each call), so
-        # compare the two families the verdict actually reads.
+        # The user temp dir differs between the two calls, so compare the two
+        # families the verdict actually reads.
         assert _masks(native_cmd) == _masks(claude_cmd)
         assert _system_binds(native_cmd) == _system_binds(claude_cmd)
         assert native_cmd[native_cmd.index("--"):][:3] == ["--", "/bin/sh", "-c"]
-
-    def test_the_probe_still_masks_both_database_directories(
-        self, make_config, monkeypatch, claude_home, tmp_path,
-    ):
-        """The control for the two above: a probe built under NATIVE that had
-        lost the masks would satisfy "no Claude paths" perfectly."""
-        _, cmd, config = self._run_and_capture(make_config, monkeypatch, tmp_path)
-
-        masked = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--tmpfs"]
-        db_dir = Path(config.db_path).parent.resolve()
-        assert str(db_dir) in masked
-        # The module root is under it here, and `_mask_dir` skips a candidate an
-        # earlier mask already covers — so the assertion is that it is covered,
-        # not that it has a mask of its own.
-        assert config.module_db_root().resolve().is_relative_to(db_dir)
 
 
 class TestVerdict:
     """`verdict` — the adapter for a caller that needs a boolean and a sentence.
 
-    `!check`'s non-admin arm and `heartbeat._check_self` are the two consumers.
-    Both used to compute their own pass/fail from their own hand-rolled probe,
-    which is what this whole spec removes; the shape they need back from the
-    registry is one bool and one line.
+    `!check`'s non-admin arm and `heartbeat._check_self` are the two consumers;
+    both used to compute pass/fail from their own hand-rolled probe.
     """
 
-    def _r(self, name, status):
-        return CheckResult(name, status, "detail")
+    @staticmethod
+    def _results(*statuses):
+        return [CheckResult(f"a.{i}", s, "detail") for i, s in enumerate(statuses)]
 
-    def test_a_failure_makes_the_verdict_unhealthy(self):
-        healthy, summary = doctor.verdict(
-            [self._r("a.one", OK), self._r("a.two", FAIL)]
-        )
-        assert healthy is False
-        assert "1 fail" in summary
+    @pytest.mark.parametrize(
+        "statuses,healthy,summary",
+        [
+            ((OK, FAIL), False, "1 fail"),
+            # A warning that pages someone is a failure wearing the wrong label;
+            # `heartbeat._check_self` used to return unhealthy for one.
+            ((OK, WARN), True, "1 warn"),
+            # A run that checked nothing must not read as one that passed
+            # everything, so the count carries the caveat.
+            ((SKIP, SKIP), True, "2 skip"),
+            ((SKIP, SKIP), True, "0 ok"),
+        ],
+        ids=["fail", "warn", "all-skip", "all-skip-no-ok"],
+    )
+    def test_the_verdict(self, statuses, healthy, summary):
+        got_healthy, got_summary = doctor.verdict(self._results(*statuses))
+        assert got_healthy is healthy
+        assert summary in got_summary
 
-    def test_a_warning_does_not(self):
-        """A warning that pages someone is a failure wearing the wrong label.
-
-        This is a deliberate behaviour change from `heartbeat._check_self`,
-        which appended its high-failure-rate finding to `failures` and so
-        returned `healthy=False` for it.
-        """
-        healthy, summary = doctor.verdict(
-            [self._r("a.one", OK), self._r("a.two", WARN)]
-        )
-        assert healthy is True
-        assert "1 warn" in summary, (
-            f"the warning is not named in the summary: {summary!r}"
-        )
-
-    def test_all_skip_is_healthy_and_says_how_many(self):
-        """A run that checked nothing must not read as a run that passed
-        everything, so the count carries the caveat."""
-        healthy, summary = doctor.verdict(
-            [self._r("a.one", SKIP), self._r("a.two", SKIP)]
-        )
-        assert healthy is True
-        assert "2 skip" in summary
-        assert "0 ok" in summary
+    def test_every_status_appears_in_the_summary_in_order(self):
+        assert doctor.verdict(self._results(OK, WARN, FAIL, SKIP))[1] == "1 ok, 1 warn, 1 fail, 1 skip"
 
     def test_an_empty_list_says_so_in_words(self):
         assert doctor.verdict([]) == (True, "no checks ran")
 
-    def test_every_status_appears_in_the_summary(self):
-        _, summary = doctor.verdict(
-            [
-                self._r("a.one", OK),
-                self._r("a.two", WARN),
-                self._r("a.three", FAIL),
-                self._r("a.four", SKIP),
-            ]
-        )
-        assert summary == "1 ok, 1 warn, 1 fail, 1 skip"
-
-    def test_it_agrees_with_exit_code(self):
-        """`verdict`'s bool and `exit_code`'s int answer the same question, and
-        a caller reading one and a caller reading the other must not disagree
-        about whether the deployment is healthy."""
-        for results in (
-            [self._r("a.one", OK)],
-            [self._r("a.one", WARN)],
-            [self._r("a.one", FAIL)],
-            [self._r("a.one", SKIP)],
-            [],
-        ):
-            healthy, _ = doctor.verdict(results)
-            assert healthy is (exit_code(results) == 0)
+    @pytest.mark.parametrize("statuses", [(OK,), (WARN,), (FAIL,), (SKIP,), ()])
+    def test_it_agrees_with_exit_code(self, statuses):
+        """A caller reading the bool and a caller reading `exit_code` must not
+        disagree about whether the deployment is healthy."""
+        results = self._results(*statuses)
+        healthy, _ = doctor.verdict(results)
+        assert healthy is (exit_code(results) == 0)
 
     def test_verdict_and_summarize_are_different_functions(self):
-        """The collision the name was chosen to avoid.
-
-        `summarize` was already taken and returns counts by status; `verdict`
-        returns a bool and a sentence. They look close enough that a later
-        tidy-up could merge them, and the two callers of `verdict` would then
-        get a dict where they expected a tuple.
-        """
+        """`summarize` returns counts by status and `verdict` a bool and a
+        sentence; a tidy-up merging them would hand the two callers a dict."""
         assert doctor.verdict is not doctor.summarize
-        results = [self._r("a.one", OK)]
+        results = self._results(OK)
         assert isinstance(doctor.summarize(results), dict)
         assert isinstance(doctor.verdict(results), tuple)
 
@@ -7379,12 +5485,8 @@ def _caps(mode="external", key="LS0tLS1CRUdJTiBQVUJMSUMgS0VZ"):
 
 @pytest.fixture
 def signaling_seams(monkeypatch):
-    """Stand in for the three things the signaling checks reach out to.
-
-    Every one of them is a network call, so a check driven against the real
-    thing would be asserting about the developer's own host — and two of the
-    three would be asserting about a Nextcloud that is not there.
-    """
+    """Stand in for the three network calls the signaling checks make, which
+    against the real thing would assert about the developer's own host."""
     doctor.reset_signaling_probe_memo()
 
     state = {
@@ -7423,82 +5525,54 @@ def signaling_seams(monkeypatch):
     doctor.reset_signaling_probe_memo()
 
 
-class TestTheSignalingChecksAreRegistered:
-    def test_all_four_are_in_the_registry(self):
-        names = {name for name, _ in CHECKS}
-        assert {
-            "talk.signaling_reachable",
-            "talk.signaling_chat_relay",
-            "talk.signaling_auth",
-            "talk.signaling_watchers",
-        } <= names
+_SIGNALING_CHECKS = (
+    "talk.signaling_reachable",
+    "talk.signaling_chat_relay",
+    "talk.signaling_auth",
+    "talk.signaling_watchers",
+)
 
-    def test_they_are_deployment_scoped(self):
-        # Every one of them asks about a rendered config, a running signaling
-        # server or a live supervisor. A bare `docker run` has none of those,
-        # and the image tier asserts no check fails there.
-        for name in (
-            "talk.signaling_reachable", "talk.signaling_chat_relay",
-            "talk.signaling_auth", "talk.signaling_watchers",
-        ):
-            assert doctor.CHECK_SCOPES[name] == DEPLOYMENT
 
-    def test_none_of_them_is_deep_or_live(self):
-        for name in (
-            "talk.signaling_reachable", "talk.signaling_chat_relay",
-            "talk.signaling_auth", "talk.signaling_watchers",
-        ):
-            assert name not in DEEP_CHECKS
-            assert name not in LIVE_CHECKS
+def test_the_signaling_checks_are_registered_deployment_scoped_and_cheap():
+    # Every one asks about a rendered config, a running signaling server or a
+    # live supervisor, none of which a bare `docker run` has.
+    names = {name for name, _ in CHECKS}
+    for name in _SIGNALING_CHECKS:
+        assert name in names
+        assert doctor.CHECK_SCOPES[name] == DEPLOYMENT
+        assert name not in DEEP_CHECKS
+        assert name not in LIVE_CHECKS
 
 
 class TestSignalingReachable:
     """The HPB answers a ``welcome``, read before any hello.
 
-    Unauthenticated by construction: nothing here sends a hello, so no
-    signaling session exists and no ``participants/active`` POST is made.
-    ``doctor`` runs on a scheduler interval and from the admin Health pane, so
-    a check that joined a room would put a phantom participant in it every time
-    somebody opened a dashboard.
+    Unauthenticated by construction: no hello, so no signaling session and no
+    ``participants/active`` POST. ``doctor`` runs on a scheduler interval and
+    from the admin Health pane, so a check that joined a room would put a
+    phantom participant in it every time somebody opened a dashboard.
     """
 
-    def test_disabled_signaling_skips(self, make_config, signaling_seams):
-        config = _signaling_config(make_config, enabled=False)
-        result = doctor.check_signaling_reachable(config, True)
-        assert result.status == SKIP
-
-    def test_disabled_talk_skips(self, make_config, signaling_seams):
-        config = _signaling_config(make_config, talk=False)
-        result = doctor.check_signaling_reachable(config, True)
+    @pytest.mark.parametrize("fields", [{"enabled": False}, {"talk": False}], ids=["signaling-off", "talk-off"])
+    def test_disabled_skips(self, make_config, signaling_seams, fields):
+        result = doctor.check_signaling_reachable(_signaling_config(make_config, **fields), True)
         assert result.status == SKIP
 
     def test_a_deployment_with_nothing_configured_skips(self, make_config):
-        """The spec's own acceptance line: `--only talk.signaling_reachable`
-        against nothing answers `skip`, not `fail`."""
-        config = make_config()
-        results = run_checks(config, only=("talk.signaling_reachable",))
+        """The spec's acceptance line: answers `skip`, not `fail`."""
+        results = run_checks(make_config(), only=("talk.signaling_reachable",))
         assert [r.status for r in results] == [SKIP]
 
     def test_probe_disabled_opens_no_socket(self, make_config, signaling_seams):
-        config = _signaling_config(make_config)
-        result = doctor.check_signaling_reachable(config, False)
+        result = doctor.check_signaling_reachable(_signaling_config(make_config), False)
         assert result.status == SKIP
         assert signaling_seams["urls"] == [], "a socket was opened under probe=False"
 
-    def test_a_welcome_frame_is_ok(self, make_config, signaling_seams):
-        config = _signaling_config(make_config)
-        result = doctor.check_signaling_reachable(config, True)
+    def test_a_welcome_frame_from_the_discovered_server_is_ok(self, make_config, signaling_seams):
+        result = doctor.check_signaling_reachable(_signaling_config(make_config), True)
         assert result.status == OK, result.detail
         assert "2.1.1" in result.detail
-
-    def test_the_discovered_server_is_turned_into_a_websocket_url(
-        self, make_config, signaling_seams
-    ):
-        config = _signaling_config(make_config)
-        doctor.check_signaling_reachable(config, True)
-        assert signaling_seams["urls"] == [
-            "wss://hpb.example.com/signaling/spreed"
-        ]
+        assert signaling_seams["urls"] == ["wss://hpb.example.com/signaling/spreed"]
 
     def test_a_configured_url_wins_and_costs_nextcloud_nothing(
         self, make_config, signaling_seams, monkeypatch
@@ -7516,79 +5590,50 @@ class TestSignalingReachable:
         assert result.status == OK, result.detail
         assert signaling_seams["urls"] == ["wss://other.example.com/sig/spreed"]
 
-    def test_internal_mode_skips_and_points_at_the_check_that_owns_it(
+    def test_internal_mode_skips_and_only_the_auth_check_fails(
         self, make_config, signaling_seams
     ):
-        """One cause, one FAIL.
-
-        A deployment with no backend registered has nothing for a reachability
-        check to reach, and `talk.signaling_auth` already FAILs it with the
-        remedy that fixes it. A second FAIL here would report a configuration
-        fault under a check named for reachability and page an operator twice
-        for one cause.
-        """
-        signaling_seams["settings"] = _settings_payload(mode="internal")
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_reachable(config, True)
-
-        assert result.status == SKIP
-        assert "internal" in result.detail
-        assert "talk.signaling_auth" in result.detail
-
-    def test_only_one_of_the_four_fails_on_an_internal_mode_deployment(
-        self, make_config, signaling_seams
-    ):
+        """One cause, one FAIL. With no backend registered there is nothing to
+        reach, and `talk.signaling_auth` already FAILs it with the remedy that
+        fixes it; a second FAIL would page an operator twice."""
         signaling_seams["settings"] = _settings_payload(mode="internal")
         signaling_seams["capabilities"] = _caps(mode="internal")
         config = _signaling_config(make_config)
 
-        results = run_checks(config, only=("talk.signaling_",))
+        result = doctor.check_signaling_reachable(config, True)
+        assert result.status == SKIP
+        assert "internal" in result.detail
+        assert "talk.signaling_auth" in result.detail
 
+        results = run_checks(config, only=("talk.signaling_",))
         failed = [r.name for r in results if r.status == FAIL]
         assert failed == ["talk.signaling_auth"], [
             (r.name, r.status) for r in results
         ]
 
-    def test_an_unreachable_server_fails(self, make_config, signaling_seams):
+    def test_an_unreachable_server_fails_without_promising_a_boot_refusal(
+        self, make_config, signaling_seams
+    ):
+        """An unreachable-but-registered server is not one of the two startup
+        refusals: watchers retry on a backoff and reconciliation carries
+        inbound meanwhile, so the remedy must not send the operator looking for
+        a boot failure that will not happen."""
         signaling_seams["welcome_error"] = "connection refused"
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_reachable(config, True)
+        result = doctor.check_signaling_reachable(_signaling_config(make_config), True)
 
         assert result.status == FAIL
         assert "connection refused" in result.detail
-        assert result.remedy
+        assert "refuses to start" not in result.remedy
+        assert "room_sync_interval" in result.remedy
 
     def test_a_settings_call_that_failed_is_reported_with_its_cause(
         self, make_config, signaling_seams
     ):
         signaling_seams["settings_error"] = "401 Unauthorized"
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_reachable(config, True)
+        result = doctor.check_signaling_reachable(_signaling_config(make_config), True)
 
         assert result.status == SKIP
         assert "401" in result.detail
-
-    def test_the_remedy_does_not_claim_the_daemon_will_refuse_to_boot(
-        self, make_config, signaling_seams
-    ):
-        """An unreachable-but-registered server is not one of the two refusals.
-
-        The spec's Behaviour table says watchers retry on a backoff and the
-        reconciliation pass carries inbound meanwhile. A remedy sending an
-        operator to look for a boot failure that will not happen is a remedy
-        they cannot act on.
-        """
-        signaling_seams["welcome_error"] = "connection refused"
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_reachable(config, True)
-
-        assert result.status == FAIL
-        assert "refuses to start" not in result.remedy
-        assert "room_sync_interval" in result.remedy
 
     def test_a_missing_library_fails_naming_the_extra(
         self, make_config, signaling_seams, monkeypatch
@@ -7601,13 +5646,10 @@ class TestSignalingReachable:
             )
 
         monkeypatch.setattr(sig, "require_websockets", refuse)
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_reachable(config, True)
+        result = doctor.check_signaling_reachable(_signaling_config(make_config), True)
 
         # A fault, not an unanswerable question: `enabled = true` with no
-        # library is one of the two startup refusals, unlike a backend that is
-        # merely not registered.
+        # library is one of the two startup refusals.
         assert result.status == FAIL
         assert "signaling" in result.detail
         assert "refuses to start" in result.remedy
@@ -7616,22 +5658,16 @@ class TestSignalingReachable:
     def test_the_probe_is_shared_with_the_chat_relay_check(
         self, make_config, signaling_seams
     ):
-        """One socket per doctor run, not one per check.
-
-        Both checks read the same frame. Probing twice would double the OCS
-        settings call and the connect on the hourly sweep and on every admin
-        page load, for one answer.
-        """
-        config = _signaling_config(make_config)
-        results = run_checks(config, only=("talk.signaling_",))
+        """One socket per doctor run, not one per check: probing twice would
+        double the settings call and the connect on every sweep and page load."""
+        results = run_checks(_signaling_config(make_config), only=("talk.signaling_",))
         assert len(signaling_seams["urls"]) == 1, signaling_seams["urls"]
         assert {r.status for r in results} <= {OK, SKIP}
 
 
 class TestSignalingChatRelay:
     def test_present_is_ok(self, make_config, signaling_seams):
-        config = _signaling_config(make_config)
-        result = doctor.check_signaling_chat_relay(config, True)
+        result = doctor.check_signaling_chat_relay(_signaling_config(make_config), True)
         assert result.status == OK
 
     def test_absent_warns_naming_the_consequence(self, make_config, signaling_seams):
@@ -7639,9 +5675,7 @@ class TestSignalingChatRelay:
             "type": "welcome",
             "welcome": {"version": "2.0.1", "features": ["hello-v2", "welcome"]},
         }
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_chat_relay(config, True)
+        result = doctor.check_signaling_chat_relay(_signaling_config(make_config), True)
 
         assert result.status == WARN
         assert "chat-relay" in result.detail
@@ -7650,22 +5684,16 @@ class TestSignalingChatRelay:
     def test_an_unreachable_server_skips_rather_than_claiming_absence(
         self, make_config, signaling_seams
     ):
-        """A server we could not reach advertises nothing we can read.
-
-        Reporting that as "no chat-relay" would name the wrong fault and send
-        an operator to upgrade a server that is simply down.
-        """
+        """Reporting "no chat-relay" for a server we could not reach would send
+        an operator to upgrade a server that is simply down."""
         signaling_seams["welcome_error"] = "connection refused"
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_chat_relay(config, True)
+        result = doctor.check_signaling_chat_relay(_signaling_config(make_config), True)
 
         assert result.status == SKIP
         assert "talk.signaling_reachable" in result.detail
 
     def test_probe_disabled_skips(self, make_config, signaling_seams):
-        config = _signaling_config(make_config)
-        result = doctor.check_signaling_chat_relay(config, False)
+        result = doctor.check_signaling_chat_relay(_signaling_config(make_config), False)
         assert result.status == SKIP
         assert signaling_seams["urls"] == []
 
@@ -7675,20 +5703,19 @@ class TestSignalingAuth:
 
     Reads ``/cloud/capabilities`` and mints nothing. The mode question is
     answered by ``signaling.signaling_mode_reason``, the same predicate the
-    startup refusal uses, so the two cannot disagree about whether a deployment
-    is configured.
+    startup refusal uses, so the two cannot disagree.
     """
 
+    def _check(self, make_config, signaling_seams, capabilities=None, probe=True, **fields):
+        if capabilities is not None:
+            signaling_seams["capabilities"] = capabilities
+        return doctor.check_signaling_auth(_signaling_config(make_config, **fields), probe)
+
     def test_external_with_a_key_is_ok(self, make_config, signaling_seams):
-        config = _signaling_config(make_config)
-        result = doctor.check_signaling_auth(config, True)
-        assert result.status == OK
+        assert self._check(make_config, signaling_seams).status == OK
 
     def test_internal_mode_fails(self, make_config, signaling_seams):
-        signaling_seams["capabilities"] = _caps(mode="internal")
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_auth(config, True)
+        result = self._check(make_config, signaling_seams, _caps(mode="internal"))
 
         assert result.status == FAIL
         assert "internal" in result.detail
@@ -7697,25 +5724,17 @@ class TestSignalingAuth:
     def test_no_hello_v2_key_warns_naming_the_non_expiring_ticket(
         self, make_config, signaling_seams
     ):
-        signaling_seams["capabilities"] = _caps(key=None)
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_auth(config, True)
+        result = self._check(make_config, signaling_seams, _caps(key=None))
 
         assert result.status == WARN
         assert "v1" in result.detail
         assert "expire" in result.detail or "rotate" in result.detail
 
     def test_the_key_itself_is_never_echoed(self, make_config, signaling_seams):
-        """It is a *public* key, so this is hygiene rather than a boundary —
-        but a check's detail is one line saying what was observed, and pasting
-        a base64 blob into the daemon log and the admin Health pane is not it.
-        """
+        """It is a *public* key, so this is hygiene rather than a boundary: a
+        detail is one line of what was observed, not a base64 blob."""
         marker = "PUBLIC-KEY-MATERIAL-abcdef"
-        signaling_seams["capabilities"] = _caps(key=marker)
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_auth(config, True)
+        result = self._check(make_config, signaling_seams, _caps(key=marker))
 
         assert marker not in result.detail
         assert marker not in result.remedy
@@ -7724,30 +5743,47 @@ class TestSignalingAuth:
         self, make_config, signaling_seams
     ):
         signaling_seams["capabilities_error"] = "connection timed out"
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_auth(config, True)
+        result = self._check(make_config, signaling_seams)
 
         assert result.status == WARN
         assert "timed out" in result.detail
 
-    def test_probe_disabled_skips(self, make_config, signaling_seams):
-        config = _signaling_config(make_config)
-        result = doctor.check_signaling_auth(config, False)
-        assert result.status == SKIP
+    @pytest.mark.parametrize(
+        "probe,fields", [(False, {}), (True, {"enabled": False})], ids=["probe-disabled", "signaling-off"]
+    )
+    def test_skips(self, make_config, signaling_seams, probe, fields):
+        assert self._check(make_config, signaling_seams, probe=probe, **fields).status == SKIP
 
-    def test_disabled_signaling_skips(self, make_config, signaling_seams):
-        config = _signaling_config(make_config, enabled=False)
-        assert doctor.check_signaling_auth(config, True).status == SKIP
+    @pytest.mark.parametrize(
+        "capabilities",
+        [
+            {"capabilities": {"spreed": {"config": {"signaling": {
+                "hello-v2-token-key": "LS0tLS1CRUdJTg==",
+            }}}}},
+            {"capabilities": {}},
+        ],
+        ids=["no-mode-key", "no-spreed-block"],
+    )
+    def test_a_talk_that_publishes_no_mode_warns_rather_than_failing(
+        self, make_config, signaling_seams, capabilities
+    ):
+        """`capabilities.spreed.config.signaling.mode` was read off the
+        deployment this design was verified against; another Talk version may
+        not publish it, and falling through `signaling_mode_reason`'s
+        unreadable-mode arm would FAIL a deployment whose backend is fine."""
+        result = self._check(make_config, signaling_seams, capabilities)
+
+        assert result.status == WARN, result.detail
+        if "spreed" in capabilities["capabilities"]:
+            assert "mode" in result.detail
+            assert "talk.signaling_reachable" in result.remedy
 
 
 class TestSignalingWatchers:
     """The number that separates "the stream is working" from "the safety net
-    is carrying it".
-
-    A watcher count alone cannot say that: a sweep-style safety net backfills
-    silently, so every room stays current while the event path delivers
-    nothing. ``rooms_behind`` is what makes the failure visible.
+    is carrying it": a sweep-style net backfills silently, so every room stays
+    current while the event path delivers nothing. ``rooms_behind`` is what
+    makes that visible, and the census must not contradict itself.
     """
 
     @pytest.fixture(autouse=True)
@@ -7758,55 +5794,63 @@ class TestSignalingWatchers:
         yield
         sig.clear_stats_source()
 
-    def _stats(self, **fields):
+    def _check(self, make_config, probe=True, enabled=True, **fields):
         from istota.transport.talk import signaling as sig
 
         base = {"watchers": 3, "connected": 3, "disconnected": [], "rooms_behind": 0}
         base.update(fields)
-        sig.set_stats_source(lambda: base)
+        sig.set_stats_source(lambda: dict(base))
+        return doctor.check_signaling_watchers(_signaling_config(make_config, enabled=enabled), probe)
 
     def test_no_supervisor_in_this_process_skips(self, make_config):
-        """doctor also runs in the web process, in the CLI and from `!check`.
-
-        Reporting every watcher down there would page an operator about a
-        process that was never supposed to have any.
-        """
-        config = _signaling_config(make_config)
-        result = doctor.check_signaling_watchers(config, True)
+        """doctor also runs in the web process, the CLI and `!check`, which
+        were never supposed to have watchers."""
+        result = doctor.check_signaling_watchers(_signaling_config(make_config), True)
         assert result.status == SKIP
 
-    def test_all_connected_and_nothing_behind_is_ok(self, make_config):
-        self._stats()
-        config = _signaling_config(make_config)
-        result = doctor.check_signaling_watchers(config, True)
+    @pytest.mark.parametrize(
+        "probe", [True, False], ids=["probed", "no-probe-needed-for-in-process-counters"]
+    )
+    def test_all_connected_and_nothing_behind_is_ok(self, make_config, probe):
+        result = self._check(make_config, probe=probe)
         assert result.status == OK, result.detail
         assert "3" in result.detail
 
-    def test_a_disconnected_watcher_warns_and_is_named(self, make_config):
-        self._stats(connected=2, disconnected=["abc123"])
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_watchers(config, True)
-
-        assert result.status == WARN
-        assert "abc123" in result.detail
+    @pytest.mark.parametrize(
+        "fields,named",
+        [
+            ({"connected": 2, "disconnected": ["abc123"]}, ("abc123",)),
+            # The case the check exists for: a socket that is up and delivering
+            # nothing looks healthy from every other angle.
+            ({"rooms_behind": 4}, ("4",)),
+            # A supervisor may report counters and no token list; reading only
+            # the list said OK beside "1 of 5 watchers connected".
+            ({"watchers": 5, "connected": 1}, ("1 of 5",)),
+        ],
+        ids=["disconnected-watcher", "rooms-behind", "counts-only-shortfall"],
+    )
+    def test_warns(self, make_config, fields, named):
+        result = self._check(make_config, **fields)
+        assert result.status == WARN, result.detail
         assert result.remedy
+        for text in named:
+            assert text in result.detail
 
-    def test_rooms_behind_warns_even_with_every_watcher_connected(self, make_config):
-        """The case the check exists for.
+    def test_a_string_disconnected_field_does_not_become_six_rooms(self, make_config):
+        """`or []` on a bare string iterates it character by character."""
+        result = self._check(make_config, watchers=5, connected=4, disconnected="abc123")
 
-        A socket that is up and delivering nothing looks healthy from every
-        other angle: the watcher count is right, no reconnect is logged, and
-        the reconciliation comparison quietly fetches the rooms the stream
-        missed. The count is the only thing that says so.
-        """
-        self._stats(rooms_behind=4)
-        config = _signaling_config(make_config)
+        assert "a, b, c" not in result.detail
+        assert "4 of 5" in result.detail
 
-        result = doctor.check_signaling_watchers(config, True)
+    def test_a_missing_key_reads_as_zero_rather_than_raising(self, make_config):
+        from istota.transport.talk import signaling as sig
 
-        assert result.status == WARN
-        assert "4" in result.detail
+        sig.set_stats_source(lambda: {})
+        result = doctor.check_signaling_watchers(_signaling_config(make_config), True)
+
+        assert result.status == OK
+        assert "0 of 0" in result.detail
 
     def test_a_supervisor_that_raises_skips_rather_than_failing(self, make_config):
         from istota.transport.talk import signaling as sig
@@ -7815,34 +5859,46 @@ class TestSignalingWatchers:
             raise RuntimeError("mid-restart")
 
         sig.set_stats_source(boom)
-        config = _signaling_config(make_config)
-
-        assert doctor.check_signaling_watchers(config, True).status == SKIP
-
-    def test_it_needs_no_probe(self, make_config):
-        """It reads in-process counters, so `probe=False` is not a reason to
-        skip: the answer costs nothing and is the same either way."""
-        self._stats()
-        config = _signaling_config(make_config)
-        assert doctor.check_signaling_watchers(config, False).status == OK
+        assert doctor.check_signaling_watchers(_signaling_config(make_config), True).status == SKIP
 
     def test_disabled_signaling_skips(self, make_config):
-        self._stats()
-        config = _signaling_config(make_config, enabled=False)
-        assert doctor.check_signaling_watchers(config, True).status == SKIP
+        assert self._check(make_config, enabled=False).status == SKIP
+
+    def test_the_reader_is_handed_a_copy_not_the_supervisors_own_mapping(self):
+        """The supervisor is on the loop thread and the reader is not."""
+        from istota.transport.talk import signaling as sig
+
+        live = {"watchers": 1, "connected": 1}
+        sig.set_stats_source(lambda: live)
+
+        read = sig.read_stats()
+        read["watchers"] = 99
+
+        assert live["watchers"] == 1
+
+    def test_registering_a_mapping_instead_of_a_callable_is_reported(self, caplog):
+        """A non-callable used to clear the source silently, after which the
+        check reported "no supervisor in this process" for the daemon's life."""
+        import logging
+
+        from istota.transport.talk import signaling as sig
+
+        with caplog.at_level(logging.WARNING, logger=sig.logger.name):
+            sig.set_stats_source({"watchers": 1})
+
+        assert sig.read_stats() is None
+        assert any("callable" in r.getMessage() for r in caplog.records)
 
 
 class TestTheProbeNeverAuthenticates:
     """The spec's load-bearing constraint, asserted against the one function
     that could break it.
 
-    Every other test in this file monkeypatches `_signaling_welcome_frame`
-    wholesale, so all of them are assertions about the fixture — the shape
-    `.claude/rules/testbed.md` has now recorded eight times. Opening a
-    signaling session means POSTing `participants/active` for a room, so a
-    check that sent a hello would put a phantom istota participant into a live
-    room's member list every time an admin opened the Health pane. Adding a
-    `send` to that function must turn something red, and nothing above would.
+    Every other signaling test monkeypatches `_signaling_welcome_frame`
+    wholesale, so all of them assert about the fixture. Opening a signaling
+    session means POSTing `participants/active`, so a check that sent a hello
+    would put a phantom participant into a live room every time an admin opened
+    the Health pane. Adding a `send` to that function must turn something red.
     """
 
     class _FakeSocket:
@@ -7878,7 +5934,6 @@ class TestTheProbeNeverAuthenticates:
 
     @pytest.fixture
     def fake_websockets(self, monkeypatch):
-        import json
         import types
 
         from istota.transport.talk import signaling as sig
@@ -7911,14 +5966,10 @@ class TestTheProbeNeverAuthenticates:
         assert fake_websockets.count("recv") == 1
 
     def test_the_control_can_fail(self, fake_websockets):
-        """Without this the assertion above is a claim rather than a guard.
-
-        Drive the same fake socket through a variant that does send a hello;
-        if the log stays empty the instrument is not observing sends and the
-        test above proves nothing.
-        """
+        """Drive the same fake socket through a variant that does send a hello;
+        if the log stays empty the instrument cannot see sends and the test
+        above proves nothing."""
         import asyncio
-        import json
 
         from istota.transport.talk import signaling as sig
 
@@ -7936,17 +5987,14 @@ class TestTheProbeNeverAuthenticates:
         )
 
     def test_it_bounds_itself_well_inside_the_callers_budget(self, monkeypatch):
-        """The handshake and the first frame share the budget, not each take it.
-
-        Giving each leg the caller's whole number let the pair run to twice it
-        before `_run_off_loop`'s outer bound noticed — which returned a timeout
-        naming the wrong number and left the thread and its socket live.
-        """
-        seen = {}
-
+        """The handshake and the first frame share the budget: giving each leg
+        the whole number let the pair run to twice it before the outer bound
+        noticed, naming the wrong number and leaving the socket live."""
         import types
 
         from istota.transport.talk import signaling as sig
+
+        seen = {}
 
         class _Connect:
             def __call__(self, url, **kwargs):
@@ -7963,246 +6011,91 @@ class TestTheProbeNeverAuthenticates:
         assert seen["open_timeout"] <= 10.0 / 2.0
 
 
-class TestTheWatcherCensusDoesNotContradictItself:
-    """A supervisor may report counters and no token list.
-
-    Reading only the token list returns OK with a detail saying "1 of 5
-    watchers connected", which is a check contradicting itself in the one
-    place it is meant to be authoritative — and a watcher mid-reconnect is
-    plausibly counted as not connected while belonging on no list.
-    """
-
-    @pytest.fixture(autouse=True)
-    def _clear(self):
-        from istota.transport.talk import signaling as sig
-
-        sig.clear_stats_source()
-        yield
-        sig.clear_stats_source()
-
-    def _stats(self, **fields):
-        from istota.transport.talk import signaling as sig
-
-        base = {"watchers": 5, "connected": 5, "disconnected": [], "rooms_behind": 0}
-        base.update(fields)
-        sig.set_stats_source(lambda: dict(base))
-
-    def test_a_counts_only_shortfall_warns(self, make_config):
-        self._stats(connected=1, disconnected=[])
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_watchers(config, True)
-
-        assert result.status == WARN, result.detail
-        assert "1 of 5" in result.detail
-
-    def test_a_string_disconnected_field_does_not_become_six_rooms(
-        self, make_config
-    ):
-        """`or []` on a bare string iterates it character by character.
-
-        Each character passes an `isinstance(token, str) and token` filter, so
-        the WARN would name six rooms that do not exist.
-        """
-        self._stats(connected=4, disconnected="abc123")
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_watchers(config, True)
-
-        assert "a, b, c" not in result.detail
-        assert "4 of 5" in result.detail
-
-    def test_a_missing_key_reads_as_zero_rather_than_raising(self, make_config):
-        from istota.transport.talk import signaling as sig
-
-        sig.set_stats_source(lambda: {})
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_watchers(config, True)
-
-        assert result.status == OK
-        assert "0 of 0" in result.detail
-
-    def test_the_reader_is_handed_a_copy_not_the_supervisors_own_mapping(self):
-        """The supervisor is on the loop thread and the reader is not."""
-        from istota.transport.talk import signaling as sig
-
-        live = {"watchers": 1, "connected": 1}
-        sig.set_stats_source(lambda: live)
-
-        read = sig.read_stats()
-        read["watchers"] = 99
-
-        assert live["watchers"] == 1
-
-    def test_registering_a_mapping_instead_of_a_callable_is_reported(self, caplog):
-        """The obvious mistake, and it is silent without this.
-
-        A non-callable used to clear the source, after which
-        `talk.signaling_watchers` reports "no supervisor in this process" for
-        the life of the daemon with nothing anywhere saying why.
-        """
-        import logging
-
-        from istota.transport.talk import signaling as sig
-
-        with caplog.at_level(logging.WARNING, logger=sig.logger.name):
-            sig.set_stats_source({"watchers": 1})
-
-        assert sig.read_stats() is None
-        assert any("callable" in r.getMessage() for r in caplog.records)
-
-
-class TestSignalingAuthOnATalkThatPublishesNoMode:
-    """An absent capability key must not fail a working deployment.
-
-    `capabilities.spreed.config.signaling.mode` was read off the deployment
-    this design was verified against, which is why the check asks it here
-    rather than paying for the settings call and its token. A different Talk
-    version may not publish it, and letting that fall through
-    `signaling_mode_reason`'s unreadable-mode arm would FAIL a deployment whose
-    high-performance backend is fine.
-    """
-
-    def test_an_absent_mode_key_warns_rather_than_failing(
-        self, make_config, signaling_seams
-    ):
-        signaling_seams["capabilities"] = {
-            "capabilities": {"spreed": {"config": {"signaling": {
-                "hello-v2-token-key": "LS0tLS1CRUdJTg==",
-            }}}}
-        }
-        config = _signaling_config(make_config)
-
-        result = doctor.check_signaling_auth(config, True)
-
-        assert result.status == WARN, result.detail
-        assert "mode" in result.detail
-        assert "talk.signaling_reachable" in result.remedy
-
-    def test_a_capabilities_payload_with_no_spreed_block_also_warns(
-        self, make_config, signaling_seams
-    ):
-        signaling_seams["capabilities"] = {"capabilities": {}}
-        config = _signaling_config(make_config)
-
-        assert doctor.check_signaling_auth(config, True).status == WARN
 class TestConfigVisibility:
     """The gate in front of the whole registry (ISSUE-412).
 
     `load_config` returns a bare `Config()` when no candidate resolves, so
-    every path-and-policy check then answers about defaults — a relative
-    `data/istota.db`, the default temp dir, a whole `[security]` block the
-    operator never wrote — while reading exactly like a run about the real
-    deployment. Inside a task that is *unconditional*: `build_clean_env` exports
-    `ISTOTA_CONFIG_PATH` naming a file under `config/`, and `config/` is bound
-    into no sandbox by design.
-
-    The verdict splits on the same principle `_deployment_sandboxing` did and
-    not on the same predicate: a boundary doing its job is not a fault, so a
-    *task* gets a `SKIP`, and the question "is this the daemon" is answered by
-    `ISTOTA_TASK_ID` rather than by `ISTOTA_SANDBOXED`, which `task_env` sets
-    only under `skill_proxy_enabled and effective_sandboxing`.
+    every path-and-policy check then answers about defaults while reading like
+    a run about the real deployment. Inside a task that is *unconditional*:
+    `build_clean_env` exports `ISTOTA_CONFIG_PATH` naming a file under
+    `config/`, which is bound into no sandbox by design. A boundary doing its
+    job is not a fault, so a *task* gets a `SKIP`, and "is this the daemon" is
+    answered by `ISTOTA_TASK_ID` rather than by `ISTOTA_SANDBOXED`, which
+    `task_env` sets only under `skill_proxy_enabled and effective_sandboxing`.
     """
 
-    def _loaded(self, make_config, tmp_path):
-        path = tmp_path / "config.toml"
-        path.write_text("")
-        return make_config(config_path=path)
+    def _gate(self, make_config, monkeypatch, env, **kwargs):
+        """The gate's answer for a config that loaded nothing, under `env`."""
+        _clear_env(monkeypatch, "ISTOTA_SANDBOXED", "ISTOTA_TASK_ID", "ISTOTA_CONFIG_PATH")
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        return doctor.config_visibility(make_config(config_path=None), **kwargs)
 
     def test_a_loaded_config_opens_the_gate(self, make_config, tmp_path, monkeypatch):
         monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
         monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(tmp_path / "absent.toml"))
-        assert doctor.config_visibility(self._loaded(make_config, tmp_path)) is None
+        path = tmp_path / "config.toml"
+        path.write_text("")
+        assert doctor.config_visibility(make_config(config_path=path)) is None
 
-    def test_inside_a_task_it_skips_rather_than_failing(
-        self, make_config, tmp_path, monkeypatch
-    ):
-        """`config/` is bound into no sandbox on purpose. The boundary working
-        is not a fault — reporting it as one is the ISSUE-381 shape again."""
-        monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
-        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(tmp_path / "absent.toml"))
-        r = doctor.config_visibility(make_config(config_path=None))
-        assert r is not None
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {"ISTOTA_SANDBOXED": "1"},
+            # The defect this predicate exists for: a `sandbox_enabled`
+            # deployment with the proxy off — warned about since ISSUE-393, and
+            # shipped — puts a task in a namespace with no marker, and keying
+            # on the marker would FAIL it with a remedy it cannot follow.
+            {"ISTOTA_TASK_ID": "41"},
+        ],
+        ids=["sandbox-marker", "task-id-without-the-sandbox-marker"],
+    )
+    def test_inside_a_task_it_skips_and_exits_zero(self, make_config, tmp_path, monkeypatch, env):
+        """Reporting the boundary working as a fault is the ISSUE-381 shape, and
+        a non-zero code every time a task runs doctor is noise."""
+        r = self._gate(make_config, monkeypatch, {**env, "ISTOTA_CONFIG_PATH": str(tmp_path / "absent.toml")})
         assert r.status == SKIP
+        assert exit_code([r]) == 0
 
-    def test_a_task_without_the_sandbox_marker_still_skips(
-        self, make_config, tmp_path, monkeypatch
+    @pytest.mark.parametrize("marker", ["ISTOTA_SANDBOXED", "ISTOTA_TASK_ID"])
+    def test_the_task_detail_says_the_checks_would_be_about_defaults(
+        self, make_config, monkeypatch, marker
     ):
-        """The defect this predicate exists for. `task_env` sets
-        `ISTOTA_SANDBOXED` only under `skill_proxy_enabled and
-        effective_sandboxing`, while `executor` exports `ISTOTA_CONFIG_PATH` on
-        `config_path is not None` alone. So a `sandbox_enabled` deployment with
-        the proxy off — warned about since ISSUE-393, and shipped — puts a task
-        in a namespace with no marker and an unreachable config directory, and
-        keying on the marker would FAIL it with a remedy it cannot follow."""
-        monkeypatch.delenv("ISTOTA_SANDBOXED", raising=False)
-        monkeypatch.setenv("ISTOTA_TASK_ID", "41")
-        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(tmp_path / "absent.toml"))
-        r = doctor.config_visibility(make_config(config_path=None))
-        assert r.status == SKIP
+        """A SKIP's remedy is not rendered by `render_text`, so the one line an
+        operator or a model sees has to carry the whole point."""
+        r = self._gate(make_config, monkeypatch, {marker: "7"})
+        assert "default" in r.detail.lower()
+        assert exit_code([r]) == 0
 
     def test_a_cron_command_job_is_not_a_task_arm(
         self, make_config, tmp_path, monkeypatch
     ):
-        """`PRECOMMIT_SCANS_REQUIRED` is the third marker in
-        `_non_daemon_env_markers` and is deliberately not in this predicate: a
+        """`PRECOMMIT_SCANS_REQUIRED` is deliberately not in this predicate: a
         cron `command` job runs unsandboxed as the daemon user with the config
-        directory in front of it, so "run it on the host as the daemon user" is
-        telling it to do what it is already doing."""
-        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID"):
-            monkeypatch.delenv(name, raising=False)
-        monkeypatch.setenv("PRECOMMIT_SCANS_REQUIRED", "1")
-        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(tmp_path / "absent.toml"))
-        r = doctor.config_visibility(make_config(config_path=None))
+        directory in front of it."""
+        r = self._gate(make_config, monkeypatch, {
+            "PRECOMMIT_SCANS_REQUIRED": "1", "ISTOTA_CONFIG_PATH": str(tmp_path / "absent.toml"),
+        })
         assert r.status == FAIL
-
-    def test_the_task_detail_says_the_checks_would_be_about_defaults(
-        self, make_config, tmp_path, monkeypatch
-    ):
-        """A SKIP's remedy is not rendered by `render_text`, so the one line an
-        operator or a model actually sees has to carry the whole point."""
-        monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
-        monkeypatch.delenv("ISTOTA_CONFIG_PATH", raising=False)
-        r = doctor.config_visibility(make_config(config_path=None))
-        assert "default" in r.detail.lower()
 
     def test_an_exported_path_that_does_not_resolve_fails_outside_a_task(
         self, make_config, tmp_path, monkeypatch
     ):
-        """The daemon named the file and the subprocess could not read it.
-        A broken install, wrong permissions, or a stale exported value."""
-        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID"):
-            monkeypatch.delenv(name, raising=False)
-        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(tmp_path / "absent.toml"))
-        r = doctor.config_visibility(make_config(config_path=None))
+        """The daemon named the file and the subprocess could not read it: a
+        broken install, wrong permissions, or a stale exported value."""
+        r = self._gate(make_config, monkeypatch, {"ISTOTA_CONFIG_PATH": str(tmp_path / "absent.toml")})
         assert r.status == FAIL
         assert "ISTOTA_CONFIG_PATH" in r.detail
         assert str(tmp_path / "absent.toml") in r.detail
         assert r.remedy
 
-    def test_the_two_arms_are_reported_differently(
-        self, make_config, tmp_path, monkeypatch
-    ):
-        """The negative control for the whole change: without it both runs
-        report a clean bill of health about defaults."""
-        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(tmp_path / "absent.toml"))
-        monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
-        inside = doctor.config_visibility(make_config(config_path=None))
-        monkeypatch.delenv("ISTOTA_SANDBOXED")
-        monkeypatch.delenv("ISTOTA_TASK_ID", raising=False)
-        outside = doctor.config_visibility(make_config(config_path=None))
-        assert (inside.status, outside.status) == (SKIP, FAIL)
-
     def test_an_explicit_c_that_does_not_resolve_fails_and_names_itself(
         self, make_config, tmp_path, monkeypatch
     ):
-        """`-c` is consulted instead of the environment, so the finding has to
-        name the argument rather than a variable the operator never set."""
-        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID", "ISTOTA_CONFIG_PATH"):
-            monkeypatch.delenv(name, raising=False)
+        """`-c` is consulted instead of the environment, so the finding names
+        the argument rather than a variable the operator never set."""
         asked = tmp_path / "typo.toml"
-        r = doctor.config_visibility(make_config(config_path=None), requested=asked)
+        r = self._gate(make_config, monkeypatch, {}, requested=asked)
         assert r.status == FAIL
         assert str(asked) in r.detail
         assert "-c" in r.detail
@@ -8211,12 +6104,8 @@ class TestConfigVisibility:
         self, make_config, monkeypatch
     ):
         """The arm is chosen from `source`, never from the rendered `named`: a
-        whitespace path collapses to empty, and reading that as "nothing was
-        named" gives the wrong cause and the wrong remedy."""
-        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID"):
-            monkeypatch.delenv(name, raising=False)
-        monkeypatch.setenv("ISTOTA_CONFIG_PATH", "   ")
-        r = doctor.config_visibility(make_config(config_path=None))
+        whitespace path collapses to empty and would give the wrong cause."""
+        r = self._gate(make_config, monkeypatch, {"ISTOTA_CONFIG_PATH": "   "})
         assert r.status == FAIL
         assert "ISTOTA_CONFIG_PATH" in r.detail
         assert "standard locations" not in r.detail
@@ -8224,54 +6113,35 @@ class TestConfigVisibility:
     def test_nothing_named_and_nothing_found_still_fails(
         self, make_config, monkeypatch
     ):
-        """A fresh checkout, or a run from the wrong directory. Nobody pointed
-        at anything, so the reason and the remedy differ — but the exit code
-        has to stay 1, because that invocation used to run 31 checks against
-        defaults and exit 1 on the several that fail. `verdict` draws the same
-        line for an empty list: a run that checked nothing must not read as a
-        run that passed everything."""
-        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID", "ISTOTA_CONFIG_PATH"):
-            monkeypatch.delenv(name, raising=False)
-        r = doctor.config_visibility(make_config(config_path=None))
+        """That invocation used to run 31 checks against defaults and exit 1 on
+        several; a run that checked nothing must not read as one that passed
+        everything, the line `verdict` draws for an empty list."""
+        r = self._gate(make_config, monkeypatch, {})
         assert r.status == FAIL
         assert exit_code([r]) == 1
         assert r.remedy
 
-    def test_only_the_task_arm_exits_zero(self, make_config, monkeypatch):
-        """A non-zero code every time a task runs doctor is noise about a
-        boundary behaving correctly."""
-        monkeypatch.setenv("ISTOTA_TASK_ID", "7")
-        monkeypatch.delenv("ISTOTA_CONFIG_PATH", raising=False)
-        assert exit_code([doctor.config_visibility(make_config(config_path=None))]) == 0
-
-    def test_image_scope_is_exempt(self, make_config, monkeypatch):
-        """`IMAGE` is defined as what a bare `docker run` with no volumes can
-        answer, which is exactly a host with no config on any search path.
-        Swallowing that scope would make a loaded config a precondition for the
-        one scope declared not to need one."""
-        monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
-        monkeypatch.setenv("ISTOTA_CONFIG_PATH", "/nonexistent/config.toml")
-        assert doctor.config_visibility(make_config(config_path=None), scope=IMAGE) is None
-
-    def test_deployment_scope_is_not_exempt(self, make_config, monkeypatch):
-        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID"):
-            monkeypatch.delenv(name, raising=False)
-        monkeypatch.setenv("ISTOTA_CONFIG_PATH", "/nonexistent/config.toml")
-        r = doctor.config_visibility(make_config(config_path=None), scope=DEPLOYMENT)
-        assert r is not None and r.status == FAIL
+    @pytest.mark.parametrize("scope,exempt", [(IMAGE, True), (DEPLOYMENT, False)])
+    def test_only_image_scope_is_exempt(self, make_config, monkeypatch, scope, exempt):
+        """`IMAGE` is what a bare `docker run` with no volumes can answer, which
+        is exactly a host with no config on any search path."""
+        env = {"ISTOTA_CONFIG_PATH": "/nonexistent/config.toml"}
+        if exempt:
+            env["ISTOTA_SANDBOXED"] = "1"
+        r = self._gate(make_config, monkeypatch, env, scope=scope)
+        if exempt:
+            assert r is None
+        else:
+            assert r is not None and r.status == FAIL
 
     def test_the_named_path_cannot_forge_a_line_of_output(
         self, make_config, monkeypatch
     ):
-        """The value is quoted straight into a `detail` that lands on a terminal
-        line, and both sources are writable by anyone who can set an environment
-        on the machine."""
-        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID"):
-            monkeypatch.delenv(name, raising=False)
-        monkeypatch.setenv(
-            "ISTOTA_CONFIG_PATH", "/a.toml\n  OK   security.sandbox_effective  fine"
-        )
-        r = doctor.config_visibility(make_config(config_path=None))
+        """The value lands on a terminal line, and both sources are writable by
+        anyone who can set an environment on the machine."""
+        r = self._gate(make_config, monkeypatch, {
+            "ISTOTA_CONFIG_PATH": "/a.toml\n  OK   security.sandbox_effective  fine",
+        })
         assert r.status == FAIL
         assert "\n" not in r.detail
         assert len(r.detail.splitlines()) == 1
@@ -8279,28 +6149,25 @@ class TestConfigVisibility:
     def test_a_very_long_named_path_is_capped_and_says_so(
         self, make_config, monkeypatch
     ):
-        """An operator told that a path did not resolve must not be shown a
-        different path from the one that was tried."""
-        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID"):
-            monkeypatch.delenv(name, raising=False)
-        monkeypatch.setenv("ISTOTA_CONFIG_PATH", "/" + "x" * 5000 + ".toml")
-        r = doctor.config_visibility(make_config(config_path=None))
+        """An operator told a path did not resolve must not be shown a different
+        path from the one that was tried."""
+        r = self._gate(make_config, monkeypatch, {"ISTOTA_CONFIG_PATH": "/" + "x" * 5000 + ".toml"})
         assert len(r.detail) < 500
         assert "…" in r.detail
 
     def test_the_gate_is_deliberately_outside_the_registry(self):
         """It answers whether the run is about this host at all, so it has no
-        `only=` prefix to be selected by and nothing to filter. Stated as an
-        assertion rather than left as an absence, because the registry
-        invariants above would otherwise silently not cover it."""
+        `only=` prefix to be selected by; stated so the registry invariants'
+        silence about it is not mistaken for coverage."""
         assert doctor.CONFIG_GATE not in {name for name, _ in CHECKS}
         assert doctor.CONFIG_GATE not in doctor.CHECK_SCOPES
 
     def test_every_arm_satisfies_the_registry_invariants(
         self, make_config, monkeypatch
     ):
-        """It renders through the same two renderers and is read by the same
-        consumers, so `scope` is set explicitly rather than left to a default."""
+        """It renders through the same renderers and is read by the same
+        consumers, so `scope` is set explicitly. Also the negative control: the
+        task arm and the daemon arm must be reported differently."""
         arms = (
             {"ISTOTA_TASK_ID": "1", "ISTOTA_CONFIG_PATH": "/nonexistent/c.toml"},
             {"ISTOTA_CONFIG_PATH": "/nonexistent/c.toml"},
@@ -8309,11 +6176,7 @@ class TestConfigVisibility:
         seen = []
         for env in arms:
             with pytest.MonkeyPatch.context() as mp:
-                for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID", "ISTOTA_CONFIG_PATH"):
-                    mp.delenv(name, raising=False)
-                for name, value in env.items():
-                    mp.setenv(name, value)
-                r = doctor.config_visibility(make_config(config_path=None))
+                r = self._gate(make_config, mp, env)
             seen.append(r.status)
             assert r.detail.strip()
             assert r.status in (OK, WARN, FAIL, SKIP)

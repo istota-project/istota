@@ -1,9 +1,11 @@
 """Tests for !command dispatch system."""
 
 import json
+import re
 import sqlite3
 import threading
-from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -11,17 +13,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from istota import db
 from istota import subscription_usage as _subscription_usage
 from istota.commands import (
+    COMMANDS, _COMMAND_ALIASES, _MAX_TASK_ID_DIGITS,
     CommandContext, CommandResult,
-    _build_export_metadata, _format_history_markdown,
+    _build_export_metadata, _cancel_one, _format_history_markdown,
     _format_history_text, _parse_export_metadata, _parse_search_args,
-    cmd_check, cmd_cron, cmd_export, cmd_help, cmd_memory, cmd_more, cmd_search,
-    cmd_skills, cmd_status, cmd_stop,
-    dispatch, parse_command,
+    _search_memory, _search_talk_api,
+    brain_for_room, cmd_brain, cmd_check, cmd_cron, cmd_export, cmd_help,
+    cmd_memory, cmd_models, cmd_more, cmd_room, cmd_search, cmd_skills,
+    cmd_status, cmd_stop, cmd_trust, cmd_untrust, cmd_usage,
+    dispatch, is_model_prefix, parse_command, parse_task_id,
     model_prefix_usage, parse_model_prefix, resolve_model_prefix,
+    resolve_room_name,
 )
 from istota.brain import BrainConfig, make_brain, set_alias_overrides
 from istota.brain.claude_code import DEFAULT_ALIASES, HAIKU, OPUS, SONNET
 from istota.config import Config, NextcloudConfig, SchedulerConfig, TalkConfig, UserConfig
+from istota.memory.knowledge_graph import add_fact, ensure_table
 
 # The root conftest neutralizes `subscription_usage.get_snapshot` for the whole
 # suite, so a doctor sweep on a laptop cannot read the real keychain or reach the
@@ -87,6 +94,34 @@ def _ctx(config, conn, user_id="alice", conversation_token="room1", args="",
     )
 
 
+def _task(conn, prompt="Do something long", *, user_id="alice",
+          source_type="talk", token="room1", status="running", **kwargs):
+    """Create a task and move it to `status` (None leaves it pending)."""
+    task_id = db.create_task(
+        conn, prompt=prompt, user_id=user_id, source_type=source_type,
+        conversation_token=token, **kwargs,
+    )
+    if status:
+        db.update_task_status(conn, task_id, status)
+    return task_id
+
+
+def _background(conn, prompt="Compile a daily film-business digest", **kwargs):
+    """A running background task, which sits in no room."""
+    return _task(
+        conn, prompt, source_type="scheduled", token=None, queue="background",
+        **kwargs,
+    )
+
+
+def _set_created_at(conn, stamps):
+    for task_id, created_at in stamps.items():
+        conn.execute(
+            "UPDATE tasks SET created_at = ? WHERE id = ?", (created_at, task_id)
+        )
+    conn.commit()
+
+
 class _RecordingConn:
     """A real connection that writes `"commit"` into a shared list when it is
     committed, so a handler's ordering can be asserted rather than only the
@@ -110,34 +145,20 @@ class _RecordingConn:
 
 
 class TestParseCommand:
-    def test_basic_command(self):
-        assert parse_command("!stop") == ("stop", "")
-
-    def test_command_with_args(self):
-        assert parse_command("!status foo bar") == ("status", "foo bar")
-
-    def test_case_insensitive(self):
-        assert parse_command("!HELP") == ("help", "")
-        assert parse_command("!Stop") == ("stop", "")
-
-    def test_not_a_command(self):
-        assert parse_command("hello world") is None
-
-    def test_empty_string(self):
-        assert parse_command("") is None
-
-    def test_just_exclamation(self):
-        assert parse_command("!") is None
-
-    def test_exclamation_space(self):
-        assert parse_command("! space") is None
-
-    def test_leading_whitespace(self):
-        assert parse_command("  !help") == ("help", "")
-
-    def test_multiline_args(self):
-        result = parse_command("!cmd line1\nline2")
-        assert result == ("cmd", "line1\nline2")
+    @pytest.mark.parametrize("text,expected", [
+        ("!stop", ("stop", "")),
+        ("!status foo bar", ("status", "foo bar")),
+        ("!HELP", ("help", "")),
+        ("!Stop", ("stop", "")),
+        ("hello world", None),
+        ("", None),
+        ("!", None),
+        ("! space", None),
+        ("  !help", ("help", "")),
+        ("!cmd line1\nline2", ("cmd", "line1\nline2")),
+    ])
+    def test_parse_command(self, text, expected):
+        assert parse_command(text) == expected
 
 
 # =============================================================================
@@ -146,120 +167,60 @@ class TestParseCommand:
 
 
 class TestParseModelPrefix:
-    def test_not_a_model_prefix_returns_none(self, brain):
-        assert parse_model_prefix("hello world", brain) is None
-        assert parse_model_prefix("!stop", brain) is None
-        assert parse_model_prefix("", brain) is None
+    # !modelfoo / !models must not be parsed as a model prefix.
+    @pytest.mark.parametrize(
+        "text", ["hello world", "!stop", "", "!modelfoo bar", "!models"],
+    )
+    def test_not_a_model_prefix_returns_none(self, brain, text):
+        assert parse_model_prefix(text, brain) is None
 
-    def test_word_boundary_does_not_match_modelfoo(self, brain):
-        # !modelfoo / !models should NOT be parsed as a model prefix
-        assert parse_model_prefix("!modelfoo bar", brain) is None
-        assert parse_model_prefix("!models", brain) is None
-
-    def test_known_alias_opus(self, brain):
-        result = parse_model_prefix("!model opus draft a spec for X", brain)
-        assert result is not None
-        assert result.unknown_alias is None
-        assert result.model == OPUS
-        assert result.effort is None
-        assert result.remainder == "draft a spec for X"
-
-    def test_effort_modifier_high(self, brain):
-        result = parse_model_prefix("!model opus:high tackle this", brain)
-        assert result is not None
-        assert result.unknown_alias is None
-        assert result.model == OPUS
-        assert result.effort == "high"
-        assert result.remainder == "tackle this"
-
-    def test_known_alias_haiku(self, brain):
-        result = parse_model_prefix("!model haiku one-liner", brain)
-        assert result is not None
-        assert result.model == HAIKU
-        assert result.effort is None
-        assert result.remainder == "one-liner"
-
-    def test_effort_modifier_xhigh(self, brain):
-        result = parse_model_prefix("!model opus:xhigh think hard", brain)
-        assert result is not None
-        assert result.unknown_alias is None
-        assert result.model == OPUS
-        assert result.effort == "xhigh"
-        assert result.remainder == "think hard"
-
-    def test_effort_modifier_max(self, brain):
-        result = parse_model_prefix("!model opus:max go deepest", brain)
-        assert result is not None
-        assert result.model == OPUS
-        assert result.effort == "max"
-
-    def test_effort_modifier_on_tier(self, brain):
-        result = parse_model_prefix("!model smart:low quick", brain)
-        assert result is not None
-        assert result.model == OPUS
-        assert result.effort == "low"
-        assert result.remainder == "quick"
-
-    def test_removed_dash_effort_form_is_unknown(self, brain):
+    @pytest.mark.parametrize("text,unknown,model,effort,remainder", [
+        ("!model opus draft a spec for X", None, OPUS, None, "draft a spec for X"),
+        ("!model opus:high tackle this", None, OPUS, "high", "tackle this"),
+        ("!model haiku one-liner", None, HAIKU, None, "one-liner"),
+        ("!model opus:xhigh think hard", None, OPUS, "xhigh", "think hard"),
+        ("!model opus:max go deepest", None, OPUS, "max", "go deepest"),
+        ("!model smart:low quick", None, OPUS, "low", "quick"),
         # HARD CUT: the old ``opus-high`` spelling no longer resolves.
-        result = parse_model_prefix("!model opus-high tackle this", brain)
-        assert result is not None
-        assert result.unknown_alias == "opus-high"
-        assert result.model is None
-
-    def test_unknown_effort_suffix_is_unknown(self, brain):
-        result = parse_model_prefix("!model opus:turbo do it", brain)
-        assert result is not None
-        assert result.unknown_alias == "opus:turbo"
-        assert result.model is None
-
-    def test_default_alias_clears_overrides(self, brain):
-        result = parse_model_prefix("!model default just do it", brain)
-        assert result is not None
-        assert result.unknown_alias is None
-        assert result.model is None
-        assert result.effort is None
-        assert result.remainder == "just do it"
-
-    def test_unknown_alias_flagged(self, brain):
-        result = parse_model_prefix("!model gpt-4 do a thing", brain)
-        assert result is not None
-        assert result.unknown_alias == "gpt-4"
-        assert result.model is None
-        assert result.effort is None
+        ("!model opus-high tackle this", "opus-high", None, None, "tackle this"),
+        ("!model opus:turbo do it", "opus:turbo", None, None, "do it"),
+        ("!model default just do it", None, None, None, "just do it"),
         # remainder still captured so the caller can decide what to do
-        assert result.remainder == "do a thing"
-
-    def test_no_alias_flagged_as_unknown(self, brain):
-        result = parse_model_prefix("!model", brain)
+        ("!model gpt-4 do a thing", "gpt-4", None, None, "do a thing"),
+        ("!model", "", None, None, ""),
+        ("!model opus", None, OPUS, None, ""),
+        ("!MODEL OPUS draft something", None, OPUS, None, "draft something"),
+        ("  !model sonnet hi", None, SONNET, None, "hi"),
+        ("!model opus line1\nline2\nline3", None, OPUS, None, "line1\nline2\nline3"),
+        # The retired ``opus-47-high`` need is met by canonical id + modifier.
+        ("!model claude-opus-4-7:high run a job", None, "claude-opus-4-7", "high",
+         "run a job"),
+    ], ids=[
+        "opus", "effort-high", "haiku", "effort-xhigh", "effort-max",
+        "effort-on-tier", "removed-dash-effort", "unknown-effort", "default",
+        "unknown-alias", "no-alias", "alias-only", "case-insensitive",
+        "leading-whitespace", "multiline", "canonical-id-plus-effort",
+    ])
+    def test_parse(self, brain, text, unknown, model, effort, remainder):
+        result = parse_model_prefix(text, brain)
         assert result is not None
-        assert result.unknown_alias == ""
-        assert result.remainder == ""
+        assert result.unknown_alias == unknown
+        assert result.model == model
+        assert result.effort == effort
+        assert result.remainder == remainder
 
-    def test_alias_only_no_remainder(self, brain):
-        result = parse_model_prefix("!model opus", brain)
+    @pytest.mark.parametrize("text,prefix,remainder", [
+        ("!model smart think hard", "claude-opus-", "think hard"),
+        ("!model fast quick answer", "claude-haiku-", "quick answer"),
+        ("!model general write a draft", "claude-sonnet-", "write a draft"),
+    ])
+    def test_role_alias_resolves_with_no_effort(self, brain, text, prefix, remainder):
+        result = parse_model_prefix(text, brain)
         assert result is not None
         assert result.unknown_alias is None
-        assert result.model == OPUS
-        assert result.remainder == ""
-
-    def test_case_insensitive_keyword_and_alias(self, brain):
-        result = parse_model_prefix("!MODEL OPUS draft something", brain)
-        assert result is not None
-        assert result.unknown_alias is None
-        assert result.model == OPUS
-        assert result.remainder == "draft something"
-
-    def test_leading_whitespace_tolerated(self, brain):
-        result = parse_model_prefix("  !model sonnet hi", brain)
-        assert result is not None
-        assert result.model == SONNET
-        assert result.remainder == "hi"
-
-    def test_multiline_remainder(self, brain):
-        result = parse_model_prefix("!model opus line1\nline2\nline3", brain)
-        assert result is not None
-        assert result.remainder == "line1\nline2\nline3"
+        assert result.model is not None and result.model.startswith(prefix)
+        assert result.effort is None
+        assert result.remainder == remainder
 
     def test_aliases_are_pinned_to_specific_model_ids(self):
         # Guard against accidental alias-table changes that drop pinning.
@@ -278,34 +239,6 @@ class TestParseModelPrefix:
         # Effort is the orthogonal :effort modifier — no shipped alias bakes it.
         for alias, (_model, effort) in DEFAULT_ALIASES.items():
             assert effort is None, f"alias {alias} should not bake an effort"
-
-    def test_role_alias_resolves_with_no_effort(self, brain):
-        result = parse_model_prefix("!model smart think hard", brain)
-        assert result is not None
-        assert result.unknown_alias is None
-        # default mapping: smart → OPUS, no effort
-        assert result.model is not None and result.model.startswith("claude-opus-")
-        assert result.effort is None
-        assert result.remainder == "think hard"
-
-    def test_fast_role_alias_resolves(self, brain):
-        result = parse_model_prefix("!model fast quick answer", brain)
-        assert result is not None
-        assert result.model is not None and result.model.startswith("claude-haiku-")
-        assert result.effort is None
-
-    def test_general_role_alias_resolves(self, brain):
-        result = parse_model_prefix("!model general write a draft", brain)
-        assert result is not None
-        assert result.model is not None and result.model.startswith("claude-sonnet-")
-        assert result.effort is None
-
-    def test_prior_opus_via_canonical_id_plus_effort(self, brain):
-        # The retired ``opus-47-high`` need is met by canonical id + modifier.
-        result = parse_model_prefix("!model claude-opus-4-7:high run a job", brain)
-        assert result is not None
-        assert result.model == "claude-opus-4-7"
-        assert result.effort == "high"
 
     def test_usage_string_lists_all_aliases(self, brain):
         usage = model_prefix_usage(brain)
@@ -390,58 +323,42 @@ class _FakeRegistry:
         return self._t
 
 
+async def _dispatch(config, text, transport=None, **kwargs):
+    with db.get_db(config.db_path) as conn:
+        return await dispatch(
+            config, "alice", "room1", text,
+            conn=conn, registry=_FakeRegistry(transport), **kwargs,
+        )
+
+
 class TestDispatch:
-    @pytest.mark.asyncio
     async def test_non_command_returns_not_handled(self, make_config):
-        config = make_config()
         transport = _FakePushTransport()
-        with db.get_db(config.db_path) as conn:
-            result = await dispatch(
-                config, "alice", "room1", "hello world",
-                conn=conn, registry=_FakeRegistry(transport),
-            )
+        result = await _dispatch(make_config(), "hello world", transport)
         assert isinstance(result, CommandResult)
         assert result.handled is False
         assert transport.delivered == []
 
-    @pytest.mark.asyncio
     async def test_known_command_delivered_on_push_surface(self, make_config):
-        config = make_config()
         transport = _FakePushTransport()
-        with db.get_db(config.db_path) as conn:
-            result = await dispatch(
-                config, "alice", "room1", "!help",
-                conn=conn, registry=_FakeRegistry(transport),
-            )
+        result = await _dispatch(make_config(), "!help", transport)
         assert result.handled is True
         assert result.delivered is True
         assert len(transport.delivered) == 1
         assert "!help" in transport.delivered[0][1]
 
-    @pytest.mark.asyncio
     async def test_unknown_command_posts_error(self, make_config):
-        config = make_config()
         transport = _FakePushTransport()
-        with db.get_db(config.db_path) as conn:
-            result = await dispatch(
-                config, "alice", "room1", "!nonexistent",
-                conn=conn, registry=_FakeRegistry(transport),
-            )
+        result = await _dispatch(make_config(), "!nonexistent", transport)
         assert result.handled is True
         msg = transport.delivered[0][1]
         assert "Unknown command" in msg
         assert "!nonexistent" in msg
         assert "!help" in msg
 
-    @pytest.mark.asyncio
     async def test_stream_surface_returns_text_undelivered(self, make_config):
         """On a stream surface (no push transport) the result comes back inline."""
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            result = await dispatch(
-                config, "alice", "room1", "!help",
-                surface="web", conn=conn, registry=_FakeRegistry(None),
-            )
+        result = await _dispatch(make_config(), "!help", None, surface="web")
         assert result.handled is True
         assert result.delivered is False
         assert "!help" in (result.text or "")
@@ -453,28 +370,17 @@ class TestDispatch:
 
 
 class TestCmdHelp:
-    @pytest.mark.asyncio
     async def test_lists_all_commands(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_help(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_help(_ctx(config, conn))
 
-        assert "!help" in result
-        assert "!stop" in result
-        assert "!status" in result
-        assert "!memory" in result
-
-    @pytest.mark.asyncio
-    async def test_help_mentions_model_prefix(self, make_config):
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_help(_ctx(config, conn, "alice", "room1", ""))
-
-        assert "!model" in result
-        # at least one alias surfaces so users can discover them from !help
-        assert "opus" in result
+        # "opus": at least one alias surfaces so users can discover them from !help
+        for needle in (
+            "!help", "!stop", "!status", "!memory", "!model", "opus",
+            "!check", "!export", "!search",
+        ):
+            assert needle in result, needle
 
 
 # =============================================================================
@@ -512,17 +418,11 @@ class TestParseTaskId:
         ],
     )
     def test_it_accepts_only_a_bounded_ascii_decimal(self, text, expected):
-        from istota.commands import parse_task_id
-
         assert parse_task_id(text) == expected
 
     def test_the_bound_sits_inside_what_sqlite_can_store(self):
         """The guard has to refuse before `int()` reaches the driver, so the
         accepted maximum must itself be storable."""
-        import sqlite3
-
-        from istota.commands import _MAX_TASK_ID_DIGITS, parse_task_id
-
         biggest = parse_task_id("9" * _MAX_TASK_ID_DIGITS)
         assert biggest is not None
         conn = sqlite3.connect(":memory:")
@@ -536,52 +436,39 @@ class TestParseTaskId:
 # =============================================================================
 
 
+def _cancelled(config, task_id):
+    with db.get_db(config.db_path) as conn:
+        return db.is_task_cancelled(conn, task_id)
+
+
+def _status(config, task_id):
+    with db.get_db(config.db_path) as conn:
+        return db.get_task(conn, task_id).status
+
+
 class TestCmdStop:
-    @pytest.mark.asyncio
     async def test_no_active_task(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_stop(_ctx(config, conn))
         assert "No active task" in result
 
-    @pytest.mark.asyncio
     async def test_cancels_running_task(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn,
-                prompt="Do something long",
-                user_id="alice",
-                source_type="talk",
-                conversation_token="room1",
-            )
-            db.update_task_status(conn, task_id, "running")
-
-            AsyncMock()
-            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
+            task_id = _task(conn)
+            result = await cmd_stop(_ctx(config, conn))
 
         assert f"#{task_id}" in result
         assert "Cancelling" in result
+        assert _cancelled(config, task_id) is True
 
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, task_id) is True
-
-    @pytest.mark.asyncio
     async def test_cancels_pending_confirmation(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn,
-                prompt="Do risky thing",
-                user_id="alice",
-                source_type="talk",
-                conversation_token="room1",
-            )
+            task_id = _task(conn, "Do risky thing", status=None)
             db.set_task_confirmation(conn, task_id, "Are you sure?")
-
-            AsyncMock()
-            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_stop(_ctx(config, conn))
 
         assert f"#{task_id}" in result
 
@@ -591,35 +478,21 @@ class TestCmdStop:
         # until `expire_stale_confirmations` reaped it two hours later, inbox row
         # still open. The web cancel button already declined through the shared
         # verb; this path now does too.
-        with db.get_db(config.db_path) as conn:
-            assert db.get_task(conn, task_id).status == "cancelled"
+        assert _status(config, task_id) == "cancelled"
 
-    @pytest.mark.asyncio
     async def test_only_cancels_own_tasks(self, make_config):
         config = make_config()
         config.users["bob"] = UserConfig()
 
         with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn,
-                prompt="Bob's task",
-                user_id="bob",
-                source_type="talk",
-                conversation_token="room1",
-            )
-            db.update_task_status(conn, task_id, "running")
-
-            AsyncMock()
-            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
+            task_id = _task(conn, "Bob's task", user_id="bob")
+            result = await cmd_stop(_ctx(config, conn))
 
         assert "No active task" in result
-
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, task_id) is False
+        assert _cancelled(config, task_id) is False
 
     # -- room scoping (ISSUE-487) -------------------------------------------
 
-    @pytest.mark.asyncio
     async def test_bare_stop_ignores_a_newer_task_in_another_room(self, make_config):
         """The reported incident, reproduced.
 
@@ -631,37 +504,18 @@ class TestCmdStop:
         """
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            watched = db.create_task(
-                conn, prompt="The task being watched", user_id="alice",
-                source_type="web", conversation_token="room1",
-            )
-            background = db.create_task(
-                conn, prompt="Compile a daily film-business digest",
-                user_id="alice", source_type="scheduled",
-                conversation_token=None, queue="background",
-            )
-            db.update_task_status(conn, watched, "running")
-            db.update_task_status(conn, background, "running")
-            conn.execute(
-                "UPDATE tasks SET created_at = ? WHERE id = ?",
-                ("2026-09-11T00:45:04", watched),
-            )
-            conn.execute(
-                "UPDATE tasks SET created_at = ? WHERE id = ?",
-                ("2026-09-11T00:45:09", background),
-            )
-            conn.commit()
-
-            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
+            watched = _task(conn, "The task being watched", source_type="web")
+            background = _background(conn)
+            _set_created_at(conn, {
+                watched: "2026-09-11T00:45:04", background: "2026-09-11T00:45:09",
+            })
+            result = await cmd_stop(_ctx(config, conn))
 
         assert f"#{watched}" in result
         assert f"#{background}" not in result
+        assert _cancelled(config, watched) is True
+        assert _cancelled(config, background) is False
 
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, watched) is True
-            assert db.is_task_cancelled(conn, background) is False
-
-    @pytest.mark.asyncio
     async def test_bare_stop_resolves_a_surface_ref_to_the_canonical_room(
         self, make_config
     ):
@@ -673,78 +527,48 @@ class TestCmdStop:
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "web-canonical", "alice", origin="web")
             db.add_room_binding(conn, "web-canonical", "talk", "talkref9")
-            task_id = db.create_task(
-                conn, prompt="Running in the promoted room", user_id="alice",
-                source_type="talk", conversation_token="web-canonical",
-            )
+            task_id = _task(conn, "Running in the promoted room", token="web-canonical")
             # A newer task the user owns elsewhere, so resolving the ref is what
             # decides the answer rather than there being only one candidate.
-            elsewhere = db.create_task(
-                conn, prompt="Compile a daily film-business digest",
-                user_id="alice", source_type="scheduled",
-                conversation_token=None, queue="background",
-            )
-            db.update_task_status(conn, task_id, "running")
-            db.update_task_status(conn, elsewhere, "running")
-            conn.execute(
-                "UPDATE tasks SET created_at = ? WHERE id = ?",
-                ("2026-09-11T00:45:04", task_id),
-            )
-            conn.execute(
-                "UPDATE tasks SET created_at = ? WHERE id = ?",
-                ("2026-09-11T00:45:09", elsewhere),
-            )
-            conn.commit()
-
+            elsewhere = _background(conn)
+            _set_created_at(conn, {
+                task_id: "2026-09-11T00:45:04", elsewhere: "2026-09-11T00:45:09",
+            })
             result = await cmd_stop(
                 _ctx(config, conn, "alice", "talkref9", "", surface="talk")
             )
 
         assert f"#{task_id}" in result
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, task_id) is True
-            assert db.is_task_cancelled(conn, elsewhere) is False
+        assert _cancelled(config, task_id) is True
+        assert _cancelled(config, elsewhere) is False
 
-    @pytest.mark.asyncio
     async def test_an_idle_room_does_not_widen_to_the_whole_user(self, make_config):
         """No silent fallback. The old query's user scope *is* the bug, so
         reaching for it when the room is idle would reinstate it."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            elsewhere = db.create_task(
-                conn, prompt="Compile a daily film-business digest",
-                user_id="alice", source_type="scheduled",
-                conversation_token=None, queue="background",
-            )
-            db.update_task_status(conn, elsewhere, "running")
+            elsewhere = _background(conn)
             conn.commit()
-
-            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_stop(_ctx(config, conn))
 
         assert "No active task in this room" in result
         # The id is offered so the user can aim the next one.
         assert f"#{elsewhere}" in result
         assert "!stop" in result
+        assert _cancelled(config, elsewhere) is False
 
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, elsewhere) is False
-
-    @pytest.mark.asyncio
     async def test_the_idle_room_listing_carries_no_prompt_text(self, make_config):
         """The listing is posted into the room `!stop` was typed in, and every
         task on it is in some *other* room — on Talk, possibly in front of other
         people. So it carries ids and nothing else."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="the private prompt nobody here should read",
-                user_id="alice", source_type="scheduled",
-                conversation_token="another-room", queue="background",
+            task_id = _task(
+                conn, "the private prompt nobody here should read",
+                source_type="scheduled", token="another-room", queue="background",
             )
-            db.update_task_status(conn, task_id, "running")
             conn.commit()
-
-            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_stop(_ctx(config, conn))
 
         listing = [ln for ln in result.splitlines() if ln.startswith("- ")]
         assert len(listing) == 1
@@ -752,7 +576,6 @@ class TestCmdStop:
         assert "private prompt" not in result
         assert "[scheduled]" in listing[0]
 
-    @pytest.mark.asyncio
     async def test_a_held_email_never_has_its_withheld_body_echoed(
         self, make_config
     ):
@@ -762,22 +585,18 @@ class TestCmdStop:
         `describe`, so it names the task without quoting it."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="SECRETBODY wire the money to account 12345",
-                user_id="alice", source_type="email",
-                conversation_token="room1",
+            task_id = _task(
+                conn, "SECRETBODY wire the money to account 12345",
+                source_type="email", status=None,
             )
             db.set_task_confirmation(conn, task_id, "Process this email?")
             conn.commit()
-
-            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_stop(_ctx(config, conn))
 
         assert f"#{task_id}" in result
         assert "SECRETBODY" not in result
-        with db.get_db(config.db_path) as conn:
-            assert db.get_task(conn, task_id).status == "cancelled"
+        assert _status(config, task_id) == "cancelled"
 
-    @pytest.mark.asyncio
     async def test_a_task_that_finished_mid_command_is_not_acknowledged(
         self, make_config
     ):
@@ -786,84 +605,36 @@ class TestCmdStop:
         moved to `running` in the gap would be flipped to `cancelled` by
         `db.cancel_task` — which has no status predicate — and returned before
         the kill, leaving the worker alive with `cancel_requested` never set."""
-        from istota.commands import _cancel_one
-
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="Already finished", user_id="alice",
-                source_type="talk", conversation_token="room1",
-            )
-            db.update_task_status(conn, task_id, "completed")
+            task_id = _task(conn, "Already finished", status="completed")
             conn.commit()
-
             # Exactly what a caller holding a stale `running` read would do.
-            result = _cancel_one(_ctx(config, conn, "alice", "room1", ""), task_id)
+            result = _cancel_one(_ctx(config, conn), task_id)
 
         assert "no longer active" in result
-        with db.get_db(config.db_path) as conn:
-            assert db.get_task(conn, task_id).status == "completed"
-            assert db.is_task_cancelled(conn, task_id) is False
+        assert _status(config, task_id) == "completed"
+        assert _cancelled(config, task_id) is False
 
     # -- targeted stop (ISSUE-487) ------------------------------------------
 
-    @pytest.mark.asyncio
-    async def test_a_task_id_targets_that_task(self, make_config):
+    @pytest.mark.parametrize("prefix", ["", "#"], ids=["bare-id", "hash-prefix"])
+    async def test_a_task_id_targets_that_task(self, make_config, prefix):
         """Deliberately *not* room-scoped: killing a runaway background job is
-        the case an explicit id exists for."""
+        the case an explicit id exists for. The target is the *older* task and
+        sits in no room, so neither the room scope nor the `created_at`
+        ordering can reach it by accident."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            background = db.create_task(
-                conn, prompt="Compile a daily film-business digest",
-                user_id="alice", source_type="scheduled",
-                conversation_token=None, queue="background",
-            )
-            in_room = db.create_task(
-                conn, prompt="The task being watched", user_id="alice",
-                source_type="web", conversation_token="room1",
-            )
-            db.update_task_status(conn, background, "running")
-            db.update_task_status(conn, in_room, "running")
+            background = _background(conn)
+            in_room = _task(conn, "The task being watched", source_type="web")
             conn.commit()
-
-            result = await cmd_stop(
-                _ctx(config, conn, "alice", "room1", str(background))
-            )
+            result = await cmd_stop(_ctx(config, conn, args=f"{prefix}{background}"))
 
         assert f"#{background}" in result
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, background) is True
-            assert db.is_task_cancelled(conn, in_room) is False
+        assert _cancelled(config, background) is True
+        assert _cancelled(config, in_room) is False
 
-    @pytest.mark.asyncio
-    async def test_a_hash_prefix_is_tolerated(self, make_config):
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            # The target is the *older* task and sits in no room, so neither the
-            # room scope nor the `created_at` ordering can reach it by accident.
-            background = db.create_task(
-                conn, prompt="Compile a daily film-business digest",
-                user_id="alice", source_type="scheduled",
-                conversation_token=None, queue="background",
-            )
-            in_room = db.create_task(
-                conn, prompt="The task being watched", user_id="alice",
-                source_type="web", conversation_token="room1",
-            )
-            db.update_task_status(conn, background, "running")
-            db.update_task_status(conn, in_room, "running")
-            conn.commit()
-
-            result = await cmd_stop(
-                _ctx(config, conn, "alice", "room1", f"#{background}")
-            )
-
-        assert f"#{background}" in result
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, background) is True
-            assert db.is_task_cancelled(conn, in_room) is False
-
-    @pytest.mark.asyncio
     async def test_a_targeted_stop_refuses_another_users_task(self, make_config):
         config = make_config()
         config.users["bob"] = UserConfig()
@@ -872,164 +643,75 @@ class TestCmdStop:
         # the check this test is about.
         config.admin_users = ["carol"]
         with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="Bob's task", user_id="bob",
-                source_type="talk", conversation_token="room2",
-            )
-            db.update_task_status(conn, task_id, "running")
+            task_id = _task(conn, "Bob's task", user_id="bob", token="room2")
             conn.commit()
-
-            result = await cmd_stop(
-                _ctx(config, conn, "alice", "room1", str(task_id))
-            )
+            result = await cmd_stop(_ctx(config, conn, args=str(task_id)))
 
         # One message for "no such task" and "not yours", so the command cannot
         # become an oracle for which ids exist — the rule `!confirm` already
         # applies to the same question.
         assert "isn't yours to stop" in result
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, task_id) is False
+        assert _cancelled(config, task_id) is False
 
-    @pytest.mark.asyncio
     async def test_an_admin_may_target_another_users_task(self, make_config):
         config = make_config()
         config.users["bob"] = UserConfig()
         config.admin_users = ["alice"]
         with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="Bob's runaway task", user_id="bob",
-                source_type="scheduled", conversation_token=None,
-                queue="background",
-            )
-            db.update_task_status(conn, task_id, "running")
+            task_id = _background(conn, "Bob's runaway task", user_id="bob")
             conn.commit()
-
-            result = await cmd_stop(
-                _ctx(config, conn, "alice", "room1", str(task_id))
-            )
+            result = await cmd_stop(_ctx(config, conn, args=str(task_id)))
 
         assert f"#{task_id}" in result
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, task_id) is True
+        assert _cancelled(config, task_id) is True
 
-    @pytest.mark.asyncio
     async def test_an_unknown_id_cancels_nothing(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            in_room = db.create_task(
-                conn, prompt="The task being watched", user_id="alice",
-                source_type="web", conversation_token="room1",
-            )
-            db.update_task_status(conn, in_room, "running")
+            in_room = _task(conn, "The task being watched", source_type="web")
             conn.commit()
-
-            result = await cmd_stop(_ctx(config, conn, "alice", "room1", "999999"))
+            result = await cmd_stop(_ctx(config, conn, args="999999"))
 
         assert "999999" in result
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, in_room) is False
+        assert _cancelled(config, in_room) is False
 
-    @pytest.mark.asyncio
     async def test_a_finished_task_is_not_restopped(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            done = db.create_task(
-                conn, prompt="Already finished", user_id="alice",
-                source_type="talk", conversation_token="room1",
-            )
-            db.update_task_status(conn, done, "completed")
+            done = _task(conn, "Already finished", status="completed")
             conn.commit()
-
-            result = await cmd_stop(_ctx(config, conn, "alice", "room1", str(done)))
+            result = await cmd_stop(_ctx(config, conn, args=str(done)))
 
         assert "completed" in result
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, done) is False
+        assert _cancelled(config, done) is False
 
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("junk", ["please", "now", "the digest", "12x"])
-    async def test_a_non_numeric_argument_cancels_nothing(self, make_config, junk):
+    @pytest.mark.parametrize(
+        "junk",
+        ["please", "now", "the digest", "12x", "²", "9" * 30, "#"],
+        ids=["please", "now", "the-digest", "12x", "superscript", "enormous",
+             "bare-hash"],
+    )
+    async def test_a_malformed_argument_cancels_nothing(self, make_config, junk):
         """`!stop please` used to cancel whatever the user-wide query found, so
-        typing a word made the outcome less predictable rather than more."""
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="Do something long", user_id="alice",
-                source_type="talk", conversation_token="room1",
-            )
-            db.update_task_status(conn, task_id, "running")
-            conn.commit()
+        typing a word made the outcome less predictable rather than more.
 
-            result = await cmd_stop(_ctx(config, conn, "alice", "room1", junk))
-
-        assert "Usage:" in result
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, task_id) is False
-
-    @pytest.mark.asyncio
-    async def test_a_superscript_digit_is_not_a_task_id(self, make_config):
-        """`isdecimal`, not `isdigit`: the latter is True for the superscript
-        two, which `int()` then refuses — turning a typo into a traceback. The
-        guard `!confirm` already carries, and which `!more` did not."""
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="Do something long", user_id="alice",
-                source_type="talk", conversation_token="room1",
-            )
-            db.update_task_status(conn, task_id, "running")
-            conn.commit()
-
-            result = await cmd_stop(_ctx(config, conn, "alice", "room1", "²"))
-
-        assert "Usage:" in result
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, task_id) is False
-
-    @pytest.mark.asyncio
-    async def test_an_enormous_id_returns_the_usage_line(self, make_config):
-        """`isdecimal` is not enough on its own: '9' * 30 is decimal and
-        converts fine in Python, then raises `OverflowError` out of sqlite3 on
-        the way into the query — which reaches the room as `Command !stop
-        failed: Python int too large to convert to SQLite INTEGER`."""
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="Do something long", user_id="alice",
-                source_type="talk", conversation_token="room1",
-            )
-            db.update_task_status(conn, task_id, "running")
-            conn.commit()
-
-            result = await cmd_stop(_ctx(config, conn, "alice", "room1", "9" * 30))
-
-        assert "Usage:" in result
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, task_id) is False
-
-    @pytest.mark.asyncio
-    async def test_a_bare_hash_is_a_malformed_id_not_an_empty_argument(
-        self, make_config
-    ):
-        """`'#'.lstrip('#')` is the empty string, so a repeated strip would read
+        `isdecimal`, not `isdigit`: the latter is True for '²', which `int()`
+        then refuses — turning a typo into a traceback. `isdecimal` is not
+        enough on its own either: '9' * 30 converts fine in Python, then raises
+        `OverflowError` out of sqlite3 on the way into the query. And
+        `'#'.lstrip('#')` is the empty string, so a repeated strip would read
         `!stop #` as a bare `!stop` and cancel the room's task — a user who
-        typed `#` was aiming at something."""
+        typed `#` was aiming at something.
+        """
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="Do something long", user_id="alice",
-                source_type="talk", conversation_token="room1",
-            )
-            db.update_task_status(conn, task_id, "running")
+            task_id = _task(conn)
             conn.commit()
-
-            result = await cmd_stop(_ctx(config, conn, "alice", "room1", "#"))
+            result = await cmd_stop(_ctx(config, conn, args=junk))
 
         assert "Usage:" in result
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, task_id) is False
+        assert _cancelled(config, task_id) is False
 
-    @pytest.mark.asyncio
     async def test_an_empty_room_token_does_not_match_tokenless_tasks(
         self, make_config
     ):
@@ -1039,21 +721,16 @@ class TestCmdStop:
         guard is local rather than spread across four transports."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="A heartbeat task", user_id="alice",
-                source_type="heartbeat", conversation_token="",
+            task_id = _task(
+                conn, "A heartbeat task", source_type="heartbeat", token="",
                 queue="background",
             )
-            db.update_task_status(conn, task_id, "running")
             conn.commit()
-
             result = await cmd_stop(_ctx(config, conn, "alice", "", ""))
 
         assert "No active task in this room" in result
-        with db.get_db(config.db_path) as conn:
-            assert db.is_task_cancelled(conn, task_id) is False
+        assert _cancelled(config, task_id) is False
 
-    @pytest.mark.asyncio
     async def test_an_admin_may_not_discard_another_users_held_task(
         self, make_config
     ):
@@ -1069,21 +746,17 @@ class TestCmdStop:
         config.users["bob"] = UserConfig()
         config.admin_users = ["alice"]
         with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="SECRETBODY from an unknown sender", user_id="bob",
-                source_type="email", conversation_token="room2",
+            task_id = _task(
+                conn, "SECRETBODY from an unknown sender", user_id="bob",
+                source_type="email", token="room2", status=None,
             )
             db.set_task_confirmation(conn, task_id, "Process this email?")
             conn.commit()
-
-            result = await cmd_stop(
-                _ctx(config, conn, "alice", "room1", str(task_id))
-            )
+            result = await cmd_stop(_ctx(config, conn, args=str(task_id)))
 
         assert "bob" in result
         assert "SECRETBODY" not in result
-        with db.get_db(config.db_path) as conn:
-            assert db.get_task(conn, task_id).status == "pending_confirmation"
+        assert _status(config, task_id) == "pending_confirmation"
 
 
 # =============================================================================
@@ -1092,82 +765,49 @@ class TestCmdStop:
 
 
 class TestCmdStatus:
-    @pytest.mark.asyncio
     async def test_no_tasks(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_status(_ctx(config, conn))
         assert "No active or pending tasks" in result
         assert "System:" in result
 
-    @pytest.mark.asyncio
     async def test_shows_user_tasks(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            db.create_task(
-                conn,
-                prompt="Task one",
-                user_id="alice",
-                source_type="talk",
-            )
-            t2 = db.create_task(
-                conn,
-                prompt="Task two",
-                user_id="alice",
-                source_type="talk",
-            )
-            db.update_task_status(conn, t2, "running")
-
-            AsyncMock()
-            result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
+            _task(conn, "Task one", token=None, status=None)
+            _task(conn, "Task two", token=None)
+            result = await cmd_status(_ctx(config, conn))
 
         assert "Your tasks (2)" in result
         assert "Task one" in result
         assert "Task two" in result
         assert "[running]" in result
 
-    @pytest.mark.asyncio
     async def test_excludes_other_users(self, make_config):
         config = make_config()
         config.users["bob"] = UserConfig()
 
         with db.get_db(config.db_path) as conn:
-            db.create_task(
-                conn,
-                prompt="Bob's task",
-                user_id="bob",
-                source_type="talk",
-            )
-
-            AsyncMock()
-            result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
+            _task(conn, "Bob's task", user_id="bob", token=None, status=None)
+            result = await cmd_status(_ctx(config, conn))
 
         assert "No active or pending tasks" in result
         # But system stats should show bob's pending task
         assert "1 queued" in result
 
-    @pytest.mark.asyncio
     async def test_system_stats(self, make_config):
         config = make_config()
         config.users["bob"] = UserConfig()
 
         with db.get_db(config.db_path) as conn:
-            t1 = db.create_task(
-                conn, prompt="Running", user_id="bob", source_type="talk"
-            )
-            db.update_task_status(conn, t1, "running")
-            db.create_task(
-                conn, prompt="Pending", user_id="alice", source_type="talk"
-            )
-
-            AsyncMock()
-            result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
+            _task(conn, "Running", user_id="bob", token=None)
+            _task(conn, "Pending", token=None, status=None)
+            result = await cmd_status(_ctx(config, conn))
 
         assert "1 running" in result
         assert "1 queued" in result
 
-    @pytest.mark.asyncio
     async def test_system_stats_hidden_for_non_admin(self, make_config):
         config = make_config()
         config.users["bob"] = UserConfig()
@@ -1175,45 +815,32 @@ class TestCmdStatus:
         config.admin_users = {"someone_else"}
 
         with db.get_db(config.db_path) as conn:
-            t1 = db.create_task(
-                conn, prompt="Running", user_id="bob", source_type="talk"
-            )
-            db.update_task_status(conn, t1, "running")
-            db.create_task(
-                conn, prompt="Pending", user_id="bob", source_type="talk"
-            )
-
-            AsyncMock()
-            result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
+            _task(conn, "Running", user_id="bob", token=None)
+            _task(conn, "Pending", user_id="bob", token=None, status=None)
+            result = await cmd_status(_ctx(config, conn))
 
         assert "System:" not in result
         assert "running" not in result
         assert "queued" not in result
 
-    @pytest.mark.asyncio
     async def test_groups_interactive_and_background(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
             db.create_task(conn, prompt="Talk task", user_id="alice", source_type="talk")
             db.create_task(conn, prompt="Scheduled job", user_id="alice", source_type="scheduled")
             db.create_task(conn, prompt="Briefing", user_id="alice", source_type="briefing")
-
-            AsyncMock()
-            result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_status(_ctx(config, conn))
 
         assert "Your tasks (1)" in result
         assert "Talk task" in result
         assert "Background (2)" in result
         assert "[scheduled]" in result
 
-    @pytest.mark.asyncio
     async def test_only_background_tasks(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
             db.create_task(conn, prompt="Cron job", user_id="alice", source_type="scheduled")
-
-            AsyncMock()
-            result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_status(_ctx(config, conn))
 
         assert "Background (1)" in result
         assert "Your tasks" not in result
@@ -1224,46 +851,69 @@ class TestCmdStatus:
 # =============================================================================
 
 
+_MODULE_JOB = "_module.feeds.run_scheduled"
+
+
+def _insert_job(conn, name="digest", cron="0 * * * *", prompt="stuff", **columns):
+    """One `scheduled_jobs` row for alice; `enabled` defaults to 1."""
+    columns = {"enabled": 1, **columns}
+    names = "".join(f", {column}" for column in columns)
+    marks = "".join(", ?" for _ in columns)
+    conn.execute(
+        f"INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt{names}) "
+        f"VALUES (?, ?, ?, ?{marks})",
+        ("alice", name, cron, prompt, *columns.values()),
+    )
+
+
+def _insert_module_job(conn, **columns):
+    _insert_job(
+        conn, _MODULE_JOB, "*/5 * * * *", "", skill="feeds",
+        skill_args='["run-scheduled"]', **columns,
+    )
+
+
+def _write_cron(config, job_toml):
+    """A CRON.md holding one `[[jobs]]` entry; returns its path."""
+    cron_path = (
+        config.workspace_path / "Users" / "alice" / "istota" / "config" / "CRON.md"
+    )
+    cron_path.write_text(
+        f"# Scheduled Jobs\n\n```toml\n[[jobs]]\n{job_toml}```\n"
+    )
+    return cron_path
+
+
+def _job(config, name):
+    with db.get_db(config.db_path) as conn:
+        return db.get_scheduled_job_by_name(conn, "alice", name)
+
+
 class TestCmdCron:
-    @pytest.mark.asyncio
     async def test_no_jobs(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_cron(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_cron(_ctx(config, conn))
         assert "No scheduled jobs" in result
 
-    @pytest.mark.asyncio
     async def test_list_jobs(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            conn.execute(
-                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled)
-                   VALUES (?, ?, ?, ?, 1)""",
-                ("alice", "daily-check", "0 9 * * *", "check stuff"),
-            )
-            AsyncMock()
-            result = await cmd_cron(_ctx(config, conn, "alice", "room1", ""))
+            _insert_job(conn, "daily-check", "0 9 * * *", "check stuff")
+            result = await cmd_cron(_ctx(config, conn))
 
         assert "daily-check" in result
         assert "0 9 * * *" in result
         assert "enabled" in result
 
-    @pytest.mark.asyncio
     async def test_list_shows_failures(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            conn.execute(
-                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled, consecutive_failures)
-                   VALUES (?, ?, ?, ?, 1, 3)""",
-                ("alice", "flaky", "0 * * * *", "flaky job"),
-            )
-            AsyncMock()
-            result = await cmd_cron(_ctx(config, conn, "alice", "room1", ""))
+            _insert_job(conn, "flaky", "0 * * * *", "flaky job", consecutive_failures=3)
+            result = await cmd_cron(_ctx(config, conn))
 
         assert "3 failures" in result
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize("enabled,suspended,expected", [
         (1, False, "enabled"),
         (0, False, "DISABLED"),
@@ -1283,14 +933,11 @@ class TestCmdCron:
         """
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            conn.execute(
-                "INSERT INTO scheduled_jobs "
-                "(user_id, name, cron_expression, prompt, enabled, auto_disabled_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                ("alice", "digest", "0 9 * * *", "p", enabled,
-                 "2026-08-30 04:05:06" if suspended else None),
+            _insert_job(
+                conn, "digest", "0 9 * * *", "p", enabled=enabled,
+                auto_disabled_at="2026-08-30 04:05:06" if suspended else None,
             )
-            result = await cmd_cron(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_cron(_ctx(config, conn))
 
         other = {"enabled", "DISABLED", "SUSPENDED"} - {expected}
         assert expected in result
@@ -1298,7 +945,6 @@ class TestCmdCron:
         if expected == "SUSPENDED":
             assert "2026-08-30 04:05" in result
 
-    @pytest.mark.asyncio
     async def test_the_listing_says_when_the_user_switched_a_job_off(
         self, make_config,
     ):
@@ -1307,18 +953,15 @@ class TestCmdCron:
         cannot tell their own disable from the daemon's."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            conn.execute(
-                "INSERT INTO scheduled_jobs "
-                "(user_id, name, cron_expression, prompt, enabled, disabled_at) "
-                "VALUES (?, ?, ?, ?, 0, ?)",
-                ("alice", "digest", "0 9 * * *", "p", "2026-08-30 04:05:06"),
+            _insert_job(
+                conn, "digest", "0 9 * * *", "p", enabled=0,
+                disabled_at="2026-08-30 04:05:06",
             )
-            result = await cmd_cron(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_cron(_ctx(config, conn))
 
         assert "DISABLED since 2026-08-30 04:05" in result
         assert "SUSPENDED" not in result
 
-    @pytest.mark.asyncio
     async def test_the_listing_claims_no_author_for_an_unstamped_disable(
         self, make_config,
     ):
@@ -1326,18 +969,12 @@ class TestCmdCron:
         It must stay a bare DISABLED rather than inventing a time."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            conn.execute(
-                "INSERT INTO scheduled_jobs "
-                "(user_id, name, cron_expression, prompt, enabled) "
-                "VALUES (?, ?, ?, ?, 0)",
-                ("alice", "digest", "0 9 * * *", "p"),
-            )
-            result = await cmd_cron(_ctx(config, conn, "alice", "room1", ""))
+            _insert_job(conn, "digest", "0 9 * * *", "p", enabled=0)
+            result = await cmd_cron(_ctx(config, conn))
 
         assert "DISABLED]" in result
         assert "since" not in result
 
-    @pytest.mark.asyncio
     async def test_the_user_disable_verb_does_not_set_the_daemon_column(
         self, make_config,
     ):
@@ -1348,31 +985,16 @@ class TestCmdCron:
         column, where the module rescue lifts it an hour later.
         """
         config = make_config()
-        cron_path = (
-            config.workspace_path / "Users" / "alice" / "istota"
-            / "config" / "CRON.md"
-        )
-        cron_path.parent.mkdir(parents=True, exist_ok=True)
-        cron_path.write_text(
-            '```toml\n[[jobs]]\nname = "digest"\ncron = "0 * * * *"\n'
-            'prompt = "stuff"\n```\n'
-        )
+        _write_cron(config, 'name = "digest"\ncron = "0 * * * *"\nprompt = "stuff"\n')
         with db.get_db(config.db_path) as conn:
-            conn.execute(
-                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled)
-                   VALUES (?, ?, ?, ?, 1)""",
-                ("alice", "digest", "0 * * * *", "stuff"),
-            )
-            result = await cmd_cron(
-                _ctx(config, conn, "alice", "room1", "disable digest"),
-            )
-            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+            _insert_job(conn)
+            result = await cmd_cron(_ctx(config, conn, args="disable digest"))
 
+        job = _job(config, "digest")
         assert "Disabled" in result
         assert job.enabled is False
         assert job.auto_disabled_at is None
 
-    @pytest.mark.asyncio
     async def test_the_user_disable_verb_records_that_the_user_did_it(
         self, make_config,
     ):
@@ -1385,22 +1007,10 @@ class TestCmdCron:
         """
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            conn.execute(
-                "INSERT INTO scheduled_jobs "
-                "(user_id, name, cron_expression, prompt, skill, skill_args, "
-                " enabled, consecutive_failures) "
-                "VALUES (?, ?, ?, '', ?, ?, 1, 3)",
-                ("alice", "_module.feeds.run_scheduled", "*/5 * * * *",
-                 "feeds", '["run-scheduled"]'),
-            )
-            result = await cmd_cron(
-                _ctx(config, conn, "alice", "room1",
-                     "disable _module.feeds.run_scheduled"),
-            )
-            job = db.get_scheduled_job_by_name(
-                conn, "alice", "_module.feeds.run_scheduled",
-            )
+            _insert_module_job(conn, consecutive_failures=3)
+            result = await cmd_cron(_ctx(config, conn, args=f"disable {_MODULE_JOB}"))
 
+        job = _job(config, _MODULE_JOB)
         assert job.enabled is False
         assert job.auto_disabled_at is None
         assert job.disabled_at is not None
@@ -1409,200 +1019,117 @@ class TestCmdCron:
         assert "Disabled module job" in result
         assert "may not persist" not in result
 
-    @pytest.mark.asyncio
     async def test_enabling_a_module_job_does_not_warn_about_cron_md(
         self, make_config,
     ):
         """The converse of the branch above, and the same misleading note."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            conn.execute(
-                "INSERT INTO scheduled_jobs "
-                "(user_id, name, cron_expression, prompt, skill, skill_args, "
-                " enabled, consecutive_failures, disabled_at) "
-                "VALUES (?, ?, ?, '', ?, ?, 0, 3, datetime('now'))",
-                ("alice", "_module.feeds.run_scheduled", "*/5 * * * *",
-                 "feeds", '["run-scheduled"]'),
+            _insert_module_job(
+                conn, enabled=0, consecutive_failures=3,
+                disabled_at="2026-08-30 04:05:06",
             )
-            result = await cmd_cron(
-                _ctx(config, conn, "alice", "room1",
-                     "enable _module.feeds.run_scheduled"),
-            )
-            job = db.get_scheduled_job_by_name(
-                conn, "alice", "_module.feeds.run_scheduled",
-            )
+            result = await cmd_cron(_ctx(config, conn, args=f"enable {_MODULE_JOB}"))
 
+        job = _job(config, _MODULE_JOB)
         assert job.enabled is True
         assert job.disabled_at is None
         assert "Enabled module job" in result
         assert "may not persist" not in result
 
-    @pytest.mark.asyncio
     async def test_the_enable_verb_clears_the_user_disable_record(
         self, make_config,
     ):
         """The converse: a running job must not carry a stale disable stamp."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            conn.execute(
-                "INSERT INTO scheduled_jobs "
-                "(user_id, name, cron_expression, prompt, enabled, "
-                " disabled_at) "
-                "VALUES (?, ?, ?, ?, 0, datetime('now'))",
-                ("alice", "digest", "0 * * * *", "stuff"),
-            )
-            await cmd_cron(_ctx(config, conn, "alice", "room1", "enable digest"))
-            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+            _insert_job(conn, enabled=0, disabled_at="2026-08-30 04:05:06")
+            await cmd_cron(_ctx(config, conn, args="enable digest"))
 
+        job = _job(config, "digest")
         assert job.enabled is True
         assert job.disabled_at is None
 
-    @pytest.mark.asyncio
     async def test_the_enable_verb_lifts_a_suspension(self, make_config):
         """The converse, and the only verb that writes both columns."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            conn.execute(
-                "INSERT INTO scheduled_jobs "
-                "(user_id, name, cron_expression, prompt, enabled, "
-                " consecutive_failures, auto_disabled_at) "
-                "VALUES (?, ?, ?, ?, 1, 5, datetime('now'))",
-                ("alice", "digest", "0 * * * *", "stuff"),
+            _insert_job(
+                conn, consecutive_failures=5, auto_disabled_at="2026-08-30 04:05:06",
             )
-            await cmd_cron(_ctx(config, conn, "alice", "room1", "enable digest"))
-            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+            await cmd_cron(_ctx(config, conn, args="enable digest"))
             assert [j.name for j in db.get_enabled_scheduled_jobs(conn)] == ["digest"]
 
+        job = _job(config, "digest")
         assert job.enabled is True
         assert job.auto_disabled_at is None
         assert job.consecutive_failures == 0
 
-    @pytest.mark.asyncio
     async def test_enable_job_updates_file_and_db(self, make_config):
-        config = make_config()
-        # Write CRON.md with disabled job
-        cron_path = config.workspace_path / "Users" / "alice" / "istota" / "config" / "CRON.md"
-        cron_path.write_text("""\
-# Scheduled Jobs
+        from istota.cron_loader import load_cron_jobs
 
-```toml
-[[jobs]]
-name = "broken"
-cron = "0 * * * *"
-prompt = "stuff"
-enabled = false
-```
-""")
+        config = make_config()
+        _write_cron(
+            config,
+            'name = "broken"\ncron = "0 * * * *"\nprompt = "stuff"\nenabled = false\n',
+        )
         with db.get_db(config.db_path) as conn:
-            conn.execute(
-                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled, consecutive_failures)
-                   VALUES (?, ?, ?, ?, 0, 5)""",
-                ("alice", "broken", "0 * * * *", "stuff"),
-            )
-            AsyncMock()
-            result = await cmd_cron(_ctx(config, conn, "alice", "room1", "enable broken"))
+            _insert_job(conn, "broken", enabled=0, consecutive_failures=5)
+            result = await cmd_cron(_ctx(config, conn, args="enable broken"))
 
         assert "Enabled" in result
         assert "DB-only" not in result
-        # DB updated
-        with db.get_db(config.db_path) as conn:
-            job = db.get_scheduled_job_by_name(conn, "alice", "broken")
-            assert job.enabled is True
-            assert job.consecutive_failures == 0
-        # File updated
-        from istota.cron_loader import load_cron_jobs
-        jobs = load_cron_jobs(config, "alice")
-        assert jobs[0].enabled is True
+        job = _job(config, "broken")
+        assert job.enabled is True
+        assert job.consecutive_failures == 0
+        assert load_cron_jobs(config, "alice")[0].enabled is True
 
-    @pytest.mark.asyncio
     async def test_enable_job_resets_last_run_at(self, make_config):
         """Enabling a job resets last_run_at so it won't fire immediately as catch-up."""
         config = make_config()
-        cron_path = config.workspace_path / "Users" / "alice" / "istota" / "config" / "CRON.md"
-        cron_path.write_text("""\
-# Scheduled Jobs
-
-```toml
-[[jobs]]
-name = "nightly"
-cron = "0 22 * * *"
-prompt = "stuff"
-enabled = false
-```
-""")
+        _write_cron(
+            config,
+            'name = "nightly"\ncron = "0 22 * * *"\nprompt = "stuff"\nenabled = false\n',
+        )
         with db.get_db(config.db_path) as conn:
-            # Insert job with an old last_run_at (simulating a job disabled long ago)
-            conn.execute(
-                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled, last_run_at)
-                   VALUES (?, ?, ?, ?, 0, '2026-01-01 00:00:00')""",
-                ("alice", "nightly", "0 22 * * *", "stuff"),
+            # An old last_run_at, simulating a job disabled long ago.
+            _insert_job(
+                conn, "nightly", "0 22 * * *", enabled=0,
+                last_run_at="2026-01-01 00:00:00",
             )
-            AsyncMock()
-            result = await cmd_cron(_ctx(config, conn, "alice", "room1", "enable nightly"))
+            result = await cmd_cron(_ctx(config, conn, args="enable nightly"))
 
         assert "Enabled" in result
-        with db.get_db(config.db_path) as conn:
-            job = db.get_scheduled_job_by_name(conn, "alice", "nightly")
-            assert job.enabled is True
-            # last_run_at must have been reset — not the old 2026-01-01 value
-            assert job.last_run_at is not None
-            assert "2026-01-01" not in job.last_run_at
+        job = _job(config, "nightly")
+        assert job.enabled is True
+        assert job.last_run_at is not None
+        assert "2026-01-01" not in job.last_run_at
 
-    @pytest.mark.asyncio
     async def test_disable_job_updates_file_and_db(self, make_config):
-        config = make_config()
-        # Write CRON.md with enabled job
-        cron_path = config.workspace_path / "Users" / "alice" / "istota" / "config" / "CRON.md"
-        cron_path.write_text("""\
-# Scheduled Jobs
+        from istota.cron_loader import load_cron_jobs
 
-```toml
-[[jobs]]
-name = "active-job"
-cron = "0 * * * *"
-prompt = "stuff"
-```
-""")
+        config = make_config()
+        _write_cron(config, 'name = "active-job"\ncron = "0 * * * *"\nprompt = "stuff"\n')
         with db.get_db(config.db_path) as conn:
-            conn.execute(
-                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled)
-                   VALUES (?, ?, ?, ?, 1)""",
-                ("alice", "active-job", "0 * * * *", "stuff"),
-            )
-            AsyncMock()
-            result = await cmd_cron(_ctx(config, conn, "alice", "room1", "disable active-job"))
+            _insert_job(conn, "active-job")
+            result = await cmd_cron(_ctx(config, conn, args="disable active-job"))
 
         assert "Disabled" in result
         assert "DB-only" not in result
-        # DB updated
-        with db.get_db(config.db_path) as conn:
-            job = db.get_scheduled_job_by_name(conn, "alice", "active-job")
-            assert job.enabled is False
-        # File updated
-        from istota.cron_loader import load_cron_jobs
-        jobs = load_cron_jobs(config, "alice")
-        assert jobs[0].enabled is False
+        assert _job(config, "active-job").enabled is False
+        assert load_cron_jobs(config, "alice")[0].enabled is False
 
-    @pytest.mark.asyncio
     async def test_enable_without_cron_file_warns(self, make_config):
         """Without CRON.md, enable falls back to DB-only with a warning."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            conn.execute(
-                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled, consecutive_failures)
-                   VALUES (?, ?, ?, ?, 0, 5)""",
-                ("alice", "broken", "0 * * * *", "stuff"),
-            )
-            AsyncMock()
-            result = await cmd_cron(_ctx(config, conn, "alice", "room1", "enable broken"))
+            _insert_job(conn, "broken", enabled=0, consecutive_failures=5)
+            result = await cmd_cron(_ctx(config, conn, args="enable broken"))
 
         assert "Enabled" in result
         assert "DB-only" in result
-        with db.get_db(config.db_path) as conn:
-            job = db.get_scheduled_job_by_name(conn, "alice", "broken")
-            assert job.enabled is True
+        assert _job(config, "broken").enabled is True
 
-    @pytest.mark.asyncio
     @pytest.mark.requires_dac
     async def test_disable_warns_when_the_file_write_is_refused(self, make_config):
         """The fallback branch is reachable, not just for a missing file.
@@ -1616,30 +1143,16 @@ prompt = "stuff"
         permission bit and root walks through it.
         """
         config = make_config()
-        config_dir = config.workspace_path / "Users" / "alice" / "istota" / "config"
-        cron_path = config_dir / "CRON.md"
-        cron_path.write_text("""\
-# Scheduled Jobs
-
-```toml
-[[jobs]]
-name = "active-job"
-cron = "0 * * * *"
-prompt = "stuff"
-```
-""")
+        cron_path = _write_cron(
+            config, 'name = "active-job"\ncron = "0 * * * *"\nprompt = "stuff"\n',
+        )
+        config_dir = cron_path.parent
         original = cron_path.read_text()
         with db.get_db(config.db_path) as conn:
-            conn.execute(
-                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled)
-                   VALUES (?, ?, ?, ?, 1)""",
-                ("alice", "active-job", "0 * * * *", "stuff"),
-            )
+            _insert_job(conn, "active-job")
             config_dir.chmod(0o555)
             try:
-                result = await cmd_cron(
-                    _ctx(config, conn, "alice", "room1", "disable active-job")
-                )
+                result = await cmd_cron(_ctx(config, conn, args="disable active-job"))
             finally:
                 config_dir.chmod(0o755)
 
@@ -1647,16 +1160,12 @@ prompt = "stuff"
         assert "DB-only" in result
         # The file is untouched, which is what the warning is about.
         assert cron_path.read_text() == original
-        with db.get_db(config.db_path) as conn:
-            job = db.get_scheduled_job_by_name(conn, "alice", "active-job")
-            assert job.enabled is False
+        assert _job(config, "active-job").enabled is False
 
-    @pytest.mark.asyncio
     async def test_enable_nonexistent(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_cron(_ctx(config, conn, "alice", "room1", "enable nope"))
+            result = await cmd_cron(_ctx(config, conn, args="enable nope"))
         assert "not found" in result or "No scheduled job" in result
 
 
@@ -1665,130 +1174,72 @@ prompt = "stuff"
 # =============================================================================
 
 
+async def _memory(config, args):
+    with db.get_db(config.db_path) as conn:
+        return await cmd_memory(_ctx(config, conn, args=args))
+
+
+def _add_facts(config, facts, valid_until=None):
+    with db.get_db(config.db_path) as conn:
+        ensure_table(conn)
+        for subject, predicate, obj in facts:
+            add_fact(conn, "alice", subject, predicate, obj, valid_until=valid_until)
+        conn.commit()
+
+
 class TestCmdMemory:
-    @pytest.mark.asyncio
-    async def test_no_args_shows_usage(self, make_config):
+    @pytest.mark.parametrize("args,expected", [
+        ("", ["!memory user", "!memory channel", "!memory facts"]),
+        ("user", ["User memory:** (empty)"]),
+        ("channel", ["Channel memory:** (empty)"]),
+        ("facts", ["no facts"]),
+    ], ids=["usage", "user-empty", "channel-empty", "facts-empty"])
+    async def test_empty_answers(self, make_config, args, expected):
+        result = await _memory(make_config(), args)
+        for needle in expected:
+            assert needle in result
+
+    # The user file is shown whole, not truncated.
+    @pytest.mark.parametrize("relpath,content,args,expected", [
+        ("Users/alice/istota/config/USER.md", "Alice likes coffee", "user",
+         ["Alice likes coffee", "User memory**"]),
+        ("Users/alice/istota/config/USER.md", "A" * 5000, "user", ["A" * 5000]),
+        ("Channels/room1/CHANNEL.md", "This is the dev channel", "channel",
+         ["This is the dev channel", "Channel memory**"]),
+    ], ids=["user", "user-not-truncated", "channel"])
+    async def test_file_contents(self, make_config, relpath, content, args, expected):
         config = make_config()
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_memory(_ctx(config, conn, "alice", "room1", ""))
-        assert "!memory user" in result
-        assert "!memory channel" in result
-        assert "!memory facts" in result
+        (config.workspace_path / relpath).write_text(content)
+        result = await _memory(config, args)
+        for needle in expected:
+            assert needle in result
 
-    @pytest.mark.asyncio
-    async def test_user_memory_empty(self, make_config):
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "user"))
-        assert "User memory:** (empty)" in result
-
-    @pytest.mark.asyncio
-    async def test_user_memory_with_content(self, make_config):
-        config = make_config()
-        user_mem_path = (
-            config.workspace_path / "Users" / "alice" / "istota" / "config" / "USER.md"
-        )
-        user_mem_path.write_text("Alice likes coffee")
-
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "user"))
-        assert "Alice likes coffee" in result
-        assert "User memory**" in result
-
-    @pytest.mark.asyncio
-    async def test_user_memory_not_truncated(self, make_config):
-        config = make_config()
-        user_mem_path = (
-            config.workspace_path / "Users" / "alice" / "istota" / "config" / "USER.md"
-        )
-        long_content = "A" * 5000
-        user_mem_path.write_text(long_content)
-
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "user"))
-        # Full content should be present, not truncated
-        assert long_content in result
-
-    @pytest.mark.asyncio
-    async def test_channel_memory_empty(self, make_config):
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "channel"))
-        assert "Channel memory:** (empty)" in result
-
-    @pytest.mark.asyncio
-    async def test_channel_memory_with_content(self, make_config):
-        config = make_config()
-        channel_mem_path = (
-            config.workspace_path / "Channels" / "room1" / "CHANNEL.md"
-        )
-        channel_mem_path.write_text("This is the dev channel")
-
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "channel"))
-        assert "This is the dev channel" in result
-        assert "Channel memory**" in result
-
-    @pytest.mark.asyncio
     async def test_no_mount_configured(self, make_config):
         config = make_config()
         config.workspace_path = None
+        assert "mount not configured" in await _memory(config, "user")
 
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "user"))
-        assert "mount not configured" in result
-
-    @pytest.mark.asyncio
-    async def test_facts_empty(self, make_config):
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))
-        assert "no facts" in result
-
-    @pytest.mark.asyncio
     async def test_facts_with_few(self, make_config):
         """Small fact sets show all facts inline."""
         config = make_config()
-        from istota.memory.knowledge_graph import ensure_table, add_fact
-        with db.get_db(config.db_path) as conn:
-            ensure_table(conn)
-            add_fact(conn, "alice", "alice", "works_at", "acme")
-            add_fact(conn, "alice", "alice", "knows", "python")
-            conn.commit()
-            AsyncMock()
-            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))
+        _add_facts(config, [("alice", "works_at", "acme"), ("alice", "knows", "python")])
+        result = await _memory(config, "facts")
         assert "Knowledge graph" in result
         assert "2 facts" in result
         assert "works_at" in result
         assert "python" in result
 
-    @pytest.mark.asyncio
     async def test_facts_large_set_summarizes(self, make_config):
         """Large fact sets show entity summary instead of all facts."""
         config = make_config()
-        from istota.memory.knowledge_graph import ensure_table, add_fact
-        with db.get_db(config.db_path) as conn:
-            ensure_table(conn)
-            for i in range(25):
-                add_fact(conn, "alice", "alice", "knows", f"tech_{i}")
-            conn.commit()
-            AsyncMock()
-            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))
+        _add_facts(config, [("alice", "knows", f"tech_{i}") for i in range(25)])
+        result = await _memory(config, "facts")
         assert "25 facts" in result
         assert "Entities:" in result
         assert "alice (25)" in result
         # Should not dump all individual facts
         assert "tech_0" not in result
 
-    @pytest.mark.asyncio
     async def test_facts_counts_the_future_expiry_it_renders(self, make_config):
         """ISSUE-472: a graph of only future-expiry facts read as empty.
 
@@ -1797,63 +1248,39 @@ class TestCmdMemory:
         `get_current_facts`, which does not — so the count disagreed with the
         list it labelled, and reached "(no facts)" over a populated graph.
         """
-        from datetime import date, timedelta
-
         config = make_config()
-        from istota.memory.knowledge_graph import ensure_table, add_fact
         future = (date.today() + timedelta(days=30)).isoformat()
-        with db.get_db(config.db_path) as conn:
-            ensure_table(conn)
-            add_fact(conn, "alice", "alice", "interested_in", "sailing",
-                     valid_until=future)
-            add_fact(conn, "alice", "alice", "interested_in", "pottery",
-                     valid_until=future)
-            conn.commit()
-            AsyncMock()
-            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))
+        _add_facts(
+            config,
+            [("alice", "interested_in", "sailing"), ("alice", "interested_in", "pottery")],
+            valid_until=future,
+        )
+        result = await _memory(config, "facts")
         assert "no facts" not in result
         assert "2 facts" in result
         assert "sailing" in result
         assert "pottery" in result
 
-    @pytest.mark.asyncio
     async def test_facts_entity_filter(self, make_config):
         """!memory facts <entity> shows facts for that entity only."""
         config = make_config()
-        from istota.memory.knowledge_graph import ensure_table, add_fact
-        with db.get_db(config.db_path) as conn:
-            ensure_table(conn)
-            add_fact(conn, "alice", "alice", "works_at", "acme")
-            add_fact(conn, "alice", "bob", "works_at", "globex")
-            conn.commit()
-            AsyncMock()
-            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts alice"))
+        _add_facts(config, [("alice", "works_at", "acme"), ("bob", "works_at", "globex")])
+        result = await _memory(config, "facts alice")
         assert "Facts about alice" in result
         assert "works_at" in result
         assert "globex" not in result
 
-    @pytest.mark.asyncio
     async def test_facts_entity_not_found(self, make_config):
         config = make_config()
-        from istota.memory.knowledge_graph import ensure_table
-        with db.get_db(config.db_path) as conn:
-            ensure_table(conn)
-            AsyncMock()
-            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts nobody"))
-        assert "none found" in result
+        _add_facts(config, [])
+        assert "none found" in await _memory(config, "facts nobody")
 
-    @pytest.mark.asyncio
     async def test_facts_no_mount_required(self, make_config):
         """Facts come from DB, not filesystem — works without mount."""
         config = make_config()
         config.workspace_path = None
-        from istota.memory.knowledge_graph import ensure_table, add_fact
-        with db.get_db(config.db_path) as conn:
-            ensure_table(conn)
-            add_fact(conn, "alice", "alice", "speaks", "portuguese")
-            conn.commit()
-            AsyncMock()
-            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))
+        _add_facts(config, [("alice", "speaks", "portuguese")])
+        result = await _memory(config, "facts")
         assert "Knowledge graph" in result
         assert "speaks" in result
 
@@ -1867,29 +1294,18 @@ class TestDbHelpers:
     def test_update_task_pid(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="test", user_id="alice", source_type="cli"
-            )
+            task_id = db.create_task(conn, prompt="test", user_id="alice")
             db.update_task_pid(conn, task_id, 12345)
             row = conn.execute(
                 "SELECT worker_pid FROM tasks WHERE id = ?", (task_id,)
             ).fetchone()
             assert row[0] == 12345
 
-    def test_is_task_cancelled_false(self, make_config):
+    def test_is_task_cancelled(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="test", user_id="alice", source_type="cli"
-            )
+            task_id = db.create_task(conn, prompt="test", user_id="alice")
             assert db.is_task_cancelled(conn, task_id) is False
-
-    def test_is_task_cancelled_true(self, make_config):
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="test", user_id="alice", source_type="cli"
-            )
             conn.execute(
                 "UPDATE tasks SET cancel_requested = 1 WHERE id = ?", (task_id,)
             )
@@ -1904,31 +1320,25 @@ class TestDbHelpers:
 class TestPollerInterception:
     """Test that !commands are intercepted in the Talk poller and don't create tasks."""
 
-    @pytest.mark.asyncio
+    @staticmethod
+    def _poll_client(MockTalkClient, msg_id, text):
+        mock_talk = MockTalkClient.return_value
+        mock_talk.list_conversations = AsyncMock(
+            return_value=[{"token": "room1", "type": 1}]
+        )
+        mock_talk.poll_messages = AsyncMock(return_value=[{
+            "id": msg_id, "actorId": "alice", "actorType": "users",
+            "message": text, "messageType": "comment", "messageParameters": {},
+        }])
+
     async def test_command_does_not_create_task(self, make_config):
         from istota.transport.talk.inbound import poll_talk_conversations
 
         config = make_config()
-
-        msg = {
-            "id": 101,
-            "actorId": "alice",
-            "actorType": "users",
-            "message": "!status",
-            "messageType": "comment",
-            "messageParameters": {},
-        }
-
         with patch("istota.transport.talk.inbound.get_talk_client") as MockTalkClient, patch(
             "istota.transport.talk.get_talk_client"
         ) as MockDeliverClient:
-            # Talk poller client
-            mock_talk = MockTalkClient.return_value
-            mock_talk.list_conversations = AsyncMock(
-                return_value=[{"token": "room1", "type": 1}]
-            )
-            mock_talk.poll_messages = AsyncMock(return_value=[msg])
-
+            self._poll_client(MockTalkClient, 101, "!status")
             # Command delivery goes through TalkTransport.deliver, which pulls
             # the persistent client from istota.transport.talk.
             mock_deliver = MockDeliverClient.return_value
@@ -1939,36 +1349,17 @@ class TestPollerInterception:
 
             result = await poll_talk_conversations(config)
 
-        # No tasks should have been created
         assert result == []
-
-        # Command should have posted a response via the transport
         mock_deliver.send_message.assert_called_once()
         sent_msg = mock_deliver.send_message.call_args[0][1]
         assert "System:" in sent_msg  # !status output
 
-    @pytest.mark.asyncio
     async def test_normal_message_still_creates_task(self, make_config):
         from istota.transport.talk.inbound import poll_talk_conversations
 
         config = make_config()
-
-        msg = {
-            "id": 102,
-            "actorId": "alice",
-            "actorType": "users",
-            "message": "What's the weather?",
-            "messageType": "comment",
-            "messageParameters": {},
-        }
-
         with patch("istota.transport.talk.inbound.get_talk_client") as MockTalkClient:
-            mock_talk = MockTalkClient.return_value
-            mock_talk.list_conversations = AsyncMock(
-                return_value=[{"token": "room1", "type": 1}]
-            )
-            mock_talk.poll_messages = AsyncMock(return_value=[msg])
-
+            self._poll_client(MockTalkClient, 102, "What's the weather?")
             with db.get_db(config.db_path) as conn:
                 db.set_talk_poll_state(conn, "room1", 50)
 
@@ -1982,71 +1373,50 @@ class TestPollerInterception:
 # =============================================================================
 
 
-class TestCmdSkills:
-    @pytest.mark.asyncio
-    async def test_lists_bundled_skills(self, make_config):
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
+async def _skills(config, args=""):
+    with db.get_db(config.db_path) as conn:
+        return await cmd_skills(_ctx(config, conn, args=args))
 
+
+class TestCmdSkills:
+    async def test_lists_bundled_skills(self, make_config):
+        result = await _skills(make_config())
         assert "Skills" in result
         assert "total" in result
         # Some well-known bundled skills should appear
         assert "files" in result
         assert "calendar" in result
 
-    @pytest.mark.asyncio
     async def test_hides_admin_skills_from_non_admin(self, make_config):
         config = make_config()
         config.admin_users = {"bob"}  # alice is not admin
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
-
         # tasks skill is admin_only, should not appear for non-admin
-        assert "**tasks**" not in result
+        assert "**tasks**" not in await _skills(config)
 
-    @pytest.mark.asyncio
     async def test_shows_admin_skills_to_admin(self, make_config):
         config = make_config()
         config.admin_users = set()  # empty = all admin
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
+        assert "tasks" in await _skills(config)
 
-        # With all users as admin, admin-only skills should be visible
-        assert "tasks" in result
-
-    @pytest.mark.asyncio
     async def test_shows_unavailable_skills(self, make_config):
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            with patch("istota.skills._loader.get_skill_availability") as mock_avail:
-                # Make one skill unavailable
-                def side_effect(meta):
-                    if meta.name == "whisper":
-                        return ("unavailable", "faster-whisper")
-                    return ("available", None)
-                mock_avail.side_effect = side_effect
-                result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
+        def side_effect(meta):
+            if meta.name == "whisper":
+                return ("unavailable", "faster-whisper")
+            return ("available", None)
+
+        with patch("istota.skills._loader.get_skill_availability", side_effect=side_effect):
+            result = await _skills(make_config())
 
         assert "Unavailable" in result
         assert "faster-whisper" in result
 
-    @pytest.mark.asyncio
     async def test_shows_disabled_skills(self, make_config):
         config = make_config()
         config.disabled_skills = ["browse"]
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
-
+        result = await _skills(config)
         assert "Disabled" in result
         assert "browse" in result
 
-    @pytest.mark.asyncio
     async def test_capability_gated_skills_disabled_when_service_off(self, make_config):
         # browser + devbox off by default → the capability gate files browse and
         # devbox under Disabled (not Available), with no explicit disabled_skills.
@@ -2054,33 +1424,25 @@ class TestCmdSkills:
         caps = config.available_capabilities()
         assert "browser" not in caps
         assert "devbox" not in caps
-        with db.get_db(config.db_path) as conn:
-            result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
+        result = await _skills(config)
         assert "**Disabled**" in result
         assert "- browse —" in result  # Disabled render (plain name)
         assert "- devbox —" in result
         assert "- **browse**:" not in result  # not in the Available (bold) section
         assert "- **devbox**:" not in result
 
-    @pytest.mark.asyncio
     async def test_capability_gated_skills_available_when_service_on(self, make_config):
         from istota.config import BrowserConfig, DevboxConfig
         config = make_config(
             browser=BrowserConfig(enabled=True),
             devbox=DevboxConfig(enabled=True),
         )
-        with db.get_db(config.db_path) as conn:
-            result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
+        result = await _skills(config)
         assert "- **browse**:" in result  # Available render (bold name)
         assert "- **devbox**:" in result
 
-    @pytest.mark.asyncio
     async def test_skill_detail_view(self, make_config):
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_skills(_ctx(config, conn, "alice", "room1", "calendar"))
-
+        result = await _skills(make_config(), "calendar")
         assert "**calendar**" in result
         assert "Status:" in result
         assert "CalDAV" in result
@@ -2113,21 +1475,33 @@ class TestCmdCheck:
             self._result("runtime.bwrap", SKIP, "sandbox disabled"),
         ]
 
-    @pytest.mark.asyncio
+    async def _check(self, config, results=None, side_effect=None, user_id="alice"):
+        if side_effect is not None:
+            patcher = patch("istota.doctor.run_checks", side_effect=side_effect)
+        else:
+            patcher = patch(
+                "istota.doctor.run_checks",
+                return_value=self._clean() if results is None else results,
+            )
+        with db.get_db(config.db_path) as conn, patcher:
+            return await cmd_check(_ctx(config, conn, user_id))
+
+    def _recorder(self, calls):
+        def fake_run_checks(cfg, **kwargs):
+            calls["kwargs"] = kwargs
+            return self._clean()
+        return fake_run_checks
+
     async def test_an_admin_gets_the_whole_registry_fenced(self, make_config):
         """`render_text`'s alignment is the information, and posted as markdown
         its two-space indents collapse into one paragraph. Hence the fence."""
-        config = make_config(admin_users=["alice"])
-        with db.get_db(config.db_path) as conn:
-            with patch("istota.doctor.run_checks", return_value=self._clean()):
-                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
+        result = await self._check(make_config(admin_users=["alice"]))
 
         assert result.startswith("**Health Check**\n\n```\n")
         assert result.endswith("\n```")
         assert "runtime.platform" in result
         assert "runtime.bwrap" in result
 
-    @pytest.mark.asyncio
     async def test_an_admin_asks_for_live_and_not_deep(self, make_config):
         """The resolved open question, pinned.
 
@@ -2139,32 +1513,19 @@ class TestCmdCheck:
         Asserted as an absence, because a later tidy-up adding it back would
         otherwise go unnoticed until an admin's `!check` started timing out.
         """
-        config = make_config(admin_users=["alice"])
         calls = {}
-
-        def fake_run_checks(cfg, **kwargs):
-            calls["kwargs"] = kwargs
-            return self._clean()
-
-        with db.get_db(config.db_path) as conn:
-            with patch("istota.doctor.run_checks", side_effect=fake_run_checks):
-                await cmd_check(_ctx(config, conn, "alice", "room1", ""))
+        await self._check(
+            make_config(admin_users=["alice"]), side_effect=self._recorder(calls),
+        )
 
         assert calls["kwargs"]["live"] is True
         assert calls["kwargs"].get("deep", False) is False
 
-    @pytest.mark.asyncio
     async def test_a_non_admin_gets_one_line_and_neither_flag(self, make_config):
-        config = make_config(admin_users=["boss"])
         calls = {}
-
-        def fake_run_checks(cfg, **kwargs):
-            calls["kwargs"] = kwargs
-            return self._clean()
-
-        with db.get_db(config.db_path) as conn:
-            with patch("istota.doctor.run_checks", side_effect=fake_run_checks):
-                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
+        result = await self._check(
+            make_config(admin_users=["boss"]), side_effect=self._recorder(calls),
+        )
 
         assert calls["kwargs"].get("live", False) is False
         assert calls["kwargs"].get("deep", False) is False
@@ -2175,21 +1536,15 @@ class TestCmdCheck:
         body = result.split("\n\n", 1)[1]
         assert "\n" not in body, f"the non-admin arm rendered more than a line: {body!r}"
 
-    @pytest.mark.asyncio
     async def test_a_non_admin_is_told_when_something_failed(self, make_config):
         from istota.doctor import FAIL
 
-        config = make_config(admin_users=["boss"])
         results = self._clean() + [self._result("web.static", FAIL, "missing")]
-
-        with db.get_db(config.db_path) as conn:
-            with patch("istota.doctor.run_checks", return_value=results):
-                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
+        result = await self._check(make_config(admin_users=["boss"]), results)
 
         assert "PROBLEMS" in result
         assert "1 fail" in result
 
-    @pytest.mark.asyncio
     async def test_a_non_admin_is_told_no_cross_user_facts(self, make_config):
         """The reason for the split.
 
@@ -2202,7 +1557,6 @@ class TestCmdCheck:
         """
         from istota.doctor import OK, WARN
 
-        config = make_config(admin_users=["boss"])
         results = [
             self._result(
                 "runtime.subscription_usage", WARN, "session window at 91% utilization"
@@ -2211,10 +1565,7 @@ class TestCmdCheck:
                 "config.skill_overlays", OK, "bob: 2 overlays; carol: 1 overlay"
             ),
         ]
-
-        with db.get_db(config.db_path) as conn:
-            with patch("istota.doctor.run_checks", return_value=results):
-                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
+        result = await self._check(make_config(admin_users=["boss"]), results)
 
         assert "91%" not in result
         assert "utilization" not in result
@@ -2222,31 +1573,24 @@ class TestCmdCheck:
         assert "carol" not in result
         assert "runtime.subscription_usage" not in result
 
-    @pytest.mark.asyncio
     async def test_an_admin_does_see_those_details(self, make_config):
         """The control for the case above: without it, a non-admin assertion
         about an absent string passes against a command that renders nothing at
         all."""
         from istota.doctor import WARN
 
-        config = make_config(admin_users=["alice"])
         results = [
             self._result(
                 "runtime.subscription_usage", WARN, "session window at 91% utilization"
             )
         ]
-
-        with db.get_db(config.db_path) as conn:
-            with patch("istota.doctor.run_checks", return_value=results):
-                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
+        result = await self._check(make_config(admin_users=["alice"]), results)
 
         assert "91% utilization" in result
 
-    @pytest.mark.asyncio
     async def test_the_admin_render_redacts(self, make_config):
         """`render_text` takes `secrets` and redacts internally, so the command
         passes `config_secrets` rather than calling `redact` as well."""
-        from istota.config import NextcloudConfig
         from istota.doctor import FAIL
 
         config = make_config(
@@ -2260,15 +1604,11 @@ class TestCmdCheck:
         results = [
             self._result("web.static", FAIL, "upstream said s3cr3t-app-password")
         ]
-
-        with db.get_db(config.db_path) as conn:
-            with patch("istota.doctor.run_checks", return_value=results):
-                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
+        result = await self._check(config, results)
 
         assert "s3cr3t-app-password" not in result
         assert "web.static" in result
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize("user_id", ["alice", "nobody"])
     async def test_it_commits_before_it_blocks(self, make_config, user_id):
         """Both arms, since both block.
@@ -2284,13 +1624,12 @@ class TestCmdCheck:
         config = make_config(admin_users=["alice"])
         order = []
 
+        def fake_run_checks(cfg, **kwargs):
+            order.append("run_checks")
+            return self._clean()
+
         with db.get_db(config.db_path) as conn:
             recording = _RecordingConn(conn, order)
-
-            def fake_run_checks(cfg, **kwargs):
-                order.append("run_checks")
-                return self._clean()
-
             with patch("istota.doctor.run_checks", side_effect=fake_run_checks):
                 await cmd_check(_ctx(config, recording, user_id, "room1", ""))
 
@@ -2298,38 +1637,28 @@ class TestCmdCheck:
             f"expected the caller's transaction committed before the probe, got {order}"
         )
 
-    @pytest.mark.asyncio
-    async def test_a_connection_that_will_not_commit_is_not_fatal(self, make_config):
-        """A connection we could not commit is the caller's problem, not a
-        reason to refuse a read-only report."""
-        config = make_config(admin_users=["alice"])
+    class _Broken:
+        def commit(self):
+            raise sqlite3.OperationalError("cannot commit - no transaction is active")
 
-        class _Broken:
-            def commit(self):
-                raise sqlite3.OperationalError("cannot commit - no transaction is active")
+    # A connection we could not commit is the caller's problem, not a reason to
+    # refuse a read-only report. And `ctx.conn` is typed non-optional while
+    # `cmd_usage` still guards for None, because a surface can build a context
+    # without one.
+    @pytest.mark.parametrize("broken", [True, False], ids=["uncommittable", "none"])
+    async def test_an_unusable_connection_is_not_fatal(self, make_config, broken):
+        config = make_config(admin_users=["alice"])
+        conn = self._Broken() if broken else None
 
         with patch("istota.doctor.run_checks", return_value=self._clean()):
-            result = await cmd_check(_ctx(config, _Broken(), "alice", "room1", ""))
+            result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
 
         assert "runtime.platform" in result
 
-    @pytest.mark.asyncio
-    async def test_a_null_connection_is_tolerated(self, make_config):
-        """`ctx.conn` is typed non-optional and `cmd_usage` still guards for
-        None, because a surface can build a context without one."""
-        config = make_config(admin_users=["alice"])
-
-        with patch("istota.doctor.run_checks", return_value=self._clean()):
-            result = await cmd_check(_ctx(config, None, "alice", "room1", ""))
-
-        assert "runtime.platform" in result
-
-    @pytest.mark.asyncio
     async def test_it_runs_the_registry_off_the_event_loop(self, make_config):
         """`run_checks` is entirely synchronous and this coroutine runs on the
         loop that polls every Talk conversation. `cmd_usage`'s own comment
         names this command's bare `subprocess.run` as what it is not doing."""
-        config = make_config(admin_users=["alice"])
         loop_thread = threading.get_ident()
         seen = {}
 
@@ -2337,19 +1666,9 @@ class TestCmdCheck:
             seen["thread"] = threading.get_ident()
             return self._clean()
 
-        with db.get_db(config.db_path) as conn:
-            with patch("istota.doctor.run_checks", side_effect=fake_run_checks):
-                await cmd_check(_ctx(config, conn, "alice", "room1", ""))
+        await self._check(make_config(admin_users=["alice"]), side_effect=fake_run_checks)
 
         assert seen["thread"] != loop_thread
-
-    @pytest.mark.asyncio
-    async def test_help_includes_check(self, make_config):
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            result = await cmd_help(_ctx(config, conn, "alice", "room1", ""))
-        assert "!check" in result
 
 
 # =============================================================================
@@ -2358,19 +1677,16 @@ class TestCmdCheck:
 
 
 class TestParseExportMetadata:
-    def test_markdown_format(self):
-        line = "<!-- export:token=abc123,last_id=42,updated=2026-02-25T14:45:00Z -->"
-        result = _parse_export_metadata(line)
-        assert result == {"token": "abc123", "last_id": 42, "updated": "2026-02-25T14:45:00Z"}
-
-    def test_text_format(self):
-        line = "# export:token=room1,last_id=100,updated=2026-02-25T14:45:00Z"
-        result = _parse_export_metadata(line)
-        assert result == {"token": "room1", "last_id": 100, "updated": "2026-02-25T14:45:00Z"}
-
-    def test_invalid_line(self):
-        assert _parse_export_metadata("# Just a heading") is None
-        assert _parse_export_metadata("") is None
+    @pytest.mark.parametrize("line,expected", [
+        ("<!-- export:token=abc123,last_id=42,updated=2026-02-25T14:45:00Z -->",
+         {"token": "abc123", "last_id": 42, "updated": "2026-02-25T14:45:00Z"}),
+        ("# export:token=room1,last_id=100,updated=2026-02-25T14:45:00Z",
+         {"token": "room1", "last_id": 100, "updated": "2026-02-25T14:45:00Z"}),
+        ("# Just a heading", None),
+        ("", None),
+    ], ids=["markdown", "text", "heading", "empty"])
+    def test_parse(self, line, expected):
+        assert _parse_export_metadata(line) == expected
 
     def test_with_leading_whitespace(self):
         line = "  <!-- export:token=t,last_id=1,updated=2026-01-01T00:00:00Z -->"
@@ -2397,8 +1713,8 @@ def _hist_msg(id, prompt, result, user_id="alice", created_at="2026-02-25T10:00:
     )
 
 
-class TestFormatHistoryMarkdown:
-    def test_basic_turns(self):
+class TestFormatHistory:
+    def test_markdown_turns(self):
         msgs = [_hist_msg(1, "Hello", "Hi there"), _hist_msg(2, "Bye", "Cya", "bob")]
         result = _format_history_markdown(msgs, "Istota")
         assert "**alice**" in result
@@ -2408,12 +1724,7 @@ class TestFormatHistoryMarkdown:
         assert "**bob**" in result
         assert "---" in result
 
-    def test_empty(self):
-        assert _format_history_markdown([], "Istota") == ""
-
-
-class TestFormatHistoryText:
-    def test_basic_turns(self):
+    def test_text_turns(self):
         result = _format_history_text([_hist_msg(1, "Hello", "Hi")], "Istota")
         assert "alice" in result
         assert "Hello" in result
@@ -2421,6 +1732,7 @@ class TestFormatHistoryText:
         assert "---" not in result  # plaintext doesn't use HR
 
     def test_empty(self):
+        assert _format_history_markdown([], "Istota") == ""
         assert _format_history_text([], "Istota") == ""
 
 
@@ -2442,26 +1754,35 @@ def _seed_conversation(conn, token="room1", user_id="alice", count=3, start=1):
     return ids
 
 
+def _export_dir(config):
+    return config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations"
+
+
+def _add_unanswered(conn):
+    return db.add_message(
+        conn, "room1", role="user", body="just between us",
+        origin_surface="talk", task_id=None, author_user_id="bob",
+    )
+
+
 class TestCmdExport:
-    @pytest.mark.asyncio
     async def test_no_mount_configured(self, make_config):
         config = make_config()
         config.workspace_path = None
         with db.get_db(config.db_path) as conn:
-            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_export(_ctx(config, conn))
         assert "mount not configured" in result
 
-    @pytest.mark.asyncio
     async def test_full_export_markdown(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
             _seed_conversation(conn, count=3)
-            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_export(_ctx(config, conn))
 
         assert "Exported 3 messages" in result
         assert "room1.md" in result
 
-        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
+        export_path = _export_dir(config) / "room1.md"
         assert export_path.exists()
         content = export_path.read_text()
         assert "<!-- export:token=room1" in content
@@ -2471,22 +1792,20 @@ class TestCmdExport:
         assert "Reply 1" in content
         assert "Prompt 3" in content
 
-    @pytest.mark.asyncio
     async def test_full_export_text(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
             _seed_conversation(conn, count=2)
-            result = await cmd_export(_ctx(config, conn, "alice", "room1", "text"))
+            result = await cmd_export(_ctx(config, conn, args="text"))
 
         assert "Exported 2 messages" in result
-        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.txt"
+        export_path = _export_dir(config) / "room1.txt"
         assert export_path.exists()
         content = export_path.read_text()
         assert "# export:token=room1" in content
         assert "====" in content
         assert "---" not in content
 
-    @pytest.mark.asyncio
     async def test_an_unanswered_last_turn_does_not_reset_the_export_cursor(
         self, make_config,
     ):
@@ -2495,69 +1814,57 @@ class TestCmdExport:
             db.register_room(conn, "room1", "alice", origin="talk")
             ids = _seed_conversation(conn, count=2)
             db.backfill_room_messages_from_tasks(conn, "room1")
-            db.add_message(
-                conn, "room1", role="user", body="just between us",
-                origin_surface="talk", task_id=None, author_user_id="bob",
-            )
-            await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+            _add_unanswered(conn)
+            await cmd_export(_ctx(config, conn))
 
-        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
-        content = export_path.read_text()
+        content = (_export_dir(config) / "room1.md").read_text()
         assert f"last_id={ids[-1]}," in content.split("\n", 1)[0]
         assert "just between us" in content
 
-    @pytest.mark.asyncio
     async def test_empty_channel(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_export(_ctx(config, conn))
         assert "No messages to export" in result
 
-    @pytest.mark.asyncio
     async def test_excludes_incomplete_tasks(self, make_config):
         """Only completed tasks with a result are exported."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
             _seed_conversation(conn, count=1)
             # A pending task in the same room must not be exported.
-            db.create_task(conn, prompt="not done yet", user_id="alice",
-                           conversation_token="room1", source_type="talk")
-            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+            _task(conn, "not done yet", status=None)
+            result = await cmd_export(_ctx(config, conn))
         assert "Exported 1 messages" in result
 
-    @pytest.mark.asyncio
     async def test_web_surface_export(self, make_config):
         """Export works for a web-chat conversation with no Talk server at all."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            tid = db.create_task(conn, prompt="web question", user_id="alice",
-                                 conversation_token="webroom", source_type="web")
+            tid = _task(conn, "web question", source_type="web", token="webroom",
+                        status=None)
             db.update_task_status(conn, tid, "completed", result="web answer")
             (config.workspace_path / "Channels" / "webroom").mkdir(parents=True, exist_ok=True)
             result = await cmd_export(
                 _ctx(config, conn, "alice", "webroom", "", surface="web"),
             )
         assert "Exported 1 messages" in result
-        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "webroom.md"
-        content = export_path.read_text()
+        content = (_export_dir(config) / "webroom.md").read_text()
         assert "web question" in content
         assert "web answer" in content
 
-    @pytest.mark.asyncio
     async def test_incremental_export(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
             _seed_conversation(conn, count=2, start=1)
-            await cmd_export(_ctx(config, conn, "alice", "room1", ""))
-
-        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
+            await cmd_export(_ctx(config, conn))
 
         with db.get_db(config.db_path) as conn:
             new_ids = _seed_conversation(conn, count=2, start=3)
-            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_export(_ctx(config, conn))
 
         assert "Appended 2 new messages" in result
-        updated_content = export_path.read_text()
+        updated_content = (_export_dir(config) / "room1.md").read_text()
         assert "Prompt 3" in updated_content
         assert "Reply 4" in updated_content
         # Original turns still present
@@ -2566,103 +1873,87 @@ class TestCmdExport:
         meta = _parse_export_metadata(updated_content.split("\n")[0])
         assert meta["last_id"] == new_ids[-1]
 
-    @pytest.mark.asyncio
     async def test_incremental_export_appends_an_unanswered_turn(self, make_config):
         config = make_config()
-        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "room1", "alice", origin="talk")
             _seed_conversation(conn, count=1)
             db.backfill_room_messages_from_tasks(conn, "room1")
-            await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+            await cmd_export(_ctx(config, conn))
         with db.get_db(config.db_path) as conn:
-            mid = db.add_message(
-                conn, "room1", role="user", body="just between us",
-                origin_surface="talk", task_id=None, author_user_id="bob",
-            )
-            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
-            again = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+            mid = _add_unanswered(conn)
+            result = await cmd_export(_ctx(config, conn))
+            again = await cmd_export(_ctx(config, conn))
 
         assert "Appended 1 new messages" in result
-        content = export_path.read_text()
+        content = (_export_dir(config) / "room1.md").read_text()
         assert content.count("just between us") == 1
         assert _parse_export_metadata(content.split("\n")[0])["last_msg_id"] == mid
         assert "No new messages" in again
 
-    @pytest.mark.asyncio
     async def test_an_append_from_the_task_fallback_is_not_rewritten_later(
         self, make_config,
     ):
         config = make_config()
-        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "room1", "alice", origin="talk")
             _seed_conversation(conn, count=1, start=1)
             db.backfill_room_messages_from_tasks(conn, "room1")
-            await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+            await cmd_export(_ctx(config, conn))
         # Unmirrored completed turns put the room on the `tasks` fallback.
         with db.get_db(config.db_path) as conn:
             _seed_conversation(conn, count=2, start=2)
-            await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+            await cmd_export(_ctx(config, conn))
         # Mirroring them moves it back to the `messages` path.
         with db.get_db(config.db_path) as conn:
             db.backfill_room_messages_from_tasks(conn, "room1")
-            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_export(_ctx(config, conn))
 
         assert "No new messages" in result
-        content = export_path.read_text()
+        content = (_export_dir(config) / "room1.md").read_text()
         assert [content.count(f"Reply {n}") for n in (1, 2, 3)] == [1, 1, 1]
 
-    @pytest.mark.asyncio
     async def test_incremental_no_new_messages(self, make_config):
         config = make_config()
 
         # Existing export file with a last_id higher than any seeded task.
-        export_dir = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations"
+        export_dir = _export_dir(config)
         export_dir.mkdir(parents=True, exist_ok=True)
-        export_path = export_dir / "room1.md"
-        export_path.write_text("<!-- export:token=room1,last_id=100000,updated=2026-02-25T00:00:00Z -->\n\n# Room\n")
+        (export_dir / "room1.md").write_text(
+            "<!-- export:token=room1,last_id=100000,updated=2026-02-25T00:00:00Z -->\n\n# Room\n"
+        )
 
         with db.get_db(config.db_path) as conn:
             _seed_conversation(conn, count=2)
-            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_export(_ctx(config, conn))
 
         assert "No new messages" in result
 
-    @pytest.mark.asyncio
     async def test_format_aliases(self, make_config):
         """txt and plaintext should also work as format arguments."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
             _seed_conversation(conn, count=1)
 
-        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.txt"
+        export_path = _export_dir(config) / "room1.txt"
         for fmt_arg in ("txt", "plaintext", "text"):
             if export_path.exists():
                 export_path.unlink()
             with db.get_db(config.db_path) as conn:
-                result = await cmd_export(_ctx(config, conn, "alice", "room1", fmt_arg))
+                result = await cmd_export(_ctx(config, conn, args=fmt_arg))
             assert "room1.txt" in result
 
-    @pytest.mark.asyncio
-    async def test_help_includes_export(self, make_config):
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            result = await cmd_help(_ctx(config, conn, "alice", "room1", ""))
-        assert "!export" in result
-
-    @pytest.mark.asyncio
     async def test_different_format_creates_separate_file(self, make_config):
         """If existing export is .md but user asks for text, it creates .txt (new export)."""
         config = make_config()
 
-        export_dir = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations"
+        export_dir = _export_dir(config)
         export_dir.mkdir(parents=True, exist_ok=True)
         (export_dir / "room1.md").write_text("<!-- export:token=room1,last_id=10,updated=2026-02-25T00:00:00Z -->\n")
 
         with db.get_db(config.db_path) as conn:
             _seed_conversation(conn, count=1)
-            result = await cmd_export(_ctx(config, conn, "alice", "room1", "text"))
+            result = await cmd_export(_ctx(config, conn, args="text"))
 
         # Should create a new .txt file, not append to .md
         assert "room1.txt" in result
@@ -2676,39 +1967,38 @@ class TestCmdExport:
 # ---------------------------------------------------------------------------
 
 
+def _finished(db_path, prompt, *, user_id="alice", status="completed", **fields):
+    with db.get_db(db_path) as conn:
+        task_id = db.create_task(conn, prompt=prompt, user_id=user_id)
+        db.update_task_status(conn, task_id, status, **fields)
+    return task_id
+
+
+async def _more(config, args):
+    with db.get_db(config.db_path) as conn:
+        return await cmd_more(_ctx(config, conn, args=args))
+
+
 class TestCmdMore:
     """Test !more command for viewing execution traces."""
 
-    @pytest.mark.asyncio
-    async def test_a_superscript_digit_returns_the_usage_line(
-        self, make_config, db_path
-    ):
-        """`isdigit` is True for '²' and `int()` refuses it, so this guard used
-        to fall through and the user got `Command !more failed: invalid literal
-        for int()` rather than the usage line. Same guard as `!confirm` and
-        `!stop`."""
-        config = make_config()
-        with db.get_db(db_path) as conn:
-            result = await cmd_more(_ctx(config, conn, "alice", "room1", "²"))
+    # `isdigit` is True for '²' and `int()` refuses it, so this guard used to
+    # fall through and the user got `Command !more failed: invalid literal for
+    # int()` rather than the usage line. Same guard as `!confirm` and `!stop`.
+    @pytest.mark.parametrize("args", ["²", "notanumber"])
+    async def test_a_malformed_id_returns_the_usage_line(self, make_config, args):
+        assert "Usage:" in await _more(make_config(), args)
 
-        assert "Usage:" in result
-
-    @pytest.mark.asyncio
     async def test_shows_execution_trace(self, make_config, db_path):
-        config = make_config()
         trace = json.dumps([
             {"type": "text", "text": "Let me look into that."},
             {"type": "tool", "text": "Read config.py"},
             {"type": "text", "text": "I see the issue. Let me fix it."},
             {"type": "tool", "text": "Edit config.py"},
         ])
-        with db.get_db(db_path) as conn:
-            task_id = db.create_task(conn, prompt="Fix the config", user_id="alice")
-            db.update_task_status(conn, task_id, "completed", result="Fixed it.", execution_trace=trace)
-
-        MagicMock()
-        with db.get_db(db_path) as conn:
-            result = await cmd_more(_ctx(config, conn, "alice", "room1", str(task_id)))
+        task_id = _finished(db_path, "Fix the config", result="Fixed it.",
+                            execution_trace=trace)
+        result = await _more(make_config(), str(task_id))
 
         assert f"Task #{task_id}" in result
         assert "Let me look into that." in result
@@ -2716,92 +2006,37 @@ class TestCmdMore:
         assert "Edit config.py" in result
         assert "Fixed it." in result
 
-    @pytest.mark.asyncio
     async def test_shows_the_question_a_confirmed_task_asked(self, make_config, db_path):
-        config = make_config()
         trace = json.dumps([
             {"type": "tool", "text": "List files"},
             {"type": "gate", "text": "May I delete them?", "outcome": "approved"},
             {"type": "tool", "text": "Delete files"},
         ])
-        with db.get_db(db_path) as conn:
-            task_id = db.create_task(conn, prompt="Clean up", user_id="alice")
-            db.update_task_status(conn, task_id, "completed", result="Done", execution_trace=trace)
-        with db.get_db(db_path) as conn:
-            result = await cmd_more(_ctx(config, conn, "alice", "room1", str(task_id)))
+        task_id = _finished(db_path, "Clean up", result="Done", execution_trace=trace)
+        result = await _more(make_config(), str(task_id))
         assert "May I delete them? (approved)" in result
 
-    @pytest.mark.asyncio
     async def test_accepts_hash_prefix(self, make_config, db_path):
-        config = make_config()
         trace = json.dumps([{"type": "tool", "text": "Read file"}])
-        with db.get_db(db_path) as conn:
-            task_id = db.create_task(conn, prompt="Test", user_id="alice")
-            db.update_task_status(conn, task_id, "completed", result="Done", execution_trace=trace)
+        task_id = _finished(db_path, "Test", result="Done", execution_trace=trace)
+        assert f"Task #{task_id}" in await _more(make_config(), f"#{task_id}")
 
-        MagicMock()
-        with db.get_db(db_path) as conn:
-            result = await cmd_more(_ctx(config, conn, "alice", "room1", f"#{task_id}"))
-
-        assert f"Task #{task_id}" in result
-
-    @pytest.mark.asyncio
     async def test_no_trace_available(self, make_config, db_path):
-        config = make_config()
-        with db.get_db(db_path) as conn:
-            task_id = db.create_task(conn, prompt="Old task", user_id="alice")
-            db.update_task_status(conn, task_id, "completed", result="Done")
+        task_id = _finished(db_path, "Old task", result="Done")
+        assert "no execution trace" in await _more(make_config(), str(task_id))
 
-        MagicMock()
-        with db.get_db(db_path) as conn:
-            result = await cmd_more(_ctx(config, conn, "alice", "room1", str(task_id)))
+    async def test_task_not_found(self, make_config):
+        assert "not found" in await _more(make_config(), "99999")
 
-        assert "no execution trace" in result
-
-    @pytest.mark.asyncio
-    async def test_task_not_found(self, make_config, db_path):
-        config = make_config()
-        MagicMock()
-        with db.get_db(db_path) as conn:
-            result = await cmd_more(_ctx(config, conn, "alice", "room1", "99999"))
-
-        assert "not found" in result
-
-    @pytest.mark.asyncio
     async def test_other_users_task_blocked(self, make_config, db_path):
         config = make_config()
         config.admin_users = {"bob"}  # alice is NOT admin
-        with db.get_db(db_path) as conn:
-            task_id = db.create_task(conn, prompt="Secret", user_id="bob")
-            db.update_task_status(conn, task_id, "completed", result="Done")
+        task_id = _finished(db_path, "Secret", user_id="bob", result="Done")
+        assert "another user" in await _more(config, str(task_id))
 
-        MagicMock()
-        with db.get_db(db_path) as conn:
-            result = await cmd_more(_ctx(config, conn, "alice", "room1", str(task_id)))
-
-        assert "another user" in result
-
-    @pytest.mark.asyncio
-    async def test_invalid_task_id(self, make_config, db_path):
-        config = make_config()
-        MagicMock()
-        with db.get_db(db_path) as conn:
-            result = await cmd_more(_ctx(config, conn, "alice", "room1", "notanumber"))
-
-        assert "Usage" in result
-
-    @pytest.mark.asyncio
     async def test_running_task_shows_status(self, make_config, db_path):
-        config = make_config()
-        with db.get_db(db_path) as conn:
-            task_id = db.create_task(conn, prompt="In progress", user_id="alice")
-            db.update_task_status(conn, task_id, "running")
-
-        MagicMock()
-        with db.get_db(db_path) as conn:
-            result = await cmd_more(_ctx(config, conn, "alice", "room1", str(task_id)))
-
-        assert "still running" in result
+        task_id = _finished(db_path, "In progress", status="running")
+        assert "still running" in await _more(make_config(), str(task_id))
 
 
 # =============================================================================
@@ -2809,366 +2044,207 @@ class TestCmdMore:
 # =============================================================================
 
 
+def _hit(summary, task_id=100, token="room1", date="Apr 1", **extra):
+    return {
+        "date": date, "room": token, "summary": summary, "task_id": task_id,
+        "conversation_token": token, **extra,
+    }
+
+
+def _talk_hit(summary, token="room1", date="Apr 1", **extra):
+    return {
+        "date": date, "room": token, "summary": summary,
+        "conversation_token": token, **extra,
+    }
+
+
+async def _identity_resolve(client, tokens):
+    return {t: t for t in tokens}
+
+
+async def _search(config, args, memory=(), talk=(), *, token="room1",
+                  surface="talk", resolve=_identity_resolve):
+    """Run `!search` against canned memory and Talk hits.
+
+    Returns the reply and both search mocks, so a test can read their calls.
+    """
+    with (
+        db.get_db(config.db_path) as conn,
+        patch("istota.commands._search_memory", return_value=list(memory)) as mock_mem,
+        patch("istota.commands._search_talk_api", return_value=list(talk)) as mock_talk,
+        patch("istota.commands._resolve_room_names", side_effect=resolve),
+    ):
+        result = await cmd_search(
+            _ctx(config, conn, conversation_token=token, args=args, surface=surface)
+        )
+    return result, mock_mem, mock_talk
+
+
 class TestCmdSearch:
     """Test !search command for conversation history search."""
 
-    def _mock_resolve(self):
-        """Patch _resolve_room_names to return token as name (identity map)."""
-        async def _identity_resolve(client, tokens):
-            return {t: t for t in tokens}
-        return patch("istota.commands._resolve_room_names", side_effect=_identity_resolve)
-
-    @pytest.mark.asyncio
-    async def test_empty_query_returns_usage(self, make_config):
+    @pytest.mark.parametrize("args", ["", "   "], ids=["empty", "whitespace"])
+    async def test_empty_query_returns_usage(self, make_config, args):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", ""))
+            result = await cmd_search(_ctx(config, conn, args=args))
         assert "Usage" in result
         assert "!search" in result
+        # Usage string should mention the filter flags.
+        assert "--since" in result
+        assert "--memories" in result
 
-    @pytest.mark.asyncio
-    async def test_whitespace_only_query_returns_usage(self, make_config):
+    async def test_search_current_room_no_results(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", "   "))
-        assert "Usage" in result
-
-    @pytest.mark.asyncio
-    async def test_search_current_room_no_results(self, make_config, db_path):
-        config = make_config()
-        with db.get_db(db_path) as conn:
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", "nonexistent query xyz"))
+            result = await cmd_search(_ctx(config, conn, args="nonexistent query xyz"))
         assert "No results" in result
 
-    @pytest.mark.asyncio
     async def test_search_current_room_filters_by_token(self, make_config, db_path):
         """Results from other rooms should be excluded when searching current room."""
         config = make_config()
         with db.get_db(db_path) as conn:
-            # Create tasks in different rooms
-            t1 = db.create_task(conn, prompt="parser bug discussion", user_id="alice",
-                                conversation_token="room1", source_type="talk")
+            t1 = _task(conn, "parser bug discussion", status=None)
             db.update_task_status(conn, t1, "completed", result="Fixed the parser bug")
-            t2 = db.create_task(conn, prompt="parser bug in other room", user_id="alice",
-                                conversation_token="room2", source_type="talk")
+            t2 = _task(conn, "parser bug in other room", token="room2", status=None)
             db.update_task_status(conn, t2, "completed", result="Also about parser")
 
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            self._mock_resolve(),
-        ):
-            # Memory search returns results from both rooms
-            mock_mem.return_value = [
-                {"date": "Apr 1", "room": "room1", "summary": "Parser bug in room1",
-                 "task_id": t1, "conversation_token": "room1"},
-                {"date": "Mar 28", "room": "room2", "summary": "Parser bug in room2",
-                 "task_id": t2, "conversation_token": "room2"},
-            ]
-            mock_talk.return_value = []
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", "parser bug"))
+        result, _, _ = await _search(config, "parser bug", memory=[
+            _hit("Parser bug in room1", t1),
+            _hit("Parser bug in room2", t2, "room2", date="Mar 28"),
+        ])
 
-        # Only room1 result should appear
         assert "Parser bug in room1" in result
         assert "room2" not in result
 
-    @pytest.mark.asyncio
-    async def test_search_all_rooms(self, make_config, db_path):
+    async def test_search_all_rooms(self, make_config):
         """--all flag should return results from all rooms."""
-        config = make_config()
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            self._mock_resolve(),
-        ):
-            mock_mem.return_value = [
-                {"date": "Apr 1", "room": "room1", "summary": "Bug in room1",
-                 "task_id": 100, "conversation_token": "room1"},
-                {"date": "Mar 28", "room": "room2", "summary": "Bug in room2",
-                 "task_id": 200, "conversation_token": "room2"},
-            ]
-            mock_talk.return_value = []
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all parser bug"))
-
+        result, _, _ = await _search(make_config(), "--all parser bug", memory=[
+            _hit("Bug in room1", 100),
+            _hit("Bug in room2", 200, "room2", date="Mar 28"),
+        ])
         assert "room1" in result
         assert "room2" in result
 
-    @pytest.mark.asyncio
-    async def test_search_specific_room(self, make_config, db_path):
+    async def test_search_specific_room(self, make_config):
         """--room flag should filter to a specific room."""
-        config = make_config()
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            self._mock_resolve(),
-        ):
-            mock_mem.return_value = [
-                {"date": "Apr 1", "room": "room1", "summary": "Result in room1",
-                 "task_id": 100, "conversation_token": "room1"},
-                {"date": "Mar 28", "room": "otherroom", "summary": "Result in other",
-                 "task_id": 200, "conversation_token": "otherroom"},
-            ]
-            mock_talk.return_value = []
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--room otherroom some query"))
-
+        result, _, _ = await _search(
+            make_config(), "--room otherroom some query", memory=[
+                _hit("Result in room1", 100),
+                _hit("Result in other", 200, "otherroom", date="Mar 28"),
+            ],
+        )
         assert "otherroom" in result
         assert "Result in room1" not in result
 
-    @pytest.mark.asyncio
-    async def test_output_format_includes_task_reference(self, make_config, db_path):
+    async def test_output_format_includes_task_reference(self, make_config):
         """Results without talk_message_id should fall back to task ID reference."""
-        config = make_config()
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            self._mock_resolve(),
-        ):
-            mock_mem.return_value = [
-                {"date": "Apr 1", "room": "room1", "summary": "Fixed parser bug",
-                 "task_id": 46945, "conversation_token": "room1"},
-            ]
-            mock_talk.return_value = []
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all parser bug"))
-
+        result, _, _ = await _search(
+            make_config(), "--all parser bug", memory=[_hit("Fixed parser bug", 46945)],
+        )
         assert "#46945" in result
 
-    @pytest.mark.asyncio
-    async def test_web_surface_skips_talk_api(self, make_config, db_path):
+    async def test_web_surface_skips_talk_api(self, make_config):
         """On a non-Talk surface, search relies on the memory index only and
         never reaches for the Talk full-text API or builds Talk deep links."""
-        config = make_config()
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            self._mock_resolve(),
-        ):
-            mock_mem.return_value = [
-                {"date": "Apr 1", "room": "webroom", "summary": "found in web chat",
-                 "task_id": 5, "conversation_token": "webroom", "talk_message_id": 999},
-            ]
-            result = await cmd_search(
-                _ctx(config, conn, "alice", "webroom", "--all web chat", surface="web"),
-            )
+        result, _, mock_talk = await _search(
+            make_config(), "--all web chat", token="webroom", surface="web",
+            memory=[_hit("found in web chat", 5, "webroom", talk_message_id=999)],
+        )
 
         mock_talk.assert_not_called()
         assert "found in web chat" in result
         # No Talk deep link on a non-Talk surface
         assert "/call/" not in result
 
-    @pytest.mark.asyncio
-    async def test_output_format_with_message_link(self, make_config, db_path):
+    async def test_output_format_with_message_link(self, make_config):
         """Results with talk_message_id should show a deep link instead of task ref."""
-        config = make_config()
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            self._mock_resolve(),
-        ):
-            mock_mem.return_value = [
-                {"date": "Apr 1", "room": "room1", "summary": "Fixed parser bug",
-                 "task_id": 100, "talk_message_id": 38939,
-                 "conversation_token": "room1"},
-            ]
-            mock_talk.return_value = []
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all parser bug"))
-
+        result, _, _ = await _search(make_config(), "--all parser bug", memory=[
+            _hit("Fixed parser bug", 100, talk_message_id=38939),
+        ])
         assert "https://nc.test/call/room1#message_38939" in result
 
-    @pytest.mark.asyncio
-    async def test_output_format_header(self, make_config, db_path):
+    async def test_output_format_header(self, make_config):
         """Output should start with result count and query."""
-        config = make_config()
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            self._mock_resolve(),
-        ):
-            mock_mem.return_value = [
-                {"date": "Apr 1", "room": "room1", "summary": "Found it",
-                 "task_id": 100, "conversation_token": "room1"},
-            ]
-            mock_talk.return_value = []
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all test query"))
-
+        result, _, _ = await _search(
+            make_config(), "--all test query", memory=[_hit("Found it")],
+        )
         assert "1 result" in result
         assert "test query" in result
 
-    @pytest.mark.asyncio
-    async def test_talk_api_results_included(self, make_config, db_path):
+    async def test_talk_api_results_included(self, make_config):
         """Talk API results should be merged when memory search has no hits."""
-        config = make_config()
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            self._mock_resolve(),
-        ):
-            mock_mem.return_value = []
-            mock_talk.return_value = [
-                {"date": "Apr 1", "room": "room1", "summary": "Recent chat message",
-                 "talk_link": "https://nc.test/call/room1#message_123",
-                 "conversation_token": "room1"},
-            ]
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all recent chat"))
-
+        result, _, _ = await _search(make_config(), "--all recent chat", talk=[
+            _talk_hit("Recent chat message",
+                      talk_link="https://nc.test/call/room1#message_123"),
+        ])
         assert "Recent chat message" in result
         assert "https://nc.test/call/room1#message_123" in result
 
-    @pytest.mark.asyncio
-    async def test_talk_api_results_filtered_by_room(self, make_config, db_path):
-        """Talk API results should respect room scoping."""
-        config = make_config()
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            self._mock_resolve(),
-        ):
-            mock_mem.return_value = []
-            mock_talk.return_value = [
-                {"date": "Apr 1", "room": "room1", "summary": "In room1",
-                 "talk_link": "https://nc.test/call/room1#message_1",
-                 "conversation_token": "room1"},
-                {"date": "Apr 1", "room": "room2", "summary": "In room2",
-                 "talk_link": "https://nc.test/call/room2#message_2",
-                 "conversation_token": "room2"},
-            ]
-            MagicMock()
-            # Default: current room only
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", "some query"))
-
+    async def test_talk_api_results_filtered_by_room(self, make_config):
+        """Talk API results should respect room scoping (current room by default)."""
+        result, _, _ = await _search(make_config(), "some query", talk=[
+            _talk_hit("In room1", talk_link="https://nc.test/call/room1#message_1"),
+            _talk_hit("In room2", "room2",
+                      talk_link="https://nc.test/call/room2#message_2"),
+        ])
         assert "In room1" in result
         assert "In room2" not in result
 
-    @pytest.mark.asyncio
-    async def test_max_results_capped(self, make_config, db_path):
+    async def test_max_results_capped(self, make_config):
         """Should cap results at 8."""
-        config = make_config()
         many_results = [
-            {"date": f"Apr {i}", "room": "room1", "summary": f"Result {i}",
-             "task_id": i, "conversation_token": "room1"}
-            for i in range(15)
+            _hit(f"Result {i}", i, date=f"Apr {i}") for i in range(15)
         ]
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            self._mock_resolve(),
-        ):
-            mock_mem.return_value = many_results
-            mock_talk.return_value = []
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all lots of results"))
-
-        # Count numbered results (lines starting with "N. ")
-        import re
+        result, _, _ = await _search(
+            make_config(), "--all lots of results", memory=many_results,
+        )
         numbered = re.findall(r"^\d+\.", result, re.MULTILINE)
         assert len(numbered) <= 8
 
-    @pytest.mark.asyncio
-    async def test_deduplication_between_sources(self, make_config, db_path):
+    async def test_deduplication_between_sources(self, make_config):
         """Same task_id from memory and Talk should not appear twice."""
-        config = make_config()
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            self._mock_resolve(),
-        ):
-            mock_mem.return_value = [
-                {"date": "Apr 1", "room": "room1", "summary": "From memory",
-                 "task_id": 100, "conversation_token": "room1"},
-            ]
-            # Talk result with same task_id
-            mock_talk.return_value = [
-                {"date": "Apr 1", "room": "room1", "summary": "From talk",
-                 "task_id": 100, "conversation_token": "room1"},
-            ]
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all test"))
-
+        result, _, _ = await _search(
+            make_config(), "--all test",
+            memory=[_hit("From memory", 100)], talk=[_hit("From talk", 100)],
+        )
         assert "1 result" in result
 
-    @pytest.mark.asyncio
-    async def test_room_names_resolved(self, make_config, db_path):
+    async def test_room_names_resolved(self, make_config):
         """Room tokens should be resolved to display names."""
-        config = make_config()
-
         async def _named_resolve(client, tokens):
             return {t: {"room1": "General", "room2": "Dev Chat"}.get(t, t) for t in tokens}
 
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            patch("istota.commands._resolve_room_names", side_effect=_named_resolve),
-        ):
-            mock_mem.return_value = [
-                {"date": "Apr 1", "room": "room1", "summary": "Some discussion",
-                 "task_id": 100, "conversation_token": "room1"},
-            ]
-            mock_talk.return_value = []
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all discussion"))
-
+        result, _, _ = await _search(
+            make_config(), "--all discussion", memory=[_hit("Some discussion")],
+            resolve=_named_resolve,
+        )
         assert "in General" in result
         assert "room1" not in result  # token should not appear
-
-    @pytest.mark.asyncio
-    async def test_help_registered(self, make_config):
-        """!search should appear in !help output."""
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            MagicMock()
-            result = await cmd_help(_ctx(config, conn, "alice", "room1", ""))
-        assert "!search" in result
 
 
 class TestSearchMemory:
     """Test the _search_memory helper that wraps memory_search."""
 
     def test_maps_search_results_to_dicts(self, make_config, db_path):
-        from istota.commands import _search_memory
         from istota.memory.search import SearchResult
 
         config = make_config()
-        mock_results = [
-            SearchResult(
-                chunk_id=1, content="User: How do I fix the parser?\n\nBot: Check stream_parser.py",
-                score=0.8, source_type="conversation", source_id="500",
-                metadata={"task_id": "500"},
-            ),
-        ]
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands.memory_search_mod.search", return_value=mock_results),
-        ):
+        with db.get_db(db_path) as conn:
             # Create the task so we can resolve its conversation_token
             task_id = db.create_task(conn, prompt="Fix parser", user_id="alice",
                                      conversation_token="room1", source_type="talk",
                                      talk_message_id=12345)
-            # Override source_id to match
-            mock_results[0].source_id = str(task_id)
-            mock_results[0].metadata["task_id"] = str(task_id)
-
-            results = _search_memory(config, conn, "alice", "fix parser")
+            mock_results = [
+                SearchResult(
+                    chunk_id=1,
+                    content="User: How do I fix the parser?\n\nBot: Check stream_parser.py",
+                    score=0.8, source_type="conversation", source_id=str(task_id),
+                    metadata={"task_id": str(task_id)},
+                ),
+            ]
+            with patch("istota.commands.memory_search_mod.search", return_value=mock_results):
+                results = _search_memory(config, conn, "alice", "fix parser")
 
         assert len(results) == 1
         assert results[0]["task_id"] == task_id
@@ -3177,20 +2253,15 @@ class TestSearchMemory:
         assert len(results[0]["summary"]) > 0
 
     def test_returns_empty_when_no_results(self, make_config, db_path):
-        from istota.commands import _search_memory
-
         config = make_config()
         with (
             db.get_db(db_path) as conn,
             patch("istota.commands.memory_search_mod.search", return_value=[]),
         ):
-            results = _search_memory(config, conn, "alice", "nothing here")
-
-        assert results == []
+            assert _search_memory(config, conn, "alice", "nothing here") == []
 
     def test_skips_results_without_task(self, make_config, db_path):
         """Memory results whose source_id doesn't map to a task should still work."""
-        from istota.commands import _search_memory
         from istota.memory.search import SearchResult
 
         config = make_config()
@@ -3226,11 +2297,7 @@ class TestSearchTalkApi:
             side_effect=error) if error else AsyncMock(return_value=data)
         return patch("istota.async_runtime.get_talk_client", return_value=client)
 
-    @pytest.mark.asyncio
     async def test_returns_formatted_results(self, make_config):
-        from istota.commands import _search_talk_api
-
-        config = make_config()
         # Mock the OCS response from Nextcloud unified search
         mock_ocs_data = {
             "entries": [
@@ -3238,15 +2305,12 @@ class TestSearchTalkApi:
                     "title": "Recent message about deployment",
                     "subline": "Let me check the deploy status",
                     "resourceUrl": "https://nc.test/call/room1#message_456",
-                    "attributes": {
-                        "conversation": "room1",
-                        "messageId": "456",
-                    },
+                    "attributes": {"conversation": "room1", "messageId": "456"},
                 },
             ],
         }
         with self._talk_client(mock_ocs_data):
-            results = await _search_talk_api(config, "deploy")
+            results = await _search_talk_api(make_config(), "deploy")
 
         assert len(results) == 1
         # subline is preferred over title (title is "username in room")
@@ -3254,63 +2318,43 @@ class TestSearchTalkApi:
         assert results[0]["conversation_token"] == "room1"
         assert "message_456" in results[0]["talk_link"]
 
-    @pytest.mark.asyncio
-    async def test_returns_empty_on_api_failure(self, make_config):
-        from istota.commands import _search_talk_api
-
-        config = make_config()
-        with self._talk_client(error=RuntimeError("Talk unreachable")):
-            results = await _search_talk_api(config, "test")
-
-        assert results == []
-
-    @pytest.mark.asyncio
-    async def test_returns_empty_on_no_entries(self, make_config):
-        from istota.commands import _search_talk_api
-
-        config = make_config()
-        with self._talk_client({"entries": []}):
-            results = await _search_talk_api(config, "test")
-
-        assert results == []
+    @pytest.mark.parametrize("kwargs", [
+        {"error": RuntimeError("Talk unreachable")},
+        {"data": {"entries": []}},
+    ], ids=["api-failure", "no-entries"])
+    async def test_returns_empty(self, make_config, kwargs):
+        with self._talk_client(**kwargs):
+            assert await _search_talk_api(make_config(), "test") == []
 
 
 class TestParseSearchArgs:
     """Test _parse_search_args with new --since, --week, --memories flags."""
 
-    def test_basic_query(self):
-        result = _parse_search_args("hello world")
-        assert result.scope is None
-        assert result.query == "hello world"
-        assert result.since is None
-        assert result.memories_only is False
-
-    def test_all_flag(self):
-        result = _parse_search_args("--all some query")
-        assert result.scope == "all"
-        assert result.query == "some query"
-
-    def test_room_flag(self):
-        result = _parse_search_args("--room abc123 some query")
-        assert result.scope == "abc123"
-        assert result.query == "some query"
-
-    def test_since_flag(self):
-        result = _parse_search_args("--since 2026-03-25 deployment")
-        assert result.since == "2026-03-25"
-        assert result.query == "deployment"
+    # `--since` with no date after it is query text; flags are order-independent.
+    @pytest.mark.parametrize("args,scope,query,since,memories_only", [
+        ("hello world", None, "hello world", None, False),
+        ("--all some query", "all", "some query", None, False),
+        ("--room abc123 some query", "abc123", "some query", None, False),
+        ("--since 2026-03-25 deployment", None, "deployment", "2026-03-25", False),
+        ("--memories something", None, "something", None, True),
+        ("--all --since 2026-01-01 query here", "all", "query here", "2026-01-01", False),
+        ("", None, "", None, False),
+        ("--since", None, "--since", None, False),
+        ("--memories --all query", "all", "query", None, True),
+        ("--all --memories query", "all", "query", None, True),
+    ])
+    def test_parse(self, args, scope, query, since, memories_only):
+        result = _parse_search_args(args)
+        assert result.scope == scope
+        assert result.query == query
+        assert result.since == since
+        assert result.memories_only is memories_only
 
     def test_week_flag(self):
-        from datetime import date, timedelta
         result = _parse_search_args("--week deployment")
         expected = (date.today() - timedelta(days=7)).isoformat()
         assert result.since == expected
         assert result.query == "deployment"
-
-    def test_memories_flag(self):
-        result = _parse_search_args("--memories something")
-        assert result.memories_only is True
-        assert result.query == "something"
 
     def test_combined_flags(self):
         result = _parse_search_args("--all --week --memories deployment")
@@ -3319,133 +2363,46 @@ class TestParseSearchArgs:
         assert result.memories_only is True
         assert result.query == "deployment"
 
-    def test_since_and_all(self):
-        result = _parse_search_args("--all --since 2026-01-01 query here")
-        assert result.scope == "all"
-        assert result.since == "2026-01-01"
-        assert result.query == "query here"
-
-    def test_empty_returns_empty_query(self):
-        result = _parse_search_args("")
-        assert result.query == ""
-
-    def test_since_without_date_treats_as_query(self):
-        """--since at end with no date should be treated as query text."""
-        result = _parse_search_args("--since")
-        assert result.query == "--since"
-        assert result.since is None
-
-    def test_flags_order_independent(self):
-        r1 = _parse_search_args("--memories --all query")
-        r2 = _parse_search_args("--all --memories query")
-        assert r1.scope == r2.scope == "all"
-        assert r1.memories_only == r2.memories_only is True
-        assert r1.query == r2.query == "query"
-
 
 class TestCmdSearchFiltering:
     """Test !search with --since, --week, --memories filtering."""
 
-    def _mock_resolve(self):
-        async def _identity_resolve(client, tokens):
-            return {t: t for t in tokens}
-        return patch("istota.commands._resolve_room_names", side_effect=_identity_resolve)
-
-    @pytest.mark.asyncio
-    async def test_memories_only_skips_talk_api(self, make_config, db_path):
+    async def test_memories_only_skips_talk_api(self, make_config):
         """--memories should skip Talk API search entirely."""
-        config = make_config()
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            self._mock_resolve(),
-        ):
-            mock_mem.return_value = [
-                {"date": "Mar 28", "room": "room1", "summary": "Memory result",
-                 "task_id": None, "conversation_token": "room1", "source_type": "memory_file"},
-            ]
-            mock_talk.return_value = []
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all --memories test"))
-
+        result, _, mock_talk = await _search(
+            make_config(), "--all --memories test", memory=[
+                _hit("Memory result", None, date="Mar 28", source_type="memory_file"),
+            ],
+        )
         mock_talk.assert_not_called()
         assert "Memory result" in result
 
-    @pytest.mark.asyncio
-    async def test_memories_only_passes_source_types(self, make_config, db_path):
+    async def test_memories_only_passes_source_types(self, make_config):
         """--memories passes the full memory source set (files + user + skill
         overlays + channel) to _search_memory — not just conversation-less
         memory_file. A skill overlay reaches a prompt only on a task that
         selected its skill, so this is the surface that finds one from a room."""
-        config = make_config()
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            self._mock_resolve(),
-        ):
-            mock_mem.return_value = []
-            mock_talk.return_value = []
-            MagicMock()
-            await cmd_search(_ctx(config, conn, "alice", "room1", "--all --memories test"))
-
-        call_kwargs = mock_mem.call_args
-        assert call_kwargs.kwargs.get("source_types") == [
+        _, mock_mem, _ = await _search(make_config(), "--all --memories test")
+        assert mock_mem.call_args.kwargs.get("source_types") == [
             "memory_file", "user_memory", "skill_overlay",
             "channel_memory", "channel_memory_durable",
         ]
 
-    @pytest.mark.asyncio
-    async def test_since_passed_to_search_memory(self, make_config, db_path):
+    async def test_since_passed_to_search_memory(self, make_config):
         """--since should be forwarded to _search_memory."""
-        config = make_config()
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            self._mock_resolve(),
-        ):
-            mock_mem.return_value = []
-            mock_talk.return_value = []
-            MagicMock()
-            await cmd_search(_ctx(config, conn, "alice", "room1", "--all --since 2026-03-01 test"))
+        _, mock_mem, _ = await _search(make_config(), "--all --since 2026-03-01 test")
+        assert mock_mem.call_args.kwargs.get("since") == "2026-03-01"
 
-        call_kwargs = mock_mem.call_args
-        assert call_kwargs.kwargs.get("since") == "2026-03-01"
-
-    @pytest.mark.asyncio
-    async def test_since_filters_talk_results(self, make_config, db_path):
+    async def test_since_filters_talk_results(self, make_config):
         """--since should filter out Talk API results older than the date."""
-        config = make_config()
-        with (
-            db.get_db(db_path) as conn,
-            patch("istota.commands._search_memory") as mock_mem,
-            patch("istota.commands._search_talk_api") as mock_talk,
-            self._mock_resolve(),
-        ):
-            mock_mem.return_value = []
-            mock_talk.return_value = [
-                {"date": "2026-03-15", "room": "room1", "summary": "Old result",
-                 "conversation_token": "room1"},
-                {"date": "2026-03-25", "room": "room1", "summary": "Recent result",
-                 "conversation_token": "room1"},
-            ]
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all --since 2026-03-20 test"))
-
+        result, _, _ = await _search(
+            make_config(), "--all --since 2026-03-20 test", talk=[
+                _talk_hit("Old result", date="2026-03-15"),
+                _talk_hit("Recent result", date="2026-03-25"),
+            ],
+        )
         assert "Recent result" in result
         assert "Old result" not in result
-
-    @pytest.mark.asyncio
-    async def test_updated_usage_string(self, make_config, db_path):
-        """Usage string should mention new flags."""
-        config = make_config()
-        with db.get_db(db_path) as conn:
-            MagicMock()
-            result = await cmd_search(_ctx(config, conn, "alice", "room1", ""))
-        assert "--since" in result
-        assert "--memories" in result
 
 
 # =============================================================================
@@ -3453,80 +2410,58 @@ class TestCmdSearchFiltering:
 # =============================================================================
 
 
+async def _trust(config, args, command=cmd_trust):
+    with db.get_db(config.db_path) as conn:
+        return await command(_ctx(config, conn, args=args))
+
+
+def _add_trusted(config, sender="joe@example.com"):
+    with db.get_db(config.db_path) as conn:
+        db.add_trusted_sender(conn, "alice", sender)
+
+
+def _is_trusted(config, sender="joe@example.com"):
+    with db.get_db(config.db_path) as conn:
+        return db.is_sender_trusted_in_db(conn, "alice", sender)
+
+
 class TestTrustCommand:
-    @pytest.mark.asyncio
-    async def test_trust_adds_sender(self, make_config, db_path):
-        from istota.commands import cmd_trust
+    async def test_trust_adds_sender(self, make_config):
         config = make_config()
-        with db.get_db(db_path) as conn:
-            MagicMock()
-            result = await cmd_trust(_ctx(config, conn, "alice", "room1", "joe@example.com"))
+        result = await _trust(config, "joe@example.com")
         assert "Trusted" in result
         assert "joe@example.com" in result
-        with db.get_db(db_path) as conn:
-            assert db.is_sender_trusted_in_db(conn, "alice", "joe@example.com") is True
+        assert _is_trusted(config) is True
 
-    @pytest.mark.asyncio
-    async def test_trust_duplicate(self, make_config, db_path):
-        from istota.commands import cmd_trust
+    async def test_trust_duplicate(self, make_config):
         config = make_config()
-        with db.get_db(db_path) as conn:
-            db.add_trusted_sender(conn, "alice", "joe@example.com")
-            MagicMock()
-            result = await cmd_trust(_ctx(config, conn, "alice", "room1", "joe@example.com"))
-        assert "already trusted" in result
+        _add_trusted(config)
+        assert "already trusted" in await _trust(config, "joe@example.com")
 
-    @pytest.mark.asyncio
-    async def test_trust_no_args_lists_senders(self, make_config, db_path):
-        from istota.commands import cmd_trust
+    async def test_trust_no_args_lists_senders(self, make_config):
         config = make_config()
         config.users["alice"] = UserConfig(trusted_email_senders=["*@corp.com"])
-        with db.get_db(db_path) as conn:
-            db.add_trusted_sender(conn, "alice", "joe@example.com")
-            MagicMock()
-            result = await cmd_trust(_ctx(config, conn, "alice", "room1", ""))
+        _add_trusted(config)
+        result = await _trust(config, "")
         assert "*@corp.com" in result
         assert "(config)" in result
         assert "joe@example.com" in result
 
-    @pytest.mark.asyncio
-    async def test_trust_invalid_email(self, make_config, db_path):
-        from istota.commands import cmd_trust
-        config = make_config()
-        with db.get_db(db_path) as conn:
-            MagicMock()
-            result = await cmd_trust(_ctx(config, conn, "alice", "room1", "notanemail"))
-        assert "Usage" in result
+    async def test_trust_invalid_email(self, make_config):
+        assert "Usage" in await _trust(make_config(), "notanemail")
 
-    @pytest.mark.asyncio
-    async def test_untrust_removes_sender(self, make_config, db_path):
-        from istota.commands import cmd_untrust
+    async def test_untrust_removes_sender(self, make_config):
         config = make_config()
-        with db.get_db(db_path) as conn:
-            db.add_trusted_sender(conn, "alice", "joe@example.com")
-            MagicMock()
-            result = await cmd_untrust(_ctx(config, conn, "alice", "room1", "joe@example.com"))
-        assert "Removed" in result
-        with db.get_db(db_path) as conn:
-            assert db.is_sender_trusted_in_db(conn, "alice", "joe@example.com") is False
+        _add_trusted(config)
+        assert "Removed" in await _trust(config, "joe@example.com", cmd_untrust)
+        assert _is_trusted(config) is False
 
-    @pytest.mark.asyncio
-    async def test_untrust_nonexistent(self, make_config, db_path):
-        from istota.commands import cmd_untrust
-        config = make_config()
-        with db.get_db(db_path) as conn:
-            MagicMock()
-            result = await cmd_untrust(_ctx(config, conn, "alice", "room1", "nobody@example.com"))
+    async def test_untrust_nonexistent(self, make_config):
+        result = await _trust(make_config(), "nobody@example.com", cmd_untrust)
         assert "not in your trusted" in result
 
-    @pytest.mark.asyncio
-    async def test_trust_list_empty(self, make_config, db_path):
-        from istota.commands import cmd_trust
-        config = make_config()
-        with db.get_db(db_path) as conn:
-            MagicMock()
-            result = await cmd_trust(_ctx(config, conn, "alice", "room1", ""))
-        assert "No trusted senders" in result
+    async def test_trust_list_empty(self, make_config):
+        assert "No trusted senders" in await _trust(make_config(), "")
 
 
 # =============================================================================
@@ -3598,6 +2533,9 @@ def _snapshot(windows=None, *, spend=None, source="cache", error="", age=0.0):
     )
 
 
+_RESET_0900 = _snapshot([_window(resets_at="2026-08-22T09:00:00Z", resets_in=3600)])
+
+
 class TestCmdUsage:
     """`!usage`: token totals for everyone, the fleet split and the plan for admins.
 
@@ -3613,69 +2551,58 @@ class TestCmdUsage:
 
     def _patch_snapshot(self, monkeypatch, snapshot):
         """Patch `get_snapshot` and return the list it records its calls in."""
-        from istota import subscription_usage as su
-
         calls = []
 
         def _fake(config, **kwargs):
             calls.append(kwargs)
             return snapshot
 
-        monkeypatch.setattr(su, "get_snapshot", _fake)
+        monkeypatch.setattr(_subscription_usage, "get_snapshot", _fake)
         return calls
+
+    def _admin_config(self, make_config, monkeypatch, snapshot=None):
+        """A config whose only admin is bob, with `snapshot` patched in."""
+        config = make_config()
+        config.admin_users = {"bob"}
+        calls = self._patch_snapshot(
+            monkeypatch, _snapshot() if snapshot is None else snapshot
+        )
+        return config, calls
+
+    async def _usage(self, config, user_id="bob", rows=()):
+        with db.get_db(config.db_path) as conn:
+            for row in rows:
+                _seed_usage_row(conn, created_at=_recent_iso(), **row)
+            return await cmd_usage(_ctx(config, conn, user_id))
 
     async def _render(self, make_config, db_path, monkeypatch, snapshot, user_id="bob"):
         """Run the handler as an admin against `snapshot`, with no usage rows."""
-        from istota.commands import cmd_usage
-
-        config = make_config()
-        config.admin_users = {"bob"}
-        self._patch_snapshot(monkeypatch, snapshot)
-        with db.get_db(db_path) as conn:
-            return await cmd_usage(_ctx(config, conn, user_id))
+        config, _ = self._admin_config(make_config, monkeypatch, snapshot)
+        return await self._usage(config, user_id)
 
     # -- the admin split -----------------------------------------------------
 
-    @pytest.mark.asyncio
     async def test_non_admin_sees_only_their_own_token_totals(
-        self, make_config, db_path, monkeypatch
+        self, make_config, monkeypatch
     ):
-        from istota.commands import cmd_usage
-
-        config = make_config()
-        config.admin_users = {"bob"}
-        self._patch_snapshot(monkeypatch, _snapshot())
-        with db.get_db(db_path) as conn:
-            _seed_usage_row(conn, user_id="alice", created_at=_recent_iso(), billed=1000)
-            _seed_usage_row(conn, user_id="bob", created_at=_recent_iso(), billed=5_000_000)
-            result = await cmd_usage(_ctx(config, conn, "alice"))
+        """And never asks for the snapshot at all — not "the reply carries no
+        percentage": that assertion passes just as well against a handler that
+        fetched the plan and forgot to print it."""
+        config, calls = self._admin_config(make_config, monkeypatch)
+        result = await self._usage(config, "alice", rows=[
+            {"user_id": "alice", "billed": 1000},
+            {"user_id": "bob", "billed": 5_000_000},
+        ])
 
         assert "**Token usage**" in result
         assert "1,000 tokens" in result
         assert "5.0M" not in result
         assert "**By brain**" not in result
         assert "**Claude Code subscription**" not in result
-
-    @pytest.mark.asyncio
-    async def test_non_admin_never_asks_for_the_snapshot(
-        self, make_config, db_path, monkeypatch
-    ):
-        """Not "the reply carries no percentage": that assertion passes just as
-        well against a handler that fetched the plan and forgot to print it."""
-        from istota.commands import cmd_usage
-
-        config = make_config()
-        config.admin_users = {"bob"}
-        calls = self._patch_snapshot(monkeypatch, _snapshot())
-        with db.get_db(db_path) as conn:
-            _seed_usage_row(conn, user_id="alice", created_at=_recent_iso(), billed=1000)
-            await cmd_usage(_ctx(config, conn, "alice"))
-
         assert calls == []
 
-    @pytest.mark.asyncio
     async def test_an_unattributable_caller_gets_nobodys_rows(
-        self, make_config, db_path, monkeypatch
+        self, make_config, monkeypatch
     ):
         """An empty `user_id` must not read as "no filter".
 
@@ -3683,15 +2610,11 @@ class TestCmdUsage:
         truthiness, so passing a falsy id straight through would drop the clause
         and hand a caller `is_admin` just refused the whole deployment's totals.
         """
-        from istota.commands import cmd_usage
-
-        config = make_config()
-        config.admin_users = {"bob"}
-        calls = self._patch_snapshot(monkeypatch, _snapshot())
-        with db.get_db(db_path) as conn:
-            _seed_usage_row(conn, user_id="alice", created_at=_recent_iso(), billed=1000)
-            _seed_usage_row(conn, user_id="bob", created_at=_recent_iso(), billed=5_000_000)
-            result = await cmd_usage(_ctx(config, conn, ""))
+        config, calls = self._admin_config(make_config, monkeypatch)
+        result = await self._usage(config, "", rows=[
+            {"user_id": "alice", "billed": 1000},
+            {"user_id": "bob", "billed": 5_000_000},
+        ])
 
         assert "No usage recorded." in result
         assert "1,000 tokens" not in result
@@ -3699,25 +2622,15 @@ class TestCmdUsage:
         assert "**By brain**" not in result
         assert calls == []
 
-    @pytest.mark.asyncio
     async def test_admin_gets_all_three_sections_fleet_wide(
-        self, make_config, db_path, monkeypatch
+        self, make_config, monkeypatch
     ):
-        from istota.commands import cmd_usage
-
-        config = make_config()
-        config.admin_users = {"bob"}
-        calls = self._patch_snapshot(monkeypatch, _snapshot())
-        with db.get_db(db_path) as conn:
-            _seed_usage_row(
-                conn, user_id="alice", created_at=_recent_iso(), billed=1000,
-                brain_kind="claude_code",
-            )
-            _seed_usage_row(
-                conn, user_id="bob", created_at=_recent_iso(), billed=2000,
-                brain_kind="native", cost_usd=4.18, cost_basis="api",
-            )
-            result = await cmd_usage(_ctx(config, conn, "bob"))
+        config, calls = self._admin_config(make_config, monkeypatch)
+        result = await self._usage(config, rows=[
+            {"user_id": "alice", "billed": 1000, "brain_kind": "claude_code"},
+            {"user_id": "bob", "billed": 2000, "brain_kind": "native",
+             "cost_usd": 4.18, "cost_basis": "api"},
+        ])
 
         assert len(calls) == 1
         assert "**Token usage** — fleet" in result
@@ -3727,33 +2640,25 @@ class TestCmdUsage:
         assert "- native: 2,000 tokens, $4.18" in result
         assert "**Claude Code subscription**" in result
 
-    @pytest.mark.asyncio
     async def test_cost_rule_survives_the_move_to_usage_render(
-        self, make_config, db_path, monkeypatch
+        self, make_config, monkeypatch
     ):
         """A subscription-only group renders the placeholder, never a figure.
 
         The rule is imported from `usage_render` rather than written here; this
         is the case that notices if the import went to the wrong thing.
         """
-        from istota.commands import cmd_usage
-
-        config = make_config()
-        config.admin_users = {"bob"}
-        self._patch_snapshot(monkeypatch, _snapshot())
-        with db.get_db(db_path) as conn:
-            _seed_usage_row(
-                conn, user_id="bob", created_at=_recent_iso(), billed=1000,
-                cost_usd=12.34, cost_basis="subscription",
-            )
-            result = await cmd_usage(_ctx(config, conn, "bob"))
+        config, _ = self._admin_config(make_config, monkeypatch)
+        result = await self._usage(config, rows=[
+            {"user_id": "bob", "billed": 1000, "cost_usd": 12.34,
+             "cost_basis": "subscription"},
+        ])
 
         assert "12.34" not in result
         assert "- claude_code: 1,000 tokens, —" in result
 
     # -- rendering -----------------------------------------------------------
 
-    @pytest.mark.asyncio
     async def test_bar_is_twenty_characters_at_every_extreme(
         self, make_config, db_path, monkeypatch
     ):
@@ -3774,29 +2679,30 @@ class TestCmdUsage:
         ]
         assert bars and all(len(bar) == 20 for bar in bars)
 
-    @pytest.mark.asyncio
+    # +08:45 (Eucla) is an offset no other zone this suite might pick up by
+    # accident produces, so the first case fails if the conversion is skipped.
+    # The line says which zone it rendered in, not why that zone was picked: a
+    # UTC clock is labelled UTC however it was arrived at — configured, the
+    # resolver's own fallback for a user with no profile, or an unparseable zone.
+    @pytest.mark.parametrize("users,expected,absent", [
+        ({"bob": UserConfig(timezone="Australia/Eucla")},
+         "(resets Aug 22 17:45)", "UTC"),
+        ({"bob": UserConfig(timezone="UTC")}, "(resets Aug 22 09:00 UTC)", None),
+        ({}, "(resets Aug 22 09:00 UTC)", None),
+        ({"bob": UserConfig(timezone="Mars/Olympus_Mons")},
+         "(resets Aug 22 09:00 UTC)", None),
+    ], ids=["users-timezone", "explicit-utc", "missing-profile", "unparseable-zone"])
     async def test_reset_renders_in_the_users_timezone(
-        self, make_config, db_path, monkeypatch
+        self, make_config, monkeypatch, users, expected, absent
     ):
-        from istota.commands import cmd_usage
-        from istota.config import UserConfig
+        config, _ = self._admin_config(make_config, monkeypatch, _RESET_0900)
+        config.users = users
+        result = await self._usage(config)
 
-        config = make_config()
-        config.admin_users = {"bob"}
-        # +08:45 — an offset no other zone this suite might pick up by accident
-        # produces, so the assertion below fails if the conversion is skipped.
-        config.users = {"bob": UserConfig(timezone="Australia/Eucla")}
-        self._patch_snapshot(
-            monkeypatch,
-            _snapshot([_window(resets_at="2026-08-22T09:00:00Z", resets_in=3600)]),
-        )
-        with db.get_db(db_path) as conn:
-            result = await cmd_usage(_ctx(config, conn, "bob"))
+        assert expected in result
+        if absent:
+            assert absent not in result
 
-        assert "(resets Aug 22 17:45)" in result
-        assert "UTC" not in result
-
-    @pytest.mark.asyncio
     async def test_reset_uses_the_live_profile_row_not_the_booted_config(
         self, make_config, db_path, monkeypatch
     ):
@@ -3809,38 +2715,24 @@ class TestCmdUsage:
         to `config.get_user(user_id).timezone` renders 03:00 and fails here.
         """
         from istota import user_profiles
-        from istota.commands import cmd_usage
-        from istota.config import UserConfig
 
-        config = make_config()
-        config.admin_users = {"bob"}
+        config, _ = self._admin_config(make_config, monkeypatch, _RESET_0900)
         # What the daemon booted with...
         config.users = {"bob": UserConfig(timezone="America/Denver")}
         # ...and what the user has since set in the web UI. +08:45.
         user_profiles.ensure_profile(db_path, "bob", timezone="Australia/Eucla")
-
-        self._patch_snapshot(
-            monkeypatch,
-            _snapshot([_window(resets_at="2026-08-22T09:00:00Z", resets_in=3600)]),
-        )
-        with db.get_db(db_path) as conn:
-            result = await cmd_usage(_ctx(config, conn, "bob"))
+        result = await self._usage(config)
 
         assert "(resets Aug 22 17:45)" in result
         assert "03:00" not in result
 
-    @pytest.mark.asyncio
     async def test_the_resolver_is_given_the_connection_already_open(
-        self, make_config, db_path, monkeypatch
+        self, make_config, monkeypatch
     ):
         """A caller holding a framework-DB connection must not make it open
         another — per-call FD churn on the FUSE-backed mount is why
         `resolve_user_timezone` takes a `conn` at all."""
-        from istota.commands import cmd_usage
-
-        config = make_config()
-        config.admin_users = {"bob"}
-        self._patch_snapshot(monkeypatch, _snapshot())
+        config, _ = self._admin_config(make_config, monkeypatch)
 
         seen = []
         real = config.resolve_user_timezone
@@ -3851,74 +2743,13 @@ class TestCmdUsage:
 
         config.resolve_user_timezone = _spy
 
-        with db.get_db(db_path) as conn:
+        with db.get_db(config.db_path) as conn:
             await cmd_usage(_ctx(config, conn, "bob"))
 
         assert seen == [conn]
 
-    @pytest.mark.asyncio
-    async def test_an_explicitly_configured_utc_is_labelled_too(
-        self, make_config, db_path, monkeypatch
-    ):
-        """The line says which zone it rendered in, not why that zone was
-        picked. A UTC clock is labelled UTC however it was arrived at."""
-        from istota.commands import cmd_usage
-        from istota.config import UserConfig
-
-        config = make_config()
-        config.admin_users = {"bob"}
-        config.users = {"bob": UserConfig(timezone="UTC")}
-        self._patch_snapshot(
-            monkeypatch,
-            _snapshot([_window(resets_at="2026-08-22T09:00:00Z", resets_in=3600)]),
-        )
-        with db.get_db(db_path) as conn:
-            result = await cmd_usage(_ctx(config, conn, "bob"))
-
-        assert "(resets Aug 22 09:00 UTC)" in result
-
-    @pytest.mark.asyncio
-    async def test_reset_falls_back_to_utc_for_a_missing_profile(
-        self, make_config, db_path, monkeypatch
-    ):
-        """No profile row and no `UserConfig`, so the resolver returns its own
-        `"UTC"` fallback and the line says so."""
-        from istota.commands import cmd_usage
-
-        config = make_config()
-        config.admin_users = {"bob"}
-        config.users = {}  # bob has no profile at all
-        self._patch_snapshot(
-            monkeypatch,
-            _snapshot([_window(resets_at="2026-08-22T09:00:00Z", resets_in=3600)]),
-        )
-        with db.get_db(db_path) as conn:
-            result = await cmd_usage(_ctx(config, conn, "bob"))
-
-        assert "(resets Aug 22 09:00 UTC)" in result
-
-    @pytest.mark.asyncio
-    async def test_reset_falls_back_to_utc_for_an_unparseable_zone(
-        self, make_config, db_path, monkeypatch
-    ):
-        from istota.commands import cmd_usage
-        from istota.config import UserConfig
-
-        config = make_config()
-        config.admin_users = {"bob"}
-        config.users = {"bob": UserConfig(timezone="Mars/Olympus_Mons")}
-        self._patch_snapshot(
-            monkeypatch,
-            _snapshot([_window(resets_at="2026-08-22T09:00:00Z", resets_in=3600)]),
-        )
-        with db.get_db(db_path) as conn:
-            result = await cmd_usage(_ctx(config, conn, "bob"))
-
-        assert "(resets Aug 22 09:00 UTC)" in result
-
-    @pytest.mark.asyncio
     async def test_a_range_edge_reset_drops_its_stamp_instead_of_raising(
-        self, make_config, db_path, monkeypatch
+        self, make_config, monkeypatch
     ):
         """`astimezone` raises `OverflowError` at the edge of the date range.
 
@@ -3928,23 +2759,16 @@ class TestCmdUsage:
         files. Shifting it east of UTC overflows, and `dispatch` would post the
         raw exception to the room. The percentage is still the reading.
         """
-        from istota.commands import cmd_usage
-        from istota.config import UserConfig
-
-        config = make_config()
-        config.admin_users = {"bob"}
-        config.users = {"bob": UserConfig(timezone="Australia/Eucla")}
-        self._patch_snapshot(
-            monkeypatch,
+        config, _ = self._admin_config(
+            make_config, monkeypatch,
             _snapshot([_window(percent=40.0, resets_at="9999-12-31T23:00:00Z")]),
         )
-        with db.get_db(db_path) as conn:
-            result = await cmd_usage(_ctx(config, conn, "bob"))
+        config.users = {"bob": UserConfig(timezone="Australia/Eucla")}
+        result = await self._usage(config)
 
         assert "- 5-hour: [########------------] 40%" in result
         assert "resets" not in result
 
-    @pytest.mark.asyncio
     async def test_the_bar_reserves_its_two_ends(
         self, make_config, db_path, monkeypatch
     ):
@@ -3963,7 +2787,6 @@ class TestCmdUsage:
         assert "- Nearly: [###################-] 98%" in result
         assert "- Barely: [#-------------------] 0%" in result
 
-    @pytest.mark.asyncio
     async def test_a_window_with_no_reset_says_nothing_about_one(
         self, make_config, db_path, monkeypatch
     ):
@@ -3974,12 +2797,10 @@ class TestCmdUsage:
         assert "- 5-hour: [--------------------] 0%" in result
         assert "resets" not in result
 
-    @pytest.mark.asyncio
     async def test_extra_usage_line_only_when_spend_is_enabled(
         self, make_config, db_path, monkeypatch
     ):
-        from istota import subscription_usage as su
-
+        su = _subscription_usage
         off = su.Spend(enabled=False, used_minor=0, limit_minor=2000, percent=0.0)
         result = await self._render(
             make_config, db_path, monkeypatch, _snapshot(spend=off)
@@ -3992,15 +2813,12 @@ class TestCmdUsage:
         )
         assert "**Extra usage:** $1.25 / $20.00 (6%)" in result
 
-    @pytest.mark.asyncio
     async def test_extra_usage_takes_its_divisor_from_the_exponent(
         self, make_config, db_path, monkeypatch
     ):
         """A zero-decimal currency is not cents. Dividing by a hardcoded 100 is
         the bug the removed implementation carried."""
-        from istota import subscription_usage as su
-
-        spend = su.Spend(
+        spend = _subscription_usage.Spend(
             enabled=True, used_minor=500, limit_minor=2000,
             currency="JPY", exponent=0, percent=25.0,
         )
@@ -4011,7 +2829,6 @@ class TestCmdUsage:
         # divisor and the precision, and 500 yen is 500 yen.
         assert "**Extra usage:** 500 JPY / 2000 JPY (25%)" in result
 
-    @pytest.mark.asyncio
     async def test_staleness_footer_only_on_an_old_reading(
         self, make_config, db_path, monkeypatch
     ):
@@ -4026,7 +2843,6 @@ class TestCmdUsage:
         )
         assert "_Reading is 2m old._" in stale
 
-    @pytest.mark.asyncio
     async def test_the_staleness_footer_never_carries_the_fetch_error(
         self, make_config, db_path, monkeypatch
     ):
@@ -4043,31 +2859,21 @@ class TestCmdUsage:
 
     # -- degradation ---------------------------------------------------------
 
-    @pytest.mark.asyncio
     async def test_an_unavailable_snapshot_omits_section_three_silently(
-        self, make_config, db_path, monkeypatch
+        self, make_config, monkeypatch
     ):
-        from istota import subscription_usage as su
-        from istota.commands import cmd_usage
-
-        config = make_config()
-        config.admin_users = {"bob"}
-        self._patch_snapshot(
-            monkeypatch,
-            su.UsageSnapshot(
-                fetched_at=0.0, source="none", error=su.NO_CREDENTIAL_ERROR
-            ),
+        su = _subscription_usage
+        config, _ = self._admin_config(
+            make_config, monkeypatch,
+            su.UsageSnapshot(fetched_at=0.0, source="none", error=su.NO_CREDENTIAL_ERROR),
         )
-        with db.get_db(db_path) as conn:
-            _seed_usage_row(conn, user_id="bob", created_at=_recent_iso(), billed=1000)
-            result = await cmd_usage(_ctx(config, conn, "bob"))
+        result = await self._usage(config, rows=[{"user_id": "bob", "billed": 1000}])
 
         assert "**Token usage**" in result
         assert "**By brain**" in result
         assert "**Claude Code subscription**" not in result
         assert "credential" not in result
 
-    @pytest.mark.asyncio
     async def test_no_usage_rows_says_so_and_still_renders_the_plan(
         self, make_config, db_path, monkeypatch
     ):
@@ -4077,27 +2883,17 @@ class TestCmdUsage:
         assert "**By brain**" not in result
         assert "**Claude Code subscription**" in result
 
-    @pytest.mark.asyncio
     async def test_a_missing_task_usage_table_degrades_to_one_line(
-        self, make_config, db_path, monkeypatch
+        self, make_config, monkeypatch
     ):
         """`dispatch` would otherwise put `no such table: task_usage` into a
         chat room. The table is created on the next database open."""
-        import sqlite3 as _sqlite3
-
-        from istota import db as db_mod
-        from istota.commands import cmd_usage
-
         def _no_table(*args, **kwargs):
-            raise _sqlite3.OperationalError("no such table: task_usage")
+            raise sqlite3.OperationalError("no such table: task_usage")
 
-        monkeypatch.setattr(db_mod, "usage_summary", _no_table)
-
-        config = make_config()
-        config.admin_users = {"bob"}
-        self._patch_snapshot(monkeypatch, _snapshot())
-        with db.get_db(db_path) as conn:
-            result = await cmd_usage(_ctx(config, conn, "bob"))
+        monkeypatch.setattr(db, "usage_summary", _no_table)
+        config, _ = self._admin_config(make_config, monkeypatch)
+        result = await self._usage(config)
 
         assert isinstance(result, str)
         assert "no such table" not in result
@@ -4107,57 +2903,28 @@ class TestCmdUsage:
         assert "istota init" in result
         assert "**Claude Code subscription**" in result
 
-    @pytest.mark.asyncio
+    # Only the missing-table case degrades. A locked database is a real fault
+    # and `dispatch` reports it, exactly as `istota usage` does; and "no such
+    # table" alone would dress a different missing table up as a fresh
+    # deployment, pointing the reader at a remedy that fixes nothing.
+    @pytest.mark.parametrize("message", [
+        "database is locked", "no such table: task_usage_models",
+    ])
     async def test_any_other_operational_error_is_not_swallowed(
-        self, make_config, db_path, monkeypatch
+        self, make_config, monkeypatch, message
     ):
-        """Only the missing-table case degrades. A locked database is a real
-        fault and `dispatch` reports it, exactly as `istota usage` does."""
-        import sqlite3 as _sqlite3
+        def _raise(*args, **kwargs):
+            raise sqlite3.OperationalError(message)
 
-        from istota import db as db_mod
-        from istota.commands import cmd_usage
-
-        def _locked(*args, **kwargs):
-            raise _sqlite3.OperationalError("database is locked")
-
-        monkeypatch.setattr(db_mod, "usage_summary", _locked)
-
-        config = make_config()
-        config.admin_users = {"bob"}
-        self._patch_snapshot(monkeypatch, _snapshot())
-        with db.get_db(db_path) as conn:
-            with pytest.raises(_sqlite3.OperationalError):
-                await cmd_usage(_ctx(config, conn, "bob"))
-
-    @pytest.mark.asyncio
-    async def test_a_different_missing_table_is_not_reported_as_task_usage(
-        self, make_config, db_path, monkeypatch
-    ):
-        """"no such table" alone would dress a real fault up as a fresh
-        deployment, and point the reader at a remedy that fixes nothing."""
-        import sqlite3 as _sqlite3
-
-        from istota import db as db_mod
-        from istota.commands import cmd_usage
-
-        def _other(*args, **kwargs):
-            raise _sqlite3.OperationalError("no such table: task_usage_models")
-
-        monkeypatch.setattr(db_mod, "usage_summary", _other)
-
-        config = make_config()
-        config.admin_users = {"bob"}
-        self._patch_snapshot(monkeypatch, _snapshot())
-        with db.get_db(db_path) as conn:
-            with pytest.raises(_sqlite3.OperationalError):
-                await cmd_usage(_ctx(config, conn, "bob"))
+        monkeypatch.setattr(db, "usage_summary", _raise)
+        config, _ = self._admin_config(make_config, monkeypatch)
+        with pytest.raises(sqlite3.OperationalError):
+            await self._usage(config)
 
     # -- the shared reading --------------------------------------------------
 
-    @pytest.mark.asyncio
     async def test_the_handler_issues_no_fetch_of_its_own(
-        self, make_config, db_path, monkeypatch
+        self, make_config, monkeypatch
     ):
         """Two `!usage` calls against a fresh cache open no connection at all.
 
@@ -4169,9 +2936,7 @@ class TestCmdUsage:
         import time
         import urllib.request
 
-        from istota import subscription_usage as su
-        from istota.commands import cmd_usage
-
+        su = _subscription_usage
         # The root conftest replaces `get_snapshot`; this is the one test here
         # that wants the real policy, because the cache hit is what it asserts.
         monkeypatch.setattr(su, "get_snapshot", _REAL_GET_SNAPSHOT)
@@ -4199,9 +2964,8 @@ class TestCmdUsage:
             su.cache_path(config.db_path.parent), ttl, now_ts=time.time()
         ) is not None
 
-        with db.get_db(db_path) as conn:
-            first = await cmd_usage(_ctx(config, conn, "bob"))
-            second = await cmd_usage(_ctx(config, conn, "bob"))
+        first = await self._usage(config)
+        second = await self._usage(config)
 
         assert opened == []
         assert "- 5-hour: [########------------] 40%" in first
@@ -4209,9 +2973,8 @@ class TestCmdUsage:
 
     # -- the credential ------------------------------------------------------
 
-    @pytest.mark.asyncio
     async def test_the_token_value_never_reaches_the_reply(
-        self, make_config, db_path, tmp_path, monkeypatch
+        self, make_config, tmp_path, monkeypatch
     ):
         """A sentinel in every resolvable source, absent from the returned text.
 
@@ -4227,14 +2990,11 @@ class TestCmdUsage:
         the stale-cache branch, so the section *and* the footer built beside
         `snapshot.error` both render — which is the only place a leak could go.
         """
-        import json as _json
         import subprocess as _subprocess
 
-        from istota import subscription_usage as su
-        from istota.commands import cmd_usage
-
+        su = _subscription_usage
         sentinel = "sk-ant-oat01-" + "z" * 40
-        blob = _json.dumps({"claudeAiOauth": {"accessToken": sentinel}})
+        blob = json.dumps({"claudeAiOauth": {"accessToken": sentinel}})
         home = tmp_path / "home"
         (home / ".claude").mkdir(parents=True)
         (home / ".claude" / ".credentials.json").write_text(blob)
@@ -4275,8 +3035,7 @@ class TestCmdUsage:
             _snapshot([_window(percent=40.0)], age=4000.0),
         )
 
-        with db.get_db(db_path) as conn:
-            result = await cmd_usage(_ctx(config, conn, "bob"))
+        result = await self._usage(config)
 
         assert "**Claude Code subscription**" in result, "the leak-prone branch never ran"
         assert "_Reading is 1h 06m old._" in result
@@ -4290,22 +3049,13 @@ class TestCmdUsage:
 
     # -- registration --------------------------------------------------------
 
-    def test_usage_is_registered_for_everyone(self):
-        from istota.commands import COMMANDS
-
+    async def test_limits_is_a_hidden_alias_for_usage(self, make_config, monkeypatch):
         assert "usage" in COMMANDS
-
-    @pytest.mark.asyncio
-    async def test_limits_is_a_hidden_alias_for_usage(self, make_config, db_path, monkeypatch):
-        from istota.commands import COMMANDS, _COMMAND_ALIASES
-
         assert _COMMAND_ALIASES["limits"] == "usage"
         assert "limits" not in COMMANDS
 
-        config = make_config()
-        config.admin_users = {"bob"}
-        self._patch_snapshot(monkeypatch, _snapshot())
-        with db.get_db(db_path) as conn:
+        config, _ = self._admin_config(make_config, monkeypatch)
+        with db.get_db(config.db_path) as conn:
             result = await dispatch(
                 config, "bob", "room1", "!limits",
                 surface="web", conn=conn, registry=_FakeRegistry(None),
@@ -4337,6 +3087,25 @@ def _room(conn, token="room1", user_id="alice", surface="talk"):
     db.add_room_binding(conn, token, surface, token)
 
 
+@contextmanager
+def _brain_room(make_config, db_path, *selectable, fallback="", brain=None,
+                register=True):
+    """A config offering `selectable`, and a connection holding `room1`
+    (registered unless told otherwise, pinned to `brain` when given)."""
+    config = make_config()
+    config.brain = _brain_config(*selectable, fallback=fallback)
+    with db.get_db(db_path) as conn:
+        if register:
+            _room(conn)
+        if brain:
+            db.set_room_brain(conn, "room1", brain)
+        yield config, conn
+
+
+def _room1(conn):
+    return db.get_room(conn, "room1")
+
+
 class TestRoomModelWriterFollowsTheRoomsBrain:
     """D5 Rule 2, the row the spec calls the worst of the five.
 
@@ -4348,41 +3117,26 @@ class TestRoomModelWriterFollowsTheRoomsBrain:
     assertion passes against it.
     """
 
-    @pytest.mark.asyncio
     async def test_native_room_never_stores_an_anthropic_id(self, make_config, db_path):
-        from istota.commands import cmd_room
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
-            db.set_room_brain(conn, "room1", "native")
+        with _brain_room(make_config, db_path, "native", brain="native") as (config, conn):
             await cmd_room(_ctx(config, conn, args="model sonnet"))
-            room = db.get_room(conn, "room1")
+            room = _room1(conn)
         # `sonnet` is an anthropic shortcut; the native brain resolves no such
         # alias, so the only correct outcomes are "unchanged" or an
         # openai_compat id. What must never be here is `claude-sonnet-5`.
         assert room.model != SONNET
         assert room.model is None
 
-    @pytest.mark.asyncio
     async def test_an_unpinned_room_still_resolves_in_the_deployment_namespace(
         self, make_config, db_path,
     ):
         """The converse, so the test above cannot pass against a writer that
         simply stopped resolving anything."""
-        from istota.commands import cmd_room
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        with _brain_room(make_config, db_path, "native") as (config, conn):
             await cmd_room(_ctx(config, conn, args="model sonnet"))
-            room = db.get_room(conn, "room1")
-        assert room.model == SONNET
+            assert _room1(conn).model == SONNET
 
 
-@pytest.mark.asyncio
 class TestCmdBrain:
     """`!brain` — show, set, and clear a room's standing brain.
 
@@ -4395,13 +3149,8 @@ class TestCmdBrain:
         """Reading is allowed to anyone. A room is shared, and every member is
         entitled to know which brain their turns run under — only writing
         chooses an isolation posture for somebody else."""
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.admin_users = {"someone-else"}
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        with _brain_room(make_config, db_path, "native") as (config, conn):
+            config.admin_users = {"someone-else"}
             out = await cmd_brain(_ctx(config, conn, user_id="alice"))
         assert "claude_code" in out
         assert "admin" not in out.lower()
@@ -4409,50 +3158,29 @@ class TestCmdBrain:
     async def test_show_names_the_lane_rule_it_would_otherwise_take(
         self, make_config, db_path,
     ):
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        config.brain.source_type_overrides = {"talk": "native"}
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        with _brain_room(make_config, db_path, "native") as (config, conn):
+            config.brain.source_type_overrides = {"talk": "native"}
             out = await cmd_brain(_ctx(config, conn))
         assert "native" in out
 
     async def test_set_writes_the_column(self, make_config, db_path):
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        with _brain_room(make_config, db_path, "native") as (config, conn):
             out = await cmd_brain(_ctx(config, conn, args="native"))
-            assert db.get_room(conn, "room1").brain == "native"
+            assert _room1(conn).brain == "native"
         assert "native" in out
 
     async def test_default_clears_the_column(self, make_config, db_path):
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
-            db.set_room_brain(conn, "room1", "native")
+        with _brain_room(make_config, db_path, "native", brain="native") as (config, conn):
             out = await cmd_brain(_ctx(config, conn, args="default"))
-            assert db.get_room(conn, "room1").brain is None
+            assert _room1(conn).brain is None
         assert "claude_code" in out
 
     async def test_unknown_kind_is_refused_and_writes_nothing(
         self, make_config, db_path,
     ):
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        with _brain_room(make_config, db_path, "native") as (config, conn):
             out = await cmd_brain(_ctx(config, conn, args="gpt5"))
-            assert db.get_room(conn, "room1").brain is None
+            assert _room1(conn).brain is None
         assert "gpt5" in out
 
     async def test_a_buildable_kind_the_operator_did_not_list_is_refused(
@@ -4461,59 +3189,40 @@ class TestCmdBrain:
         """A separate branch from the unknown one: `tmux_claude` is a kind
         `make_brain` builds, so only the allowlist stands between it and the
         room."""
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config("native")  # tmux deliberately absent
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        # tmux deliberately absent from the allowlist
+        with _brain_room(make_config, db_path, "native") as (config, conn):
             out = await cmd_brain(_ctx(config, conn, args="tmux_claude"))
-            assert db.get_room(conn, "room1").brain is None
+            assert _room1(conn).brain is None
         assert "native" in out  # names what *is* on offer
 
     async def test_the_feature_is_off_until_the_operator_names_a_kind(
         self, make_config, db_path,
     ):
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config()  # room_selectable = []
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        with _brain_room(make_config, db_path) as (config, conn):  # room_selectable = []
             out = await cmd_brain(_ctx(config, conn, args="native"))
-            assert db.get_room(conn, "room1").brain is None
+            assert _room1(conn).brain is None
         assert "room_selectable" in out
         # Names no kinds: with the list empty there is nothing to offer, and a
         # message listing the buildable kinds would read as a menu.
         assert "`native`" not in out
 
     async def test_a_non_admin_cannot_set_or_clear(self, make_config, db_path):
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.admin_users = {"alice"}
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
-            db.set_room_brain(conn, "room1", "native")
+        with _brain_room(make_config, db_path, "native", brain="native") as (config, conn):
+            config.admin_users = {"alice"}
             set_out = await cmd_brain(
                 _ctx(config, conn, user_id="bob", args="claude_code")
             )
             clear_out = await cmd_brain(
                 _ctx(config, conn, user_id="bob", args="default")
             )
-            assert db.get_room(conn, "room1").brain == "native"
+            assert _room1(conn).brain == "native"
         assert "admin" in set_out.lower()
         assert "admin" in clear_out.lower()
 
     async def test_an_unregistered_room_is_told_to_send_a_message_first(
         self, make_config, db_path,
     ):
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
+        with _brain_room(make_config, db_path, "native", register=False) as (config, conn):
             out = await cmd_brain(_ctx(config, conn, args="native"))
         assert "registered" in out.lower()
 
@@ -4523,20 +3232,14 @@ class TestCmdBrain:
         """The column keeps its value when `room_selectable` shortens — the
         operator may restore the list — so the show form has to say the room is
         running something other than what it is set to."""
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config()  # nothing selectable any more
-        with db.get_db(db_path) as conn:
-            _room(conn)
-            db.set_room_brain(conn, "room1", "native")
+        # nothing selectable any more
+        with _brain_room(make_config, db_path, brain="native") as (config, conn):
             out = await cmd_brain(_ctx(config, conn))
         assert "native" in out
         assert "claude_code" in out
         assert "ignor" in out.lower()
 
 
-@pytest.mark.asyncio
 class TestBrainPinTurnsFailoverOff:
     """D12, as it reaches the user. The behaviour itself is
     `resolve_brain_kind`'s (stage 1); what is asserted here is that both
@@ -4544,12 +3247,9 @@ class TestBrainPinTurnsFailoverOff:
     visible at the moment of choosing."""
 
     async def test_the_set_reply_names_the_consequence(self, make_config, db_path):
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config("native", fallback="claude_code")
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        with _brain_room(
+            make_config, db_path, "native", fallback="claude_code",
+        ) as (config, conn):
             out = await cmd_brain(_ctx(config, conn, args="native"))
         assert "ailover" in out
         assert "!brain default" in out
@@ -4557,12 +3257,7 @@ class TestBrainPinTurnsFailoverOff:
     async def test_an_unpinned_room_is_told_what_it_falls_back_to(
         self, make_config, db_path,
     ):
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config("native", fallback="native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        with _brain_room(make_config, db_path, "native", fallback="native") as (config, conn):
             out = await cmd_brain(_ctx(config, conn))
         assert "Failover: `native`" in out
 
@@ -4573,18 +3268,14 @@ class TestBrainPinTurnsFailoverOff:
         rather than the admission. A room pinned to the deployment's own kind
         runs that kind either way, so nothing but the allowlist distinguishes
         the two states."""
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config(fallback="native")  # nothing selectable
-        with db.get_db(db_path) as conn:
-            _room(conn)
-            db.set_room_brain(conn, "room1", "claude_code")
+        # nothing selectable
+        with _brain_room(
+            make_config, db_path, fallback="native", brain="claude_code",
+        ) as (config, conn):
             out = await cmd_brain(_ctx(config, conn))
         assert "Failover: `native`" in out
 
 
-@pytest.mark.asyncio
 class TestBrainChangeClearsACrossNamespacePin:
     """D5 Rule 1, both halves.
 
@@ -4593,15 +3284,10 @@ class TestBrainChangeClearsACrossNamespacePin:
     """
 
     async def test_a_namespace_change_drops_the_model_pin(self, make_config, db_path):
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config("claude_code", "native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        with _brain_room(make_config, db_path, "claude_code", "native") as (config, conn):
             db.set_room_model_effort(conn, "room1", OPUS, "high")
             out = await cmd_brain(_ctx(config, conn, args="native"))
-            room = db.get_room(conn, "room1")
+            room = _room1(conn)
         assert room.brain == "native"
         assert room.model is None
         assert room.effort is None
@@ -4613,16 +3299,12 @@ class TestBrainChangeClearsACrossNamespacePin:
         """`claude_code` and `tmux_claude` share `model_namespace ==
         "anthropic"`, so the same id runs under both and there is nothing to
         clear."""
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config("claude_code", "tmux_claude")
-        with db.get_db(db_path) as conn:
-            _room(conn)
-            db.set_room_brain(conn, "room1", "claude_code")
+        with _brain_room(
+            make_config, db_path, "claude_code", "tmux_claude", brain="claude_code",
+        ) as (config, conn):
             db.set_room_model_effort(conn, "room1", OPUS, "high")
             out = await cmd_brain(_ctx(config, conn, args="tmux_claude"))
-            room = db.get_room(conn, "room1")
+            room = _room1(conn)
         assert room.brain == "tmux_claude"
         assert room.model == OPUS
         assert room.effort == "high"
@@ -4631,33 +3313,21 @@ class TestBrainChangeClearsACrossNamespacePin:
     async def test_clearing_the_pin_back_to_the_inherited_brain_also_drops_it(
         self, make_config, db_path,
     ):
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
-            db.set_room_brain(conn, "room1", "native")
+        with _brain_room(make_config, db_path, "native", brain="native") as (config, conn):
             db.set_room_model_effort(conn, "room1", "some-openai-compat-slug", None)
             await cmd_brain(_ctx(config, conn, args="default"))
-            room = db.get_room(conn, "room1")
+            room = _room1(conn)
         assert room.brain is None
         assert room.model is None
 
     async def test_a_room_with_no_pin_reports_nothing_cleared(
         self, make_config, db_path,
     ):
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        with _brain_room(make_config, db_path, "native") as (config, conn):
             out = await cmd_brain(_ctx(config, conn, args="native"))
         assert "cleared" not in out.lower()
 
 
-@pytest.mark.asyncio
 class TestModelSurfacesFollowTheRoomsBrain:
     """The rest of D5 Rule 2: everything that *offers* a model name, and the
     end-to-end path through `!brain` that the writer test above reaches by
@@ -4666,44 +3336,37 @@ class TestModelSurfacesFollowTheRoomsBrain:
     async def test_brain_then_room_model_never_leaves_an_anthropic_id(
         self, make_config, db_path,
     ):
-        from istota.commands import cmd_brain, cmd_room
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        with _brain_room(make_config, db_path, "native") as (config, conn):
             await cmd_brain(_ctx(config, conn, args="native"))
             await cmd_room(_ctx(config, conn, args="model sonnet"))
-            room = db.get_room(conn, "room1")
+            room = _room1(conn)
         assert room.model != SONNET
         assert room.model is None
 
-    async def test_models_lists_the_rooms_namespace(self, make_config, db_path):
-        from istota.commands import cmd_models
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        config.brain.native.model = "some-endpoint/model-a"
-        with db.get_db(db_path) as conn:
-            _room(conn)
-            db.set_room_brain(conn, "room1", "native")
-            pinned = await cmd_models(_ctx(config, conn))
+    # `cmd_help` is a surface that offers model names, so D5 Rule 2 binds it
+    # exactly as it binds the writers. It lists alias *names*, and the two
+    # namespaces have different ones: native offers the three portable tiers,
+    # anthropic those plus its own provider shortcuts. `opus` is the
+    # discriminator. Each converse is there so the assertion is about the room
+    # rather than about the handler having stopped listing anything.
+    @pytest.mark.parametrize("handler,pinned_has,pinned_lacks,inherited_has", [
+        (cmd_models, "some-endpoint/model-a", OPUS, OPUS),
+        (cmd_help, "`smart`", "`opus`", "`opus`"),
+    ], ids=["models", "help"])
+    async def test_the_offered_names_follow_the_rooms_namespace(
+        self, make_config, db_path, handler, pinned_has, pinned_lacks, inherited_has,
+    ):
+        with _brain_room(make_config, db_path, "native", brain="native") as (config, conn):
+            config.brain.native.model = "some-endpoint/model-a"
+            pinned = await handler(_ctx(config, conn))
             db.set_room_brain(conn, "room1", None)
-            inherited = await cmd_models(_ctx(config, conn))
-        assert "some-endpoint/model-a" in pinned
-        assert OPUS not in pinned
-        # The converse, so the assertion is about the room rather than about
-        # `cmd_models` having stopped listing anything.
-        assert OPUS in inherited
+            inherited = await handler(_ctx(config, conn))
+        assert pinned_has in pinned
+        assert pinned_lacks not in pinned
+        assert inherited_has in inherited
 
     async def test_room_show_names_the_brain(self, make_config, db_path):
-        from istota.commands import cmd_room
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
-            db.set_room_brain(conn, "room1", "native")
+        with _brain_room(make_config, db_path, "native", brain="native") as (config, conn):
             out = await cmd_room(_ctx(config, conn))
         assert "Brain: `native`" in out
 
@@ -4714,8 +3377,6 @@ class TestBrainForRoom:
     ):
         """The pre-feature answer, which is the whole never-raise contract: this
         runs inside the Talk poll's inner loop and on the web send path."""
-        from istota.commands import brain_for_room
-
         config = make_config()
         config.brain = _brain_config("native")
         config.brain.source_type_overrides = {"talk": "native"}
@@ -4732,16 +3393,10 @@ class TestBrainForRoom:
     ):
         """`resolve_brain_kind` returns the same object when nothing applies,
         which is what the executor's cheap no-routing check reads."""
-        from istota.commands import brain_for_room
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        with _brain_room(make_config, db_path, "native") as (config, conn):
             assert brain_for_room(config, conn, "room1", "talk") is config.brain
 
 
-@pytest.mark.asyncio
 class TestTheReviewFindings:
     """Cases added from the stage's own review. Each one is a defect the first
     cut had, kept as a test rather than as a comment."""
@@ -4759,16 +3414,13 @@ class TestTheReviewFindings:
         survives as the room's standing default under a brain that cannot run
         it, silently.
         """
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config("claude_code")  # native no longer offered
-        with db.get_db(db_path) as conn:
-            _room(conn)
-            db.set_room_brain(conn, "room1", "native")
+        # native no longer offered
+        with _brain_room(
+            make_config, db_path, "claude_code", brain="native",
+        ) as (config, conn):
             db.set_room_model_effort(conn, "room1", "endpoint/some-slug", "high")
             out = await cmd_brain(_ctx(config, conn, args="claude_code"))
-            room = db.get_room(conn, "room1")
+            room = _room1(conn)
         assert room.brain == "claude_code"
         assert room.model is None
         assert "endpoint/some-slug" in out
@@ -4779,81 +3431,31 @@ class TestTheReviewFindings:
         """Emptying `[brain] room_selectable` is the documented way to switch
         the feature off, and it is therefore exactly how a room ends up holding
         a pin nothing honours. Clearing is a narrowing, so it needs no entry."""
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config()  # nothing selectable
-        with db.get_db(db_path) as conn:
-            _room(conn)
-            db.set_room_brain(conn, "room1", "native")
+        # nothing selectable
+        with _brain_room(make_config, db_path, brain="native") as (config, conn):
             out = await cmd_brain(_ctx(config, conn, args="default"))
-            assert db.get_room(conn, "room1").brain is None
+            assert _room1(conn).brain is None
         assert "room_selectable" not in out
-
-    async def test_setting_is_still_refused_with_the_allowlist_emptied(
-        self, make_config, db_path,
-    ):
-        """The converse of the case above, so moving the `default` branch ahead
-        of the gate cannot be read as removing the gate."""
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config()
-        with db.get_db(db_path) as conn:
-            _room(conn)
-            out = await cmd_brain(_ctx(config, conn, args="native"))
-            assert db.get_room(conn, "room1").brain is None
-        assert "room_selectable" in out
 
     async def test_the_reply_names_the_effort_it_dropped(self, make_config, db_path):
         """`set_room_model_effort` moves the pair, so a reply naming only the
         model under-reports what it just did."""
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        with _brain_room(make_config, db_path, "native") as (config, conn):
             db.set_room_model_effort(conn, "room1", OPUS, "high")
             out = await cmd_brain(_ctx(config, conn, args="native"))
-            assert db.get_room(conn, "room1").effort is None
+            assert _room1(conn).effort is None
         assert "high" in out
 
     async def test_a_bare_effort_survives_a_brain_change(self, make_config, db_path):
         """An effort level with no model pin is a semantic rung every brain
         reads, so nothing namespaced is lost and nothing is cleared."""
-        from istota.commands import cmd_brain
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        with _brain_room(make_config, db_path, "native") as (config, conn):
             db.set_room_effort(conn, "room1", "high")
             out = await cmd_brain(_ctx(config, conn, args="native"))
-            room = db.get_room(conn, "room1")
+            room = _room1(conn)
         assert room.brain == "native"
         assert room.effort == "high"
         assert "cleared" not in out.lower()
-
-    async def test_help_offers_the_rooms_own_aliases(self, make_config, db_path):
-        """`!help` is a surface that offers model names, so D5 Rule 2 binds it
-        exactly as it binds the writers."""
-        from istota.commands import cmd_help
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
-            db.set_room_brain(conn, "room1", "native")
-            pinned = await cmd_help(_ctx(config, conn))
-            db.set_room_brain(conn, "room1", None)
-            inherited = await cmd_help(_ctx(config, conn))
-        # `cmd_help` lists alias *names*, and the two namespaces have different
-        # ones: native offers the three portable tiers, anthropic those plus its
-        # own provider shortcuts. `opus` is the discriminator.
-        assert "`opus`" not in pinned
-        assert "`smart`" in pinned
-        assert "`opus`" in inherited
 
 
 class TestBrainForRoomNeverRaises:
@@ -4866,12 +3468,7 @@ class TestBrainForRoomNeverRaises:
         drop every remaining conversation's messages and roll the cursors back,
         every cycle.
         """
-        from istota.commands import brain_for_room
-
-        config = make_config()
-        config.brain = _brain_config("native")
-        with db.get_db(db_path) as conn:
-            _room(conn)
+        with _brain_room(make_config, db_path, "native") as (config, conn):
             conn.execute("UPDATE rooms SET brain = 5 WHERE token = 'room1'")
             assert brain_for_room(config, conn, "room1", "talk").kind == "claude_code"
 
@@ -4886,8 +3483,6 @@ class TestIsModelPrefix:
     """
 
     def test_it_agrees_with_the_parser(self, brain):
-        from istota.commands import is_model_prefix, parse_model_prefix
-
         for content in (
             "!model opus do the thing", "!model", "  !MODEL opus x",
             "hello", "!models", "!room model opus", "", "!modelfoo",
@@ -4906,10 +3501,7 @@ class TestResolveRoomNameOnWeb:
     placeholder (ISSUE-474).
     """
 
-    @pytest.mark.asyncio
     async def test_it_prefers_the_registry_name(self, make_config):
-        from istota.commands import resolve_room_name
-
         config = make_config()
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "talk-1", "alice", origin="talk", name=None)
@@ -4918,10 +3510,7 @@ class TestResolveRoomNameOnWeb:
             ctx = _ctx(config, conn, conversation_token="talk-1", surface="web")
             assert await resolve_room_name(ctx, "talk-1") == "team"
 
-    @pytest.mark.asyncio
     async def test_it_falls_back_to_the_handle_then_the_token(self, make_config):
-        from istota.commands import resolve_room_name
-
         config = make_config()
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "talk-1", "alice", origin="talk", name=None)

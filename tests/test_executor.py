@@ -68,78 +68,128 @@ def _system_half(config, user_id="alice", task_id=1) -> str:
 
 
 
+_FILES_INDEX = '[files]\ndescription = "File ops"\nalways_include = true\n'
+
+
+def _skills_config(tmp_path, *, files_skill=True, mount=False, **kw):
+    """A Config over a fresh DB and a project skills dir under tmp_path.
+
+    `bundled_skills_dir` defaults to an empty directory; pass `None` to load
+    the real bundled skills, whose manifests some env-var tests depend on.
+    """
+    db_path = tmp_path / "test.db"
+    db.init_db(db_path)
+    skills_dir = tmp_path / "config" / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    if files_skill:
+        (skills_dir / "_index.toml").write_text(_FILES_INDEX)
+        (skills_dir / "files.md").write_text("File operations guide.")
+    if mount:
+        mount_path = tmp_path / "mount"
+        mount_path.mkdir(parents=True, exist_ok=True)
+        kw.setdefault("workspace_path", mount_path)
+    kw.setdefault("bundled_skills_dir", tmp_path / "_empty_bundled")
+    return Config(
+        db_path=db_path, skills_dir=skills_dir, temp_dir=tmp_path / "temp", **kw,
+    )
+
+
+def _bare_config(tmp_path):
+    db_path = tmp_path / "test.db"
+    db.init_db(db_path)
+    return Config(
+        db_path=db_path,
+        skills_dir=tmp_path / "_empty_skills",
+        bundled_skills_dir=tmp_path / "_empty_bundled",
+        temp_dir=tmp_path / "temp",
+        security=SecurityConfig(sandbox_enabled=False, skill_proxy_enabled=False),
+    )
+
+
+def _execute(
+    config, mock_run, *, user_id="alice", source_type="talk", prompt="test",
+    failed=False, **task_kw,
+):
+    """Create a task and run it through `execute_task` against a faked CLI."""
+    (config.temp_dir / user_id).mkdir(parents=True, exist_ok=True)
+    if failed:
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
+    else:
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+    with db.get_db(config.db_path) as conn:
+        task_id = db.create_task(
+            conn, prompt=prompt, user_id=user_id, source_type=source_type, **task_kw,
+        )
+        task = db.get_task(conn, task_id)
+        # Release the writer lock so a secrets read can bump last_accessed_at.
+        conn.commit()
+        return executor.execute_task(task, config, [], conn=conn)
+
+
+def _env(mock_run):
+    return mock_run.call_args[1]["env"]
+
+
+def _api_error(code, err_type="api_error", message="Internal server error"):
+    return (
+        f'API Error: {code} {{"type":"error","error":{{"type":"{err_type}",'
+        f'"message":"{message}"}}}}'
+    )
+
+
 # ---------------------------------------------------------------------------
 # TestParseApiError
 # ---------------------------------------------------------------------------
 
 
 class TestParseApiError:
-    def test_parses_500_error(self):
-        error_text = 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"req_abc123"}'
-        result = parse_api_error(error_text)
-        assert result is not None
-        assert result["status_code"] == 500
-        assert result["message"] == "Internal server error"
-        assert result["request_id"] == "req_abc123"
-
-    def test_parses_429_error(self):
-        error_text = 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Rate limit exceeded"},"request_id":"req_xyz"}'
-        result = parse_api_error(error_text)
-        assert result is not None
-        assert result["status_code"] == 429
-        assert result["message"] == "Rate limit exceeded"
-        assert result["request_id"] == "req_xyz"
-
-    def test_parses_401_error(self):
-        error_text = 'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid API key"},"request_id":"req_auth"}'
-        result = parse_api_error(error_text)
-        assert result is not None
-        assert result["status_code"] == 401
-        assert result["message"] == "Invalid API key"
-
-    def test_parses_error_with_prefix_text(self):
-        error_text = 'Some prefix text before API Error: 503 {"type":"error","error":{"type":"overloaded_error","message":"Service overloaded"}}'
-        result = parse_api_error(error_text)
-        assert result is not None
-        assert result["status_code"] == 503
-        assert result["message"] == "Service overloaded"
-
-    def test_returns_none_for_non_api_error(self):
-        error_text = "Claude Code was killed (likely out of memory)"
-        result = parse_api_error(error_text)
-        assert result is None
-
-    def test_returns_none_for_regular_text(self):
-        result = parse_api_error("Task completed successfully")
-        assert result is None
-
-    def test_handles_malformed_json(self):
-        # Malformed JSON with closing brace but invalid content
-        error_text = 'API Error: 500 {broken json}'
-        result = parse_api_error(error_text)
-        assert result is not None
-        assert result["status_code"] == 500
-        assert result["message"] == "Unknown error"
-        assert result["request_id"] is None
-
-    def test_unclosed_json_still_yields_the_status(self):
+    @pytest.mark.parametrize("error_text, expected", [
+        (
+            'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"req_abc123"}',
+            {"status_code": 500, "message": "Internal server error", "request_id": "req_abc123"},
+        ),
+        (
+            'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Rate limit exceeded"},"request_id":"req_xyz"}',
+            {"status_code": 429, "message": "Rate limit exceeded", "request_id": "req_xyz"},
+        ),
+        (
+            'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid API key"},"request_id":"req_auth"}',
+            {"status_code": 401, "message": "Invalid API key"},
+        ),
+        (
+            'Some prefix text before API Error: 503 {"type":"error","error":{"type":"overloaded_error","message":"Service overloaded"}}',
+            {"status_code": 503, "message": "Service overloaded"},
+        ),
+        # Malformed JSON with closing brace but invalid content.
+        (
+            'API Error: 500 {broken json}',
+            {"status_code": 500, "message": "Unknown error", "request_id": None},
+        ),
         # The JSON pattern needs a closing brace, so this used to parse as "not
         # an API error at all" — which meant a truncated 500 was never retried
         # and never reached the fallback (ISSUE-212). A 500 is a 500; only the
         # message is lost.
-        error_text = 'API Error: 500 {broken json'
+        ('API Error: 500 {broken json', {"status_code": 500, "request_id": None}),
+        (
+            'API Error: 500 {"type":"error","request_id":"req_123"}',
+            {"status_code": 500, "message": "Unknown error", "request_id": "req_123"},
+        ),
+    ], ids=[
+        "500", "429", "401", "prefix_text", "malformed_json", "unclosed_json",
+        "missing_error_field",
+    ])
+    def test_parses(self, error_text, expected):
         result = parse_api_error(error_text)
         assert result is not None
-        assert result["status_code"] == 500
-        assert result["request_id"] is None
+        for key, value in expected.items():
+            assert result[key] == value, key
 
-    def test_handles_missing_error_field(self):
-        error_text = 'API Error: 500 {"type":"error","request_id":"req_123"}'
-        result = parse_api_error(error_text)
-        assert result is not None
-        assert result["status_code"] == 500
-        assert result["message"] == "Unknown error"
-        assert result["request_id"] == "req_123"
+    @pytest.mark.parametrize("text", [
+        "Claude Code was killed (likely out of memory)",
+        "Task completed successfully",
+    ])
+    def test_returns_none_for_non_api_text(self, text):
+        assert parse_api_error(text) is None
 
 
 # ---------------------------------------------------------------------------
@@ -148,41 +198,19 @@ class TestParseApiError:
 
 
 class TestIsTransientApiError:
-    def test_500_is_transient(self):
-        error_text = 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}'
-        assert is_transient_api_error(error_text) is True
-
-    def test_502_is_transient(self):
-        error_text = 'API Error: 502 {"type":"error","error":{"type":"api_error","message":"Bad gateway"}}'
-        assert is_transient_api_error(error_text) is True
-
-    def test_503_is_transient(self):
-        error_text = 'API Error: 503 {"type":"error","error":{"type":"api_error","message":"Service unavailable"}}'
-        assert is_transient_api_error(error_text) is True
-
-    def test_504_is_transient(self):
-        error_text = 'API Error: 504 {"type":"error","error":{"type":"api_error","message":"Gateway timeout"}}'
-        assert is_transient_api_error(error_text) is True
-
-    def test_529_is_transient(self):
-        error_text = 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
-        assert is_transient_api_error(error_text) is True
-
-    def test_429_is_transient(self):
-        error_text = 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Rate limited"}}'
-        assert is_transient_api_error(error_text) is True
-
-    def test_401_is_not_transient(self):
-        error_text = 'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Unauthorized"}}'
-        assert is_transient_api_error(error_text) is False
-
-    def test_403_is_not_transient(self):
-        error_text = 'API Error: 403 {"type":"error","error":{"type":"permission_error","message":"Forbidden"}}'
-        assert is_transient_api_error(error_text) is False
-
-    def test_400_is_not_transient(self):
-        error_text = 'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Bad request"}}'
-        assert is_transient_api_error(error_text) is False
+    @pytest.mark.parametrize("code, err_type, expected", [
+        (500, "api_error", True),
+        (502, "api_error", True),
+        (503, "api_error", True),
+        (504, "api_error", True),
+        (529, "overloaded_error", True),
+        (429, "rate_limit_error", True),
+        (401, "authentication_error", False),
+        (403, "permission_error", False),
+        (400, "invalid_request_error", False),
+    ])
+    def test_status_code(self, code, err_type, expected):
+        assert is_transient_api_error(_api_error(code, err_type, "x")) is expected
 
     def test_non_api_error_is_not_transient(self):
         assert is_transient_api_error("Claude Code was killed (likely out of memory)") is False
@@ -196,20 +224,13 @@ class TestIsTransientApiError:
 
 
 class TestTransientStatusCodes:
-    def test_includes_common_server_errors(self):
-        assert 500 in TRANSIENT_STATUS_CODES
-        assert 502 in TRANSIENT_STATUS_CODES
-        assert 503 in TRANSIENT_STATUS_CODES
-        assert 504 in TRANSIENT_STATUS_CODES
-
-    def test_includes_anthropic_overloaded(self):
-        assert 529 in TRANSIENT_STATUS_CODES
+    def test_includes_server_errors_and_anthropic_overloaded(self):
+        for code in (500, 502, 503, 504, 529):
+            assert code in TRANSIENT_STATUS_CODES, code
 
     def test_excludes_client_errors(self):
-        assert 400 not in TRANSIENT_STATUS_CODES
-        assert 401 not in TRANSIENT_STATUS_CODES
-        assert 403 not in TRANSIENT_STATUS_CODES
-        assert 404 not in TRANSIENT_STATUS_CODES
+        for code in (400, 401, 403, 404):
+            assert code not in TRANSIENT_STATUS_CODES, code
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +253,9 @@ class TestRetryConfiguration:
 # ---------------------------------------------------------------------------
 
 
+_STREAMING_ONCE = "istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once"
+
+
 class TestExecuteStreamingRetry:
     """Retry logic for transient API errors lives in ClaudeCodeBrain.
 
@@ -240,8 +264,8 @@ class TestExecuteStreamingRetry:
     layering the executor used to have.
     """
 
-    def _make_request(self, tmp_path: Path) -> BrainRequest:
-        return BrainRequest(
+    def _run(self, tmp_path) -> BrainResult:
+        request = BrainRequest(
             prompt="test",
             allowed_tools=["Bash"],
             cwd=tmp_path,
@@ -250,19 +274,18 @@ class TestExecuteStreamingRetry:
             streaming=True,
             result_file=tmp_path / "result.txt",
         )
+        return ClaudeCodeBrain()._execute_streaming([], request)
 
-    @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
+    @patch(_STREAMING_ONCE)
     def test_retries_on_transient_error(self, mock_exec_once, tmp_path, monkeypatch):
         """Should retry on transient 500 errors before giving up."""
         slept = sleep_spy(monkeypatch, claude_code)
-        error_500 = 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"req_123"}'
         mock_exec_once.side_effect = [
-            BrainResult(False, error_500, stop_reason="error"),
+            BrainResult(False, _api_error(500), stop_reason="error"),
             BrainResult(True, "Success after retry"),
         ]
 
-        brain = ClaudeCodeBrain()
-        result = brain._execute_streaming([], self._make_request(tmp_path))
+        result = self._run(tmp_path)
 
         assert result.success is True
         assert result.result_text == "Success after retry"
@@ -272,46 +295,32 @@ class TestExecuteStreamingRetry:
         # Retry-After, not just the fixed 5s). The total is the contract.
         assert sum(slept) == pytest.approx(API_RETRY_DELAY_SECONDS)
 
-    @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
-    def test_no_retry_on_permanent_error(self, mock_exec_once, tmp_path, monkeypatch):
-        """Should not retry on permanent 401 errors."""
+    @pytest.mark.parametrize("text, stop_reason, needle", [
+        (_api_error(401, "authentication_error", "Invalid API key"), "error", "401"),
+        ("Claude Code was killed (likely out of memory)", "oom", "out of memory"),
+    ], ids=["permanent_401", "non_api_oom"])
+    @patch(_STREAMING_ONCE)
+    def test_no_retry(
+        self, mock_exec_once, tmp_path, monkeypatch, text, stop_reason, needle,
+    ):
         slept = sleep_spy(monkeypatch, claude_code)
-        error_401 = 'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid API key"}}'
-        mock_exec_once.return_value = BrainResult(False, error_401, stop_reason="error")
+        mock_exec_once.return_value = BrainResult(False, text, stop_reason=stop_reason)
 
-        brain = ClaudeCodeBrain()
-        result = brain._execute_streaming([], self._make_request(tmp_path))
+        result = self._run(tmp_path)
 
         assert result.success is False
-        assert "401" in result.result_text
+        assert needle in result.result_text
         assert mock_exec_once.call_count == 1
         assert slept == []
 
-    @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
-    def test_no_retry_on_non_api_error(self, mock_exec_once, tmp_path, monkeypatch):
-        """Should not retry on non-API errors like OOM."""
+    @patch(_STREAMING_ONCE)
+    def test_gives_up_after_max_retries(self, mock_exec_once, tmp_path, monkeypatch):
         slept = sleep_spy(monkeypatch, claude_code)
         mock_exec_once.return_value = BrainResult(
-            False, "Claude Code was killed (likely out of memory)", stop_reason="oom",
+            False, _api_error(500), stop_reason="error",
         )
 
-        brain = ClaudeCodeBrain()
-        result = brain._execute_streaming([], self._make_request(tmp_path))
-
-        assert result.success is False
-        assert "out of memory" in result.result_text
-        assert mock_exec_once.call_count == 1
-        assert slept == []
-
-    @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
-    def test_gives_up_after_max_retries(self, mock_exec_once, tmp_path, monkeypatch):
-        """Should give up after max retry attempts."""
-        slept = sleep_spy(monkeypatch, claude_code)
-        error_500 = 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}'
-        mock_exec_once.return_value = BrainResult(False, error_500, stop_reason="error")
-
-        brain = ClaudeCodeBrain()
-        result = brain._execute_streaming([], self._make_request(tmp_path))
+        result = self._run(tmp_path)
 
         assert result.success is False
         assert "500" in result.result_text
@@ -320,48 +329,33 @@ class TestExecuteStreamingRetry:
             API_RETRY_DELAY_SECONDS * (API_RETRY_MAX_ATTEMPTS - 1)
         )
 
-    @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
-    def test_success_on_first_try_no_retry(self, mock_exec_once, tmp_path):
-        """Should not retry if first attempt succeeds."""
-        mock_exec_once.return_value = BrainResult(True, "Immediate success")
-
-        brain = ClaudeCodeBrain()
-        result = brain._execute_streaming([], self._make_request(tmp_path))
-
-        assert result.success is True
-        assert result.result_text == "Immediate success"
-        assert mock_exec_once.call_count == 1
-
-    @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
-    def test_actions_taken_passed_through(self, mock_exec_once, tmp_path):
-        """Should pass through actions_taken from _execute_streaming_once."""
+    @patch(_STREAMING_ONCE)
+    def test_first_try_success_passes_actions_through(self, mock_exec_once, tmp_path):
         actions = '["📄 Reading file.py", "✏️ Editing file.py"]'
         mock_exec_once.return_value = BrainResult(
             True, "Done", actions_taken=actions, execution_trace='[]',
         )
 
-        brain = ClaudeCodeBrain()
-        result = brain._execute_streaming([], self._make_request(tmp_path))
+        result = self._run(tmp_path)
 
         assert result.success is True
         assert result.result_text == "Done"
         assert result.actions_taken == actions
+        assert mock_exec_once.call_count == 1
 
-    @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
+    @patch(_STREAMING_ONCE)
     def test_actions_taken_from_successful_retry(
         self, mock_exec_once, tmp_path, monkeypatch,
     ):
         """On retry, should use actions_taken from the successful attempt."""
         sleep_spy(monkeypatch, claude_code, record=False)
-        error_500 = 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"err"},"request_id":"req_1"}'
         actions = '["📄 Reading config"]'
         mock_exec_once.side_effect = [
-            BrainResult(False, error_500, stop_reason="error"),
+            BrainResult(False, _api_error(500, message="err"), stop_reason="error"),
             BrainResult(True, "ok", actions_taken=actions),
         ]
 
-        brain = ClaudeCodeBrain()
-        result = brain._execute_streaming([], self._make_request(tmp_path))
+        result = self._run(tmp_path)
 
         assert result.success is True
         assert result.actions_taken == actions
@@ -373,55 +367,32 @@ class TestExecuteStreamingRetry:
 
 
 class TestBuildPromptSkillsChangelog:
-    def _make_task(self, source_type="talk"):
-        return db.Task(
-            id=1,
-            status="running",
-            source_type=source_type,
-            user_id="alice",
-            prompt="hello",
-            conversation_token="room1",
+    def _prompt(self, tmp_path, **kw):
+        config = _skills_config(tmp_path, files_skill=False)
+        task = db.Task(
+            id=1, status="running", source_type="talk", user_id="alice",
+            prompt="hello", conversation_token="room1",
         )
-
-    def _make_config(self, tmp_path):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
-            bundled_skills_dir=tmp_path / "_empty_bundled",
-            temp_dir=tmp_path / "temp",
-        )
+        return build_prompt(task, [], config, **kw).system
 
     def test_changelog_included_when_provided(self, tmp_path):
-        config = self._make_config(tmp_path)
-        task = self._make_task()
-        prompt = build_prompt(
-            task, [], config,
-            skills_changelog="## 2026-02-08\n- New feature added",
-        ).system
+        prompt = self._prompt(
+            tmp_path, skills_changelog="## 2026-02-08\n- New feature added",
+        )
         assert "## What's New in Skills" in prompt
         assert "New feature added" in prompt
 
     def test_changelog_not_included_when_none(self, tmp_path):
-        config = self._make_config(tmp_path)
-        task = self._make_task()
-        prompt = build_prompt(task, [], config, skills_changelog=None).system
+        prompt = self._prompt(tmp_path, skills_changelog=None)
         assert "What's New in Skills" not in prompt
 
     def test_changelog_appears_before_skills_doc(self, tmp_path):
-        config = self._make_config(tmp_path)
-        task = self._make_task()
-        prompt = build_prompt(
-            task, [], config,
+        prompt = self._prompt(
+            tmp_path,
             skills_doc="## Skills Reference (v: abc123)\n\n### Files\n\nFile ops.",
             skills_changelog="## 2026-02-08\n- Updated files skill",
-        ).system
-        changelog_pos = prompt.index("What's New in Skills")
-        skills_pos = prompt.index("Skills Reference")
-        assert changelog_pos < skills_pos
+        )
+        assert prompt.index("What's New in Skills") < prompt.index("Skills Reference")
 
 
 # ---------------------------------------------------------------------------
@@ -460,7 +431,6 @@ class TestResolveUserTz:
 
     def test_falls_back_to_in_memory_config_when_no_db_row(self, tmp_path):
         config = self._make_config(tmp_path, user_tz="America/New_York")
-        # No user_profiles row written.
         tz, tz_str = _resolve_user_tz(config, "alice")
         assert tz_str == "America/New_York"
 
@@ -477,15 +447,12 @@ class TestResolveUserTz:
         assert tz_str == "UTC"
 
     def test_invalid_timezone_warns_once(self, tmp_path, caplog):
-        import logging
-
-        from istota import executor as _executor
         from istota import user_profiles
 
         config = self._make_config(tmp_path)
         # "PDT" is an abbreviation, not an IANA name — the real-world bug.
         user_profiles.ensure_profile(config.db_path, "alice", timezone="PDT")
-        _executor._INVALID_TZ_WARNED.discard(("alice", "PDT"))
+        executor._INVALID_TZ_WARNED.discard(("alice", "PDT"))
 
         with caplog.at_level(logging.WARNING, logger="istota.executor"):
             _resolve_user_tz(config, "alice")
@@ -515,133 +482,64 @@ class TestResolveUserTz:
 # ---------------------------------------------------------------------------
 
 
+@patch("istota.executor.subprocess.run")
 class TestSkillsFingerprintIntegration:
-    def _make_config(self, tmp_path):
-        db_path = tmp_path / "test.db"
-        if not db_path.exists():
-            db.init_db(db_path)
-        skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
-        (skills_dir / "_index.toml").write_text('[files]\ndescription = "File ops"\nalways_include = true\n')
-        (skills_dir / "files.md").write_text("File operations guide.")
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
-            bundled_skills_dir=tmp_path / "_empty_bundled",
-            temp_dir=tmp_path / "temp",
+    def _make_config(self, tmp_path, changelog=True):
+        config = _skills_config(tmp_path)
+        if changelog:
+            (config.skills_dir / "CHANGELOG.md").write_text("## v1\n- New feature")
+        return config
+
+    def _current_fingerprint(self, config):
+        from istota.skills._loader import compute_skills_fingerprint
+        return compute_skills_fingerprint(
+            config.skills_dir, bundled_dir=config.bundled_skills_dir,
         )
 
-    def _make_task(self, conn, source_type="talk"):
-        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type=source_type)
-        return db.get_task(conn, task_id)
+    def _stored_fingerprint(self, config):
+        with db.get_db(config.db_path) as conn:
+            return db.get_user_skills_fingerprint(conn, "alice")
 
-    @patch("istota.executor.subprocess.run")
     def test_changelog_included_when_fingerprint_changed(self, mock_run, tmp_path):
         config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        (config.skills_dir / "CHANGELOG.md").write_text("## v1\n- New feature")
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn, source_type="talk")
-            from istota.executor import execute_task
-            success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
-
+        _execute(config, mock_run)
         # The changelog is a standing instruction, so it is in the system
         # half — the file, not stdin.
         assert "What's New in Skills" in _system_half(config)
 
-    @patch("istota.executor.subprocess.run")
     def test_changelog_not_included_when_fingerprint_matches(self, mock_run, tmp_path):
         config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        (config.skills_dir / "CHANGELOG.md").write_text("## v1\n- New feature")
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        # Pre-store the current fingerprint
-        from istota.skills._loader import compute_skills_fingerprint
-        fp = compute_skills_fingerprint(config.skills_dir, bundled_dir=config.bundled_skills_dir)
-
         with db.get_db(config.db_path) as conn:
-            db.set_user_skills_fingerprint(conn, "alice", fp)
-            task = self._make_task(conn, source_type="talk")
-            from istota.executor import execute_task
-            success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
-
+            db.set_user_skills_fingerprint(
+                conn, "alice", self._current_fingerprint(config),
+            )
+        _execute(config, mock_run)
         assert "What's New in Skills" not in _system_half(config)
 
-    @patch("istota.executor.subprocess.run")
-    def test_changelog_not_included_for_briefing(self, mock_run, tmp_path):
+    @pytest.mark.parametrize("source_type", ["briefing", "scheduled"])
+    def test_changelog_not_included_for_automated(
+        self, mock_run, tmp_path, source_type,
+    ):
         config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        (config.skills_dir / "CHANGELOG.md").write_text("## v1\n- New feature")
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn, source_type="briefing")
-            from istota.executor import execute_task
-            success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
-
+        _execute(config, mock_run, source_type=source_type)
         assert "What's New in Skills" not in _system_half(config)
 
-    @patch("istota.executor.subprocess.run")
-    def test_changelog_not_included_for_scheduled(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        (config.skills_dir / "CHANGELOG.md").write_text("## v1\n- New feature")
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn, source_type="scheduled")
-            from istota.executor import execute_task
-            success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
-
-        assert "What's New in Skills" not in _system_half(config)
-
-    @patch("istota.executor.subprocess.run")
     def test_fingerprint_updated_after_success(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        config = self._make_config(tmp_path, changelog=False)
+        success, *_ = _execute(config, mock_run)
+        assert success is True
+        assert self._stored_fingerprint(config) == self._current_fingerprint(config)
 
-        from istota.skills._loader import compute_skills_fingerprint
-        expected_fp = compute_skills_fingerprint(config.skills_dir, bundled_dir=config.bundled_skills_dir)
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn, source_type="talk")
-            from istota.executor import execute_task
-            success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
-            assert success is True
-            stored_fp = db.get_user_skills_fingerprint(conn, "alice")
-            assert stored_fp == expected_fp
-
-    @patch("istota.executor.subprocess.run")
-    def test_fingerprint_not_updated_for_non_interactive(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn, source_type="scheduled")
-            from istota.executor import execute_task
-            success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
-            assert success is True
-            stored_fp = db.get_user_skills_fingerprint(conn, "alice")
-            assert stored_fp is None
-
-    @patch("istota.executor.subprocess.run")
-    def test_fingerprint_not_updated_on_failure(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn, source_type="talk")
-            from istota.executor import execute_task
-            success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
-            assert success is False
-            stored_fp = db.get_user_skills_fingerprint(conn, "alice")
-            assert stored_fp is None
+    @pytest.mark.parametrize("source_type, failed", [
+        ("scheduled", False), ("talk", True),
+    ], ids=["non_interactive", "failure"])
+    def test_fingerprint_not_updated(self, mock_run, tmp_path, source_type, failed):
+        config = self._make_config(tmp_path, changelog=False)
+        success, *_ = _execute(
+            config, mock_run, source_type=source_type, failed=failed,
+        )
+        assert success is (not failed)
+        assert self._stored_fingerprint(config) is None
 
 
 # ---------------------------------------------------------------------------
@@ -662,16 +560,6 @@ class TestDeveloperEnvVars:
         self, tmp_path, developer_enabled=True, github=False,
         skill_proxy_enabled=False, **dev_kw,
     ):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        skills_dir = tmp_path / "config" / "skills"
-        # exist_ok: a test may build two configs from one tmp_path to compare
-        # how the hook behaves across settings.
-        skills_dir.mkdir(parents=True, exist_ok=True)
-        (skills_dir / "_index.toml").write_text(
-            '[files]\ndescription = "File ops"\nalways_include = true\n'
-        )
-        (skills_dir / "files.md").write_text("File operations guide.")
         kw = dict(
             enabled=developer_enabled,
             # Under tmp_path, never a real host path: the hook creates
@@ -690,20 +578,14 @@ class TestDeveloperEnvVars:
                 github_username="istotabot",
             )
         kw.update(dev_kw)
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
+        # A test may build two configs from one tmp_path to compare how the
+        # hook behaves across settings; `_skills_config` tolerates that.
+        return _skills_config(
+            tmp_path,
             bundled_skills_dir=None,
-            temp_dir=tmp_path / "temp",
             developer=DeveloperConfig(**kw),
             security=SecurityConfig(skill_proxy_enabled=skill_proxy_enabled),
         )
-
-    def _make_task(self, conn):
-        task_id = db.create_task(
-            conn, prompt="test", user_id="alice", source_type="talk",
-        )
-        return db.get_task(conn, task_id)
 
     def _hook_env(self, config, tmp_path):
         from istota.skills.developer import setup_env
@@ -731,6 +613,14 @@ class TestDeveloperEnvVars:
         )
         return setup_env(ctx), user_temp
 
+    def _policy(self, user_temp):
+        return json.loads(
+            (user_temp / ".developer" / "forge-policy.json").read_text()
+        )
+
+    def _helper_body(self, user_temp):
+        return (user_temp / ".developer" / "git-credential-helper").read_text()
+
     def test_disabled_developer_returns_nothing(self, tmp_path):
         config = self._make_config(tmp_path, developer_enabled=False)
         env, _ = self._hook_env(config, tmp_path)
@@ -743,14 +633,6 @@ class TestDeveloperEnvVars:
         assert helper.exists()
         assert env["GIT_CONFIG_COUNT"] == "1"
         assert env["GIT_CONFIG_KEY_0"] == "credential.https://gitlab.example.com.helper"
-
-    def test_credential_helper_quotes_the_expansion(self, tmp_path):
-        """git wants the value verbatim; an unquoted expansion is word-split
-        by sh and rejoined by echo on single spaces."""
-        config = self._make_config(tmp_path)
-        _, user_temp = self._hook_env(config, tmp_path)
-        body = (user_temp / ".developer" / "git-credential-helper").read_text()
-        assert 'echo password="$GITLAB_TOKEN"' in body
 
     def test_forge_wrappers_installed_under_every_name(self, tmp_path):
         config = self._make_config(tmp_path)
@@ -765,12 +647,6 @@ class TestDeveloperEnvVars:
             assert installed.read_bytes() == canonical, name
             assert installed.stat().st_mode & 0o777 == 0o700, name
 
-    def test_retired_api_cmd_vars_are_gone(self, tmp_path):
-        config = self._make_config(tmp_path, github=True)
-        env, _ = self._hook_env(config, tmp_path)
-        assert "GITLAB_API_CMD" not in env
-        assert "GITHUB_API_CMD" not in env
-
     def test_path_prepend_is_the_only_env_var_the_wrapper_needs(self, tmp_path):
         """Everything else travels in the policy file. The wrapper runs as a
         child of the model's shell, so an env-supplied path is a path the model
@@ -783,8 +659,14 @@ class TestDeveloperEnvVars:
             "ISTOTA_FORGE_POLICY", "ISTOTA_GH_CONFIG_DIR",
             "ISTOTA_GLAB_CONFIG_DIR", "ISTOTA_GH_URL", "ISTOTA_GITLAB_URL",
             "ISTOTA_GH_REAL", "ISTOTA_GLAB_REAL", "ISTOTA_FORGE_STATE_DIR",
+            # The retired API-command vars.
+            "GITLAB_API_CMD", "GITHUB_API_CMD",
         ):
             assert retired not in env, retired
+        # No token value appears in the returned env.
+        joined = " ".join(env.values())
+        assert "glpat-test" not in joined
+        assert "ghp-test" not in joined
 
     def test_policy_carries_the_settings_the_wrapper_must_not_trust(self, tmp_path):
         config = self._make_config(
@@ -792,7 +674,7 @@ class TestDeveloperEnvVars:
         )
         _, user_temp = self._hook_env(config, tmp_path)
         dev_bin = user_temp / ".developer"
-        policy = json.loads((dev_bin / "forge-policy.json").read_text())
+        policy = self._policy(user_temp)
         gh = policy["github"]
         assert gh["real_bin"] == "/opt/gh"
         assert gh["url"] == "https://github.com"
@@ -817,9 +699,7 @@ class TestDeveloperEnvVars:
         )
         config = self._make_config(tmp_path, github=True)
         _, user_temp = self._hook_env(config, tmp_path)
-        policy = json.loads(
-            (user_temp / ".developer" / "forge-policy.json").read_text()
-        )
+        policy = self._policy(user_temp)
         assert policy["github"]["real_bin"] == "/usr/bin/gh"
         assert policy["gitlab"]["real_bin"] == "/usr/bin/glab"
 
@@ -835,9 +715,7 @@ class TestDeveloperEnvVars:
             gh_bin_path="/opt/nonexistent/gh", glab_bin_path="/opt/nonexistent/glab",
         )
         _, user_temp = self._hook_env(config, tmp_path)
-        policy = json.loads(
-            (user_temp / ".developer" / "forge-policy.json").read_text()
-        )
+        policy = self._policy(user_temp)
         assert policy["github"]["real_bin"] == "/opt/nonexistent/gh"
         assert policy["gitlab"]["real_bin"] == "/opt/nonexistent/glab"
 
@@ -848,65 +726,48 @@ class TestDeveloperEnvVars:
         _, user_temp = self._hook_env(
             self._make_config(tmp_path, skill_proxy_enabled=False), tmp_path,
         )
-        off = json.loads(
-            (user_temp / ".developer" / "forge-policy.json").read_text()
-        )
-        assert off["github"]["direct_token"] is True
+        assert self._policy(user_temp)["github"]["direct_token"] is True
 
         _, user_temp2 = self._hook_env(
             self._make_config(tmp_path, skill_proxy_enabled=True), tmp_path,
         )
-        on = json.loads(
-            (user_temp2 / ".developer" / "forge-policy.json").read_text()
-        )
-        assert on["github"]["direct_token"] is False
+        assert self._policy(user_temp2)["github"]["direct_token"] is False
 
     def test_data_dir_is_pinned_and_empty(self, tmp_path):
         """gh execs gh-<name> from $XDG_DATA_HOME/gh/extensions for an unknown
         first argument, which no argv rule can see."""
         config = self._make_config(tmp_path)
         _, user_temp = self._hook_env(config, tmp_path)
-        policy = json.loads(
-            (user_temp / ".developer" / "forge-policy.json").read_text()
-        )
-        data = Path(policy["github"]["data_dir"])
+        data = Path(self._policy(user_temp)["github"]["data_dir"])
         assert data.is_dir()
         assert list(data.iterdir()) == []
 
-    def test_policy_file_is_loadable_and_denies_the_baseline(self, tmp_path):
+    @pytest.mark.parametrize("dev_kw, denied, allowed", [
+        ({}, ["repo", "delete", "x"], ["pr", "create"]),
+        (
+            {"forge_cli_extra_denied": ["gh pr merge"], "forge_cli_permit": ["gh repo delete"]},
+            ["pr", "merge", "1"], ["repo", "delete", "x"],
+        ),
+    ], ids=["baseline", "operator_knobs"])
+    def test_policy_file_is_loadable_and_carries_the_rules(
+        self, tmp_path, dev_kw, denied, allowed,
+    ):
         from istota.forge_cli import FORGE_GITHUB, denied_reason, load_policy
 
-        config = self._make_config(tmp_path)
+        config = self._make_config(tmp_path, **dev_kw)
         _, user_temp = self._hook_env(config, tmp_path)
         policy = load_policy(
             str(user_temp / ".developer" / "forge-policy.json"), FORGE_GITHUB,
         )
-        assert denied_reason(FORGE_GITHUB, ["repo", "delete", "x"], policy)
-        assert denied_reason(FORGE_GITHUB, ["pr", "create"], policy) is None
-
-    def test_operator_knobs_reach_the_policy_file(self, tmp_path):
-        from istota.forge_cli import FORGE_GITHUB, denied_reason, load_policy
-
-        config = self._make_config(
-            tmp_path,
-            forge_cli_extra_denied=["gh pr merge"],
-            forge_cli_permit=["gh repo delete"],
-        )
-        _, user_temp = self._hook_env(config, tmp_path)
-        policy = load_policy(
-            str(user_temp / ".developer" / "forge-policy.json"), FORGE_GITHUB,
-        )
-        assert denied_reason(FORGE_GITHUB, ["pr", "merge", "1"], policy)
-        assert denied_reason(FORGE_GITHUB, ["repo", "delete", "x"], policy) is None
+        assert denied_reason(FORGE_GITHUB, denied, policy)
+        assert denied_reason(FORGE_GITHUB, allowed, policy) is None
 
     def test_cli_config_dirs_seeded_at_the_mode_glab_demands(self, tmp_path):
         """glab refuses any mode but 0600; gh accepts either. Measured against
         glab 1.114 — see the integration tests in test_forge_cli_exec.py."""
         config = self._make_config(tmp_path)
         _, user_temp = self._hook_env(config, tmp_path)
-        policy = json.loads(
-            (user_temp / ".developer" / "forge-policy.json").read_text()
-        )
+        policy = self._policy(user_temp)
         for forge in ("github", "gitlab"):
             config_yml = Path(policy[forge]["config_dir"]) / "config.yml"
             assert config_yml.exists(), forge
@@ -930,7 +791,7 @@ class TestDeveloperEnvVars:
         config = self._make_config(tmp_path, skill_proxy_enabled=True)
         _, user_temp = self._hook_env(config, tmp_path)
         shim = credential_shim.shim_path(user_temp)
-        body = (user_temp / ".developer" / "git-credential-helper").read_text()
+        body = self._helper_body(user_temp)
         assert f'echo password="$({shim} env GITLAB_TOKEN)"' in body
         assert "glpat-test" not in body
 
@@ -964,9 +825,11 @@ class TestDeveloperEnvVars:
     def test_the_helper_reads_the_variable_directly_when_the_proxy_is_off(
         self, tmp_path,
     ):
+        """git wants the value verbatim; an unquoted expansion is word-split
+        by sh and rejoined by echo on single spaces, so it is quoted."""
         config = self._make_config(tmp_path, skill_proxy_enabled=False)
         _, user_temp = self._hook_env(config, tmp_path)
-        body = (user_temp / ".developer" / "git-credential-helper").read_text()
+        body = self._helper_body(user_temp)
         assert 'echo password="$GITLAB_TOKEN"' in body
         assert "istota-credential" not in body
 
@@ -976,20 +839,10 @@ class TestDeveloperEnvVars:
         honoured by every later one."""
         config = self._make_config(tmp_path)
         _, user_temp = self._hook_env(config, tmp_path)
-        policy = json.loads(
-            (user_temp / ".developer" / "forge-policy.json").read_text()
-        )
-        cfg = Path(policy["github"]["config_dir"]) / "config.yml"
+        cfg = Path(self._policy(user_temp)["github"]["config_dir"]) / "config.yml"
         cfg.write_text("aliases:\n    pwn: repo delete\n")
         self._hook_env(config, tmp_path)
         assert cfg.read_text() == ""
-
-    def test_no_token_value_appears_in_the_returned_env(self, tmp_path):
-        config = self._make_config(tmp_path, github=True)
-        env, _ = self._hook_env(config, tmp_path)
-        joined = " ".join(env.values())
-        assert "glpat-test" not in joined
-        assert "ghp-test" not in joined
 
 
 class TestPlainHttpGitlabReachesTheConfiguredHost:
@@ -1008,57 +861,40 @@ class TestPlainHttpGitlabReachesTheConfiguredHost:
     sits next to is the thing most likely to be broken by a later edit here.
     """
 
-    def _seed(self, tmp_path, url, forge="gitlab"):
+    def _seed(self, tmp_path, url, forge="gitlab", name=None):
         from istota.skills.developer import _seed_cli_config_dir
 
         target = _seed_cli_config_dir(
-            tmp_path, f"{forge}-config", forge=forge, forge_url=url
+            tmp_path, name or f"{forge}-config", forge=forge, forge_url=url
         )
         return (target / "config.yml").read_text()
 
-    def test_gh_gets_nothing_even_when_its_url_is_plain_http(self, tmp_path):
-        """The entry is glab's, and gh must not receive it.
-
-        The entry exists to reach a forge over plain HTTP, and gh refuses a
-        scheme in `GH_HOST` outright — so there is nothing it could fix for gh.
-        (The *port* half is a separate question and is handled:
-        `forge_cli._gh_host` keeps a non-default one, ISSUE-279.) Worse than
-        useless, though: gh *reads* a `hosts:` block, and on
-        seeing one it runs its multi-account migration and writes a `hosts.yml`
-        beside the config. `_seed_cli_config_dir` truncates `config.yml` and
-        nothing else, and `user_temp_dir` persists across tasks — so that file
-        would survive every later run in a directory whose whole design is that
-        nothing does.
-        """
-        assert self._seed(tmp_path, "http://ghe.internal:8080", forge="github") == ""
-
-    def test_the_forge_decides_rather_than_the_directory_name(self, tmp_path):
-        """The rule lives in the function, not in what the caller passed.
-
-        `_section` builds the directory name from the forge already, so a
-        caller-blanked URL would work — and would put a security-relevant rule
-        in the one place a later refactor is free to change without reading
-        this docstring.
-        """
-        from istota.skills.developer import _seed_cli_config_dir
-
-        target = _seed_cli_config_dir(
-            tmp_path, "confusingly-named", forge="github",
-            forge_url="http://ghe.internal:8080",
-        )
-
-        assert (target / "config.yml").read_text() == ""
-
-    def test_https_still_seeds_an_empty_file(self, tmp_path):
-        """The overwhelmingly common case must not grow a config surface.
-
-        Anything written here is honoured by glab before dispatch, so the file
-        stays empty wherever it does not have to carry something.
-        """
-        assert self._seed(tmp_path, "https://gitlab.example.com") == ""
-
-    def test_no_url_seeds_an_empty_file(self, tmp_path):
-        assert self._seed(tmp_path, "") == ""
+    @pytest.mark.parametrize("url, forge, name", [
+        # The entry is glab's, and gh must not receive it. gh refuses a scheme
+        # in `GH_HOST` outright, so there is nothing the entry could fix for it
+        # (the port half is `forge_cli._gh_host`'s, ISSUE-279). Worse, gh
+        # *reads* a `hosts:` block and runs its multi-account migration, writing
+        # a `hosts.yml` beside the config that nothing truncates — in a
+        # directory whose whole design is that nothing survives a task.
+        ("http://ghe.internal:8080", "github", None),
+        # The rule lives in the function, not in the directory name the caller
+        # passed: a later refactor is free to change the name without reading
+        # this.
+        ("http://ghe.internal:8080", "github", "confusingly-named"),
+        # The overwhelmingly common case must not grow a config surface:
+        # anything written here is honoured by glab before dispatch.
+        ("https://gitlab.example.com", "gitlab", None),
+        ("", "gitlab", None),
+        # The one case where making it work would be worse than leaving it
+        # broken. Measured on glab 1.114.0: its lookup key includes the
+        # userinfo, so a matching entry would have to carry the password into
+        # `config.yml`, which is bound *readable* into the sandbox. The token
+        # belongs in `gitlab_token`; `developer.forge_transport` says why the
+        # call fails.
+        ("http://user:s3cr3t-value@gitlab.internal:8080", "gitlab", None),
+    ], ids=["gh_plain_http", "forge_not_dir_name", "https", "no_url", "password_in_url"])
+    def test_seeds_an_empty_file(self, tmp_path, url, forge, name):
+        assert self._seed(tmp_path, url, forge=forge, name=name) == ""
 
     def test_plain_http_writes_the_protocol_for_that_host_only(self, tmp_path):
         body = self._seed(tmp_path, "http://127.0.0.1:18080")
@@ -1085,11 +921,23 @@ class TestPlainHttpGitlabReachesTheConfiguredHost:
             "api_host": "gitlab.internal:8080",
         }, parsed
 
-    def test_a_default_port_keeps_the_bare_host_as_the_key(self, tmp_path):
+    @pytest.mark.parametrize("url, key", [
+        ("http://gitlab.internal", "gitlab.internal"),
+        # glab looks the entry up by a lowercased key. Measured on 1.114.0:
+        # the key written verbatim finds nothing and forces https.
+        ("http://GitLab.Internal:8080", "gitlab.internal:8080"),
+        # `build_invocation` puts the *whole* URL in GITLAB_HOST — a subpath
+        # install is a supported shape (`tests/test_forge_cli.py::
+        # test_gitlab_host_keeps_port_and_subpath`), and glab's lookup key
+        # carries the path.
+        ("http://forge.internal/gitlab", "forge.internal/gitlab"),
+        ("http://forge.internal/", "forge.internal"),
+    ], ids=["default_port_bare_host", "uppercase_lowered", "subpath_kept", "trailing_slash_dropped"])
+    def test_the_host_key(self, tmp_path, url, key):
         yaml = pytest.importorskip("yaml")
-        parsed = yaml.safe_load(self._seed(tmp_path, "http://gitlab.internal"))
+        parsed = yaml.safe_load(self._seed(tmp_path, url))
 
-        assert set(parsed["hosts"]) == {"gitlab.internal"}, parsed
+        assert set(parsed["hosts"]) == {key}, parsed
 
     def test_the_file_is_still_replaced_rather_than_appended(self, tmp_path):
         """The truncation invariant, asserted on the branch that writes content.
@@ -1111,56 +959,13 @@ class TestPlainHttpGitlabReachesTheConfiguredHost:
         _seed_cli_config_dir(tmp_path, "gitlab-config", forge="gitlab", forge_url=url)
 
         assert "pwn" not in (target / "config.yml").read_text()
-
-    def test_an_uppercase_host_is_lowercased(self, tmp_path):
-        """glab looks the entry up by a lowercased key. Measured on 1.114.0:
-        `GITLAB_HOST=http://LOCALHOST:8080` with the key written verbatim finds
-        nothing and forces https; the same entry filed lowercase works."""
-        yaml = pytest.importorskip("yaml")
-        parsed = yaml.safe_load(self._seed(tmp_path, "http://GitLab.Internal:8080"))
-
-        assert set(parsed["hosts"]) == {"gitlab.internal:8080"}, parsed
-
-    def test_a_subpath_install_keeps_its_path_in_the_key(self, tmp_path):
-        """`build_invocation` puts the *whole* URL in GITLAB_HOST — a subpath
-        install is a documented supported shape (`tests/test_forge_cli.py::
-        test_gitlab_host_keeps_port_and_subpath`). Measured: glab's lookup key
-        carries the path, so an entry filed under the bare netloc is never
-        consulted and the call still forces https."""
-        yaml = pytest.importorskip("yaml")
-        parsed = yaml.safe_load(self._seed(tmp_path, "http://forge.internal/gitlab"))
-
-        assert set(parsed["hosts"]) == {"forge.internal/gitlab"}, parsed
-
-    def test_a_trailing_slash_does_not_become_part_of_the_key(self, tmp_path):
-        yaml = pytest.importorskip("yaml")
-        parsed = yaml.safe_load(self._seed(tmp_path, "http://forge.internal/"))
-
-        assert set(parsed["hosts"]) == {"forge.internal"}, parsed
-
-    def test_a_url_carrying_a_password_gets_no_entry_at_all(self, tmp_path):
-        """The one case where making it work would be worse than leaving it broken.
-
-        Measured on glab 1.114.0: its lookup key includes the userinfo, so an
-        entry that actually matched `http://user:token@host` would have to carry
-        the password — into `config.yml`, which lives under `.developer` and is
-        bound *readable* into the sandbox. That hands the model a credential to
-        support a shape that should not exist: the token belongs in
-        `gitlab_token`, and `git_remote_scrub` exists to strip exactly this out
-        of URLs.
-
-        So: no entry, the call fails the way it did before, and
-        `developer.forge_transport` is what says why.
-        """
-        body = self._seed(tmp_path, "http://user:s3cr3t-value@gitlab.internal:8080")
-
-        assert body == "", body
+        assert (target / "config.yml").stat().st_mode & 0o777 == 0o600
 
     def test_no_password_survives_into_the_file_by_any_route(self, tmp_path):
         """Stated over the whole output rather than over the branch.
 
         A later change that starts emitting the netloc again would satisfy the
-        assertion above only if it also returned early — this one fails
+        empty-file assertion only if it also returned early — this one fails
         whatever route the value took.
         """
         for url in (
@@ -1169,16 +974,6 @@ class TestPlainHttpGitlabReachesTheConfiguredHost:
             "http://s3cr3t-value@gitlab.internal:8080",
         ):
             assert "s3cr3t-value" not in self._seed(tmp_path, url), url
-
-    def test_the_seeded_file_keeps_the_mode_glab_demands(self, tmp_path):
-        from istota.skills.developer import _seed_cli_config_dir
-
-        target = _seed_cli_config_dir(
-            tmp_path, "gitlab-config", forge="gitlab",
-            forge_url="http://127.0.0.1:18080",
-        )
-
-        assert (target / "config.yml").stat().st_mode & 0o777 == 0o600
 
 
 class TestPathPrependOrdering:
@@ -1217,152 +1012,75 @@ class TestPathPrependOrdering:
 
 
 class TestWebsiteEnvVars:
-    """The bot's own instance-wide web root — no per-user gating."""
-
     """The agent-writable static web root was removed (ISSUE-194): a
     publicly-served directory the agent could write to with a plain ``cp`` was
     an outbound egress channel the confirmation model classified as a benign
     local write. No env var may hand a task a path to one.
     """
 
-    def _make_config(self, tmp_path):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
-        (skills_dir / "_index.toml").write_text('[files]\ndescription = "File ops"\nalways_include = true\n')
-        (skills_dir / "files.md").write_text("File operations guide.")
-        mount_path = tmp_path / "mount"
-        mount_path.mkdir(parents=True)
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
-            bundled_skills_dir=tmp_path / "_empty_bundled",
-            temp_dir=tmp_path / "temp",
-            workspace_path=mount_path,
+    @patch("istota.executor.subprocess.run")
+    def test_website_env_vars_never_set(self, mock_run, tmp_path):
+        config = _skills_config(
+            tmp_path, mount=True,
             site=SiteConfig(hostname="istota.example.com"),
             users={"alice": UserConfig()},
         )
+        _execute(config, mock_run)
 
-    def _make_task(self, conn):
-        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
-        return db.get_task(conn, task_id)
-
-    @patch("istota.executor.subprocess.run")
-    def test_website_env_vars_never_set(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
+        env = _env(mock_run)
         assert "WEBSITE_PATH" not in env
         assert "WEBSITE_URL" not in env
 
 
+@patch("istota.executor.subprocess.run")
 class TestKarakeepEnvVars:
     """Karakeep env vars come from the encrypted secrets table after the
     modules / connected services refactor — the karakeep resource type was
     retired with that change.
     """
 
-    def _make_config(self, tmp_path):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
-        (skills_dir / "_index.toml").write_text('[files]\ndescription = "File ops"\nalways_include = true\n')
-        (skills_dir / "files.md").write_text("File operations guide.")
-        mount_path = tmp_path / "mount"
-        mount_path.mkdir(parents=True)
-        users = {"alice": UserConfig()}
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
-            # Real bundled skills dir so the bookmarks manifest is loaded.
-            bundled_skills_dir=None,
-            temp_dir=tmp_path / "temp",
-            workspace_path=mount_path,
-            users=users,
-            security=SecurityConfig(skill_proxy_enabled=False),
-        )
-
-    def _make_task(self, conn):
-        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
-        return db.get_task(conn, task_id)
-
-    @patch("istota.executor.subprocess.run")
-    def test_karakeep_env_vars_set_when_secrets_configured(self, mock_run, tmp_path, monkeypatch):
+    def _make_config(self, tmp_path, monkeypatch, secrets):
         from istota import secrets_store
 
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "x" * 64)
-        config = self._make_config(tmp_path)
-        secrets_store.set_secret(
-            config.db_path, "alice", "karakeep", "base_url",
-            "https://keep.example.com/api/v1",
+        config = _skills_config(
+            tmp_path, mount=True,
+            # Real bundled skills dir so the bookmarks manifest is loaded.
+            bundled_skills_dir=None,
+            users={"alice": UserConfig()},
+            security=SecurityConfig(skill_proxy_enabled=False),
         )
-        secrets_store.set_secret(
-            config.db_path, "alice", "karakeep", "api_key", "kk-secret",
-        )
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        for key, value in secrets.items():
+            secrets_store.set_secret(config.db_path, "alice", "karakeep", key, value)
+        return config
 
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            conn.commit()  # release writer lock so secrets_store can bump last_accessed_at
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
+    def test_karakeep_env_vars_set_when_secrets_configured(
+        self, mock_run, tmp_path, monkeypatch,
+    ):
+        config = self._make_config(tmp_path, monkeypatch, {
+            "base_url": "https://keep.example.com/api/v1",
+            "api_key": "kk-secret",
+        })
+        _execute(config, mock_run)
 
-        env = mock_run.call_args[1]["env"]
+        env = _env(mock_run)
         assert env["KARAKEEP_BASE_URL"] == "https://keep.example.com/api/v1"
         assert env["KARAKEEP_API_KEY"] == "kk-secret"
 
-    @patch("istota.executor.subprocess.run")
-    def test_karakeep_env_vars_not_set_when_no_secrets(self, mock_run, tmp_path, monkeypatch):
-        monkeypatch.setenv("ISTOTA_SECRET_KEY", "x" * 64)
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+    # With only ``base_url`` configured, ``bookmarks`` does not auto-authorize
+    # (its sensitive spec ``KARAKEEP_API_KEY`` does not resolve), so none of
+    # its env vars flow: the half-configured user gets nothing, a cleaner
+    # failure mode than a partial env.
+    @pytest.mark.parametrize("secrets", [
+        {}, {"base_url": "https://keep.example.com/api/v1"},
+    ], ids=["no_secrets", "only_base_url"])
+    def test_karakeep_env_vars_not_set(
+        self, mock_run, tmp_path, monkeypatch, secrets,
+    ):
+        config = self._make_config(tmp_path, monkeypatch, secrets)
+        _execute(config, mock_run)
 
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        assert "KARAKEEP_BASE_URL" not in env
-        assert "KARAKEEP_API_KEY" not in env
-
-    @patch("istota.executor.subprocess.run")
-    def test_karakeep_env_vars_partial_when_only_one_secret(self, mock_run, tmp_path, monkeypatch):
-        # Phase 3: ``bookmarks`` auto-authorizes only when its sensitive
-        # spec (``KARAKEEP_API_KEY``) resolves. With only ``base_url``
-        # configured and ``bookmarks`` not selected, the skill is not
-        # authorized and none of its env vars flow. The user-facing
-        # signal is "the half-configured user gets nothing" — a cleaner
-        # failure mode than the Phase 2 partial-env shape.
-        from istota import secrets_store
-
-        monkeypatch.setenv("ISTOTA_SECRET_KEY", "x" * 64)
-        config = self._make_config(tmp_path)
-        secrets_store.set_secret(
-            config.db_path, "alice", "karakeep", "base_url",
-            "https://keep.example.com/api/v1",
-        )
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            conn.commit()
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
+        env = _env(mock_run)
         assert "KARAKEEP_BASE_URL" not in env
         assert "KARAKEEP_API_KEY" not in env
 
@@ -1398,48 +1116,43 @@ class TestWebsitePromptSection:
 
 
 class TestAdminPromptIsolation:
-    def _make_config(self, tmp_path, admin_users=None):
+    def _composed(self, tmp_path, is_admin, sandbox_enabled=False):
+        """Build the prompt for alice; a non-admin is one outside admin_users."""
         mount_path = tmp_path / "mount"
         mount_path.mkdir(parents=True)
-        return Config(
+        config = Config(
             db_path=tmp_path / "test.db",
             # Admin vs non-admin mount-path scoping is a Nextcloud multi-user
             # feature — the "mounted at" wording requires a Nextcloud backend.
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
             workspace_path=mount_path,
-            admin_users=admin_users or set(),
+            admin_users=set() if is_admin else {"bob"},
         )
-
-    def _make_task(self, conn):
-        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
-        return db.get_task(conn, task_id)
+        if sandbox_enabled:
+            config.security.sandbox_enabled = True
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
+            task = db.get_task(conn, task_id)
+        return config, build_prompt(task, [], config, is_admin=is_admin)
 
     @pytest.mark.parametrize("is_admin", [True, False])
     def test_prompt_never_states_the_db_path(self, tmp_path, is_admin):
         """Naming a file that has been masked out of the sandbox is worse than
         saying nothing: a failed open reads as a broken command, not a boundary."""
-        config = self._make_config(tmp_path, admin_users=None if is_admin else {"bob"})
-        db.init_db(config.db_path)
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
+        config, composed = self._composed(tmp_path, is_admin)
         # Both halves: "the prompt never names the database path" is a boundary
         # claim about everything the model is shown, not a claim about where a
         # layer was classified. A half-scoped assertion would go quiet the day
         # a path started leaking through the other one.
-        composed = build_prompt(task, [], config, is_admin=is_admin)
         assert str(config.db_path) not in composed.system + composed.user
         assert "Database: reachable only through skill CLIs" in composed.system
 
     @pytest.mark.parametrize("is_admin", [True, False])
     def test_absence_claim_only_when_sandbox_is_in_effect(self, tmp_path, is_admin):
-        config = self._make_config(tmp_path, admin_users=None if is_admin else {"bob"})
-        config.security.sandbox_enabled = True
-        db.init_db(config.db_path)
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
         with patch("istota.executor._bwrap_available", return_value=True):
-            prompt = build_prompt(task, [], config, is_admin=is_admin).system
-        assert "the directories that hold them are empty here" in prompt
+            _, composed = self._composed(tmp_path, is_admin, sandbox_enabled=True)
+        assert "the directories that hold them are empty here" in composed.system
 
     @pytest.mark.parametrize("is_admin", [True, False])
     def test_prohibition_kept_where_there_is_no_sandbox(self, tmp_path, is_admin):
@@ -1449,143 +1162,61 @@ class TestAdminPromptIsolation:
         claiming they aren't would be a false boundary — the exact failure this
         change set exists to correct. The older prohibition wording covers it.
         """
-        config = self._make_config(tmp_path, admin_users=None if is_admin else {"bob"})
-        config.security.sandbox_enabled = True
-        db.init_db(config.db_path)
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
         with patch("istota.executor._bwrap_available", return_value=False):
-            prompt = build_prompt(task, [], config, is_admin=is_admin).system
+            _, composed = self._composed(tmp_path, is_admin, sandbox_enabled=True)
+        prompt = composed.system
         assert "the directories that hold them are empty here" not in prompt
         assert "Never open a database file directly" in prompt
         assert "no filesystem sandbox" in prompt
 
-    def test_admin_prompt_states_admin_privileges(self, tmp_path):
-        config = self._make_config(tmp_path)
-        db.init_db(config.db_path)
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=True).system
-        assert "Privileges: admin" in prompt
+    @pytest.mark.parametrize("is_admin", [True, False])
+    def test_standing_rules_present_for_everyone(self, tmp_path, is_admin):
+        import re
 
-    def test_non_admin_prompt_states_standard_privileges(self, tmp_path):
-        config = self._make_config(tmp_path, admin_users={"bob"})
-        db.init_db(config.db_path)
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=False).system
-        assert "Privileges: standard user" in prompt
-        assert "Privileges: admin" not in prompt
-
-    def test_prompt_has_no_sqlite3_tool(self, tmp_path):
-        """sqlite3 tool removed in favor of deferred JSON operations."""
-        config = self._make_config(tmp_path)
-        db.init_db(config.db_path)
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=True).system
+        _, composed = self._composed(tmp_path, is_admin)
+        prompt = composed.system
+        # ISSUE-091 — UTC anchor + elapsed-time rule.
+        assert re.search(r"Current UTC: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", prompt), (
+            "Current UTC ISO 8601 line missing from prompt header"
+        )
+        assert "normalize both to ISO 8601 UTC" in prompt, (
+            "Elapsed-time arithmetic rule missing from rules section"
+        )
+        # ISSUE-155 — dates in fetched content must not override the prompt date.
+        assert "publication or authorship dates" in prompt, (
+            "Fetched-content date rule missing from rules section"
+        )
+        # Subtask creation instructions belong in the tasks skill doc, loaded
+        # only when relevant, not in the hardcoded prompt.
+        assert "create subtasks" not in prompt.lower()
+        # The sqlite3 tool was removed in favour of deferred JSON operations.
         assert "sqlite3 for the task database" not in prompt
 
-    def test_admin_prompt_no_subtask_instructions(self, tmp_path):
-        """Subtask creation instructions should NOT be in the hardcoded prompt.
+    def test_admin_prompt(self, tmp_path):
+        config, composed = self._composed(tmp_path, is_admin=True)
+        assert "Privileges: admin" in composed.system
+        assert f"mounted at '{config.workspace_path}'" in composed.system
 
-        They belong in the tasks skill doc, loaded only when relevant.
-        """
-        config = self._make_config(tmp_path)
-        db.init_db(config.db_path)
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=True).system
-        assert "create subtasks" not in prompt.lower()
-
-    def test_non_admin_prompt_no_subtask_rule(self, tmp_path):
-        config = self._make_config(tmp_path, admin_users={"bob"})
-        db.init_db(config.db_path)
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=False).system
-        assert "create subtasks" not in prompt
-
-    def test_admin_prompt_has_full_mount_path(self, tmp_path):
-        config = self._make_config(tmp_path)
-        db.init_db(config.db_path)
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=True).system
-        assert f"mounted at '{config.workspace_path}'" in prompt
-
-    def test_non_admin_prompt_has_scoped_mount_path(self, tmp_path):
-        config = self._make_config(tmp_path, admin_users={"bob"})
-        db.init_db(config.db_path)
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
+    def test_non_admin_prompt(self, tmp_path):
+        config, composed = self._composed(tmp_path, is_admin=False)
+        prompt = composed.system
+        assert "Privileges: standard user" in prompt
+        assert "Privileges: admin" not in prompt
         scoped = str(config.workspace_path / "Users" / "alice")
-        prompt = build_prompt(task, [], config, is_admin=False).system
         assert f"mounted at '{scoped}'" in prompt
-
-    def test_non_admin_prompt_has_restricted_access_rule(self, tmp_path):
-        config = self._make_config(tmp_path, admin_users={"bob"})
-        db.init_db(config.db_path)
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=False).system
         assert "You can ONLY access files under" in prompt
         assert "do NOT have access to the task database" in prompt
 
-    def test_prompt_includes_utc_anchor_and_elapsed_time_rule(self, tmp_path):
-        """ISSUE-091 — UTC anchor + elapsed-time rule must be present."""
-        import re
-        config = self._make_config(tmp_path)
-        db.init_db(config.db_path)
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-        for is_admin in (True, False):
-            prompt = build_prompt(task, [], config, is_admin=is_admin).system
-            assert re.search(r"Current UTC: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", prompt), (
-                "Current UTC ISO 8601 line missing from prompt header"
-            )
-            assert "normalize both to ISO 8601 UTC" in prompt, (
-                "Elapsed-time arithmetic rule missing from rules section"
-            )
 
-    def test_prompt_includes_fetched_content_date_rule(self, tmp_path):
-        """ISSUE-155 — dates in fetched content must not override the prompt date."""
-        config = self._make_config(tmp_path)
-        db.init_db(config.db_path)
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-        for is_admin in (True, False):
-            prompt = build_prompt(task, [], config, is_admin=is_admin).system
-            assert "publication or authorship dates" in prompt, (
-                "Fetched-content date rule missing from rules section"
-            )
-
-
+@patch("istota.executor.subprocess.run")
 class TestAdminEnvVarIsolation:
-    def _make_config(self, tmp_path, admin_users=None):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
-        (skills_dir / "_index.toml").write_text('[files]\ndescription = "File ops"\nalways_include = true\n')
-        (skills_dir / "files.md").write_text("File operations guide.")
-        mount_path = tmp_path / "mount"
-        mount_path.mkdir(parents=True)
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
-            bundled_skills_dir=tmp_path / "_empty_bundled",
-            temp_dir=tmp_path / "temp",
-            workspace_path=mount_path,
-            admin_users=admin_users or set(),
+    def _make_config(self, tmp_path, is_admin=True):
+        return _skills_config(
+            tmp_path, mount=True, admin_users=set() if is_admin else {"bob"},
         )
 
-    def _make_task(self, conn):
-        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
-        return db.get_task(conn, task_id)
-
-    @patch("istota.executor.subprocess.run")
-    def test_admin_no_db_path_env(self, mock_run, tmp_path):
+    @pytest.mark.parametrize("is_admin", [True, False])
+    def test_no_db_path_env(self, mock_run, tmp_path, is_admin):
         """Admins used to get ISTOTA_DB_PATH in Claude's env. Nobody does now.
 
         It goes to the skill proxy instead — see
@@ -1593,48 +1224,11 @@ class TestAdminEnvVarIsolation:
         covers the non-admin half (the path reaches the proxy for every user,
         which is what un-broke scoped reads for non-admins).
         """
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        _execute(self._make_config(tmp_path, is_admin), mock_run)
+        assert "ISTOTA_DB_PATH" not in _env(mock_run)
 
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        assert "ISTOTA_DB_PATH" not in env
-
-    @patch("istota.executor.subprocess.run")
-    def test_non_admin_no_db_path_env(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, admin_users={"bob"})
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        assert "ISTOTA_DB_PATH" not in env
-
-    @patch("istota.executor.subprocess.run")
-    def test_admin_gets_full_mount_path_env(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        assert env["NEXTCLOUD_MOUNT_PATH"] == str(config.workspace_path)
-
-    @patch("istota.executor.subprocess.run")
-    def test_non_admin_gets_real_root_mount_path_env(self, mock_run, tmp_path):
+    @pytest.mark.parametrize("is_admin", [True, False])
+    def test_mount_path_env_is_the_real_root(self, mock_run, tmp_path, is_admin):
         # The mount env var is the REAL root for non-admins too. Every consumer
         # (memory / memory_search CLIs, the schedules/reminders skill docs)
         # prepends `Users/<uid>` to it; a previously "scoped" mount
@@ -1642,153 +1236,57 @@ class TestAdminEnvVarIsolation:
         # landed at real/Users/<uid>/Users/<uid>/… — a phantom path never read
         # back. Filesystem isolation is enforced by the bwrap bind (only the
         # user's own Users/<uid> dir is bound), not by this env var.
-        config = self._make_config(tmp_path, admin_users={"bob"})
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        config = self._make_config(tmp_path, is_admin)
+        _execute(config, mock_run)
 
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
+        env = _env(mock_run)
         assert env["NEXTCLOUD_MOUNT_PATH"] == str(config.workspace_path)
         # Specifically NOT the doubled/scoped form.
         assert env["NEXTCLOUD_MOUNT_PATH"] != str(
             config.workspace_path / "Users" / "alice"
         )
 
-    @patch("istota.executor.subprocess.run")
-    def test_admin_skills_include_admin_only(self, mock_run, tmp_path):
-        """Admin user should get admin-only skills like schedules in the prompt."""
-        config = self._make_config(tmp_path)
-        skills_dir = config.skills_dir
-        (skills_dir / "_index.toml").write_text(
-            '[files]\ndescription = "File ops"\nalways_include = true\n\n'
+    @pytest.mark.parametrize("is_admin", [True, False])
+    def test_admin_only_skills_follow_admin_status(self, mock_run, tmp_path, is_admin):
+        """Admin users get admin-only skills like schedules in the prompt;
+        non-admins do not."""
+        config = self._make_config(tmp_path, is_admin)
+        (config.skills_dir / "_index.toml").write_text(
+            _FILES_INDEX + '\n'
             '[schedules]\ndescription = "Scheduled jobs"\nsource_types = ["talk"]\nadmin_only = true\n'
         )
-        (skills_dir / "schedules.md").write_text("Admin scheduling reference.")
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        (config.skills_dir / "schedules.md").write_text("Admin scheduling reference.")
+        _execute(config, mock_run, prompt="set up a schedule")
 
-        with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(conn, prompt="set up a schedule", user_id="alice", source_type="talk")
-            task = db.get_task(conn, task_id)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        assert "Admin scheduling reference" in _system_half(config)
-
-    @patch("istota.executor.subprocess.run")
-    def test_non_admin_skills_exclude_admin_only(self, mock_run, tmp_path):
-        """Non-admin user should NOT get admin-only skills."""
-        config = self._make_config(tmp_path, admin_users={"bob"})
-        skills_dir = config.skills_dir
-        (skills_dir / "_index.toml").write_text(
-            '[files]\ndescription = "File ops"\nalways_include = true\n\n'
-            '[schedules]\ndescription = "Scheduled jobs"\nsource_types = ["talk"]\nadmin_only = true\n'
-        )
-        (skills_dir / "schedules.md").write_text("Admin scheduling reference.")
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(conn, prompt="set up a schedule", user_id="alice", source_type="talk")
-            task = db.get_task(conn, task_id)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        assert "Admin scheduling reference" not in _system_half(config)
+        assert ("Admin scheduling reference" in _system_half(config)) is is_admin
 
 
+@patch("istota.executor.subprocess.run")
 class TestDeferredDirEnvVar:
     """ISTOTA_DEFERRED_DIR env var should always be set."""
 
-    def _make_config(self, tmp_path, admin_users=None):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
-        (skills_dir / "_index.toml").write_text('[files]\ndescription = "File ops"\nalways_include = true\n')
-        (skills_dir / "files.md").write_text("File operations guide.")
-        mount_path = tmp_path / "mount"
-        mount_path.mkdir(parents=True)
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
-            bundled_skills_dir=tmp_path / "_empty_bundled",
-            temp_dir=tmp_path / "temp",
-            workspace_path=mount_path,
-            admin_users=admin_users or set(),
-        )
+    @pytest.mark.parametrize("admin_users", [set(), {"bob"}], ids=["admin", "non_admin"])
+    def test_deferred_dir_set(self, mock_run, tmp_path, admin_users):
+        config = _skills_config(tmp_path, mount=True, admin_users=admin_users)
+        _execute(config, mock_run)
+        assert _env(mock_run)["ISTOTA_DEFERRED_DIR"] == str(tmp_path / "temp" / "alice")
 
-    def _make_task(self, conn):
-        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
-        return db.get_task(conn, task_id)
-
-    @patch("istota.executor.subprocess.run")
-    def test_deferred_dir_set_for_admin(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        assert env["ISTOTA_DEFERRED_DIR"] == str(tmp_path / "temp" / "alice")
-
-    @patch("istota.executor.subprocess.run")
-    def test_deferred_dir_set_for_non_admin(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, admin_users={"bob"})
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        assert env["ISTOTA_DEFERRED_DIR"] == str(tmp_path / "temp" / "alice")
-
-    @patch("istota.executor.subprocess.run")
     def test_experimental_features_propagated(self, mock_run, tmp_path):
         """LLM-path subprocess must carry ISTOTA_EXPERIMENTAL_FEATURES so
         skills invoked via the skill proxy (which forwards env to skill CLIs)
         see consistent gating with the scheduler subprocess paths."""
         from istota.config import ExperimentalConfig
-        config = self._make_config(tmp_path)
+        config = _skills_config(tmp_path, mount=True)
         config.experimental = ExperimentalConfig(features=["money_tax", "money_wash_sales"])
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        _execute(config, mock_run)
+        assert _env(mock_run)["ISTOTA_EXPERIMENTAL_FEATURES"] == "money_tax,money_wash_sales"
 
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        assert env["ISTOTA_EXPERIMENTAL_FEATURES"] == "money_tax,money_wash_sales"
-
-    @patch("istota.executor.subprocess.run")
     def test_experimental_features_empty_when_unset(self, mock_run, tmp_path):
         """Always-set contract: even with no features enabled, the var
         exists (empty string) so consumers don't have to dance around
         os.environ.get(...) returning None."""
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        assert env["ISTOTA_EXPERIMENTAL_FEATURES"] == ""
+        _execute(_skills_config(tmp_path, mount=True), mock_run)
+        assert _env(mock_run)["ISTOTA_EXPERIMENTAL_FEATURES"] == ""
 
 
 # ---------------------------------------------------------------------------
@@ -1796,30 +1294,16 @@ class TestDeferredDirEnvVar:
 # ---------------------------------------------------------------------------
 
 
+@patch("istota.executor.subprocess.run")
 class TestCalDAVCredentialScoping:
     """CalDAV credentials should only be injected when user has calendars."""
 
     def _make_config(self, tmp_path):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        skills_dir = tmp_path / "config" / "skills"
-        # exist_ok: a test may build two configs from one tmp_path to compare
-        # how the hook behaves across settings.
-        skills_dir.mkdir(parents=True, exist_ok=True)
-        (skills_dir / "_index.toml").write_text(
-            '[files]\ndescription = "File ops"\nalways_include = true\n'
-        )
-        (skills_dir / "files.md").write_text("File operations guide.")
-        mount_path = tmp_path / "mount"
-        mount_path.mkdir(parents=True)
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
+        return _skills_config(
+            tmp_path, mount=True,
             # Real bundled skills dir so the calendar manifest's
             # gate_has_discovered_calendars CALDAV_* specs are loaded.
             bundled_skills_dir=None,
-            temp_dir=tmp_path / "temp",
-            workspace_path=mount_path,
             nextcloud=NextcloudConfig(
                 url="https://nc.example.com",
                 username="bot",
@@ -1827,64 +1311,29 @@ class TestCalDAVCredentialScoping:
             ),
         )
 
-    def _make_task(self, conn):
-        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
-        return db.get_task(conn, task_id)
-
-    @patch("istota.executor.get_calendars_for_user")
+    @pytest.mark.parametrize("calendars, expected", [
+        ([("Personal", "https://cal/personal", True)], True),
+        ([], False),
+    ], ids=["has_calendars", "no_calendars"])
     @patch("istota.executor.get_caldav_client")
-    @patch("istota.executor.subprocess.run")
-    def test_caldav_creds_present_when_user_has_calendars(
-        self, mock_run, mock_client, mock_cals, tmp_path,
-    ):
-        mock_cals.return_value = [("Personal", "https://cal/personal", True)]
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        assert "CALDAV_URL" in env
-        assert "CALDAV_USERNAME" in env
-
     @patch("istota.executor.get_calendars_for_user")
-    @patch("istota.executor.get_caldav_client")
-    @patch("istota.executor.subprocess.run")
-    def test_caldav_creds_absent_when_no_calendars(
-        self, mock_run, mock_client, mock_cals, tmp_path,
+    def test_caldav_creds_follow_calendars(
+        self, mock_cals, mock_client, mock_run, tmp_path, calendars, expected,
     ):
-        mock_cals.return_value = []  # No calendars for this user
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_cals.return_value = calendars
+        _execute(self._make_config(tmp_path), mock_run)
 
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
+        env = _env(mock_run)
+        assert ("CALDAV_URL" in env) is expected
+        assert ("CALDAV_USERNAME" in env) is expected
 
-        env = mock_run.call_args[1]["env"]
-        assert "CALDAV_URL" not in env
-        assert "CALDAV_USERNAME" not in env
-
-    @patch("istota.executor.subprocess.run")
     def test_caldav_creds_absent_when_no_caldav_config(self, mock_run, tmp_path):
         """No CalDAV configured at all — creds should not appear."""
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
         config = self._make_config(tmp_path)
         config.nextcloud = NextcloudConfig()  # No URL = no CalDAV
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        _execute(config, mock_run)
 
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
+        env = _env(mock_run)
         assert "CALDAV_URL" not in env
         assert "CALDAV_USERNAME" not in env
 
@@ -1897,15 +1346,13 @@ class TestCalDAVCredentialScoping:
 class TestUserIdSubstitution:
     """Skill docs should have {user_id} replaced with actual user ID."""
 
-    def _make_config(self, tmp_path):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
-        (skills_dir / "_index.toml").write_text(
+    @patch("istota.executor.subprocess.run")
+    def test_user_id_substituted_in_skills_doc(self, mock_run, tmp_path):
+        config = _skills_config(tmp_path, files_skill=False, mount=True)
+        (config.skills_dir / "_index.toml").write_text(
             '[memory]\ndescription = "Memory"\nalways_include = true\n'
         )
-        skill_dir = skills_dir / "memory"
+        skill_dir = config.skills_dir / "memory"
         skill_dir.mkdir()
         (skill_dir / "skill.toml").write_text(
             'description = "Memory"\nalways_include = true\n'
@@ -1913,30 +1360,7 @@ class TestUserIdSubstitution:
         (skill_dir / "skill.md").write_text(
             "Memory file at /Users/{user_id}/bot/config/USER.md"
         )
-        mount_path = tmp_path / "mount"
-        mount_path.mkdir(parents=True)
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
-            bundled_skills_dir=tmp_path / "_empty_bundled",
-            temp_dir=tmp_path / "temp",
-            workspace_path=mount_path,
-        )
-
-    def _make_task(self, conn, user_id="alice"):
-        task_id = db.create_task(conn, prompt="test", user_id=user_id, source_type="talk")
-        return db.get_task(conn, task_id)
-
-    @patch("istota.executor.subprocess.run")
-    def test_user_id_substituted_in_skills_doc(self, mock_run, tmp_path):
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn, user_id="alice")
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
+        _execute(config, mock_run)
 
         # The skill body carrying the placeholder is a standing instruction,
         # so the substitution is visible in the system half.
@@ -1962,58 +1386,45 @@ class TestLoadPersona:
             kwargs["workspace_path"] = mount
         return Config(**kwargs)
 
+    def _plant_global(self, tmp_path, text="Global persona"):
+        (tmp_path / "config" / "persona.md").write_text(text)
+
+    def _user_config_dir(self, config, bot_dir="istota"):
+        user_dir = config.workspace_path / "Users" / "alice" / bot_dir / "config"
+        user_dir.mkdir(parents=True)
+        return user_dir
+
     def test_user_persona_overrides_global(self, tmp_path):
         config = self._make_config(tmp_path)
-        # Create global persona
-        (tmp_path / "config" / "persona.md").write_text("Global persona")
-        # Create user workspace persona
-        user_dir = config.workspace_path / "Users" / "alice" / "istota" / "config"
-        user_dir.mkdir(parents=True)
-        (user_dir / "PERSONA.md").write_text("Custom persona for Alice")
+        self._plant_global(tmp_path)
+        (self._user_config_dir(config) / "PERSONA.md").write_text("Custom persona for Alice")
 
-        result = load_persona(config, user_id="alice")
-        assert result == "Custom persona for Alice"
+        assert load_persona(config, user_id="alice") == "Custom persona for Alice"
 
     def test_empty_user_persona_falls_back_to_global(self, tmp_path):
         config = self._make_config(tmp_path)
-        (tmp_path / "config" / "persona.md").write_text("Global persona")
-        user_dir = config.workspace_path / "Users" / "alice" / "istota" / "config"
-        user_dir.mkdir(parents=True)
-        (user_dir / "PERSONA.md").write_text("   ")
+        self._plant_global(tmp_path)
+        (self._user_config_dir(config) / "PERSONA.md").write_text("   ")
 
-        result = load_persona(config, user_id="alice")
-        assert result == "Global persona"
+        assert load_persona(config, user_id="alice") == "Global persona"
 
-    def test_missing_user_persona_falls_back_to_global(self, tmp_path):
-        config = self._make_config(tmp_path)
-        (tmp_path / "config" / "persona.md").write_text("Global persona")
+    @pytest.mark.parametrize("has_workspace, user_id", [
+        (True, "alice"), (False, "alice"), (True, None),
+    ], ids=["missing_user_persona", "no_mount", "no_user_id"])
+    def test_falls_back_to_global(self, tmp_path, has_workspace, user_id):
+        config = self._make_config(tmp_path, has_workspace=has_workspace)
+        self._plant_global(tmp_path)
 
-        result = load_persona(config, user_id="alice")
-        assert result == "Global persona"
-
-    def test_no_mount_falls_back_to_global(self, tmp_path):
-        config = self._make_config(tmp_path, has_workspace=False)
-        (tmp_path / "config" / "persona.md").write_text("Global persona")
-
-        result = load_persona(config, user_id="alice")
-        assert result == "Global persona"
-
-    def test_no_user_id_falls_back_to_global(self, tmp_path):
-        config = self._make_config(tmp_path)
-        (tmp_path / "config" / "persona.md").write_text("Global persona")
-
-        result = load_persona(config, user_id=None)
-        assert result == "Global persona"
+        assert load_persona(config, user_id=user_id) == "Global persona"
 
     def test_bot_name_substituted_in_user_persona(self, tmp_path):
         config = self._make_config(tmp_path)
         config.bot_name = "Jarvis"
-        user_dir = config.workspace_path / "Users" / "alice" / "jarvis" / "config"
-        user_dir.mkdir(parents=True)
-        (user_dir / "PERSONA.md").write_text("You are {BOT_NAME}, a helpful bot.")
+        (self._user_config_dir(config, "jarvis") / "PERSONA.md").write_text(
+            "You are {BOT_NAME}, a helpful bot."
+        )
 
-        result = load_persona(config, user_id="alice")
-        assert result == "You are Jarvis, a helpful bot."
+        assert load_persona(config, user_id="alice") == "You are Jarvis, a helpful bot."
 
 
 class TestLoadPersonaPlantedPaths(TestLoadPersona):
@@ -2021,23 +1432,18 @@ class TestLoadPersonaPlantedPaths(TestLoadPersona):
     sandbox, and `load_persona` reads it host-side, in the daemon's filesystem
     view. Whatever it returns becomes prompt text on the next task (ISSUE-339).
 
-    Subclasses `TestLoadPersona` so the ten cases above run again against the
+    Subclasses `TestLoadPersona` so the cases above run again against the
     hardened reader: the refusals below are only worth anything if the ordinary
     paths still work, and a guard that rejects everything would otherwise pass
     every test in this class.
     """
-
-    def _plant_global(self, tmp_path):
-        (tmp_path / "config" / "persona.md").write_text("Global persona")
 
     def test_a_symlink_at_persona_is_not_followed(self, tmp_path):
         config = self._make_config(tmp_path)
         self._plant_global(tmp_path)
         secret = tmp_path / "credentials.json"
         secret.write_text("TOP SECRET TOKEN")
-        user_dir = config.workspace_path / "Users" / "alice" / "istota" / "config"
-        user_dir.mkdir(parents=True)
-        (user_dir / "PERSONA.md").symlink_to(secret)
+        (self._user_config_dir(config) / "PERSONA.md").symlink_to(secret)
 
         assert load_persona(config, user_id="alice") == "Global persona"
 
@@ -2048,9 +1454,7 @@ class TestLoadPersonaPlantedPaths(TestLoadPersona):
 
         config = self._make_config(tmp_path)
         self._plant_global(tmp_path)
-        user_dir = config.workspace_path / "Users" / "alice" / "istota" / "config"
-        user_dir.mkdir(parents=True)
-        os.mkfifo(user_dir / "PERSONA.md")
+        os.mkfifo(self._user_config_dir(config) / "PERSONA.md")
 
         with fails_if_it_blocks(what="load_persona"):
             assert load_persona(config, user_id="alice") == "Global persona"
@@ -2081,15 +1485,13 @@ class TestLoadPersonaPlantedPaths(TestLoadPersona):
     def test_bot_name_substituted_in_global_persona(self, tmp_path):
         config = self._make_config(tmp_path)
         config.bot_name = "Jarvis"
-        (tmp_path / "config" / "persona.md").write_text("You are {BOT_NAME}.")
+        self._plant_global(tmp_path, "You are {BOT_NAME}.")
 
-        result = load_persona(config)
-        assert result == "You are Jarvis."
+        assert load_persona(config) == "You are Jarvis."
 
     def test_no_persona_files_returns_none(self, tmp_path):
         config = self._make_config(tmp_path)
-        result = load_persona(config, user_id="alice")
-        assert result is None
+        assert load_persona(config, user_id="alice") is None
 
 
 # ---------------------------------------------------------------------------
@@ -2104,47 +1506,38 @@ class TestLoadChannelGuidelines:
     literal ``{user_id}`` reaching the model would hand the user a broken link.
     """
 
-    def _make_config(self, tmp_path):
+    def _make_config(self, tmp_path, web_md=None):
         config_dir = tmp_path / "config"
         (config_dir / "skills").mkdir(parents=True)
         (config_dir / "guidelines").mkdir()
+        if web_md is not None:
+            (config_dir / "guidelines" / "web.md").write_text(web_md)
         return Config(
             skills_dir=config_dir / "skills",
             bundled_skills_dir=tmp_path / "_empty_bundled",
             bot_name="Istota",
         )
 
-    def test_substitutes_user_id(self, tmp_path):
+    @pytest.mark.parametrize("web_md, user_id, expected", [
+        ("path=/Users/{user_id}/istota/report.csv", "alice",
+         "path=/Users/alice/istota/report.csv"),
+        ("{BOT_NAME} in {BOT_DIR} for {user_id}", "alice", "Istota in istota for alice"),
+        # No user id leaves the placeholder rather than crashing.
+        ("hi {user_id}", None, "hi {user_id}"),
+        (None, "alice", None),
+    ], ids=["user_id", "bot_placeholders", "no_user_id", "missing_file"])
+    def test_load(self, tmp_path, web_md, user_id, expected):
         from istota.executor import load_channel_guidelines
 
-        config = self._make_config(tmp_path)
-        (tmp_path / "config" / "guidelines" / "web.md").write_text(
-            "path=/Users/{user_id}/istota/report.csv",
-        )
-        result = load_channel_guidelines(config, "web", "alice")
-        assert result == "path=/Users/alice/istota/report.csv"
-        assert "{user_id}" not in result
+        config = self._make_config(tmp_path, web_md)
+        args = (config, "web") if user_id is None else (config, "web", user_id)
+        assert load_channel_guidelines(*args) == expected
 
-    def test_substitutes_bot_placeholders_too(self, tmp_path):
-        from istota.executor import load_channel_guidelines
 
-        config = self._make_config(tmp_path)
-        (tmp_path / "config" / "guidelines" / "web.md").write_text(
-            "{BOT_NAME} in {BOT_DIR} for {user_id}",
-        )
-        assert load_channel_guidelines(config, "web", "alice") == "Istota in istota for alice"
-
-    def test_no_user_id_leaves_the_placeholder_rather_than_crashing(self, tmp_path):
-        from istota.executor import load_channel_guidelines
-
-        config = self._make_config(tmp_path)
-        (tmp_path / "config" / "guidelines" / "web.md").write_text("hi {user_id}")
-        assert load_channel_guidelines(config, "web") == "hi {user_id}"
-
-    def test_missing_file_is_none(self, tmp_path):
-        from istota.executor import load_channel_guidelines
-
-        assert load_channel_guidelines(self._make_config(tmp_path), "web", "alice") is None
+def _shipped_guideline(name):
+    import istota
+    repo = Path(istota.__file__).resolve().parents[2]
+    return (repo / "config" / "guidelines" / name).read_text()
 
 
 class TestShippedWebGuidelines:
@@ -2154,24 +1547,16 @@ class TestShippedWebGuidelines:
     or reaches for a public share link to show someone their own file.
     """
 
-    def _text(self):
-        from pathlib import Path
-        import istota
-        repo = Path(istota.__file__).resolve().parents[2]
-        return (repo / "config" / "guidelines" / "web.md").read_text()
-
-    def test_points_at_the_authenticated_download_endpoint(self):
-        text = self._text()
+    def test_points_at_the_download_endpoint_and_not_a_share_link(self):
+        text = _shipped_guideline("web.md")
         assert "/api/chat/files?path=" in text
-
-    def test_warns_off_a_public_share_link(self):
-        assert "public share link" in self._text()
+        assert "public share link" in text
 
     def test_teaches_the_inline_image_form_and_its_limits(self):
         # The prompt goldens cannot witness this: `test_prompt_golden.py`
         # writes its own one-line guideline stubs into a tmp config dir, so a
         # change to the shipped file diffs nothing there.
-        text = self._text()
+        text = _shipped_guideline("web.md")
         assert "![" in text
         for fmt in ("PNG", "JPEG", "GIF", "WebP"):
             assert fmt in text
@@ -2185,47 +1570,36 @@ class TestShippedTalkGuidelines:
     chat it is not the Talk conversation's, and the share 404s.
     """
 
-    def _text(self):
-        from pathlib import Path
-        import istota
-        repo = Path(istota.__file__).resolve().parents[2]
-        return (repo / "config" / "guidelines" / "talk.md").read_text()
-
-    def test_names_the_share_file_verb(self):
-        assert "nextcloud talk share-file" in self._text()
-
-    def test_carries_the_promoted_room_caveat(self):
-        assert "404" in self._text()
+    def test_names_the_share_file_verb_and_the_promoted_room_caveat(self):
+        text = _shipped_guideline("talk.md")
+        assert "nextcloud talk share-file" in text
+        assert "404" in text
 
 
 class TestLoadEmissaries:
-    def _make_config(self, tmp_path):
+    def _make_config(self, tmp_path, text=None):
         config_dir = tmp_path / "config"
         skills_dir = config_dir / "skills"
         skills_dir.mkdir(parents=True)
+        if text is not None:
+            (config_dir / "emissaries.md").write_text(text)
         return Config(skills_dir=skills_dir, bundled_skills_dir=tmp_path / "_empty_bundled")
 
     def test_returns_none_when_absent(self, tmp_path):
-        config = self._make_config(tmp_path)
-        assert load_emissaries(config) is None
+        assert load_emissaries(self._make_config(tmp_path)) is None
 
     def test_returns_content_when_present(self, tmp_path):
-        config = self._make_config(tmp_path)
-        (tmp_path / "config" / "emissaries.md").write_text("# Emissaries\n\nBe good.")
-        result = load_emissaries(config)
-        assert result == "# Emissaries\n\nBe good."
+        config = self._make_config(tmp_path, "# Emissaries\n\nBe good.")
+        assert load_emissaries(config) == "# Emissaries\n\nBe good."
 
     def test_no_bot_name_substitution(self, tmp_path):
-        config = self._make_config(tmp_path)
+        config = self._make_config(tmp_path, "Agent {BOT_NAME} principles")
         config.bot_name = "Jarvis"
-        (tmp_path / "config" / "emissaries.md").write_text("Agent {BOT_NAME} principles")
-        result = load_emissaries(config)
-        assert result == "Agent {BOT_NAME} principles"
+        assert load_emissaries(config) == "Agent {BOT_NAME} principles"
 
     def test_returns_none_when_disabled(self, tmp_path):
-        config = self._make_config(tmp_path)
+        config = self._make_config(tmp_path, "# Emissaries\n\nBe good.")
         config.emissaries_enabled = False
-        (tmp_path / "config" / "emissaries.md").write_text("# Emissaries\n\nBe good.")
         assert load_emissaries(config) is None
 
 
@@ -2238,15 +1612,13 @@ class TestEmissariesInPrompt:
         )
 
     def test_emissaries_appears_in_prompt(self):
-        task = self._make_task()
         result = build_prompt(
-            task, [], Config(), emissaries="# Emissaries\n\nBe good.",
+            self._make_task(), [], Config(), emissaries="# Emissaries\n\nBe good.",
         ).system
         assert "# Emissaries" in result
         assert "Be good." in result
 
     def test_emissaries_before_persona(self, tmp_path):
-        task = self._make_task()
         config_dir = tmp_path / "config"
         skills_dir = config_dir / "skills"
         skills_dir.mkdir(parents=True)
@@ -2254,15 +1626,12 @@ class TestEmissariesInPrompt:
         config = Config(skills_dir=skills_dir, bundled_skills_dir=tmp_path / "_empty_bundled")
 
         result = build_prompt(
-            task, [], config, emissaries="# Emissaries\n\nBe good.",
+            self._make_task(), [], config, emissaries="# Emissaries\n\nBe good.",
         ).system
-        emissaries_pos = result.index("# Emissaries")
-        persona_pos = result.index("# Persona")
-        assert emissaries_pos < persona_pos
+        assert result.index("# Emissaries") < result.index("# Persona")
 
     def test_emissaries_absent_when_no_file(self):
-        task = self._make_task()
-        result = build_prompt(task, [], Config()).system
+        result = build_prompt(self._make_task(), [], Config()).system
         assert "Emissaries" not in result
 
 
@@ -2332,26 +1701,23 @@ class TestPreTranscribeAttachments:
         assert result.startswith("summarize this")
         assert "call the plumber" in result
 
-    @patch(_TRANSCRIBE_PATCH)
-    def test_transcription_failure_returns_prompt_unchanged(self, mock_transcribe):
-        mock_transcribe.return_value = {"status": "error", "error": "corrupted file"}
-        result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "[voice.mp3]")
-        assert result == "[voice.mp3]"
-
-    @patch(_TRANSCRIBE_PATCH)
-    def test_transcription_exception_returns_prompt_unchanged(self, mock_transcribe):
-        mock_transcribe.side_effect = RuntimeError("boom")
-        result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "[voice.mp3]")
-        assert result == "[voice.mp3]"
-
-    @patch(_TRANSCRIBE_PATCH)
-    def test_faster_whisper_not_installed_returns_prompt_unchanged(self, mock_transcribe):
-        """The dependency is now missing *in the child*, which reports it as an
-        ordinary error result rather than raising in the daemon."""
-        mock_transcribe.return_value = {
+    @pytest.mark.parametrize("outcome", [
+        {"status": "error", "error": "corrupted file"},
+        RuntimeError("boom"),
+        # The dependency is missing *in the child*, which reports it as an
+        # ordinary error result rather than raising in the daemon.
+        {
             "status": "error",
             "error": "faster-whisper not installed. Install with: uv sync --extra whisper",
-        }
+        },
+        {"status": "ok", "text": "  "},
+    ], ids=["failure", "exception", "faster_whisper_missing", "empty_transcription"])
+    @patch(_TRANSCRIBE_PATCH)
+    def test_unusable_transcription_returns_prompt_unchanged(self, mock_transcribe, outcome):
+        if isinstance(outcome, Exception):
+            mock_transcribe.side_effect = outcome
+        else:
+            mock_transcribe.return_value = outcome
         result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "[voice.mp3]")
         assert result == "[voice.mp3]"
 
@@ -2377,20 +1743,24 @@ class TestPreTranscribeAttachments:
             ["/tmp/a.mp3", "/tmp/b.wav"],
             "[a.mp3] [b.wav]",
         )
-        assert "first part" in result
-        assert "second part" in result
-        assert "a.mp3" in result
-        assert "b.wav" in result
-
-    @patch(_TRANSCRIBE_PATCH)
-    def test_empty_transcription_returns_prompt_unchanged(self, mock_transcribe):
-        mock_transcribe.return_value = {"status": "ok", "text": "  "}
-        result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "[voice.mp3]")
-        assert result == "[voice.mp3]"
+        for needle in ("first part", "second part", "a.mp3", "b.wav"):
+            assert needle in result
 
     def test_all_audio_extensions_recognized(self):
         for ext in ["mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"]:
             assert ext in _AUDIO_EXTENSIONS
+
+
+_POPEN = "istota.skills.whisper.out_of_process.subprocess.Popen"
+
+
+def _whisper_child(text):
+    """A finished whisper CLI child, as `Popen` would hand it back."""
+    proc = MagicMock()
+    proc.pid = 99
+    proc.returncode = 0
+    proc.communicate.return_value = (json.dumps({"status": "ok", "text": text}), "")
+    return proc
 
 
 class TestTheAudioTheChildIsActuallyHandedIsInReach:
@@ -2434,17 +1804,9 @@ class TestTheAudioTheChildIsActuallyHandedIsInReach:
         def fake_popen(argv, **kwargs):
             seen["argv"] = argv
             seen["env"] = kwargs.get("env") or {}
-            proc = MagicMock()
-            proc.pid = 99
-            proc.returncode = 0
-            proc.communicate.return_value = (
-                json.dumps({"status": "ok", "text": "buy milk"}), "",
-            )
-            return proc
+            return _whisper_child("buy milk")
 
-        monkeypatch.setattr(
-            "istota.skills.whisper.out_of_process.subprocess.Popen", fake_popen,
-        )
+        monkeypatch.setattr(_POPEN, fake_popen)
         return seen
 
     def test_a_talk_attachment_on_the_mount_is_passed_through(
@@ -2556,15 +1918,7 @@ class TestPreTranscriptionStaysOutOfTheDaemon:
     """
 
     def test_it_spawns_the_whisper_cli_instead_of_importing_the_model(self):
-        with patch("istota.skills.whisper.out_of_process.subprocess.Popen") as popen:
-            proc = MagicMock()
-            proc.pid = 99
-            proc.returncode = 0
-            proc.communicate.return_value = (
-                json.dumps({"status": "ok", "text": "buy milk"}),
-                "",
-            )
-            popen.return_value = proc
+        with patch(_POPEN, return_value=_whisper_child("buy milk")) as popen:
             result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "")
 
         argv = popen.call_args[0][0]
@@ -2575,14 +1929,8 @@ class TestPreTranscriptionStaysOutOfTheDaemon:
     def test_the_in_process_transcriber_is_never_called(self):
         """The seam that carried the leak. `transcribe.transcribe_audio` is the
         function that pulls faster_whisper into whichever process calls it."""
-        with patch("istota.skills.whisper.transcribe.transcribe_audio") as in_process, patch(
-            "istota.skills.whisper.out_of_process.subprocess.Popen"
-        ) as popen:
-            proc = MagicMock()
-            proc.pid = 99
-            proc.returncode = 0
-            proc.communicate.return_value = (json.dumps({"status": "ok", "text": "hi"}), "")
-            popen.return_value = proc
+        with patch("istota.skills.whisper.transcribe.transcribe_audio") as in_process, \
+                patch(_POPEN, return_value=_whisper_child("hi")):
             _pre_transcribe_attachments(["/tmp/voice.mp3"], "")
 
         in_process.assert_not_called()
@@ -2623,12 +1971,7 @@ class TestPreTranscriptionStaysOutOfTheDaemon:
     def test_each_audio_file_gets_its_own_process(self):
         """One process per file, so the ratchet resets between them rather than
         accumulating across a multi-attachment send."""
-        with patch("istota.skills.whisper.out_of_process.subprocess.Popen") as popen:
-            proc = MagicMock()
-            proc.pid = 99
-            proc.returncode = 0
-            proc.communicate.return_value = (json.dumps({"status": "ok", "text": "x"}), "")
-            popen.return_value = proc
+        with patch(_POPEN, return_value=_whisper_child("x")) as popen:
             _pre_transcribe_attachments(["/tmp/a.mp3", "/tmp/b.wav"], "")
 
         assert popen.call_count == 2
@@ -2647,40 +1990,32 @@ class TestPreTranscriptionStaysOutOfTheDaemon:
 class TestPromptOutputTarget:
     """Verify that source_type and output_target appear in the prompt header."""
 
-    def _make_task(self, source_type="talk", output_target=None):
-        return db.Task(
+    def _prompt(self, task_source, task_target=None, **kw):
+        task = db.Task(
             id=1, status="running", prompt="hello", user_id="alice",
-            source_type=source_type, conversation_token="room1",
-            output_target=output_target,
+            source_type=task_source, conversation_token="room1",
+            output_target=task_target,
         )
+        return build_prompt(task, [], Config(), **kw).system
 
-    def test_talk_source_and_target_in_prompt(self):
-        task = self._make_task(source_type="talk")
-        result = build_prompt(
-            task, [], Config(),
-            source_type="talk", output_target="talk",
-        ).system
-        assert "Source: talk" in result
-        assert "Output target: talk" in result
-
-    def test_scheduled_source_with_email_target(self):
-        task = self._make_task(source_type="scheduled", output_target="email")
-        result = build_prompt(
-            task, [], Config(),
-            source_type="scheduled", output_target="email",
-        ).system
-        assert "Source: scheduled" in result
-        assert "Output target: email" in result
+    @pytest.mark.parametrize("source_type, task_target, output_target", [
+        ("talk", None, "talk"), ("scheduled", "email", "email"),
+    ])
+    def test_source_and_target_in_prompt(self, source_type, task_target, output_target):
+        result = self._prompt(
+            source_type, task_target,
+            source_type=source_type, output_target=output_target,
+        )
+        assert f"Source: {source_type}" in result
+        assert f"Output target: {output_target}" in result
 
     def test_defaults_when_no_output_target(self):
-        task = self._make_task(source_type="cli")
-        result = build_prompt(task, [], Config()).system
+        result = self._prompt("cli")
         assert "Source: cli" in result
         assert "Output target: text" in result
 
     def test_email_tool_line_distinguishes_send_and_output(self):
-        task = self._make_task(source_type="talk")
-        result = build_prompt(task, [], Config()).system
+        result = self._prompt("talk")
         assert "email send" in result
         assert "email output" in result
         assert "Only use `output` when this task arrived as an incoming email" in result
@@ -2691,114 +2026,61 @@ class TestPromptOutputTarget:
 # ---------------------------------------------------------------------------
 
 
+def _notified_parent(conn, *, source_type, result, prompt="parent", talk_id=42):
+    """A completed task in room1 whose Talk post has id `talk_id`."""
+    parent_id = db.create_task(
+        conn, prompt=prompt, user_id="alice",
+        source_type=source_type, conversation_token="room1",
+    )
+    db.update_task_status(conn, parent_id, "completed", result=result)
+    conn.execute(
+        "UPDATE tasks SET talk_response_id = ? WHERE id = ?",
+        (talk_id, parent_id),
+    )
+    conn.commit()
+    return parent_id
+
+
 class TestDetectNotificationReply:
-    def test_returns_parent_for_scheduled_source_type(self, tmp_path):
+    def _reply(self, conn, reply_to_talk_id=42):
+        reply_id = db.create_task(
+            conn, prompt="Thanks", user_id="alice",
+            source_type="talk", conversation_token="room1",
+            reply_to_talk_id=reply_to_talk_id,
+        )
+        return db.get_task(conn, reply_id)
+
+    @pytest.mark.parametrize("source_type, is_notification", [
+        ("scheduled", True), ("briefing", True), ("talk", False),
+    ])
+    def test_reply_to_a_parent(self, tmp_path, source_type, is_notification):
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         with db.get_db(db_path) as conn:
-            # Create a completed scheduled parent task with a talk_response_id
-            parent_id = db.create_task(
-                conn, prompt="Drink water", user_id="alice",
-                source_type="scheduled", conversation_token="room1",
+            parent_id = _notified_parent(
+                conn, source_type=source_type, result="Time to drink water!",
             )
-            db.update_task_status(conn, parent_id, "completed", result="Time to drink water!")
-            # Set talk_response_id on the parent
-            conn.execute(
-                "UPDATE tasks SET talk_response_id = ? WHERE id = ?",
-                (42, parent_id),
-            )
-            conn.commit()
-
-            # Create a reply task
-            reply_id = db.create_task(
-                conn, prompt="Drinking", user_id="alice",
-                source_type="talk", conversation_token="room1",
-                reply_to_talk_id=42,
-            )
-            reply_task = db.get_task(conn, reply_id)
-
-            result = _detect_notification_reply(reply_task, Config(), conn)
-            assert result is not None
-            assert result.id == parent_id
-            assert result.source_type == "scheduled"
-
-    def test_returns_parent_for_briefing_source_type(self, tmp_path):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        with db.get_db(db_path) as conn:
-            parent_id = db.create_task(
-                conn, prompt="Morning briefing", user_id="alice",
-                source_type="briefing", conversation_token="room1",
-            )
-            db.update_task_status(conn, parent_id, "completed", result="Good morning!")
-            conn.execute(
-                "UPDATE tasks SET talk_response_id = ? WHERE id = ?",
-                (99, parent_id),
-            )
-            conn.commit()
-
-            reply_id = db.create_task(
-                conn, prompt="Thanks", user_id="alice",
-                source_type="talk", conversation_token="room1",
-                reply_to_talk_id=99,
-            )
-            reply_task = db.get_task(conn, reply_id)
-
-            result = _detect_notification_reply(reply_task, Config(), conn)
-            assert result is not None
-            assert result.source_type == "briefing"
-
-    def test_returns_none_for_talk_source_type(self, tmp_path):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        with db.get_db(db_path) as conn:
-            parent_id = db.create_task(
-                conn, prompt="What's up?", user_id="alice",
-                source_type="talk", conversation_token="room1",
-            )
-            db.update_task_status(conn, parent_id, "completed", result="Not much!")
-            conn.execute(
-                "UPDATE tasks SET talk_response_id = ? WHERE id = ?",
-                (50, parent_id),
-            )
-            conn.commit()
-
-            reply_id = db.create_task(
-                conn, prompt="Cool", user_id="alice",
-                source_type="talk", conversation_token="room1",
-                reply_to_talk_id=50,
-            )
-            reply_task = db.get_task(conn, reply_id)
-
-            result = _detect_notification_reply(reply_task, Config(), conn)
-            assert result is None
+            result = _detect_notification_reply(self._reply(conn), Config(), conn)
+            if is_notification:
+                assert result is not None
+                assert result.id == parent_id
+                assert result.source_type == source_type
+            else:
+                assert result is None
 
     def test_returns_none_when_no_reply_to_talk_id(self, tmp_path):
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         with db.get_db(db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="Hello", user_id="alice",
-                source_type="talk", conversation_token="room1",
-            )
-            task = db.get_task(conn, task_id)
-
-            result = _detect_notification_reply(task, Config(), conn)
-            assert result is None
+            task = self._reply(conn, reply_to_talk_id=None)
+            assert _detect_notification_reply(task, Config(), conn) is None
 
     def test_returns_none_when_no_conn(self, tmp_path):
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         with db.get_db(db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="Hello", user_id="alice",
-                source_type="talk", conversation_token="room1",
-                reply_to_talk_id=42,
-            )
-            task = db.get_task(conn, task_id)
-
-        result = _detect_notification_reply(task, Config(), None)
-        assert result is None
+            task = self._reply(conn)
+        assert _detect_notification_reply(task, Config(), None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -2806,136 +2088,39 @@ class TestDetectNotificationReply:
 # ---------------------------------------------------------------------------
 
 
+@patch("istota.executor.subprocess.run")
 class TestNotificationReplyContextScoping:
-    def _make_config(self, tmp_path):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        skills_dir = tmp_path / "config" / "skills"
-        # exist_ok: a test may build two configs from one tmp_path to compare
-        # how the hook behaves across settings.
-        skills_dir.mkdir(parents=True, exist_ok=True)
-        (skills_dir / "_index.toml").write_text(
-            '[files]\ndescription = "File ops"\nalways_include = true\n'
-        )
-        (skills_dir / "files.md").write_text("File operations guide.")
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
-            bundled_skills_dir=tmp_path / "_empty_bundled",
-            temp_dir=tmp_path / "temp",
-        )
-
-    @patch("istota.executor.subprocess.run")
-    def test_notification_reply_scopes_context(self, mock_run, tmp_path):
-        """Reply to a scheduled notification gets scoped context, not full history."""
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
+    def _run_reply(self, tmp_path, mock_run, *, parent_type, parent_result):
+        config = _skills_config(tmp_path)
         with db.get_db(config.db_path) as conn:
-            # Create completed scheduled parent
-            parent_id = db.create_task(
-                conn, prompt="Drink water", user_id="alice",
-                source_type="scheduled", conversation_token="room1",
-            )
-            db.update_task_status(
-                conn, parent_id, "completed",
-                result="Time to hydrate! Remember to drink water.",
-            )
-            conn.execute(
-                "UPDATE tasks SET talk_response_id = ? WHERE id = ?",
-                (42, parent_id),
-            )
-            conn.commit()
+            _notified_parent(conn, source_type=parent_type, result=parent_result)
+        _execute(
+            config, mock_run, prompt="Drinking",
+            conversation_token="room1", reply_to_talk_id=42,
+        )
+        return mock_run.call_args.kwargs["input"]
 
-            # Create reply task
-            reply_id = db.create_task(
-                conn, prompt="Drinking", user_id="alice",
-                source_type="talk", conversation_token="room1",
-                reply_to_talk_id=42,
+    def test_notification_reply_scopes_context(self, mock_run, tmp_path):
+        """Reply to a scheduled notification gets scoped context, not full
+        history, and skips the full Talk context fetch."""
+        with patch("istota.executor._build_talk_api_context") as mock_talk_ctx:
+            prompt_text = self._run_reply(
+                tmp_path, mock_run, parent_type="scheduled",
+                parent_result="Time to hydrate! Remember to drink water.",
             )
-            reply_task = db.get_task(conn, reply_id)
-
-            from istota.executor import execute_task
-            success, result, _actions, _trace = execute_task(
-                reply_task, config, [], conn=conn,
-            )
-
-        # Check the prompt contains the notification hint
-        call_args = mock_run.call_args
-        prompt_text = call_args.kwargs["input"]
+        mock_talk_ctx.assert_not_called()
         assert "replying to a scheduled notification" in prompt_text
         assert "respond very briefly" in prompt_text
         assert "Time to hydrate" in prompt_text
 
-    @patch("istota.executor.subprocess.run")
-    def test_notification_reply_skips_full_context(self, mock_run, tmp_path):
-        """Notification reply should not call _build_talk_api_context."""
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            parent_id = db.create_task(
-                conn, prompt="Reminder", user_id="alice",
-                source_type="scheduled", conversation_token="room1",
-            )
-            db.update_task_status(conn, parent_id, "completed", result="Do the thing")
-            conn.execute(
-                "UPDATE tasks SET talk_response_id = ? WHERE id = ?",
-                (42, parent_id),
-            )
-            conn.commit()
-
-            reply_id = db.create_task(
-                conn, prompt="Done", user_id="alice",
-                source_type="talk", conversation_token="room1",
-                reply_to_talk_id=42,
-            )
-            reply_task = db.get_task(conn, reply_id)
-
-            with patch("istota.executor._build_talk_api_context") as mock_talk_ctx:
-                from istota.executor import execute_task
-                execute_task(reply_task, config, [], conn=conn)
-                mock_talk_ctx.assert_not_called()
-
-    @patch("istota.executor.subprocess.run")
     def test_non_notification_reply_uses_normal_context(self, mock_run, tmp_path):
         """Reply to a regular talk message should use normal context loading."""
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            # Create completed talk parent (not scheduled)
-            parent_id = db.create_task(
-                conn, prompt="What's the weather?", user_id="alice",
-                source_type="talk", conversation_token="room1",
+        with patch("istota.executor._build_talk_api_context") as mock_talk_ctx:
+            mock_talk_ctx.return_value = (None, set())  # Fall through to DB context
+            prompt_text = self._run_reply(
+                tmp_path, mock_run, parent_type="talk", parent_result="It's sunny!",
             )
-            db.update_task_status(conn, parent_id, "completed", result="It's sunny!")
-            conn.execute(
-                "UPDATE tasks SET talk_response_id = ? WHERE id = ?",
-                (42, parent_id),
-            )
-            conn.commit()
-
-            reply_id = db.create_task(
-                conn, prompt="Thanks", user_id="alice",
-                source_type="talk", conversation_token="room1",
-                reply_to_talk_id=42,
-            )
-            reply_task = db.get_task(conn, reply_id)
-
-            with patch("istota.executor._build_talk_api_context") as mock_talk_ctx:
-                mock_talk_ctx.return_value = (None, set())  # Fall through to DB context
-                from istota.executor import execute_task
-                execute_task(reply_task, config, [], conn=conn)
-                # Normal context path should be attempted
-                mock_talk_ctx.assert_called_once()
-
-        # Prompt should NOT contain notification hint
-        call_args = mock_run.call_args
-        prompt_text = call_args.kwargs["input"]
+        mock_talk_ctx.assert_called_once()
         assert "replying to a scheduled notification" not in prompt_text
 
 
@@ -2944,16 +2129,17 @@ class TestNotificationReplyContextScoping:
 # ---------------------------------------------------------------------------
 
 
-class TestRecencyWindowTalk:
-    def _make_config(self, recency_hours=2.0, min_messages=10):
-        from istota.config import ConversationConfig
-        config = Config()
-        config.conversation = ConversationConfig(
-            context_recency_hours=recency_hours,
-            context_min_messages=min_messages,
-        )
-        return config
+def _recency_config(recency_hours=2.0, min_messages=10):
+    from istota.config import ConversationConfig
+    config = Config()
+    config.conversation = ConversationConfig(
+        context_recency_hours=recency_hours,
+        context_min_messages=min_messages,
+    )
+    return config
 
+
+class TestRecencyWindowTalk:
     def _make_talk_msg(self, message_id, timestamp, content="msg"):
         return db.TalkMessage(
             message_id=message_id,
@@ -2968,57 +2154,43 @@ class TestRecencyWindowTalk:
         )
 
     def test_disabled_when_zero(self):
-        config = self._make_config(recency_hours=0)
+        config = _recency_config(recency_hours=0)
         msgs = [self._make_talk_msg(i, 1000 + i) for i in range(20)]
-        result = _apply_recency_window_talk(msgs, config)
-        assert len(result) == 20
+        assert len(_apply_recency_window_talk(msgs, config)) == 20
 
     def test_empty_messages(self):
-        config = self._make_config()
-        assert _apply_recency_window_talk([], config) == []
+        assert _apply_recency_window_talk([], _recency_config()) == []
 
     def test_fewer_than_min_returns_all(self):
-        config = self._make_config(min_messages=10)
+        config = _recency_config(min_messages=10)
         msgs = [self._make_talk_msg(i, 1000 + i) for i in range(8)]
-        result = _apply_recency_window_talk(msgs, config)
-        assert len(result) == 8
+        assert len(_apply_recency_window_talk(msgs, config)) == 8
 
     def test_all_within_window_returns_all(self):
-        config = self._make_config(recency_hours=2.0, min_messages=5)
+        config = _recency_config(recency_hours=2.0, min_messages=5)
         now = 1000000
         # 15 messages all within last hour
         msgs = [self._make_talk_msg(i, now - (15 - i) * 60) for i in range(15)]
-        result = _apply_recency_window_talk(msgs, config)
-        assert len(result) == 15
+        assert len(_apply_recency_window_talk(msgs, config)) == 15
 
     def test_trims_old_messages_beyond_min(self):
-        config = self._make_config(recency_hours=2.0, min_messages=5)
+        config = _recency_config(recency_hours=2.0, min_messages=5)
         now = 1000000
         # 5 messages from 10 hours ago
         old = [self._make_talk_msg(i, now - 36000 + i) for i in range(5)]
         # 10 messages from last 30 minutes
         recent = [self._make_talk_msg(10 + i, now - (10 - i) * 60) for i in range(10)]
-        msgs = old + recent
-        result = _apply_recency_window_talk(msgs, config)
-        # 5 guaranteed recent (min) is less than the 10 recent, but all 10 recent
-        # are within the 2h window, so we get 10 (within window) + 0 old = 10
-        # Wait: min_messages=5 means guaranteed = last 5, older = first 10
-        # Of the first 10 (5 old + 5 recent), only the 5 recent are within window
-        assert len(result) == 10  # 5 within window from older + 5 guaranteed
+        result = _apply_recency_window_talk(old + recent, config)
+        # guaranteed = last 5, older = first 10; of those only the 5 recent are
+        # within the window.
+        assert len(result) == 10
 
     def test_guaranteed_minimum_always_kept(self):
-        config = self._make_config(recency_hours=1.0, min_messages=10)
+        config = _recency_config(recency_hours=1.0, min_messages=10)
         now = 1000000
-        # 20 messages, all from 5 hours ago
-        msgs = [self._make_talk_msg(i, now - 18000 + i) for i in range(20)]
-        # newest is at now - 18000 + 19, all within ~0 of each other
-        # but the newest is the reference, so cutoff = newest - 3600
-        # all messages are within 20 seconds of each other, so all within window
-        # Let me make a better test: spread them out
         old_msgs = [self._make_talk_msg(i, now - 50000 + i * 100) for i in range(15)]
         recent_msgs = [self._make_talk_msg(15 + i, now - 60 + i * 10) for i in range(5)]
-        msgs = old_msgs + recent_msgs
-        result = _apply_recency_window_talk(msgs, config)
+        result = _apply_recency_window_talk(old_msgs + recent_msgs, config)
         # 10 guaranteed (last 10), older 10 checked against window
         # window = newest - 3600, old msgs are ~50000s ago, way outside
         # So result = 10 guaranteed minimum
@@ -3026,7 +2198,7 @@ class TestRecencyWindowTalk:
 
     def test_partial_window_inclusion(self):
         """Some older messages within window, some outside."""
-        config = self._make_config(recency_hours=1.0, min_messages=3)
+        config = _recency_config(recency_hours=1.0, min_messages=3)
         now = 1000000
         # 2 messages from 5 hours ago (outside window)
         outside = [self._make_talk_msg(i, now - 18000 + i) for i in range(2)]
@@ -3034,46 +2206,31 @@ class TestRecencyWindowTalk:
         inside = [self._make_talk_msg(10 + i, now - 1800 + i * 60) for i in range(3)]
         # 3 messages from 5 minutes ago (guaranteed min)
         recent = [self._make_talk_msg(20 + i, now - 300 + i * 60) for i in range(3)]
-        msgs = outside + inside + recent
-        result = _apply_recency_window_talk(msgs, config)
-        # guaranteed = last 3 (recent), older = outside + inside
-        # inside (3) within window, outside (2) not
+        result = _apply_recency_window_talk(outside + inside + recent, config)
         assert len(result) == 6  # 3 inside + 3 guaranteed
 
 
 class TestRecencyWindowDb:
-    def _make_config(self, recency_hours=2.0, min_messages=10):
-        from istota.config import ConversationConfig
-        config = Config()
-        config.conversation = ConversationConfig(
-            context_recency_hours=recency_hours,
-            context_min_messages=min_messages,
-        )
-        return config
-
     def _make_msg(self, msg_id, created_at, prompt="q", result="a"):
         return db.ConversationMessage(
             id=msg_id, prompt=prompt, result=result, created_at=created_at,
         )
 
     def test_disabled_when_zero(self):
-        config = self._make_config(recency_hours=0)
+        config = _recency_config(recency_hours=0)
         msgs = [self._make_msg(i, "2026-02-23 12:00:00") for i in range(20)]
-        result = _apply_recency_window_db(msgs, config)
-        assert len(result) == 20
+        assert len(_apply_recency_window_db(msgs, config)) == 20
 
     def test_empty_returns_empty(self):
-        config = self._make_config()
-        assert _apply_recency_window_db([], config) == []
+        assert _apply_recency_window_db([], _recency_config()) == []
 
     def test_fewer_than_min_returns_all(self):
-        config = self._make_config(min_messages=10)
+        config = _recency_config(min_messages=10)
         msgs = [self._make_msg(i, f"2026-02-23 12:0{i}:00") for i in range(5)]
-        result = _apply_recency_window_db(msgs, config)
-        assert len(result) == 5
+        assert len(_apply_recency_window_db(msgs, config)) == 5
 
     def test_trims_old_db_messages(self):
-        config = self._make_config(recency_hours=1.0, min_messages=3)
+        config = _recency_config(recency_hours=1.0, min_messages=3)
         msgs = [
             self._make_msg(1, "2026-02-23 08:00:00"),  # 4h before newest
             self._make_msg(2, "2026-02-23 09:00:00"),  # 3h before newest
@@ -3083,11 +2240,10 @@ class TestRecencyWindowDb:
         ]
         result = _apply_recency_window_db(msgs, config)
         # min=3 guaranteed (ids 3,4,5), older=[1,2], 1 and 2 are >1h old
-        assert len(result) == 3
         assert [m.id for m in result] == [3, 4, 5]
 
     def test_keeps_within_window_beyond_min(self):
-        config = self._make_config(recency_hours=2.0, min_messages=2)
+        config = _recency_config(recency_hours=2.0, min_messages=2)
         msgs = [
             self._make_msg(1, "2026-02-23 08:00:00"),  # outside
             self._make_msg(2, "2026-02-23 10:30:00"),  # within 2h
@@ -3097,15 +2253,13 @@ class TestRecencyWindowDb:
         ]
         result = _apply_recency_window_db(msgs, config)
         # guaranteed = [4,5], older = [1,2,3], within window = [2,3]
-        assert len(result) == 4
         assert [m.id for m in result] == [2, 3, 4, 5]
 
     def test_unparseable_created_at_skips_filter(self):
-        config = self._make_config(recency_hours=1.0, min_messages=2)
+        config = _recency_config(recency_hours=1.0, min_messages=2)
         msgs = [self._make_msg(i, "not-a-date") for i in range(5)]
-        result = _apply_recency_window_db(msgs, config)
         # Can't parse newest, returns all
-        assert len(result) == 5
+        assert len(_apply_recency_window_db(msgs, config)) == 5
 
 
 # ---------------------------------------------------------------------------
@@ -3114,45 +2268,30 @@ class TestRecencyWindowDb:
 
 
 class TestBuildPromptRecalledMemories:
-    def _make_task(self, **overrides):
-        defaults = {
-            "id": 1, "prompt": "test prompt", "user_id": "alice",
-            "source_type": "talk", "status": "running",
-        }
-        defaults.update(overrides)
-        return db.Task(**defaults)
+    def _prompt(self, **kw):
+        task = db.Task(
+            id=1, prompt="test prompt", user_id="alice",
+            source_type="talk", status="running",
+        )
+        return build_prompt(task, [], Config(), **kw).user
 
     def test_recalled_section_included_when_provided(self):
-        task = self._make_task()
-        config = Config()
-        prompt = build_prompt(
-            task, [], config,
+        prompt = self._prompt(
             recalled_memories="- [memory_file] User prefers dark mode\n- [conversation] Discussed project X",
-        ).user
+        )
         assert "Recalled memories (from search)" in prompt
         assert "User prefers dark mode" in prompt
         assert "Discussed project X" in prompt
 
-    def test_recalled_section_absent_when_none(self):
-        task = self._make_task()
-        config = Config()
-        prompt = build_prompt(task, [], config, recalled_memories=None).user
-        assert "Recalled memories" not in prompt
-
-    def test_recalled_section_absent_when_empty_string(self):
-        task = self._make_task()
-        config = Config()
-        prompt = build_prompt(task, [], config, recalled_memories="").user
-        assert "Recalled memories" not in prompt
+    @pytest.mark.parametrize("recalled", [None, ""])
+    def test_recalled_section_absent_when_empty(self, recalled):
+        assert "Recalled memories" not in self._prompt(recalled_memories=recalled)
 
     def test_recalled_section_after_dated_memories(self):
-        task = self._make_task()
-        config = Config()
-        prompt = build_prompt(
-            task, [], config,
+        prompt = self._prompt(
             dated_memories="- Dated memory entry",
             recalled_memories="- Recalled entry",
-        ).user
+        )
         dated_pos = prompt.index("Recent context (from previous days)")
         recalled_pos = prompt.index("Recalled memories (from search)")
         assert dated_pos < recalled_pos
@@ -3164,45 +2303,45 @@ class TestBuildPromptRecalledMemories:
 
 
 class TestRecallMemories:
-    def test_returns_none_when_disabled(self):
-        from istota.executor import _recall_memories
+    def _config(self, enabled=True, auto_recall=True, with_db=True, **kw):
         from istota.config import MemorySearchConfig
-        config = Config(memory_search=MemorySearchConfig(enabled=True, auto_recall=False))
-        task = db.Task(id=1, prompt="test", user_id="alice", source_type="talk", status="running")
-        assert _recall_memories(config, None, task, task.prompt) is None
+        config_kw = {"db_path": Path("/tmp/test.db")} if with_db else {}
+        return Config(
+            memory_search=MemorySearchConfig(
+                enabled=enabled, auto_recall=auto_recall, **kw,
+            ),
+            **config_kw,
+        )
 
-    def test_returns_none_when_search_not_enabled(self):
-        from istota.executor import _recall_memories
-        from istota.config import MemorySearchConfig
-        config = Config(memory_search=MemorySearchConfig(enabled=False, auto_recall=True))
-        task = db.Task(id=1, prompt="test", user_id="alice", source_type="talk", status="running")
-        assert _recall_memories(config, None, task, task.prompt) is None
+    def _task(self, **kw):
+        return db.Task(
+            id=1, prompt="test", user_id="alice", source_type="talk",
+            status="running", **kw,
+        )
 
-    def test_returns_none_when_skip_memory(self):
+    @pytest.mark.parametrize("enabled, auto_recall, skip_memory", [
+        (True, False, False), (False, True, False), (True, True, True),
+    ], ids=["auto_recall_off", "search_off", "skip_memory"])
+    def test_returns_none_when_off(self, enabled, auto_recall, skip_memory):
         from istota.executor import _recall_memories
-        from istota.config import MemorySearchConfig
-        config = Config(memory_search=MemorySearchConfig(enabled=True, auto_recall=True))
-        task = db.Task(id=1, prompt="test", user_id="alice", source_type="talk", status="running")
-        assert _recall_memories(config, None, task, task.prompt, skip_memory=True) is None
+        config = self._config(enabled=enabled, auto_recall=auto_recall, with_db=False)
+        task = self._task()
+        kw = {"skip_memory": True} if skip_memory else {}
+        assert _recall_memories(config, None, task, task.prompt, **kw) is None
 
     @patch("istota.memory.search.search")
     def test_formats_results(self, mock_search):
         from istota.executor import _recall_memories
-        from istota.config import MemorySearchConfig
 
         mock_result = MagicMock()
         mock_result.content = "User likes Python"
         mock_result.source_type = "memory_file"
         mock_search.return_value = [mock_result]
 
-        config = Config(
-            memory_search=MemorySearchConfig(enabled=True, auto_recall=True, auto_recall_limit=5),
-            db_path=Path("/tmp/test.db"),
+        task = self._task()
+        result = _recall_memories(
+            self._config(auto_recall_limit=5), MagicMock(), task, "what language?",
         )
-        task = db.Task(id=1, prompt="what language?", user_id="alice", source_type="talk", status="running")
-
-        conn = MagicMock()
-        result = _recall_memories(config, conn, task, task.prompt)
         assert result is not None
         assert "[memory_file]" in result
         assert "User likes Python" in result
@@ -3210,31 +2349,18 @@ class TestRecallMemories:
     @patch("istota.memory.search.search")
     def test_returns_none_when_no_results(self, mock_search):
         from istota.executor import _recall_memories
-        from istota.config import MemorySearchConfig
 
         mock_search.return_value = []
-        config = Config(
-            memory_search=MemorySearchConfig(enabled=True, auto_recall=True),
-            db_path=Path("/tmp/test.db"),
-        )
-        task = db.Task(id=1, prompt="test", user_id="alice", source_type="talk", status="running")
-        assert _recall_memories(config, MagicMock(), task, task.prompt) is None
+        task = self._task()
+        assert _recall_memories(self._config(), MagicMock(), task, task.prompt) is None
 
     @patch("istota.memory.search.search")
     def test_includes_channel_in_search(self, mock_search):
         from istota.executor import _recall_memories
-        from istota.config import MemorySearchConfig
 
         mock_search.return_value = []
-        config = Config(
-            memory_search=MemorySearchConfig(enabled=True, auto_recall=True),
-            db_path=Path("/tmp/test.db"),
-        )
-        task = db.Task(
-            id=1, prompt="test", user_id="alice", source_type="talk", status="running",
-            conversation_token="room123",
-        )
-        _recall_memories(config, MagicMock(), task, task.prompt)
+        task = self._task(conversation_token="room123")
+        _recall_memories(self._config(), MagicMock(), task, task.prompt)
         call_kwargs = mock_search.call_args[1]
         assert call_kwargs["include_user_ids"] == ["channel:room123"]
 
@@ -3245,23 +2371,12 @@ class TestRecallMemories:
 
 
 class TestApplyMemoryCap:
-    def test_unlimited_when_zero(self):
+    @pytest.mark.parametrize("cap", [0, 500], ids=["unlimited", "under_cap"])
+    def test_no_truncation(self, cap):
         from istota.executor import _apply_memory_cap
-        config = Config(max_memory_chars=0)
+        config = Config(max_memory_chars=cap)
         u, d, c, r, k, _pb = _apply_memory_cap(config, "A" * 100, "B" * 100, "C" * 100, "D" * 100)
-        assert len(u) == 100
-        assert len(d) == 100
-        assert len(c) == 100
-        assert len(r) == 100
-
-    def test_no_truncation_under_cap(self):
-        from istota.executor import _apply_memory_cap
-        config = Config(max_memory_chars=500)
-        u, d, c, r, k, _pb = _apply_memory_cap(config, "A" * 100, "B" * 100, "C" * 100, "D" * 100)
-        assert len(u) == 100
-        assert len(d) == 100
-        assert len(c) == 100
-        assert len(r) == 100
+        assert [len(u), len(d), len(c), len(r)] == [100, 100, 100, 100]
 
     def test_truncates_recalled_first(self):
         from istota.executor import _apply_memory_cap
@@ -3311,8 +2426,6 @@ class TestApplyMemoryCap:
         assert r is not None and "truncated" in r
 
     def test_group_memory_is_never_truncated_and_is_named(self, caplog):
-        import logging
-
         from istota.executor import _apply_memory_cap
         config = Config(max_memory_chars=50)
         with caplog.at_level(logging.WARNING, logger="istota.executor"):
@@ -3325,113 +2438,58 @@ class TestApplyMemoryCap:
 # ---------------------------------------------------------------------------
 
 
+@patch("istota.executor.subprocess.run")
 class TestDatedMemoriesAutoLoad:
-    def _make_config(self, tmp_path, auto_load_days=3, sleep_enabled=True):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
-        (skills_dir / "_index.toml").write_text("")
-        mount = tmp_path / "mount"
-        mount.mkdir(exist_ok=True)
+    def _make_config(self, tmp_path, auto_load_days=3, sleep_enabled=True, memory=None):
+        from datetime import datetime
+
         from istota.config import SleepCycleConfig
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
-            bundled_skills_dir=tmp_path / "_empty_bundled",
-            temp_dir=tmp_path / "temp",
-            workspace_path=mount,
+        config = _skills_config(
+            tmp_path, files_skill=False, mount=True,
             sleep_cycle=SleepCycleConfig(
                 enabled=sleep_enabled,
                 auto_load_dated_days=auto_load_days,
             ),
         )
+        (config.skills_dir / "_index.toml").write_text("")
+        if memory is not None:
+            memories_dir = config.workspace_path / "Users" / "alice" / "memories"
+            memories_dir.mkdir(parents=True)
+            today = datetime.now().strftime("%Y-%m-%d")
+            (memories_dir / f"{today}.md").write_text(memory)
+        return config
 
-    def _make_task(self, conn, source_type="talk"):
-        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type=source_type)
-        return db.get_task(conn, task_id)
+    def _prompt(self, config, mock_run, source_type="talk"):
+        _execute(config, mock_run, source_type=source_type)
+        return mock_run.call_args.kwargs["input"]
 
-    @patch("istota.executor.subprocess.run")
     def test_dated_memories_loaded_when_enabled(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, auto_load_days=3)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        # Create a dated memory file
-        from datetime import datetime
-        memories_dir = config.workspace_path / "Users" / "alice" / "memories"
-        memories_dir.mkdir(parents=True)
-        today = datetime.now().strftime("%Y-%m-%d")
-        (memories_dir / f"{today}.md").write_text("- User prefers dark mode")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn, source_type="talk")
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        prompt_text = mock_run.call_args.kwargs["input"]
+        config = self._make_config(tmp_path, memory="- User prefers dark mode")
+        prompt_text = self._prompt(config, mock_run)
         assert "User prefers dark mode" in prompt_text
         assert "Recent context (from previous days)" in prompt_text
 
-    @patch("istota.executor.subprocess.run")
     def test_dated_memories_skipped_for_briefing(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, auto_load_days=3)
+        config = self._make_config(tmp_path, memory="- Should not appear")
         # Add briefing skill with exclude_memory so flag-based check works
         briefing_dir = config.skills_dir / "briefing"
         briefing_dir.mkdir(parents=True)
         (briefing_dir / "skill.toml").write_text(
             'description = "Briefing"\nsource_types = ["briefing"]\nexclude_memory = true\n'
         )
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        assert "Should not appear" not in self._prompt(config, mock_run, "briefing")
 
-        from datetime import datetime
-        memories_dir = config.workspace_path / "Users" / "alice" / "memories"
-        memories_dir.mkdir(parents=True)
-        today = datetime.now().strftime("%Y-%m-%d")
-        (memories_dir / f"{today}.md").write_text("- Should not appear")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn, source_type="briefing")
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        prompt_text = mock_run.call_args.kwargs["input"]
-        assert "Should not appear" not in prompt_text
-
-    @patch("istota.executor.subprocess.run")
-    def test_dated_memories_none_when_zero_days(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, auto_load_days=0)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        from datetime import datetime
-        memories_dir = config.workspace_path / "Users" / "alice" / "memories"
-        memories_dir.mkdir(parents=True)
-        today = datetime.now().strftime("%Y-%m-%d")
-        (memories_dir / f"{today}.md").write_text("- Should not appear")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn, source_type="talk")
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        prompt_text = mock_run.call_args.kwargs["input"]
-        assert "Recent context (from previous days)" not in prompt_text
-
-    @patch("istota.executor.subprocess.run")
-    def test_dated_memories_none_when_sleep_disabled(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, auto_load_days=3, sleep_enabled=False)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn, source_type="talk")
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        prompt_text = mock_run.call_args.kwargs["input"]
-        assert "Recent context (from previous days)" not in prompt_text
+    @pytest.mark.parametrize("auto_load_days, sleep_enabled, memory", [
+        (0, True, "- Should not appear"), (3, False, None),
+    ], ids=["zero_days", "sleep_disabled"])
+    def test_dated_memories_none(
+        self, mock_run, tmp_path, auto_load_days, sleep_enabled, memory,
+    ):
+        config = self._make_config(
+            tmp_path, auto_load_days=auto_load_days,
+            sleep_enabled=sleep_enabled, memory=memory,
+        )
+        assert "Recent context (from previous days)" not in self._prompt(config, mock_run)
 
 
 # =============================================================================
@@ -3440,60 +2498,37 @@ class TestDatedMemoriesAutoLoad:
 
 
 class TestConfirmationContext:
-    def _make_task(self, **kwargs):
-        defaults = dict(
-            id=1, status="running", source_type="email",
-            user_id="carol", prompt="Emissary reply from bob@ext.com",
-            conversation_token="room1",
-        )
-        defaults.update(kwargs)
-        return db.Task(**defaults)
-
-    def _make_config(self, tmp_path):
+    def _prompt(self, tmp_path, confirmation_context):
         skills_dir = tmp_path / "config" / "skills"
         skills_dir.mkdir(parents=True)
-        return Config(
+        config = Config(
             db_path=tmp_path / "test.db",
             skills_dir=skills_dir,
             bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
         )
-
-    def test_confirmation_context_included_in_prompt(self, tmp_path):
-        config = self._make_config(tmp_path)
-        task = self._make_task()
-        previous_output = "I drafted a reply: 'How about Tuesday at 3pm?' Should I send this?"
-
-        prompt = build_prompt(
-            task, [], config,
-            confirmation_context=previous_output,
+        task = db.Task(
+            id=1, status="running", source_type="email",
+            user_id="carol", prompt="Emissary reply from bob@ext.com",
+            conversation_token="room1",
+        )
+        return build_prompt(
+            task, [], config, confirmation_context=confirmation_context,
         ).user
 
+    def test_confirmation_context_included_before_the_request(self, tmp_path):
+        prompt = self._prompt(
+            tmp_path,
+            "I drafted a reply: 'How about Tuesday at 3pm?' Should I send this?",
+        )
         assert "## Confirmed action" in prompt
         assert "How about Tuesday at 3pm?" in prompt
         assert "Do not re-draft" in prompt
         assert "`istota-skill email send`" in prompt
+        assert prompt.index("## Confirmed action") < prompt.index("## User's request")
 
     def test_no_confirmation_context_when_none(self, tmp_path):
-        config = self._make_config(tmp_path)
-        task = self._make_task()
-
-        prompt = build_prompt(task, [], config, confirmation_context=None).user
-
-        assert "## Confirmed action" not in prompt
-
-    def test_confirmation_context_appears_before_user_request(self, tmp_path):
-        config = self._make_config(tmp_path)
-        task = self._make_task()
-
-        prompt = build_prompt(
-            task, [], config,
-            confirmation_context="Previous draft here",
-        ).user
-
-        confirmed_pos = prompt.index("## Confirmed action")
-        request_pos = prompt.index("## User's request")
-        assert confirmed_pos < request_pos
+        assert "## Confirmed action" not in self._prompt(tmp_path, None)
 
 
 # ---------------------------------------------------------------------------
@@ -3501,85 +2536,64 @@ class TestConfirmationContext:
 # ---------------------------------------------------------------------------
 
 
+_XML_IN_PROSE = (
+    "The model produced an error with </parameter> tags. "
+    "This is a known issue when context pressure causes problems."
+)
+
+
 class TestDetectMalformedResult:
     """Test detection of malformed model output (leaked XML, disproportionately short)."""
 
-    def test_normal_text_passes(self):
-        assert detect_malformed_result("Here are three painting studios in Lisbon...") is None
-
-    def test_short_normal_text_passes(self):
-        assert detect_malformed_result("Done.") is None
-
-    def test_empty_string_passes(self):
-        assert detect_malformed_result("") is None
-
-    def test_none_passes(self):
-        assert detect_malformed_result(None) is None
-
-    def test_whitespace_only_passes(self):
-        assert detect_malformed_result("   \n  ") is None
-
-    def test_xml_parameter_close_detected(self):
-        result = detect_malformed_result("</parameter>\n</invoke>")
-        assert result is not None
-        assert "leaked tool-call XML" in result
-
-    def test_xml_invoke_close_detected(self):
-        result = detect_malformed_result("</invoke>")
-        assert result is not None
-        assert "leaked tool-call XML" in result
-
-    def test_xml_invoke_open_detected(self):
-        result = detect_malformed_result("<invoke name='foo'>")
-        assert result is not None
-        assert "leaked tool-call XML" in result
-
-    def test_antml_prefix_detected(self):
-        result = detect_malformed_result("</thinking>")
-        assert result is not None
-        assert "leaked tool-call XML" in result
-
-    def test_parameter_open_detected(self):
-        result = detect_malformed_result("<parameter name='path'>")
-        assert result is not None
-        assert "leaked tool-call XML" in result
-
-    def test_xml_in_long_response_passes(self):
-        """XML patterns embedded in a substantive response should not trigger detection."""
-        text = (
+    @pytest.mark.parametrize("text", [
+        "Here are three painting studios in Lisbon...",
+        "Done.",
+        "",
+        None,
+        "   \n  ",
+        # XML patterns embedded in a substantive response.
+        (
             "The model produced an error with </parameter> tags. "
             "This is a known issue when context pressure causes the model to emit "
             "raw XML fragments instead of coherent responses. Here is the analysis..."
-        )
+        ),
+    ], ids=["normal", "short", "empty", "none", "whitespace", "xml_in_long_response"])
+    def test_passes(self, text):
         assert detect_malformed_result(text) is None
+
+    @pytest.mark.parametrize("text", [
+        "</parameter>\n</invoke>",
+        "</invoke>",
+        "<invoke name='foo'>",
+        "</thinking>",
+        "<parameter name='path'>",
+    ], ids=["parameter_close", "invoke_close", "invoke_open", "antml_prefix", "parameter_open"])
+    def test_leaked_xml_detected(self, text):
+        result = detect_malformed_result(text)
+        assert result is not None
+        assert "leaked tool-call XML" in result
 
     # --- Strict mode (output_target="talk") ---
 
     def test_talk_xml_in_prose_detected(self):
         """XML patterns embedded in prose should be caught in strict Talk mode."""
-        text = (
-            "The model produced an error with </parameter> tags. "
-            "This is a known issue when context pressure causes problems."
-        )
         # Non-strict: passes (enough non-syntax content)
-        assert detect_malformed_result(text) is None
+        assert detect_malformed_result(_XML_IN_PROSE) is None
         # Strict (Talk): flagged
-        result = detect_malformed_result(text, output_target="talk")
+        result = detect_malformed_result(_XML_IN_PROSE, output_target="talk")
         assert result is not None
         assert "Talk output" in result
 
-    def test_talk_xml_in_code_fence_passes(self):
-        """XML patterns inside code fences should not trigger in strict mode."""
-        text = (
+    @pytest.mark.parametrize("text", [
+        # XML patterns inside code fences.
+        (
             "Here's an example of the XML format:\n\n"
             "```xml\n<parameter name='path'>/foo</parameter>\n```\n\n"
             "This shows the structure."
-        )
-        assert detect_malformed_result(text, output_target="talk") is None
-
-    def test_talk_clean_markdown_passes(self):
-        """Normal markdown should not trigger strict mode."""
-        text = "## Results\n\n- Item one\n- Item two\n\nHere's a **bold** conclusion."
+        ),
+        "## Results\n\n- Item one\n- Item two\n\nHere's a **bold** conclusion.",
+    ], ids=["xml_in_code_fence", "clean_markdown"])
+    def test_talk_passes(self, text):
         assert detect_malformed_result(text, output_target="talk") is None
 
     def test_talk_xml_outside_fence_with_fenced_xml_detected(self):
@@ -3588,24 +2602,16 @@ class TestDetectMalformedResult:
             "```xml\n<parameter>ok</parameter>\n```\n\n"
             "And then </invoke> happened."
         )
-        result = detect_malformed_result(text, output_target="talk")
-        assert result is not None
+        assert detect_malformed_result(text, output_target="talk") is not None
 
-    def test_both_target_uses_strict_mode(self):
+    @pytest.mark.parametrize("target", ["both", "all"])
+    def test_multi_target_uses_strict_mode(self, target):
         text = "Something </invoke> happened"
-        assert detect_malformed_result(text, output_target="both") is not None
-
-    def test_all_target_uses_strict_mode(self):
-        text = "Something </invoke> happened"
-        assert detect_malformed_result(text, output_target="all") is not None
+        assert detect_malformed_result(text, output_target=target) is not None
 
     def test_email_target_uses_lenient_mode(self):
         """Email target should use lenient mode (XML patterns allowed in longer text)."""
-        text = (
-            "The model produced an error with </parameter> tags. "
-            "This is a known issue when context pressure causes problems."
-        )
-        assert detect_malformed_result(text, output_target="email") is None
+        assert detect_malformed_result(_XML_IN_PROSE, output_target="email") is None
 
 
 # ---------------------------------------------------------------------------
@@ -3644,6 +2650,11 @@ def _block(prefix: str, target_chars: int) -> str:
     return (sentence * n).strip()
 
 
+def _narrated(text, tool="Write file"):
+    """A text block followed by one tool call: the text is pre-tool."""
+    return [{"type": "text", "text": text}, {"type": "tool", "text": tool}]
+
+
 class TestComposeFullResult:
     """Mechanism B (terse-recovery) — tests against the redesigned function."""
 
@@ -3671,8 +2682,7 @@ class TestComposeFullResult:
             {"type": "tool", "text": "git log"},
             {"type": "tool", "text": "Read file"},
         ]
-        result = _compose_full_result(real_summary, trace)
-        assert result == real_summary
+        assert _compose_full_result(real_summary, trace) == real_summary
 
     def test_empty_trace_entries_ignored(self):
         trace = [
@@ -3684,79 +2694,50 @@ class TestComposeFullResult:
     def test_substantial_no_tools_no_recovery(self):
         """A substantial result with no tool boundary in trace: still no
         override — gate is on terseness, not trace shape."""
-        block = _block("Findings.", 800)
-        trace = [{"type": "text", "text": block}]
+        trace = [{"type": "text", "text": _block("Findings.", 800)}]
         long_result = _block("Result.", 400)
-        result = _compose_full_result(long_result, trace)
-        assert result == long_result
+        assert _compose_full_result(long_result, trace) == long_result
 
     # --- terse-pattern recovery ---
 
-    def test_see_above_with_substantial_pre_tool_region(self):
-        """Canonical ISSUE-025 shape: substantial text → tool → terse result."""
+    @pytest.mark.parametrize("result", ["See above.", "Done."])
+    def test_back_reference_with_substantial_pre_tool_region(self, result):
+        """Canonical ISSUE-025 shape: substantial text → tool → terse result.
+        "See above" points at earlier text, so it reaches past the tool."""
         findings = _block("Findings.", 800)
-        trace = [
-            {"type": "text", "text": findings},
-            {"type": "tool", "text": "Write file"},
-        ]
-        result = _compose_full_result("See above.", trace, task=_make_task())
-        assert result == findings
+        trace = _narrated(findings)
+        assert _compose_full_result(result, trace, task=_make_task()) == findings
 
     def test_terse_short_result_does_not_reach_back_past_a_tool(self):
         """A short result that isn't an explicit back-reference is a real (if
         brief) answer. Reaching back past a tool call for it would promote
         mid-turn narration — ISSUE-211. Only the trailing region qualifies."""
-        findings = _block("Findings.", 800)
-        trace = [
-            {"type": "text", "text": findings},
-            {"type": "tool", "text": "Write file"},
-        ]
+        trace = _narrated(_block("Findings.", 800))
         result = _compose_full_result(
             "Operation completed.", trace, task=_make_task(),
         )
         assert result == "Operation completed."
 
-    def test_terse_short_result_with_substantial_trailing_region(self):
-        """Result < 150 chars but not a known reference — the region *after*
-        the last tool call is the model's final message, so it still wins."""
+    @pytest.mark.parametrize("result", ["Operation completed.", ""])
+    def test_terse_result_with_substantial_trailing_region(self, result):
+        """The region *after* the last tool call is the model's final message,
+        so it wins over a short result that is not a known reference, and over
+        an empty one (the brain lost the final message; the trace has it)."""
         findings = _block("Findings.", 800)
         trace = [
             {"type": "tool", "text": "Write file"},
             {"type": "text", "text": findings},
         ]
-        result = _compose_full_result(
-            "Operation completed.", trace, task=_make_task(),
-        )
-        assert result == findings
-
-    def test_done_with_substantial_pre_tool_region(self):
-        findings = _block("Findings.", 800)
-        trace = [
-            {"type": "text", "text": findings},
-            {"type": "tool", "text": "Write file"},
-        ]
-        assert _compose_full_result("Done.", trace, task=_make_task()) == findings
-
-    def test_empty_result_with_substantial_trailing_region(self):
-        """An empty result with real text after the last tool call: the brain
-        lost the final message, the trace still has it."""
-        findings = _block("Findings.", 800)
-        trace = [
-            {"type": "tool", "text": "Write file"},
-            {"type": "text", "text": findings},
-        ]
-        assert _compose_full_result("", trace, task=_make_task()) == findings
+        assert _compose_full_result(result, trace, task=_make_task()) == findings
 
     # --- terse but no qualifying region ---
 
     def test_terse_result_short_trailing_region_no_override(self):
         """Trailing region must be ≥ TRAILING_REGION_MIN_CHARS to override."""
         short_block = "Brief note about the result. " * 5  # ~145 chars
-        trace = [
-            {"type": "text", "text": short_block},
-            {"type": "tool", "text": "Write file"},
-        ]
-        result = _compose_full_result("See above.", trace, task=_make_task())
+        result = _compose_full_result(
+            "See above.", _narrated(short_block), task=_make_task(),
+        )
         # Region < 500 chars → no override
         assert result == "See above."
 
@@ -3766,8 +2747,7 @@ class TestComposeFullResult:
         trace = [{"type": "text", "text": block}]
         # Result already contains the region (followed by a tag) — no override
         embedded = block + "\n\n[done]"
-        result = _compose_full_result(embedded, trace, task=_make_task())
-        assert result == embedded
+        assert _compose_full_result(embedded, trace, task=_make_task()) == embedded
 
     # --- streaming fragment aggregation ---
 
@@ -3790,52 +2770,19 @@ class TestComposeFullResult:
 
     # --- automated-task gate ---
 
-    def test_scheduled_task_no_terse_recovery(self):
-        """Mechanism B is gated for scheduled tasks regardless of trace."""
-        findings = _block("Findings.", 800)
-        trace = [
-            {"type": "text", "text": findings},
-            {"type": "tool", "text": "Write file"},
-        ]
+    @pytest.mark.parametrize("task_kw", [
+        {"source_type": "scheduled"},
+        {"source_type": "briefing"},
+        # The flags gate Mechanism B even when source_type isn't in the
+        # explicit set.
+        {"source_type": "cli", "heartbeat_silent": True},
+        {"source_type": "cli", "scheduled_job_id": 42},
+    ], ids=["scheduled", "briefing", "heartbeat_silent", "scheduled_job_id"])
+    def test_automated_task_no_terse_recovery(self, task_kw):
+        """Mechanism B is gated for automated tasks regardless of trace."""
+        trace = _narrated(_block("Findings.", 800))
         result = _compose_full_result(
-            "See above.", trace, task=_make_task(source_type="scheduled"),
-        )
-        assert result == "See above."
-
-    def test_briefing_task_no_terse_recovery(self):
-        findings = _block("Findings.", 800)
-        trace = [
-            {"type": "text", "text": findings},
-            {"type": "tool", "text": "Write file"},
-        ]
-        result = _compose_full_result(
-            "See above.", trace, task=_make_task(source_type="briefing"),
-        )
-        assert result == "See above."
-
-    def test_heartbeat_silent_blocks_terse_recovery(self):
-        """heartbeat_silent flag gates Mechanism B even when source_type
-        isn't in the explicit set."""
-        findings = _block("Findings.", 800)
-        trace = [
-            {"type": "text", "text": findings},
-            {"type": "tool", "text": "Write file"},
-        ]
-        result = _compose_full_result(
-            "See above.", trace,
-            task=_make_task(source_type="cli", heartbeat_silent=True),
-        )
-        assert result == "See above."
-
-    def test_scheduled_job_id_blocks_terse_recovery(self):
-        findings = _block("Findings.", 800)
-        trace = [
-            {"type": "text", "text": findings},
-            {"type": "tool", "text": "Write file"},
-        ]
-        result = _compose_full_result(
-            "See above.", trace,
-            task=_make_task(source_type="cli", scheduled_job_id=42),
+            "See above.", trace, task=_make_task(**task_kw),
         )
         assert result == "See above."
 
@@ -3843,12 +2790,7 @@ class TestComposeFullResult:
         """Backwards-compat: callers passing no task get the original gating
         behavior (no automated-task gate fires)."""
         findings = _block("Findings.", 800)
-        trace = [
-            {"type": "text", "text": findings},
-            {"type": "tool", "text": "Write file"},
-        ]
-        result = _compose_full_result("See above.", trace)
-        assert result == findings
+        assert _compose_full_result("See above.", _narrated(findings)) == findings
 
     # --- regression — 2026-05-08 incident ---
 
@@ -4053,92 +2995,57 @@ class TestFinalAnswerGuard:
     a region the model wrote *after* its last tool call (that is its final
     message, just missing from the brain's result), and may reach further back
     only when the result is an explicit back-reference ("see above") — there
-    the model itself says the answer is earlier.
+    the model itself says the answer is earlier. The back-reference half is
+    `TestComposeFullResult::test_back_reference_with_substantial_pre_tool_region`.
     """
 
     def test_short_answer_is_not_replaced_by_pre_tool_narration(self):
-        narration = _block("Let me check the calendar.", 800)
-        trace = [
-            {"type": "text", "text": narration},
-            {"type": "tool", "text": "Read calendar"},
-        ]
+        trace = _narrated(_block("Let me check the calendar.", 800), "Read calendar")
         result = _compose_full_result(
             "Your meeting is at 3pm.", trace, task=_make_task(),
         )
         assert result == "Your meeting is at 3pm."
 
-    def test_empty_answer_labels_narration_instead_of_promoting_it(self):
-        narration = _block("Let me check the calendar.", 800)
-        trace = [
-            {"type": "text", "text": narration},
-            {"type": "tool", "text": "Read calendar"},
-        ]
+    @pytest.mark.parametrize("narration", [
+        _block("Let me check the calendar.", 800),
+        # Even a short partial is carried.
+        "Let me check the calendar.",
+    ], ids=["substantial", "short_partial"])
+    def test_empty_answer_labels_narration_instead_of_promoting_it(self, narration):
+        trace = _narrated(narration, "Read calendar")
         result = _compose_full_result("", trace, task=_make_task())
         assert result != narration
         assert result.startswith(_NO_FINAL_ANSWER_NOTICE)
         # The work isn't thrown away — it is labelled as progress, not answer.
         assert narration in result
 
-    def test_trailing_region_after_last_tool_is_still_recovered(self):
-        narration = _block("Checking.", 600)
-        answer = _block("Here is the answer.", 600)
-        trace = [
-            {"type": "text", "text": narration},
-            {"type": "tool", "text": "Read calendar"},
-            {"type": "text", "text": answer},
-        ]
-        result = _compose_full_result("", trace, task=_make_task())
-        assert result == answer
-
-    def test_short_trailing_answer_is_adopted_not_labelled(self):
-        """A brief final message the brain lost is still the answer — the
-        size floors protect a non-empty result, and there is none here."""
-        trace = [
-            {"type": "text", "text": _block("Checking.", 600)},
-            {"type": "tool", "text": "Read calendar"},
-            {"type": "text", "text": "Your meeting is at 3pm."},
-        ]
-        result = _compose_full_result("", trace, task=_make_task())
-        assert result == "Your meeting is at 3pm."
-
-    def test_explicit_back_reference_still_reaches_past_a_tool(self):
-        """ISSUE-025 stays fixed: "see above" points at earlier text."""
-        findings = _block("Findings.", 800)
-        trace = [
-            {"type": "text", "text": findings},
-            {"type": "tool", "text": "Write file"},
-        ]
-        assert _compose_full_result("See above.", trace, task=_make_task()) == findings
+    @pytest.mark.parametrize("answer", [
+        _block("Here is the answer.", 600),
+        # A brief final message the brain lost is still the answer — the size
+        # floors protect a non-empty result, and there is none here.
+        "Your meeting is at 3pm.",
+    ], ids=["substantial", "short"])
+    def test_trailing_region_after_last_tool_is_adopted(self, answer):
+        trace = _narrated(_block("Checking.", 600), "Read calendar")
+        trace.append({"type": "text", "text": answer})
+        assert _compose_full_result("", trace, task=_make_task()) == answer
 
     def test_cm_recovery_does_not_reach_back_past_a_tool(self):
-        narration = _block("Let me look this up.", 450)
         trace = [
-            {"type": "text", "text": narration},
+            {"type": "text", "text": _block("Let me look this up.", 450)},
             {"type": "cm_boundary"},
             {"type": "tool", "text": "Write file"},
         ]
-        result = _compose_full_result("Saved.", trace, task=_make_task())
-        assert result == "Saved."
+        assert _compose_full_result("Saved.", trace, task=_make_task()) == "Saved."
 
-    def test_empty_result_with_no_trace_yields_the_notice(self):
-        assert _compose_full_result("", [], task=_make_task()) == _NO_FINAL_ANSWER_NOTICE
-
-    def test_notice_carries_even_a_short_partial(self):
-        trace = [
-            {"type": "text", "text": "Let me check the calendar."},
-            {"type": "tool", "text": "Read calendar"},
-        ]
-        result = _compose_full_result("", trace, task=_make_task())
-        assert result.startswith(_NO_FINAL_ANSWER_NOTICE)
-        assert "Let me check the calendar." in result
+    @pytest.mark.parametrize("result", ["", "   \n "], ids=["empty", "whitespace_only"])
+    def test_empty_result_with_no_trace_yields_the_notice(self, result):
+        assert _compose_full_result(result, [], task=_make_task()) == _NO_FINAL_ANSWER_NOTICE
 
     def test_automated_task_empty_result_left_alone(self):
         """A briefing's body is parsed as JSON and an empty result flows to the
         existing quiet retry — a prose notice would be parsed as the body."""
-        trace = [
-            {"type": "text", "text": _block("Narration.", 800)},
-            {"type": "tool", "text": "Read feed"},
-        ]
+        trace = _narrated(_block("Narration.", 800), "Read feed")
         assert _compose_full_result(
             "", trace, task=_make_task(source_type="briefing"),
         ) == ""
@@ -4148,64 +3055,35 @@ class TestFinalAnswerGuard:
             "The answer.", [], task=_make_task(),
         ) == "The answer."
 
-    def test_whitespace_only_answer_treated_as_empty(self):
-        assert _compose_full_result(
-            "   \n ", [], task=_make_task(),
-        ) == _NO_FINAL_ANSWER_NOTICE
-
 
 class TestComposeHelpers:
     """Direct tests for the helper predicates."""
 
-    def test_is_terse_short(self):
-        assert _is_terse("Done.")
-
-    def test_is_terse_empty(self):
-        assert _is_terse("")
-        assert _is_terse("   ")
-
-    def test_is_terse_pattern_see_above(self):
-        assert _is_terse("See above.")
-        assert _is_terse("see above")
-        assert _is_terse("SEE ABOVE")
-
-    def test_is_terse_pattern_done(self):
-        assert _is_terse("Done.")
-        assert _is_terse("Done")
-        assert _is_terse("OK")
-        assert _is_terse("✓")
+    @pytest.mark.parametrize("text", [
+        "Done.", "Done", "OK", "✓", "", "   ", "See above.", "see above", "SEE ABOVE",
+    ])
+    def test_is_terse(self, text):
+        assert _is_terse(text)
 
     def test_is_terse_substantial_text_not_terse(self):
         long_text = "A" * (_TERSE_RESULT_MAX_CHARS + 1)
         assert not _is_terse(long_text)
 
-    def test_is_automated_task_none(self):
-        assert not _is_automated_task(None)
-
-    def test_is_automated_task_scheduled(self):
-        assert _is_automated_task(_make_task(source_type="scheduled"))
-
-    def test_is_automated_task_briefing(self):
-        assert _is_automated_task(_make_task(source_type="briefing"))
-
-    def test_is_automated_task_talk_not_automated(self):
-        assert not _is_automated_task(_make_task(source_type="talk"))
-
-    def test_is_automated_task_email_not_automated(self):
-        assert not _is_automated_task(_make_task(source_type="email"))
-
-    def test_is_automated_task_subtask_not_automated(self):
-        assert not _is_automated_task(_make_task(source_type="subtask"))
-
-    def test_is_automated_task_heartbeat_silent_flag(self):
-        assert _is_automated_task(
-            _make_task(source_type="cli", heartbeat_silent=True),
-        )
-
-    def test_is_automated_task_scheduled_job_id_flag(self):
-        assert _is_automated_task(
-            _make_task(source_type="cli", scheduled_job_id=42),
-        )
+    @pytest.mark.parametrize("task, expected", [
+        (None, False),
+        (_make_task(source_type="scheduled"), True),
+        (_make_task(source_type="briefing"), True),
+        (_make_task(source_type="talk"), False),
+        (_make_task(source_type="email"), False),
+        (_make_task(source_type="subtask"), False),
+        (_make_task(source_type="cli", heartbeat_silent=True), True),
+        (_make_task(source_type="cli", scheduled_job_id=42), True),
+    ], ids=[
+        "none", "scheduled", "briefing", "talk", "email", "subtask",
+        "heartbeat_silent_flag", "scheduled_job_id_flag",
+    ])
+    def test_is_automated_task(self, task, expected):
+        assert bool(_is_automated_task(task)) is expected
 
     def test_last_substantial_region_empty_trace(self):
         assert _last_substantial_region([], {"tool"}, 100) is None
@@ -4261,45 +3139,37 @@ class TestComposeHelpers:
 class TestPerUserEmailInPrompt:
     """Verify per-user plus-addressed email appears in prompt header."""
 
-    def _make_task(self, user_id="carol"):
-        return db.Task(
-            id=1, status="running", prompt="hello", user_id=user_id,
+    def _composed(self, email):
+        config = Config()
+        config.email = email
+        task = db.Task(
+            id=1, status="running", prompt="hello", user_id="carol",
             source_type="talk", conversation_token="room1",
         )
+        return build_prompt(task, [], config)
 
     def test_per_user_email_shown_when_email_enabled(self):
-        config = Config()
-        config.email = AppEmailConfig(
+        composed = self._composed(AppEmailConfig(
             enabled=True,
             imap_host="imap.test", imap_port=993,
             imap_user="u", imap_password="p",
             bot_email="istota@example.com",
-        )
-        task = self._make_task(user_id="carol")
-        result = build_prompt(task, [], config).system
-        assert "istota+carol@example.com" in result
+        ))
+        assert "istota+carol@example.com" in composed.system
 
-    def test_per_user_email_not_shown_when_email_disabled(self):
-        config = Config()
-        config.email = AppEmailConfig(enabled=False)
-        task = self._make_task(user_id="carol")
-        # Both halves: a plus-address appearing anywhere in the prompt is the
-        # thing being ruled out, whichever section it came from.
-        composed = build_prompt(task, [], config)
-        assert "+carol@" not in composed.system + composed.user
-
-    def test_per_user_email_not_shown_when_no_bot_email(self):
-        config = Config()
-        config.email = AppEmailConfig(
+    @pytest.mark.parametrize("email", [
+        AppEmailConfig(enabled=False),
+        AppEmailConfig(
             enabled=True,
             imap_host="imap.test", imap_port=993,
             imap_user="u", imap_password="p",
             bot_email="",
-        )
-        task = self._make_task(user_id="carol")
+        ),
+    ], ids=["email_disabled", "no_bot_email"])
+    def test_per_user_email_not_shown(self, email):
         # Both halves: a plus-address appearing anywhere in the prompt is the
         # thing being ruled out, whichever section it came from.
-        composed = build_prompt(task, [], config)
+        composed = self._composed(email)
         assert "+carol@" not in composed.system + composed.user
 
 
@@ -4311,17 +3181,13 @@ class TestPerUserEmailInPrompt:
 class TestSmtpFrom:
     """Verify SMTP_FROM uses plain bot email (not plus-addressed)."""
 
-    def _make_config(self, tmp_path):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
+    @patch("istota.executor.subprocess.run")
+    def test_smtp_from_uses_plain_bot_email(self, mock_run, tmp_path):
+        """SMTP_FROM should be the plain bot email; plus-addressing is for inbound only."""
+        config = _skills_config(
+            tmp_path, files_skill=False,
             # Real bundled skills dir so the email manifest is loaded.
             bundled_skills_dir=None,
-            temp_dir=tmp_path / "temp",
             email=AppEmailConfig(
                 enabled=True,
                 imap_host="imap.test", imap_port=993,
@@ -4331,26 +3197,8 @@ class TestSmtpFrom:
             ),
             security=SecurityConfig(skill_proxy_enabled=False),
         )
-
-    def _make_task(self, conn):
-        task_id = db.create_task(conn, prompt="test", user_id="carol", source_type="talk")
-        return db.get_task(conn, task_id)
-
-    @patch("istota.executor.subprocess.run")
-    def test_smtp_from_uses_plain_bot_email(self, mock_run, tmp_path):
-        """SMTP_FROM should be the plain bot email; plus-addressing is for inbound only."""
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "carol").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        call_args = mock_run.call_args
-        env = call_args[1]["env"]
-        assert env["SMTP_FROM"] == "istota@example.com"
+        _execute(config, mock_run, user_id="carol")
+        assert _env(mock_run)["SMTP_FROM"] == "istota@example.com"
 
 
 class TestWorkspaceDirBwrap:
@@ -4370,47 +3218,33 @@ class TestWorkspaceDirBwrap:
             security=SecurityConfig(),
         )
 
-    def _task(self, tmp_path):
-        with _db.get_db((tmp_path / "data" / "test.db")) as conn:
-            tid = _db.create_task(conn, prompt="x", user_id="alice", source_type="repl")
-            return _db.get_task(conn, tid)
-
-    def test_workspace_bind_and_chdir(self, tmp_path, monkeypatch):
-        from istota import executor
+    def _bwrap(self, tmp_path, monkeypatch, workspace_dir):
         monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
         cfg = self._cfg(tmp_path)
-        task = self._task(tmp_path)
-        ws = tmp_path / "project"
-        ws.mkdir()
+        with _db.get_db(cfg.db_path) as conn:
+            tid = _db.create_task(conn, prompt="x", user_id="alice", source_type="repl")
+            task = _db.get_task(conn, tid)
         user_temp = tmp_path / "temp" / "alice"
         user_temp.mkdir(parents=True)
-        cmd = executor.build_bwrap_cmd(
-            ["claude"], cfg, task, True, [], user_temp, workspace_dir=ws,
+        return executor.build_bwrap_cmd(
+            ["claude"], cfg, task, True, [], user_temp, workspace_dir=workspace_dir,
             profile=executor.SandboxProfile.CLAUDE,
         )
-        joined = " ".join(cmd)
+
+    def test_workspace_bind_and_chdir(self, tmp_path, monkeypatch):
+        ws = tmp_path / "project"
+        ws.mkdir()
+        cmd = self._bwrap(tmp_path, monkeypatch, ws)
         # chdir targets the workspace, and the workspace is bound RW.
         assert "--chdir" in cmd
-        chdir_idx = cmd.index("--chdir")
-        assert cmd[chdir_idx + 1] == str(ws.resolve())
-        assert str(ws.resolve()) in joined
+        assert cmd[cmd.index("--chdir") + 1] == str(ws.resolve())
+        assert str(ws.resolve()) in " ".join(cmd)
 
     def test_workspace_blocklist_rejects_home_ssh(self, tmp_path, monkeypatch):
-        from istota import executor
-        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
-        cfg = self._cfg(tmp_path)
-        task = self._task(tmp_path)
-        user_temp = tmp_path / "temp" / "alice"
-        user_temp.mkdir(parents=True)
-        ssh_dir = Path.home() / ".ssh"
         with pytest.raises(ValueError):
-            executor.build_bwrap_cmd(
-                ["claude"], cfg, task, True, [], user_temp, workspace_dir=ssh_dir,
-                profile=executor.SandboxProfile.CLAUDE,
-            )
+            self._bwrap(tmp_path, monkeypatch, Path.home() / ".ssh")
 
     def test_validate_workspace_rejects_source_tree(self, tmp_path):
-        from istota import executor
         cfg = self._cfg(tmp_path)
         # The istota package dir is inside the source tree → rejected.
         src_dir = Path(executor.__file__).resolve().parent
@@ -4418,7 +3252,6 @@ class TestWorkspaceDirBwrap:
             executor._validate_workspace_dir(cfg, src_dir)
 
     def test_validate_workspace_allows_arbitrary_dir(self, tmp_path):
-        from istota import executor
         cfg = self._cfg(tmp_path)
         ok = tmp_path / "safe"
         ok.mkdir()
@@ -4426,20 +3259,14 @@ class TestWorkspaceDirBwrap:
 
 
 class TestReplInteractiveGate:
-    def test_repl_in_interactive_source_types(self):
-        from istota.executor import _INTERACTIVE_SOURCE_TYPES
-        assert "repl" in _INTERACTIVE_SOURCE_TYPES
-        assert "talk" in _INTERACTIVE_SOURCE_TYPES
-        assert "email" in _INTERACTIVE_SOURCE_TYPES
-
-    def test_the_push_surfaces_are_interactive(self):
-        """ISSUE-500. Membership rather than behaviour: what a text message
-        loses by being absent from this tuple is asserted through the
-        assembled prompt in `tests/test_prompt_golden.py`.
+    def test_interactive_source_types(self):
+        """ISSUE-500 for the push surfaces. Membership rather than behaviour:
+        what a text message loses by being absent from this tuple is asserted
+        through the assembled prompt in `tests/test_prompt_golden.py`.
         """
         from istota.executor import _INTERACTIVE_SOURCE_TYPES
-        assert "sms" in _INTERACTIVE_SOURCE_TYPES
-        assert "whatsapp" in _INTERACTIVE_SOURCE_TYPES
+        for source_type in ("repl", "talk", "email", "sms", "whatsapp"):
+            assert source_type in _INTERACTIVE_SOURCE_TYPES, source_type
 
 
 class TestTheInteractiveSourceTypeSets:
@@ -4532,50 +3359,24 @@ class TestWorkspacePlaceholderDoesNotClobberSandboxBind:
     the display string; the parameter stays None for a normal task.
     """
 
-    def _make_config(self, tmp_path):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        mount = tmp_path / "mount"
-        (mount / "Users" / "alice").mkdir(parents=True)
-        skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
-        # An eager skill whose body references the {workspace} placeholder, so
-        # the substitution block that clobbered the variable actually runs.
-        (skills_dir / "_index.toml").write_text(
-            '[files]\ndescription = "File ops"\nalways_include = true\n'
-        )
-        (skills_dir / "files.md").write_text("Your files live in {workspace}.")
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
-            bundled_skills_dir=tmp_path / "_empty_bundled",
-            temp_dir=tmp_path / "temp",
-            nextcloud=NextcloudConfig(url="https://cloud.example.com"),
-            workspace_path=mount,
-            security=SecurityConfig(sandbox_enabled=True, skill_proxy_enabled=False),
-        )
-
     @patch("istota.executor.build_bwrap_cmd")
     @patch("istota.executor.subprocess.run")
     def test_normal_task_passes_none_workspace_dir_to_sandbox(
         self, mock_run, mock_bwrap, tmp_path
     ):
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        config = _skills_config(
+            tmp_path, mount=True,
+            nextcloud=NextcloudConfig(url="https://cloud.example.com"),
+            security=SecurityConfig(sandbox_enabled=True, skill_proxy_enabled=False),
+        )
+        (config.workspace_path / "Users" / "alice").mkdir(parents=True)
+        # An eager skill whose body references the {workspace} placeholder, so
+        # the substitution block that clobbered the variable actually runs.
+        (config.skills_dir / "files.md").write_text("Your files live in {workspace}.")
         # build_bwrap_cmd is a no-op wrapper here; we only inspect its kwargs.
         mock_bwrap.side_effect = lambda raw_cmd, *a, **k: raw_cmd
 
-        with db.get_db(config.db_path) as conn:
-            task_id = db.create_task(
-                conn, prompt="hi", user_id="alice", source_type="talk"
-            )
-            task = db.get_task(conn, task_id)
-            from istota.executor import execute_task
-
-            success, _result, _actions, _trace = execute_task(
-                task, config, [], conn=conn
-            )
+        _execute(config, mock_run, prompt="hi")
 
         # The sandbox wrapper must have been invoked, and with workspace_dir=None
         # (the mount-subdir value belongs in the {workspace} display string, not
@@ -4612,22 +3413,11 @@ class TestImagePreparationWritesIntoTheControlDirectory:
     to disk.
     """
 
-    def _make_config(self, tmp_path):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        return Config(
-            db_path=db_path,
-            skills_dir=tmp_path / "_empty_skills",
-            bundled_skills_dir=tmp_path / "_empty_bundled",
-            temp_dir=tmp_path / "temp",
-            security=SecurityConfig(sandbox_enabled=False, skill_proxy_enabled=False),
-        )
-
     def test_the_out_dir_is_inside_the_task_control_directory(self, tmp_path):
         from istota.executor import execute_task, get_task_control_dir, get_user_temp_dir
         from istota.image_attachments import ImagePreparation
 
-        config = self._make_config(tmp_path)
+        config = _bare_config(tmp_path)
         img = tmp_path / "inbox" / "shot.png"
         img.parent.mkdir(parents=True)
         img.write_bytes(b"not really a png")
@@ -4668,21 +3458,10 @@ class TestAnUnusableControlDirectoryFailsTheTask:
     the path in front of whoever asked.
     """
 
-    def _make_config(self, tmp_path):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        return Config(
-            db_path=db_path,
-            skills_dir=tmp_path / "_empty_skills",
-            bundled_skills_dir=tmp_path / "_empty_bundled",
-            temp_dir=tmp_path / "temp",
-            security=SecurityConfig(sandbox_enabled=False, skill_proxy_enabled=False),
-        )
-
     def test_a_control_root_that_is_a_file_fails_the_task_by_return(self, tmp_path):
         from istota.executor import CONTROL_DIR_NAME, execute_task
 
-        config = self._make_config(tmp_path)
+        config = _bare_config(tmp_path)
         config.temp_dir.mkdir(parents=True, exist_ok=True)
         # A real corrupt-state case rather than a patched one: `O_DIRECTORY`
         # is what refuses it, several layers below the assertion.
@@ -4727,21 +3506,10 @@ class TestTheControlDirectoryIsGuardedOnEveryShape:
     half; this is the wiring.
     """
 
-    def _make_config(self, tmp_path):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        return Config(
-            db_path=db_path,
-            skills_dir=tmp_path / "_empty_skills",
-            bundled_skills_dir=tmp_path / "_empty_bundled",
-            temp_dir=tmp_path / "temp",
-            security=SecurityConfig(sandbox_enabled=False, skill_proxy_enabled=False),
-        )
-
     def _run(self, tmp_path, confined):
         from istota.executor import execute_task
 
-        config = self._make_config(tmp_path)
+        config = _bare_config(tmp_path)
         captured = {}
 
         class _Brain:
