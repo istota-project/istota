@@ -46,7 +46,8 @@ istota-skill health add-biomarker 12 WBC 12.5 10^3/uL --flag H
 # A marker measured in urine takes its Urine_ name (Urine_Creatinine, not
 # Creatinine), so it never joins the blood marker's trend. Skip dipstick
 # results with no number ("negative", "trace", "1+"): a value must be numeric.
-istota-skill health add-panel --drawn-at 2026-05-08 --lab Quest --type Urinalysis --specimen urine
+istota-skill health add-panel --drawn-at 2026-05-08 --lab Quest --type Urinalysis --specimen urine --ref ua
+istota-skill health add-biomarker @ua Urine_pH 6.0 ""                # unitless markers take an explicit empty unit
 
 # Adding a panel and its biomarkers in ONE sandboxed task: the panel id
 # doesn't exist yet (the write is deferred), so give the panel a --ref name

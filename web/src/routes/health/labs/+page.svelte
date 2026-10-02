@@ -142,7 +142,7 @@
   onMount(load);
 </script>
 
-{#if !loading && !error}
+{#if !loading}
   <!-- Held back while loading so the pane shows nothing but the centered
        loading message, rather than centering it in the space left under
        this header. -->
@@ -211,7 +211,7 @@
   <div class="center-msg">Loading…</div>
 {:else if error}
   <div class="center-msg error">{error}</div>
-{:else if specimen && matrix && matrix.panels.length === 0}
+{:else if specimen && matrix && matrix.panels.length === 0 && drafts.length === 0}
   <div class="empty">No confirmed {specimen} panels on file.</div>
 {:else if matrix && matrix.panels.length === 0 && drafts.length === 0}
   <div class="empty">
@@ -239,7 +239,7 @@
 
   {#if matrix.panels.length === 0}
     <div class="empty">
-      No confirmed panels yet.
+      {specimen ? `No confirmed ${specimen} panels yet.` : 'No confirmed panels yet.'}
       {#if drafts.length > 0}
         Review the draft above to add it to your history,
       {/if}

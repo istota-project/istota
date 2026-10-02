@@ -122,7 +122,10 @@ class TestPanelsCli:
             "add-panel", "--drawn-at", "2026-05-08", "--specimen", "urine",
         ], env)["id"]
         _run(["add-panel", "--drawn-at", "2026-05-09"], env)
+        # Urine_pH has no unit; skill.md tells the model to pass "".
+        _run(["add-biomarker", str(urine), "Urine_pH", "6.0", ""], env)
         out = _run(["panels", "--specimen", "urine"], env)
+        assert out["panels"][0]["biomarker_count"] == 1
         assert [p["id"] for p in out["panels"]] == [urine]
         assert out["panels"][0]["specimen"] == "urine"
         assert _run(["panel", str(urine)], env)["panel"]["specimen"] == "urine"

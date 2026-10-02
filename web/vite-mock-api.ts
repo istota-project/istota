@@ -7045,6 +7045,7 @@ const handlers: MockHandler[] = [
         notes: p.notes,
         has_source: false,
         encounter_id: p.encounter_id,
+        specimen: p.specimen ?? null,
       };
     };
 
@@ -7242,6 +7243,7 @@ const handlers: MockHandler[] = [
           draft: false,
           notes: body.notes ?? null,
           encounter_id: body.encounter_id ?? null,
+          specimen: body.specimen || null,
         };
         panels.push(p);
         return { status: 'ok', id: p.id };
@@ -7263,6 +7265,7 @@ const handlers: MockHandler[] = [
           if (body.lab_name !== undefined) p.lab_name = body.lab_name;
           if (body.panel_type !== undefined) p.panel_type = body.panel_type;
           if (body.notes !== undefined) p.notes = body.notes;
+          if (body.specimen !== undefined) p.specimen = body.specimen || null;
           if (body.encounter_id !== undefined) {
             if (body.encounter_id !== null && !encounters.find((e) => e.id === body.encounter_id)) {
               return { error: 'encounter not found' };
