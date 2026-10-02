@@ -17,7 +17,6 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from email.utils import parseaddr
-from pathlib import Path
 
 from imap_tools import AND, U
 
@@ -42,7 +41,9 @@ from ...notification_resolvers import confirmation as confirmation_source
 from ...notification_resolvers import task_alert as task_alert_source
 from ...notification_store import RaiseResult, deliver_pending, mark_delivered
 from ...outbound_policy import effective_policy
-from ...skills.email import download_attachments, list_emails, read_email
+from ...skills.email import (
+    attachment_leaf_name, download_attachments, list_emails, read_email,
+)
 from ...storage import ensure_user_directories_v2, upload_file_to_inbox_v2
 from .._types import IncomingMessage
 from ..ingest import classify_ahead, ingest_message
@@ -2218,7 +2219,7 @@ def poll_emails(config: Config) -> list[int]:
                     downloaded_names = {p.name for p in local_attachment_paths}
                     skipped_attachments = [
                         name for name in declared_attachments
-                        if Path(name).name not in downloaded_names
+                        if attachment_leaf_name(name) not in downloaded_names
                     ]
 
                     # Upload attachments to user's Nextcloud inbox

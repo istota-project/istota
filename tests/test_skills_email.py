@@ -2,6 +2,7 @@
 
 import json
 import smtplib
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -940,6 +941,83 @@ class TestDownloadAttachmentsSecurity:
             result = download_attachments("1", target_dir=tmp_path, config=email_config)
 
         assert len(result) == 0
+
+    def _download(self, tmp_path, email_config, filename):
+        from istota.skills.email import download_attachments
+
+        mock_att = MagicMock()
+        mock_att.filename = filename
+        mock_att.payload = b"%PDF"
+        mock_msg = MagicMock()
+        mock_msg.attachments = [mock_att]
+        mock_mailbox = MagicMock()
+        mock_mailbox.__enter__ = MagicMock(return_value=mock_mailbox)
+        mock_mailbox.__exit__ = MagicMock(return_value=False)
+        mock_mailbox.fetch.return_value = [mock_msg]
+        with patch("istota.skills.email._get_mailbox", return_value=mock_mailbox):
+            return download_attachments("1", target_dir=tmp_path, config=email_config)
+
+    def test_a_control_character_in_the_name_is_replaced(self, tmp_path, email_config):
+        """ISSUE-593: a CR in a forwarded booking's filename reached the inbox
+        and Nextcloud refused the upload. Unlike traversal, which is refused,
+        a control character is replaced, since the attachment is legitimate."""
+        result = self._download(
+            tmp_path, email_config, "Your Booking Confirmation\r Receipt.pdf",
+        )
+
+        assert result == [tmp_path / "Your Booking Confirmation Receipt.pdf"]
+        assert [p.name for p in tmp_path.iterdir()] == [
+            "Your Booking Confirmation Receipt.pdf"
+        ]
+
+    def test_each_component_of_a_nested_name_is_sanitised(self, tmp_path, email_config):
+        result = self._download(tmp_path, email_config, "scans\t/page:1.png")
+
+        assert result == [tmp_path / "scans" / "page_1.png"]
+
+    def test_two_names_that_sanitise_alike_both_land(self, tmp_path, email_config):
+        """Without numbering the second write truncated the first, and the
+        skipped-attachment diff reported nothing missing."""
+        from istota.skills.email import download_attachments
+
+        atts = []
+        for name, payload in (("a:b.pdf", b"A"), ("a?b.pdf", b"B")):
+            att = MagicMock()
+            att.filename = name
+            att.payload = payload
+            atts.append(att)
+        mock_msg = MagicMock()
+        mock_msg.attachments = atts
+        mock_mailbox = MagicMock()
+        mock_mailbox.__enter__ = MagicMock(return_value=mock_mailbox)
+        mock_mailbox.__exit__ = MagicMock(return_value=False)
+        mock_mailbox.fetch.return_value = [mock_msg]
+        with patch("istota.skills.email._get_mailbox", return_value=mock_mailbox):
+            result = download_attachments("1", target_dir=tmp_path, config=email_config)
+
+        assert result == [tmp_path / "a_b.pdf", tmp_path / "a_b (2).pdf"]
+        assert [p.read_bytes() for p in result] == [b"A", b"B"]
+
+    def test_a_backslash_traversal_is_refused_not_renamed(self, tmp_path, email_config):
+        assert self._download(tmp_path, email_config, "..\\..\\etc\\passwd") == []
+        assert list(tmp_path.iterdir()) == []
+
+    def test_the_numbered_name_survives_a_stem_at_the_cap(self):
+        from istota.skills.email import _unclaimed_name
+
+        first = Path("/r") / ("a" * 120 + ".pdf")
+        second = _unclaimed_name(first, [first])
+        assert second != first and second.name.endswith(" (2).pdf")
+
+    def test_the_leaf_name_matches_what_was_written(self, tmp_path, email_config):
+        """The two callers that report skipped attachments compare the declared
+        name with the written one; both sides have to go through one rule."""
+        from istota.skills.email import attachment_leaf_name
+
+        raw = "dir/Booking-Ref\r Receipt.pdf"
+        result = self._download(tmp_path, email_config, raw)
+
+        assert [p.name for p in result] == [attachment_leaf_name(raw)]
 
     def test_a_nested_name_lands_under_the_destination(self, tmp_path, email_config):
         """The other half of the refusals above.

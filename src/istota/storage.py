@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from .atomic_write import write_text_atomic
+from .filenames import MAX_NAME_BYTES, safe_filename
 from .rclone_client import (
     rclone_cat,
     rclone_cat_checked,
@@ -1923,6 +1924,16 @@ def get_user_inbox_path(user_id: str) -> str:
     return f"{get_user_base_path(user_id)}/inbox"
 
 
+def _inbox_name(name: str) -> str:
+    """The name a file is given in the inbox (ISSUE-593).
+
+    Only the byte limit binds here, not the stem cap: callers prefix a name the
+    rule already capped (`<id>_<name>`), and capping again would cut two
+    distinct names down to one.
+    """
+    return safe_filename(name, max_stem=MAX_NAME_BYTES)
+
+
 def upload_file_to_inbox(
     remote: str,
     user_id: str,
@@ -1944,7 +1955,7 @@ def upload_file_to_inbox(
     if not local_path.exists():
         return None
 
-    filename = remote_filename or local_path.name
+    filename = _inbox_name(remote_filename or local_path.name)
     inbox_path = get_user_inbox_path(user_id)
     remote_path = f"{inbox_path}/{filename}"
 
@@ -2375,7 +2386,9 @@ def upload_file_to_inbox_v2(
     if not local_path.exists():
         return None
 
-    filename = remote_filename or local_path.name
+    # Every inbox writer goes through here, so the name rule sits here too: a
+    # name Nextcloud refuses stays in the rclone VFS cache for good (ISSUE-593).
+    filename = _inbox_name(remote_filename or local_path.name)
     inbox_path = get_user_inbox_path(user_id)
     remote_path = f"{inbox_path}/{filename}"
 
@@ -2385,7 +2398,7 @@ def upload_file_to_inbox_v2(
         shutil.copy2(str(local_path), str(dst))
         return remote_path
     else:
-        return upload_file_to_inbox(config.rclone_remote, user_id, local_path, remote_filename)
+        return upload_file_to_inbox(config.rclone_remote, user_id, local_path, filename)
 
 
 # Date pattern for dated memory files (YYYY-MM-DD.md)

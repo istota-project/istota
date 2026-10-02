@@ -247,6 +247,25 @@ class TestFieldsGet:
         assert written["token"] == out["token"] and written["path"] == "blocks"
         assert written["value"][0]["title"].startswith(OPEN)
 
+    def test_output_keeps_value_and_definition_off_stdout(self, env, capsys, site):
+        # ISSUE-595: the definition can be as large as the value.
+        target = env.mount / "Users" / "alice" / "blocks.json"
+        code, out = run(["fields", "get", "--id", "4580", "--path", "blocks",
+                         "--output", str(target)], capsys)
+        assert code == 0, out
+        assert "value" not in out and "definition" not in out
+        assert out["definition_summary"] == {
+            "type": "flexible_content", "layouts": ["list", "text"]}
+        assert json.loads(target.read_text())["definition"]["type"] == "flexible_content"
+
+    def test_output_summarises_a_group_by_its_sub_fields(self, env, capsys, site):
+        target = env.mount / "Users" / "alice" / "hero.json"
+        code, out = run(["fields", "get", "--id", "4580", "--path", "hero",
+                         "--output", str(target)], capsys)
+        assert code == 0, out
+        assert "definition" not in out
+        assert out["definition_summary"] == {"type": "group", "sub_fields": ["heading"]}
+
     def test_an_options_page_is_read_by_slug(self, env, capsys, site):
         code, out = run(["fields", "get", "--page", "acf-options"], capsys)
         assert code == 0, out

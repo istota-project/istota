@@ -28,13 +28,13 @@ fails does not undo the upload; it is reported as ``metadata_error``.
 from __future__ import annotations
 
 import os
-import re
 import stat
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from istota.filenames import safe_filename as _safe_name
 from istota.image_sniff import sniff_decodable
 from istota.skill_host_paths import memory_refusal, resolve_in_roots
 from istota.skills._hostpath import egress_roots
@@ -50,7 +50,6 @@ _HEAD_BYTES = 64
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".jpe", ".gif", ".webp", ".heic", ".heif"})
 #: Answered with a 5xx before WordPress stores anything (a disallowed type).
 _DEFINITE_CODES = frozenset({"rest_upload_sideload_error"})
-_FILENAME_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 _META_FIELDS = ("title", "alt_text", "caption")
 #: Seconds kept back from the proxy's ceiling for the post write and read-back.
 CALL_RESERVE_SECONDS = 45
@@ -144,13 +143,7 @@ def safe_filename(path: str) -> str:
     """The name sent in ``Content-Disposition``: no quote, semicolon or control
     character can reach WordPress's header parser, and the extension, which is
     how WordPress decides the type, is kept."""
-    name = Path(path).name
-    stem, dot, suffix = name.rpartition(".")
-    if not dot:
-        stem, suffix = name, ""
-    stem = _FILENAME_UNSAFE.sub("_", stem).strip("._") or "upload"
-    suffix = _FILENAME_UNSAFE.sub("", suffix)
-    return f"{stem}.{suffix}" if suffix else stem
+    return _safe_name(path, ascii_only=True, fallback="upload")
 
 
 def egress_path(path: str, operation: str) -> str:
