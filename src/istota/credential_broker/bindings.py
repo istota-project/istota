@@ -142,12 +142,15 @@ def credential_groups(conn, user_id):
     return groups
 
 
-def get_entry_binding(conn, user_id, name):
+def get_entry_binding(conn, user_id, name, groups=None):
+    """``groups`` is ``credential_groups``' answer, for a caller looping over entries."""
     binding = get_binding(conn, user_id, name)
     if binding is not None:
         return binding
+    if groups is None:
+        groups = credential_groups(conn, user_id)
     # Entries without passwords still have username, URL or custom fields.
-    for member in credential_groups(conn, user_id).get(name, []):
+    for member in groups.get(name, []):
         binding = get_binding(conn, user_id, member)
         if binding is not None:
             return binding
