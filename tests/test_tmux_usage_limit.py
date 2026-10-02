@@ -13,6 +13,7 @@ import pytest
 
 from istota.brain._types import BrainRequest, BrainResult
 from istota.brain.tmux_claude import (
+    _SessionDir,
     TmuxClaudeBrain,
     consume_circuit_open_alert,
     reset_circuit_breaker,
@@ -46,7 +47,10 @@ class TestBuildResultUsageLimit:
             "transcript_path": "",
             "last_assistant_message": "Claude usage limit reached. Resets at 5pm.",
         }))
-        result = brain._build_result(sentinel, _req(tmp_path), forward_progress=False)
+        (tmp_path / "config").mkdir(exist_ok=True)
+        result = brain._build_result(
+            _SessionDir(tmp_path), _req(tmp_path), forward_progress=False,
+        )
         assert result.success is False
         assert result.stop_reason == "usage_limit"
 
@@ -57,7 +61,10 @@ class TestBuildResultUsageLimit:
             "transcript_path": "",
             "last_assistant_message": "Here is your answer about API rate limits.",
         }))
-        result = brain._build_result(sentinel, _req(tmp_path), forward_progress=False)
+        (tmp_path / "config").mkdir(exist_ok=True)
+        result = brain._build_result(
+            _SessionDir(tmp_path), _req(tmp_path), forward_progress=False,
+        )
         assert result.success is True
         assert result.stop_reason == "completed"
 

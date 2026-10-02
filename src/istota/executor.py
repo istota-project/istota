@@ -8232,7 +8232,7 @@ def execute_task(
     #
     # The user half is a debugging artifact and nothing in the product reads it
     # back — the prompt reaches ClaudeCodeBrain on stdin, TmuxClaudeBrain
-    # through its own `workdir/prompt.txt`, and NativeBrain as the initial user
+    # through a tmux buffer loaded over stdin, and NativeBrain as the initial user
     # message. It is kept as one, and it is the half that had to move: it
     # carries retrieved memory, knowledge facts, playbooks, conversation
     # history and the request itself, it differs per task, and where it used to
