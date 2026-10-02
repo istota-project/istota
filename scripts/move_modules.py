@@ -230,7 +230,7 @@ SCAN_ROOTS = (
     "config/", ".github/",
 )
 # pyproject.toml carries per-file ruff ignores keyed on `src/istota/web_app.py`.
-SCAN_FILES = ("AGENTS.md", "README.md", "pyproject.toml", "install.sh")
+SCAN_FILES = ("AGENTS.md", "README.md", "pyproject.toml", "install.sh", "schema.sql")
 SUFFIXES = frozenset({".py", ".sh", ".md", ".toml", ".yml", ".yaml", ".j2", ".service", ".txt", ".cfg"})
 EXCLUDED_NAMES = frozenset({"CHANGELOG.md", "DEVLOG.md"})
 EXCLUDED_PREFIXES = (
@@ -290,18 +290,33 @@ class Mapper:
 
     table: Table
     pairs: dict[str, str]
+    root: Path | None = None
     reverse_pairs: dict[str, str] = field(init=False)
 
     def __post_init__(self) -> None:
         self.reverse_pairs = {new: old for old, new in self.pairs.items()}
-        self._children = {old: self.table.children(old) for old in self.table.collisions}
+        self._children: dict[str, frozenset[str]] = {}
+        self._landed: set[str] = set()
+        for old in self.table.collisions:
+            children = set(self.table.children(old))
+            if self.root is not None and not module_file(self.root, old).is_file():
+                # Landed: the package is the authority on its children, so a
+                # module added to it later is not read as an old-module attribute.
+                self._landed.add(old)
+                children |= _package_entries(module_dir(self.root, old))
+            self._children[old] = frozenset(children)
+        self.ambiguous = False
 
-    def forward_parts(self, parts: list[str], following: str = "") -> list[str] | None:
+    def forward_parts(self, parts: list[str], following: str = "", token: bool = False) -> list[str] | None:
         """Map `istota.<parts>`; None when nothing changes.
 
         `following` is the text after a bare collision token, so
-        `from istota.notifications import delivery` reads as converted.
+        `from istota.notifications import delivery` reads as converted. With
+        `token`, a bare collision token on a landed stage that is not followed
+        by `import <name>` could mean the package itself: it is left alone and
+        `self.ambiguous` is set for the caller to report.
         """
+        self.ambiguous = False
         for k in range(len(parts), 0, -1):
             old = "istota." + ".".join(parts[:k])
             new = self.pairs.get(old)
@@ -311,9 +326,12 @@ class Mapper:
                 children = self._children[old]
                 if len(parts) > k and parts[k] in children:
                     return None
-                if len(parts) == k and following:
-                    m = IMPORT_CHILD_RE.match(following)
+                if len(parts) == k:
+                    m = IMPORT_CHILD_RE.match(following) if following else None
                     if m and m.group(1) in children:
+                        return None
+                    if token and m is None and old in self._landed:
+                        self.ambiguous = True
                         return None
             return new.split(".")[1:] + parts[k:]
         return None
@@ -343,6 +361,18 @@ class Report:
 # Tree state
 
 
+def _package_entries(directory: Path) -> set[str]:
+    if not directory.is_dir():
+        return set()
+    entries = set()
+    for entry in directory.iterdir():
+        if entry.suffix == ".py" and entry.stem != "__init__":
+            entries.add(entry.stem)
+        elif (entry / "__init__.py").is_file():
+            entries.add(entry.name)
+    return entries
+
+
 def module_file(root: Path, dotted: str) -> Path:
     return root / SRC / Path(*dotted.split(".")[1:]).with_suffix(".py")
 
@@ -368,6 +398,10 @@ def pair_state(root: Path, table: Table, old: str, new: str) -> str:
     has_old = old_exists(root, table, old)
     has_new = new_exists(root, table, old, new)
     if has_old and not has_new:
+        # A leftover destination directory (a stale __pycache__/ after a reset)
+        # would make `git mv` nest the package inside it.
+        if old in table.packages and module_dir(root, new).exists():
+            return "inconsistent"
         return "pending"
     if has_new and not has_old:
         return "done"
@@ -416,7 +450,7 @@ def scanned_files(root: Path, skip: set[str]) -> list[str]:
         path = root / rel
         if path.is_symlink() or not path.is_file():
             continue
-        if not wanted_type(path):
+        if rel not in SCAN_FILES and not wanted_type(path):
             continue
         out.append(rel)
     return out
@@ -486,7 +520,7 @@ def rule_relative(text: str, rel: str, root: Path, mapper: Mapper, hand_fix: lis
         final_pkg = final_mod if is_init else final_mod.rsplit(".", 1)[0]
         moved_already = False
 
-    lines = text.splitlines(keepends=True)
+    lines = io.StringIO(text).readlines()
     edits: list[tuple[int, int, int, str]] = []  # (line index, start col, end col, replacement)
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom) or not node.level:
@@ -507,12 +541,18 @@ def rule_relative(text: str, rel: str, root: Path, mapper: Mapper, hand_fix: lis
             if mapper.forward(pre) == post:
                 continue
             if moved_already and _resolves_now(root, post, base_post, suffix, bool(node.module)):
-                # Written against the file's new home, not carried over a merge.
+                # Written against the file's new home, not carried over a merge,
+                # unless the old home had a module of that name too (`db` beside
+                # `briefings/db.py`): then either reading is plausible.
+                if module_exists(root, mapper.forward(pre)):
+                    hand_fix.append(f"{rel}:{node.lineno}: `{suffix}` resolves at both the old and the new home")
                 continue
             convert = True
         if not convert:
             continue
         line = lines[node.lineno - 1]
+        if KEEP_MARKER in "".join(lines[node.lineno - 1: node.end_lineno]):
+            continue
         col = node.col_offset
         m = RELATIVE_HEAD_RE.match(line, col)
         if line[:col].strip() or m is None:
@@ -582,7 +622,7 @@ def rule_from_istota(text: str, rel: str, mapper: Mapper, hand_fix: list[str]) -
     except SyntaxError:
         hand_fix.append(f"{rel}: does not parse; `from istota import` not checked")
         return text, 0
-    lines = text.splitlines(keepends=True)
+    lines = io.StringIO(text).readlines()
     edits: list[tuple[int, int, list[str]]] = []
     for node in ast.walk(tree):
         if not (isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "istota"):
@@ -628,34 +668,30 @@ def rule_from_istota(text: str, rel: str, mapper: Mapper, hand_fix: list[str]) -
     return "".join(lines), len(edits)
 
 
-def rule_dotted(text: str, mapper: Mapper) -> tuple[str, int]:
+def rule_dotted(text: str, rel: str, mapper: Mapper, hand_fix: list[str]) -> tuple[str, int]:
     """Rule 4: `istota.x.y` tokens and `{{ istota_package }}.x` forms."""
     count = 0
 
-    def token(match: re.Match[str]) -> str:
-        nonlocal count
-        if _keep_line(text, match.start()):
-            return match.group(0)
-        parts = match.group(1).split(".")[1:]
-        mapped = mapper.forward_parts(parts, text[match.end(): match.end() + 200])
-        if mapped is None:
-            return match.group(0)
-        count += 1
-        return "istota." + ".".join(mapped)
+    def substitute(pattern: re.Pattern[str], prefix_group: int | None, dotted_group: int, source: str) -> str:
+        def one(match: re.Match[str]) -> str:
+            nonlocal count
+            if _keep_line(source, match.start()):
+                return match.group(0)
+            parts = match.group(dotted_group).split(".")[1:]
+            mapped = mapper.forward_parts(parts, source[match.end(): match.end() + 200], token=True)
+            if mapper.ambiguous:
+                line = source.count("\n", 0, match.start()) + 1
+                hand_fix.append(f"{rel}:{line}: {match.group(0)}: the package, or the old module it replaced?")
+            if mapped is None:
+                return match.group(0)
+            count += 1
+            head = "istota" if prefix_group is None else match.group(prefix_group)
+            return head + "." + ".".join(mapped)
 
-    def templated(match: re.Match[str]) -> str:
-        nonlocal count
-        if _keep_line(text, match.start()):
-            return match.group(0)
-        parts = match.group(2).split(".")[1:]
-        mapped = mapper.forward_parts(parts, text[match.end(): match.end() + 200])
-        if mapped is None:
-            return match.group(0)
-        count += 1
-        return match.group(1) + "." + ".".join(mapped)
+        return pattern.sub(one, source)
 
-    text = TOKEN_RE.sub(token, text)
-    text = TEMPLATED_RE.sub(templated, text)
+    text = substitute(TOKEN_RE, None, 1, text)
+    text = substitute(TEMPLATED_RE, 1, 2, text)
     return text, count
 
 
@@ -754,7 +790,7 @@ def rewrite_text(text: str, rel: str, root: Path, mapper: Mapper, table: Table, 
         text, counts["relative"] = rule_relative(text, rel, root, mapper, hand_fix)
     if rel.endswith(".py"):
         text, counts["from_istota"] = rule_from_istota(text, rel, mapper, hand_fix)
-    text, counts["dotted"] = rule_dotted(text, mapper)
+    text, counts["dotted"] = rule_dotted(text, rel, mapper, hand_fix)
     text, counts["paths"] = rule_paths(text, mapper, table)
     if rel.endswith(".md"):
         text, counts["markdown"] = rule_markdown(text, mapper, table, unique)
@@ -826,7 +862,7 @@ def run(root: Path, only: list[str] | None, check: bool, table: Table = DEFAULT_
     report = Report()
     stages, notes = select(root, table, only)
     selected = [(s, old, new) for s, old, new in table.moves if s in stages]
-    mapper = Mapper(table, {old: new for _, old, new in selected})
+    mapper = Mapper(table, {old: new for _, old, new in selected}, root)
     pending = [(old, new) for _, old, new in selected if pair_state(root, table, old, new) == "pending"]
 
     if pending and not check:

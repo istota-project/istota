@@ -195,6 +195,16 @@ class TestFromIstota:
             "    return room_policy, rs, notifications, notification_store, db\n"
         )
 
+    def test_a_line_separator_ast_does_not_count_shifts_nothing(self, repo):
+        """`str.splitlines` breaks on U+2028 and friends; `ast` line numbers do not."""
+        path = repo / "src/istota/sep.py"
+        path.write_text('X = "a b"\ndef f():\n    y = 1\n    from istota import room_policy\n    return room_policy, y\n')
+        _commit(repo)
+        assert run(repo, "--only", "rooms") == 0
+        text = path.read_text()
+        assert "    y = 1\n" in text
+        assert "    from istota.rooms import policy as room_policy\n" in text
+
     def test_the_rewritten_file_still_parses(self, repo):
         assert run(repo, "--only", "rooms", "notes", "web", "pkg") == 0
         for path in (repo / "src").rglob("*.py"):
@@ -234,6 +244,17 @@ class TestRelativeImports:
         # Written against the new home: it already resolves, so it is left alone.
         assert "from .scopes import scope_for as again  # noqa: F401\n" in text
 
+    def test_a_name_at_both_homes_is_reported(self, repo, capsys):
+        assert run(repo, "--only", "rooms") == 0
+        (repo / "src/istota/rooms/db.py").write_text("")
+        policy = repo / "src/istota/rooms/policy.py"
+        policy.write_text(policy.read_text() + "from . import db as again  # noqa: F401\n")
+        _commit(repo)
+        capsys.readouterr()
+        assert run(repo) == 0
+        assert "from . import db as again" in policy.read_text()
+        assert "resolves at both the old and the new home" in capsys.readouterr().out
+
 
 class TestDottedReferences:
     def test_the_collision_rule(self, repo):
@@ -244,6 +265,37 @@ class TestDottedReferences:
         _commit(repo)
         assert run(repo, "--only", "notes") == 0
         assert read(repo, "tests/test_things.py") == text
+
+    def test_a_module_added_to_a_landed_collision_package_is_left_alone(self, repo):
+        assert run(repo, "--only", "notes") == 0
+        _commit(repo)
+        (repo / "src/istota/notifications/digest.py").write_text("X = 1\n")
+        (repo / "src/istota/uses.py").write_text(
+            "from istota.notifications import digest  # noqa: F401\n"
+            'PATCH = "istota.notifications.digest.X"\n'
+        )
+        _commit(repo)
+        before = snapshot(repo)
+        assert run(repo, "--check") == 0
+        assert run(repo) == 0
+        assert snapshot(repo) == before
+
+    def test_a_bare_collision_token_after_landing_is_reported_not_rewritten(self, repo, capsys):
+        assert run(repo, "--only", "notes") == 0
+        _commit(repo)
+        (repo / "docs/pkg.md").write_text("The `istota.notifications` package.\n")
+        (repo / "src/istota/branch.py").write_text(
+            "from istota.notifications import send_notification  # noqa: F401\n"
+        )
+        _commit(repo)
+        capsys.readouterr()
+        assert run(repo) == 0
+        assert read(repo, "docs/pkg.md") == "The `istota.notifications` package.\n"
+        # Importing a name the package does not have is unambiguously the old module.
+        assert read(repo, "src/istota/branch.py") == (
+            "from istota.notifications.delivery import send_notification  # noqa: F401\n"
+        )
+        assert "hand-fix docs/pkg.md:1: istota.notifications:" in capsys.readouterr().out
 
     def test_a_logger_name_and_the_keep_marker(self, repo):
         assert run(repo, "--only", "rooms", "web") == 0
@@ -309,6 +361,13 @@ class TestRefusals:
         _commit(repo)
         assert run(repo) == 2
         assert run(repo, "--only", "rooms") == 0
+
+    def test_a_leftover_package_destination_refuses(self, repo):
+        """`git mv` into an existing directory would nest the package inside it."""
+        (repo / "src/istota/newpkg/sub/__pycache__").mkdir(parents=True)
+        (repo / "src/istota/newpkg/sub/__pycache__/x.pyc").write_bytes(b"")
+        assert run(repo, "--only", "pkg") == 2
+        assert (repo / "src/istota/old_pkg/inner.py").exists()
 
     def test_a_gitignored_destination(self, repo):
         (repo / ".gitignore").write_text("rooms/\n")
