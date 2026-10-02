@@ -61,9 +61,9 @@ Gated:
 - creating or updating users, changing site settings, and activating, deactivating or installing plugins;
 - any `rest` call that is not a `GET`, and running an ability the site does not mark read-only;
 - writing an ACF options page;
-- a `fields edit` on any post that is not a draft or pending (a live post, or a media item), on an options page, on a post another user has open in the editor, and any `fields edit` that removes a row, a draft included, since no revision keeps a copy of the removed row.
+- a `fields edit` on any post that is not a draft or pending (a live post, or a media item), on an options page, on a post another user has open in the editor, and any `fields edit` that loses rows, a draft included, since no revision keeps a copy of them: a removed row, or a set after which a repeater or flexible content list holds fewer rows (the `would` line names the list and the count, `blocks/0/items: 4 rows → 1`).
 
-Drafts, pending posts and media uploads are not gated, and neither is a `fields edit` on a draft that only sets, inserts or moves.
+Drafts, pending posts and media uploads are not gated, and neither is a `fields edit` on a draft that loses no rows.
 
 ## How writes behave
 
@@ -97,7 +97,7 @@ The plugin registers these as abilities with the WordPress Abilities API, so it 
 
 `fields get` lists a post's or options page's fields with a token each; with `--path` (`blocks/0/items`) it returns the value there and the field definition: names, types, choices, which sub-fields are required, and for a flexible content field its layouts. Values come back in one shape the edit accepts unchanged: field names as keys, every defined sub-field present, attachment and post ids rather than objects, `null` for nothing stored.
 
-`fields edit` applies `--set`, `--insert`, `--remove` and `--move` operations, in the order given, to one top-level field, and sends only what changes. Fields and rows it does not name are not sent and cannot be damaged. It needs the token from `fields get`: when someone has saved the field since, the edit is refused with `stale_value` and nothing is written, so an index from an old read never lands on the wrong row. A successful edit gives a new token. Only the values the edit writes are validated, so a field elsewhere on the page that is required only under a condition does not block it. A required sub-field left empty is reported in `missing_required`; the editor asks for it on the next manual save. Flexible content rows keep their disabled flag and custom label through every operation.
+`fields edit` applies `--set`, `--insert`, `--remove` and `--move` operations, in the order given, to one top-level field, and sends only what changes. Fields and rows it does not name are not sent and cannot be damaged. It needs the token from `fields get`: when someone has saved the field since, the edit is refused with `stale_value` and nothing is written, so an index from an old read never lands on the wrong row. A successful edit gives a new token. Only the values the edit writes are validated, so a field elsewhere on the page that is required only under a condition does not block it. A required sub-field left empty is reported in `missing_required`; the editor asks for it on the next manual save. Flexible content rows keep their disabled flag and custom label through every operation. A custom label is text an editor typed, so it comes back inside the markers like any other.
 
 Text copied from a `fields get` answer, untrusted-content markers included, is written without the markers. A value that still holds a marker, or the text a marker was replaced with, is refused rather than written. `update --acf-*` and `options update` apply the same rule.
 

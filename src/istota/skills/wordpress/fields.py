@@ -22,9 +22,10 @@ stops and the ability is the one that answers.
 
 **The gate.** A post that is not a draft or pending (live, or an attachment,
 whose status is ``inherit``), any options page, a post another user has open
-in the editor, and every row removal ask first (no revision is made, so a removed
-row is gone from WordPress). A draft edit that only sets, inserts or moves
-does not. The gate runs here, ahead of the uploads, and the ability is run with
+in the editor, every row removal, and every set that leaves a row list shorter
+ask first (no revision is made, so a dropped row is gone from WordPress). A set
+the read cannot count rows for, because an earlier op of the edit replaced
+what it lands in, asks too. A draft edit that loses no rows does not. The gate runs here, ahead of the uploads, and the ability is run with
 ``gated=False``.
 
 **Fences come off on the way in** (`acf.unwrap_markers`): a value copied whole
@@ -55,9 +56,11 @@ MAX_OPS = 50
 MAX_SEGMENTS = 16
 MAX_OPS_BYTES = acf.MAX_ACF_BYTES
 VERBS = ("set", "insert", "remove", "move")
-#: A flexible content row's own keys beside its sub-fields. Reads leave them
-#: bare, and no path addresses them.
+#: A flexible content row's own keys beside its sub-fields; no path addresses them.
 RESERVED = frozenset({"acf_fc_layout", "acf_fc_layout_disabled", "acf_fc_layout_custom_label"})
+#: What reads leave unfenced: a layout name from the definition and a boolean.
+#: A custom label is text an editor typed, fenced like any other (Decision 17).
+BARE = frozenset({"acf_fc_layout", "acf_fc_layout_disabled"})
 _ROW_TYPES = frozenset({"repeater", "flexible_content"})
 _OBJECT_TYPES = frozenset({"group", "clone", "row"})
 _OP_KEYS = frozenset({"op", "path", "value", "from"})
@@ -344,8 +347,8 @@ def _context(result: dict) -> dict:
 
 
 def fence_value(value):
-    """A normalized value with its site text fenced and a row's own keys bare."""
-    return fence_tree(value, keep=RESERVED)
+    """A normalized value with its site text fenced, a row's layout and flag bare."""
+    return fence_tree(value, keep=BARE)
 
 
 def fence_definition(definition):
@@ -432,6 +435,32 @@ def _named_child(definition: dict, value, name: str):
     return None
 
 
+def _dropped_rows(definition: dict, current, new, here: str, out: list) -> None:
+    """Each repeater or flexible content list at or under `here` that a set of
+    `new` over `current` leaves with fewer rows, as ``(path, before, after)``.
+    A set clears what its value leaves out, so a list it omits drops to none."""
+    kind = definition.get("type")
+    if kind in _ROW_TYPES:
+        before = current if isinstance(current, list) else []
+        after = new if isinstance(new, list) else []
+        if len(after) < len(before):
+            out.append((here, len(before), len(after)))
+        for i in range(min(len(before), len(after))):
+            _dropped_rows(_row_def(definition, before[i]), before[i], after[i], f"{here}/{i}", out)
+        return
+    if kind not in _OBJECT_TYPES or definition.get("raw"):
+        return
+    layout = definition.get("layout")
+    if layout is not None and isinstance(new, dict) and new.get("acf_fc_layout", layout) != layout:
+        new = {}
+    for sub in definition.get("sub_fields") or []:
+        if isinstance(sub, dict) and isinstance(sub.get("name"), str):
+            name = sub["name"]
+            _dropped_rows(sub, current.get(name) if isinstance(current, dict) else None,
+                          new.get(name) if isinstance(new, dict) else None,
+                          f"{here}/{name}", out)
+
+
 class _Walk:
     """The read value, with what earlier ops of the edit did to it counted.
 
@@ -446,6 +475,8 @@ class _Walk:
         self.lengths: dict[str, int] = {}
         self.shifted: set[str] = set()
         self.replaced: set[str] = set()
+        #: Why the last `find` could not say: "replaced" or "shifted".
+        self.blind: str | None = None
 
     def _unknown(self, label: str, path: list, exists: str) -> WordPressError:
         where = "/".join(str(s) for s in path)
@@ -462,6 +493,7 @@ class _Walk:
         """``(definition, value, path string)``, or None where the read cannot say."""
         definition, node = self.definition, self.value
         here = str(path[0])
+        self.blind = "replaced"
         if here in self.replaced:
             return None
         for segment in path[1:]:
@@ -471,6 +503,7 @@ class _Walk:
                 if segment >= self.length(here, node):
                     raise self._unknown(label, path, here)
                 if here in self.shifted:
+                    self.blind = "shifted"
                     return None
                 definition, node = _row_def(definition, node[segment]), node[segment]
             else:
@@ -481,6 +514,7 @@ class _Walk:
             here = f"{here}/{segment}"
             if here in self.replaced:
                 return None
+        self.blind = None
         return definition, node, here
 
     def rows(self, path: list, label: str, verb: str):
@@ -500,11 +534,20 @@ class _Walk:
         """What the `would` line needs about this op, after checking its path."""
         verb = op["op"]
         path = parse_path(op["path"], label, append=verb == "insert")
-        seen: dict = {"current": _UNKNOWN, "layout": None}
+        seen: dict = {"current": _UNKNOWN, "layout": None, "dropped": [], "blind": False}
         if verb == "set":
             found = self.find(path, label)
-            if found is not None:
+            value = op["value"]
+            # A string, number or boolean replaces no list; anything else might.
+            could_drop = value is None or isinstance(value, (dict, list))
+            if found is None:
+                seen["blind"] = self.blind == "replaced" or could_drop
+            elif any(p == found[2] or p.startswith(found[2] + "/") for p in self.shifted):
+                # Rows under it moved earlier in this edit, so the read's counts are stale.
+                seen["blind"] = could_drop
+            else:
                 seen["current"] = found[1]
+                _dropped_rows(found[0], found[1], value, found[2], seen["dropped"])
             self.replaced.add(op["path"])
             return seen
         found = self.rows(path, label, verb)
@@ -590,14 +633,16 @@ def _subject(args, context: dict) -> str:
 
 
 def _actions(args, context: dict, seen: list[dict]) -> list[str]:
-    """The `would` lines, or none for a draft edit that removes nothing."""
+    """The `would` lines, or none for a draft edit that loses no rows."""
     status = context.get("post_status")
     # An attachment is `inherit` and public, and a status this list does not
     # know is asked about rather than assumed private.
     live = args.page is None and status not in _UNGATED_STATUSES
     locked = context.get("locked_by")
     removes = [(op, s) for op, s in zip(args.field_ops, seen) if op["op"] == "remove"]
-    if not (live or args.page is not None or locked or removes):
+    dropped = [d for s in seen for d in s.get("dropped", [])]
+    blind = [op for op, s in zip(args.field_ops, seen) if s.get("blind")]
+    if not (live or args.page is not None or locked or removes or dropped or blind):
         return []
     subject = _subject(args, context)
     changes = "; ".join(_describe_op(op, s, args.uploads) for op, s in zip(args.field_ops, seen))
@@ -615,6 +660,12 @@ def _actions(args, context: dict, seen: list[dict]) -> list[str]:
         layout = f" (layout {quoted(s['layout'])})" if s["layout"] else ""
         actions.append(f"remove {op['path']}{layout} for good: no revision is made, so "
                        f"WordPress keeps no copy of the row")
+    for path, before, after in dropped:
+        actions.append(f"drop rows for good, {path}: {before} rows → {after}; no revision "
+                       f"is made, so WordPress keeps no copy of them")
+    for op in blind:
+        actions.append(f"set {op['path']} below a node an earlier operation of this edit "
+                       f"changed, so the rows it may replace cannot be counted beforehand")
     return actions
 
 

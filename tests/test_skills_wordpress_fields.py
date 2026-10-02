@@ -212,14 +212,17 @@ class TestFieldsGet:
         assert call.method == "GET" and call.url.params["input[post_id]"] == "4580"
         assert writes(env.site) == []
 
-    def test_a_path_returns_the_value_fenced_with_a_rows_own_keys_bare(
+    def test_a_path_returns_the_value_fenced_with_layout_and_flag_bare(
             self, env, capsys, site):
         code, out = run(["fields", "get", "--id", "4580", "--path", "blocks"], capsys)
         assert code == 0, out
         row = out["value"][0]
         assert row["acf_fc_layout"] == "list"
         assert row["acf_fc_layout_disabled"] is False
-        assert row["acf_fc_layout_custom_label"] == "Top list"
+        # Decision 17: a custom label is text an editor typed.
+        label = row["acf_fc_layout_custom_label"]
+        assert label.startswith(OPEN) and label.count(CLOSE) == 1 and "Top list" in label
+        assert out["value"][1]["acf_fc_layout_custom_label"] is None
         assert row["title"].startswith(OPEN) and row["title"].count(CLOSE) == 1
         assert out["token"] == token_of(_value()["blocks"])
         # Labels and choice labels are site text; names, types and keys are not.
@@ -375,7 +378,9 @@ class TestFences:
         assert code == 0, out
         sent = sent_ops(site)[0]["value"]
         assert sent["title"] == "Our picks"  # the site's own text, back as it was
+        # The label read back fenced goes back as its text.
         assert sent["acf_fc_layout_custom_label"] == "Top list"
+        assert sent["acf_fc_layout_disabled"] is False
         assert OPEN not in json.dumps(sent)
 
     def test_a_hostile_value_redacted_on_the_way_out_cannot_come_back(
@@ -511,6 +516,55 @@ class TestTheGate:
         assert f"which is live ({status})" in line
         assert writes(env.site) == []
 
+    @pytest.mark.parametrize("ops,line", [
+        (["--set", 'blocks/0/items=[{"label": "x"}]'], "blocks/0/items: 2 rows → 1"),
+        (["--set", "blocks=[]"], "blocks: 2 rows → 0"),
+        (["--set", "blocks/0/items=null"], "blocks/0/items: 2 rows → 0"),
+        # A whole-row set clears the list it leaves out.
+        (["--set", 'blocks/0={"acf_fc_layout": "list", "title": "x"}'],
+         "blocks/0/items: 2 rows → 0"),
+        # A row changing layout takes its lists with it.
+        (["--set", 'blocks/0={"acf_fc_layout": "text", "body": "x"}'],
+         "blocks/0/items: 2 rows → 0"),
+        (["--set", 'blocks=[{"acf_fc_layout": "list", "items": []}, '
+                   '{"acf_fc_layout": "text"}]'], "blocks/0/items: 2 rows → 0"),
+    ])
+    def test_a_draft_set_that_drops_rows_is_gated(self, env, capsys, site, ops, line):
+        code, out = run(edit(*ops), capsys)
+        assert code == 1 and out["reason"] == "confirmation_required", out
+        assert any(line in w and "for good" in w for w in out["would"]), out["would"]
+        assert writes(env.site) == []
+        code, out = run(edit(*ops, "--confirmed"), capsys)
+        assert code == 0, out
+
+    @pytest.mark.parametrize("ops", [
+        ["--set", 'blocks/0/items=[{"label": "a"}, {"label": "b"}]'],
+        ["--set", 'blocks/0/items=[{"label": "a"}, {"label": "b"}, {"label": "c"}]'],
+        ["--set", 'blocks/0/items/1={"label": "b", "image": null}'],
+        ["--set", 'blocks/0/title="x"'],
+    ])
+    def test_a_draft_set_that_keeps_or_grows_its_rows_is_not_gated(
+            self, env, capsys, site, ops):
+        code, out = run(edit(*ops), capsys)
+        assert code == 0, out
+        assert len(site.edits) == 1
+
+    def test_a_set_below_a_node_an_earlier_op_replaced_is_gated(self, env, capsys, site):
+        row = {"acf_fc_layout": "list", "title": "t",
+               "items": [{"label": "a"}, {"label": "b"}]}
+        _, out = run(edit("--set", f"blocks/0={json.dumps(row)}",
+                          "--set", 'blocks/0/title="x"'), capsys)
+        assert out["reason"] == "confirmation_required"
+        assert any("set blocks/0/title below a node" in w for w in out["would"])
+        assert writes(env.site) == []
+
+    def test_a_list_set_after_rows_moved_in_it_is_gated(self, env, capsys, site):
+        # The read's count is stale once an earlier op inserted into the list.
+        _, out = run(edit("--insert", 'blocks/0/items/-={"label": "c"}',
+                          "--set", 'blocks/0/items=[{"label": "a"}, {"label": "b"}]'), capsys)
+        assert out["reason"] == "confirmation_required"
+        assert writes(env.site) == []
+
     @pytest.mark.parametrize("status", ["inherit", "some-plugin-status"])
     def test_anything_but_a_draft_or_pending_post_is_gated(self, env, capsys, status):
         Fields(env.site, status=status)
@@ -603,7 +657,7 @@ class TestTheWrite:
 
     @pytest.mark.parametrize("ops", [
         ["--set", 'blocks/0/title="A"', "--set",
-         'blocks/0={"acf_fc_layout": "list", "title": "B", "items": []}'],
+         'blocks/0={"acf_fc_layout": "list", "title": "B", "items": []}', "--confirmed"],
         ["--insert", 'blocks/0/items/-={"label": "x"}', "--set", 'blocks/0/items/2/label="y"'],
     ])
     def test_a_node_a_later_op_rewrote_is_not_reported(self, env, capsys, site, ops):
