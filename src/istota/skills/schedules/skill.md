@@ -51,7 +51,7 @@ These are TOML basic strings: a backslash or a double quote inside one must be e
 - `name`: Unique per user, short identifier (e.g., `daily-report`, `weekly-cleanup`)
 - `cron`: Standard 5-field cron (minute hour day month weekday). Evaluated in the user's configured timezone
 - `prompt`: The full prompt text that will be executed as a task (via Claude Code). Mutually exclusive with `command` and `prompt_file`
-- `prompt_file`: Path to a file containing the prompt text (relative to your workspace root, `$NEXTCLOUD_MOUNT_PATH`, e.g. `/Users/alice/scripts/prompts/my-job.txt`). The file contents are read at load time and used as the prompt. Mutually exclusive with `prompt` and `command`. Useful for long prompts that would clutter CRON.md
+- `prompt_file`: Path to a file containing the prompt text, inside your own folder: `/Users/<your id>/...`, e.g. `/Users/alice/scripts/prompts/my-job.txt`. A path outside your own folder (another user's, a room's `Channels/` folder, anything with `..`) or one that goes through a symlink is refused and the job does not run. The file contents are read at load time and used as the prompt. Mutually exclusive with `prompt` and `command`. Useful for long prompts that would clutter CRON.md
 - `command`: A shell command to run directly via subprocess (not Claude Code). Mutually exclusive with `prompt` and `prompt_file`. Each job must have exactly one of `prompt`, `prompt_file`, or `command`
 - `target`: Where to deliver results. See "Delivering into a room" below — `"email"`, `"ntfy"`, a room descriptor, a comma-separated list of those, or omit for no delivery
 - `room`: The conversation the job runs in. See "Delivering into a room" — it is a *room* token and not always a Talk one

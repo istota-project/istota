@@ -21,6 +21,7 @@ from .rclone_client import (
     rclone_rcat,
     rclone_run,
 )
+from .skill_host_paths import owner_path_parts
 from .user_scope import is_scopable_user_id
 
 if TYPE_CHECKING:
@@ -196,9 +197,9 @@ execution_test = true                  # Test actual Claude CLI invocation
 
 ## Check Types
 
-- **file-watch** — Check file age or existence (`path`, `max_age_hours`)
+- **file-watch** — Check file age or existence (`path` inside `/Users/<your id>/`, `max_age_hours`)
 - **shell-command** — Run command, evaluate condition (`command`, `condition`, `message`, `timeout`)
-- **url-health** — HTTP health check (`url`, `expected_status`, `timeout`)
+- **url-health** — HTTP health check, admin-only (`url`, `expected_status`, `timeout`)
 - **calendar-conflicts** — Find overlapping events (`lookahead_hours`)
 - **task-deadline** — Check for overdue tasks (`source`, `warn_hours_before`)
 - **self-check** — System health diagnostics: Claude binary, bwrap, DB, failure rate, execution test (`execution_test`)
@@ -1276,6 +1277,116 @@ def read_regular_file(
         # that reads well in isolation, and a second spelling here would make
         # this the only surface saying something different about the same file.
         return None, OVERLAY_NOT_UTF8
+
+
+#: Bound on ``read_owner_text``. Generous: the text reaches a model whole,
+#: and a cap is what keeps a daemon read from being unbounded.
+OWNER_FILE_MAX_BYTES = 1024 * 1024
+
+# Refusals a path decides, as opposed to a fault that may
+# clear by itself (a missing file, an unreadable mount).
+OWNER_FILE_OUTSIDE_OWNER = "outside_owner_workspace"
+OWNER_FILE_SYMLINK = "symlink"
+OWNER_FILE_NOT_A_DIRECTORY = "not_a_directory"
+OWNER_FILE_NOT_A_REGULAR_FILE = "not_a_regular_file"
+OWNER_FILE_TOO_LARGE = "too_large"
+OWNER_FILE_NOT_UTF8 = "not_utf8"
+OWNER_FILE_MISSING = "missing"
+OWNER_FILE_UNREADABLE = "unreadable"
+
+
+def _classify_dir_refusal(root: Path, dirs: list[str]) -> tuple[str, bool]:
+    """Why ``open_overlay_dir`` refused, for the hold decision only.
+
+    The read has already been refused; this decides whether the refusal holds
+    the sync (a fault) or drops the job (the path itself). A race here costs
+    at most that choice, never a read.
+    """
+    current = root
+    for part in dirs:
+        current = current / part
+        try:
+            st = os.lstat(current)
+        except FileNotFoundError:
+            return OWNER_FILE_MISSING, False
+        except OSError:
+            return OWNER_FILE_UNREADABLE, False
+        if stat.S_ISLNK(st.st_mode):
+            return OWNER_FILE_SYMLINK, True
+        if not stat.S_ISDIR(st.st_mode):
+            return OWNER_FILE_NOT_A_DIRECTORY, True
+    return OWNER_FILE_UNREADABLE, False
+
+
+def read_owner_text(
+    config: "Config", user_id: str, path: str, *, max_bytes: int = OWNER_FILE_MAX_BYTES,
+) -> tuple[str | None, str | None, bool]:
+    """Read a user-named file in the daemon: ``(text, refusal, definitive)``.
+
+    For a path a user chose and the daemon reads outside every sandbox — a
+    CRON.md ``prompt_file``, a briefing source's ``path`` — so it is scoped
+    like any daemon read of a model-chosen host path (ISSUE-596): the owner's
+    own ``{mount}/Users/{user_id}`` and nothing else — no other user, no
+    ``Channels/`` (a shared room's files are written by everyone in it), no
+    ``Talk/``, nothing outside the mount. ``path`` is mount-relative, in the
+    form ``skill_host_paths.owner_path_parts`` takes. Never raises.
+
+    ``definitive`` separates a refusal the path itself decides (outside the
+    tree, a symlink, not a regular file, too large, not UTF-8) from a fault
+    that may clear by itself (missing, unreadable), for a caller that holds
+    state on a fault and drops it on a refusal.
+
+    Containment is by construction rather than by comparison:
+    ``open_overlay_dir`` walks every directory below the user root with
+    ``O_NOFOLLOW | O_DIRECTORY``, and ``read_overlay_bytes`` opens the leaf
+    ``O_NOFOLLOW | O_NONBLOCK`` relative to that fd, refuses anything not a
+    regular file, and caps the read. A symlink at any component is refused,
+    including one that points back inside the user's own tree: the tree is
+    bound read-write into the user's sandbox, so a resolve-then-compare
+    check is a race the model can win.
+    """
+    from .skills._loader import (  # noqa: PLC0415 - import cycle
+        OVERLAY_IS_A_SYMLINK,
+        OVERLAY_NOT_A_REGULAR_FILE,
+        OVERLAY_UNREADABLY_LARGE,
+        open_overlay_dir,
+        read_overlay_bytes,
+    )
+
+    parts = owner_path_parts(path, user_id)
+    root = config.workspace_root(user_id)
+    if parts is None or root is None:
+        return None, OWNER_FILE_OUTSIDE_OWNER, True
+    *dirs, leaf = parts
+
+    fd = open_overlay_dir(root, *dirs)
+    if fd is None:
+        reason, definitive = _classify_dir_refusal(root, dirs)
+        return None, reason, definitive
+    try:
+        data, reason, size = read_overlay_bytes(
+            Path(leaf), max_bytes=max_bytes, dir_fd=fd,
+        )
+    finally:
+        os.close(fd)
+
+    if reason == OVERLAY_IS_A_SYMLINK:
+        return None, OWNER_FILE_SYMLINK, True
+    if reason == OVERLAY_NOT_A_REGULAR_FILE:
+        return None, OWNER_FILE_NOT_A_REGULAR_FILE, True
+    if reason == OVERLAY_UNREADABLY_LARGE:
+        return None, OWNER_FILE_TOO_LARGE, True
+    if reason is not None:
+        return None, OWNER_FILE_UNREADABLE, False
+    if size is None:
+        # `read_overlay_bytes` reports a missing file as empty with no size.
+        return None, OWNER_FILE_MISSING, False
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, OWNER_FILE_NOT_UTF8, True
+    # Universal newlines, as the `read_text()` this replaced applied.
+    return text.replace("\r\n", "\n").replace("\r", "\n"), None, False
 
 
 def create_file_if_absent(path: Path, text: str) -> bool:

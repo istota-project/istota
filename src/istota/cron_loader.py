@@ -3,14 +3,17 @@
 import hashlib
 import json
 import logging
+import os
 import re
 import shlex
 from dataclasses import dataclass
+from pathlib import Path
 
 import tomli
 
 from . import db
-from .storage import get_user_scripts_path
+from .skill_host_paths import owner_path_parts
+from .storage import OWNER_FILE_MAX_BYTES, get_user_scripts_path, read_owner_text
 
 # The fence markers (ISSUE-386), and this module is why `toml_fence` states
 # its bounds as loosely as it does: a marker that module does not recognise
@@ -363,6 +366,10 @@ class CronDocument:
     block_span: tuple[int, int] | None
     jobs: list[CronJob]
     skipped_entries: int = 0
+    # Jobs whose `prompt_file` the path rule refused (ISSUE-596). The sync
+    # deletes their rows even when it otherwise holds, since a pre-fix row
+    # can carry another user's text as its prompt.
+    refused_names: frozenset[str] = frozenset()
 
     @property
     def is_template(self) -> bool:
@@ -517,13 +524,14 @@ def parse_cron_document(content: str, config, user_id: str) -> "CronDocument | N
         )
         return None
 
-    jobs, skipped = _parse_jobs(data, config, user_id)
+    jobs, skipped, refused_names = _parse_jobs(data, config, user_id)
     return CronDocument(
         content=content,
         block=toml_str,
         block_span=block_span,
         jobs=jobs,
         skipped_entries=skipped,
+        refused_names=refused_names,
     )
 
 
@@ -539,7 +547,9 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
     return None if doc is None else doc.jobs
 
 
-def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
+def _parse_jobs(
+    data: dict, config, user_id: str,
+) -> tuple[list[CronJob], int, frozenset[str]]:
     """Build the ``CronJob`` list from a parsed toml block. Never raises.
 
     Everything reachable from here is user-authored TOML, so nothing may
@@ -552,8 +562,15 @@ def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
     list nothing survived. The count is derived at the end rather than
     incremented at each of the six ``continue``s below, so a seventh cannot
     forget to keep it.
+
+    The one exception is a ``prompt_file`` the path rule refuses
+    (``refused``): that is the file stating a job that can never run, not a
+    fault that may clear, so it must not hold the sync. Holding it kept the
+    row a pre-ISSUE-596 read wrote, with another user's text as its prompt,
+    running for as long as the file said what it says.
     """
     jobs = []
+    refused: set[str] = set()
     raw_jobs = data.get("jobs", [])
     if not isinstance(raw_jobs, list):
         logger.warning(
@@ -563,7 +580,7 @@ def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
         # One refused entry rather than none: the file did state something
         # under `jobs`, so this must not read as "the user has no jobs" and
         # authorize the orphan sweep.
-        return jobs, 1
+        return jobs, 1, frozenset()
     for j in raw_jobs:
         if not isinstance(j, dict):
             logger.warning(
@@ -591,15 +608,16 @@ def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
                     name, user_id,
                 )
                 continue
-            file_path = config.workspace_path / prompt_file.lstrip("/")
-            try:
-                prompt = file_path.read_text().strip()
-            except OSError as e:
+            text, reason, definitive = read_owner_text(config, user_id, prompt_file)
+            if text is None:
                 logger.warning(
                     "Skipping job '%s' in CRON.md for %s: cannot read prompt_file %s: %s",
-                    name, user_id, prompt_file, e,
+                    name, user_id, prompt_file, reason,
                 )
+                if definitive:
+                    refused.add(name)
                 continue
+            prompt = text.strip()
         if prompt and command:
             logger.warning(
                 "Skipping job '%s' in CRON.md for %s: cannot have both prompt and command",
@@ -671,7 +689,7 @@ def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
                 j.get("publish_shared_kv_trusted", False), False),
         ))
 
-    return jobs, len(raw_jobs) - len(jobs)
+    return jobs, len(raw_jobs) - len(jobs) - len(refused), frozenset(refused)
 
 
 # Every character TOML requires an escape for inside a basic string, plus the
@@ -839,43 +857,104 @@ def _disambiguate_prompt_file_name(filename: str, name: str) -> str:
     return f"{filename[:191]}-{digest}"
 
 
-def _write_generated_prompt(path, prompt: str) -> None:
-    """Create a generated prompt file without replacing unrelated content."""
+def _write_generated_prompt(dir_fd: int, filename: str, prompt: str) -> None:
+    """Create a generated prompt file without replacing unrelated content.
+
+    Opened relative to ``dir_fd`` with ``O_EXCL | O_NOFOLLOW``, so a link
+    planted at the name is ``FileExistsError`` rather than followed. An
+    existing file is compared through the same hardened reader the load path
+    uses, and anything that is not this exact prompt raises.
+    """
+    from .skills._loader import read_overlay_bytes  # noqa: PLC0415 - import cycle
+
+    data = prompt.encode("utf-8")
     try:
-        with path.open("x") as f:
-            f.write(prompt)
+        fd = os.open(
+            filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644,
+            dir_fd=dir_fd,
+        )
     except FileExistsError:
-        if path.read_text() != prompt:
+        existing, reason, _size = read_overlay_bytes(
+            Path(filename), max_bytes=OWNER_FILE_MAX_BYTES, dir_fd=dir_fd,
+        )
+        if reason is not None or existing != data:
             raise
+        return
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+
+
+def _open_or_create_dirs(root: Path, parts: list[str]) -> int:
+    """An fd on ``{root}/{parts...}``, creating what is missing. Raises OSError.
+
+    The write-side counterpart of ``open_overlay_dir``: each component is made
+    with ``mkdir(dir_fd=)`` and opened ``O_NOFOLLOW | O_DIRECTORY`` relative to
+    the one above, so a symlink anywhere below the user root (``scripts ->
+    /anywhere``) fails the open instead of steering a daemon write. ``root``
+    itself is the daemon's own ``{mount}/Users/{user_id}`` and is created and
+    opened by name, as ``open_overlay_dir`` opens it.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts:
+            try:
+                os.mkdir(part, 0o755, dir_fd=fd)
+            except FileExistsError:
+                pass
+            nxt = os.open(
+                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd,
+            )
+            os.close(fd)
+            fd = nxt
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def _externalize_multiline_prompts(config, user_id: str, jobs: list[CronJob]) -> None:
-    """Move inline multiline prompts into files before CRON.md is rewritten."""
-    prompts_dir_ref = f"{get_user_scripts_path(user_id, config.bot_dir_name)}/prompts"
-    prompts_dir = config.workspace_path / prompts_dir_ref.lstrip("/")
-    assigned_names: dict[str, str] = {}
+    """Move inline multiline prompts into files before CRON.md is rewritten.
 
-    for job in jobs:
-        if (
+    Raises ``OSError`` on a refusal, which ``_write_cron_md`` turns into a
+    refused write. The reference written into CRON.md is checked against
+    ``skill_host_paths.owner_path_parts`` before anything is created, so a file this
+    writes is one ``storage.read_owner_text`` will read back.
+    """
+    prompts_dir_ref = f"{get_user_scripts_path(user_id, config.bot_dir_name)}/prompts"
+    pending = [
+        job for job in jobs
+        if not (
             job.command
             or job.prompt_file
             or ("\r" not in job.prompt and "\n" not in job.prompt)
-        ):
-            continue
+        )
+    ]
+    if not pending:
+        return
 
-        prompts_dir.mkdir(parents=True, exist_ok=True)
-        stem = _prompt_file_name(job.name)
-        if stem in assigned_names and assigned_names[stem] != job.name:
-            stem = _disambiguate_prompt_file_name(stem, job.name)
-        assigned_names[stem] = job.name
-        prompt_path = prompts_dir / f"{stem}.txt"
-        try:
-            _write_generated_prompt(prompt_path, job.prompt)
-        except FileExistsError:
-            digest = hashlib.sha256(job.prompt.encode()).hexdigest()[:8]
-            prompt_path = prompts_dir / f"{stem}-{digest}.txt"
-            _write_generated_prompt(prompt_path, job.prompt)
-        job.prompt_file = f"{prompts_dir_ref}/{prompt_path.name}"
+    parts = owner_path_parts(f"{prompts_dir_ref}/x", user_id)
+    root = config.workspace_root(user_id)
+    if parts is None or root is None:
+        raise PermissionError(f"prompts directory outside the owner's tree for {user_id}")
+    dir_fd = _open_or_create_dirs(root, parts[:-1])
+    try:
+        assigned_names: dict[str, str] = {}
+        for job in pending:
+            stem = _prompt_file_name(job.name)
+            if stem in assigned_names and assigned_names[stem] != job.name:
+                stem = _disambiguate_prompt_file_name(stem, job.name)
+            assigned_names[stem] = job.name
+            filename = f"{stem}.txt"
+            try:
+                _write_generated_prompt(dir_fd, filename, job.prompt)
+            except FileExistsError:
+                digest = hashlib.sha256(job.prompt.encode()).hexdigest()[:8]
+                filename = f"{stem}-{digest}.txt"
+                _write_generated_prompt(dir_fd, filename, job.prompt)
+            job.prompt_file = f"{prompts_dir_ref}/{filename}"
+    finally:
+        os.close(dir_fd)
 
 
 def _write_cron_md(

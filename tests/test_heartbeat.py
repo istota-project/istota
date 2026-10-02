@@ -219,74 +219,92 @@ execution_test = false
 
 
 class TestCheckFileWatch:
+    def _mount(self, tmp_path):
+        mount = tmp_path / "mount"
+        (mount / "Users/alice").mkdir(parents=True)
+        return mount
+
+    def _check(self, config, path, **extra):
+        check = HeartbeatCheck(
+            name="test", type="file-watch", config={"path": path, **extra},
+        )
+        return _check_file_watch(check, config, "alice")
+
     def test_no_path(self, tmp_path):
         config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(name="test", type="file-watch", config={})
-        result = _check_file_watch(check, config)
+        result = _check_file_watch(check, config, "alice")
         assert result.healthy is False
         assert "No path configured" in result.message
 
     def test_file_not_found(self, tmp_path):
-        config = Config(workspace_path=tmp_path)
-        check = HeartbeatCheck(
-            name="test",
-            type="file-watch",
-            config={"path": "/nonexistent/file.txt"},
-        )
-        result = _check_file_watch(check, config)
+        config = Config(workspace_path=self._mount(tmp_path))
+        result = self._check(config, "/Users/alice/nonexistent.txt")
         assert result.healthy is False
         assert "not found" in result.message
 
     def test_file_exists_no_age_check(self, tmp_path):
-        mount = tmp_path / "mount"
-        mount.mkdir()
-        test_file = mount / "test.txt"
-        test_file.write_text("content")
-
+        mount = self._mount(tmp_path)
+        (mount / "Users/alice/test.txt").write_text("content")
         config = Config(workspace_path=mount)
-        check = HeartbeatCheck(
-            name="test",
-            type="file-watch",
-            config={"path": "/test.txt"},
-        )
-        result = _check_file_watch(check, config)
-        assert result.healthy is True
+        assert self._check(config, "/Users/alice/test.txt").healthy is True
 
     def test_file_too_old(self, tmp_path):
         import os
-        mount = tmp_path / "mount"
-        mount.mkdir()
-        test_file = mount / "test.txt"
+        mount = self._mount(tmp_path)
+        test_file = mount / "Users/alice/test.txt"
         test_file.write_text("content")
-
-        # Set mtime to 48 hours ago
         old_time = datetime.now().timestamp() - (48 * 3600)
         os.utime(test_file, (old_time, old_time))
 
         config = Config(workspace_path=mount)
-        check = HeartbeatCheck(
-            name="test",
-            type="file-watch",
-            config={"path": "/test.txt", "max_age_hours": 24},
-        )
-        result = _check_file_watch(check, config)
+        result = self._check(config, "/Users/alice/test.txt", max_age_hours=24)
         assert result.healthy is False
         assert "too old" in result.message
 
     def test_file_fresh(self, tmp_path):
-        mount = tmp_path / "mount"
-        mount.mkdir()
-        test_file = mount / "test.txt"
-        test_file.write_text("content")  # Fresh file
-
+        mount = self._mount(tmp_path)
+        (mount / "Users/alice/test.txt").write_text("content")
         config = Config(workspace_path=mount)
-        check = HeartbeatCheck(
-            name="test",
-            type="file-watch",
-            config={"path": "/test.txt", "max_age_hours": 24},
-        )
-        result = _check_file_watch(check, config)
+        result = self._check(config, "/Users/alice/test.txt", max_age_hours=24)
         assert result.healthy is True
+
+    # ISSUE-596: the daemon answers existence and age, so the path is scoped
+    # to the owner's own tree exactly as a CRON.md prompt_file is.
+
+    def test_another_users_file_reads_as_not_found(self, tmp_path):
+        mount = self._mount(tmp_path)
+        (mount / "Users/bob").mkdir(parents=True)
+        (mount / "Users/bob/diary.txt").write_text("x")
+        config = Config(workspace_path=mount)
+        result = self._check(config, "/Users/bob/diary.txt")
+        assert result.healthy is False
+        assert "not found" in result.message
+
+    def test_dotdot_and_mount_root_paths_read_as_not_found(self, tmp_path):
+        mount = self._mount(tmp_path)
+        (mount / "Users/bob").mkdir(parents=True)
+        (mount / "Users/bob/diary.txt").write_text("x")
+        (mount / "top.txt").write_text("x")
+        (tmp_path / "outside.txt").write_text("x")
+        config = Config(workspace_path=mount)
+        for path in (
+            "/Users/alice/../bob/diary.txt",
+            "/Users/alice/../../outside.txt",
+            "/top.txt",
+        ):
+            assert self._check(config, path).healthy is False, path
+
+    def test_symlinks_are_not_followed(self, tmp_path):
+        mount = self._mount(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "f.txt").write_text("x")
+        (mount / "Users/alice/leaf.txt").symlink_to(outside / "f.txt")
+        (mount / "Users/alice/dir").symlink_to(outside)
+        config = Config(workspace_path=mount)
+        assert self._check(config, "/Users/alice/leaf.txt").healthy is False
+        assert self._check(config, "/Users/alice/dir/f.txt").healthy is False
 
 
 # ---------------------------------------------------------------------------
@@ -668,12 +686,25 @@ class TestRunCheckAdminGate:
 
     def test_non_admin_other_check_types_unaffected(self, tmp_path):
         config = Config(workspace_path=tmp_path, admin_users={"root"})
-        url_check = HeartbeatCheck(
-            name="t", type="url-health", config={"url": ""},
-        )
-        result = run_check(url_check, config, "alice")
-        # Fails for "no URL" reasons, not for admin-only — distinct path.
+        watch = HeartbeatCheck(name="t", type="file-watch", config={"path": ""})
+        result = run_check(watch, config, "alice")
+        # Fails for "no path" reasons, not for admin-only — distinct path.
         assert "admin-only" not in result.message
+
+    @patch("istota.heartbeat.httpx.stream")
+    def test_non_admin_url_health_is_refused_before_any_request(
+        self, mock_stream, tmp_path,
+    ):
+        """ISSUE-596: a daemon-netns GET to a URL the user chose is an SSRF probe."""
+        config = Config(workspace_path=tmp_path, admin_users={"root"})
+        check = HeartbeatCheck(
+            name="t", type="url-health",
+            config={"url": "http://169.254.169.254/latest/meta-data/"},
+        )
+        result = run_check(check, config, "alice")
+        assert result.healthy is False
+        assert "admin-only" in result.message
+        mock_stream.assert_not_called()
 
     def test_empty_admin_users_treats_all_as_admin(self, tmp_path):
         """Back-compat: empty admin_users = all users admin (Config.is_admin)."""
@@ -698,11 +729,11 @@ class TestCheckUrlHealth:
         assert result.healthy is False
         assert "No URL configured" in result.message
 
-    @patch("istota.heartbeat.httpx.get")
+    @patch("istota.heartbeat.httpx.stream")
     def test_url_success(self, mock_get, tmp_path):
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_get.return_value = mock_response
+        mock_get.return_value.__enter__.return_value = mock_response
 
         config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
@@ -713,11 +744,11 @@ class TestCheckUrlHealth:
         result = _check_url_health(check, config)
         assert result.healthy is True
 
-    @patch("istota.heartbeat.httpx.get")
+    @patch("istota.heartbeat.httpx.stream")
     def test_url_wrong_status(self, mock_get, tmp_path):
         mock_response = MagicMock()
         mock_response.status_code = 503
-        mock_get.return_value = mock_response
+        mock_get.return_value.__enter__.return_value = mock_response
 
         config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
@@ -729,7 +760,7 @@ class TestCheckUrlHealth:
         assert result.healthy is False
         assert "503" in result.message
 
-    @patch("istota.heartbeat.httpx.get")
+    @patch("istota.heartbeat.httpx.stream")
     def test_url_timeout(self, mock_get, tmp_path):
         import httpx
         mock_get.side_effect = httpx.TimeoutException("timeout")
@@ -743,6 +774,18 @@ class TestCheckUrlHealth:
         result = _check_url_health(check, config)
         assert result.healthy is False
         assert "timeout" in result.message.lower()
+
+    @patch("istota.heartbeat.httpx.stream")
+    def test_the_timeout_is_clamped(self, mock_stream, tmp_path):
+        mock_stream.return_value.__enter__.return_value = MagicMock(status_code=200)
+        config = Config(workspace_path=tmp_path)
+        for given, used in ((100000, 60.0), (0, 1.0), ("x", 10.0)):
+            check = HeartbeatCheck(
+                name="t", type="url-health",
+                config={"url": "https://example.com", "timeout": given},
+            )
+            _check_url_health(check, config)
+            assert mock_stream.call_args.kwargs["timeout"] == used
 
 
 # ---------------------------------------------------------------------------
@@ -831,7 +874,7 @@ class TestCheckHeartbeats:
         users_dir.mkdir(parents=True)
 
         # Create the file to watch
-        watched_file = mount / "test.txt"
+        watched_file = mount / "Users" / "alice" / "test.txt"
         watched_file.write_text("content")
 
         (users_dir / "HEARTBEAT.md").write_text("""
@@ -842,7 +885,7 @@ conversation_token = "room123"
 [[checks]]
 name = "test-check"
 type = "file-watch"
-path = "/test.txt"
+path = "/Users/alice/test.txt"
 ```
 """)
 
@@ -970,7 +1013,7 @@ channel = "ntfy"
 [[checks]]
 name = "slow-check"
 type = "file-watch"
-path = "/test.txt"
+path = "/Users/alice/test.txt"
 interval_minutes = 30
 ```
 """)
@@ -998,7 +1041,7 @@ interval_minutes = 30
         users_dir = mount / "Users" / "alice" / "istota" / "config"
         users_dir.mkdir(parents=True)
 
-        watched_file = mount / "test.txt"
+        watched_file = mount / "Users" / "alice" / "test.txt"
         watched_file.write_text("content")
 
         (users_dir / "HEARTBEAT.md").write_text("""
@@ -1006,7 +1049,7 @@ interval_minutes = 30
 [[checks]]
 name = "slow-check"
 type = "file-watch"
-path = "/test.txt"
+path = "/Users/alice/test.txt"
 interval_minutes = 30
 ```
 """)
@@ -1044,7 +1087,7 @@ interval_minutes = 30
         users_dir = mount / "Users" / "alice" / "istota" / "config"
         users_dir.mkdir(parents=True)
 
-        watched_file = mount / "test.txt"
+        watched_file = mount / "Users" / "alice" / "test.txt"
         watched_file.write_text("content")
 
         (users_dir / "HEARTBEAT.md").write_text("""
@@ -1052,7 +1095,7 @@ interval_minutes = 30
 [[checks]]
 name = "fast-check"
 type = "file-watch"
-path = "/test.txt"
+path = "/Users/alice/test.txt"
 ```
 """)
 

@@ -46,6 +46,62 @@ class DiscoveredTasksFile:
     owner_id: str  # Nextcloud username of the file owner
 
 
+def _tasks_file_name(config: Config, user_id: str, file_path: str) -> str | None:
+    """The bare TASKS.md name if ``file_path`` is in ``user_id``'s config dir."""
+    from .storage import get_user_config_path
+
+    head, _, name = file_path.rpartition("/")
+    if head != get_user_config_path(user_id, config.bot_dir_name):
+        return None
+    if not TASKS_FILE_PATTERN.match(name):
+        return None
+    return name
+
+
+def _read_tasks_file(config: Config, file_path: str, *, user_id: str) -> str:
+    """Read a user's TASKS.md. Raises on a refusal or a failed read.
+
+    On a local workspace this is ``storage.read_user_config_file``, the
+    hardened read every other reader of ``{bot_dir}/config/`` uses (ISSUE-339,
+    ISSUE-596): the directory is checked against the user's tree and the leaf
+    is opened ``O_NOFOLLOW | O_NONBLOCK``, so a symlink at TASKS.md cannot turn
+    another user's file into this user's tasks and a FIFO cannot stall the
+    scheduler. A missing file is ``""``.
+    """
+    if not config.has_workspace:
+        return read_text(config, file_path)
+    from .storage import read_user_config_file
+
+    name = _tasks_file_name(config, user_id, file_path)
+    if name is None:
+        raise PermissionError(f"not this user's TASKS.md: {file_path}")
+    text = read_user_config_file(config, user_id, name)
+    if text is None:
+        raise PermissionError(f"refused to read {file_path}")
+    return text
+
+
+def _write_tasks_file(
+    config: Config, file_path: str, content: str, *, user_id: str,
+) -> None:
+    """Write a user's TASKS.md back. Raises on a refusal or a failed write.
+
+    ``write_regular_file`` refuses anything at the name that is not a plain
+    file, so a link there is not written through.
+    """
+    if not config.has_workspace:
+        write_text(config, file_path, content)
+        return
+    from .storage import resolve_user_config_dir, write_regular_file
+
+    name = _tasks_file_name(config, user_id, file_path)
+    config_dir = resolve_user_config_dir(config, user_id)
+    if name is None or config_dir is None:
+        raise PermissionError(f"not this user's TASKS.md: {file_path}")
+    if not write_regular_file(config_dir / name, content):
+        raise PermissionError(f"refused to write {file_path}")
+
+
 def discover_tasks_files(config: Config) -> list[DiscoveredTasksFile]:
     """
     Discover TASKS.md files in users' bot-managed directories.
@@ -239,7 +295,7 @@ def poll_user_tasks_file(config: Config, user_id: str, file_path: str) -> list[i
     """
     # Read the file (mount-aware)
     try:
-        file_content = read_text(config, file_path)
+        file_content = _read_tasks_file(config, file_path, user_id=user_id)
     except Exception as e:
         # File read error - log and skip
         logger.error("Error reading %s for %s: %s", file_path, user_id, e)
@@ -294,7 +350,7 @@ def poll_user_tasks_file(config: Config, user_id: str, file_path: str) -> list[i
     # Write updated file back if any changes
     if file_updated:
         try:
-            write_text(config, file_path, updated_content)
+            _write_tasks_file(config, file_path, updated_content, user_id=user_id)
             logger.debug("Updated %s with %d new task(s)", file_path, len(created_task_ids))
         except Exception as e:
             logger.error("Error updating %s for %s: %s", file_path, user_id, e)
@@ -384,7 +440,9 @@ def handle_tasks_file_completion(
 
     # Update the file (using file_path from DB, mount-aware)
     try:
-        file_content = read_text(config, istota_task.file_path)
+        file_content = _read_tasks_file(
+            config, istota_task.file_path, user_id=task.user_id,
+        )
 
         updated_content = update_task_in_file(
             file_content,
@@ -394,7 +452,9 @@ def handle_tasks_file_completion(
             error_message=result_summary if not success else None,
         )
 
-        write_text(config, istota_task.file_path, updated_content)
+        _write_tasks_file(
+            config, istota_task.file_path, updated_content, user_id=task.user_id,
+        )
         logger.debug("Updated %s with task completion", istota_task.file_path)
     except Exception as e:
         logger.error("Error updating %s after completion for %s: %s", istota_task.file_path, task.user_id, e)

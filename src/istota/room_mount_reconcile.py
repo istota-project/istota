@@ -243,7 +243,9 @@ def _cron_plan(config, user: str, content: str, mapping: dict[str, str]):
     if span is None:
         return None
     doc = cron_loader.parse_cron_document(content, config, user)
-    if doc is None or doc.skipped_entries or set(raw) - {"jobs"}:
+    # A refused prompt_file is not a skipped entry (ISSUE-596), but a rewrite
+    # renders only parsed jobs and would delete its definition all the same.
+    if doc is None or doc.skipped_entries or doc.refused_names or set(raw) - {"jobs"}:
         raise ValueError("CRON.md cannot preserve every entry")
     names = set()
     for entry, job in zip(raw.get("jobs", []), doc.jobs, strict=True):

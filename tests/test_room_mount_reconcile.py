@@ -133,6 +133,10 @@ def test_files_rewrite_canonical_fields_preserve_prose_and_backup(migrated):
     '```toml\n[[jobs]]\nname="lost"\nroom="old-talk"\n```\n',
     '```toml\n[[jobs]]\nname="job"\ncron="* * * * *"\nprompt="hi"\nroom="old-talk"\nfuture=true\n```\n',
     '```toml\n[[jobs]]\nname="job"\ncron="* * * * *"\nprompt="hi"\nroom="old-talk"\nenabled="false"\n```\n',
+    # ISSUE-596: a refused prompt_file is not a skipped entry, and still must
+    # not be rendered out of the file by a rewrite.
+    '```toml\n[[jobs]]\nname="job"\ncron="* * * * *"\nprompt="hi"\nroom="old-talk"\n'
+    '[[jobs]]\nname="theirs"\ncron="* * * * *"\nprompt_file="/Users/bob/x.txt"\n```\n',
 ])
 def test_malformed_file_refuses_user_before_either_file_is_written(migrated, bad):
     config, old, new = migrated
