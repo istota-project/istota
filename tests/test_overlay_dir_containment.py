@@ -590,6 +590,9 @@ class TestTheReturnedPathIsDisplayOnly:
     _NOT_OVERLAY_READERS = frozenset({
         "storage.py",                 # read_regular_file / read_user_config_file
         "skills/memory/__init__.py",  # the memory CLI's _read_text
+        # BRIEFINGS.md import: contained `config/` dir, then the leaf; needs
+        # missing-vs-empty and a lenient decode, which read_regular_file folds.
+        "user_briefings.py",
     })
 
     #: Wrappers whose own callers have to carry a descriptor through, checked by
