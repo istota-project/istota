@@ -2142,6 +2142,24 @@ class TestChatAttachments:
         assert os.path.exists(path)
         assert not os.path.basename(path).startswith("-")
 
+    async def test_the_allowlist_checks_the_extension_that_is_stored(self, chat_client):
+        """ISSUE-593: the check and the name on disk use one rule."""
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.post(
+            "/istota/api/chat/attachments",
+            files={"file": ("report.pdf ", b"%PDF", "application/pdf")},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["path"].endswith(".pdf")
+
+        resp = await chat_client.post(
+            "/istota/api/chat/attachments",
+            files={"file": ("report.pd\rf", b"%PDF", "application/pdf")},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
     async def test_disallowed_extension_rejected(self, chat_client):
         cookies = await _login(chat_client, "alice")
         resp = await chat_client.post(

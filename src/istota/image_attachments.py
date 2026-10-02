@@ -61,6 +61,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .brain._types import ImageInput
+from .filenames import filename_parts
 from .skills.transcribe.out_of_process import ocr_image_out_of_process
 from .user_scope import is_within
 
@@ -213,7 +214,6 @@ MAX_DISPLAY_NAME_CHARS = 128
 _UNSAFE_NAME_CHARS = re.compile(
     r"[\x00-\x1f\x7f\u0085\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]+"
 )
-_UNSAFE_STEM_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
 # A whitespace-delimited token starting at `/` with at least one more `/` in
 # it: enough to catch the paths the OCR child reports without rewriting every
@@ -799,9 +799,9 @@ def _out_path(out_dir: Path, index: int, source: Path, output_format: str, *, oc
     with the derivation, so keeping two tasks' renditions apart is done by
     handing each its own directory, which is the caller's job.
     """
-    stem = _UNSAFE_STEM_CHARS.sub("_", source.stem).strip("._") or "image"
+    stem = filename_parts(source.name, ascii_only=True, max_stem=60)[0] or "image"
     suffix = ".ocr" if ocr else ""
-    return out_dir / f"{index:02d}_{stem[:60]}{suffix}.{_SUFFIX[output_format]}"
+    return out_dir / f"{index:02d}_{stem}{suffix}.{_SUFFIX[output_format]}"
 
 
 def _webp_is_lossless(source: Path) -> bool:

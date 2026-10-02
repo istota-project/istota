@@ -31,6 +31,7 @@ from fastapi import File as FastAPIFile
 from fastapi import Form
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
+from istota.filenames import filename_parts
 from istota.health import db as health_db
 from istota.health import documents as health_documents
 from istota.health import garmin_sync as health_garmin_sync
@@ -850,7 +851,7 @@ async def api_panel_upload(
         return JSONResponse({"error": "empty upload"}, status_code=400)
 
     mime = file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream"
-    suffix = Path(file.filename or "").suffix or mimetypes.guess_extension(mime) or ""
+    suffix = filename_parts(file.filename)[1] or mimetypes.guess_extension(mime) or ""
 
     def _save_and_record():
         with health_db.connect(ctx.db_path) as conn:
@@ -1563,7 +1564,7 @@ async def api_encounter_extract(
         or mimetypes.guess_type(file.filename or "")[0]
         or "application/octet-stream"
     )
-    suffix = Path(file.filename or "").suffix or (
+    suffix = filename_parts(file.filename)[1] or (
         mimetypes.guess_extension(mime) or ""
     )
 
@@ -2400,7 +2401,7 @@ async def api_immunization_extract(
         or mimetypes.guess_type(file.filename or "")[0]
         or "application/octet-stream"
     )
-    suffix = Path(file.filename or "").suffix or (
+    suffix = filename_parts(file.filename)[1] or (
         mimetypes.guess_extension(mime) or ""
     )
 

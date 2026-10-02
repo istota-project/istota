@@ -209,6 +209,33 @@ class TestMountOperations:
         assert dest.exists()
         assert dest.read_text() == "file contents"
 
+    def test_an_inbox_name_with_a_control_character_is_sanitised(self, mount_config, tmp_path):
+        """ISSUE-593: a CR in the name reached the mount, and Nextcloud refused
+        the upload for good. Every inbox writer goes through this function."""
+        ensure_user_directories_v2(mount_config, "alice")
+        src = tmp_path / "src.pdf"
+        src.write_bytes(b"%PDF")
+
+        result = upload_file_to_inbox_v2(
+            mount_config, "alice", src, "0a1b2c3d_Booking-Ref\r Receipt.pdf",
+        )
+
+        assert result == "/Users/alice/inbox/0a1b2c3d_Booking-Ref Receipt.pdf"
+        inbox = mount_config.workspace_path / "Users" / "alice" / "inbox"
+        assert [p.name for p in inbox.iterdir()] == ["0a1b2c3d_Booking-Ref Receipt.pdf"]
+
+    def test_a_prefix_does_not_cut_two_long_names_to_one(self, mount_config, tmp_path):
+        """The poll prefixes a name the rule already capped; capping again cut
+        two names that differ only in their tails to the same inbox name."""
+        ensure_user_directories_v2(mount_config, "alice")
+        src = tmp_path / "src.pdf"
+        src.write_bytes(b"%PDF")
+        names = [
+            upload_file_to_inbox_v2(mount_config, "alice", src, f"0a1b2c3d_{'R' * 111}{tail}.pdf")
+            for tail in ("part1", "part2")
+        ]
+        assert names[0] != names[1]
+
     def test_upload_file_not_exists(self, mount_config):
         result = upload_file_to_inbox_v2(mount_config, "alice", Path("/nonexistent/file.txt"))
         assert result is None

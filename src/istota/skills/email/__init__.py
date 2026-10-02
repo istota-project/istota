@@ -24,6 +24,9 @@ from email.message import EmailMessage
 from email.utils import formatdate, getaddresses, parsedate_to_datetime
 from pathlib import Path
 
+from istota.filenames import (
+    DEFAULT_MAX_STEM, MAX_NAME_BYTES, filename_parts, safe_filename,
+)
 from istota.skill_host_paths import (
     path_under_roots,
     resolve_in_roots,
@@ -585,6 +588,9 @@ def download_attachments(
                 file_path = _attachment_destination(dest_root, att.filename, email_id)
                 if file_path is None:
                     continue
+                # Distinct names can sanitise to one (`a:b.pdf`, `a?b.pdf`), and
+                # the write truncates, so the second would replace the first.
+                file_path = _unclaimed_name(file_path, downloaded)
                 payload = att.payload or b""
                 if max_total_bytes is not None and written + len(payload) > max_total_bytes:
                     logger.warning(
@@ -643,7 +649,13 @@ def _attachment_destination(
     sender's bytes under a name they did not send and reports success; a
     refusal says what happened, and the model is told which attachments did
     not come back. It also keeps a legitimately nested name, which a basename
-    would flatten.
+    would flatten. A `..` spelled with backslashes is refused the same way:
+    POSIX reads `..\\..\\x` as one component, so containment passes it, and
+    `safe_filename` would then cut it to `x`.
+
+    Characters storage refuses (a CR, a `:`) are a different matter and are
+    replaced per component by `safe_filename` once containment has passed
+    (ISSUE-593), since refusing those drops a legitimate file.
 
     A NUL is refused by name rather than left to the write. `Path.is_symlink`
     swallows the `ValueError` an embedded NUL raises and answers False, and
@@ -656,6 +668,12 @@ def _attachment_destination(
     if "\x00" in filename:
         logger.warning(
             "Skipping attachment on email %s: the name contains a NUL byte",
+            email_id,
+        )
+        return None
+    if ".." in re.split(r"[/\\]", filename):
+        logger.warning(
+            "Skipping attachment on email %s: the name climbs out of its directory",
             email_id,
         )
         return None
@@ -672,7 +690,60 @@ def _attachment_destination(
         # else: this line goes to the daemon log on the poll path.
         logger.warning("Skipping attachment on email %s: %s", email_id, error)
         return None
+    # Contained, so now make each component a name storage accepts (ISSUE-593).
+    # After the check, never before: sanitising `..` would turn a refusal into a
+    # silent rename. The second resolve covers a symlink at the new name.
+    relative = resolved.relative_to(dest_root)
+    sanitised = dest_root.joinpath(*(safe_filename(part) for part in relative.parts))
+    if sanitised == resolved:
+        return resolved
+    try:
+        resolved, error = resolve_in_roots(
+            sanitised, [dest_root],
+            writable=True, operation=f"attachment on email {email_id}",
+        )
+    except (OSError, ValueError) as e:
+        logger.warning("Skipping unusable attachment name on email %s: %s", email_id, e)
+        return None
+    if error is not None:
+        logger.warning("Skipping attachment on email %s: %s", email_id, error)
+        return None
     return resolved
+
+
+def _unclaimed_name(path: Path, claimed: list[Path]) -> Path:
+    """`path`, or `name (2).ext`, `name (3).ext`… if this download wrote it.
+
+    Only names written by the same call count. A file already in the directory
+    is overwritten as before, since `attachments --dest` re-run into the same
+    directory is expected to replace what it wrote last time.
+    """
+    if path not in claimed:
+        return path
+    stem, suffix = filename_parts(path.name)
+    n = 2
+    while True:
+        marker = f" ({n}){suffix}"
+        # Shortened first, so the length cap cannot cut the number back off.
+        base = stem
+        while len(f"{base}{marker}") > DEFAULT_MAX_STEM or len(
+            f"{base}{marker}".encode("utf-8")
+        ) > MAX_NAME_BYTES - 16:
+            base = base[:-1]
+        candidate = path.with_name(f"{base.rstrip(' .')}{marker}")
+        if candidate not in claimed:
+            return candidate
+        n += 1
+
+
+def attachment_leaf_name(filename: str) -> str:
+    """The name an attachment called `filename` is written under, leaf only.
+
+    For the two callers that diff declared attachments against written ones:
+    the written name has been through `safe_filename`, so comparing it with the
+    raw header would report every renamed attachment as missing.
+    """
+    return safe_filename(Path(filename).name)
 
 
 def _attach_files(msg: EmailMessage, attachments: list[str]) -> None:
@@ -1918,7 +1989,7 @@ def cmd_attachments(args):
     landed = {p.name for p in saved}
     skipped = [
         name for name in (entry.get("filename") for entry in email.attachment_manifest)
-        if name and Path(name).name not in landed
+        if name and attachment_leaf_name(name) not in landed
     ]
     return {
         "status": "ok",

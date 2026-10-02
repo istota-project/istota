@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 import shutil
 import sqlite3
 import time
 from pathlib import Path
 
 from istota.atomic_write import write_bytes_atomic
+from istota.filenames import safe_filename
 from istota.health import db as health_db
 from istota.health.models import Document, HealthContext
 
@@ -47,9 +47,6 @@ DEFAULT_MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 
 _DOCUMENTS_SUBDIR = "documents"
 
-_UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
-_RUNS = re.compile(r"_{2,}")
-
 _MAX_STEM_CHARS = 100
 
 
@@ -74,29 +71,12 @@ def sanitize_document_filename(raw: str) -> str:
 
     Each document lives in its own numbered directory, so this does not have
     to guarantee uniqueness — only that the name can't escape that directory
-    or hide from a file browser.
+    or hide from a file browser. ASCII only, because the name goes back out in
+    a ``Content-Disposition`` header.
     """
-    name = Path(raw or "").name
-    # A Windows client may send a backslash path; Path.name won't split it.
-    name = name.rsplit("\\", 1)[-1]
-    ext = Path(name).suffix
-    stem = name[: len(name) - len(ext)] if ext else name
-
-    ext = _UNSAFE_CHARS.sub("_", ext)
-    ext = _RUNS.sub("_", ext)
-    if ext in (".", "_", ""):
-        ext = ""
-
-    stem = _UNSAFE_CHARS.sub("_", stem)
-    stem = _RUNS.sub("_", stem)
-    stem = stem.lstrip(".")           # no hidden files
-    stem = stem.strip("_.")
-    stem = stem[:_MAX_STEM_CHARS]
-    stem = stem.strip("_.")
-
-    if not stem:
-        return f"document{ext}" if ext else "document.bin"
-    return f"{stem}{ext}" if ext else stem
+    return safe_filename(
+        raw, ascii_only=True, max_stem=_MAX_STEM_CHARS, fallback="document.bin",
+    )
 
 
 def relative_document_path(document_id: int, filename: str) -> str:
