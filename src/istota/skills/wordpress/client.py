@@ -388,8 +388,22 @@ class WordPressClient:
             # Field names come off the server; keep only identifier-shaped ones
             # so they can sit outside the fence.
             fields = sorted(str(k) for k in names if _FIELD_NAME_RE.fullmatch(str(k)))
+            # The per-field reason ("acf[x] must be at most 3 characters long") is
+            # what lets the model correct the value; the top message only says
+            # "Invalid parameter(s)".
+            field_errors = {}
+            if isinstance(params, dict):
+                for key in fields:
+                    said_here = fence(params.get(key)) if isinstance(params.get(key), str) else ""
+                    if said_here:
+                        field_errors[key] = said_here
+            if field_errors:
+                detail = "".join(f" {key}: {msg}" for key, msg in field_errors.items())
+                extra["field_errors"] = field_errors
+            else:
+                detail = tail
             return WordPressError(
-                f"WordPress refused these fields: {', '.join(fields) or '(unnamed)'}.{tail}",
+                f"WordPress refused these fields: {', '.join(fields) or '(unnamed)'}.{detail}",
                 "validation_error", fields=fields, **extra,
             )
         if status == 501:

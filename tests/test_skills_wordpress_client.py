@@ -336,6 +336,20 @@ class TestErrorMapping:
             client.get("wp/v2/posts")
         assert sorted(err.value.extra["fields"]) == ["slug", "status"]
 
+    def test_validation_error_carries_each_fields_own_reason_fenced(self):
+        reason = "acf[newsletter_issue] must be at most 3 characters long."
+        client = make_client(Recorder(_wp_error(
+            400, "rest_invalid_param", message="Invalid parameter(s): acf",
+            data={"status": 400, "params": {"acf": reason, "slug": 7}},
+        )))
+        with pytest.raises(WordPressError) as err:
+            client.get("wp/v2/posts")
+        assert err.value.extra["fields"] == ["acf", "slug"]
+        [(field, said)] = err.value.extra["field_errors"].items()
+        assert field == "acf" and said == frame_untrusted(reason, "WORDPRESS CONTENT")
+        assert reason in str(err.value)
+        assert "Invalid parameter(s)" not in str(err.value)
+
     def test_auth_failed_names_the_three_ordinary_causes(self):
         client = make_client(Recorder(_wp_error(401, "incorrect_password")))
         with pytest.raises(WordPressError) as err:

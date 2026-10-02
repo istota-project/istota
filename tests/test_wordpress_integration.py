@@ -154,7 +154,8 @@ def test_a_draft_round_trip_with_a_term_and_an_image(live, capsys):
         out = ok(capsys, "media", "upload", "--file", str(image), "--alt", "A square",
                  "--caption", "Smoke caption")
         media_id = out["item"]["id"]
-        print("metadata_kept:", out.get("metadata_kept"), "error:", out.get("metadata_error"))
+        with capsys.disabled():
+            print("metadata_kept:", out.get("metadata_kept"), "error:", out.get("metadata_error"))
         assert "A square" in out["item"]["alt_text"]
 
         out = ok(capsys, "update", "--id", str(post_id), "--title", f"Smoke {tag} edited",
@@ -221,7 +222,8 @@ def test_abilities_list(live, capsys):
     """§14.5: which abilities the site registers."""
     code, out = cli(capsys, "abilities", "list")
     assert code == 0 or out["reason"] == "unknown_route", out
-    print("abilities:", [item["name"] for item in out.get("items", [])])
+    with capsys.disabled():
+        print("abilities:", [item["name"] for item in out.get("items", [])])
 
 
 @pytest.mark.skipif(not (PLUGIN and BLOG),
@@ -242,7 +244,8 @@ def test_network_plugin_deactivate_and_reactivate(live, capsys):
     assert code == 0, out
     code, out = cli(capsys, "plugins", "activate", "--plugin", PLUGIN, "--network",
                     "--confirmed", scoped=False)
-    print("network activation:", out.get("reason", "ok"))
+    with capsys.disabled():
+        print("network activation:", out.get("reason", "ok"))
     assert code == 0, (f"{PLUGIN} is now deactivated network-wide; network-activate it "
                        f"again in the network admin. The skill answered: {out}")
 
