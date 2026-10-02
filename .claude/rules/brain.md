@@ -13,7 +13,7 @@ The executor composes prompt, env and sandbox and hands a `BrainRequest` to a `B
 **The prompt is three channels**: `prompt` (user half, the user turn), `composed_system_prompt_path` (Istota's standing instructions, system authority), `custom_system_prompt_path` (operator file, each backend's override semantics). The split stops a compacting brain from compacting away its instructions (ISSUE-375). Direct text-only callers supply only `prompt`.
 
 ## Layout
-`__init__.py`, `_types.py`, `_events.py` (root `stream_parser.py` is a shim), `_aliases.py`, `_roles.py`, `_fallback.py`, `_postures.py`, `claude_code.py` (`build_claude_cli_flags` shared with tmux), `native.py`, `tmux_claude.py`.
+`__init__.py`, `_types.py`, `_events.py`, `_aliases.py`, `_roles.py`, `_fallback.py`, `_postures.py`, `claude_code.py` (`build_claude_cli_flags` shared with tmux), `native.py`, `tmux_claude.py`.
 
 ## Brain protocol
 `model_namespace` (`anthropic` for claude_code and tmux_claude, `openai_compat` for native), `execute(req)`, `resolve_alias`, `resolve_model_name`, `list_aliases`, `validate_alias_override`, and properties `default_model` / `default_effort` (the brain's own configured default, unresolved; per brain since ISSUE-418). Consumers use `make_brain`, never a brain's tables.

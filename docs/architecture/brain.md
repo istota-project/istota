@@ -29,8 +29,6 @@ brain/
 
 The native loop's machinery lives in sibling packages: `llm/` (the provider abstraction — `openai_compat` is the only provider), `agent/` (the loop and tool dispatch), and `session/` (turn state, compaction, retry).
 
-`stream_parser.py` at the package root is now a thin re-export shim of `brain/_events.py`, kept for backward compatibility with tests and a few internal callers.
-
 ## Brain protocol
 
 ```python

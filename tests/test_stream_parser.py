@@ -1,9 +1,9 @@
-"""Tests for stream_parser module."""
+"""Tests for the stream-json event parser in istota.brain._events."""
 
 import json
 
 from istota.agent.events import _tool_invocation
-from istota.stream_parser import (
+from istota.brain._events import (
     ContextManagementEvent,
     ResultEvent,
     TextDeltaEvent,

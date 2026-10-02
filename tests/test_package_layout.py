@@ -162,7 +162,6 @@ ROOT_ALLOWLIST = frozenset({
     "static_dir",
     "status_writer",
     "storage",
-    "stream_parser",
     "subscription_usage",
     "surfaces",
     "talk",

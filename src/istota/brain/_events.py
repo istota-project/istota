@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 # Tool-use rendering moved to istota.agent.events in Phase 0 of the agent-loop
 # migration (brain-agnostic; reused by the native loop). Re-exported here so
-# the stream_parser shim and existing imports keep working.
+# existing imports from this module keep working.
 from ..agent.events import _TOOL_EMOJI, _describe_tool_use, _lone_relay_ask, _tool_invocation  # noqa: F401
 
 logger = logging.getLogger("istota.brain.events")
