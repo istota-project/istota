@@ -528,6 +528,67 @@ class TestAbilitiesRun:
         assert out["reason"] == "outcome_unknown"
         assert len(writes(env.site)) == 1
 
+    @pytest.mark.parametrize(("name", "notes"), [
+        ("scf/create-field-group", {}),
+        ("scf/delete-post-type", {"destructive": True, "idempotent": True}),
+        ("acf/update-field", {"readonly": False}),
+        ("scf/get-field-group", {"readonly": True, "destructive": True}),
+    ])
+    def test_a_definition_edit_is_refused_even_confirmed(self, env, capsys, name, notes):
+        calls = ability(env, name=name, **notes)
+        code, out = run(["abilities", "run", name, "--confirmed"], capsys)
+        assert code == 1 and out["reason"] == "definition_edit_refused"
+        assert "wp-admin" in out["error"]
+        assert calls == [] and writes(env.site) == []
+
+    def test_a_definition_read_still_runs(self, env, capsys):
+        calls = ability(env, name="scf/list-field-groups", readonly=True)
+        code, out = run(["abilities", "run", "scf/list-field-groups"], capsys)
+        assert code == 0, out
+        assert [c.method for c in calls] == ["GET"]
+
+    def _with_schema(self, env, schema, **notes):
+        calls = ability(env, **notes)
+        env.site.routes[("GET", f"{ABILITIES}/acme/do-thing")] = respond({
+            "name": "acme/do-thing", "label": "Do", "meta": {"annotations": notes},
+            "input_schema": schema,
+        })
+        return calls
+
+    def test_no_input_to_an_object_schema_sends_an_empty_object_on_get(self, env, capsys):
+        calls = self._with_schema(env, {"type": "object", "properties": {}}, readonly=True)
+        code, out = run(["abilities", "run", "acme/do-thing"], capsys)
+        assert code == 0, out
+        assert calls[0].url.query == b"input="
+
+    def test_no_input_to_an_object_schema_posts_an_empty_object(self, env, capsys):
+        calls = self._with_schema(env, {"type": ["object", "null"]})
+        run(["abilities", "run", "acme/do-thing", "--confirmed"], capsys)
+        assert body_of(calls[0]) == {"input": {}}
+
+    def test_no_input_without_an_object_schema_sends_none(self, env, capsys):
+        calls = self._with_schema(env, {"type": "string"}, readonly=True)
+        run(["abilities", "run", "acme/do-thing"], capsys)
+        assert calls[0].url.query == b""
+
+    def _bad_output(self, env, method):
+        env.site.routes[(method, f"{ABILITIES}/acme/do-thing/run")] = httpx.Response(
+            500, json={"code": "ability_invalid_output", "message": "has invalid output"})
+
+    def test_bad_output_from_a_read_is_the_sites_failure_not_unknown(self, env, capsys):
+        ability(env, readonly=True)
+        self._bad_output(env, "GET")
+        code, out = run(["abilities", "run", "acme/do-thing"], capsys)
+        assert code == 1 and out["reason"] == "server_error"
+        assert out["wp_code"] == "ability_invalid_output"
+        assert len([r for r in env.site.requests if r.url.path.endswith("/run")]) == 1
+
+    def test_bad_output_from_a_write_is_still_unknown(self, env, capsys):
+        ability(env)
+        self._bad_output(env, "POST")
+        _, out = run(["abilities", "run", "acme/do-thing", "--confirmed"], capsys)
+        assert out["reason"] == "outcome_unknown"
+
     def test_an_unknown_ability(self, env, capsys):
         env.site.routes[("GET", f"{ABILITIES}/acme/nope")] = httpx.Response(
             404, json={"code": "rest_ability_not_found", "message": "Ability not found."})

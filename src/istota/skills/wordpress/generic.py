@@ -48,6 +48,11 @@ MAX_BODY_BYTES = 8 * 1024 * 1024
 
 #: ``namespace/name``, as the Abilities API registers one.
 _ABILITY_RE = re.compile(r"\A[a-z0-9-]{1,64}/[a-z0-9-]{1,128}\Z")
+#: Ability namespaces that edit field group, field, post type, taxonomy and
+#: options-page *definitions* (Secure Custom Fields registers ~50). The skill
+#: never edits definitions (spec §3.4, decision 12): they are changed in
+#: wp-admin and pulled into a repo, so only a read of one runs.
+DEFINITION_NAMESPACES = frozenset({"scf", "acf"})
 
 
 def check_route(route: str) -> str:
@@ -248,6 +253,13 @@ def fetch_ability(ctx, name: str) -> dict:
     return ability
 
 
+def _object_schema(schema) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    kind = schema.get("type")
+    return kind == "object" or (isinstance(kind, list) and "object" in kind)
+
+
 def run_ability(args, ctx, name: str, ability: dict, value, *,
                 described: str | None = None, always_gate: bool = False,
                 hint: str | None = None):
@@ -262,6 +274,13 @@ def run_ability(args, ctx, name: str, ability: dict, value, *,
     notes = annotations(ability)
     readonly = notes.get("readonly") is True
     destructive = notes.get("destructive") is True
+    # Refused ahead of the gate, so no --confirmed reaches it.
+    if name.split("/", 1)[0] in DEFINITION_NAMESPACES and (destructive or not readonly):
+        raise WordPressError(
+            f"{name} changes a field group, field, post type, taxonomy or options-page "
+            f"definition. The skill never edits definitions; make the change in wp-admin.",
+            "definition_edit_refused",
+        )
     # An ability that calls itself both is gated: the annotation is the
     # site's own claim, and the cautious half wins.
     if always_gate or not readonly or destructive:
@@ -273,20 +292,31 @@ def run_ability(args, ctx, name: str, ability: dict, value, *,
         gate(args, ctx, [described])
     route = f"{ABILITIES_NAMESPACE}/abilities/{name}/run"
     params = json_body = None
+    # Core validates a missing input as null, which an object schema with no
+    # `default` refuses ("input is not of type object"), so none given there
+    # means an empty object: `input=` on a query (core reads it as one), `{}`
+    # in a body.
+    empty_object = value is None and _object_schema(ability.get("input_schema"))
     # The method follows the annotations even under `always_gate`: core's run
     # controller refuses any other.
-    if readonly:
-        method = "GET"
-        params = php_query("input", value) or None
-    elif destructive and notes.get("idempotent") is True:
-        method = "DELETE"
-        params = php_query("input", value) or None
+    if readonly or (destructive and notes.get("idempotent") is True):
+        method = "GET" if readonly else "DELETE"
+        params = [("input", "")] if empty_object else (php_query("input", value) or None)
     else:
         method = "POST"
-        json_body = {"input": value} if value is not None else {}
+        if value is not None:
+            json_body = {"input": value}
+        else:
+            json_body = {"input": {}} if empty_object else {}
+    # Core refuses bad input before the ability runs, so that answer is never
+    # ambiguous. Bad output comes after it ran, which only a read can shrug off.
+    definite = {"ability_invalid_input"}
+    if readonly and not destructive:
+        definite.add("ability_invalid_output")
     try:
         result, _ = ctx.client.request(method, route, params=params, json=json_body,
-                                       base=ctx.base, idempotent=False)
+                                       base=ctx.base, idempotent=False,
+                                       definite_codes=frozenset(definite))
     except WordPressError as exc:
         if hint is not None:
             lookup_hint(exc, hint)

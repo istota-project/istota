@@ -95,7 +95,7 @@ To update the plugin, build a new zip and upload it again; WordPress offers to r
 
 ## Not offered
 
-Core updates, creating network sites, network users and super admins, search-replace, database import and export, and editing field group or post type definitions all need WP-CLI or wp-admin. Deleting users and plugins, and anything to do with application passwords, are left to wp-admin too.
+Core updates, creating network sites, network users and super admins, search-replace, database import and export, and editing field group or post type definitions all need WP-CLI or wp-admin. Secure Custom Fields registers abilities that create, update, delete and import those definitions; `abilities run` refuses every `scf/*` and `acf/*` ability that is not read-only, with `definition_edit_refused`, whatever `--confirmed` says. Its read abilities still run. Deleting users and plugins, and anything to do with application passwords, are left to wp-admin too.
 
 ## Testing against a live site
 
