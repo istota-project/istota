@@ -6,12 +6,12 @@ recorded as a flag that could hide a late VFS flush into an old directory.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import stat
-import sys
 from contextlib import closing
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import tomli
@@ -20,7 +20,9 @@ import tomli_w
 from . import cron_loader, db, storage
 from .nextcloud import dav
 from .nextcloud._http import OcsError, dav_files_url, dav_request
-from .room_relocate import EXIT_OK, EXIT_PARTIAL, EXIT_REFUSED, _descriptor, _preflight, _refusal
+from .room_relocate import (
+    EXIT_OK, EXIT_PARTIAL, EXIT_REFUSED, _descriptor, _preflight, _problem, _refusal, load_vector_extension,
+)
 from .sqlite_util import connect_read_only
 from .toml_fence import BACKTICK_RUN_RE, FENCE_OPEN_RE, find_toml_block
 from .user_scope import is_scopable_user_id
@@ -44,7 +46,7 @@ def _check_tree(path: Path) -> None:
             _check_tree(child)
 
 
-def _merge_local(source: Path, target: Path, *, dry_run: bool) -> None:
+def _merge_local(config, tokens, source: Path, target: Path, *, dry_run: bool, rel: tuple[str, ...] = ()) -> None:
     source_kind, target_kind = _local_kind(source), _local_kind(target)
     if source_kind is None:
         return
@@ -63,12 +65,78 @@ def _merge_local(source: Path, target: Path, *, dry_run: bool) -> None:
         if not dry_run:
             source.unlink()
         return
+    if source_kind == target_kind == "file" and _is_dated_memory(rel):
+        _merge_dated_local(config, tokens, rel, source, target, dry_run=dry_run)
+        return
     if source_kind != "directory" or target_kind != "directory":
-        raise ValueError(f"collision: {source.name}")
+        raise ValueError(f"collision: {'/'.join(rel) or source.name}")
     for child in sorted(source.iterdir()):
-        _merge_local(child, target / child.name, dry_run=dry_run)
+        _merge_local(config, tokens, child, target / child.name, dry_run=dry_run, rel=(*rel, child.name))
     if not dry_run:
         source.rmdir()  # Empty only: never recursively delete a late write.
+
+
+_DATED_MEMORY_RE = re.compile(r"\d{4}-\d{2}-\d{2}\.md")
+
+
+def _is_dated_memory(rel: tuple[str, ...]) -> bool:
+    """Exactly ``memories/YYYY-MM-DD.md`` under a channel directory."""
+    if len(rel) != 2 or rel[0] != "memories" or not _DATED_MEMORY_RE.fullmatch(rel[1]):
+        return False
+    try:
+        date.fromisoformat(rel[1][:-3])
+    except ValueError:
+        return False
+    return True
+
+
+def _merged_dated(source_text: str, target_text: str) -> str | None:
+    """Alias content first, then the room's own; None when the target holds it.
+
+    A phone room minted mid-day has written that day under both names
+    (ISSUE-588). A dated memory is an append-only log, so the merge is what
+    appending would have produced. A target in exactly the merged shape is a
+    prior run that stopped before removing the source; a target that merely
+    begins with the same words is not, and is merged.
+    """
+    from .memory.sleep_cycle import join_dated_memory  # noqa: PLC0415
+
+    head = source_text.rstrip("\n")
+    if not head.strip() or target_text == source_text or target_text.startswith(head + "\n\n"):
+        return None
+    if not target_text.strip():
+        return source_text
+    return join_dated_memory(source_text, target_text)
+
+
+def _back_up_dated(config, tokens, rel, source_text: str, target_text: str) -> None:
+    old, new = tokens
+    _backup(config, ("Channels", old, *rel[:-1]), rel[-1], source_text)
+    # Keyed by the alias too: a second alias merging into the same room on the
+    # same day backs up a different target text, which one path would refuse.
+    _backup(config, ("Channels", new, "before", old, *rel[:-1]), rel[-1], target_text)
+
+
+def _merge_dated_local(config, tokens, rel, source: Path, target: Path, *, dry_run: bool) -> None:
+    label = "/".join(rel)
+    texts = []
+    for path in (source, target):
+        text, reason = storage.read_regular_file(path)
+        if reason:
+            raise ValueError(f"{label}: {reason}")
+        texts.append(text)
+    source_text, target_text = texts
+    merged = _merged_dated(source_text, target_text)
+    if dry_run:
+        return
+    if merged is not None:
+        _back_up_dated(config, tokens, rel, source_text, target_text)
+        if not storage.write_regular_file(target, merged):
+            raise OSError(f"{label}: merge write failed")
+        written, reason = storage.read_regular_file(target)
+        if reason or written != merged:
+            raise ValueError(f"{label}: merge did not verify")
+    source.unlink()
 
 
 def _dav_stat(config, path: str):
@@ -95,13 +163,53 @@ def _move_dav(config, source: str, target: str) -> None:
         raise
 
 
-def _merge_dav(config, source: str, target: str, *, dry_run: bool) -> None:
+def _dav_text(config, path: str) -> str:
+    response = dav_request(config, "GET", dav_files_url(config, path))
+    return response.content.decode("utf-8")
+
+
+def _delete_dav_file(config, path: str) -> None:
+    try:
+        dav_request(config, "DELETE", dav_files_url(config, path))
+    except OcsError:
+        # As for MOVE: a lost answer can hide an applied DELETE.
+        if _dav_stat(config, path) is None:
+            return
+        raise
+
+
+def _merge_dated_dav(config, tokens, rel, source: str, target: str, source_info, target_info, *, dry_run: bool) -> None:
+    label = "/".join(rel)
+    for info in (source_info, target_info):
+        if (info.get("size") or 0) > storage.USER_CONFIG_READ_CAP_BYTES:
+            raise ValueError(f"{label}: too large to merge")
+    source_text, target_text = _dav_text(config, source), _dav_text(config, target)
+    merged = _merged_dated(source_text, target_text)
+    if dry_run:
+        return
+    if merged is not None:
+        _back_up_dated(config, tokens, rel, source_text, target_text)
+        headers = {"Content-Type": "text/markdown; charset=utf-8"}
+        etag = target_info.get("etag")
+        if etag:
+            # Refuse rather than overwrite a write that landed since the stat.
+            headers["If-Match"] = f'"{etag}"'
+        dav_request(config, "PUT", dav_files_url(config, target), content=merged.encode("utf-8"), headers=headers)
+        if _dav_text(config, target) != merged:
+            raise ValueError(f"{label}: merge did not verify")
+    _delete_dav_file(config, source)
+
+
+def _merge_dav(config, tokens, source: str, target: str, *, dry_run: bool, rel: tuple[str, ...] = ()) -> None:
     source_info, target_info = _dav_stat(config, source), _dav_stat(config, target)
     if source_info is None:
         return
     if target_info is None:
         if not dry_run:
             _move_dav(config, source, target)
+        return
+    if not source_info["is_dir"] and not target_info["is_dir"] and _is_dated_memory(rel):
+        _merge_dated_dav(config, tokens, rel, source, target, source_info, target_info, dry_run=dry_run)
         return
     if not source_info["is_dir"] or not target_info["is_dir"]:
         raise ValueError(f"collision: {source}")
@@ -111,7 +219,7 @@ def _merge_dav(config, source: str, target: str, *, dry_run: bool) -> None:
             raise ValueError("unsafe DAV entry")
         if entry["path"].rstrip("/") != source + "/" + name:
             raise ValueError("DAV entry outside source directory")
-        _merge_dav(config, source + "/" + name, target + "/" + name, dry_run=dry_run)
+        _merge_dav(config, tokens, source + "/" + name, target + "/" + name, dry_run=dry_run, rel=(*rel, name))
     # DAV DELETE on a collection is recursive. Leave the empty shell rather
     # than risk deleting a write that arrived after this listing. Every pass
     # lists it again; an empty shell carries no outstanding history.
@@ -200,9 +308,9 @@ def _briefing_plan(content: str, mapping: dict[str, str]):
     return content[:span[0]] + block + content[span[1]:]
 
 
-def _backup(config, user: str, filename: str, content: str) -> None:
+def _backup(config, scope: tuple[str, ...], filename: str, content: str) -> None:
     root = config.workspace_path
-    path = root / "Backups" / "room-token-migration" / datetime.now(timezone.utc).strftime("%Y-%m-%d") / user
+    path = root.joinpath("Backups", "room-token-migration", datetime.now(timezone.utc).strftime("%Y-%m-%d"), *scope)
     # Backups are host-side writes too; reject every link in their ancestry.
     relative = path.relative_to(root)
     current = root
@@ -243,7 +351,7 @@ def _rewrite_user(config, user: str, mapping: dict[str, str], *, dry_run: bool) 
     if dry_run:
         return
     for filename, content, plan in plans:
-        _backup(config, user, filename, content)
+        _backup(config, (user,), filename, content)
     for filename, content, plan in plans:
         current, reason = storage.read_regular_file(directory / filename)
         if reason or current != content:
@@ -256,10 +364,11 @@ def _rewrite_user(config, user: str, mapping: dict[str, str], *, dry_run: bool) 
             raise OSError(f"{filename} write failed")
 
 
-def reconcile(config, *, dry_run: bool = False) -> int:
+def reconcile(config, *, dry_run: bool = False, problems: list[str] | None = None) -> int:
     try:
         with closing(connect_read_only(config.db_path.resolve())) as conn:
             conn.row_factory = sqlite3.Row
+            load_vector_extension(conn)
             _preflight(conn)
             # A deleted room leaves an alias tombstone. Never resurrect its
             # files and never make every future sweep report it incomplete.
@@ -290,28 +399,30 @@ def reconcile(config, *, dry_run: bool = False) -> int:
         elif _local_kind(root / "Channels") not in {None, "directory"}:
             raise ValueError("Channels is not a directory")
     except Exception as exc:
-        print(f"partial: {exc}", file=sys.stderr)
-        return EXIT_PARTIAL
+        # Nothing moved yet, and an outage heals itself: a refusal keeps the
+        # deploy failing so the next tick retries, where a partial would not.
+        _refusal(str(exc))
+        return EXIT_REFUSED
     failures = len(collisions)
     for old in collisions:
-        print(f"failed: {old}: mapping source belongs to a live room", file=sys.stderr)
+        _problem(problems, f"failed: {old}: mapping source belongs to a live room")
     for old, new in mapping.items():
         try:
             if config.nextcloud.url:
-                _merge_dav(config, f"/Channels/{old}", f"/Channels/{new}", dry_run=dry_run)
+                _merge_dav(config, (old, new), f"/Channels/{old}", f"/Channels/{new}", dry_run=dry_run)
             else:
                 source, target = root / "Channels" / old, root / "Channels" / new
                 _check_tree(source)
                 _check_tree(target)
-                _merge_local(source, target, dry_run=dry_run)
+                _merge_local(config, (old, new), source, target, dry_run=dry_run)
             print(f"mount: {old} -> {new}")
         except Exception as exc:
             failures += 1
-            print(f"failed: {old}: {exc}", file=sys.stderr)
+            _problem(problems, f"failed: {old}: {exc}")
     for user in sorted(users):
         try:
             _rewrite_user(config, user, mapping, dry_run=dry_run)
         except Exception as exc:
             failures += 1
-            print(f"refusal: user {user}: {exc}", file=sys.stderr)
+            _problem(problems, f"refusal: user {user}: {exc}")
     return EXIT_PARTIAL if failures else EXIT_OK

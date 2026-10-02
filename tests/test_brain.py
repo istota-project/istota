@@ -212,6 +212,82 @@ class TestAdvisorFlag:
         assert flags.index("--effort") < flags.index("--advisor")
 
 
+class TestCliSettingsFlags:
+    """`--settings` and `--setting-sources` on the shared flag builder.
+
+    The CLI's own prompt tells the model to sign commits and PRs, which the
+    `commit` skill forbids; the settings document removes that instruction at
+    the source. `--setting-sources user` keeps a repository's own
+    `.claude/settings*.json` out of the run.
+    """
+
+    def _req(self, tmp_path, *, allowed_tools=("Bash",), settings_path=None):
+        return BrainRequest(
+            prompt="hi", allowed_tools=list(allowed_tools), cwd=tmp_path,
+            env={}, timeout_seconds=60, cli_settings_path=settings_path,
+        )
+
+    def test_the_document_blanks_commit_and_pr_attribution(self):
+        from istota.brain.claude_code import cli_settings_document
+
+        assert cli_settings_document()["attribution"] == {"commit": "", "pr": ""}
+
+    def test_a_set_path_is_passed_as_given_without_an_exists_check(self, tmp_path):
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        missing = tmp_path / "control" / "cli_settings.json"
+        flags = build_claude_cli_flags(self._req(tmp_path, settings_path=missing))
+        assert flags[flags.index("--settings") + 1] == str(missing)
+
+    def test_no_path_with_tools_carries_the_same_document_inline(self, tmp_path):
+        import json
+
+        from istota.brain.claude_code import (
+            build_claude_cli_flags,
+            cli_settings_document,
+        )
+
+        flags = build_claude_cli_flags(self._req(tmp_path))
+        inline = json.loads(flags[flags.index("--settings") + 1])
+        assert inline == cli_settings_document()
+
+    def test_a_text_only_call_with_a_path_still_gets_it(self, tmp_path):
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        path = tmp_path / "cli_settings.json"
+        flags = build_claude_cli_flags(
+            self._req(tmp_path, allowed_tools=(), settings_path=path)
+        )
+        assert flags[flags.index("--settings") + 1] == str(path)
+
+    def test_a_text_only_call_with_no_path_gets_no_settings(self, tmp_path):
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        flags = build_claude_cli_flags(self._req(tmp_path, allowed_tools=()))
+        assert "--settings" not in flags
+
+    @pytest.mark.parametrize("allowed_tools", [(), ("Bash",)])
+    def test_only_the_user_source_is_loaded(self, tmp_path, allowed_tools):
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        flags = build_claude_cli_flags(
+            self._req(tmp_path, allowed_tools=allowed_tools)
+        )
+        assert flags[flags.index("--setting-sources") + 1] == "user"
+
+    def test_the_tmux_launch_carries_both(self, tmp_path):
+        from istota.brain.claude_code import build_claude_cli_flags
+        from istota.brain.tmux_claude import _TMUX_UNSUPPORTED_FLAGS
+
+        path = tmp_path / "cli_settings.json"
+        flags = build_claude_cli_flags(
+            self._req(tmp_path, settings_path=path),
+            unsupported=_TMUX_UNSUPPORTED_FLAGS,
+        )
+        assert flags[flags.index("--settings") + 1] == str(path)
+        assert "--setting-sources" in flags
+
+
 class TestComposedSystemPromptFlag:
     """`--append-system-prompt-file` carries Istota's composed system half.
 

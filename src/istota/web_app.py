@@ -858,6 +858,27 @@ _LOGIN_PAGE_THEME_SCRIPT = (
     "document.documentElement.setAttribute('data-theme','light')}catch(e){}"
 )
 
+# A cut-down `installKeyboardDismiss()` (web/src/lib/platform/input.ts), which
+# these pages can't import. Links and buttons are exempt: a blur before their
+# click arrives can make the first tap miss (ISSUE-204).
+_LOGIN_PAGE_KEYBOARD_SCRIPT = (
+    "(function(){"
+    "function entry(el){return !!el&&((el.tagName==='INPUT'&&!/^(radio|checkbox)$/.test(el.type))"
+    "||el.tagName==='TEXTAREA'||el.isContentEditable===true)}"
+    "var opts={capture:true,passive:true},start=null;"
+    "window.addEventListener('pointerdown',function(e){start={x:e.clientX,y:e.clientY}},opts);"
+    "window.addEventListener('pointercancel',function(){start=null},opts);"
+    "window.addEventListener('pointerup',function(e){"
+    "var s=start;start=null;"
+    "if(!s||Math.abs(e.clientX-s.x)>10||Math.abs(e.clientY-s.y)>10)return;"
+    "if(!window.matchMedia||!window.matchMedia('(pointer: coarse)').matches)return;"
+    "var field=document.activeElement,t=e.target;"
+    "if(!entry(field)||!t||typeof t.closest!=='function')return;"
+    "if(t===field||entry(t)||t.closest('a[href],button,select,summary'))return;"
+    "var label=t.closest('label');if(label&&entry(label.control))return;"
+    "field.blur()},opts)})();"
+)
+
 # Lucide icons, inlined. This page is server-rendered FastAPI HTML, so it can't
 # import `@lucide/svelte` the way the SvelteKit app does — the path data and the
 # default attributes are copied verbatim from the package so the two surfaces
@@ -1044,7 +1065,8 @@ def _render_form_page(bot_name: str, headline: str, body: str, mark: str) -> str
         f'<main class="card">{mark}<h1>{name}</h1>'
         f'<p class="tagline">{escape(headline)}</p>{body}</main>'
         f'<footer>Running <a href="{ISTOTA_SITE_URL}" target="_blank" '
-        'rel="noopener">Istota</a></footer></body></html>'
+        'rel="noopener">Istota</a></footer>'
+        f'<script>{_LOGIN_PAGE_KEYBOARD_SCRIPT}</script></body></html>'
     )
 
 

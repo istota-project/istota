@@ -187,6 +187,7 @@ from .brain.claude_code import (  # noqa: E402,F401  (kept after module docstrin
     is_usage_limit_error,
     parse_api_error,
 )
+from .brain.claude_code import CLI_SETTINGS_FILENAME, cli_settings_document  # noqa: E402
 
 # Audio extensions eligible for pre-transcription (matches whisper skill file_types)
 _AUDIO_EXTENSIONS = frozenset({"mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"})
@@ -8231,7 +8232,7 @@ def execute_task(
     #
     # The user half is a debugging artifact and nothing in the product reads it
     # back — the prompt reaches ClaudeCodeBrain on stdin, TmuxClaudeBrain
-    # through its own `workdir/prompt.txt`, and NativeBrain as the initial user
+    # through a tmux buffer loaded over stdin, and NativeBrain as the initial user
     # message. It is kept as one, and it is the half that had to move: it
     # carries retrieved memory, knowledge facts, playbooks, conversation
     # history and the request itself, it differs per task, and where it used to
@@ -8285,6 +8286,11 @@ def execute_task(
     # by other local accounts.
     system_prompt_file = control_dir / "system_prompt.txt"
     _write_control_file(system_prompt_file, composed.system)
+
+    # Written for every brain, not only the CLI ones: a native task can reroute
+    # onto `claude_code`, and the request it carries across names this file.
+    cli_settings_file = control_dir / CLI_SETTINGS_FILENAME
+    _write_control_file(cli_settings_file, json.dumps(cli_settings_document()))
 
     # Result file path
     result_file = user_temp_dir / f"task_{task.id}_result.txt"
@@ -8625,6 +8631,7 @@ def execute_task(
             # be ISSUE-375 recreated by a filesystem race. Absolute by
             # construction — see the `.resolve()` at the write above.
             composed_system_prompt_path=system_prompt_file,
+            cli_settings_path=cli_settings_file,
             # The prepared images, as paths and media types — never bytes. Each
             # brain converts at the last moment, so nothing large reaches a task
             # row or a log line and the executor learns no provider wire format.

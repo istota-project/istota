@@ -140,6 +140,33 @@ describe('the list', () => {
     expect(document.body.textContent).not.toContain('Password vault');
   });
 
+  it('tints each source badge by its own kind, at the compact size', async () => {
+    vi.mocked(getCredentialGrants).mockResolvedValue(
+      settings({
+        credentials: [
+          local(),
+          portal(),
+          portal({ name: 'forge.github', source: 'config', hosts: ['github.com'] }),
+        ],
+      }),
+    );
+    render(CredentialsCard);
+    await screen.findByText('portal.example');
+
+    const sources: Record<string, string> = {
+      openrouter_key: 'local',
+      portal: 'vault',
+      'forge.github': 'config',
+    };
+    for (const [name, source] of Object.entries(sources)) {
+      const badge = row(name).querySelector(`.cred-source-${source} .badge`);
+      expect(badge?.classList.contains('badge-sm')).toBe(true);
+    }
+    for (const badge of row('openrouter_key').querySelectorAll('.badge')) {
+      expect(badge.classList.contains('badge-sm')).toBe(true);
+    }
+  });
+
   it('says what to do about a missing site, by source', async () => {
     vi.mocked(getCredentialGrants).mockResolvedValue(
       settings({ credentials: [local({ hosts: [], url: '' }), portal({ hosts: [] })] }),

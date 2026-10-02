@@ -88,6 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The badges on the Credentials settings card are now the compact size the admin pages use, and a credential's source has its own colour: amber for Istota, green for KeePassXC and violet for Deployment.
 - WhatsApp rooms in web chat now carry a green WhatsApp glyph, a single speech bubble for your private WhatsApp chat and a pair of bubbles for a WhatsApp group, so the two read apart from the room list alone. A group shows its glyph instead of the generic people icon, the chat header shows the same glyph for SMS and WhatsApp rooms, and the "Sent on WhatsApp" line under a message uses it too.
 - New rooms use independent room IDs in their links and memory folders. Talk delivery uses the bound conversation address, including for rooms first opened in Talk.
 
@@ -158,6 +159,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A WhatsApp or SMS room minted on a day that already had a dated memory no longer leaves the room migration stuck. The sweep now merges the two copies of `memories/YYYY-MM-DD.md` (older text first, both originals backed up) instead of refusing. Any other same-name file still refuses.
+- A room migration that leaves work outstanding no longer puts the auto-update in a two-minute loop that stops and restarts every service. The partial now counts as deployed, admins get a notice in the bell naming each room and file, and the next deploy retries.
+- Commits and merge requests the bot writes on the Claude Code brains no longer end with a Claude co-author trailer or a "Generated with Claude Code" footer. The skill told the model not to add them, but the CLI's own instructions told it to, and the CLI won. Those instructions are now switched off for every task, and the rule now covers merge request and pull request descriptions too.
+- Re-running the deploy no longer fails at "Relocate room identities offline" with `refusal: no such module: vec0` on a host that has the memory-search vector index. The database half of the room migration loaded sqlite-vec before checking the schema, but the channel-directory sweep that runs after it opened its own connection without it, so every deploy after the first one stopped there.
+- On a phone, tapping outside a field on the sign-in pages now closes the keyboard, as it does in web chat. Before, the keyboard stayed up over the submit button, and in the 6-digit code field, whose number pad has no return key, there was no way to put it away. This covers sign-in, the emailed-code page, set-password and password reset. A tap on another field, a link or a button leaves the keyboard alone, so the first tap on submit still submits (ISSUE-582).
 - A WhatsApp group room in web chat no longer shows a composer that does nothing. A message sent there became a web task that reached nobody in the group, and an unaddressed one got no answer either. Group rooms are now read-only in web chat like your one-to-one SMS and WhatsApp rooms, and the server refuses a send; a group's waiting questions can still be answered from web chat (ISSUE-585).
 - The nightly sleep cycle no longer holds the database write lock while it waits on a model call. It inserted knowledge facts and then ran USER.md curation on the same open transaction, so for about a minute every other writer failed with `database is locked`, including the web credentials page, which then showed nothing.
 
@@ -289,6 +295,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- On the `tmux_claude` brain, a task can no longer prepare the session directory of a later task, or point its own at another session's. The daemon used to adopt a directory already at that name and write the prompt and the session's Claude Code settings into it following symlinks, so a planted link turned those writes into writes to any file the daemon could reach, and it read the session's answer and transcript from whatever the name pointed at by the end of the turn. The directory now has an unpredictable name, is created fresh, and is read through a handle taken when it was created; the prompt no longer touches disk.
+- The temp-file sweep no longer follows a symlink in a user's temp directory. A task could leave a link to a directory there, and the daemon then deleted every file older than the retention window in the directory it named; stale links are now removed and never followed.
+- On the Claude Code brains, a task can no longer leave Claude Code project settings behind for later tasks. A `.claude/settings.json`, `.mcp.json` or `CLAUDE.md` written into a user's task directory used to apply to every later task of that user, and on deployments without the sandbox to every user's tasks; project settings are now ignored, and the settings that switch off commit and PR attribution travel with each task's own read-only files. One side effect: `istota repl` started inside a repository no longer loads that repository's `CLAUDE.md` on its own, so ask for it to be read if you rely on it.
 - With the credential broker enabled, a host-side skill such as `browse interact --fill-credential` now honours the credential's grant: it needs an entry granted to the task when it started, so an ungranted entry, a room the grant does not cover, or a scheduled task without scheduled use is refused. A task may still fill an entry it created itself with `istota-credential new`. Before, grants bound only the proxy's header substitution.
 
 - `enforce_reveal` now takes effect only with the credential broker enabled, and the daemon warns at startup when it is set without it. Enforcement without the broker refused every git and `gh`/`glab` call.

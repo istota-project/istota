@@ -81,10 +81,11 @@ def test_compatibility_does_not_bypass_channel_read_guards(migrated, unsafe):
     assert secret.read_text() == "other room"
 
 
-def test_missing_mount_fails_partial(migrated):
+def test_missing_mount_refuses_so_the_deploy_retries(migrated):
+    # A partial counts as deployed (ISSUE-588); an outage must not.
     config, old, new = migrated
     config.workspace_path = config.workspace_path / "absent"
-    assert room_relocate.reconcile_mount(config) == 2
+    assert room_relocate.reconcile_mount(config) == 1
     assert not config.workspace_path.exists()
 
 
@@ -290,3 +291,212 @@ def test_rclone_fallback_requires_a_missing_file(migrated, returncode, expected)
     ]) as command:
         assert storage.read_channel_memory(config, new) == expected
     assert command.call_count == (1 if returncode == 1 else 2)
+
+
+def test_existing_vector_index_does_not_refuse_the_sweep(migrated, monkeypatch):
+    # The inventory reads table_info on every table, a vec0 one included, so
+    # the sweep's own connection needs the extension the database half loads.
+    sqlite_vec = pytest.importorskip("sqlite_vec")
+    monkeypatch.setattr("istota.memory.search._vec_available", None)
+    config, old, new = migrated
+    with db.get_db(config.db_path) as conn:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.execute("CREATE VIRTUAL TABLE memory_chunks_vec USING vec0(chunk_id INTEGER PRIMARY KEY, embedding FLOAT[384])")
+    put(config, f"Channels/{old}/CHANNEL.md", "remember this")
+    assert room_relocate.reconcile_mount(config) == 0
+    assert (config.workspace_path / "Channels" / new / "CHANNEL.md").read_text() == "remember this"
+
+
+DAY = "memories/2026-10-01.md"
+
+
+def _backups(config):
+    root = config.workspace_path / "Backups" / "room-token-migration"
+    # Drop the date directory: the sweep stamps today's date, the test does not.
+    return {p.relative_to(root).parts[1:]: p.read_text() for p in root.rglob("*.md")}
+
+
+def test_mint_day_dated_memory_merges_older_content_first(migrated):
+    """ISSUE-588: a phone room's alias and its minted room both wrote today."""
+    config, old, new = migrated
+    alias = put(config, f"Channels/{old}/{DAY}", "before the mint\n")
+    target = put(config, f"Channels/{new}/{DAY}", "after the mint\n")
+    assert room_relocate.reconcile_mount(config) == 0
+    assert target.read_text() == "before the mint\n\nafter the mint\n"
+    assert not alias.exists()
+    assert _backups(config) == {
+        ("Channels", old, "memories", "2026-10-01.md"): "before the mint\n",
+        ("Channels", new, "before", old, "memories", "2026-10-01.md"): "after the mint\n",
+    }
+    assert room_relocate.reconcile_mount(config) == 0
+    assert target.read_text() == "before the mint\n\nafter the mint\n"
+
+
+def test_dated_memory_merge_resumes_after_the_write(migrated):
+    config, old, new = migrated
+    alias = put(config, f"Channels/{old}/{DAY}", "before\n")
+    target = put(config, f"Channels/{new}/{DAY}", "before\n\nafter\n")
+    assert room_relocate.reconcile_mount(config) == 0
+    assert target.read_text() == "before\n\nafter\n"
+    assert not alias.exists()
+
+
+def test_alias_text_that_only_prefixes_the_target_is_still_merged(migrated):
+    config, old, new = migrated
+    alias = put(config, f"Channels/{old}/{DAY}", "- Discussed the launch\n")
+    target = put(config, f"Channels/{new}/{DAY}", "- Discussed the launch date\n")
+    assert room_relocate.reconcile_mount(config) == 0
+    assert target.read_text() == "- Discussed the launch\n\n- Discussed the launch date\n"
+    assert not alias.exists()
+    assert len(_backups(config)) == 2
+
+
+def test_dated_memory_merge_that_cannot_write_keeps_both(migrated):
+    config, old, new = migrated
+    alias = put(config, f"Channels/{old}/{DAY}", "before\n")
+    target = put(config, f"Channels/{new}/{DAY}", "after\n")
+    with patch("istota.room_mount_reconcile.storage.write_regular_file", return_value=False):
+        assert room_relocate.reconcile_mount(config) == 2
+    assert alias.read_text() == "before\n"
+    assert target.read_text() == "after\n"
+
+
+def test_dated_memory_dry_run_writes_nothing(migrated):
+    config, old, new = migrated
+    alias = put(config, f"Channels/{old}/{DAY}", "before\n")
+    target = put(config, f"Channels/{new}/{DAY}", "after\n")
+    assert room_relocate.reconcile_mount(config, dry_run=True) == 0
+    assert alias.read_text() == "before\n"
+    assert target.read_text() == "after\n"
+    assert not (config.workspace_path / "Backups").exists()
+
+
+@pytest.mark.parametrize("name", [
+    "memories/notes.md", "memories/2026-02-30.md", "memories/2026-10-01.txt",
+    "2026-10-01.md", "memories/x/2026-10-01.md",
+])
+def test_other_same_name_collisions_still_refuse(migrated, name):
+    config, old, new = migrated
+    alias = put(config, f"Channels/{old}/{name}", "before\n")
+    target = put(config, f"Channels/{new}/{name}", "after\n")
+    assert room_relocate.reconcile_mount(config) == 2
+    assert alias.read_text() == "before\n"
+    assert target.read_text() == "after\n"
+    assert not (config.workspace_path / "Backups").exists()
+
+
+class FakeDav:
+    """Just enough of a WebDAV server for the merge: files and collections."""
+
+    def __init__(self):
+        self.files: dict[str, bytes] = {}
+        self.dirs: set[str] = {"/", "/Channels"}
+
+    def put_file(self, path, text):
+        parts = path.strip("/").split("/")
+        for i in range(1, len(parts)):
+            self.dirs.add("/" + "/".join(parts[:i]))
+        self.files[path] = text.encode()
+
+    def etag(self, path):
+        return str(len(self.files[path])) + "-" + str(sum(self.files[path]))
+
+    def stat(self, config, path):
+        from istota.nextcloud._http import OcsError
+        if path in self.dirs:
+            return {"path": path, "is_dir": True, "size": 0, "etag": "d"}
+        if path in self.files:
+            return {"path": path, "is_dir": False, "size": len(self.files[path]), "etag": self.etag(path)}
+        raise OcsError("missing", 404, None, path)
+
+    def list_dir(self, config, path):
+        names = {p[len(path) + 1:].split("/")[0] for p in [*self.files, *self.dirs]
+                 if p.startswith(path + "/")}
+        return [{"name": n, "path": f"{path}/{n}"} for n in sorted(names)]
+
+    def request(self, config, method, url, *, content=None, headers=None, **_):
+        from types import SimpleNamespace
+        from istota.nextcloud._http import OcsError
+        headers = headers or {}
+        if method == "GET":
+            if url not in self.files:
+                raise OcsError("missing", 404, None, url)
+            return SimpleNamespace(content=self.files[url], status_code=200)
+        if method == "PUT":
+            match = headers.get("If-Match")
+            if match is not None and (url not in self.files or match.strip('"') != self.etag(url)):
+                raise OcsError("precondition", 412, None, url)
+            self.files[url] = content
+            return SimpleNamespace(content=b"", status_code=204)
+        if method == "DELETE":
+            if self.files.pop(url, None) is None:
+                raise OcsError("missing", 404, None, url)
+            return SimpleNamespace(content=b"", status_code=204)
+        if method == "MOVE":
+            target = headers["Destination"]
+            moved = {p: v for p, v in self.files.items() if p == url or p.startswith(url + "/")}
+            for p, v in moved.items():
+                del self.files[p]
+                self.files[target + p[len(url):]] = v
+            for d in [d for d in self.dirs if d == url or d.startswith(url + "/")]:
+                self.dirs.discard(d)
+                self.dirs.add(target + d[len(url):])
+            return SimpleNamespace(content=b"", status_code=201)
+        raise AssertionError(method)
+
+
+@pytest.fixture
+def dav_server(migrated):
+    config, old, new = migrated
+    config.nextcloud.url = "https://cloud.example.com"
+    config.nextcloud.username = "bot"
+    server = FakeDav()
+    with patch("istota.room_mount_reconcile.dav.stat", side_effect=server.stat), patch(
+        "istota.room_mount_reconcile.dav.list_dir", side_effect=server.list_dir
+    ), patch("istota.room_mount_reconcile.dav_request", side_effect=server.request), patch(
+        "istota.room_mount_reconcile.dav_files_url", side_effect=lambda config, path: path
+    ):
+        yield config, old, new, server
+
+
+def test_dav_mint_day_dated_memory_merges_older_content_first(dav_server):
+    config, old, new, server = dav_server
+    server.put_file(f"/Channels/{old}/{DAY}", "before the mint\n")
+    server.put_file(f"/Channels/{new}/{DAY}", "after the mint\n")
+    server.put_file(f"/Channels/{old}/CHANNEL.md", "notes")
+    assert room_relocate.reconcile_mount(config) == 0
+    assert server.files[f"/Channels/{new}/{DAY}"] == b"before the mint\n\nafter the mint\n"
+    assert f"/Channels/{old}/{DAY}" not in server.files
+    assert server.files[f"/Channels/{new}/CHANNEL.md"] == b"notes"
+    assert _backups(config) == {
+        ("Channels", old, "memories", "2026-10-01.md"): "before the mint\n",
+        ("Channels", new, "before", old, "memories", "2026-10-01.md"): "after the mint\n",
+    }
+    assert room_relocate.reconcile_mount(config) == 0
+
+
+def test_dav_other_collision_still_refuses(dav_server):
+    config, old, new, server = dav_server
+    server.put_file(f"/Channels/{old}/memories/notes.md", "before\n")
+    server.put_file(f"/Channels/{new}/memories/notes.md", "after\n")
+    assert room_relocate.reconcile_mount(config) == 2
+    assert server.files[f"/Channels/{old}/memories/notes.md"] == b"before\n"
+    assert server.files[f"/Channels/{new}/memories/notes.md"] == b"after\n"
+
+
+def test_dav_merge_refuses_a_target_that_changed_under_it(dav_server):
+    config, old, new, server = dav_server
+    server.put_file(f"/Channels/{old}/{DAY}", "before\n")
+    server.put_file(f"/Channels/{new}/{DAY}", "after\n")
+    real = server.request
+
+    def late_write(config, method, url, **kw):
+        if method == "PUT":
+            server.files[url] = b"a late write\n"
+        return real(config, method, url, **kw)
+
+    with patch("istota.room_mount_reconcile.dav_request", side_effect=late_write):
+        assert room_relocate.reconcile_mount(config) == 2
+    assert server.files[f"/Channels/{new}/{DAY}"] == b"a late write\n"
+    assert server.files[f"/Channels/{old}/{DAY}"] == b"before\n"

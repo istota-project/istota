@@ -64,13 +64,16 @@ def test_update_script_offline_window_and_refusals(tmp_path, rc, reason):
     calls = rig.calls()
     migrations = [i for i, c in enumerate(calls) if 'init --relocate-rooms' in c]
     assert migrations, calls
+    # A partial (exit 2) is outstanding work the next deploy resumes, not a
+    # failed deploy: failing it re-ran the offline window every tick (ISSUE-588).
+    deployed = rc == 0 or reason in ('live_tasks', 'partial')
     for unit in ('scheduler', 'web', 'webhooks'):
         assert calls.index(f'systemctl stop istota-{unit}') < migrations[0]
-        verb = 'restart' if rc == 0 or reason == 'live_tasks' else 'start'
+        verb = 'restart' if deployed else 'start'
         assert calls.index(f'systemctl {verb} istota-{unit}') > migrations[0]
-    assert (result.returncode == 0) == (rc == 0 or reason == 'live_tasks'), result.stderr
-    if rc and reason != 'live_tasks':
-        assert (rig.state / 'last-deployed-sha').read_text().strip() != target
+    assert (result.returncode == 0) == deployed, result.stderr
+    marker = (rig.state / 'last-deployed-sha').read_text().strip()
+    assert (marker == target) == deployed
 
 
 def test_update_script_stop_failure_never_migrates(tmp_path):
@@ -126,6 +129,42 @@ def test_offline_init_refusal_does_not_move_workspace(tmp_path, monkeypatch, sta
     assert old.is_dir()
     with db.get_db(config.db_path) as conn:
         assert conn.execute('SELECT token FROM rooms').fetchone()[0] == 'old-talk'
+
+
+def test_partial_sweep_raises_an_admin_alert_and_a_clean_one_closes_it(tmp_path, monkeypatch):
+    from istota.config import UserConfig
+    config = Config(db_path=tmp_path / 'state.db', workspace_path=tmp_path / 'mount',
+                    users={'alice': UserConfig(), 'bob': UserConfig()})
+    db.init_db(config.db_path)
+    with db.get_db(config.db_path) as conn:
+        db.register_room(conn, 'old-talk', 'alice', origin='talk')
+    for user in config.users:
+        (config.workspace_path / 'Users' / user / config.bot_dir_name / 'config').mkdir(parents=True)
+    channels = config.workspace_path / 'Channels'
+    (channels / 'old-talk').mkdir(parents=True)
+    conflict = channels / 'old-talk' / 'CHANNEL.md'
+    conflict.write_text('alias notes')
+    monkeypatch.setattr(cli, 'load_config', lambda path: config)
+    monkeypatch.setattr('istota.config.load_admin_users', lambda *a, **k: {'bob'})
+    args = SimpleNamespace(config=None, relocate_rooms=True)
+    assert cli.cmd_init(args) == 0
+    with db.get_db(config.db_path) as conn:
+        token = conn.execute('SELECT token FROM rooms').fetchone()[0]
+    (channels / 'old-talk').mkdir()
+    conflict.write_text('a late write')
+    (channels / token / 'CHANNEL.md').write_text('room notes')
+    assert cli.cmd_init(args) == 2
+    with db.get_db(config.db_path) as conn:
+        rows = conn.execute(
+            "SELECT user_id, state, title, params FROM notifications WHERE source='task_alert'"
+        ).fetchall()
+    assert [(r[0], r[1]) for r in rows] == [('bob', 'open')]
+    assert 'old-talk' in rows[0][3] and 'CHANNEL.md' in rows[0][3]
+    conflict.unlink()
+    assert cli.cmd_init(args) == 0
+    with db.get_db(config.db_path) as conn:
+        states = conn.execute("SELECT state FROM notifications WHERE source='task_alert'").fetchall()
+    assert [s[0] for s in states] == ['resolved']
 
 
 def test_fresh_offline_init_needs_no_workspace(tmp_path, monkeypatch):

@@ -21,6 +21,7 @@ from istota.brain import claude_code
 from istota.brain.claude_code import build_claude_cli_flags
 from istota.brain import tmux_claude
 from istota.brain.tmux_claude import (
+    _SessionDir,
     TmuxClaudeBrain,
     _CircuitBreaker,
     _TranscriptTailer,
@@ -68,6 +69,17 @@ def _write_transcript(tmp_path, records, name="t.jsonl"):
     return p
 
 
+def _session_payload(sentinel, transcript, last_msg):
+    """A Stop payload naming a copy of ``transcript`` inside the session's own
+    CLAUDE_CONFIG_DIR, the only place the brain reads one (ISSUE-587)."""
+    own = Path(sentinel).parent / "config" / "projects" / "p"
+    own.mkdir(parents=True, exist_ok=True)
+    copy = own / Path(transcript).name
+    copy.write_bytes(Path(transcript).read_bytes())
+    return json.dumps(
+        {"transcript_path": str(copy), "last_assistant_message": last_msg})
+
+
 # --------------------------------------------------------------------------
 # Stage 1/8 — shared CLI flag helper
 # --------------------------------------------------------------------------
@@ -87,6 +99,8 @@ class TestFlagHelper:
         flags = build_claude_cli_flags(req)
         assert flags == [
             "--disallowedTools", "Agent", "Workflow",
+            "--setting-sources", "user",
+            "--settings", '{"attribution": {"commit": "", "pr": ""}}',
             "--model", "claude-opus-4-8", "--effort", "high",
             "--system-prompt-file", str(sp),
         ]
@@ -505,8 +519,7 @@ class TestObservability:
         monkeypatch.setattr(brain, "_learn_transcript_path", lambda *a, **k: None)
 
         def wfc(name, sentinel, deadline, cancel_check):
-            Path(sentinel).write_text(json.dumps(
-                {"transcript_path": str(tr), "last_assistant_message": "Hi"}))
+            Path(sentinel).write_text(_session_payload(sentinel, tr, "Hi"))
             return ("done", "")
 
         monkeypatch.setattr(brain, "_wait_for_completion", wfc)
@@ -621,8 +634,7 @@ class TestOnboardingSeed:
         monkeypatch.setattr(brain, "_learn_transcript_path", lambda *a: None)
 
         def wfc(name, sentinel, deadline, cancel_check):
-            Path(sentinel).write_text(json.dumps(
-                {"transcript_path": str(tr), "last_assistant_message": "x"}))
+            Path(sentinel).write_text(_session_payload(sentinel, tr, "x"))
             return ("done", "")
 
         monkeypatch.setattr(brain, "_wait_for_completion", wfc)
@@ -674,23 +686,27 @@ class TestPromptSubmission:
     def test_turn_started_via_userpromptsubmit(self, tmp_path):
         s = tmp_path / "started.json"
         s.write_text(json.dumps({"hook_event_name": "UserPromptSubmit"}))
-        assert TmuxClaudeBrain._turn_started(s) is True
+        (tmp_path / "config").mkdir()
+        assert TmuxClaudeBrain._turn_started(_SessionDir(tmp_path)) is True
 
     def test_turn_started_via_transcript_exists(self, tmp_path):
-        tr = tmp_path / "t.jsonl"
+        (tmp_path / "config").mkdir()
+        tr = tmp_path / "config" / "t.jsonl"
         tr.write_text("{}")
         s = tmp_path / "started.json"
         s.write_text(json.dumps({"hook_event_name": "SessionStart",
                                  "transcript_path": str(tr)}))
-        assert TmuxClaudeBrain._turn_started(s) is True
+        assert TmuxClaudeBrain._turn_started(_SessionDir(tmp_path)) is True
 
     def test_turn_not_started_sessionstart_no_transcript(self, tmp_path):
         s = tmp_path / "started.json"
         s.write_text(json.dumps({"hook_event_name": "SessionStart",
                                  "transcript_path": str(tmp_path / "missing.jsonl")}))
-        assert TmuxClaudeBrain._turn_started(s) is False
+        (tmp_path / "config").mkdir()
+        assert TmuxClaudeBrain._turn_started(_SessionDir(tmp_path)) is False
         # missing sentinel → not started
-        assert TmuxClaudeBrain._turn_started(tmp_path / "nope.json") is False
+        s.unlink()
+        assert TmuxClaudeBrain._turn_started(_SessionDir(tmp_path)) is False
 
     def test_inject_submits_once_when_confirmed(self, monkeypatch, tmp_path):
         brain = TmuxClaudeBrain()
@@ -699,9 +715,10 @@ class TestPromptSubmission:
         monkeypatch.setattr(mod, "_READY_POLL_S", 0.0)
         keys = []
         monkeypatch.setattr(brain, "_tmux", lambda *a: keys.append(a) or _CP())
+        monkeypatch.setattr(brain, "_load_buffer", lambda buf, text: None)
         # Turn starts immediately after the first Enter.
         monkeypatch.setattr(brain, "_turn_started", lambda s: True)
-        brain._inject_prompt("s", tmp_path / "p.txt", tmp_path / "started.json")
+        brain._inject_prompt("s", "prompt", tmp_path / "started.json")
         enters = [a for a in keys if a[:1] == ("send-keys",) and a[-1] == "Enter"]
         assert len(enters) == 1  # exactly one Enter — no stray resend
 
@@ -715,6 +732,7 @@ class TestPromptSubmission:
         monotonic_spy(monkeypatch, mod, lambda: next(ticks, 999.0))
         keys = []
         monkeypatch.setattr(brain, "_tmux", lambda *a: keys.append(a) or _CP())
+        monkeypatch.setattr(brain, "_load_buffer", lambda buf, text: None)
         # Not started for the first two attempts, then started.
         calls = {"n": 0}
 
@@ -723,7 +741,7 @@ class TestPromptSubmission:
             return calls["n"] > 6  # a few confirm-polls fail, then succeeds
 
         monkeypatch.setattr(brain, "_turn_started", started)
-        brain._inject_prompt("s", tmp_path / "p.txt", tmp_path / "started.json")
+        brain._inject_prompt("s", "prompt", tmp_path / "started.json")
         enters = [a for a in keys if a[:1] == ("send-keys",) and a[-1] == "Enter"]
         assert len(enters) >= 2  # resent at least once
 
@@ -985,8 +1003,7 @@ class TestExecuteStreamingPaths:
         monkeypatch.setattr(brain, "_pane_pid", lambda *a, **k: 1)
 
         def wfc(name, sentinel, deadline, cancel_check):
-            Path(sentinel).write_text(json.dumps(
-                {"transcript_path": str(tr), "last_assistant_message": "done"}))
+            Path(sentinel).write_text(_session_payload(sentinel, tr, "done"))
             return ("done", "")
 
         monkeypatch.setattr(brain, "_wait_for_completion", wfc)
@@ -1038,10 +1055,13 @@ class TestExecuteStreamingPaths:
         brain = TmuxClaudeBrain()
         import istota.brain.tmux_claude as mod
         monkeypatch.setattr(mod, "_SENTINEL_POLL_S", 0.0)
+        (tmp_path / "config").mkdir()
+        tr = tmp_path / "config" / "y.jsonl"
+        tr.write_text("{}\n")
         started = tmp_path / "started.json"
-        started.write_text(json.dumps({"transcript_path": "/x/y.jsonl"}))
-        got = brain._learn_transcript_path(started, tmp_path)
-        assert str(got) == "/x/y.jsonl"
+        started.write_text(json.dumps({"transcript_path": str(tr)}))
+        got = brain._learn_transcript_path(_SessionDir(tmp_path))
+        assert got == tr.resolve()
 
     def test_build_result_trace_independent_of_tailer(self, monkeypatch, tmp_path):
         # The persisted execution_trace comes from the Stop-time parse and is
@@ -1054,9 +1074,10 @@ class TestExecuteStreamingPaths:
         ])
         brain = TmuxClaudeBrain()
         sentinel = tmp_path / "stop.json"
-        sentinel.write_text(json.dumps(
-            {"transcript_path": str(tr), "last_assistant_message": "done"}))
-        r1 = brain._build_result(sentinel, _req(tmp_path), forward_progress=True)
-        r2 = brain._build_result(sentinel, _req(tmp_path), forward_progress=False)
+        sentinel.write_text(_session_payload(sentinel, tr, "done"))
+        session_dir = _SessionDir(tmp_path)
+        r1 = brain._build_result(session_dir, _req(tmp_path), forward_progress=True)
+        r2 = brain._build_result(session_dir, _req(tmp_path), forward_progress=False)
+        assert r1.execution_trace is not None
         assert r1.execution_trace == r2.execution_trace
         assert r1.result_text == r2.result_text == "done"

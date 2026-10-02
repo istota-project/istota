@@ -53,7 +53,13 @@ output=$(systemd-run --quiet --wait --pipe --collect --uid="$service_user" \
     --property="EnvironmentFile=-/etc/${namespace}/secrets.env" \
     "$istota_bin" -c "$config_path" init --relocate-rooms 2>&1) || result=$?
 printf '%s\n' "$output"
-if [ "$result" -ne 0 ]; then
+# Exit 2 is a partial: what could move moved, the rest is re-listed by every
+# later sweep, and the CLI has raised an admin alert naming it. Failing here
+# made the cron redeploy every tick, stopping and restarting every unit each
+# time (ISSUE-588), so it counts as deployed and the next deploy retries.
+if [ "$result" -eq 2 ]; then
+    echo "WARNING: room migration left work outstanding; the next deployment retries it"
+elif [ "$result" -ne 0 ]; then
     if [ "$result" -ne 1 ] || ! grep -qx 'refusal: live_tasks' <<< "$output"; then
         exit "$result"
     fi

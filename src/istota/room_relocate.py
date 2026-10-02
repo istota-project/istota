@@ -166,6 +166,26 @@ def check_inventory(conn: sqlite3.Connection) -> set[tuple[str, str]]:
     return columns
 
 
+def load_vector_extension(conn: sqlite3.Connection) -> None:
+    """Load sqlite-vec when the database holds the vec0 index.
+
+    `check_inventory` reads `table_info` on every table, and a vec0 table
+    cannot be read without its module, so every connection that preflights
+    needs this, the mount sweep's read-only one included.
+    """
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='memory_chunks_vec'").fetchone():
+        return
+    from .memory.search import enable_vec_extension
+    # The loader opens the installed package's extension, never a DB-
+    # supplied path. Restrict extension loading again immediately.
+    conn.enable_load_extension(True)
+    try:
+        if not enable_vec_extension(conn):
+            raise MigrationRefusal("vector_extension_unavailable")
+    finally:
+        conn.enable_load_extension(False)
+
+
 def _preflight(conn: sqlite3.Connection) -> None:
     try:
         live = db.get_users_with_live_tasks(conn)
@@ -355,7 +375,16 @@ def _refusal(reason: str) -> None:
     print(f"refusal: {reason}", file=sys.stderr)
 
 
-def migrate_database(db_path: Path, *, dry_run: bool = False, list_only: bool = False) -> int:
+def _problem(problems: list[str] | None, line: str) -> None:
+    """Report outstanding work, and keep it for the caller's admin alert."""
+    print(line, file=sys.stderr)
+    if problems is not None:
+        problems.append(line)
+
+
+def migrate_database(
+    db_path: Path, *, dry_run: bool = False, list_only: bool = False, problems: list[str] | None = None,
+) -> int:
     """Migrate each legacy room atomically; a failed room remains resumable.
 
     The service units must be stopped by the caller. A writer lock closes the
@@ -376,16 +405,7 @@ def migrate_database(db_path: Path, *, dry_run: bool = False, list_only: bool = 
             conn = sqlite_util.connect(
                 path, timeout=5, busy_timeout_ms=None, foreign_keys=False, create=False,
             )
-        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='memory_chunks_vec'").fetchone():
-            from .memory.search import enable_vec_extension
-            # The loader opens the installed package's extension, never a DB-
-            # supplied path. Restrict extension loading again immediately.
-            conn.enable_load_extension(True)
-            try:
-                if not enable_vec_extension(conn):
-                    raise MigrationRefusal("vector_extension_unavailable")
-            finally:
-                conn.enable_load_extension(False)
+        load_vector_extension(conn)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("BEGIN" if dry_run or list_only else "BEGIN IMMEDIATE")
         _preflight(conn)
@@ -406,24 +426,66 @@ def migrate_database(db_path: Path, *, dry_run: bool = False, list_only: bool = 
             except Exception as exc:
                 conn.rollback()
                 failures += 1
-                print(f"failed: {old}: {exc}", file=sys.stderr)
+                _problem(problems, f"failed: {old}: {exc}")
                 continue
             moved += 1
             print(f"migrated: {old} -> {new}")
         print(f"database: {moved} migrated, {len(rooms) - len(legacy)} already-migrated, {failures} failed")
         return EXIT_PARTIAL if failures else EXIT_OK
     except Exception as exc:
+        if moved or failures:
+            _problem(problems, f"refusal: {exc}")
+            return EXIT_PARTIAL
         _refusal(str(exc))
-        return EXIT_PARTIAL if moved or failures else EXIT_REFUSED
+        return EXIT_REFUSED
     finally:
         if conn is not None:
             conn.close()
 
 
-def reconcile_mount(config, *, dry_run: bool = False, list_only: bool = False) -> int:
+def reconcile_mount(
+    config, *, dry_run: bool = False, list_only: bool = False, problems: list[str] | None = None,
+) -> int:
     """The resumable filesystem half, driven only by committed mappings."""
     from .room_mount_reconcile import reconcile
-    return reconcile(config, dry_run=dry_run or list_only)
+    return reconcile(config, dry_run=dry_run or list_only, problems=problems)
+
+
+MIGRATION_ALERT_TITLE = "Room migration left work outstanding"
+
+
+def record_outcome(config, result: int, problems: list[str]) -> None:
+    """Tell admins about a partial in the bell; a clean run closes the notice.
+
+    A partial no longer fails the deploy (ISSUE-588), so the update log is no
+    longer read for it. Written, never pushed: this runs from a one-shot CLI in
+    the offline window, with every service stopped. Never raises.
+    """
+    from .notification_resolvers import task_alert  # noqa: PLC0415
+    from .notification_store import resolve_notification  # noqa: PLC0415
+
+    if result not in (EXIT_OK, EXIT_PARTIAL):
+        return
+    key = task_alert.room_migration_key()
+    # The panel renders `messages` in place of the body, so the lead goes in it.
+    cap = task_alert.MAX_DEFERRED_ALERTS_PER_TASK - 2
+    messages = ["The next deploy retries these; each names a room and what it could not move.", *problems[:cap]]
+    if len(problems) > cap:
+        messages.append(f"…and {len(problems) - cap} more in the update log")
+    try:
+        readers = task_alert.admin_readers(config)
+        with db.get_db(config.db_path) as conn:
+            for user_id in readers:
+                if result == EXIT_OK:
+                    resolve_notification(conn, user_id, task_alert.SOURCE, key, by="room_migration")
+                    continue
+                task_alert.write(
+                    conn, user_id, dedup_key=key, title=MIGRATION_ALERT_TITLE,
+                    body=messages[0],
+                    params={"messages": messages},
+                )
+    except Exception as exc:
+        print(f"warning: could not record the migration alert: {exc}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:

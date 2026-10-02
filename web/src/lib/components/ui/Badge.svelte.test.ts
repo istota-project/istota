@@ -27,6 +27,14 @@ describe('Badge', () => {
     },
   );
 
+  it('is the default size unless asked to be small', () => {
+    const { container } = render(Badge, { children: text('x') });
+    expect(container.querySelector('.badge-sm')).toBeNull();
+    cleanup();
+    const small = render(Badge, { size: 'sm', children: text('x') });
+    expect(small.container.querySelector('.badge.badge-sm')).toBeTruthy();
+  });
+
   it('keeps `partial` off the severity ramp as its own variant', () => {
     // "Series incomplete" is part-done, not late. Giving it a severity would
     // rank it against overdue, which is the distinction the purple carries.
