@@ -12,7 +12,7 @@ from pathlib import Path
 import tomli
 
 from . import db
-from .skill_host_paths import owner_path_parts
+from istota.sandbox.host_paths import owner_path_parts
 from .storage import OWNER_FILE_MAX_BYTES, get_user_scripts_path, read_owner_text
 
 # The fence markers (ISSUE-386), and this module is why `toml_fence` states

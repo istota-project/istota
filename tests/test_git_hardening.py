@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from istota.git_hardening import (
+from istota.sandbox.git_hardening import (
     GIT_HARDENING,
     GIT_SUBPROCESS_ENV,
     GIT_SUBPROCESS_ENV_UNSET,
@@ -472,6 +472,10 @@ class TestTheOverlayIsStatedOnce:
         assert len(self._names_stated_as_code(kwargs)) == 2
         assert self._names_stated_as_code(prose) == []
 
+    def test_every_allowlisted_path_exists(self):
+        src = Path(__file__).resolve().parents[1] / "src" / "istota"
+        assert (src / "sandbox" / "git_hardening.py").is_file()
+
     def test_no_module_restates_the_overlay(self):
         src = Path(__file__).resolve().parents[1] / "src" / "istota"
         offenders = {}
@@ -481,5 +485,5 @@ class TestTheOverlayIsStatedOnce:
                 offenders[path.relative_to(src).as_posix()] = hits
 
         assert offenders == {
-            "git_hardening.py": sorted(EXPECTED_ENV),
+            "sandbox/git_hardening.py": sorted(EXPECTED_ENV),
         }, f"a second copy of the git environment overlay: {offenders}"

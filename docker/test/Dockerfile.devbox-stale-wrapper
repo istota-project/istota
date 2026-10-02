@@ -12,7 +12,7 @@
 #
 # So this one perturbs the copy instead of removing it. The file is present,
 # readable, and still a working Python wrapper — only its bytes differ from
-# `src/istota/forge_cli.py`.
+# `src/istota/sandbox/forge_cli.py`.
 #
 # Usage:
 #

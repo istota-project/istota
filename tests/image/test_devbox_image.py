@@ -15,7 +15,7 @@ What it asserts is the properties nothing else can see at image level:
     *textually*; this asserts the two binaries agree, which is the claim the
     textual test is a proxy for.
   * `docker/devbox/lib/istota_forge_cli.py` in the image is byte-identical to
-    `src/istota/forge_cli.py` in the repo. That is the property
+    `src/istota/sandbox/forge_cli.py` in the repo. That is the property
     `scripts/sync-devbox-lib.sh` exists to maintain, and it is currently checked
     by nothing at image level — a stale copy means the devbox enforces a
     different deny policy than the sandbox does, silently. The same claim now
@@ -54,7 +54,7 @@ pytestmark = pytest.mark.image
 
 FORGE_LIB = "/usr/local/lib/istota_forge"
 WRAPPER_IN_IMAGE = f"{FORGE_LIB}/istota_forge_cli.py"
-SOURCE_OF_TRUTH = REPO / "src" / "istota" / "forge_cli.py"
+SOURCE_OF_TRUTH = REPO / "src" / "istota" / "sandbox" / "forge_cli.py"
 
 EXEC_LIB = "/usr/local/lib/istota_devbox_exec"
 EXEC_PROTOCOL_IN_IMAGE = f"{EXEC_LIB}/istota_devbox_exec_protocol.py"
@@ -142,12 +142,12 @@ class TestTheWrapperCopyIsInSync:
 
         assert actual == expected, (
             "docker/devbox/lib/istota_forge_cli.py has drifted from "
-            "src/istota/forge_cli.py; run scripts/sync-devbox-lib.sh"
+            "src/istota/sandbox/forge_cli.py; run scripts/sync-devbox-lib.sh"
         )
 
     # The "is the *repo* copy in sync" half deliberately lives elsewhere:
     # `tests/test_forge_cli.py` already asserts
-    # src/istota/forge_cli.py == docker/devbox/lib/istota_forge_cli.py, in the
+    # src/istota/sandbox/forge_cli.py == docker/devbox/lib/istota_forge_cli.py, in the
     # default suite, with no Docker at all. A copy of it here would sit behind
     # the `image` marker and a Docker daemon, so it would run far less often
     # and could only fail in a state that cheaper test had already caught.

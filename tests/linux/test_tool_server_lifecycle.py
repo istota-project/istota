@@ -28,7 +28,8 @@ from pathlib import Path
 
 import pytest
 
-from istota import db, task_cgroup
+from istota import db
+from istota.sandbox import cgroup as task_cgroup
 from istota.config import SecurityConfig
 from istota.executor import SandboxProfile, _bwrap_available, build_bwrap_cmd
 from istota.session.tools import hello_payload, start_tool_server

@@ -1,6 +1,6 @@
 """The native brain's tool server: one per task attempt, inside the sandbox.
 
-``python -m istota.tool_server --fd N``. The daemon spawns it once through
+``python -m istota.sandbox.tool_server --fd N``. The daemon spawns it once through
 ``build_bwrap_cmd(..., profile=NATIVE)``, places it in the task cgroup from
 ``preexec_fn``, and talks to it over the inherited socketpair end on fd ``N``.
 It builds one ``ToolEnv`` from the ``hello`` frame, binds the six core tools to
@@ -52,7 +52,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from istota import tool_server_protocol as proto
+from istota.sandbox import tool_server_protocol as proto
 
 # Set on this process by `build_bwrap_cmd`'s bridge wrapper, needed by the
 # children this process forks. `NO_PROXY=` is set to empty on purpose there, so
@@ -346,7 +346,7 @@ def _error(text: str):
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="istota.tool_server", add_help=True)
+    parser = argparse.ArgumentParser(prog="istota.sandbox.tool_server", add_help=True)
     parser.add_argument(
         "--fd",
         type=int,

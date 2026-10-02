@@ -34,9 +34,11 @@ from pathlib import Path
 
 import pytest
 
-from istota import credential_shim, executor, secrets_store, secrets_vault, task_env
+from istota import executor, secrets_store, secrets_vault
+from istota.sandbox import credential_shim
+from istota.sandbox import task_env
 from istota.config import Config, DevboxConfig, SecurityConfig
-from istota.skill_proxy import SkillProxy
+from istota.sandbox.skill_proxy import SkillProxy
 
 #: Distinct enough that a sweep over two whole environment dicts means
 #: something. Every one of these is a *value*; the names beside them are
@@ -180,7 +182,7 @@ class TestVaultCredential:
             captured.update(env or {})
             return _Result()
 
-        monkeypatch.setattr("istota.skill_proxy.subprocess.run", _fake_run)
+        monkeypatch.setattr("istota.sandbox.skill_proxy.subprocess.run", _fake_run)
         with proxy(sock_path, allowed_skills=frozenset({"email"})):
             request(sock_path, {"skill": "email", "args": ["send"]})
 
@@ -197,7 +199,7 @@ class TestTheFetchLog:
     def test_an_injection_logs_at_info_and_a_read_at_warning(
         self, sock_path, caplog,
     ):
-        with caplog.at_level(logging.INFO, logger="istota.skill_proxy"):
+        with caplog.at_level(logging.INFO, logger="istota.sandbox.skill_proxy"):
             with proxy(sock_path):
                 request(sock_path, {
                     "type": "vault_credential",
@@ -218,7 +220,7 @@ class TestTheFetchLog:
         """The direction that does not under-report: `mode` is a claim by
         whoever holds the socket, so an absent or invented one must not be able
         to buy the quieter level."""
-        with caplog.at_level(logging.INFO, logger="istota.skill_proxy"):
+        with caplog.at_level(logging.INFO, logger="istota.sandbox.skill_proxy"):
             with proxy(sock_path):
                 request(sock_path, {
                     "type": "vault_credential",
@@ -239,7 +241,7 @@ class TestTheFetchLog:
         )
 
     def test_no_value_reaches_any_log_record(self, sock_path, caplog):
-        with caplog.at_level(logging.DEBUG, logger="istota.skill_proxy"):
+        with caplog.at_level(logging.DEBUG, logger="istota.sandbox.skill_proxy"):
             with proxy(sock_path):
                 for name in VAULT:
                     request(sock_path, {
@@ -261,7 +263,7 @@ class TestTheFetchLog:
         process in the sandbox can speak to — so an unflattened one could forge
         a record in the daemon's own log."""
         hostile = "a\nproxy_rejected task_id=0 forged=yes " + "b" * 200
-        with caplog.at_level(logging.INFO, logger="istota.skill_proxy"):
+        with caplog.at_level(logging.INFO, logger="istota.sandbox.skill_proxy"):
             with proxy(sock_path):
                 reply = request(
                     sock_path,
@@ -375,7 +377,7 @@ class TestTheFetchCap:
         pass a budget of one."""
         client_count = 16
         # Exercise the credential cap without overflowing the listen backlog.
-        monkeypatch.setattr("istota.skill_proxy.LISTEN_BACKLOG", client_count)
+        monkeypatch.setattr("istota.sandbox.skill_proxy.LISTEN_BACKLOG", client_count)
         results: list[dict] = []
         lock = threading.Lock()
 
@@ -400,7 +402,7 @@ class TestTheFetchCap:
     def test_the_cap_logs_the_count_and_the_limit_and_no_name(
         self, sock_path, caplog,
     ):
-        with caplog.at_level(logging.INFO, logger="istota.skill_proxy"):
+        with caplog.at_level(logging.INFO, logger="istota.sandbox.skill_proxy"):
             with proxy(sock_path, vault_fetch_limit=1):
                 request(sock_path, {
                     "type": "vault_credential", "name": "github_pat",
@@ -720,7 +722,7 @@ class TestTheShimGetVerb:
         assert result.stdout == VAULT["github_pat"]
 
     def test_it_is_logged_at_warning(self, sock_path, caplog):
-        with caplog.at_level(logging.INFO, logger="istota.skill_proxy"):
+        with caplog.at_level(logging.INFO, logger="istota.sandbox.skill_proxy"):
             with proxy(sock_path):
                 run_shim(sock_path, ["get", "github_pat"])
         served = [

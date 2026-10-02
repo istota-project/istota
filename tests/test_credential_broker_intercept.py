@@ -15,7 +15,7 @@ from istota import db, secrets_store
 from istota.config import Config
 from istota.credential_broker import ca, grants
 from istota.credential_broker.bindings import parse_binding
-from istota.network_proxy import NetworkProxy
+from istota.sandbox.network_proxy import NetworkProxy
 
 VALUE = b"fixture-broker-password"
 PLACEHOLDER = b"{{cred:portal}}"
@@ -406,8 +406,8 @@ def test_curl_http_through_bridge_and_native_environment(broker, tmp_path):
     import subprocess
     import sys
     import time
-    from istota.network_proxy import write_bridge_script
-    from istota.tool_server import merge_proxy_env
+    from istota.sandbox.network_proxy import write_bridge_script
+    from istota.sandbox.tool_server import merge_proxy_env
     curl = shutil.which("curl")
     assert curl, "curl is required to verify the HTTP proxy environment"
     config, _, _, _, proxy, host, received = broker

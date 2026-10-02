@@ -433,7 +433,7 @@ class TestDeferredImportCsvSourcePath(_HealthOpsReplay):
         does not happen to involve `"alice"`, which is the shape of every
         real one.
         """
-        from istota.skill_host_paths import path_under_roots
+        from istota.sandbox.host_paths import path_under_roots
         from istota.scheduler_deferred import _source_path_allowed
 
         config = Config(workspace_path=tmp_path / "mount")

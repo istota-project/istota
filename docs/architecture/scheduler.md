@@ -101,7 +101,7 @@ A shut gate logs `dispatch_admission_closed` once on the first closed tick and t
 
 ### Per-task cgroups
 
-`task_cgroup.py` puts each task's subprocesses in `<unit cgroup>/task-<id>/` with `memory.max`, `pids.max` and `cpu.max` set from `task_memory_max_mb` (2048), `task_pids_max` (512) and `task_cpu_max_percent` (200, a percentage of one core). A tree that overruns is OOM-killed inside its own group: one failed task instead of a host-wide event. `MemoryHigh=` on the unit bounds the daemon as a whole and does nothing about this case, and bwrap gives a task filesystem and network isolation with no resource isolation at all.
+`sandbox/cgroup.py` puts each task's subprocesses in `<unit cgroup>/task-<id>/` with `memory.max`, `pids.max` and `cpu.max` set from `task_memory_max_mb` (2048), `task_pids_max` (512) and `task_cpu_max_percent` (200, a percentage of one core). A tree that overruns is OOM-killed inside its own group: one failed task instead of a host-wide event. `MemoryHigh=` on the unit bounds the daemon as a whole and does nothing about this case, and bwrap gives a task filesystem and network isolation with no resource isolation at all.
 
 The directory is a **sibling** of the daemon's own leaf, not a child of it. cgroup v2 forbids a non-root cgroup from both holding processes and enabling controllers for its children, so a `task-<id>/` made inside the daemon's cgroup would be created successfully and then contain no `memory.max` — containment that never engages and never reports. `Delegate=memory pids cpu` plus `DelegateSubgroup=supervisor` on the scheduler unit is what makes the sibling shape available; `resolve_root()` walks up from `/proc/self/cgroup` to the `.service` / `.scope` component to find it.
 

@@ -33,7 +33,7 @@ outstanding hole.
 callers may not pay for that package.** Importing any ``istota.skills``
 submodule executes the package ``__init__``, which star-imports ``calendar``,
 ``email`` and ``files``: measured at ~195ms against ~31ms for
-``import istota.tool_server``, which spawns once per task attempt inside the
+``import istota.sandbox.tool_server``, which spawns once per task attempt inside the
 sandbox and reaches this module through ``session/tools/web_fetch``. That is
 the same cost ``git_hardening.py`` and ``forge_bin.py`` were lifted out of
 ``skills/`` to avoid (``.claude/rules/sandbox.md``), and a function-scope import

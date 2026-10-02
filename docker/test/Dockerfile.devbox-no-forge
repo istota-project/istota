@@ -9,7 +9,7 @@
 # **Three forge controls, not one, and that was measured rather than assumed.** The
 # file asserts three separable things: that the two images ship the same forge
 # versions, that the vendored wrapper in the image is byte-identical to
-# `src/istota/forge_cli.py`, and that `gh` and `glab` resolve on PATH to the
+# `src/istota/sandbox/forge_cli.py`, and that `gh` and `glab` resolve on PATH to the
 # wrapper rather than to a real binary. This image breaks the first, and the
 # second only in the weak sense that the file is gone rather than different.
 # It does not touch the third at all: `/usr/local/bin/gh` is a *copy* of the

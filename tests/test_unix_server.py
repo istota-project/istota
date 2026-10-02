@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
-from istota.unix_server import (
+from istota.sandbox.unix_server import (
     ACCEPT_RETRY_DELAY_S,
     MAX_ACCEPT_FAILURES,
     UnixSocketServer,
@@ -446,6 +446,16 @@ class TestAcceptFailures:
 class TestNoSecondCopy:
     """Pin: the accept-loop-with-socketpair-wake shape lives in one module."""
 
+    def test_every_allowlisted_path_exists(self):
+        if not SRC.is_dir():
+            pytest.skip(f"no source tree at {SRC}; nothing to scan")
+        for rel in (
+            "sandbox/unix_server.py",
+            "sandbox/network_proxy.py",
+            "sandbox/skill_proxy.py",
+        ):
+            assert (SRC / rel).is_file(), rel
+
     def test_only_unix_server_carries_the_accept_loop(self):
         if not SRC.is_dir():
             pytest.skip(f"no source tree at {SRC}; nothing to scan")
@@ -454,7 +464,7 @@ class TestNoSecondCopy:
             text = path.read_text(encoding="utf-8")
             if "socketpair" in text and "DefaultSelector" in text:
                 offenders.append(path.relative_to(SRC).as_posix())
-        assert offenders == ["unix_server.py"], offenders
+        assert offenders == ["sandbox/unix_server.py"], offenders
 
     def test_the_proxies_no_longer_declare_one(self):
         if not SRC.is_dir():
@@ -462,7 +472,7 @@ class TestNoSecondCopy:
         # The accept loop needs a selector, so its absence is the pin. A bare
         # `socketpair` is not: skill_proxy hands each skill invocation one as
         # its private credential channel (`_serve_credential_channel`).
-        for name in ("network_proxy.py", "skill_proxy.py"):
+        for name in ("sandbox/network_proxy.py", "sandbox/skill_proxy.py"):
             text = (SRC / name).read_text(encoding="utf-8")
             assert "DefaultSelector" not in text, name
             assert "UnixSocketServer" in text, name

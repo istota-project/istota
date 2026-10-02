@@ -64,7 +64,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from istota.lib import du
 from istota.lib import sqlite_util
-from .user_scope import is_within, paths_overlap
+from istota.sandbox.user_scope import is_within, paths_overlap
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; a runtime import is a cycle
     from .config import Config
@@ -1314,7 +1314,7 @@ def _overlaps(a: Path, b: Path) -> bool:
     written rather than case-folded: the comparison would then be wrong on
     every case-*sensitive* filesystem, which is where bubblewrap runs and
     therefore where a bind exists at all — which is also why the shared
-    :func:`~istota.user_scope.paths_overlap` it delegates to is lexical.
+    :func:`~istota.sandbox.user_scope.paths_overlap` it delegates to is lexical.
 
     Kept as a named local rather than replaced by that import at its call
     sites, because the case-folding caveat above is about *this* comparison
@@ -3745,7 +3745,7 @@ def check_credential_broker(config: "Config", probe: bool) -> list[CheckResult]:
     from .credential_broker import ca
     from .credential_broker.bindings import credential_groups, credential_name, get_entry_binding
     from .credential_broker.grants import AUTO_GRANT_DECLINED, auto_grant_marker, get_grant
-    from . import peer_process
+    from istota.sandbox import peer_process
 
     prefix = "security.credential_broker"
     if not config.security.credential_broker.enabled:
@@ -3846,7 +3846,7 @@ def check_proxy_peer_check(config: "Config", probe: bool) -> CheckResult:
     name = "security.proxy_peer_check"
     if not getattr(config.security, "skill_proxy_enabled", True):
         return CheckResult(name, SKIP, "[security] skill_proxy_enabled = false")
-    from . import peer_process
+    from istota.sandbox import peer_process
 
     if not peer_process.supported():
         return CheckResult(
@@ -4148,7 +4148,7 @@ def _resolved_forge_bin(dev, name: str) -> str:
     # The leaf, not `skills.developer` — reaching the same function through the
     # skill package costs ~190ms of import on every `load_config`, which is the
     # exact expense `probe=False` exists to avoid.
-    from .forge_bin import resolve_real_bin
+    from istota.sandbox.forge_bin import resolve_real_bin
 
     configured = dev.gh_bin_path if name == "gh" else dev.glab_bin_path
     return resolve_real_bin(configured, name)
@@ -4438,7 +4438,7 @@ def check_forge_policy(config: "Config", probe: bool) -> CheckResult:
     if dev is None:
         return CheckResult("developer.forge_policy", SKIP, reason)
     try:
-        from .forge_cli import FORGE_GITHUB, FORGE_GITLAB, unmatched_permits
+        from istota.sandbox.forge_cli import FORGE_GITHUB, FORGE_GITLAB, unmatched_permits
 
         dead = unmatched_permits(
             [FORGE_GITHUB, FORGE_GITLAB],
@@ -5132,7 +5132,7 @@ def check_web_build_current(config: "Config", probe: bool) -> CheckResult:
         return CheckResult("web.build_current", SKIP, "[web] enabled = false")
     # Function-local like every other package import in this module: nothing
     # here may land on the config-load path's import graph.
-    from .git_hardening import GIT_HARDENING
+    from istota.sandbox.git_hardening import GIT_HARDENING
     from .static_dir import resolve_static_dir
 
     version_file = Path(resolve_static_dir()) / "_app" / "version.json"

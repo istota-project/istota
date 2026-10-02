@@ -37,7 +37,7 @@ from __future__ import annotations
 import logging
 import shutil
 
-logger = logging.getLogger("istota.shell_exec")
+logger = logging.getLogger("istota.sandbox.shell_exec")
 
 # What `shell=True` resolves to on POSIX, and what we fall back to.
 POSIX_SH = "/bin/sh"

@@ -31,7 +31,7 @@ from istota.executor import (
     API_RETRY_DELAY_SECONDS,
     TRANSIENT_STATUS_CODES,
 )
-from istota import credential_shim
+from istota.sandbox import credential_shim
 from istota import db as _db
 from istota import executor
 from istota.skills import developer as developer_skill
@@ -41,7 +41,7 @@ from istota.brain import claude_code
 from tests.support.monotonic_spy import monotonic_spy
 from tests.support.sleep_spy import sleep_spy
 from istota.brain._types import BrainResult
-from istota.skill_host_paths import path_under_roots, workspace_roots
+from istota.sandbox.host_paths import path_under_roots, workspace_roots
 import json
 from pathlib import Path
 
@@ -552,7 +552,7 @@ class TestDeveloperEnvVars:
     The hook used to generate `gitlab-api` / `github-api` shell scripts whose
     bodies were a case statement built from an endpoint allowlist. Those are
     gone: the model drives the real `gh` and `glab` through the wrapper in
-    src/istota/forge_cli.py. What is asserted here is what the hook installs
+    src/istota/sandbox/forge_cli.py. What is asserted here is what the hook installs
     and what it hands back, not the contents of a generated script.
     """
 
@@ -639,7 +639,7 @@ class TestDeveloperEnvVars:
         _, user_temp = self._hook_env(config, tmp_path)
         dev_bin = user_temp / ".developer"
         canonical = (
-            Path(__file__).resolve().parent.parent / "src/istota/forge_cli.py"
+            Path(__file__).resolve().parent.parent / "src/istota/sandbox/forge_cli.py"
         ).read_bytes()
         for name in ("gh", "glab", "github-api", "gitlab-api"):
             installed = dev_bin / name
@@ -752,7 +752,7 @@ class TestDeveloperEnvVars:
     def test_policy_file_is_loadable_and_carries_the_rules(
         self, tmp_path, dev_kw, denied, allowed,
     ):
-        from istota.forge_cli import FORGE_GITHUB, denied_reason, load_policy
+        from istota.sandbox.forge_cli import FORGE_GITHUB, denied_reason, load_policy
 
         config = self._make_config(tmp_path, **dev_kw)
         _, user_temp = self._hook_env(config, tmp_path)
@@ -993,7 +993,7 @@ class TestPathPrependOrdering:
 
     def test_reserved_key_is_not_merged_into_env(self):
         """The hook loop skips it, so it cannot ride into proxy_base_env."""
-        from istota import task_env
+        from istota.sandbox import task_env
         from tests.support.drift import source_of
 
         # Reads `build_task_runtime` rather than `execute_task`: the env

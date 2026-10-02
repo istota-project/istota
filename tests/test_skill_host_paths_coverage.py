@@ -4,7 +4,7 @@ A skill CLI runs host-side: the proxy spawns it outside the sandbox with the
 daemon's whole filesystem view, precisely so it can reach the databases the
 model cannot. So any verb taking a *host* path is an arbitrary-file read or
 write unless it is scoped, and the model chooses the path.
-``src/istota/skill_host_paths.py`` holds the rule. What nothing held was the
+``src/istota/sandbox/host_paths.py`` holds the rule. What nothing held was the
 *list of places the rule has to be applied*: it lived in that module's
 docstring, was written by hand, and had gone stale — three write verbs and one
 read were outside it when this file was written, and the module still described
@@ -370,7 +370,7 @@ def test_every_path_shaped_argument_is_accounted_for():
         f"{unregistered} name a path and carry no disposition. A skill CLI "
         f"runs host-side with the daemon's filesystem view, so a host path the "
         f"model chooses is an arbitrary read or write unless it goes through "
-        f"istota.skill_host_paths. Declare it with `_hostpath.host_path`, or "
+        f"istota.sandbox.host_paths. Declare it with `_hostpath.host_path`, or "
         f"register why it needs no scoping."
     )
 
@@ -551,7 +551,7 @@ def test_a_scoped_entry_names_a_guard_that_calls_its_helper(key):
     assert entry.guard and entry.helper, key
     source = source_of(_resolve(entry.guard))
     # The open paren is load-bearing: a bare name match is satisfied by the
-    # function-scope `from istota.skill_host_paths import resolve_host_path`
+    # function-scope `from istota.sandbox.host_paths import resolve_host_path`
     # several of these guards carry, so deleting the call and leaving the
     # import would keep this green. Measured — it did.
     assert f"{entry.helper}(" in source, (

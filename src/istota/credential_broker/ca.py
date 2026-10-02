@@ -46,7 +46,7 @@ class Authority:
 
 def state_directory(config) -> Path:
     """Refuse a state location covered by any configured sandbox bind."""
-    from ..sandbox_plan import sandbox_bound_reason
+    from istota.sandbox.plan import sandbox_bound_reason
 
     if not config.db_path:
         raise ValueError("credential broker requires a daemon database directory")

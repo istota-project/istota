@@ -1100,7 +1100,7 @@ istota_developer_github_default_owner: ""  # Default org/user for short repo nam
 istota_developer_github_reviewer: ""  # GitHub username to request as PR reviewer
 
 # Forge CLI wrapper policy. The real `gh` and `glab` run behind
-# src/istota/forge_cli.py, which checks the argv against a baseline policy the
+# src/istota/sandbox/forge_cli.py, which checks the argv against a baseline policy the
 # code owns. These two knobs extend and puncture it. Entries are written as
 # they would be typed — "gh repo delete" — and an entry with no binary name
 # applies to both CLIs.

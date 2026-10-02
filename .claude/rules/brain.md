@@ -227,8 +227,8 @@ Native, gated on `turn_budget_nudge`, a `max_turns`, and tools.
 
 ### The tool server (native-only)
 
-One `python -m istota.tool_server` per attempt via `build_bwrap_cmd(..., profile=NATIVE)`, in the task cgroup, pid via `on_pid`; six proxy tools (`session/tools/remote.py`); `WebFetch` stays in the daemon. Replaced a Python path policy and a per-call Bash namespace carrying `.credentials.json` (ISSUE-389).
-- Transport: inherited socketpair (`pass_fds`), nothing nameable; `close_fds` keeps it from Bash. Protocol `tool_server_protocol.py`.
+One `python -m istota.sandbox.tool_server` per attempt via `build_bwrap_cmd(..., profile=NATIVE)`, in the task cgroup, pid via `on_pid`; six proxy tools (`session/tools/remote.py`); `WebFetch` stays in the daemon. Replaced a Python path policy and a per-call Bash namespace carrying `.credentials.json` (ISSUE-389).
+- Transport: inherited socketpair (`pass_fds`), nothing nameable; `close_fds` keeps it from Bash. Protocol `sandbox/tool_server_protocol.py`.
 - A dead server, `fatal` or bad frame fails the attempt naming the tool server, checked before `timed_out`/`aborted` (else "Cancelled by user").
 - No enable/disable flag (two paths forever). Without bwrap it runs unwrapped with `ToolEnv` as before. Text-only spawns nothing.
 

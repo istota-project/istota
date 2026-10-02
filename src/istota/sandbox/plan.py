@@ -43,8 +43,8 @@ from . import credential_shim
 from .user_scope import is_within, scoped_user_dir
 
 if TYPE_CHECKING:
-    from . import db
-    from .config import Config
+    from istota import db
+    from istota.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +229,7 @@ def plan_masks(config: Config, protected: list[Path]) -> tuple[list[Path], list[
     standalone layout puts db_path beside the workspace, so this is reachable
     by configuration rather than only by mistake.
     """
-    from . import executor
+    from istota import executor
 
     masks: list[Path] = []
     refused: list[Path] = []
@@ -390,8 +390,8 @@ def build_mount_plan(
     task on macOS or the standalone install turns the first into a directory
     nothing will mount and the second into the same two lines forever.
     """
-    from . import config as istota_config
-    from . import executor
+    from istota import config as istota_config
+    from istota import executor
 
     # The workspace bind is `{temp_dir}/{user_id}`, and `get_user_temp_dir` is a
     # plain join — deliberately, because `.claude/rules/executor.md` records the
@@ -988,7 +988,7 @@ def render_bwrap_argv(
     ``--die-with-parent`` / ``--chdir`` / ``--`` tail plus the network bridge
     wrapper are the process's lifecycle rather than its filesystem.
     """
-    from . import executor
+    from istota import executor
 
     args: list[str] = ["bwrap"]
 
@@ -1339,7 +1339,7 @@ def config_sandbox_bound_roots(config: "Config") -> list[tuple[Path, str]]:
     )
 
     try:
-        from . import executor  # noqa: PLC0415
+        from istota import executor  # noqa: PLC0415
 
         istota_src, venv_path = executor._source_and_venv_paths()
         base_pythons = executor.python_base_prefix_binds()

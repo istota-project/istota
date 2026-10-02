@@ -52,7 +52,7 @@ _EXECUTOR = _REPO / "src" / "istota" / "executor.py"
 # `execute_task` into `task_env` and this scan silently found nothing:
 # the sibling "has a reader" guard then passed vacuously, which is the
 # worse half. A further extraction has to be added here or go red.
-_ENV_SOURCES = (_EXECUTOR, _REPO / "src" / "istota" / "task_env.py")
+_ENV_SOURCES = (_EXECUTOR, _REPO / "src" / "istota" / "sandbox" / "task_env.py")
 
 
 _SERVER = _REPO / "docker/devbox/scripts/istota-exec-serve"

@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from istota.session.tools import ToolEnv, hello_payload
-from istota.tool_server import build_env, merge_proxy_env
+from istota.sandbox.tool_server import build_env, merge_proxy_env
 
 
 def _hello(**kw):
@@ -180,7 +180,7 @@ class TestMergeProxyEnv:
 class TestTheServerDoesNotImportTheSkillsPackage:
     """`istota.skills.__init__` star-imports three skills; the server may not.
 
-    Measured at the time of writing: `import istota.tool_server` is ~31ms and
+    Measured at the time of writing: `import istota.sandbox.tool_server` is ~31ms and
     loads no `istota.skills` module at all, while `import istota.skills.anything`
     is ~195ms, because importing any submodule executes the package `__init__`
     and that star-imports `calendar`, `email` and `files`. The server is spawned
@@ -209,7 +209,7 @@ class TestTheServerDoesNotImportTheSkillsPackage:
     #: imported the module would not reach `make_web_fetch_tool`'s body.
     PROBE = (
         "import sys\n"
-        "import istota.tool_server\n"
+        "import istota.sandbox.tool_server\n"
         "from pathlib import Path\n"
         "from istota.session.tools import ToolEnv, WebFetchPolicy, build_default_tools\n"
         "env = ToolEnv(cwd=Path('.'), web_fetch=WebFetchPolicy(enabled=True))\n"

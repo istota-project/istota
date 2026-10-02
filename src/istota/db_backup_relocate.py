@@ -25,7 +25,7 @@ from typing import Callable
 
 from .db_backup import backup_destination
 from .db_restore import _DAEMON_LOCK_PATH
-from .user_scope import is_within
+from istota.sandbox.user_scope import is_within
 
 LEGACY_DIR_NAME = "istota-db-backups"
 DESTINATION_PARTS = ("Backups", "db", "snapshots")

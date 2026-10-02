@@ -43,8 +43,8 @@ from typing import TYPE_CHECKING
 from .claude_runtime_env import without_claude_runtime_env
 
 if TYPE_CHECKING:
-    from . import db
-    from .config import Config
+    from istota import db
+    from istota.config import Config
     from .network_proxy import NetworkProxy
     from .skill_proxy import SkillProxy
 
@@ -92,8 +92,8 @@ def _vault_credentials(config: Config, user_id: str) -> dict[str, str]:
     if not config.db_path or not user_id:
         return {}
     try:
-        from . import secrets_store
-        from .secrets_vault import VAULT_ENTRY_SERVICE, vault_isolation_refusal
+        from istota import secrets_store
+        from istota.secrets_vault import VAULT_ENTRY_SERVICE, vault_isolation_refusal
 
         if vault_isolation_refusal(config, user_id):
             return {}
@@ -205,7 +205,7 @@ def build_task_runtime(
     ``resolve_sandbox_cache_dir`` raise, as the inline block did. Nothing here
     is entered, started or bound, so a raise leaks nothing.
     """
-    from .executor import (
+    from istota.executor import (
         HOOK_PATH_PREPEND_KEY,
         SANDBOX_CACHE_NPM,
         SANDBOX_CACHE_UV,
@@ -298,7 +298,7 @@ def build_task_runtime(
         )
 
     # Declarative env vars from skill manifests
-    from .skills._env import (
+    from istota.skills._env import (
         EnvContext,
         build_identity_env,
         build_skill_env,
@@ -459,10 +459,10 @@ def build_task_runtime(
         # `files` withheld a skill CLI's roots drop the user's workspace, as the
         # sandbox's binds do. Only here, never in the model's env.
         if withheld_scopes:
-            from .skill_host_paths import WITHHELD_SCOPES_VAR
+            from istota.sandbox.host_paths import WITHHELD_SCOPES_VAR
             proxy_base_env[WITHHELD_SCOPES_VAR] = ",".join(sorted(withheld_scopes))
         if group_ids:
-            from .skill_host_paths import TASK_GROUPS_VAR
+            from istota.sandbox.host_paths import TASK_GROUPS_VAR
             proxy_base_env[TASK_GROUPS_VAR] = ",".join(sorted(group_ids))
         # One skill CLI is itself a model caller, and the strip above left it
         # unauthenticated: `code_review` spawns the `claude` binary per
@@ -592,9 +592,9 @@ def build_task_runtime(
         env.pop("GITHUB_TOKEN", None)
 
     if config.db_path and Path(config.db_path).is_file():
-        from . import db
-        from .credential_broker.bindings import sync_forge_bindings
-        from .credential_broker.grants import ensure_credential_grants
+        from istota import db
+        from istota.credential_broker.bindings import sync_forge_bindings
+        from istota.credential_broker.grants import ensure_credential_grants
         # A caller holding a write transaction (execute_task_interactive) would
         # deadlock a second connection's BEGIN IMMEDIATE, so join it instead.
         with db.get_db_if_present(config.db_path, conn) as c:
@@ -707,12 +707,12 @@ def build_task_runtime(
 
     sandbox_env = {}
     if config.security.credential_broker.enabled:
-        from .credential_broker.ca import load_or_create_ca, state_directory, write_trust_bundle
+        from istota.credential_broker.ca import load_or_create_ca, state_directory, write_trust_bundle
 
         authority = load_or_create_ca(state_directory(config))
         sandbox_env = write_trust_bundle(authority, control_dir / "trust")
         if _net_proxy_ctx is not None:
-            from .credential_broker.intercept import Broker
+            from istota.credential_broker.intercept import Broker
             _net_proxy_ctx.broker = Broker(config, task.id, task.user_id, authority)
         else:
             logger.warning("Credential broker enabled without a network proxy: placeholders cannot authenticate")

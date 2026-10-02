@@ -34,7 +34,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from istota import task_cgroup
+from istota.sandbox import cgroup as task_cgroup
 from istota.brain._types import BrainRequest
 from istota.brain.claude_code import ClaudeCodeBrain
 
@@ -137,7 +137,7 @@ class TestPlacement:
         so the callable swallows its own errors.
         """
         with task_cgroup.placement(cgroup) as preexec:
-            with patch("istota.task_cgroup.os.write", side_effect=OSError("nope")):
+            with patch("istota.sandbox.cgroup.os.write", side_effect=OSError("nope")):
                 preexec()  # must not raise
 
     def test_the_descriptor_is_closed_when_the_block_exits(self, cgroup):
@@ -151,8 +151,8 @@ class TestPlacement:
             opened.append(fd)
             return fd
 
-        with patch("istota.task_cgroup.os.open", side_effect=_open), patch(
-            "istota.task_cgroup.os.close", side_effect=lambda fd: (closed.append(fd), real_close(fd))[1]
+        with patch("istota.sandbox.cgroup.os.open", side_effect=_open), patch(
+            "istota.sandbox.cgroup.os.close", side_effect=lambda fd: (closed.append(fd), real_close(fd))[1]
         ):
             with task_cgroup.placement(cgroup) as preexec:
                 assert preexec is not None
@@ -164,7 +164,7 @@ class TestPlacement:
         real_close = os.close
 
         with patch(
-            "istota.task_cgroup.os.close",
+            "istota.sandbox.cgroup.os.close",
             side_effect=lambda fd: (closed.append(fd), real_close(fd))[1],
         ):
             with pytest.raises(RuntimeError):
@@ -363,7 +363,7 @@ class TestClaudeCodeBrainPlacesBeforeExec:
         by luck, which would let this pass with the guard removed.
         """
         req = _req(tmp_path, task_cgroup=tmp_path / "gone")
-        with patch("istota.task_cgroup.verify_placement") as verify, caplog.at_level(
+        with patch("istota.sandbox.cgroup.verify_placement") as verify, caplog.at_level(
             "WARNING"
         ):
             ClaudeCodeBrain()._execute_streaming_once(["true"], req)
@@ -376,7 +376,7 @@ class TestClaudeCodeBrainPlacesBeforeExec:
         spawn checks its membership back, and dropping the call would otherwise
         leave the suite green."""
         req = _req(tmp_path, task_cgroup=cgroup)
-        with patch("istota.task_cgroup.verify_placement") as verify:
+        with patch("istota.sandbox.cgroup.verify_placement") as verify:
             ClaudeCodeBrain()._execute_streaming_once(["true"], req)
 
         verify.assert_called_once()

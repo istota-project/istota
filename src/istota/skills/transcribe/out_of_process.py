@@ -43,7 +43,7 @@ import os
 import subprocess
 import sys
 
-from istota.process_group import kill_group_if_live
+from istota.sandbox.process_group import kill_group_if_live
 
 __all__ = ["ocr_image_out_of_process", "child_argv", "DEFAULT_TIMEOUT_SECONDS"]
 

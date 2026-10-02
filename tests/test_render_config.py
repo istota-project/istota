@@ -1793,7 +1793,7 @@ class TestTheWebServiceCanReachTheModel:
         # Imported inside the test: this module otherwise pulls in only
         # `istota.config`, and `executor` carries a much larger graph.
         from istota import executor
-        from istota.claude_runtime_env import CLAUDE_RUNTIME_ENV_VARS
+        from istota.sandbox.claude_runtime_env import CLAUDE_RUNTIME_ENV_VARS
 
         return set(executor._MODEL_CLI_ENDPOINT_VARS) | set(CLAUDE_RUNTIME_ENV_VARS)
 

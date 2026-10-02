@@ -40,7 +40,7 @@ import pytest
 from istota import db
 from istota.config import SecurityConfig
 from istota.executor import SandboxProfile, _bwrap_available, build_bwrap_cmd
-from istota.network_proxy import NetworkProxy, write_bridge_script
+from istota.sandbox.network_proxy import NetworkProxy, write_bridge_script
 from istota.session.tools import hello_payload, start_tool_server
 
 from .test_sandbox_real import _can_unshare_net, _unavailable

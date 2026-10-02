@@ -1954,7 +1954,7 @@ class TestTheForgeScenarioFailureMarkers:
         """`pipefail` is on for every command the daemon runs, so a correct
         `… | head -1` makes bash exit 141. The tool annotates that one rather
         than treating it as a fault, and so must this."""
-        from istota.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE
+        from istota.sandbox.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE
 
         assert not self._failed(f"yes | head -1\ny\n[exit code: {SIGPIPE_EXIT}] {SIGPIPE_NOTE}")
 
@@ -1964,7 +1964,7 @@ class TestTheForgeScenarioFailureMarkers:
         assert self._failed("[exit code: 141]")
 
     def test_a_sigpipe_alongside_a_real_failure_is_a_failure(self):
-        from istota.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE
+        from istota.sandbox.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE
 
         text = (
             f"[exit code: {SIGPIPE_EXIT}] {SIGPIPE_NOTE}\n[command timed out after 5s]"

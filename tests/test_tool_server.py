@@ -24,10 +24,10 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import process_group
+from istota.sandbox import process_group
 from istota.session.tools import ToolEnv, hello_payload, start_tool_server
 from istota.session.tools import remote as remote_mod
-from istota import tool_server_protocol as tsp
+from istota.sandbox import tool_server_protocol as tsp
 
 pytestmark = pytest.mark.asyncio
 
@@ -569,13 +569,13 @@ class TestAnOversizedResultCostsTheCallOnly:
         server process via an env-var-free route — a tiny wrap script — because
         the constant lives in the child.
         """
-        from istota import tool_server_protocol as p
+        from istota.sandbox import tool_server_protocol as p
 
         big = tmp_path / "big.txt"
         big.write_text("x" * 4096)
 
         script = (
-            "import sys, istota.tool_server_protocol as p, istota.tool_server as t;"
+            "import sys, istota.sandbox.tool_server_protocol as p, istota.sandbox.tool_server as t;"
             "p.MAX_FRAME_BYTES = 512;"
             "sys.exit(t.main(sys.argv[1:]))"
         )
@@ -621,7 +621,7 @@ class TestAbortOrdering:
         raw = child.detach()
         os.set_inheritable(raw, True)
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "istota.tool_server", "--fd", str(raw),
+            sys.executable, "-m", "istota.sandbox.tool_server", "--fd", str(raw),
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE, pass_fds=(raw,),
         )
@@ -664,7 +664,7 @@ class TestTheWrapIsApplied:
             hello=_hello(tmp_path), sandbox_wrap=_wrap, loop_abort=asyncio.Event()
         ):
             pass
-        assert seen["cmd"][:3] == [sys.executable, "-m", "istota.tool_server"]
+        assert seen["cmd"][:3] == [sys.executable, "-m", "istota.sandbox.tool_server"]
         assert seen["cmd"][3] == "--fd"
         assert int(seen["cmd"][4]) > 2
 

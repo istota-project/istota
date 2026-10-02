@@ -12,7 +12,7 @@ from pathlib import Path
 from . import db
 from . import user_profiles
 from .build_info import version_label
-from .user_scope import is_scopable_user_id
+from istota.sandbox.user_scope import is_scopable_user_id
 from .config import load_config
 from .logging_setup import setup_logging
 from .executor import execute_task
@@ -2536,7 +2536,7 @@ def _whatsapp_attach_refusal(config) -> str | None:
             f"their own working directory. Set {culprit} to an absolute path."
         )
     try:
-        from . import sandbox_plan
+        from istota.sandbox import plan as sandbox_plan
 
         bound = sandbox_plan.sandbox_bound_reason(config, relay)
     except Exception:  # noqa: BLE001 — same reason

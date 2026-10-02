@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from istota import peer_process
+from istota.sandbox import peer_process
 from istota.devbox_peer import peer_in_devbox
 from istota.devbox_proxy_protocol import (
     ACTION_FORGE_TOKEN,
@@ -321,7 +321,7 @@ async def handle_git_credential(request: dict, ctx: DevboxProxyContext) -> str:
 async def handle_forge_token(request: dict, ctx: DevboxProxyContext) -> str:
     """Hand the in-container ``gh`` / ``glab`` wrapper its forge token.
 
-    The wrapper (``src/istota/forge_cli.py``, vendored into the image)
+    The wrapper (``src/istota/sandbox/forge_cli.py``, vendored into the image)
     sends ``{"action": "forge_token", "provider": "github"|"gitlab"}`` and
     execs the real binary with the token in its environment. There is no
     policy check here: the policy is the wrapper's, read from a root-owned

@@ -159,7 +159,7 @@ ENV PATH="/home/dev/.cargo/bin:/home/dev/.local/bin:${PATH}"
 
 # Layer 5: forge CLIs. The real `gh` and `glab` live under
 # /usr/local/lib/istota_forge/ and are reached only through the wrapper — the
-# same src/istota/forge_cli.py the sandbox uses, vendored here because Docker
+# same src/istota/sandbox/forge_cli.py the sandbox uses, vendored here because Docker
 # cannot COPY from outside its build context (scripts/sync-devbox-lib.sh keeps
 # the copy honest and a test fails when the two drift).
 #

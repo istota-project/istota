@@ -69,7 +69,7 @@ from pathlib import Path
 
 from istota import devbox_exec_client as _client
 from istota import devbox_exec_protocol as proto
-from istota.skill_host_paths import write_resolved
+from istota.sandbox.host_paths import write_resolved
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import READ, REMOTE, WRITE, host_path
 

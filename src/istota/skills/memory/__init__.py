@@ -73,7 +73,7 @@ from istota.skills._group_access import (
     group_refusal,
 )
 from istota.lib.untrusted import frame_untrusted
-from istota.user_scope import is_scopable_user_id
+from istota.sandbox.user_scope import is_scopable_user_id
 from istota.memory.curation.audit import (
     write_audit_log,
     write_group_audit_log,

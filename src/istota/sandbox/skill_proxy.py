@@ -15,11 +15,12 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
 
-from istota import peer_process, skill_client
+from istota import skill_client
+from istota.sandbox import peer_process
 from istota.secrets_vault import label_for_display
-from istota.unix_server import UnixSocketServer
+from istota.sandbox.unix_server import UnixSocketServer
 
-logger = logging.getLogger("istota.skill_proxy")
+logger = logging.getLogger("istota.sandbox.skill_proxy")
 
 #: The three paths that may ask for a shared credential, as the request
 #: declares itself: a skill CLI resolving a stamped argument, the shim
@@ -575,15 +576,15 @@ class SkillProxy:
                 )
                 reply = {"names": names}
                 if self.config is not None and self.user_id:
-                    from . import db
-                    from .credential_broker.bindings import get_binding
-                    from .credential_broker.grants import get_grant
+                    from istota import db
+                    from istota.credential_broker.bindings import get_binding
+                    from istota.credential_broker.grants import get_grant
                     with db.get_db(self.config.db_path) as database:
                         metadata = {name: get_binding(database, self.user_id, name)
                                     for name in names}
                         # Forge names are visible only when this task already
                         # has access to the corresponding deployment token.
-                        from .credential_broker.bindings import forge_bindings
+                        from istota.credential_broker.bindings import forge_bindings
                         for name, binding in forge_bindings(self.config.developer).items():
                             env_name = name.split(".")[1].upper() + "_TOKEN"
                             if env_name in self.credential_env:
@@ -593,7 +594,7 @@ class SkillProxy:
                         # (`wordpress --site`). Membership is the vault parser's,
                         # never a name suffix, and an entry is listed only when a
                         # member is in this task's snapshot.
-                        from .credential_broker.bindings import credential_groups
+                        from istota.credential_broker.bindings import credential_groups
                         entries = sorted(
                             entry for entry, members in credential_groups(database, self.user_id).items()
                             if any(member in self.vault_credentials for member in members)
@@ -833,9 +834,9 @@ class SkillProxy:
 
     def _serve_vault_create(self, conn: socket.socket, request: dict) -> None:
         """Create one entry from a host-only passphrase and return names only."""
-        from . import db, email_support, secrets_vault, storage
-        from .notification_resolvers import task_alert
-        from .notification_store import deliver_pending
+        from istota import db, email_support, secrets_vault, storage
+        from istota.notification_resolvers import task_alert
+        from istota.notification_store import deliver_pending
 
         with self._vault_write_lock:
             self._vault_writes += 1
@@ -1005,8 +1006,8 @@ class SkillProxy:
         """Live grant check for the private skill channel; fails closed."""
         if not self.user_id or not self.task_id:
             return "credential_not_granted"
-        from . import db
-        from .credential_broker.grants import check_credential_use
+        from istota import db
+        from istota.credential_broker.grants import check_credential_use
         try:
             with db.get_db(self.config.db_path) as database:
                 return check_credential_use(database, int(self.task_id), self.user_id, name)
@@ -1101,8 +1102,8 @@ class SkillProxy:
         if not trusted_skill:
             revealable = False
             if self.config is not None and self.user_id:
-                from . import db, secrets_store
-                from .credential_broker.bindings import get_binding
+                from istota import db, secrets_store
+                from istota.credential_broker.bindings import get_binding
                 enforce = self.config.security.credential_broker.reveal_enforced
                 with db.get_db(self.config.db_path) as database:
                     if enforce:
@@ -1141,7 +1142,7 @@ class SkillProxy:
         if request.get("binding") is True and live_reply is None:
             reply["bound_hosts"] = []
             if self.config is not None and self.user_id:
-                from . import secrets_store
+                from istota import secrets_store
                 live = secrets_store.get_secret(
                     self.config.db_path, self.user_id, "vault_entries", name, binding=True,
                 )
@@ -1197,8 +1198,8 @@ class SkillProxy:
         if not name or self.config is None or not self.user_id:
             not_present()
             return
-        from . import db, secrets_store
-        from .credential_broker.bindings import credential_groups, get_binding, get_entry_binding
+        from istota import db, secrets_store
+        from istota.credential_broker.bindings import credential_groups, get_binding, get_entry_binding
 
         with db.get_db(self.config.db_path) as database:
             members = [m for m in credential_groups(database, self.user_id).get(name, [])

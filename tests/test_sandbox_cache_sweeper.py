@@ -54,7 +54,7 @@ from istota.sandbox_cache_sweeper import (
     sweep_and_report,
     sweep_caches,
 )
-from istota.user_scope import is_scopable_user_id
+from istota.sandbox.user_scope import is_scopable_user_id
 
 MB = 1024 * 1024
 

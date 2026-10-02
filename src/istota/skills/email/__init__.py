@@ -27,7 +27,7 @@ from pathlib import Path
 from istota.lib.filenames import (
     DEFAULT_MAX_STEM, MAX_NAME_BYTES, filename_parts, safe_filename,
 )
-from istota.skill_host_paths import (
+from istota.sandbox.host_paths import (
     path_under_roots,
     resolve_in_roots,
     user_workspace_root,

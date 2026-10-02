@@ -3,7 +3,7 @@
 A skill CLI runs host-side. `skill_proxy` spawns it outside the sandbox as the
 daemon user, precisely so it can reach the databases `build_bwrap_cmd` masks,
 so any verb taking a *host* path is an arbitrary read or write unless it is
-scoped — and the model chooses the path. `istota.skill_host_paths` holds the
+scoped — and the model chooses the path. `istota.sandbox.host_paths` holds the
 containment rule. What this module holds is where the rule gets applied.
 
 **The disposition lives on the argument, and the enforcement reads it back.**
@@ -73,8 +73,8 @@ exception straight back to the caller, which is `HostPathRefused` and one
 envelope. `click_stamped` and `click_commands` are the walk over the other
 tree, keyed the way the argparse walk keys, so one coverage check reads both.
 
-Nothing from the package beyond `istota.skill_host_paths`, itself a leaf over
-`istota.user_scope` — so a skill subprocess pays nothing beyond what
+Nothing from the package beyond `istota.sandbox.host_paths`, itself a leaf over
+`istota.sandbox.user_scope` — so a skill subprocess pays nothing beyond what
 `istota.skills.__init__` already costs. Click is never imported here either:
 the two walks and the decorator go through `__click_params__`, `.params` and
 `.commands` by duck typing, so a skill CLI that has nothing to do with Click
@@ -88,7 +88,7 @@ import logging
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
-from istota.skill_host_paths import env_host_roots, memory_refusal, resolve_in_roots
+from istota.sandbox.host_paths import env_host_roots, memory_refusal, resolve_in_roots
 
 log = logging.getLogger(__name__)
 

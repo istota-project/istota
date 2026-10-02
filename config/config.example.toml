@@ -1412,7 +1412,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # Recommended: use dedicated bot accounts with minimal required permissions.
 
 # The bot drives the real `gh` and `glab`, not a REST client of our own. Both
-# run behind the wrapper in `src/istota/forge_cli.py`: it checks the argv
+# run behind the wrapper in `src/istota/sandbox/forge_cli.py`: it checks the argv
 # against a deny policy first, and only then fetches the token and puts it in
 # the CLI's own environment — a denied command contacts nothing and fetches no
 # credential. With `[security] skill_proxy_enabled` on, the token comes from

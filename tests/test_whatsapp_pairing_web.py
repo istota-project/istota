@@ -711,9 +711,9 @@ class TestTheSandboxBoundRelayRefusal:
         `package_cache` mount enters the walk at all, and the guard is vacuous
         exactly where it is needed.
         """
-        from istota import sandbox_plan
+        from istota.sandbox import plan as sandbox_plan
         from istota.config import DeveloperConfig, SecurityConfig
-        from istota.sandbox_plan import SandboxProfile
+        from istota.sandbox.plan import SandboxProfile
 
         config = _make_config(tmp_path)
         config.security = SecurityConfig(

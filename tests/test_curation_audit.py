@@ -7,7 +7,7 @@ import pytest
 
 from istota import db
 from istota.config import Config, NextcloudConfig
-from istota.kv_namespaces import is_reserved_namespace
+from istota.sandbox.kv_namespaces import is_reserved_namespace
 from istota.memory.curation.audit import (
     AUDIT_NAMESPACE,
     CURATION_NAMESPACE,

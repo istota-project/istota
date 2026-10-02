@@ -358,7 +358,7 @@ class TestConfigLoadPathStaysCheap:
     @pytest.mark.parametrize(
         "module,absent",
         [
-            ("istota.forge_bin", ("istota.skills", "istota.config")),
+            ("istota.sandbox.forge_bin", ("istota.skills", "istota.config")),
             ("istota.static_dir", ("fastapi", "istota.web_app", "istota.config")),
             # `doctor` imports `subscription_usage` lazily, so it stays cheap
             # for the config-load path that imports `doctor` itself.
@@ -514,7 +514,7 @@ class TestConfigLoadPathStaysCheap:
         assert web_app._resolve_static_dir() == static_dir.resolve_static_dir()
 
     def test_developer_skill_and_doctor_resolve_the_same_binary(self):
-        from istota import forge_bin
+        from istota.sandbox import forge_bin
         from istota.skills import developer
 
         assert developer._resolve_real_bin is forge_bin.resolve_real_bin
@@ -1987,7 +1987,7 @@ class TestProxyPeerCheck:
         return make_config(users={f"u{i}": UserConfig() for i in range(n)})
 
     def test_fails_where_no_peer_can_be_read(self, make_config, monkeypatch):
-        from istota import peer_process
+        from istota.sandbox import peer_process
 
         monkeypatch.setattr(peer_process, "supported", lambda: False)
         result = self._run(make_config())
@@ -2896,7 +2896,7 @@ class TestWrapperShadowing:
         per-task wrapper *is* a verbatim copy of that file."""
         import shutil as _shutil
 
-        from istota import forge_cli
+        from istota.sandbox import forge_cli
 
         wrapper = tmp_path / "path" / "gh"
         wrapper.parent.mkdir(parents=True, exist_ok=True)
@@ -2908,7 +2908,7 @@ class TestWrapperShadowing:
     def test_the_sentinel_is_near_the_top_of_both_copies_of_the_wrapper(self):
         """`_looks_like_the_wrapper` reads only the file's head, and the devbox
         image ships a byte-identical copy under another name."""
-        from istota import forge_cli
+        from istota.sandbox import forge_cli
 
         assert doctor._WRAPPER_SENTINEL in Path(forge_cli.__file__).read_bytes()[:8192]
         copy = Path(__file__).resolve().parents[1] / "docker/devbox/lib/istota_forge_cli.py"
@@ -3266,7 +3266,7 @@ class TestWebBuildCurrent:
         """Asserted on the argv, because behaviourally it cannot be observed:
         `git diff --quiet` runs no `diff.external` (measured), so this guards
         against a future change such as a dropped `--quiet`."""
-        from istota.git_hardening import GIT_HARDENING
+        from istota.sandbox.git_hardening import GIT_HARDENING
 
         self._checkout(tmp_path, monkeypatch)
         seen = []

@@ -84,7 +84,7 @@ from .location_logic import (
     resolve_timezone,
     utc_day_bounds,
 )
-from .process_group import kill_process_group
+from istota.sandbox.process_group import kill_process_group
 
 logger = logging.getLogger("istota.web_app")
 
@@ -4832,7 +4832,7 @@ def _pairing_relay_sandbox_reason() -> str | None:
     whole graph and a cycle. Never raises: a config it cannot resolve produces a
     refusal, not a traceback.
     """
-    from . import sandbox_plan
+    from istota.sandbox import plan as sandbox_plan
 
     try:
         relay = _pairing_relay_path()

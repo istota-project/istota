@@ -1711,7 +1711,7 @@ class TestCredentialFreeConfigs:
     helper the skill registers, and every worktree cut from the clone inherits
     it. `git remote -v` and `git config --list` then print it into the model's
     context as a matter of routine. The daemon strips these on the way in
-    (`istota.git_remote_scrub`); the body has to state the invariant and give
+    (`istota.sandbox.git_remote_scrub`); the body has to state the invariant and give
     the model a check too, because the daemon's sweep runs at setup and the
     model can be handed a repository at any point after that."""
 

@@ -28,7 +28,7 @@ import pytest
 from istota import db
 from istota.config import Config, DeveloperConfig, SecurityConfig
 from istota.executor import build_bwrap_cmd, native_fs_roots
-from istota.sandbox_plan import SandboxProfile
+from istota.sandbox.plan import SandboxProfile
 
 
 @pytest.fixture

@@ -26,7 +26,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-_module_logger = logging.getLogger("istota.unix_server")
+_module_logger = logging.getLogger("istota.sandbox.unix_server")
 
 # A failing accept() is retried rather than treated as shutdown, but a
 # listener that fails forever must not spin. Give up after this many in a row.

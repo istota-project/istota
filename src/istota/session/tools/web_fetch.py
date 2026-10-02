@@ -36,7 +36,7 @@ import httpx
 
 from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import TextContent, ToolParameter, ToolSchema
-from istota.net_guard import ip_is_public as _ip_is_public
+from istota.sandbox.net_guard import ip_is_public as _ip_is_public
 from istota.lib.untrusted import frame_untrusted
 
 from .env import ToolEnv, WebFetchPolicy
@@ -88,7 +88,7 @@ class WebFetchSSRF(WebFetchError):
 
 
 # --------------------------------------------------------------------------- #
-# URL validation (pure). The SSRF address rule is `istota.net_guard`'s.
+# URL validation (pure). The SSRF address rule is `istota.sandbox.net_guard`'s.
 # --------------------------------------------------------------------------- #
 
 

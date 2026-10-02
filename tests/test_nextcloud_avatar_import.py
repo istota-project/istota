@@ -878,7 +878,7 @@ class TestTheRecordedState:
             assert avatars.import_probe_state(conn) == {"alice": ""}
 
     def test_the_state_lives_in_a_namespace_the_model_may_not_touch(self):
-        from istota.kv_namespaces import is_reserved_namespace
+        from istota.sandbox.kv_namespaces import is_reserved_namespace
 
         assert is_reserved_namespace(avatars.IMPORT_STATE_NAMESPACE)
 

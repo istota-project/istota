@@ -1499,7 +1499,7 @@ class TestSchedulerIntegration:
         skip the same fixture *is* found, so a green assertion means the prune
         did it and not the depth limit or the git-dir test.
         """
-        from istota.git_remote_scrub import find_git_dirs
+        from istota.sandbox.git_remote_scrub import find_git_dirs
         from istota.scheduler import _package_cache_dirs
 
         repos_dir, _bare, _ = repos

@@ -5222,7 +5222,7 @@ class TestTaskAttemptContract(_TaskPathEnvHarness):
 
         # Imported inside ``execute_task`` from ``.skill_proxy``, the same as
         # ``BrainRequest`` below, so the patch goes on the defining module.
-        monkeypatch.setattr("istota.skill_proxy.SkillProxy", FakeProxy)
+        monkeypatch.setattr("istota.sandbox.skill_proxy.SkillProxy", FakeProxy)
         monkeypatch.setattr("istota.executor.subprocess.run", fake_run)
         monkeypatch.setattr("istota.brain.BrainRequest", spy_request)
 

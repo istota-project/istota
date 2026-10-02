@@ -13,10 +13,10 @@ import threading
 from collections.abc import Iterable
 from pathlib import Path
 
-from istota import peer_process
-from istota.unix_server import UnixSocketServer
+from istota.sandbox import peer_process
+from istota.sandbox.unix_server import UnixSocketServer
 
-logger = logging.getLogger("istota.network_proxy")
+logger = logging.getLogger("istota.sandbox.network_proxy")
 
 # Owner-only, so no other local user can reach the CONNECT allowlist. This
 # proxy's own decision, stated here rather than inherited from the server
@@ -228,8 +228,8 @@ class NetworkProxy:
 
     def _handle_http(self, client, url, data):
         from urllib.parse import urlsplit
-        from .credential_broker.bindings import credential_host
-        from .credential_broker.intercept import _requests
+        from istota.credential_broker.bindings import credential_host
+        from istota.credential_broker.intercept import _requests
         try:
             parsed = urlsplit(url)
             if parsed.scheme != "http" or parsed.fragment:
@@ -256,8 +256,8 @@ class NetworkProxy:
             return
 
         if self.broker is not None:
-            from .credential_broker.bindings import https_host
-            from .credential_broker.intercept import intercept
+            from istota.credential_broker.bindings import https_host
+            from istota.credential_broker.intercept import intercept
             if self.broker.covers(https_host(f"https://{host}:{port}")):
                 intercept(self.broker, client, host, port)
                 return

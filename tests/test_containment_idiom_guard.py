@@ -22,7 +22,7 @@ below are narrower than that on purpose: each is the *whole* of a predicate,
 which is what a re-implementation of one of these functions looks like and
 what an incidental use does not.
 
-The one permitted file is ``user_scope.py`` itself.
+The one permitted file is ``sandbox/user_scope.py`` itself.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[1] / "src" / "istota"
 
 #: The module allowed to state each rule. Exactly one, which is the point.
-OWNER = "user_scope.py"
+OWNER = "sandbox/user_scope.py"
 
 
 def _modules():
@@ -189,13 +189,18 @@ def _offenders(finder) -> list[str]:
     out = []
     for path, tree in _modules():
         for where in finder(tree):
-            if path.name == OWNER:
+            if path.relative_to(SRC).as_posix() == OWNER:
                 continue
             out.append(f"{path.relative_to(SRC)}:{where}")
     return out
 
 
 class TestOneStatementOfEachIdiom:
+    def test_every_allowlisted_path_exists(self):
+        # An allowlisted path that no longer exists exempts nothing real.
+        for rel in (OWNER, "executor.py"):
+            assert (SRC / rel).is_file(), rel
+
     def test_the_overlap_test_is_not_written_out_anywhere(self):
         assert _offenders(_find_overlap_copies) == [], (
             "both directions of the at-or-under test written inline; "

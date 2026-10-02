@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from istota.skill_proxy import SkillProxy
+from istota.sandbox.skill_proxy import SkillProxy
 from istota.skills._credref import _resolve_name
 from tests import test_vault_credential_fetch as _vault_fetch
 from tests.test_vault_credential_fetch import VAULT, request
@@ -30,7 +30,7 @@ def skill_program(tmp_path, monkeypatch):
         launcher = tmp_path / "python-skill"
         launcher.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{program}" "$@"\n')
         launcher.chmod(0o700)
-        monkeypatch.setattr("istota.skill_proxy.sys.executable", str(launcher))
+        monkeypatch.setattr("istota.sandbox.skill_proxy.sys.executable", str(launcher))
     return install
 
 
@@ -113,7 +113,7 @@ def test_channel_closed_after_invocation(sock_path, monkeypatch, failure):
         if failure == "spawn":
             raise OSError("spawn failed")
         return subprocess.CompletedProcess(args[0], 0, "ok", "")
-    monkeypatch.setattr("istota.skill_proxy.subprocess.run", run)
+    monkeypatch.setattr("istota.sandbox.skill_proxy.subprocess.run", run)
     try:
         with start_proxy(sock_path) as proxy:
             response = request(sock_path, {"skill": "probe", "args": []})
@@ -126,7 +126,8 @@ def test_channel_closed_after_invocation(sock_path, monkeypatch, failure):
 
 
 def test_private_channel_preserves_live_binding_and_value(tmp_path, sock_path, monkeypatch):
-    from istota import credential_shim, db, secrets_store
+    from istota import db, secrets_store
+    from istota.sandbox import credential_shim
     from istota.config import Config
     from istota.credential_broker.bindings import parse_binding
 
@@ -149,7 +150,7 @@ def test_private_channel_preserves_live_binding_and_value(tmp_path, sock_path, m
 
 
 def test_private_provenance_is_server_owned(sock_path, monkeypatch):
-    from istota import credential_shim
+    from istota.sandbox import credential_shim
 
     with start_proxy(sock_path) as proxy:
         calls = []

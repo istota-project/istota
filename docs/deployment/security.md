@@ -126,7 +126,7 @@ The set of stripped variables is **manifest-derived**: `derive_credential_set(sk
 
 Adding a sensitive credential to a skill's `env:` block is the only step needed to route it through the proxy; there is no longer a hand-maintained `_PROXY_CREDENTIAL_VARS` list to keep in sync.
 
-Skill CLI commands run through the proxy (`skill_proxy.py`) in the executor thread. The proxy injects credentials server-side, scoped per skill: `derive_skill_credential_map(authorized, skill_index)` returns the per-skill credential map, so a CLI invocation only ever sees credentials its own manifest declared. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled.
+Skill CLI commands run through the proxy (`sandbox/skill_proxy.py`) in the executor thread. The proxy injects credentials server-side, scoped per skill: `derive_skill_credential_map(authorized, skill_index)` returns the per-skill credential map, so a CLI invocation only ever sees credentials its own manifest declared. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled.
 
 The proxy's Unix socket path includes the host process PID — `istota-proxy-{pid}-{task_id}.sock` (and the same shape for the network proxy). This prevents collisions when multiple processes (xdist test workers, parallel `istota run` instances, the daemon plus a manual scheduler) pick the same `task.id` from independent SQLite databases.
 

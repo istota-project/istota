@@ -551,7 +551,7 @@ class TestProviderLifecycle:
 class TestFsConfinement:
     """NB-1: the request's roots reach the tools that enforce them.
 
-    The tools moved into `istota.tool_server`, so the seam under test moved
+    The tools moved into `istota.sandbox.tool_server`, so the seam under test moved
     with them: `BrainRequest` → `NativeBrain._hello_payload` → the `hello`
     frame → `tool_server.build_env` → `ToolEnv`. These drive that translation
     directly rather than through a subprocess, which keeps the file fast and
@@ -563,7 +563,7 @@ class TestFsConfinement:
 
     def _tool(self, brain, req, name):
         from istota.session.tools import build_default_tools
-        from istota.tool_server import build_env
+        from istota.sandbox.tool_server import build_env
 
         env = build_env(brain._hello_payload(req))
         return next(t for t in build_default_tools(env) if t.schema.name == name)
@@ -637,7 +637,7 @@ class TestFsConfinement:
         `None` is carried as `null` — and an unconfined dev machine that
         started refusing every read would look like a broken tool rather than
         like a bad translation."""
-        from istota.tool_server import build_env
+        from istota.sandbox.tool_server import build_env
 
         brain = _brain(MockProvider([]))
         unconfined = build_env(brain._hello_payload(_req("hi", tmp_path, tools=["Read"])))

@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from istota import task_cgroup
+from istota.sandbox import cgroup as task_cgroup
 from istota.executor import execute_task
 
 from .test_task_cgroup import _kernelish_rmdir
@@ -56,7 +56,7 @@ def _patches(cgroup_root: Path, *, stdout: str = "done", returncode: int = 0):
         for name, ret in zip(_EXECUTOR_PATCHES, _EXECUTOR_PATCH_RETURNS)
     ] + [
         patch("istota.executor.subprocess.run", return_value=result),
-        patch("istota.task_cgroup.resolve_root", return_value=cgroup_root),
+        patch("istota.sandbox.cgroup.resolve_root", return_value=cgroup_root),
         # cgroupfs semantics for `rmdir`, shared with tests/test_task_cgroup.py.
         # Patching `rmdir` rather than `destroy` itself matters here: the real
         # `destroy` now kills a cgroup that still holds processes, and stubbing
@@ -90,7 +90,7 @@ def test_creates_the_cgroup_with_the_configured_limits_and_removes_it(
         return path
 
     with contextmanager_chain(
-        _patches(cgroup_root) + [patch("istota.task_cgroup.create", side_effect=record)]
+        _patches(cgroup_root) + [patch("istota.sandbox.cgroup.create", side_effect=record)]
     ):
         success, _result, _actions, _trace = execute_task(task, config, [])
 
@@ -145,7 +145,7 @@ def test_the_brains_pid_is_placed_in_the_cgroup(tmp_path, cgroup_root):
         )
 
     with contextmanager_chain(
-        _patches(cgroup_root) + [patch("istota.task_cgroup.place", side_effect=record)]
+        _patches(cgroup_root) + [patch("istota.sandbox.cgroup.place", side_effect=record)]
     ):
         with patch("istota.executor.make_brain") as make_brain:
             brain = MagicMock()
@@ -198,7 +198,7 @@ def test_an_oom_kill_is_named_before_the_counters_are_removed(
 
     with contextmanager_chain(
         _patches(cgroup_root)
-        + [patch("istota.task_cgroup.create", side_effect=create_with_an_oom)]
+        + [patch("istota.sandbox.cgroup.create", side_effect=create_with_an_oom)]
     ):
         with caplog.at_level(logging.WARNING, logger="istota.executor"):
             execute_task(task, config, [])
@@ -246,7 +246,7 @@ def test_a_task_still_runs_when_no_cgroup_can_be_created(tmp_path):
     result.returncode = 0
     patches += [
         patch("istota.executor.subprocess.run", return_value=result),
-        patch("istota.task_cgroup.resolve_root", return_value=None),
+        patch("istota.sandbox.cgroup.resolve_root", return_value=None),
     ]
 
     with contextmanager_chain(patches):

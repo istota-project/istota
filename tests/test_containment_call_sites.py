@@ -1,7 +1,7 @@
 """Every site that now calls ``user_scope`` still refuses what it refused (F18).
 
 Nine hand-rolled containment checks were replaced by a call to
-:mod:`istota.user_scope`. The claim each conversion makes is that the site's
+:mod:`istota.sandbox.user_scope`. The claim each conversion makes is that the site's
 rule did not change, and the only way to hold that claim is to ask each site
 the hostile questions ``tests/test_user_dir_containment.py`` asks the rule
 itself: the four ids that are not a child, the absolute one, and a planted
@@ -29,10 +29,12 @@ from pathlib import Path
 import pytest
 
 from istota import repos_relocate, sandbox_cache_sweeper as sweeper
-from istota import git_remote_scrub, skill_host_paths, worktree_reaper
+from istota import worktree_reaper
+from istota.sandbox import git_remote_scrub
+from istota.sandbox import host_paths as skill_host_paths
 from istota.executor import _daemon_dirs, get_task_control_dir
 from istota.skills.developer import _user_repos_dir
-from istota.user_scope import is_within, paths_overlap, scoped_user_dir
+from istota.sandbox.user_scope import is_within, paths_overlap, scoped_user_dir
 
 #: The ids that never name a child of a root. `""` and `"."` are dropped by
 #: `PurePath`, `".."` is a child by name and the parent on disk, `"a/b"` goes

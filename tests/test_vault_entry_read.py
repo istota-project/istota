@@ -287,19 +287,19 @@ class TestTheBox:
 
 class TestTheFieldKeys:
     def test_members_map_to_field_keys(self):
-        from istota.skill_proxy import entry_fields
+        from istota.sandbox.skill_proxy import entry_fields
         assert entry_fields("acme", {"acme": "p", "acme_username": "u", "acme_url": "w",
                                      "acme_pin": "1"}) == {
             "password": "p", "username": "u", "url": "w", "pin": "1"}
 
     def test_a_custom_field_named_password_keeps_its_full_name(self):
-        from istota.skill_proxy import entry_fields
+        from istota.sandbox.skill_proxy import entry_fields
         assert entry_fields("acme", {"acme_password": "custom"}) == {"acme_password": "custom"}
         assert entry_fields("acme", {"acme": "p", "acme_password": "custom"}) == {
             "password": "p", "acme_password": "custom"}
 
     def test_a_fallback_name_never_overwrites_another_field(self):
-        from istota.skill_proxy import entry_fields
+        from istota.sandbox.skill_proxy import entry_fields
         fields = entry_fields("acme", {"acme": "p", "acme_acme_password": "A",
                                        "acme_password": "B"})
         assert sorted(fields.values()) == ["A", "B", "p"]

@@ -27,7 +27,7 @@ from .brain import (
     room_selectable_kinds,
 )
 from .memory import search as memory_search_mod
-from .process_group import kill_process_group
+from istota.sandbox.process_group import kill_process_group
 from .config import Config
 # The static room-model table: a stdlib-only leaf importing nothing, so it
 # costs this module — which is imported on the Talk polling path — nothing.

@@ -274,7 +274,7 @@
 # Forge CLIs (developer skill)
 # ============================================================
 # The developer skill drives the real `gh` and `glab` through the wrapper in
-# src/istota/forge_cli.py. The sandbox binds / read-only, so a binary here is
+# src/istota/sandbox/forge_cli.py. The sandbox binds / read-only, so a binary here is
 # visible inside it with no extra mount.
 #
 # From the vendors' own releases, pinned and sha256-verified, rather than from

@@ -153,7 +153,7 @@ def test_proxy_resolves_live_value_and_hosts_together(tmp_path, monkeypatch):
     from pathlib import Path
     from istota.config import Config
     from istota.credential_broker.bindings import parse_binding
-    from istota.skill_proxy import SkillProxy
+    from istota.sandbox.skill_proxy import SkillProxy
     from istota.skills._credref import _resolve_name
     from tests.test_vault_credential_fetch import request
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
@@ -184,8 +184,8 @@ def test_vault_list_names_whole_entries_in_the_snapshot(tmp_path, monkeypatch):
     import tempfile
     from pathlib import Path
     from istota.config import Config
-    from istota.credential_shim import ProxyError, list_entries
-    from istota.skill_proxy import SkillProxy
+    from istota.sandbox.credential_shim import ProxyError, list_entries
+    from istota.sandbox.skill_proxy import SkillProxy
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
     database = tmp_path / "data.db"
     db.init_db(database)
@@ -259,9 +259,9 @@ def test_empty_value_still_revokes_hosts_and_reveal(tmp_path, monkeypatch):
 def test_list_columns_include_unbound_and_forge(tmp_path, monkeypatch, capsys):
     import tempfile
     from pathlib import Path
-    from istota import credential_shim
+    from istota.sandbox import credential_shim
     from istota.config import Config, DeveloperConfig
-    from istota.skill_proxy import SkillProxy
+    from istota.sandbox.skill_proxy import SkillProxy
     database = tmp_path / "data.db"
     db.init_db(database)
     config = Config(db_path=database, developer=DeveloperConfig(github_token="fixture-token"))

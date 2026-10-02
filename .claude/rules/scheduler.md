@@ -122,7 +122,7 @@ Below `min_available_memory_mb` of `MemAvailable` or above `host_pressure_psi_th
 - Because of the drain, `scheduler_stats` carries `admission_closed_s` and the "istota is a bystander" alert keys on `_claimable_backlog()`, not worker count.
 - Admission only; held tasks stay `pending`. Fails open (disabled, no or unreadable sample, both thresholds 0); `update_pressure(None)` clears. `shmem_unaccounted` fires the snapshot, not the hold. One `dispatch_admission_closed` WARNING per cooldown.
 
-### Per-task cgroups (`task_cgroup.py`)
+### Per-task cgroups (`sandbox/cgroup.py`)
 
 `execute_task` creates `<unit cgroup>/task-<id>-<attempt>/` (`memory.max`, `pids.max`, `cpu.max`) and releases it from the proxies' `ExitStack` on every exit path. `run_daemon` sweeps leftover `task-*` (an OOM-killed daemon runs no cleanup).
 - Attempt in the name, so a retry never shares a surviving runaway's directory.

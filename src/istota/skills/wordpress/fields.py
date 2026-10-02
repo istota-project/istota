@@ -40,7 +40,7 @@ import json
 import re
 from pathlib import Path
 
-from istota.skill_host_paths import write_resolved
+from istota.sandbox.host_paths import write_resolved
 
 from . import acf, media
 from .client import WordPressError, fence, fence_tree, selector

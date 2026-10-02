@@ -11,7 +11,7 @@ import argparse
 import json
 from pathlib import Path
 
-from istota.skill_host_paths import path_under_roots, resolve_in_roots, write_resolved
+from istota.sandbox.host_paths import path_under_roots, resolve_in_roots, write_resolved
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import READ, host_path, write_roots
 from istota.skills.whisper.models import (

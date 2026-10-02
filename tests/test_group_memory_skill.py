@@ -212,7 +212,7 @@ class TestAudit:
         assert _group_audit(env, "other") == []
 
     def test_the_audit_namespace_is_reserved(self):
-        from istota.kv_namespaces import is_reserved_namespace
+        from istota.sandbox.kv_namespaces import is_reserved_namespace
 
         assert is_reserved_namespace(AUDIT_NAMESPACE)
 

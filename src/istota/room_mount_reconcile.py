@@ -25,7 +25,7 @@ from .room_relocate import (
 )
 from istota.lib.sqlite_util import connect_read_only
 from istota.lib.toml_fence import BACKTICK_RUN_RE, FENCE_OPEN_RE, find_toml_block
-from .user_scope import is_scopable_user_id
+from istota.sandbox.user_scope import is_scopable_user_id
 
 
 def _local_kind(path: Path) -> str | None:

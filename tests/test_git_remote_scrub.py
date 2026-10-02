@@ -36,8 +36,8 @@ from pathlib import Path
 
 import pytest
 
-from istota import git_remote_scrub
-from istota.git_remote_scrub import (
+from istota.sandbox import git_remote_scrub
+from istota.sandbox.git_remote_scrub import (
     config_files_for,
     find_git_dirs,
     is_git_dir,
@@ -684,7 +684,7 @@ class TestFailureIsNotSilence:
         bare = _bare(tmp_path)
         _git(bare, "config", "remote.origin.url", FAKE_URL)
 
-        from istota import git_remote_scrub
+        from istota.sandbox import git_remote_scrub
 
         monkeypatch.setattr(git_remote_scrub, "_run_write", lambda *a: False)
         findings = git_remote_scrub.scrub_remotes(tmp_path)
@@ -696,7 +696,7 @@ class TestFailureIsNotSilence:
         bare = _bare(tmp_path)
         _git(bare, "config", "remote.origin.url", FAKE_URL)
 
-        from istota import git_remote_scrub
+        from istota.sandbox import git_remote_scrub
 
         monkeypatch.setattr(git_remote_scrub, "_run_write", lambda *a: False)
         with caplog.at_level("WARNING"):
@@ -708,7 +708,7 @@ class TestFailureIsNotSilence:
     def test_scrub_and_report_never_raises(self, tmp_path, monkeypatch):
         """The never-raises contract, exercised rather than asserted. A hook
         that raises has its whole returned env discarded by the dispatcher."""
-        from istota import git_remote_scrub
+        from istota.sandbox import git_remote_scrub
 
         def _boom(_root):
             raise RuntimeError("walk exploded")
@@ -855,7 +855,7 @@ class TestDeveloperSetupEnvSweep:
         """`dispatch_setup_env_hooks` keeps only what the hook returned, so an
         exception here would silently discard GIT_CONFIG_COUNT and the forge
         wiring — a task that looks fine and cannot authenticate."""
-        from istota import git_remote_scrub
+        from istota.sandbox import git_remote_scrub
 
         def _boom(_root):
             raise RuntimeError("sweep exploded")
@@ -973,7 +973,7 @@ class TestOneBadRepoDoesNotEndTheSweep:
     def test_scrub_and_report_survives_a_non_utf8_config(self, tmp_path):
         bad = _bare(tmp_path, "bad.git")
         (bad / "config").write_bytes(b'[core]\n\tbare = true\n\turl = https://h/\xff.git\n')
-        from istota import git_remote_scrub
+        from istota.sandbox import git_remote_scrub
 
         assert isinstance(git_remote_scrub.scrub_and_report(tmp_path), list)
 

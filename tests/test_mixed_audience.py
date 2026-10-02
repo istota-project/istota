@@ -263,7 +263,7 @@ class TestAGuestsTurnHasItsOwnDirectories:
     def test_a_skill_cli_host_path_refuses_the_talk_dir_when_restricted(
         self, tmp_path, monkeypatch,
     ):
-        from istota.skill_host_paths import WITHHELD_SCOPES_VAR, resolve_host_path
+        from istota.sandbox.host_paths import WITHHELD_SCOPES_VAR, resolve_host_path
 
         mount = tmp_path / "mount"
         (mount / "Users" / "alice").mkdir(parents=True)
@@ -294,7 +294,7 @@ class TestTheMemoryHostPathRefusal:
     def test_a_skill_cli_host_path_refuses_memory_when_it_is_withheld(
         self, tmp_path, monkeypatch,
     ):
-        from istota.skill_host_paths import WITHHELD_SCOPES_VAR, resolve_host_path
+        from istota.sandbox.host_paths import WITHHELD_SCOPES_VAR, resolve_host_path
 
         mount = tmp_path / "mount"
         memories = mount / "Users" / "alice" / "memories"

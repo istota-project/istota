@@ -63,10 +63,10 @@ resolving at dispatch would buy the refund and give up the guarantee that no
 handler ever runs on a half-resolved namespace, which is the property §4a asks
 for and the one the whole stamp exists to provide.
 
-Nothing from the package beyond `istota.credential_shim`, which is a stdlib-only
+Nothing from the package beyond `istota.sandbox.credential_shim`, which is a stdlib-only
 leaf (it is copied verbatim into the task's own shim directory and runs with no
 istota package on its path), and `._hostpath`, itself a leaf over
-`istota.skill_host_paths` — so a skill subprocess pays nothing for this beyond
+`istota.sandbox.host_paths` — so a skill subprocess pays nothing for this beyond
 what `istota.skills.__init__` already costs.
 """
 
@@ -77,7 +77,7 @@ import logging
 import os
 from collections.abc import Sequence
 
-from istota.credential_shim import ProxyError, fetch_credential, fetch_entry
+from istota.sandbox.credential_shim import ProxyError, fetch_credential, fetch_entry
 
 from ._hostpath import actions_on_path, stamped as _stamped_by
 

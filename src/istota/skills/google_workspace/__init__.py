@@ -49,7 +49,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from istota.skill_host_paths import resolve_host_path, user_workspace_root
+from istota.sandbox.host_paths import resolve_host_path, user_workspace_root
 from istota.skills._cli import fail
 
 logger = logging.getLogger("istota.skills.google_workspace")

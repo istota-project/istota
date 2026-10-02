@@ -35,7 +35,7 @@ import os
 import subprocess
 import sys
 
-from istota.process_group import kill_group_if_live
+from istota.sandbox.process_group import kill_group_if_live
 
 __all__ = ["transcribe_audio_out_of_process", "DEFAULT_TIMEOUT_SECONDS"]
 

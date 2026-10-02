@@ -4,7 +4,7 @@
 ``Read``/``Write``/``Edit``/``Grep``/``Glob`` on daemon worker threads behind
 ``ToolEnv``'s path allowlist, and ``Bash`` inside a fresh bwrap namespace per
 call. This module replaces both with one namespace per task attempt:
-``python -m istota.tool_server``, spawned once through
+``python -m istota.sandbox.tool_server``, spawned once through
 ``build_bwrap_cmd(..., profile=NATIVE)``, holding all six tools, reached over a
 socket the model cannot name (ISSUE-389).
 
@@ -71,10 +71,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from istota import task_cgroup, tool_server_protocol as proto
+from istota.sandbox import cgroup as task_cgroup
+from istota.sandbox import tool_server_protocol as proto
 from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import ImageContent, TextContent, ToolSchema
-from istota.process_group import kill_group_if_live
+from istota.sandbox.process_group import kill_group_if_live
 
 from .bash import BASH_SCHEMA
 from .files import (
@@ -597,13 +598,13 @@ def server_command() -> list[str]:
     symlink to it that no bind carries in.
     """
     # Function scope, and not for a cycle — there is none today, measured.
-    # `istota.tool_server` imports this module's package from *inside* the
+    # `istota.sandbox.tool_server` imports this module's package from *inside* the
     # namespace, and `executor` pulls the brains and their provider clients in
     # behind it. The daemon has paid for that graph; the tool server has not,
     # and it starts one per task attempt.
     from ...executor import sandbox_interpreter
 
-    return [str(sandbox_interpreter()), "-m", "istota.tool_server"]
+    return [str(sandbox_interpreter()), "-m", "istota.sandbox.tool_server"]
 
 
 async def start_tool_server(

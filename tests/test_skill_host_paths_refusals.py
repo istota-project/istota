@@ -735,7 +735,7 @@ class TestTheDerivedEgressRoots:
         assert _hostpath.egress_roots() == _hostpath._roots_for(EGRESS, writable=False)
 
     def test_it_admits_the_workspace_and_deferred_dir_and_nothing_shared(self, mount):
-        from istota.skill_host_paths import path_under_roots
+        from istota.sandbox.host_paths import path_under_roots
         from istota.skills._hostpath import egress_roots
 
         roots = egress_roots()
@@ -852,7 +852,7 @@ class TestTheVerbsTheDaemonReplays:
         from types import SimpleNamespace
 
         from istota.scheduler_deferred import _source_path_allowed
-        from istota.skill_host_paths import path_under_roots
+        from istota.sandbox.host_paths import path_under_roots
         from istota.skills._hostpath import _roots_for
 
         config = SimpleNamespace(workspace_path=str(mount.link))

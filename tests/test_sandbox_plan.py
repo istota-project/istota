@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from istota.sandbox_plan import (
+from istota.sandbox.plan import (
     EXTRA_RO_BIND,
     Mount,
     MountPlan,
@@ -60,7 +60,7 @@ class TestTheImportDirection:
     """
 
     def test_the_plan_module_pulls_in_no_executor(self):
-        loaded = _fresh_interpreter("import istota.sandbox_plan")
+        loaded = _fresh_interpreter("import istota.sandbox.plan")
         assert "istota.executor" not in loaded, (
             "sandbox_plan reached executor at module scope. executor imports "
             "sandbox_plan at module scope to re-export SandboxProfile, so this "
@@ -71,7 +71,7 @@ class TestTheImportDirection:
         """The control, so the assertion above cannot pass on an empty set."""
         loaded = _fresh_interpreter("import istota.executor")
         assert "istota.executor" in loaded
-        assert "istota.sandbox_plan" in loaded
+        assert "istota.sandbox.plan" in loaded
 
     def test_the_re_export_is_the_same_object(self):
         """The five import sites name ``executor.SandboxProfile``.
@@ -178,7 +178,7 @@ class TestTheGroupBinds:
     def test_a_collapsing_id_binds_nothing_and_says_so(
         self, tmp_path, monkeypatch, caplog,
     ):
-        with caplog.at_level(logging.WARNING, logger="istota.sandbox_plan"):
+        with caplog.at_level(logging.WARNING, logger="istota.sandbox.plan"):
             built = self._built(tmp_path, monkeypatch, ["..", "", "."])
         group_sources = [m.source for m in built.plan.mounts
                          if m.reason == "nextcloud_group_dir"]

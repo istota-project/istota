@@ -282,7 +282,7 @@ class TestAReapedChildIsNeverSignalled:
     def test_a_child_that_has_already_been_reaped_is_not_signalled(self):
         signalled = []
         with patch(_POPEN) as popen, patch(
-            "istota.process_group._signal",
+            "istota.sandbox.process_group._signal",
             side_effect=lambda pid, sig: signalled.append(pid) or "gone",
         ):
             proc = _fake_proc(returncode=0)
@@ -298,7 +298,7 @@ class TestAReapedChildIsNeverSignalled:
         # above and lose the kill this module exists to make.
         signalled = []
         with patch(_POPEN) as popen, patch(
-            "istota.process_group._signal",
+            "istota.sandbox.process_group._signal",
             side_effect=lambda pid, sig: signalled.append(pid) or "group",
         ):
             popen.return_value = _fake_proc(returncode=None, timeout_first=True)

@@ -21,8 +21,8 @@ from istota.lib.rclone_client import (
     rclone_rcat,
     rclone_run,
 )
-from .skill_host_paths import owner_path_parts
-from .user_scope import is_scopable_user_id
+from istota.sandbox.host_paths import owner_path_parts
+from istota.sandbox.user_scope import is_scopable_user_id
 
 if TYPE_CHECKING:
     from .config import Config

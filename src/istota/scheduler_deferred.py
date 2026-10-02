@@ -29,10 +29,10 @@ from typing import Any
 from . import db
 from .config import Config
 from .brain import model_namespace_for_kind, resolve_brain_kind
-from .kv_namespaces import is_reserved_namespace
+from istota.sandbox.kv_namespaces import is_reserved_namespace
 from .notification_store import deliver_pending
-from .skill_host_paths import path_under_roots, workspace_roots
-from .user_scope import is_scopable_user_id
+from istota.sandbox.host_paths import path_under_roots, workspace_roots
+from istota.sandbox.user_scope import is_scopable_user_id
 
 # Use the parent scheduler's logger name so log lines remain identical to
 # pre-extraction output and any operator-side log routing keeps working.

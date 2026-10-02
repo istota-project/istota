@@ -151,7 +151,7 @@ SQLite tables (`schema.sql`):
 | `memory_chunks_fts` | FTS5 virtual table, trigger-synced from `memory_chunks` |
 | `memory_chunks_vec` | sqlite-vec table, lazy-created via `ensure_vec_table()` |
 | `knowledge_facts` | Temporal triples; `valid_from` / `valid_until` columns; unique-current index on `(user_id, subject, predicate, object) WHERE valid_until IS NULL` |
-| `istota_kv` | Two reserved namespaces here: `_memory_audit` (one row per curation write event, keyed `<ts>-<NNN>`) and `_memory_curation` (`last_seen`, `lint_seen`). Both refused by the `kv` skill and by the deferred-op applier — see `kv_namespaces.py` |
+| `istota_kv` | Two reserved namespaces here: `_memory_audit` (one row per curation write event, keyed `<ts>-<NNN>`) and `_memory_curation` (`last_seen`, `lint_seen`). Both refused by the `kv` skill and by the deferred-op applier — see `sandbox/kv_namespaces.py` |
 
 `source_type` values used in `memory_chunks`:
 

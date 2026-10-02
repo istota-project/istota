@@ -894,7 +894,7 @@ class TestProvisionedTokenRecord:
     """
 
     def test_the_namespace_is_reserved_from_the_model(self):
-        from istota.kv_namespaces import is_reserved_namespace
+        from istota.sandbox.kv_namespaces import is_reserved_namespace
         from istota.rooms.provision import PROVISIONED_NAMESPACE
 
         assert is_reserved_namespace(PROVISIONED_NAMESPACE)

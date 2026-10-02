@@ -10,9 +10,10 @@ import pytest
 
 from pykeepass import create_database
 
-from istota import credential_shim, db, doctor, secrets_store, secrets_vault
+from istota import db, doctor, secrets_store, secrets_vault
+from istota.sandbox import credential_shim
 from istota.config import Config, UserConfig
-from istota.skill_proxy import SkillProxy
+from istota.sandbox.skill_proxy import SkillProxy
 
 
 @pytest.fixture

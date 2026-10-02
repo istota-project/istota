@@ -1073,7 +1073,8 @@ class TestNoValueIsLogged:
 
 
 def test_multi_user_policy_blocks_cached_credentials_and_sync(ready, monkeypatch):
-    from istota import doctor, secrets_vault, task_env
+    from istota import doctor, secrets_vault
+    from istota.sandbox import task_env
 
     config, _ = ready
     monkeypatch.setattr("istota.executor._bwrap_available", lambda: False)

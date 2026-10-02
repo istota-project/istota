@@ -36,7 +36,7 @@ from pathlib import Path
 
 from istota.lib.filenames import safe_filename as _safe_name
 from istota.lib.image_sniff import sniff_decodable
-from istota.skill_host_paths import memory_refusal, resolve_in_roots
+from istota.sandbox.host_paths import memory_refusal, resolve_in_roots
 from istota.skills._hostpath import egress_roots
 
 from .client import UPLOAD_TIMEOUT, WordPressError, fence, raw_text, selector
@@ -281,7 +281,7 @@ def call_deadline(config) -> float:
     budget is the proxy's own ceiling for this skill less a reserve for the
     post write and read-back that follow.
     """
-    from istota.skill_proxy import resolve_skill_timeout  # heavy; uploads only
+    from istota.sandbox.skill_proxy import resolve_skill_timeout  # heavy; uploads only
 
     security = config.security
     try:

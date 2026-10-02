@@ -14,7 +14,7 @@ import pytest
 
 from istota.config import SecurityConfig
 from istota.skill_client import SKILL_CLIENT_WAIT_SECONDS
-from istota.skill_proxy import (
+from istota.sandbox.skill_proxy import (
     CLIENT_WAIT_MARGIN_SECONDS,
     CONNECTION_SLACK_SECONDS,
     DEFAULT_SKILL_TIMEOUTS,
@@ -172,7 +172,7 @@ class TestProxyCredentialLookup:
             })
         assert "error" in resp
 
-    @patch("istota.skill_proxy.subprocess.run")
+    @patch("istota.sandbox.skill_proxy.subprocess.run")
     def test_skill_requests_still_work(self, mock_run, sock_path):
         """Existing skill requests (no 'type' field) continue to work."""
         mock_run.return_value = MagicMock(
@@ -246,7 +246,7 @@ class TestProxyScopedCredentials:
             })
         assert "error" in resp
 
-    @patch("istota.skill_proxy.subprocess.run")
+    @patch("istota.sandbox.skill_proxy.subprocess.run")
     def test_skill_cli_gets_only_mapped_credentials(self, mock_run, sock_path):
         mock_run.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
         cred_env = {"SMTP_PASSWORD": "smtp_secret", "GITLAB_TOKEN": "gl_secret"}
@@ -259,7 +259,7 @@ class TestProxyScopedCredentials:
         assert called_env["SMTP_PASSWORD"] == "smtp_secret"
         assert "GITLAB_TOKEN" not in called_env
 
-    @patch("istota.skill_proxy.subprocess.run")
+    @patch("istota.sandbox.skill_proxy.subprocess.run")
     def test_skill_not_in_map_gets_no_credentials(self, mock_run, sock_path):
         mock_run.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
         cred_env = {"SMTP_PASSWORD": "smtp_secret", "GITLAB_TOKEN": "gl_secret"}
@@ -272,7 +272,7 @@ class TestProxyScopedCredentials:
         assert "SMTP_PASSWORD" not in called_env
         assert "GITLAB_TOKEN" not in called_env
 
-    @patch("istota.skill_proxy.subprocess.run")
+    @patch("istota.sandbox.skill_proxy.subprocess.run")
     def test_none_skill_map_allows_all_credentials(self, mock_run, sock_path):
         """skill_credential_map=None means all credentials (backward compat)."""
         mock_run.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
@@ -521,7 +521,7 @@ class TestProxyInformativeRejections:
     def test_proxy_logs_warning_on_rejection(self, sock_path, caplog):
         """Every rejection emits a structured WARNING for observability."""
         import logging
-        with caplog.at_level(logging.WARNING, logger="istota.skill_proxy"):
+        with caplog.at_level(logging.WARNING, logger="istota.sandbox.skill_proxy"):
             with SkillProxy(
                 sock_path, {}, {"PATH": "/usr/bin"},
                 allowed_skills=frozenset({"calendar"}),
@@ -713,7 +713,7 @@ class TestSkillProxyProtocol:
             assert resp["returncode"] == 1
             assert "Invalid JSON" in resp["stderr"]
 
-    @patch("istota.skill_proxy.subprocess.run")
+    @patch("istota.sandbox.skill_proxy.subprocess.run")
     def test_runs_allowed_skill(self, mock_run, sock_path):
         mock_run.return_value = MagicMock(
             stdout='{"status": "ok"}', stderr="", returncode=0,
@@ -736,7 +736,7 @@ class TestSkillProxyProtocol:
         assert called_env["SMTP_PASSWORD"] == "secret"
         assert called_env["PATH"] == "/usr/bin"
 
-    @patch("istota.skill_proxy.subprocess.run")
+    @patch("istota.sandbox.skill_proxy.subprocess.run")
     def test_passes_args_correctly(self, mock_run, sock_path):
         mock_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
 
@@ -751,7 +751,7 @@ class TestSkillProxyProtocol:
         assert cmd[1:3] == ["-m", "istota.skills.calendar"]
         assert cmd[3:] == ["list", "--date", "today", "--tz", "America/New_York"]
 
-    @patch("istota.skill_proxy.subprocess.run")
+    @patch("istota.sandbox.skill_proxy.subprocess.run")
     def test_handles_subprocess_failure(self, mock_run, sock_path):
         mock_run.return_value = MagicMock(
             stdout="", stderr="Error: invalid arguments", returncode=2,
@@ -765,7 +765,7 @@ class TestSkillProxyProtocol:
         assert resp["returncode"] == 2
         assert "invalid arguments" in resp["stderr"]
 
-    @patch("istota.skill_proxy.subprocess.run")
+    @patch("istota.sandbox.skill_proxy.subprocess.run")
     def test_handles_timeout(self, mock_run, sock_path):
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="test", timeout=5)
 
@@ -777,7 +777,7 @@ class TestSkillProxyProtocol:
         assert resp["returncode"] == 124
         assert "timed out" in resp["stderr"]
 
-    @patch("istota.skill_proxy.subprocess.run")
+    @patch("istota.sandbox.skill_proxy.subprocess.run")
     def test_concurrent_requests(self, mock_run, sock_path):
         """Multiple concurrent skill calls should all succeed."""
         mock_run.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
@@ -1063,7 +1063,7 @@ class TestPerSkillTimeout:
         assert describe_skill_timeouts(300, None) == []
         assert describe_skill_timeouts(300, {"code_review": 480}) == []
 
-    @patch("istota.skill_proxy.subprocess.run")
+    @patch("istota.sandbox.skill_proxy.subprocess.run")
     def test_the_proxy_runs_a_skill_under_its_own_entry(self, mock_run, sock_path):
         """The end the whole thing is for: the number reaching `subprocess.run`
         is the skill's, not the global's."""
@@ -1077,7 +1077,7 @@ class TestPerSkillTimeout:
             )
         assert mock_run.call_args.kwargs["timeout"] == 480
 
-    @patch("istota.skill_proxy.subprocess.run")
+    @patch("istota.sandbox.skill_proxy.subprocess.run")
     def test_the_shipped_policy_reaches_the_subprocess_with_no_map_at_all(
         self, mock_run, sock_path
     ):
@@ -1089,7 +1089,7 @@ class TestPerSkillTimeout:
             )
         assert mock_run.call_args.kwargs["timeout"] == 540
 
-    @patch("istota.skill_proxy.subprocess.run")
+    @patch("istota.sandbox.skill_proxy.subprocess.run")
     def test_another_skill_on_the_same_proxy_keeps_the_global(
         self, mock_run, sock_path
     ):
@@ -1105,7 +1105,7 @@ class TestPerSkillTimeout:
             )
         assert mock_run.call_args.kwargs["timeout"] == 300
 
-    @patch("istota.skill_proxy.subprocess.run")
+    @patch("istota.sandbox.skill_proxy.subprocess.run")
     def test_the_response_send_is_armed_at_the_skill_own_budget(
         self, mock_run, sock_path
     ):
@@ -1247,7 +1247,7 @@ class TestTheClientWaitKnob:
         notes = describe_skill_timeouts(900, {})
         assert str(MAX_SKILL_TIMEOUT_SECONDS) in notes[0]
 
-        with patch("istota.skill_proxy.subprocess.run") as mock_run:
+        with patch("istota.sandbox.skill_proxy.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 stdout="{}", stderr="", returncode=0,
             )
@@ -1261,7 +1261,7 @@ class TestTheClientWaitKnob:
             assert mock_run.call_args.kwargs["timeout"] == \
                 MAX_SKILL_TIMEOUT_SECONDS
 
-    @patch("istota.skill_proxy.subprocess.run")
+    @patch("istota.sandbox.skill_proxy.subprocess.run")
     def test_the_proxy_ceiling_comes_from_the_constructor_argument(
         self, mock_run, sock_path
     ):

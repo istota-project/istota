@@ -18,7 +18,7 @@ from istota.config import (
     SchedulerConfig,
     TalkConfig,
 )
-from istota.kv_namespaces import RESERVED_NAMESPACE_PREFIX, is_reserved_namespace
+from istota.sandbox.kv_namespaces import RESERVED_NAMESPACE_PREFIX, is_reserved_namespace
 from istota.memory.curation.audit import AUDIT_NAMESPACE, CURATION_NAMESPACE
 from istota.scheduler import _process_deferred_kv_ops
 from istota.skills.kv import main as kv_main

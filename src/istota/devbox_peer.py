@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from istota import peer_process
+from istota.sandbox import peer_process
 
 
 _INSPECT_FORMAT = (

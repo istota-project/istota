@@ -1,4 +1,4 @@
-"""Tests for ``istota.task_cgroup``.
+"""Tests for ``istota.sandbox.cgroup``.
 
 Every function in that module takes its roots as parameters, the way
 ``host_pressure`` does, so these tests build a fake cgroup tree under
@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from istota import task_cgroup
+from istota.sandbox import cgroup as task_cgroup
 
 from .support.cgroups import live_cgroup_task_id
 
@@ -145,7 +145,7 @@ class TestCreate:
         root.mkdir()
         os.chmod(root, stat.S_IRUSR | stat.S_IXUSR)
         try:
-            with caplog.at_level(logging.WARNING, logger="istota.task_cgroup"):
+            with caplog.at_level(logging.WARNING, logger="istota.sandbox.cgroup"):
                 first = task_cgroup.create(1, DEFAULT_LIMITS, root=root)
                 second = task_cgroup.create(2, DEFAULT_LIMITS, root=root)
         finally:
@@ -175,7 +175,7 @@ class TestCreate:
 
         monkeypatch.setattr(Path, "write_text", refuse_memory_max)
 
-        with caplog.at_level(logging.WARNING, logger="istota.task_cgroup"):
+        with caplog.at_level(logging.WARNING, logger="istota.sandbox.cgroup"):
             path = task_cgroup.create(9, DEFAULT_LIMITS, root=cgroup_root)
 
         assert path is None
@@ -276,7 +276,7 @@ class TestPlace:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(Path, "write_text", gone)
-            with caplog.at_level(logging.WARNING, logger="istota.task_cgroup"):
+            with caplog.at_level(logging.WARNING, logger="istota.sandbox.cgroup"):
                 assert task_cgroup.place(4242, path) is False
 
         # Not worth a warning: nothing is running, so nothing is uncontained.
@@ -285,7 +285,7 @@ class TestPlace:
     def test_a_missing_cgroup_is_reported_once_and_never_raises(self, tmp_path, caplog):
         missing = tmp_path / "task-99"
 
-        with caplog.at_level(logging.WARNING, logger="istota.task_cgroup"):
+        with caplog.at_level(logging.WARNING, logger="istota.sandbox.cgroup"):
             assert task_cgroup.place(4242, missing) is False
             assert task_cgroup.place(4243, missing) is False
 
@@ -313,7 +313,7 @@ class TestPlace:
 
         monkeypatch.setattr(Path, "write_text", fail)
 
-        with caplog.at_level(logging.WARNING, logger="istota.task_cgroup"):
+        with caplog.at_level(logging.WARNING, logger="istota.sandbox.cgroup"):
             task_cgroup.place(1, path)
             task_cgroup.place(2, path)      # same errno — muted
             errno_to_raise[0] = errno.ENOENT
@@ -544,7 +544,7 @@ class TestSweepStale:
             if self.name == "cgroup.kill" else real_write(self, *a, **k),
         )
 
-        with caplog.at_level(logging.WARNING, logger="istota.task_cgroup"):
+        with caplog.at_level(logging.WARNING, logger="istota.sandbox.cgroup"):
             removed, surviving = task_cgroup.sweep_stale(cgroup_root)
 
         assert (removed, surviving) == (1, 1)

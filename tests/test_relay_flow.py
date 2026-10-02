@@ -9,7 +9,7 @@ from istota import db
 from istota.relay import relays
 from istota.relay import requests
 from istota.executor import build_prompt
-from istota.skill_proxy import SkillProxy
+from istota.sandbox.skill_proxy import SkillProxy
 from . import test_relay_questions
 from .test_relay_questions import park, approve
 from .test_relay_answers import event, receive

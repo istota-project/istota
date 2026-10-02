@@ -18,7 +18,7 @@ import pytest
 
 from istota import db
 from istota.config import Config, ExperimentalConfig, WordPressConfig
-from istota.credential_shim import ProxyError
+from istota.sandbox.credential_shim import ProxyError
 from istota.skills import _credref
 from istota.skills import wordpress as wp
 from istota.skills.wordpress import content as content_mod
@@ -176,7 +176,7 @@ class TestSites:
         assert code == 0 and out["sites"] == []
 
     def test_a_listing_the_proxy_cannot_give_is_refused_not_empty(self, env, capsys, monkeypatch):
-        import istota.credential_shim as shim
+        import istota.sandbox.credential_shim as shim
 
         # The real wrapper and shim, under a proxy that omits `entries`.
         monkeypatch.setattr(wp, "_list_entries", REAL_LIST_ENTRIES)
@@ -375,7 +375,7 @@ class TestDescribe:
         assert len(env.site.requests) > sent
 
     def test_the_cache_is_in_the_reserved_namespace(self, env, capsys):
-        from istota.kv_namespaces import is_reserved_namespace
+        from istota.sandbox.kv_namespaces import is_reserved_namespace
 
         run(["describe"], capsys)
         with db.get_db(env.config.db_path) as conn:

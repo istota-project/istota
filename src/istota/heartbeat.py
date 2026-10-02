@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from . import db
-from .shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
+from istota.sandbox.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
 from istota.lib.toml_fence import find_toml_block
 
 if TYPE_CHECKING:
@@ -215,7 +215,7 @@ def _watched_stat(config: "Config", user_id: str, file_path: str) -> os.stat_res
     as itself rather than followed. None covers both "refused" and "absent",
     and the message says not found either way, so a refusal discloses nothing.
     """
-    from .skill_host_paths import owner_path_parts  # noqa: PLC0415
+    from istota.sandbox.host_paths import owner_path_parts  # noqa: PLC0415
     from .skills._loader import open_overlay_dir  # noqa: PLC0415 - import cycle
 
     parts = owner_path_parts(file_path, user_id)

@@ -949,7 +949,7 @@ class TestTheImageCapIsTheTreesOwnNumber:
     async def test_it_sits_well_inside_the_tool_server_frame_cap(self):
         # base64 inflates by 4/3, and the frame also carries the text block and
         # the envelope.
-        from istota import tool_server_protocol as proto
+        from istota.sandbox import tool_server_protocol as proto
         from istota.session.tools import files
 
         assert files.MAX_IMAGE_BYTES * 4 // 3 < proto.MAX_FRAME_BYTES

@@ -47,7 +47,7 @@ The full suite is ~17,350 tests in ~125s (2026-08-30; it was ~16,700 in ~110s wh
 
 `scripts/qt` is that lever. pytest-testmon records which tests executed which source lines, so an ordinary Python change reruns a handful of tests in under a second, and a change that affects nothing exits immediately.
 
-**Do not work out the affected set by reading the code instead.** Both intuitive methods were measured against what actually executes, and both are wrong in both directions at once. Editing `shell_argv()` in `shell_exec.py` touches 101 tests across six files:
+**Do not work out the affected set by reading the code instead.** Both intuitive methods were measured against what actually executes, and both are wrong in both directions at once. Editing `shell_argv()` in `sandbox/shell_exec.py` touches 101 tests across six files:
 
 | Method | Files picked | Of the 101 tests |
 |---|---|---|
@@ -57,7 +57,7 @@ The full suite is ~17,350 tests in ~125s (2026-08-30; it was ~16,700 in ~110s wh
 
 grep adds nothing over the name match. It picks three files that never exercise the function and misses `test_scheduler.py` (35 tests), `test_heartbeat.py` (26) and `native/test_tools_bash.py` (25) — which are exactly the three consumers `AGENTS.md` documents as depending on this function's `pipefail` semantics, so the tests that would catch a regression are the ones both methods skip. The reason is structural: dependence runs through call chains, not through text, and those files call something that calls `shell_argv` without ever naming it.
 
-It fails the other way too. The same grep picks seven files for `git_remote_scrub.py` where one holds every test that exercises the changed function. And the name match assumes a file that often does not exist — of five sampled modules, `usage_render.py` is covered by `tests/test_cli_render_cost.py` and `process_group.py` by `tests/test_process_group_kill.py`.
+It fails the other way too. The same grep picks seven files for `sandbox/git_remote_scrub.py` where one holds every test that exercises the changed function. And the name match assumes a file that often does not exist — of five sampled modules, `usage_render.py` is covered by `tests/test_cli_render_cost.py` and `sandbox/process_group.py` by `tests/test_process_group_kill.py`.
 
 Where a module does have a clean 1:1 test file, the guess is right and `qt` adds nothing. The point is that you cannot tell which case you are in without asking, and `qt` asks.
 

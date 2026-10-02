@@ -32,7 +32,7 @@ from istota.browser_admission import BrowserQueueTimeout, browser_request
 import httpx
 
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
-from istota.skill_host_paths import (
+from istota.sandbox.host_paths import (
     resolve_host_path,
     user_workspace_root,
     write_resolved,

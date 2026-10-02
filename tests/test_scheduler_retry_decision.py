@@ -29,7 +29,7 @@ import pytest
 
 from istota.db import Task
 from istota.scheduler import RetryDecision, decide_retry, retry_flags
-from istota.shell_exec import SIGPIPE_NOTE
+from istota.sandbox.shell_exec import SIGPIPE_NOTE
 
 FLAG_NAMES = (
     "is_cancelled", "is_policy", "is_oom",

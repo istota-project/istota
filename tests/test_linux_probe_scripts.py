@@ -199,7 +199,7 @@ class TestTheParentEnvProbe:
         environ = tmp_path / "environ"
         environ.write_bytes(body)
         cmdline = tmp_path / "cmdline"
-        cmdline.write_bytes(b"python3\x00-m\x00istota.tool_server\x00")
+        cmdline.write_bytes(b"python3\x00-m\x00istota.sandbox.tool_server\x00")
         script = real.parent_env_probe("CLAUDE_CODE_OAUTH_TOKEN")
         script = script.replace("/proc/$PPID/environ", str(environ))
         script = script.replace("/proc/$PPID/cmdline", str(cmdline))
@@ -223,4 +223,4 @@ class TestTheParentEnvProbe:
     def test_it_reports_the_parent_command(self, tmp_path):
         """Without this the absence arm is a fact about an unknown process."""
         out = self._run(tmp_path, b"PATH=/usr/bin\x00")
-        assert "istota.tool_server" in out
+        assert "istota.sandbox.tool_server" in out

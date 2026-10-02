@@ -36,10 +36,10 @@ from ._events import (
     ToolUseEvent,
     make_stream_parser,
 )
-from istota import task_cgroup
-from istota.peer_process import reporting_pid
+from istota.sandbox import cgroup as task_cgroup
+from istota.sandbox.peer_process import reporting_pid
 from istota import usage as usage_types
-from ..process_group import kill_group_if_live
+from istota.sandbox.process_group import kill_group_if_live
 from ._aliases import CANONICAL_ROLES, split_effort
 from ._roles import get_alias_override_target, get_alias_overrides
 from ._types import BrainRequest, BrainResult

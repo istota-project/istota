@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from istota import forge_cli
+from istota.sandbox import forge_cli
 from tests.test_developer_shims import _make_config, _run_hook
 
 
@@ -120,7 +120,7 @@ def forge_clients(broker, tmp_path):
     from istota import db
     from istota.credential_broker import ca, grants
     from istota.credential_broker.bindings import sync_forge_bindings
-    from istota.network_proxy import write_bridge_script
+    from istota.sandbox.network_proxy import write_bridge_script
     from tests.test_developer_shims import _Ctx
     from istota.skills.developer import setup_env
     config, _, authority, _, proxy, host, received = broker

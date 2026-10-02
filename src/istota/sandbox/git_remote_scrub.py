@@ -60,7 +60,7 @@ dropped, because a caller must never mistake a failed sweep for a clean one.
 
 stdlib-only leaf: imported by the developer skill's ``setup_env`` hook, and
 usable from a maintenance one-liner. The one package import is
-:mod:`istota.git_hardening`, which is itself a leaf and has no imports of its
+:mod:`istota.sandbox.git_hardening`, which is itself a leaf and has no imports of its
 own beyond the stdlib.
 """
 
@@ -75,10 +75,10 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 
-from istota.git_hardening import git_env
-from istota.user_scope import is_within
+from istota.sandbox.git_hardening import git_env
+from istota.sandbox.user_scope import is_within
 
-logger = logging.getLogger("istota.git_remote_scrub")
+logger = logging.getLogger("istota.sandbox.git_remote_scrub")
 
 # How far below the walk's root to look. The documented layout puts a bare
 # clone at `{repos_dir}/{user_id}/<namespace>/<project>.git` with its worktrees
@@ -492,7 +492,7 @@ def _git_config(*args: str) -> tuple[int, str]:
     ``surrogateescape`` round-trips those bytes back through ``os.fsencode``
     when a value is handed to git again, so a rewrite still matches.
 
-    Not :func:`istota.git_hardening.run_git`, deliberately. This is the one git
+    Not :func:`istota.sandbox.git_hardening.run_git`, deliberately. This is the one git
     call here that names no repository at all: ``--file`` is the whole input, so
     there is no ``-C``, nothing is discovered, and the ``-c`` overrides would
     have nothing to override — ``git config --file`` does not report them and
@@ -594,7 +594,7 @@ def _writable(origin: Path, root: Path) -> bool:
     reported with ``removed=False`` instead.
 
     The resolution is here rather than inside
-    :func:`~istota.user_scope.is_within`, which is lexical: an origin naming
+    :func:`~istota.sandbox.user_scope.is_within`, which is lexical: an origin naming
     ``{root}/../etc/gitconfig`` is under the root by spelling and outside it on
     disk, and that is the whole input class this predicate exists for.
 

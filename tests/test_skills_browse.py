@@ -1972,7 +1972,7 @@ class TestFillCredential:
         import tempfile
         from pathlib import Path as _Path
 
-        from istota.skill_proxy import SkillProxy
+        from istota.sandbox.skill_proxy import SkillProxy
 
         directory = tempfile.mkdtemp(prefix="bz_", dir="/tmp")
         sock = _Path(directory) / "s.sock"

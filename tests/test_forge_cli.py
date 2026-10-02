@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from istota.forge_cli import (
+from istota.sandbox.forge_cli import (
     _BASELINE_PATH_RULES,
     _CARRY_EXACT,
     _CARRY_GIT,
@@ -706,7 +706,7 @@ class TestGhPreflight:
 
 def _module_paths():
     root = Path(__file__).resolve().parent.parent
-    return root / "src/istota/forge_cli.py", root / "docker/devbox/lib/istota_forge_cli.py"
+    return root / "src/istota/sandbox/forge_cli.py", root / "docker/devbox/lib/istota_forge_cli.py"
 
 
 class TestVendoredCopy:
@@ -714,7 +714,7 @@ class TestVendoredCopy:
         canonical, vendored = _module_paths()
         assert vendored.exists(), f"{vendored} missing — run scripts/sync-devbox-lib.sh"
         assert canonical.read_bytes() == vendored.read_bytes(), (
-            "src/istota/forge_cli.py and docker/devbox/lib/istota_forge_cli.py "
+            "src/istota/sandbox/forge_cli.py and docker/devbox/lib/istota_forge_cli.py "
             "have drifted — run scripts/sync-devbox-lib.sh"
         )
 
@@ -810,7 +810,7 @@ class TestHostname:
         ("", ""),
     ])
     def test_hostname(self, url, expected):
-        from istota.forge_cli import _hostname
+        from istota.sandbox.forge_cli import _hostname
         assert _hostname(url) == expected
 
     def test_empty_host_falls_back_to_github_not_enterprise(self):
@@ -879,7 +879,7 @@ class TestGhHost:
         ("", ""),
     ])
     def test_gh_host(self, url, expected):
-        from istota.forge_cli import _gh_host
+        from istota.sandbox.forge_cli import _gh_host
         assert _gh_host(url) == expected
 
     def test_a_scheme_is_dropped_while_the_port_is_kept(self):
@@ -891,7 +891,7 @@ class TestGhHost:
         Asserted as concrete values: `"://" not in` would hold for any hostname
         and so would pass against the pre-fix code.
         """
-        from istota.forge_cli import _gh_host
+        from istota.sandbox.forge_cli import _gh_host
         assert _gh_host("http://forge.internal:8080") == "forge.internal:8080"
         assert _gh_host("https://forge.internal:8443") == "forge.internal:8443"
 
@@ -920,7 +920,7 @@ class TestGhHost:
         — `_gh_host` is built on `_hostname` — and this pins that rather than
         leaving it to coincidence.
         """
-        from istota.forge_cli import _gh_host, _hostname
+        from istota.sandbox.forge_cli import _gh_host, _hostname
         gh = _gh_host(url)
         bare = gh
         if bare.startswith("["):
@@ -935,7 +935,7 @@ class TestGhHost:
         `"://" in 42` is a TypeError, which no `except ValueError` catches, in a
         process that is holding a forge token one call before `execve`.
         """
-        from istota.forge_cli import _gh_host, _hostname
+        from istota.sandbox.forge_cli import _gh_host, _hostname
         for bad in (42, None, ["https://ghe.example.com"], {"url": "x"}):
             assert _hostname(bad) == ""
             assert _gh_host(bad) == ""

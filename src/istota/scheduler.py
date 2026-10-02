@@ -29,7 +29,7 @@ from croniter import croniter
 # every dispatch tick (~0.5s), and it is a stdlib-only leaf with no import of
 # its own back into the package, so there is no cycle to avoid.
 from . import host_pressure as host_pressure_mod
-from . import task_cgroup
+from istota.sandbox import cgroup as task_cgroup
 
 logger = logging.getLogger("istota.scheduler")
 # What a partial answer from an interrupted run is labelled with when it is
@@ -110,7 +110,7 @@ from .consumers import (
 )
 from .db_health import CheckReport, check_and_repair
 from .events import EventWriter, PROGRESS_MESSAGES
-from .shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, is_sigpipe_failure, shell_argv
+from istota.sandbox.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, is_sigpipe_failure, shell_argv
 from .skills.briefing import (
     get_briefings_for_user,
     parse_briefing_json,
@@ -144,7 +144,7 @@ from .notification_store import (
     sweep_retention,
 )
 from .notifications import effective_log_destinations, send_notification
-from .process_group import kill_group_if_live
+from istota.sandbox.process_group import kill_group_if_live
 from .session.session_log import (
     SWEEP_STATE_KEY,
     SWEEP_STATE_NAMESPACE,

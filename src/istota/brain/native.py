@@ -53,7 +53,7 @@ from urllib.parse import urlparse
 
 from istota.build_info import RUNNING_VERSION as _ISTOTA_VERSION
 from istota import usage as usage_types
-from istota.claude_runtime_env import without_claude_runtime_env
+from istota.sandbox.claude_runtime_env import without_claude_runtime_env
 from istota.agent.events import AgentEvent, _describe_tool_use, _lone_relay_ask, _tool_invocation
 from istota.agent.loop import run_agent_loop, run_agent_loop_continue
 from istota.agent.sanitize import sanitize_tool_pairs

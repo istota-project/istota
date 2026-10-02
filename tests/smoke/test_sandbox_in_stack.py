@@ -822,7 +822,7 @@ TOOLSERVER_SCRIPT = [
 class TestOneNamespaceForTheWholeAttempt:
     """The tool server's own shape, observed in the shipped image.
 
-    `NativeBrain` spawns `istota.tool_server` once per task *attempt* through
+    `NativeBrain` spawns `istota.sandbox.tool_server` once per task *attempt* through
     `build_bwrap_cmd(..., profile=NATIVE)` and every tool runs in that one
     namespace (ISSUE-389). Before it, `Bash` rebuilt a whole bwrap namespace
     per call and the five file tools ran on daemon worker threads behind a

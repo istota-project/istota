@@ -60,7 +60,7 @@ class TestActionConstants:
     def test_wrapper_and_protocol_agree_on_the_action_name(self):
         # forge_cli.py cannot import istota, so it carries its own copy of
         # the action name. This is the seam where the two would drift.
-        from istota.forge_cli import ACTION_FORGE_TOKEN as WRAPPER_ACTION
+        from istota.sandbox.forge_cli import ACTION_FORGE_TOKEN as WRAPPER_ACTION
 
         assert WRAPPER_ACTION == ACTION_FORGE_TOKEN
         assert WRAPPER_ACTION in ALL_ACTIONS

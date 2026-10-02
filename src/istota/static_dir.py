@@ -1,6 +1,6 @@
 """Where the built SvelteKit frontend is on disk.
 
-A stdlib-only leaf for the same reason as :mod:`istota.forge_bin`: two callers
+A stdlib-only leaf for the same reason as :mod:`istota.sandbox.forge_bin`: two callers
 with very different budgets need one answer. ``web_app`` resolves this at import
 and serves from it; ``doctor``'s ``web.static`` check needs the same path to say
 whether the build exists.

@@ -6,7 +6,7 @@ import tempfile
 
 from istota import db
 from istota.config import Config
-from istota.skill_proxy import SkillProxy
+from istota.sandbox.skill_proxy import SkillProxy
 from istota.skills._loader import capability_disabled_skills, load_skill_index
 from . import test_relay_questions
 from .test_whatsapp_skill import call
@@ -161,7 +161,7 @@ def test_the_proxy_hands_the_relay_skill_the_nextcloud_credential(tmp_path):
 def test_a_task_that_never_selected_relay_still_gives_its_cli_the_credential(tmp_path, make_task):
     # Relay is a menu skill, so it reaches the proxy's credential map only by
     # auto-authorization on the credential being present. Drive that seam.
-    from istota import task_env
+    from istota.sandbox import task_env
     from istota.config import SecurityConfig
     index = load_skill_index(Path(__file__).parents[1] / 'src/istota/skills')
     (tmp_path / 'db').mkdir()

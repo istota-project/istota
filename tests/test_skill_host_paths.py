@@ -1,4 +1,4 @@
-"""Tests for istota.skill_host_paths — the shared host-path allowlist.
+"""Tests for istota.sandbox.host_paths — the shared host-path allowlist.
 
 A skill CLI runs host-side (the proxy spawns it outside the sandbox), so any
 verb taking a host path is an arbitrary-file read or write unless it is scoped.
@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from istota.skill_host_paths import (
+from istota.sandbox.host_paths import (
     allowed_host_roots,
     developer_repos_root,
     resolve_host_path,
@@ -32,7 +32,7 @@ from istota.skill_host_paths import (
     validate_host_path,
     write_resolved,
 )
-from istota.user_scope import scoped_user_dir
+from istota.sandbox.user_scope import scoped_user_dir
 from tests.support.skill_cli import run_skill_main
 
 
@@ -1252,7 +1252,7 @@ class TestWorkspaceRoots:
     """The one derivation, from explicit values rather than the environment."""
 
     def test_scopes_the_mount_to_the_named_user(self, tmp_path):
-        from istota.skill_host_paths import workspace_roots
+        from istota.sandbox.host_paths import workspace_roots
 
         mount = tmp_path / "mount"
         (mount / "Users" / "alice").mkdir(parents=True)
@@ -1270,7 +1270,7 @@ class TestWorkspaceRoots:
         version, restated here because this is now where it is decided.
 
         """
-        from istota.skill_host_paths import workspace_roots
+        from istota.sandbox.host_paths import workspace_roots
 
         mount = tmp_path / "mount"
         (mount / "Users" / "bob").mkdir(parents=True)
@@ -1302,7 +1302,7 @@ class TestWorkspaceRoots:
         A version of this function stripping the id before scoping passes
         every other case in this class.
         """
-        from istota.skill_host_paths import workspace_roots
+        from istota.sandbox.host_paths import workspace_roots
 
         mount = tmp_path / "mount"
         (mount / "Users" / "alice").mkdir(parents=True)
@@ -1312,7 +1312,7 @@ class TestWorkspaceRoots:
 
     def test_an_absent_user_id_contributes_nothing_from_the_mount(self, tmp_path):
         """Fail closed: with no identity there is no subtree to scope to."""
-        from istota.skill_host_paths import workspace_roots
+        from istota.sandbox.host_paths import workspace_roots
 
         mount = tmp_path / "mount"
         mount.mkdir()
@@ -1326,7 +1326,7 @@ class TestWorkspaceRoots:
 
     @pytest.mark.parametrize("token", ["../..", "a/b", ".", "..", "", "   "])
     def test_a_traversing_token_is_not_turned_into_a_path(self, tmp_path, token):
-        from istota.skill_host_paths import workspace_roots
+        from istota.sandbox.host_paths import workspace_roots
 
         mount = tmp_path / "mount"
         (mount / "Users" / "alice").mkdir(parents=True)
@@ -1342,7 +1342,7 @@ class TestWorkspaceRoots:
         callers do not, which is the whole of what keeps their root sets
         different from each other.
         """
-        from istota.skill_host_paths import workspace_roots
+        from istota.sandbox.host_paths import workspace_roots
 
         mount = tmp_path / "mount"
         (mount / "Users" / "alice").mkdir(parents=True)
@@ -1354,7 +1354,7 @@ class TestWorkspaceRoots:
         )
 
     def test_no_mount_leaves_the_deferred_dir_standing_alone(self, tmp_path):
-        from istota.skill_host_paths import workspace_roots
+        from istota.sandbox.host_paths import workspace_roots
 
         deferred = tmp_path / "deferred"
         deferred.mkdir()
@@ -1363,7 +1363,7 @@ class TestWorkspaceRoots:
         ) == [deferred.resolve()]
 
     def test_nothing_at_all_is_an_empty_list(self):
-        from istota.skill_host_paths import workspace_roots
+        from istota.sandbox.host_paths import workspace_roots
 
         assert workspace_roots(mount=None, user_id="") == []
 
@@ -1372,7 +1372,7 @@ class TestEnvHostRoots:
     """The environment-reading wrapper, and the alias three call sites use."""
 
     def test_it_is_what_allowed_host_roots_returns(self, mount, monkeypatch):
-        from istota.skill_host_paths import env_host_roots
+        from istota.sandbox.host_paths import env_host_roots
 
         monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "tok1")
         for writable in (False, True):
@@ -1383,7 +1383,7 @@ class TestEnvHostRoots:
     def test_it_derives_the_four_roots_the_sandbox_binds(
         self, mount, monkeypatch, tmp_path,
     ):
-        from istota.skill_host_paths import env_host_roots
+        from istota.sandbox.host_paths import env_host_roots
 
         monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "tok1")
         assert set(env_host_roots()) == {
@@ -1396,7 +1396,7 @@ class TestEnvHostRoots:
     def test_talk_can_be_dropped_for_a_read_whose_bytes_leave_the_task(
         self, mount, monkeypatch,
     ):
-        from istota.skill_host_paths import env_host_roots
+        from istota.sandbox.host_paths import env_host_roots
 
         monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "tok1")
         assert (mount / "Talk").resolve() not in env_host_roots(talk=False)
@@ -1405,18 +1405,18 @@ class TestEnvHostRoots:
 
 class TestPathUnderRoots:
     def test_a_path_at_a_root_is_under_it(self, tmp_path):
-        from istota.skill_host_paths import path_under_roots
+        from istota.sandbox.host_paths import path_under_roots
 
         assert path_under_roots(tmp_path, [tmp_path])
 
     def test_a_sibling_prefix_is_not_a_child(self, tmp_path):
         """Lexical containment, not `startswith`: `/a/bc` is not under `/a/b`."""
-        from istota.skill_host_paths import path_under_roots
+        from istota.sandbox.host_paths import path_under_roots
 
         assert not path_under_roots(tmp_path / "bc", [tmp_path / "b"])
 
     def test_no_roots_refuses(self, tmp_path):
-        from istota.skill_host_paths import path_under_roots
+        from istota.sandbox.host_paths import path_under_roots
 
         assert not path_under_roots(tmp_path, [])
 
@@ -1481,7 +1481,7 @@ class TestTheFourCallersRootSets:
         `READ` argument in the tree is behind it, which is why the case is
         kept and asked of the derivation rather than deleted with the roots.
         """
-        from istota.skill_host_paths import path_under_roots
+        from istota.sandbox.host_paths import path_under_roots
 
         monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "../..")
         victim = mount / "Users" / "bob" / "private.txt"
@@ -1647,7 +1647,7 @@ class TestTheConsolidationNeverWidens:
         ids=[c[0].replace(" ", "_") for c in _EQUIVALENCE_CASES],
     )
     def test_the_table(self, bed, tmp_path, name, relative, user_id, token, expected):
-        from istota.skill_host_paths import path_under_roots, workspace_roots
+        from istota.sandbox.host_paths import path_under_roots, workspace_roots
 
         mount, deferred = bed
         target = self._target(bed, tmp_path, relative)
@@ -1665,7 +1665,7 @@ class TestTheConsolidationNeverWidens:
 
     def test_the_deferred_replay_derivation_matches_its_old_copy(self, bed):
         """Except on the ISSUE-402 ids, where it is narrower and says so."""
-        from istota.skill_host_paths import workspace_roots
+        from istota.sandbox.host_paths import workspace_roots
 
         mount, deferred = bed
         assert workspace_roots(
@@ -1702,7 +1702,7 @@ class TestTheConsolidationNeverWidens:
     ):
         """Equal for an ordinary token, narrower for a traversing one — which
         is the guard `_indexable_roots` lacked."""
-        from istota.skill_host_paths import env_host_roots
+        from istota.sandbox.host_paths import env_host_roots
 
         deferred = tmp_path / "deferred"
         monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "tok1")
@@ -1717,7 +1717,7 @@ class TestTheConsolidationNeverWidens:
     def test_a_symlink_out_of_the_workspace_is_caught_by_resolving_first(self, bed):
         """The one case containment alone does not answer — every caller
         resolves before asking, which is why `path_under_roots` need not."""
-        from istota.skill_host_paths import path_under_roots, workspace_roots
+        from istota.sandbox.host_paths import path_under_roots, workspace_roots
 
         mount, deferred = bed
         secret = mount / "Users" / "bob" / "secret.csv"

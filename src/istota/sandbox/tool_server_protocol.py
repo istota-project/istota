@@ -60,7 +60,7 @@ from typing import Any
 # ---- Version ---------------------------------------------------------------
 
 # Both ends ship from the same tree — the server is `python -m
-# istota.tool_server` out of the same checkout the daemon is running — so a
+# istota.sandbox.tool_server` out of the same checkout the daemon is running — so a
 # mismatch means something is badly wrong rather than a rolling upgrade. It is
 # still checked, because "badly wrong" is exactly when a clear error is worth
 # most, and because the sandbox binds a *venv* and a *source tree* whose

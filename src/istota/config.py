@@ -19,7 +19,7 @@ from .config_mapper import (
     coerce_int,
     report_unknown,
 )
-from .user_scope import paths_overlap, scoped_user_dir
+from istota.sandbox.user_scope import paths_overlap, scoped_user_dir
 
 if TYPE_CHECKING:
     import sqlite3
@@ -1021,7 +1021,7 @@ class DeveloperConfig:
     github_default_owner: str = ""  # Default org/user for resolving short repo names
     github_reviewer: str = ""     # GitHub username to request as PR reviewer
     author_credit: str = ""       # Appended to every commit message (e.g., "Co-Authored-By: Name <email>")
-    # Forge CLI wrapper (src/istota/forge_cli.py). The real `gh` and `glab`
+    # Forge CLI wrapper (src/istota/sandbox/forge_cli.py). The real `gh` and `glab`
     # run behind a wrapper that injects the token and checks the argv against
     # a policy. The policy is code-owned rather than config-owned because it
     # is a safety default, not a preference; these two knobs extend and
@@ -2223,7 +2223,7 @@ class Config:
         ``workspace / "Users" / uid`` idiom inlined across the codebase — not a
         storage abstraction (no backend switch).
 
-        **Scoped through :func:`~istota.user_scope.scoped_user_dir`, not
+        **Scoped through :func:`~istota.sandbox.user_scope.scoped_user_dir`, not
         joined.** The join is not the check it reads as: ``.`` is discarded,
         an absolute component replaces the root and ``..`` is a child by name
         and the parent on disk, so ``{workspace}/Users`` — every user's directory

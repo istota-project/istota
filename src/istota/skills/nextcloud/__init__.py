@@ -107,7 +107,7 @@ def _scoped(config: Config, path: str, *, whole_tree: bool = False) -> str:
 
 
 def _refuse_withheld_path(path: str, user_id: str, *, whole_tree: bool) -> None:
-    from istota.skill_host_paths import withheld_from_env
+    from istota.sandbox.host_paths import withheld_from_env
 
     withheld = withheld_from_env()
     if "files" in withheld:
@@ -128,7 +128,7 @@ def _refuse_withheld_path(path: str, user_id: str, *, whole_tree: bool) -> None:
 def _withheld_memory_dirs(user_id: str) -> list[str]:
     """The caller's memory directories as Nextcloud paths, when the room
     withholds memory; empty otherwise."""
-    from istota.skill_host_paths import memory_dir_parts, withheld_from_env
+    from istota.sandbox.host_paths import memory_dir_parts, withheld_from_env
 
     if "memory" not in withheld_from_env() or not user_id:
         return []
@@ -1370,7 +1370,7 @@ def main(argv=None):
         parser.print_help()
         sys.exit(1)
     if group in ("files", "share"):
-        from istota.skill_host_paths import withheld_from_env
+        from istota.sandbox.host_paths import withheld_from_env
 
         if "files" in withheld_from_env():
             # The files control plane, trash and share listings included, is

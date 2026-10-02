@@ -33,7 +33,7 @@ from email.utils import getaddresses
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .skill_host_paths import path_under_roots
+from istota.sandbox.host_paths import path_under_roots
 
 if TYPE_CHECKING:
     from .config import Config

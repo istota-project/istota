@@ -815,7 +815,7 @@ def cmd_export_csv(args: argparse.Namespace) -> None:
     resolved path — reopening the argument would re-walk the symlinks the
     resolution settled.
     """
-    from istota.skill_host_paths import write_resolved
+    from istota.sandbox.host_paths import write_resolved
 
     resolved = Path(args.output) if args.output else None
 

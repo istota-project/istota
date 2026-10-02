@@ -11,7 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from istota import executor, network_proxy, skill_proxy, task_env
+from istota import executor
+from istota.sandbox import network_proxy
+from istota.sandbox import skill_proxy
+from istota.sandbox import task_env
 from istota.config import Config, DevboxConfig, NetworkConfig, SecurityConfig
 from istota.skills._types import EnvSpec, SkillMeta
 
@@ -896,8 +899,8 @@ def test_runtime_freezes_empty_credential_snapshot(tmp_path, runtime_inputs):
 class TestBrokerTrustSplit:
     def test_trust_only_enters_sandbox_wrapper(self, tmp_path, runtime_inputs, monkeypatch):
         from istota.config import CredentialBrokerConfig
-        from istota.sandbox_plan import SandboxProfile
-        from istota.tool_server import merge_proxy_env
+        from istota.sandbox.plan import SandboxProfile
+        from istota.sandbox.tool_server import merge_proxy_env
         import shlex
 
         monkeypatch.setattr(executor, "_bwrap_available", lambda: True)

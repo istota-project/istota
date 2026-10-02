@@ -42,7 +42,7 @@ class TestBash:
 
     async def test_the_argv_is_the_pipefail_shell_and_nothing_wraps_it(self, tmp_path):
         """This tool no longer wraps anything, and that is the seam change
-        rather than a simplification: it runs inside `istota.tool_server`,
+        rather than a simplification: it runs inside `istota.sandbox.tool_server`,
         which is itself the process bubblewrap wrapped once for the attempt.
         A per-call wrap here would nest bubblewrap inside a namespace built
         with `--unshare-user --disable-userns`, which fails every command.

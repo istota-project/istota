@@ -402,7 +402,7 @@ def _resolver():
 
 def _list_entries() -> list[str]:
     """The task's vault entry names, through the proxy. Tests replace this."""
-    from istota.credential_shim import ProxyError, list_entries
+    from istota.sandbox.credential_shim import ProxyError, list_entries
 
     try:
         return list_entries()

@@ -114,12 +114,12 @@ re-run. The cost is that a forge namespace legitimately named after the admin
 stays where it is, one level shallower than the rest — inside that user's own
 root, which is where it belongs, and reported rather than passed over.
 
-Every ``git`` invocation goes through :func:`istota.git_hardening.run_git`, for
+Every ``git`` invocation goes through :func:`istota.sandbox.git_hardening.run_git`, for
 the reason it always does under ``repos_dir``: repository config is
 model-written and a plain ``git`` command there runs whatever
 ``core.fsmonitor`` names, as the daemon user, with the daemon's environment.
 
-A repository is recognised by :func:`istota.git_remote_scrub.is_git_dir`, the
+A repository is recognised by :func:`istota.sandbox.git_remote_scrub.is_git_dir`, the
 strict structural test, for the same reason: recognising one *prunes the walk*,
 so a directory carrying an empty ``HEAD`` beside empty ``objects/`` and
 ``refs/`` — which the predicate this module used to carry accepted — would
@@ -136,7 +136,7 @@ the exit code as well as by the text. ``--dry-run`` touches nothing.
 The planning and applying halves are a stdlib-only leaf — the root and the
 admin set are parameters. Only :func:`main` reads configuration, the admins
 file and the task table. The two package imports are
-:mod:`istota.git_hardening` and :mod:`istota.git_remote_scrub`, both of which
+:mod:`istota.sandbox.git_hardening` and :mod:`istota.sandbox.git_remote_scrub`, both of which
 are themselves leaves.
 """
 
@@ -151,9 +151,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .git_hardening import run_git
-from .git_remote_scrub import is_git_dir
-from .user_scope import is_within, scoped_user_dir
+from istota.sandbox.git_hardening import run_git
+from istota.sandbox.git_remote_scrub import is_git_dir
+from istota.sandbox.user_scope import is_within, scoped_user_dir
 
 logger = logging.getLogger(__name__)
 
@@ -314,7 +314,7 @@ def _real(path: Path) -> Path:
 def _contained(root: Path, name: str) -> bool:
     """``{root}/{name}`` really is a child of ``root``, symlinks included.
 
-    :func:`~istota.user_scope.scoped_user_dir`, which is the same equality rule
+    :func:`~istota.sandbox.user_scope.scoped_user_dir`, which is the same equality rule
     ``executor.get_user_repos_dir`` and ``sandbox_cache_sweeper`` apply and for
     the same reason: truthiness alone lets through ``.`` (which collapses to
     the root), ``..`` (its parent) and an absolute component (which replaces
@@ -333,7 +333,7 @@ def _contained(root: Path, name: str) -> bool:
 def _under(child: Path, parent: Path) -> bool:
     """``child`` is at or below ``parent``, compared on realpaths.
 
-    :func:`~istota.user_scope.is_within` is lexical; the resolution is
+    :func:`~istota.sandbox.user_scope.is_within` is lexical; the resolution is
     :func:`_real`'s, and it is ``realpath`` rather than ``Path.resolve`` for
     this module's reason — it is asked about paths git recorded before a
     rename, which no longer exist.
@@ -451,7 +451,7 @@ def _git_dirs(
     so a subtree dropped for depth or for an unreadable directory is a clone
     whose worktrees nobody will fix, and it is reported rather than passed over.
     That is why this is not
-    :func:`istota.git_remote_scrub.find_git_dirs`, which shares the predicate
+    :func:`istota.sandbox.git_remote_scrub.find_git_dirs`, which shares the predicate
     and answers a different question: it logs what it skipped instead of
     returning it, and it records a repository reached through a symlink, whose
     path is outside ``clone_root`` and has no translation into the destination
@@ -823,7 +823,7 @@ def plan(
 
 
 def _git(cwd: Path, *args: str) -> tuple[int, str]:
-    """``(exit_status, output)``, through :func:`istota.git_hardening.run_git`.
+    """``(exit_status, output)``, through :func:`istota.sandbox.git_hardening.run_git`.
 
     stderr is merged into stdout and a failure to run git at all comes back as
     the exception's own message, because this output is reported to an operator

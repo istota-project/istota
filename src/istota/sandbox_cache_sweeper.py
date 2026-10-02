@@ -119,7 +119,7 @@ environment carries the secret key and every module credential, and a process
 whose job is to unlink files needs none of it. The per-user cache is
 model-written by construction; a host-side tool started with its cwd inside it
 would pick up a ``uv.toml`` or an ``.npmrc`` the model wrote, as the daemon
-user. Same shape as the reasoning in :mod:`istota.git_hardening`, for a
+user. Same shape as the reasoning in :mod:`istota.sandbox.git_hardening`, for a
 different pair of programs.
 
 A tool is run only where its own subdirectory exists, which also covers the one
@@ -173,7 +173,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from istota.lib import du
-from istota.user_scope import is_scopable_user_id, scoped_user_dir
+from istota.sandbox.user_scope import is_scopable_user_id, scoped_user_dir
 
 logger = logging.getLogger("istota.sandbox_cache_sweeper")
 
@@ -301,7 +301,7 @@ def _candidates_in_root(root: Path) -> Iterator[tuple[str, Path, bool]]:
     ``resolve_sandbox_cache_dir`` creates ``{root}/{user_id}`` and nothing
     deeper on that branch — so a candidate is a directory that **resolves to
     its own name inside the root**, which is
-    :func:`~istota.user_scope.scoped_user_dir` and is asked against the root
+    :func:`~istota.sandbox.user_scope.scoped_user_dir` and is asked against the root
     resolved once, at the top, rather than per entry. A directory that fails
     that yields ``False`` and is reported rather than silently skipped: a
     planted symlink is the interesting case, and a sweep that quietly ignored
@@ -415,7 +415,7 @@ def _candidates_for_users(
     which answers perfectly happily for a path outside the root. The equality
     would still refuse the result, but only after a traversal outside the root
     had been stat'd. So the id is checked against
-    :func:`~istota.user_scope.is_scopable_user_id` instead — the lexical half
+    :func:`~istota.sandbox.user_scope.is_scopable_user_id` instead — the lexical half
     of the shared rule, without a root. What the *resolved* equality is for is
     symlinks, which are children by name and somewhere else on disk.
 

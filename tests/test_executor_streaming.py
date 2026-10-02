@@ -687,7 +687,7 @@ class TestStreamingExecution:
         patches = _patch_executor() + [
             patch("istota.executor.subprocess.Popen", return_value=mock_process),
             patch("istota.executor.threading.Timer", InstantTimer),
-            patch("istota.process_group.kill_process_group",
+            patch("istota.sandbox.process_group.kill_process_group",
                   side_effect=lambda pid, *a, **k: killed.append(pid) or "group"),
         ]
         with contextmanager_chain(patches):

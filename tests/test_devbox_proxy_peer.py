@@ -75,7 +75,8 @@ def docker_peer(tmp_path, monkeypatch):
 
 
 def check_peer(tmp_path):
-    from istota import devbox_peer, peer_process
+    from istota import devbox_peer
+    from istota.sandbox import peer_process
     pid = os.getpid()
     return devbox_peer.peer_in_devbox(
         pid, peer_process.start_time(pid), user_id="alice",
@@ -122,7 +123,8 @@ def test_container_recreation_does_not_authorize_old_cgroup(tmp_path, docker_pee
 
 
 def test_recycled_peer_pid_is_refused(tmp_path, docker_peer):
-    from istota import devbox_peer, peer_process
+    from istota import devbox_peer
+    from istota.sandbox import peer_process
     assert not devbox_peer.peer_in_devbox(
         os.getpid(), peer_process.start_time(os.getpid()) - 1,
         user_id="alice", container_name="custom-alice",

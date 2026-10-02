@@ -957,7 +957,7 @@ def _pytest_is_the_skill_proxy_task_root(monkeypatch):
     adding to it.
     """
     try:
-        from istota import skill_proxy
+        from istota.sandbox import skill_proxy
     except ImportError:
         return
     monkeypatch.setattr(

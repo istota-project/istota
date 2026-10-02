@@ -8,7 +8,7 @@ import tempfile
 
 from istota import db
 from istota.config import Config
-from istota.skill_proxy import SkillProxy
+from istota.sandbox.skill_proxy import SkillProxy
 from istota.skills._loader import capability_disabled_skills, load_skill_index
 from .test_whatsapp_requests import task
 

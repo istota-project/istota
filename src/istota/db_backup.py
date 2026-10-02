@@ -45,7 +45,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from .modules import MODULE_NAMES
-from .user_scope import is_within
+from istota.sandbox.user_scope import is_within
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +148,7 @@ def _resolve_or_none(path) -> Path | None:
 def _destination_is_under_mount(dest: Path, mount: Path) -> bool:
     """Whether ``dest`` lands at or inside ``mount``, both sides already resolved.
 
-    The comparison is :func:`~istota.user_scope.is_within`, which is lexical —
+    The comparison is :func:`~istota.sandbox.user_scope.is_within`, which is lexical —
     the discipline that module's docstring asks each caller to choose for its
     own boundary. ``mount`` arrives resolved from
     :func:`_destination_is_durable`, which resolves it once and then uses that

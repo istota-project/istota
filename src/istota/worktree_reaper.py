@@ -80,9 +80,9 @@ NUL form contains it, and a listing with a duplicate path is refused entirely.
 the sandbox, so a checkout's own ``.git/config`` is model-written. Plain
 ``git status`` there runs whatever ``core.fsmonitor`` names, as the daemon user,
 with the daemon's environment — so every call goes through
-:func:`istota.git_hardening.run_git`, which applies both
-:data:`~istota.git_hardening.GIT_HARDENING` and the environment policy
-:func:`~istota.git_hardening.git_env` builds. ``GIT_CONFIG_NOSYSTEM`` and
+:func:`istota.sandbox.git_hardening.run_git`, which applies both
+:data:`~istota.sandbox.git_hardening.GIT_HARDENING` and the environment policy
+:func:`~istota.sandbox.git_hardening.git_env` builds. ``GIT_CONFIG_NOSYSTEM`` and
 ``GIT_CONFIG_GLOBAL`` do not cover repository config and are not a substitute.
 
 That policy removes as well as sets, and this module is why (ISSUE-457): an
@@ -119,9 +119,9 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import NamedTuple
 
-from istota.git_hardening import run_git
-from istota.git_remote_scrub import find_git_dirs
-from istota.user_scope import is_within
+from istota.sandbox.git_hardening import run_git
+from istota.sandbox.git_remote_scrub import find_git_dirs
+from istota.sandbox.user_scope import is_within
 
 logger = logging.getLogger("istota.worktree_reaper")
 
@@ -251,7 +251,7 @@ class ReapOutcome(NamedTuple):
 # --------------------------------------------------------------------------
 
 def _git(cwd: Path, *args: str, timeout: int = _GIT_TIMEOUT) -> tuple[int, str]:
-    """``(exit_status, stdout)``, through :func:`istota.git_hardening.run_git`.
+    """``(exit_status, stdout)``, through :func:`istota.sandbox.git_hardening.run_git`.
 
     Stdout only, and an empty string when git could not be run at all: every
     caller here parses the output, so git's own diagnosis must not arrive as
@@ -657,7 +657,7 @@ def _is_within(path: Path, root: Path) -> bool:
     is out of scope — acting on it would let a chosen path steer a delete.
 
     The resolution is here and the comparison is
-    :func:`~istota.user_scope.is_within`, which is lexical: a record naming
+    :func:`~istota.sandbox.user_scope.is_within`, which is lexical: a record naming
     ``{root}/..`` is a child by spelling and the root's parent on disk, so
     asking the shared predicate about the unresolved path would answer about
     the wrong directory.

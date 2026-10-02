@@ -35,7 +35,7 @@ from istota.executor import (
     execute_task,
     without_claude_runtime_env,
 )
-from istota.shell_exec import PIPEFAIL_SHELLOPTS, SHELLOPTS_VAR
+from istota.sandbox.shell_exec import PIPEFAIL_SHELLOPTS, SHELLOPTS_VAR
 from istota.skills._env import EnvContext, build_identity_env, build_skill_env
 from istota.skills._types import EnvSpec, SkillMeta
 
@@ -266,7 +266,7 @@ class TestTheTaskEnvCanImportIstota:
 
     `NativeBrain._start_tool_server` hands `req.env` — the env this function
     builds — straight to `create_subprocess_exec`, and the argv is
-    `[sys.executable, "-m", "istota.tool_server"]`. So the env has to be one
+    `[sys.executable, "-m", "istota.sandbox.tool_server"]`. So the env has to be one
     that interpreter can import `istota` from. Nothing in the env says so, and
     nothing needs to: `PATH` is built from `sys.prefix` because the venv it
     names is where the package is installed. That is a fact about the
@@ -297,7 +297,7 @@ class TestTheTaskEnvCanImportIstota:
         # directory on `sys.path`: run from anywhere holding an `istota/`, the
         # import would succeed without the venv having anything to do with it.
         proc = subprocess.run(
-            [sys.executable, "-c", "import istota.tool_server"],
+            [sys.executable, "-c", "import istota.sandbox.tool_server"],
             env=env,
             cwd=tmp_path,
             capture_output=True,

@@ -35,7 +35,7 @@ from pathlib import PurePosixPath
 
 import pytest
 
-from istota.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE
+from istota.sandbox.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE
 from testbed.services.gitlab import CONTAINER_REPOS_DIR, FORGE_PROJECT, FORGE_TOKEN
 
 pytestmark = pytest.mark.smoke

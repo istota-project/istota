@@ -12,8 +12,8 @@ sites that printed an error envelope and exited 0. (``skills/kv`` checked no
 status in ``main`` either, but every one of its error paths already exited 1.)
 
 Nothing from the package beyond ``._hostpath`` (a leaf over
-``istota.skill_host_paths``) and ``._credref`` (a leaf over
-``istota.credential_shim``, which is stdlib-only because a copy of it runs as
+``istota.sandbox.host_paths``) and ``._credref`` (a leaf over
+``istota.sandbox.credential_shim``, which is stdlib-only because a copy of it runs as
 the task's own shim with no istota package on its path) — so a skill subprocess
 pays nothing for it beyond what ``istota.skills.__init__`` already costs.
 

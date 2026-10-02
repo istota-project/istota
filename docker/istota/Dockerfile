@@ -45,7 +45,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # Forge CLIs (developer skill). The skill's forge verbs — MR/PR creation,
 # review, ci/run status, repo view — exec a real `gh` or `glab` through
-# src/istota/forge_cli.py, which the daemon writes per task. Without the
+# src/istota/sandbox/forge_cli.py, which the daemon writes per task. Without the
 # binaries every one of them exits 6 at exec, while git clone/branch/push keep
 # working, so the skill looks configured and dies at the point it would publish.
 #

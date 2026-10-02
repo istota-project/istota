@@ -30,7 +30,7 @@ import pytest
 from istota import db
 from istota.brain import BrainRequest
 from istota.brain.claude_code import ClaudeCodeBrain
-from istota.process_group import kill_group_if_live, kill_process_group
+from istota.sandbox.process_group import kill_group_if_live, kill_process_group
 
 
 # =============================================================================
@@ -134,8 +134,8 @@ class TestKillProcessGroup:
         # !stop and the web cancel endpoint send SIGTERM, not SIGKILL, so the
         # CLI gets a chance to shut down cleanly.
         sent = []
-        with patch("istota.process_group.os.getpgid", return_value=1234), \
-             patch("istota.process_group.os.killpg",
+        with patch("istota.sandbox.process_group.os.getpgid", return_value=1234), \
+             patch("istota.sandbox.process_group.os.killpg",
                    side_effect=lambda pgid, sig: sent.append((pgid, sig))):
             assert kill_process_group(1234, signal.SIGTERM) == "group"
         assert sent == [(1234, signal.SIGTERM)]
@@ -168,7 +168,7 @@ class TestKillGroupIfLive:
 
     def test_a_reaped_process_is_not_signalled(self):
         signalled = []
-        with patch("istota.process_group.kill_process_group",
+        with patch("istota.sandbox.process_group.kill_process_group",
                    side_effect=lambda pid, *a, **k: signalled.append(pid) or "group"):
             kill_group_if_live(_FakeProcess(returncode=-9))
         assert signalled == [], "signalled a pid that had already been reaped"
@@ -178,7 +178,7 @@ class TestKillGroupIfLive:
         # a cleanly-exited process through — the shape this guard is easiest to
         # write wrong.
         signalled = []
-        with patch("istota.process_group.kill_process_group",
+        with patch("istota.sandbox.process_group.kill_process_group",
                    side_effect=lambda pid, *a, **k: signalled.append(pid) or "group"):
             kill_group_if_live(_FakeProcess(returncode=0))
         assert signalled == []
@@ -187,7 +187,7 @@ class TestKillGroupIfLive:
         # The control. Without it, a guard that refused everything would pass
         # both tests above.
         signalled = []
-        with patch("istota.process_group.kill_process_group",
+        with patch("istota.sandbox.process_group.kill_process_group",
                    side_effect=lambda pid, *a, **k: signalled.append(pid) or "group"):
             kill_group_if_live(_FakeProcess(returncode=None))
         assert signalled == [4242]
@@ -197,14 +197,14 @@ class TestKillGroupIfLive:
         # `kill_process_group`'s own default. A different default here would be
         # a behaviour change hidden inside a refactor.
         sent = []
-        with patch("istota.process_group.kill_process_group",
+        with patch("istota.sandbox.process_group.kill_process_group",
                    side_effect=lambda pid, sig="sentinel": sent.append(sig) or "group"):
             kill_group_if_live(_FakeProcess(returncode=None))
         assert sent == [signal.SIGKILL]
 
     def test_the_signal_is_configurable(self):
         sent = []
-        with patch("istota.process_group.kill_process_group",
+        with patch("istota.sandbox.process_group.kill_process_group",
                    side_effect=lambda pid, sig=None: sent.append(sig) or "group"):
             kill_group_if_live(_FakeProcess(returncode=None), signal.SIGTERM)
         assert sent == [signal.SIGTERM]
@@ -212,7 +212,7 @@ class TestKillGroupIfLive:
     def test_it_never_raises_when_the_helper_below_it_fails(self):
         # Two of the three call sites are in a `finally` or a timer callback
         # with no `try` around them.
-        with patch("istota.process_group._signal", side_effect=RuntimeError("boom")):
+        with patch("istota.sandbox.process_group._signal", side_effect=RuntimeError("boom")):
             kill_group_if_live(_FakeProcess(returncode=None))
 
     def test_a_real_process_group_dies(self):
@@ -270,7 +270,7 @@ class TestSchedulerRunCaptureKillsTheGroup:
         from istota.scheduler import _run_capture
 
         signalled = []
-        with patch("istota.process_group.kill_process_group",
+        with patch("istota.sandbox.process_group.kill_process_group",
                    side_effect=lambda pid, *a, **k: signalled.append(pid) or "group"):
             with pytest.raises(subprocess.TimeoutExpired):
                 # Short enough to exit on its own: the kill is patched out, so
@@ -343,7 +343,7 @@ class TestClaudeCodeBrainKillsTheGroup:
         proc = _mock_process([_tool_use_line()], returncode=-9)
         killed = []
         with patch("istota.brain.claude_code.subprocess.Popen", return_value=proc), \
-             patch("istota.process_group.kill_process_group",
+             patch("istota.sandbox.process_group.kill_process_group",
                    side_effect=lambda pid, *a, **k: killed.append(pid) or "group"):
             result = ClaudeCodeBrain()._execute_streaming_once(
                 ["claude"], _req(tmp_path, cancel_check=lambda: True),
@@ -365,7 +365,7 @@ class TestClaudeCodeBrainKillsTheGroup:
         proc.stdout = _slow_stdout()
         killed = []
         with patch("istota.brain.claude_code.subprocess.Popen", return_value=proc), \
-             patch("istota.process_group.kill_process_group",
+             patch("istota.sandbox.process_group.kill_process_group",
                    side_effect=lambda pid, *a, **k: killed.append(pid) or "group"):
             result = ClaudeCodeBrain()._execute_streaming_once(
                 ["claude"], _req(tmp_path, timeout_seconds=0.05),
@@ -387,7 +387,7 @@ class TestClaudeCodeBrainKillsTheGroup:
         proc.returncode = -9  # reaped before the cancel poll runs
         killed = []
         with patch("istota.brain.claude_code.subprocess.Popen", return_value=proc), \
-             patch("istota.process_group.kill_process_group",
+             patch("istota.sandbox.process_group.kill_process_group",
                    side_effect=lambda pid, *a, **k: killed.append(pid) or "group"):
             ClaudeCodeBrain()._execute_streaming_once(
                 ["claude"], _req(tmp_path, cancel_check=lambda: True),
