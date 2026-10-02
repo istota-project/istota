@@ -40,7 +40,7 @@ PAYLOAD_MAX_BYTES = 8192
 # answer or a long confirmation prompt cannot be clipped (ISSUE-178). The size
 # cap still guards every other kind (tool output, progress narration) so a
 # runaway tool result can't bloat the event log.
-_UNCAPPED_EVENT_KINDS = frozenset({"result", "confirmation"})
+_UNCAPPED_EVENT_KINDS = frozenset({"result", "confirmation", "confirmed"})
 
 # Generic "working on it" progress verbs, surface-agnostic (no markup) so every
 # output surface draws from one list. The executor stamps one onto the
@@ -113,6 +113,7 @@ EventKind = Literal[
     "context_management",  # brain compacted context
     "brain_fallback",      # primary brain was unavailable; the run continues on the fallback
     "confirmation",        # task paused for user confirmation
+    "confirmed",           # an approved `confirmation`, relabelled in place by confirmations.approve; never emitted live
     "result",              # final output text
     "error",               # task failed
     "cancelled",           # task was cancelled

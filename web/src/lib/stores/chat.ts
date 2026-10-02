@@ -93,7 +93,9 @@ import {
   isStranded,
   isQueued,
   isClientOnly,
+  answerGate,
   type ChatMessage,
+  type GateOutcome,
   type Segment,
   type ToolEntry,
   type SearchResultsData,
@@ -122,8 +124,11 @@ export type {
  * payload. Tool entries render as neutral "done" chips (history carries no
  * per-tool success / progress / timing); the last text segment is the answer
  * (unsettled, prominent), all earlier text segments are settled narration. */
-function historySegments(raw: { kind: string; text: string }[]): Segment[] {
+function historySegments(raw: { kind: string; text: string; outcome?: GateOutcome }[]): Segment[] {
   const segs: Segment[] = raw.map((s, i) => {
+    if (s.kind === 'gate') {
+      return { kind: 'gate', id: `g${i}`, text: s.text, outcome: s.outcome };
+    }
     if (s.kind === 'tool') {
       return {
         kind: 'tool',
@@ -245,6 +250,7 @@ const STREAM_KINDS = [
   'context_management',
   'brain_fallback',
   'confirmation',
+  'confirmed',
   'result',
   'error',
   'cancelled',
@@ -1319,7 +1325,14 @@ function createSession(): ChatSession {
   }
 
   function streamTask(taskId: number, cid: number): { stop: () => void } {
-    let lastSeq = 0;
+    // An approved question already on screen: resume past it rather than
+    // replaying events this message has already applied (ISSUE-592).
+    let lastSeq = get(messages).find((m) => m.cid === cid)?.resumeAfterSeq ?? 0;
+    if (lastSeq) {
+      updateMsg(cid, (m) => {
+        m.resumeAfterSeq = undefined;
+      });
+    }
     let es: EventSource | null = null;
     let pollTimer: ReturnType<typeof setInterval> | null = null;
     let finished = false;
@@ -1382,7 +1395,14 @@ function createSession(): ChatSession {
       } catch {
         /* swallow */
       }
-      if (kind === 'confirmation') paused = true;
+      if (kind === 'confirmation') {
+        paused = true;
+        if (seq) {
+          updateMsg(cid, (m) => {
+            m.gateSeq = seq;
+          });
+        }
+      }
       // `done` is the normal terminal; settle on `error`/`cancelled` too so a
       // failure that arrives without a trailing `done` (older paths, dropped
       // connection) can't leave the room stuck on "Working…".
@@ -5122,12 +5142,22 @@ function createSession(): ChatSession {
     updateMsg(cid, (m) => {
       m.confirmation = false;
       m.status = 'pending';
-      // Drop the confirmation prompt's segments so the resumed stream
-      // rebuilds the answer fresh (the prompt was a question, not the answer).
-      m.segments = [];
-      m.text = '';
       m.streaming = true;
       m.error = false;
+      if (m.gateSeq) {
+        // Everything above the question stays, and the question itself is
+        // marked answered; the re-run streams in below it (ISSUE-592). The
+        // server relabels that event `confirmed` at the same seq, so resuming
+        // after it skips nothing of the re-run's.
+        answerGate(m, 'approved');
+        m.resumeAfterSeq = m.gateSeq;
+      } else {
+        // A turn rendered from history has no seq to resume from. The replay
+        // from seq 0 rebuilds the whole of it, the answered question included,
+        // so it starts from nothing rather than drawing the turn twice.
+        m.segments = [];
+        m.text = '';
+      }
     });
     // The confirmed task resumes ahead of anything queued behind it. The
     // stream paused (so no stream is active); enqueueStream starts it now.
@@ -5144,15 +5174,19 @@ function createSession(): ChatSession {
       m.confirmation = false;
       m.status = 'cancelled';
       m.streaming = false;
-      // Strike the declined prompt (the trailing text segment), or leave a
-      // bare notice when there was none.
-      const last = m.segments[m.segments.length - 1];
-      if (last && last.kind === 'text' && last.text) last.text = `~~${last.text}~~`;
-      else m.segments.push({ kind: 'text', id: 'declined', text: '_(declined)_', settled: false });
-      m.text =
-        m.segments[m.segments.length - 1].kind === 'text'
-          ? (m.segments[m.segments.length - 1] as Extract<Segment, { kind: 'text' }>).text
-          : '';
+      // Mark the question declined. A turn from before the gate segment
+      // existed carries the question as its trailing text, so strike that, or
+      // leave a bare notice when there was nothing to strike.
+      if (!answerGate(m, 'declined')) {
+        const last = m.segments[m.segments.length - 1];
+        if (last && last.kind === 'text' && last.text) last.text = `~~${last.text}~~`;
+        else
+          m.segments.push({ kind: 'text', id: 'declined', text: '_(declined)_', settled: false });
+        m.text =
+          m.segments[m.segments.length - 1].kind === 'text'
+            ? (m.segments[m.segments.length - 1] as Extract<Segment, { kind: 'text' }>).text
+            : '';
+      }
     });
     // The parked confirmation was holding the stream queue; release it so the
     // next queued *task* (if any) starts. `cancelled` rather than `done`

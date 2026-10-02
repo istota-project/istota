@@ -24,6 +24,7 @@ Nothing in here decides *whether* to ask. That is the gate in
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 
@@ -36,6 +37,60 @@ logger = logging.getLogger("istota.confirmations")
 # is the *last* resort for describing one — `describe` reaches for the
 # bot-composed confirmation prompt and the `processed_emails` metadata first.
 _PREVIEW_CHARS = 60
+
+# The `execution_trace` entry a parked attempt ends on: the question it asked.
+GATE_TRACE_TYPE = "gate"
+
+
+def _trace_entries(raw: str | None) -> list | None:
+    if not raw:
+        return []
+    try:
+        entries = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return entries if isinstance(entries, list) else None
+
+
+def trace_with_gate(
+    prior_trace: str | None, trace: str | None, *, prompt: str | None = None,
+) -> str | None:
+    """An attempt's trace with the work of the parks before it kept in front.
+
+    ``prior_trace`` is the task row's stored trace. Everything up to and
+    including its last gate entry is earlier attempts' work that the user saw
+    and answered, so it leads; anything after that gate belongs to an earlier
+    attempt of this same run, which ``trace`` supersedes. Cutting at the last
+    gate rather than keeping the whole stored trace is what stops a retried or
+    re-confirmed run from repeating it.
+
+    With ``prompt`` the attempt parked. Its trailing text entry is the question
+    as streamed, so it becomes the gate entry: the rule the live `confirmation`
+    event and `_trace_segments`' answer overwrite both follow. Never raises; an
+    unreadable ``trace`` is returned as it came (ISSUE-592).
+    """
+    prior = _trace_entries(prior_trace) or []
+    cut = 0
+    for i, entry in enumerate(prior):
+        if isinstance(entry, dict) and entry.get("type") == GATE_TRACE_TYPE:
+            cut = i + 1
+    prefix = prior[:cut]
+    if not prefix and prompt is None:
+        return trace
+    if prefix:
+        # Only an approval re-runs a parked task, so this run is the answer to
+        # the last question; say so on the entry rather than leave a reader to
+        # infer it from what follows, which a run stopped early never records.
+        prefix[-1] = {**prefix[-1], "outcome": "approved"}
+    body = _trace_entries(trace)
+    if body is None:
+        return trace
+    body = list(body)
+    if prompt is not None:
+        if body and isinstance(body[-1], dict) and body[-1].get("type") == "text":
+            body.pop()
+        body.append({"type": GATE_TRACE_TYPE, "text": prompt})
+    return json.dumps(prefix + body)
 
 
 def pending_for_user(conn, user_id: str) -> list[db.Task]:
@@ -255,31 +310,23 @@ def approve(
             db.confirm_task(conn, task.id)
     db.log_task(conn, task.id, "info", "User confirmed task")
 
-    # Drop the parked attempt's two terminal frames, and nothing else
-    # (ISSUE-235). The work it did before it asked — `task_started`, the tool
-    # rows — stays: the park path persists no `execution_trace` (only
-    # completion does, and the re-run overwrites it), so those rows are the
-    # only durable record of what ran before permission was given. The web
-    # endpoint used to delete the *whole* log here, on the reasoning that the
-    # re-run's seq counter would collide on UNIQUE(task_id, seq); untrue since
-    # `EventWriter._resume_seq` began seeding from `get_max_task_event_seq`.
-    #
-    # `confirmation` and `done` cannot stay, because a replaying client cannot
-    # tell them from live ones: a web client opens the task stream at seq 0
-    # (the confirm path sends no `since_seq`, nor does a reload that picks the
-    # task back up), `chat_task_stream` returns on the first `done` it sends,
-    # and the reducer re-arms the confirmation card with nothing to clear it —
-    # so the re-run would stream to nobody and the answered card would come
-    # back. The question itself is not lost; it is on
-    # `tasks.confirmation_prompt`. Same kind-scoped prune the scheduler already
-    # does for `text_delta` once a terminal frame lands, and gaps in `seq` are
-    # harmless (SSE resume is `seq > last`).
+    # Keep the parked attempt's work and its question; drop only its `done`
+    # (ISSUE-235, ISSUE-592). The work it did before it asked stays, text
+    # included: the scheduler no longer prunes `text_delta` on a park. A web
+    # client streams a confirmed task from seq 0 — the confirm path after a
+    # reload sends no `since_seq`, nor does a reload that picks the task back up
+    # — and `chat_task_stream` returns on the first `done` it sends, so a
+    # surviving `done` would end the stream before the re-run reached it. The
+    # question is relabelled `confirmed` rather than deleted: a replayed
+    # `confirmation` would re-arm the answered card, while `confirmed` replays
+    # as the approved prompt above the re-run. `done` is the top seq, so the
+    # re-run's `EventWriter._resume_seq` takes its number and nothing collides.
     #
     # This lives in the shared verb rather than on the web endpoint because a
     # task confirmed over Talk or by `!confirm` is read back on the web surface
     # too, and a log that depends on which surface answered is exactly the
     # drift this module exists to prevent.
-    db.delete_task_events_by_kind(conn, task.id, "confirmation")
+    db.relabel_task_events_kind(conn, task.id, "confirmation", "confirmed")
     db.delete_task_events_by_kind(conn, task.id, "done")
 
     trusted = False
