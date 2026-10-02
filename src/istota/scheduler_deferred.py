@@ -30,7 +30,7 @@ from . import db
 from .config import Config
 from .brain import model_namespace_for_kind, resolve_brain_kind
 from istota.sandbox.kv_namespaces import is_reserved_namespace
-from .notification_store import deliver_pending
+from istota.notifications.store import deliver_pending
 from istota.sandbox.host_paths import path_under_roots, workspace_roots
 from istota.sandbox.user_scope import is_scopable_user_id
 
@@ -779,7 +779,7 @@ def _process_deferred_user_alerts(
         return 0
     path, data = loaded
 
-    from .notification_resolvers import task_alert
+    from istota.notifications.resolvers import task_alert
 
     # Insertion-ordered, so the first type seen leads the log line.
     by_type: dict[str, list[str]] = {}
@@ -921,8 +921,8 @@ def _send_deferred_alerts_unrecorded(
     that did reach someone, which the unconsumed-file warning names; the
     alternative is silently discarding the thing the model wrote.
     """
-    from .notifications import send_notification
-    from .notification_resolvers import task_alert
+    from istota.notifications.delivery import send_notification
+    from istota.notifications.resolvers import task_alert
 
     delivered = False
     skipped: list[str] = []
@@ -961,7 +961,7 @@ def _deferred_alert_title(alert_type: str, task_id: int) -> str:
     every kind — `Security alert (task #3)` would arrive as `Security alert task
     #3`.
     """
-    from .notification_resolvers import task_alert
+    from istota.notifications.resolvers import task_alert
 
     if alert_type == task_alert.ALERT_TYPE_ACTION_NEEDED:
         return f"Action needed — task #{task_id}"
@@ -1685,7 +1685,7 @@ def _process_deferred_garmin_import(
     except (TypeError, ValueError):
         days_back = 7
 
-    from .notifications import send_notification
+    from istota.notifications.delivery import send_notification
 
     try:
         from istota.health import garmin as gm

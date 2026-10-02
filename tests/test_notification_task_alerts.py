@@ -26,9 +26,11 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, notification_sources as sources, notification_store as store
+from istota import db
+from istota.notifications import sources
+from istota.notifications import store
 from istota.config import Config, UserConfig
-from istota.notification_resolvers import task_alert
+from istota.notifications.resolvers import task_alert
 from istota.scheduler_deferred import _process_deferred_user_alerts
 
 
@@ -84,7 +86,7 @@ def _params(row):
 
 
 def _sends(delivered=True):
-    return patch("istota.notifications.send_notification", return_value=delivered)
+    return patch("istota.notifications.delivery.send_notification", return_value=delivered)
 
 
 # ---------------------------------------------------------------------------
@@ -824,7 +826,7 @@ class TestThrottleNotices:
     def _deliver(self, config, notices, window=3600, delivered=True):
         from istota.transport.email import inbound as inbound_module
 
-        with patch("istota.notifications.send_notification",
+        with patch("istota.notifications.delivery.send_notification",
                    return_value=delivered) as send:
             inbound_module._deliver_throttle_notices(config, notices, window)
         return send
@@ -869,7 +871,7 @@ class TestThrottleNotices:
         """
         from istota.transport.email import inbound as inbound_module
 
-        with patch("istota.notifications.send_notification", return_value=True) as send:
+        with patch("istota.notifications.delivery.send_notification", return_value=True) as send:
             inbound_module._deliver_throttle_notices(config, self._notice(filed=3), 3600)
             inbound_module._deliver_throttle_notices(config, self._notice(filed=4), 3600)
 
@@ -890,7 +892,7 @@ class TestThrottleNotices:
         """
         from istota.transport.email import inbound as inbound_module
 
-        with patch("istota.notifications.send_notification", return_value=True):
+        with patch("istota.notifications.delivery.send_notification", return_value=True):
             inbound_module._deliver_throttle_notices(config, self._notice(filed=3), 3600)
 
         row = self._throttle_rows(config)[0]
@@ -899,7 +901,7 @@ class TestThrottleNotices:
         assert self._throttle_rows(config)[0]["state"] == "resolved"
 
         # The flood is still going; the next poll finds more over-budget mail.
-        with patch("istota.notifications.send_notification", return_value=True) as send:
+        with patch("istota.notifications.delivery.send_notification", return_value=True) as send:
             inbound_module._deliver_throttle_notices(config, self._notice(filed=9), 3600)
 
         assert send.call_count == 0
@@ -911,7 +913,7 @@ class TestThrottleNotices:
         """Dismissing means "not now", not "never again"."""
         from istota.transport.email import inbound as inbound_module
 
-        with patch("istota.notifications.send_notification", return_value=True):
+        with patch("istota.notifications.delivery.send_notification", return_value=True):
             inbound_module._deliver_throttle_notices(config, self._notice(filed=3), 3600)
 
         row = self._throttle_rows(config)[0]
@@ -920,7 +922,7 @@ class TestThrottleNotices:
 
         # Same poll shape, but the window has lapsed.
         inbound_module._reset_volume_state()
-        with patch("istota.notifications.send_notification", return_value=True) as send:
+        with patch("istota.notifications.delivery.send_notification", return_value=True) as send:
             inbound_module._deliver_throttle_notices(config, self._notice(filed=9), 3600)
 
         assert send.call_count == 1

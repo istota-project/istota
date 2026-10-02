@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     import sqlite3
 
-    from .config import Config
+    from istota.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -275,7 +275,7 @@ def _register_all() -> None:
         ):
             try:
                 module = importlib.import_module(
-                    f".notification_resolvers.{module_name}", package=__package__,
+                    f".resolvers.{module_name}", package=__package__,
                 )
                 register(module.RESOLVER)
             except Exception:

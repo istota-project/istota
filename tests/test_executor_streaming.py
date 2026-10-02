@@ -1930,7 +1930,7 @@ class TestTmuxFallback:
             patch("istota.executor.make_brain", side_effect=fake_make_brain),
             # not_found opens the availability breaker → one operator alert; stub
             # it so the test doesn't touch the notification stack.
-            patch("istota.notifications.send_notification", return_value=None),
+            patch("istota.notifications.delivery.send_notification", return_value=None),
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(task, config, [])

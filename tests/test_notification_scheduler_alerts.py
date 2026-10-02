@@ -22,7 +22,9 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, notification_sources as sources, notification_store as store
+from istota import db
+from istota.notifications import sources
+from istota.notifications import store
 from istota.config import (
     Config,
     EmailConfig,
@@ -31,7 +33,7 @@ from istota.config import (
     TalkConfig,
     UserConfig,
 )
-from istota.notification_resolvers import task_alert
+from istota.notifications.resolvers import task_alert
 from istota.scheduler import _write_undelivered_row, run_cleanup_checks
 
 
@@ -109,7 +111,7 @@ class TestTheExpiredConfirmationNotice:
         Reusing the confirmation's key would reopen a resolved row, which would
         put a Confirm button back on a task that has already been cancelled.
         """
-        from istota.notification_resolvers import confirmation as confirmation_source
+        from istota.notifications.resolvers import confirmation as confirmation_source
 
         task_id = _held_task(config, minutes_ago=90)
         with db.get_db(config.db_path) as conn:
@@ -232,7 +234,7 @@ class TestTheSweepsRunInTheCleanupPass:
 
     def test_an_object_backed_row_is_never_swept(self, config):
         """Its close condition is the object, not the clock, at any age."""
-        from istota.notification_resolvers import confirmation as confirmation_source
+        from istota.notifications.resolvers import confirmation as confirmation_source
 
         sources.register(task_alert.RESOLVER)
         sources.register(confirmation_source.RESOLVER)

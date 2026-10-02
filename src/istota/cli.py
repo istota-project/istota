@@ -1811,7 +1811,7 @@ def cmd_user_ensure(args):
                     sys.exit(1)
         updates["default_room"] = room
     if args.route is not None:
-        from .notifications import PURPOSES
+        from istota.notifications.delivery import PURPOSES
         from .transport import parse_output_target
         routing: dict[str, str] = {}
         for entry in args.route:

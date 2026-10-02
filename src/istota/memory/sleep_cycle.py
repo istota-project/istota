@@ -304,7 +304,7 @@ def _alert_brain_unavailable(
     rather than silently retrying every cycle (ISSUE-181).
     """
     try:
-        from ..notifications import send_operator_alert
+        from istota.notifications.delivery import send_operator_alert
 
         send_operator_alert(
             config,
@@ -1428,7 +1428,7 @@ def _maybe_warn_usermd_size(config: Config, user_id: str, size_bytes: int) -> No
         "recall and KG facts in prompts."
     )
     try:
-        from ..notifications import send_notification
+        from istota.notifications.delivery import send_notification
         send_notification(
             config,
             user_id,
@@ -1474,7 +1474,7 @@ def _post_curation_summary(
         f"+{n_headings} new headings"
     )
     try:
-        from ..notifications import send_notification  # late import to avoid cycles in tests
+        from istota.notifications.delivery import send_notification  # late import to avoid cycles in tests
         send_notification(
             config,
             user_id,

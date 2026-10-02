@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from ... import ntfy_headers
+from istota.notifications import ntfy_headers
 from .._types import DeliveryOptions, IncomingMessage, TransportCapabilities
 
 if TYPE_CHECKING:

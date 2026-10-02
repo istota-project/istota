@@ -390,7 +390,7 @@ class TestAnUnreadableCredentialSaysOneThing:
         assert key == "whatsapp:baileys-credential-unreadable"
         assert "unlinked" not in title.lower()
         # Stored bodies are flattened (backticks go), so compare that form.
-        from istota.notification_resolvers.task_alert import flatten_body
+        from istota.notifications.resolvers.task_alert import flatten_body
 
         assert flatten_body(baileys_runtime.CREDENTIAL_UNREADABLE_REMEDY) in body
 

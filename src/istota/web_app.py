@@ -4065,7 +4065,8 @@ def _notifications_snapshot(username: str) -> dict[str, int]:
     that more likely, not less. Raising puts it on the generator's skip-this-tick
     path, which is what `_room_events_batch` and `_drafts_snapshot` already do.
     """
-    from . import db, notification_store  # noqa: PLC0415
+    from istota import db  # noqa: PLC0415
+    from istota.notifications import store as notification_store  # noqa: PLC0415
 
     with db.get_db(
         _config.db_path, busy_timeout_ms=_ROOM_STREAM_BUSY_TIMEOUT_MS,
@@ -10325,14 +10326,16 @@ _SEEN_VERSION_MAX_CHARS = 64
 
 
 def _notification_counts(username: str) -> dict:
-    from . import db, notification_store  # noqa: PLC0415
+    from istota import db  # noqa: PLC0415
+    from istota.notifications import store as notification_store  # noqa: PLC0415
 
     with db.get_db(_config.db_path) as conn:
         return notification_store.counts(conn, username)
 
 
 def _notification_list(username: str, filter_: str, limit) -> dict:
-    from . import db, notification_store  # noqa: PLC0415
+    from istota import db  # noqa: PLC0415
+    from istota.notifications import store as notification_store  # noqa: PLC0415
 
     with db.get_db(_config.db_path) as conn:
         rendered, total_open = notification_store.list_open(
@@ -10345,7 +10348,8 @@ def _notification_list(username: str, filter_: str, limit) -> dict:
 
 
 def _notification_dismiss(username: str, notification_id: int) -> bool:
-    from . import db, notification_store  # noqa: PLC0415
+    from istota import db  # noqa: PLC0415
+    from istota.notifications import store as notification_store  # noqa: PLC0415
 
     with db.get_db(_config.db_path) as conn:
         return notification_store.dismiss(
@@ -10354,7 +10358,8 @@ def _notification_dismiss(username: str, notification_id: int) -> bool:
 
 
 def _notification_mark_seen(username: str, seen: list[tuple[int, str]]) -> None:
-    from . import db, notification_store  # noqa: PLC0415
+    from istota import db  # noqa: PLC0415
+    from istota.notifications import store as notification_store  # noqa: PLC0415
 
     with db.get_db(_config.db_path) as conn:
         notification_store.mark_seen(conn, username, seen)
@@ -13498,7 +13503,7 @@ def _coerce_profile_value(
             _validate_descriptor_rooms(value, user_id)
         return value
     if t == "routing":
-        from .notifications import PURPOSES
+        from istota.notifications.delivery import PURPOSES
         from .transport import parse_output_target
         if value is None:
             return {}

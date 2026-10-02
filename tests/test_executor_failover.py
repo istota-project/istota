@@ -74,7 +74,7 @@ def _reset_breaker():
 
 @pytest.fixture(autouse=True)
 def _no_alerts():
-    with patch("istota.notifications.send_notification", return_value=None):
+    with patch("istota.notifications.delivery.send_notification", return_value=None):
         yield
 
 

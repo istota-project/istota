@@ -25,9 +25,9 @@ from . import _common
 if TYPE_CHECKING:
     import sqlite3
 
-    from ..config import Config
-    from ..notification_sources import NotificationRow, NotificationView
-    from ..notification_store import RaiseResult
+    from istota.config import Config
+    from istota.notifications.sources import NotificationRow, NotificationView
+    from istota.notifications.store import RaiseResult
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ def body_for(confirmation_prompt: str | None) -> str:
     and subject only, which is exactly what `describe` is allowed to show — and
     flattening covers the fact that both spellings embed attacker-supplied text.
     """
-    from ..confirmations import flatten
+    from istota.confirmations import flatten
 
     return flatten(confirmation_prompt or "")[:_BODY_CHARS]
 
@@ -99,7 +99,7 @@ def write(
     ``deliver_pending`` after its ``with`` block closes — see the store's module
     docstring for why the two are separate calls.
     """
-    from ..notification_store import write_notification
+    from istota.notifications.store import write_notification
 
     return write_notification(
         conn, user_id,
@@ -138,8 +138,8 @@ class ConfirmationResolver:
     def resolve(
         self, config: "Config", conn: "sqlite3.Connection", row: "NotificationRow",
     ) -> "NotificationView | None":
-        from .. import confirmations, db
-        from ..notification_sources import NotificationAction, NotificationView
+        from istota import confirmations, db
+        from istota.notifications.sources import NotificationAction, NotificationView
 
         task_id = _task_id(row)
         if task_id is None:
@@ -165,7 +165,7 @@ class ConfirmationResolver:
         # A phone task's question was asked by text and is answered by text;
         # both endpoints refuse it from web (room-surface-model Stage 24), so
         # buttons here would never work.
-        from ..transport.routing import phone_transcript_surface
+        from istota.transport.routing import phone_transcript_surface
 
         phone = (
             phone_transcript_surface(conn, task.conversation_token)

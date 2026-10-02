@@ -480,7 +480,7 @@ class TestTalkToRoomMirror:
         return config
 
     def _send(self, config, *, surface, message="Heads up"):
-        from istota import notifications
+        from istota.notifications import delivery as notifications
         with (
             patch.object(notifications, "_send_talk", new=AsyncMock(return_value=77)),
             patch.object(notifications, "_send_web", return_value=True),
@@ -536,7 +536,7 @@ class TestTalkToRoomMirror:
         would pass just as well if the mirror were writing the only row, or if
         the web leg had been deleted outright.
         """
-        from istota import notifications
+        from istota.notifications import delivery as notifications
         config = self._config(make_config)
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "2ay6qic9", "alice", origin="talk")
@@ -557,7 +557,7 @@ class TestTalkToRoomMirror:
     def test_a_promoted_rooms_two_names_are_not_two_rows(self, make_config):
         """A promoted room's Talk token differs from its own, so comparing the
         raw tokens let both legs write."""
-        from istota import notifications
+        from istota.notifications import delivery as notifications
         config = self._config(make_config)
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "canonical", "alice", origin="web")
@@ -599,7 +599,7 @@ class TestTalkToRoomMirror:
         self, make_config,
     ):
         """The Talk post has already happened. Best-effort, and loud in the log."""
-        from istota import notifications
+        from istota.notifications import delivery as notifications
         config = self._config(make_config)
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "2ay6qic9", "alice", origin="talk")
@@ -619,7 +619,7 @@ class TestTalkToRoomMirror:
     ):
         """The repro: the gate posts to `alerts_channel`, and the web reader of
         that same room saw nothing."""
-        from istota import notifications
+        from istota.notifications import delivery as notifications
         config = self._config(make_config)
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "2ay6qic9", "alice", origin="talk")

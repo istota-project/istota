@@ -10,7 +10,7 @@ def description(relay):
 
 
 def write(conn, relay):
-    from ..notification_store import write_notification
+    from istota.notifications.store import write_notification
 
     return write_notification(conn, relay["asker_user_id"], source=SOURCE,
                               dedup_key=relay["id"], object_type="message_relay", object_id=relay["id"],
@@ -22,7 +22,7 @@ class MessageRelayResolver:
     auto_resolve_on_seen = True
 
     def resolve(self, config, conn, row):
-        from ..notification_sources import NotificationView
+        from istota.notifications.sources import NotificationView
 
         relay = conn.execute("SELECT id,state,return_state FROM message_relays WHERE id=? AND asker_user_id=?",
                              (row.object_id, row.user_id)).fetchone()

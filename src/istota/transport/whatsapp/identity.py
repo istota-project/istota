@@ -356,7 +356,7 @@ def _write_identity_alert(conn, user_id: str, bsuid: str) -> object | None:
     Deduplicated on the *pair*, so a line that keeps sending bumps one row
     rather than raising a push per message.
     """
-    from ...notification_resolvers import task_alert
+    from istota.notifications.resolvers import task_alert
 
     fingerprint = bsuid_fingerprint(bsuid)
     return task_alert.write(
@@ -389,7 +389,7 @@ def _write_jid_identity_alert(conn, user_id: str, jid: str) -> object | None:
     instruction: there is no per-adapter reset verb, and offering one would
     leave the other adapter's stale identity resolving the previous holder.
     """
-    from ...notification_resolvers import task_alert
+    from istota.notifications.resolvers import task_alert
 
     fingerprint = jid_fingerprint(jid)
     return task_alert.write(
@@ -431,7 +431,7 @@ def _write_cross_adapter_alert(conn, user_id: str, fingerprint: str) -> object |
     is unique per `(user, source, key)` and a bump does not deliver, so a
     shared prefix would fold this into a mismatch alert and deliver nothing.
     """
-    from ...notification_resolvers import task_alert
+    from istota.notifications.resolvers import task_alert
 
     return task_alert.write(
         conn, user_id,

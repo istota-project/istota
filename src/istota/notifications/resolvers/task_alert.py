@@ -5,7 +5,7 @@ sent, a cron job is re-enabled, a token is reconnected — the object changes an
 the resolver sees it. Nothing will ever happen to a "the model raised a security
 alert" or a "your emailed request failed" notice. So this source is the one with
 ``auto_resolve_on_seen = True``: the row closes when the panel is opened with it
-visible, and :func:`istota.notification_store.sweep_expired_alerts` is the
+visible, and :func:`istota.notifications.store.sweep_expired_alerts` is the
 backstop for rows that fell below the render limit or belong to a user who never
 opens the panel.
 
@@ -83,9 +83,9 @@ from . import _common
 if TYPE_CHECKING:
     import sqlite3
 
-    from ..config import Config
-    from ..notification_sources import NotificationRow, NotificationView
-    from ..notification_store import RaiseResult
+    from istota.config import Config
+    from istota.notifications.sources import NotificationRow, NotificationView
+    from istota.notifications.store import RaiseResult
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,7 @@ def flatten(text: str | None) -> str:
     this package is written so a daemon hot path can import it without pulling
     the world in.
     """
-    from ..confirmations import flatten as _flatten
+    from istota.confirmations import flatten as _flatten
 
     return _flatten(text or "")
 
@@ -293,7 +293,7 @@ def admin_readers(config: "Config") -> list[str]:
     `config.users` (a stale entry, a renamed account) falls back the same way
     rather than writing rows for users with no configuration.
     """
-    from ..config import load_admin_users  # noqa: PLC0415
+    from istota.config import load_admin_users  # noqa: PLC0415
 
     try:
         admins = load_admin_users()
@@ -322,7 +322,7 @@ def write(
 ) -> "RaiseResult | None":
     """Write one fire-and-forget row, on the caller's connection.
 
-    Deliberately narrower than :func:`istota.notification_store.write_notification`:
+    Deliberately narrower than :func:`istota.notifications.store.write_notification`:
     there is no `link`, no `object_type` and no `object_id` parameter, because
     this source has no object to point at and must never emit a URL. A producer
     cannot pass one by mistake.
@@ -332,10 +332,10 @@ def write(
     their delivery gate is an in-process window (the DMARC canary's 24-hour key,
     the mail throttle's per-window notice) or a send that carries routing the
     store does not model. Those call ``send_notification`` themselves and record
-    the outcome with :func:`istota.notification_store.mark_delivered`; see the
+    the outcome with :func:`istota.notifications.store.mark_delivered`; see the
     spec's "the row is the durable record" rule.
     """
-    from ..notification_store import write_notification
+    from istota.notifications.store import write_notification
 
     # `object_type` and `object_id` go as None rather than being named on the
     # signature above, which is the same decision stated twice: this source has
@@ -465,7 +465,7 @@ class TaskAlertResolver:
 
         No `link` and no actions, on every path. See the module docstring.
         """
-        from ..notification_sources import NotificationView
+        from istota.notifications.sources import NotificationView
 
         return NotificationView(
             title=flatten(row.title)[:MAX_ALERT_TITLE_CHARS] or "Notice",

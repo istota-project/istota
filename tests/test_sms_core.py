@@ -9,9 +9,10 @@ from dataclasses import replace
 
 import pytest
 
-from istota import db, notifications
+from istota import db
+from istota.notifications import delivery as notifications
 from istota.rooms import surfaces
-from istota.notification_resolvers import confirmation as confirmation_source
+from istota.notifications.resolvers import confirmation as confirmation_source
 from istota.config import Config, SmsConfig, UserConfig
 from istota.transport import make_registry
 from istota.transport.routing import (
@@ -2018,7 +2019,7 @@ class TestSmsRoomMint:
             assert conn.execute('SELECT new_token FROM room_token_migration WHERE old_token=?', (old,)).fetchone()[0] == original
 
     def test_new_text_cancels_legacy_and_current_questions_and_notifications(self, tmp_path):
-        from istota import notification_store
+        from istota.notifications import store as notification_store
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
             first = handle_provider_event(conn, config, _inbound())

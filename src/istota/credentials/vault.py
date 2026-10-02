@@ -2728,7 +2728,7 @@ def _report(
     """
     import asyncio  # noqa: PLC0415 - for the exception type alone
 
-    from istota.notification_resolvers import connected_service  # noqa: PLC0415
+    from istota.notifications.resolvers import connected_service  # noqa: PLC0415
 
     try:
         if outcome == OUTCOME_OK:
@@ -2869,8 +2869,8 @@ def _report_unscoped(config, user_id: str, names: int, *, deliver: bool) -> None
     import asyncio  # noqa: PLC0415 - for the exception type alone
 
     from istota import db  # noqa: PLC0415
-    from istota.notification_resolvers import task_alert  # noqa: PLC0415
-    from istota.notification_store import deliver_pending  # noqa: PLC0415
+    from istota.notifications.resolvers import task_alert  # noqa: PLC0415
+    from istota.notifications.store import deliver_pending  # noqa: PLC0415
 
     try:
         with db.get_db(config.db_path) as conn:

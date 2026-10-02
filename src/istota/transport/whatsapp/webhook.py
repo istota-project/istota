@@ -651,7 +651,7 @@ def _write_send_id_alert(conn, user_id: str, bsuid: str) -> object | None:
     reply will take the fallback route. Deduplicated on the destination, so a
     user who keeps writing bumps one row rather than firing a push per message.
     """
-    from ...notification_resolvers import task_alert
+    from istota.notifications.resolvers import task_alert
 
     fingerprint = bsuid_fingerprint(bsuid)
     return task_alert.write(
@@ -1363,7 +1363,7 @@ async def deliver_event_responses(
             # The command is already a turn in the room it came from; its reply
             # joins it there only when that is the private chat's room, after
             # the send and whatever the send returned.
-            from ...notifications import mirror_phone_command_reply
+            from istota.notifications.delivery import mirror_phone_command_reply
 
             await asyncio.to_thread(
                 mirror_phone_command_reply, config, "whatsapp", owner,

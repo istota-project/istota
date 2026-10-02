@@ -22,9 +22,9 @@ from . import _common
 if TYPE_CHECKING:
     import sqlite3
 
-    from ..config import Config
-    from ..notification_sources import NotificationRow, NotificationView
-    from ..notification_store import RaiseResult
+    from istota.config import Config
+    from istota.notifications.sources import NotificationRow, NotificationView
+    from istota.notifications.store import RaiseResult
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ def title_for(to_addr: str) -> str:
     One spelling, used by both producers and by the resolver, so the stored
     fallback text and the rendered title cannot drift apart.
     """
-    from ..confirmations import flatten
+    from istota.confirmations import flatten
 
     who = flatten(to_addr or "") or "an unknown address"
     return f"Email reply to {who} is waiting for your approval"
@@ -72,7 +72,7 @@ def body_for(subject: str | None, recipients: str = "") -> str:
     only, since a `!drafts` listing can be read by everyone in a Talk room and
     printing the blind list there would defeat the one property Bcc has.
     """
-    from ..confirmations import flatten
+    from istota.confirmations import flatten
 
     flat = flatten(subject or "")[:_SUBJECT_CHARS]
     parts = []
@@ -85,7 +85,7 @@ def body_for(subject: str | None, recipients: str = "") -> str:
 
 def visible_recipients(to_addrs, cc_addrs=(), bcc_addrs=()) -> str:
     """To + Cc by address, Bcc by count. See :func:`body_for`."""
-    from ..confirmations import flatten
+    from istota.confirmations import flatten
 
     shown = [flatten(a) for a in [*(to_addrs or []), *(cc_addrs or [])]]
     text = ", ".join(a for a in shown if a) or "(no recipients)"
@@ -119,7 +119,7 @@ def write(
     room_token: str | None = None,
 ) -> "RaiseResult | None":
     """Write the row on the caller's connection, inside its transaction."""
-    from ..notification_store import write_notification
+    from istota.notifications.store import write_notification
 
     return write_notification(
         conn, user_id,
@@ -158,8 +158,8 @@ class OutboundDraftResolver:
     def resolve(
         self, config: "Config", conn: "sqlite3.Connection", row: "NotificationRow",
     ) -> "NotificationView | None":
-        from .. import outbound_drafts as drafts
-        from ..notification_sources import NotificationAction, NotificationView
+        from istota import outbound_drafts as drafts
+        from istota.notifications.sources import NotificationAction, NotificationView
 
         # The statuses come from the store that writes them, never re-spelled
         # here. `resolve` returning None means "the object is gone" and

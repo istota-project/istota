@@ -153,7 +153,7 @@ def _close_relay(conn: sqlite3.Connection, relay_id: str, *, state: str, reason:
                (SELECT id FROM whatsapp_skill_requests WHERE relay_id=?)""", (relay_id,),
         )
     if changed:
-        from istota.notification_resolvers.message_relay import write
+        from istota.notifications.resolvers.message_relay import write
 
         relay = conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone()
         write(conn, relay)
@@ -162,7 +162,7 @@ def _close_relay(conn: sqlite3.Connection, relay_id: str, *, state: str, reason:
 
 
 def _resolve_recipient_notice(conn, relay) -> None:
-    from istota.notification_resolvers import relay_question
+    from istota.notifications.resolvers import relay_question
 
     relay_question.resolve_for_relay(conn, relay["recipient_user_id"], relay["id"], by="system")
 
@@ -794,7 +794,7 @@ def reconcile_return_delivery(conn, *, logical_key: str, status: str, message_id
             "WHERE id=? AND state='answered' AND return_state IN ('sending','uncertain','delivered')", (relay_id,),
         ).rowcount
         if changed:
-            from istota.notification_resolvers.message_relay import write
+            from istota.notifications.resolvers.message_relay import write
 
             write(conn, conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone())
     elif status in ("accepted", "queued", "sent", "delivered", "read"):
@@ -823,7 +823,7 @@ def write_recipient_notice(conn, relay_id: str):
     Returns the write result for a caller that pushes it; one that does not
     (a phone destination, whose message is its own push) drops it.
     """
-    from istota.notification_resolvers import relay_question
+    from istota.notifications.resolvers import relay_question
 
     relay = conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone()
     if relay is None or relay["state"] not in relay_question.OPEN_STATES:
@@ -891,7 +891,7 @@ async def _deliver_room_question(config, row) -> None:
     never posts a second time.
     """
     import asyncio
-    from istota.notification_store import deliver_pending
+    from istota.notifications.store import deliver_pending
 
     fresh = row["state"] == "queued"
     if fresh:
@@ -1026,12 +1026,12 @@ def _settle_return(conn, relay_id: str, state: str, *, message_id=None, error=No
         (state, str(message_id) if message_id is not None else None, error, relay_id, state),
     ).rowcount
     if changed and state == "delivered":
-        from istota.notification_store import resolve_by_object
+        from istota.notifications.store import resolve_by_object
 
         resolve_by_object(conn, user_id=conn.execute("SELECT asker_user_id FROM message_relays WHERE id=?", (relay_id,)).fetchone()[0],
                           source="message_relay", object_type="message_relay", object_id=relay_id, by="delivered")
     if changed and state in ("blocked", "uncertain"):
-        from istota.notification_resolvers.message_relay import write
+        from istota.notifications.resolvers.message_relay import write
 
         write(conn, conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone())
 
@@ -1189,8 +1189,8 @@ async def poll_relays(config, *, limit: int = 20):
 async def deliver_relay_notices(config, *, limit: int = 20):
     """Retry only body-free notices; never reroute a private answer."""
     import asyncio
-    from istota.notification_store import RaiseResult, deliver_pending, mark_delivered
-    from istota.notifications import send_notification
+    from istota.notifications.store import RaiseResult, deliver_pending, mark_delivered
+    from istota.notifications.delivery import send_notification
 
     with db.get_db(config.db_path) as conn:
         rows = [dict(row) for row in conn.execute(

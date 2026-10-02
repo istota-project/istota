@@ -2234,7 +2234,7 @@ async def cmd_cron(ctx: CommandContext):
         if not job:
             return f"No scheduled job named '{job_name}' found."
         # Write to CRON.md (source of truth); DB updated on next sync
-        from .notification_resolvers import cron_job as cron_job_source
+        from istota.notifications.resolvers import cron_job as cron_job_source
 
         if is_module_job:
             db.enable_scheduled_job(conn, job.id)
@@ -2272,7 +2272,7 @@ async def cmd_cron(ctx: CommandContext):
         if not job:
             return f"No scheduled job named '{job_name}' found."
         # Write to CRON.md (source of truth); DB updated on next sync
-        from .notification_resolvers import cron_job as cron_job_source
+        from istota.notifications.resolvers import cron_job as cron_job_source
 
         # Closed here too, and `disable` is the case the resolver cannot cover:
         # disabling by hand writes the user's column and leaves the scheduler's

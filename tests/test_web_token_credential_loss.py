@@ -24,10 +24,12 @@ import sqlite3
 import httpx
 import pytest
 
-from istota import db, notification_sources as sources, notification_store as store
+from istota import db
+from istota.notifications import sources
+from istota.notifications import store
 from istota import web_tokens
 from istota.config import Config, UserConfig, WebConfig
-from istota.notification_resolvers import connected_service
+from istota.notifications.resolvers import connected_service
 
 KEY = "x" * 64
 
@@ -83,7 +85,7 @@ def _sends(monkeypatch, *, delivered=True):
         calls.append((user_id, text, kwargs.get("purpose")))
         return delivered
 
-    monkeypatch.setattr("istota.notifications.send_notification", _send)
+    monkeypatch.setattr("istota.notifications.delivery.send_notification", _send)
     return calls
 
 
@@ -354,7 +356,7 @@ class TestGarminIsUnchanged:
 
 def _row_for(config, service):
     """A NotificationRow standing for a stored row naming `service`."""
-    from istota.notification_sources import NotificationRow
+    from istota.notifications.sources import NotificationRow
 
     return NotificationRow(
         id=1,
@@ -392,7 +394,7 @@ class TestTheProducerHoldsNoWriteLock:
             probe.check()
             return real_raise(cfg, user_id, **kwargs)
 
-        monkeypatch.setattr("istota.notification_store.raise_notification", _spy)
+        monkeypatch.setattr("istota.notifications.store.raise_notification", _spy)
 
         web_tokens.get_access_token(config.db_path, config, "alice")
 
@@ -494,7 +496,7 @@ class TestItNeverRaisesIntoTheCaller:
         def _boom(*a, **k):
             raise sqlite3.OperationalError("no such table: notifications")
 
-        monkeypatch.setattr("istota.notification_store.raise_notification", _boom)
+        monkeypatch.setattr("istota.notifications.store.raise_notification", _boom)
 
         assert web_tokens.get_access_token(
             config.db_path, config, "alice",

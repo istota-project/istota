@@ -182,7 +182,7 @@ class TestDisplayLoaderCrossSurface:
         separately, which is the arrangement this route was written for.
         """
         from istota.config import Config, NextcloudConfig, UserConfig
-        from istota import notifications
+        from istota.notifications import delivery as notifications
         from unittest.mock import AsyncMock, patch
 
         title = "Security alert — task #7"

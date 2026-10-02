@@ -7,7 +7,7 @@ A task asks another user of the same installation a question; the recipient's ex
 - `relay/destinations.py`: where a question goes. `resolve_destination`, the three per-kind resolvers (`_room`, `_whatsapp`, `_sms`), `check_room` for re-resolution at admission, `render_question` / `fit_question` for the wording, and `relay_delivery_options` for the settings page. `KINDS` is derived from `user_profiles.RELAY_DELIVERY_VALUES`, so the PUT's enum and the resolver's kinds are one tuple.
 - `relay/requests.py`: durable intent, approval and admission for every relay question, despite the name. `hold_question`, `park_question`, `approve_request`, the clean-turn rule, `admit_request`, `drain_requests`, `_finish_request`. The table is still `whatsapp_skill_requests`; a rename was rejected as churn with no behaviour change.
 - `relay/relays.py`: blocks, frozen private origins, `deliver_question` (the room arm is here; WhatsApp and SMS go through their ledgers), answer acceptance per surface, `create_recipient_task`, `recipient_context`, returns, expiry and notices.
-- `notification_resolvers/relay_question.py` (recipient side) and `message_relay.py` (asker side). See `.claude/rules/notifications.md`.
+- `notifications/resolvers/relay_question.py` (recipient side) and `message_relay.py` (asker side). See `.claude/rules/notifications.md`.
 - `skills/relay/`: the task-facing CLI. It persists intent under the proxy's trusted user and task identity and never sends. `skills/whatsapp/` keeps only self-sends.
 
 ## Asking and the destination

@@ -27,9 +27,9 @@ from . import _common
 if TYPE_CHECKING:
     import sqlite3
 
-    from ..config import Config
-    from ..notification_sources import NotificationRow, NotificationView
-    from ..notification_store import RaiseResult
+    from istota.config import Config
+    from istota.notifications.sources import NotificationRow, NotificationView
+    from istota.notifications.store import RaiseResult
 
 SOURCE = "relay_question"
 OBJECT_TYPE = "message_relay"
@@ -70,7 +70,7 @@ def instruction(relay) -> str:
 
 def write(conn: "sqlite3.Connection", relay) -> "RaiseResult | None":
     """Open (or bump) the recipient's row, inside the producer's transaction."""
-    from ..notification_store import write_notification
+    from istota.notifications.store import write_notification
 
     room_token = _destination(relay).get("room_token") if relay["surface"] == "room" else None
     return write_notification(
@@ -100,7 +100,7 @@ class RelayQuestionResolver:
     def resolve(
         self, config: "Config", conn: "sqlite3.Connection", row: "NotificationRow",
     ) -> "NotificationView | None":
-        from ..notification_sources import NotificationAction, NotificationView
+        from istota.notifications.sources import NotificationAction, NotificationView
         from istota.lib.untrusted import frame_untrusted
 
         relay = conn.execute(

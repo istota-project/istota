@@ -38,9 +38,9 @@ if TYPE_CHECKING:
     import sqlite3
     from pathlib import Path
 
-    from ..config import Config
-    from ..notification_sources import NotificationRow, NotificationView
-    from ..notification_store import RaiseResult
+    from istota.config import Config
+    from istota.notifications.sources import NotificationRow, NotificationView
+    from istota.notifications.store import RaiseResult
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ def dedup_key(panel_id: int | str) -> str:
 
 def title_for(drawn_at: str | None, lab_name: str | None) -> str:
     """The one-line label. One spelling for the producer and the resolver."""
-    from ..confirmations import flatten
+    from istota.confirmations import flatten
 
     lab = flatten(lab_name or "")[:_LAB_CHARS]
     when = flatten(drawn_at or "")[:10]
@@ -89,7 +89,7 @@ def title_for(drawn_at: str | None, lab_name: str | None) -> str:
 
 
 def body_for(drawn_at: str | None, lab_name: str | None) -> str:
-    from ..confirmations import flatten
+    from istota.confirmations import flatten
 
     lab = flatten(lab_name or "")[:_LAB_CHARS]
     when = flatten(drawn_at or "")[:10]
@@ -116,7 +116,7 @@ def write(
     lab_name: str | None = None,
 ) -> "RaiseResult | None":
     """Write the row on the caller's connection to the **framework** DB."""
-    from ..notification_store import write_notification
+    from istota.notifications.store import write_notification
 
     return write_notification(
         conn, user_id,
@@ -166,7 +166,7 @@ def write_for_panel(
     not be able to fail an upload.
     """
     try:
-        from .. import db
+        from istota import db
 
         with db.get_db(db_path) as conn:
             write(
@@ -202,7 +202,7 @@ def close_for_panel(db_path: "Path", user_id: str, panel_id: int, *, by: str) ->
     wait half a minute on an unrelated writer. Never raises.
     """
     try:
-        from .. import db
+        from istota import db
 
         with db.get_db(db_path, busy_timeout_ms=_CLOSE_BUSY_TIMEOUT_MS) as conn:
             resolve_for_panel(conn, user_id, panel_id, by=by)
@@ -235,9 +235,9 @@ class HealthPanelResolver:
     def resolve(
         self, config: "Config", conn: "sqlite3.Connection", row: "NotificationRow",
     ) -> "NotificationView | None":
-        from ..health import db as health_db
-        from ..health._loader import UserNotFoundError, resolve_for_user
-        from ..notification_sources import NotificationAction, NotificationView
+        from istota.health import db as health_db
+        from istota.health._loader import UserNotFoundError, resolve_for_user
+        from istota.notifications.sources import NotificationAction, NotificationView
 
         panel_id = _panel_id(row)
         if panel_id is None:

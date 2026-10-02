@@ -19,8 +19,8 @@ from istota import db
 from istota.rooms import veto as room_veto
 from ...email_support import get_email_config
 from istota.lib.llm_json import find_fenced_block
-from ...notification_resolvers import outbound_draft as draft_source
-from ...notification_store import RaiseResult, deliver_pending
+from istota.notifications.resolvers import outbound_draft as draft_source
+from istota.notifications.store import RaiseResult, deliver_pending
 from ...skills.email import reply_to_email, send_email
 from . import threads as email_threads
 
@@ -376,7 +376,7 @@ def _announce_hold(
     The old direct send survives as the fallback for a row that failed to write
     — the notice predates the inbox (ISSUE-246) and must not be lost with it.
     """
-    from ...notifications import send_notification
+    from istota.notifications.delivery import send_notification
 
     if notification is not None:
         deliver_pending(config, [notification])

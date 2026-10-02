@@ -59,7 +59,7 @@ def _alert_brain_unavailable(config, label: str, reason: str) -> None:
     briefing's shared section is N hours behind, not fresh (ISSUE-181).
     """
     try:
-        from istota.notifications import send_operator_alert
+        from istota.notifications.delivery import send_operator_alert
 
         send_operator_alert(
             config,

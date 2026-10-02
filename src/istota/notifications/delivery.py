@@ -14,14 +14,14 @@ from typing import TYPE_CHECKING
 
 # Re-exported so existing references (and the is_channel_configured probe) keep
 # working; the canonical home is the ntfy transport.
-from .transport.ntfy import _NTFY_DEFAULT_PRIORITY  # noqa: F401
-from .transport.ntfy import ntfy_settings as _ntfy_settings
-from .transport.registry import make_registry
+from istota.transport.ntfy import _NTFY_DEFAULT_PRIORITY  # noqa: F401
+from istota.transport.ntfy import ntfy_settings as _ntfy_settings
+from istota.transport.registry import make_registry
 
 if TYPE_CHECKING:
-    from .config import Config
+    from istota.config import Config
 
-logger = logging.getLogger("istota.notifications")
+logger = logging.getLogger("istota.notifications.delivery")
 
 
 # Purpose names for the per-user routing table.
@@ -42,7 +42,7 @@ def resolve_destinations(config: "Config", user_id: str, purpose: str):
     A returned Talk destination may carry ``channel=None``, meaning "resolve the
     user's Talk channel at delivery time." Always returns at least one entry.
     """
-    from .transport import Destination, parse_output_target
+    from istota.transport import Destination, parse_output_target
 
     uc = config.users.get(user_id)
 
@@ -115,7 +115,7 @@ def effective_log_destinations(config: "Config", user_id: str):
     :func:`resolve_conversation_token`; if that yields nothing the destination is
     dropped. Returns a deduplicated list; never raises into the caller.
     """
-    from .transport import Destination, parse_output_target
+    from istota.transport import Destination, parse_output_target
 
     try:
         uc = config.users.get(user_id)
@@ -160,7 +160,7 @@ def effective_log_destinations(config: "Config", user_id: str):
                     continue
             elif dest.surface == "web" and channel is None:
                 # Bare `web` log route lands in the user's default room.
-                from .transport.web import default_web_room_token
+                from istota.transport.web import default_web_room_token
                 channel = default_web_room_token(config, user_id)
                 if not channel:
                     logger.warning(
@@ -173,7 +173,7 @@ def effective_log_destinations(config: "Config", user_id: str):
                 continue
             seen.add(key)
             resolved.append(Destination(dest.surface, channel))
-        from .transport.routing import refuse_shared_rooms
+        from istota.transport.routing import refuse_shared_rooms
         return refuse_shared_rooms(config, user_id, resolved, purpose="log")
     except Exception:
         logger.warning(
@@ -210,7 +210,7 @@ def resolve_conversation_token(
 
     # Honour an explicit Talk route for the alert/reply purposes first.
     if user_config.routing:
-        from .transport import parse_output_target
+        from istota.transport import parse_output_target
         for purpose in ("alert", "reply"):
             spec = user_config.routing.get(purpose)
             if not spec:
@@ -234,7 +234,7 @@ def resolve_conversation_token(
     # where it is stored is the drift this issue exists to remove.
     if config.db_path:
         try:
-            from . import db
+            from istota import db
             if conn is not None:
                 token = db.configured_delivery_room(conn, user_id, "talk")
             else:
@@ -257,7 +257,7 @@ def resolve_conversation_token(
 
     # Fall back to auto-detected 1:1 DM from talk poller
     try:
-        from .transport.talk import get_dm_token
+        from istota.transport.talk import get_dm_token
         dm_token = get_dm_token(user_id)
         if dm_token:
             return dm_token
@@ -281,7 +281,7 @@ async def _send_talk(
         logger.warning("Nextcloud not configured for notifications")
         return None
 
-    from .transport.talk import TalkTransport
+    from istota.transport.talk import TalkTransport
     return await TalkTransport(config).deliver(token, message)
 
 
@@ -331,8 +331,8 @@ def _send_email(
         return False
 
     try:
-        from .email_support import get_email_config
-        from .skills.email import send_email
+        from istota.email_support import get_email_config
+        from istota.skills.email import send_email
         email_config = get_email_config(config)
         send_email(
             to=user_config.email_addresses[0],
@@ -359,9 +359,9 @@ def _send_ntfy(
     Thin sync shim: builds ``DeliveryOptions`` and calls the ntfy transport
     (the single ntfy delivery path) on the persistent loop via ``run_coro``.
     """
-    from .async_runtime import run_coro
-    from .transport._types import DeliveryOptions
-    from .transport.ntfy import send_ntfy_async
+    from istota.async_runtime import run_coro
+    from istota.transport._types import DeliveryOptions
+    from istota.transport.ntfy import send_ntfy_async
 
     return bool(run_coro(send_ntfy_async(
         config, user_id, message,
@@ -381,9 +381,9 @@ def _send_web(
     ``role='system'`` row in the canonical ``messages`` store, rendered as a
     system message in the room and pushed live by the room stream.
     """
-    from .async_runtime import run_coro
-    from .transport._types import DeliveryOptions
-    from .transport.web import WebTransport, default_web_room_token
+    from istota.async_runtime import run_coro
+    from istota.transport._types import DeliveryOptions
+    from istota.transport.web import WebTransport, default_web_room_token
 
     token = conversation_token or default_web_room_token(config, user_id)
     if not token:
@@ -410,9 +410,9 @@ def _send_sms(
     raise cost nothing. Without one the send falls back to a random key, which
     is honest but not free: see `SmsTransport.send_record`.
     """
-    from .async_runtime import run_coro
-    from .transport.sms import SmsTransport
-    from .transport.sms._types import REACHED_PROVIDER
+    from istota.async_runtime import run_coro
+    from istota.transport.sms import SmsTransport
+    from istota.transport.sms._types import REACHED_PROVIDER
 
     record = run_coro(SmsTransport(config).send_record(
         "", message, user_id=user_id, reference_id=reference_id,
@@ -433,9 +433,9 @@ def _send_whatsapp(
     surface it costs *money* rather than a row — without one every raise mints
     a fresh ledger key and a fresh billable message.
     """
-    from .async_runtime import run_coro
-    from .transport.whatsapp import WhatsAppTransport
-    from .transport.whatsapp._types import REACHED_META
+    from istota.async_runtime import run_coro
+    from istota.transport.whatsapp import WhatsAppTransport
+    from istota.transport.whatsapp._types import REACHED_META
 
     record = run_coro(WhatsAppTransport(config).send_record(
         "", message, user_id=user_id, reference_id=reference_id,
@@ -452,7 +452,7 @@ _MIRROR_LOCK_WAIT_MS = 250
 
 def _default_web_room(config: "Config", user_id: str) -> str | None:
     """The room a bare ``web`` destination lands on. None if the user has none."""
-    from .transport.web import default_web_room_token
+    from istota.transport.web import default_web_room_token
 
     try:
         return default_web_room_token(config, user_id)
@@ -466,7 +466,7 @@ def _canonical_room_token(config: "Config", token: str) -> str:
     A promoted web room keeps its own token and binds the Talk one to it, so
     the two names for one room only compare equal after this.
     """
-    from . import db
+    from istota import db
 
     if not config.db_path:
         return token
@@ -480,7 +480,7 @@ def _canonical_room_token(config: "Config", token: str) -> str:
 def strip_leading_title(message: str, title: str | None) -> str:
     """Drop a leading copy of ``title`` from a message body.
 
-    :func:`istota.notification_store._delivery_text` composes the delivered text
+    :func:`istota.notifications.store._delivery_text` composes the delivered text
     as the title, a blank line, then the body, and it has to: Talk takes no title
     argument, so the first line of the message is the only place a Talk reader
     ever sees the label. Every *other* surface in :func:`_dispatch` takes ``title``
@@ -555,7 +555,7 @@ def mirror_talk_to_room(
     mirror is a convenience for the web reader. The confirmation prompt, the one
     case where the mirror really matters, is delivered outside any transaction.
     """
-    from . import db
+    from istota import db
 
     if not config.db_path:
         return
@@ -607,8 +607,8 @@ def mirror_phone_to_room(
     a WhatsApp group member's command is answered in their private chat, and
     its reply must land in neither the group nor a room that never held it.
     """
-    from . import db
-    from .transport.routing import is_private_phone_room, private_phone_room
+    from istota import db
+    from istota.transport.routing import is_private_phone_room, private_phone_room
 
     if not config.db_path or not message:
         return
@@ -676,7 +676,7 @@ def is_channel_configured(
     Compound surfaces (``both``, ``all``) are configured if **any** of
     their leaf channels are.
     """
-    from .transport import parse_output_target
+    from istota.transport import parse_output_target
 
     user_config = config.users.get(user_id)
 
@@ -717,11 +717,11 @@ def is_channel_configured(
         return bool(config.db_path)
 
     def _sms_ok() -> bool:
-        from .transport.sms.outbound import is_sms_configured
+        from istota.transport.sms.outbound import is_sms_configured
         return is_sms_configured(config, user_id)
 
     def _whatsapp_ok() -> bool:
-        from .transport.whatsapp.outbound import is_whatsapp_configured
+        from istota.transport.whatsapp.outbound import is_whatsapp_configured
         return is_whatsapp_configured(config, user_id)
 
     probes = {
@@ -770,8 +770,8 @@ def _dispatch(
     """
     from dataclasses import replace
 
-    from .async_runtime import run_coro
-    from .transport.routing import refuse_shared_rooms
+    from istota.async_runtime import run_coro
+    from istota.transport.routing import refuse_shared_rooms
 
     dests = refuse_shared_rooms(
         config, user_id,
@@ -910,7 +910,7 @@ def send_notification(
             more than one human reads is refused for every notification except
             this one (`routing.refuse_shared_rooms`).
     """
-    from .transport import parse_output_target
+    from istota.transport import parse_output_target
 
     if surface is not None:
         dests = parse_output_target(surface)

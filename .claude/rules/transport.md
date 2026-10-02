@@ -2,7 +2,7 @@
 paths:
   - "src/istota/transport/**"
   - "src/istota/email_support.py"
-  - "src/istota/notifications.py"
+  - "src/istota/notifications/delivery.py"
   - "src/istota/rooms/surfaces.py"
 ---
 

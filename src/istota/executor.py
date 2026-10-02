@@ -1866,7 +1866,7 @@ def _fire_fallback_alert(config, task, primary_kind, fallback_kind, reason, wind
     say when the primary comes back.
     """
     try:
-        from . import notifications
+        from istota.notifications import delivery as notifications
 
         cooldown = int(round(window))
         if fallback_kind is not None:
@@ -2117,7 +2117,7 @@ def run_with_failover(
                         consume_circuit_open_alert,
                     )
                     if consume_circuit_open_alert():
-                        from . import notifications
+                        from istota.notifications import delivery as notifications
                         _tail = (
                             "falling back."
                             if _fallback_kind is not None

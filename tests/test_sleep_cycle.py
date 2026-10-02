@@ -1588,14 +1588,14 @@ class TestUserMemoryObservability:
         """Below 8 KB, no notification fires."""
         from istota.memory.sleep_cycle import _maybe_warn_usermd_size, USER_MEMORY_SOFT_WARN_BYTES
         mount_config.users["alice"] = UserConfig(log_channel="logroom")
-        with patch("istota.notifications.send_notification") as mock_send:
+        with patch("istota.notifications.delivery.send_notification") as mock_send:
             _maybe_warn_usermd_size(mount_config, "alice", USER_MEMORY_SOFT_WARN_BYTES - 1)
             mock_send.assert_not_called()
 
     def test_warn_at_or_above_threshold_posts_to_log_channel(self, mount_config):
         from istota.memory.sleep_cycle import _maybe_warn_usermd_size, USER_MEMORY_SOFT_WARN_BYTES
         mount_config.users["alice"] = UserConfig(log_channel="logroom")
-        with patch("istota.notifications.send_notification") as mock_send:
+        with patch("istota.notifications.delivery.send_notification") as mock_send:
             _maybe_warn_usermd_size(mount_config, "alice", USER_MEMORY_SOFT_WARN_BYTES + 1)
             mock_send.assert_called_once()
 
@@ -1603,7 +1603,7 @@ class TestUserMemoryObservability:
         """No log_channel → no notification, but logger still records."""
         from istota.memory.sleep_cycle import _maybe_warn_usermd_size, USER_MEMORY_SOFT_WARN_BYTES
         mount_config.users["alice"] = UserConfig()  # no log_channel
-        with patch("istota.notifications.send_notification") as mock_send:
+        with patch("istota.notifications.delivery.send_notification") as mock_send:
             _maybe_warn_usermd_size(mount_config, "alice", USER_MEMORY_SOFT_WARN_BYTES + 1)
             mock_send.assert_not_called()
 

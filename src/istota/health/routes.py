@@ -52,7 +52,7 @@ from istota.health.units import (
     pick_canonical_range,
     widest_canonical_range,
 )
-from istota.notification_resolvers import health_panel as notification_health_panel
+from istota.notifications.resolvers import health_panel as notification_health_panel
 from istota.lib.timestamps import iso_now as _now
 from istota.web_router_stubs import (  # noqa: F401
     make_get_user_context,

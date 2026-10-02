@@ -26,7 +26,8 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, notification_store as store
+from istota import db
+from istota.notifications import store
 from istota.config import Config, EmailConfig, UserConfig
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email.inbound import poll_emails
@@ -50,7 +51,7 @@ class _WriteProbe:
     caller's connection.
     """
 
-    def __init__(self, monkeypatch, target: str = "istota.notification_store.write_notification"):
+    def __init__(self, monkeypatch, target: str = "istota.notifications.store.write_notification"):
         self.calls: list[dict] = []
         self._depth = _ConnectionDepth(monkeypatch)
         real = store.write_notification
@@ -100,7 +101,7 @@ def _count_sends(monkeypatch, *, delivered: bool = False) -> list[tuple]:
         calls.append((user_id, text, kwargs.get("purpose")))
         return delivered
 
-    monkeypatch.setattr("istota.notifications.send_notification", _send)
+    monkeypatch.setattr("istota.notifications.delivery.send_notification", _send)
     return calls
 
 
@@ -208,7 +209,7 @@ class TestEmailGate:
         probe = _WriteProbe(monkeypatch)
         envelope, email = _gated_mail()
         with patch(
-            "istota.notifications.send_confirmation_prompt", return_value=(True, None),
+            "istota.notifications.delivery.send_confirmation_prompt", return_value=(True, None),
         ):
             task_ids = _poll(config, envelope, email)
 
@@ -236,7 +237,7 @@ class TestEmailGate:
         # stubbing a *successful* prompt would leave the buffer empty and the
         # probe would pass on a call that sent nothing.
         with patch(
-            "istota.notifications.send_confirmation_prompt", return_value=(False, None),
+            "istota.notifications.delivery.send_confirmation_prompt", return_value=(False, None),
         ):
             _poll(config, envelope, email)
 
@@ -256,7 +257,7 @@ class TestEmailGate:
         sent = _count_sends(monkeypatch)
         envelope, email = _gated_mail(uid="43")
         with patch(
-            "istota.notifications.send_confirmation_prompt", return_value=(True, None),
+            "istota.notifications.delivery.send_confirmation_prompt", return_value=(True, None),
         ):
             _poll(config, envelope, email)
 
@@ -275,7 +276,7 @@ class TestEmailGate:
         sent = _count_sends(monkeypatch, delivered=True)
         envelope, email = _gated_mail(uid="44")
         with patch(
-            "istota.notifications.send_confirmation_prompt", return_value=(False, None),
+            "istota.notifications.delivery.send_confirmation_prompt", return_value=(False, None),
         ):
             _poll(config, envelope, email)
 
@@ -296,7 +297,7 @@ class TestEmailGate:
 
         sent = _count_sends(monkeypatch)
         with patch(
-            "istota.notifications.send_confirmation_prompt", return_value=(True, None),
+            "istota.notifications.delivery.send_confirmation_prompt", return_value=(True, None),
         ):
             for n in range(inbound._MAX_PROMPTS_PER_SENDER_WINDOW + 1):
                 envelope, email = _gated_mail(uid=str(50 + n))
@@ -471,7 +472,7 @@ class TestSkillCliGate:
         probe = _WriteProbe(monkeypatch)
         sent: list = []
         monkeypatch.setattr(
-            "istota.notifications.send_notification",
+            "istota.notifications.delivery.send_notification",
             lambda *a, **k: sent.append(a) or True,
         )
 

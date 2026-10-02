@@ -41,7 +41,7 @@ import pytest
 from istota import db
 from istota.credentials import store as secrets_store
 from istota.config import Config, UserConfig
-from istota.notification_resolvers import connected_service
+from istota.notifications.resolvers import connected_service
 
 PASSPHRASE = "notification-fixture-passphrase-not-a-real-one"
 WRONG_PASSPHRASE = "notification-fixture-passphrase-that-does-not-match"
@@ -91,13 +91,13 @@ class _DeliveryCounter:
 
     `deliver_pending` resolves `send_notification` from the module at call time
     (`from .notifications import send_notification` inside the function body),
-    so patching the attribute on `istota.notifications` reaches it.
+    so patching the attribute on `istota.notifications.delivery` reaches it.
     """
 
     def __init__(self, monkeypatch):
         self.calls: list[tuple[str, str]] = []
 
-        from istota import notifications
+        from istota.notifications import delivery as notifications
 
         def counted(config, user_id, text, **kwargs):
             self.calls.append((user_id, text))
@@ -689,7 +689,7 @@ class TestTheResolver:
     """The backstop, not the close path — but the one the panel renders through."""
 
     def _row(self, config: Config):
-        from istota.notification_sources import NotificationRow
+        from istota.notifications.sources import NotificationRow
 
         raw = _only_row(config)
         return NotificationRow(
@@ -915,7 +915,7 @@ def _write_unscoped_vault(path: Path, *, password: str = PASSPHRASE) -> None:
 
 
 def _alert_rows(config: Config, user_id: str = "alice") -> list[dict]:
-    from istota.notification_resolvers import task_alert
+    from istota.notifications.resolvers import task_alert
 
     with db.get_db(config.db_path) as conn:
         return [

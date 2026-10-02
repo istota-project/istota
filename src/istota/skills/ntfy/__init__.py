@@ -28,7 +28,7 @@ import sys
 
 import httpx
 
-from ... import ntfy_headers
+from istota.notifications import ntfy_headers
 from .._cli import emit, parse_and_resolve, status_exit_code
 
 DEFAULT_SERVER = "https://ntfy.sh"

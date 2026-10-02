@@ -836,8 +836,8 @@ class SkillProxy:
         """Create one entry from a host-only passphrase and return names only."""
         from istota import db, email_support, storage
         from istota.credentials import vault as secrets_vault
-        from istota.notification_resolvers import task_alert
-        from istota.notification_store import deliver_pending
+        from istota.notifications.resolvers import task_alert
+        from istota.notifications.store import deliver_pending
 
         with self._vault_write_lock:
             self._vault_writes += 1

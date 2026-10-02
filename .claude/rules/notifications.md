@@ -1,6 +1,6 @@
 # Notifications: the inbox behind the bell
 
-`notifications.py` is delivery (Talk / email / ntfy). The three below are the durable open set of what is waiting on a user.
+`notifications/delivery.py` is delivery (Talk / email / ntfy). The three below are the durable open set of what is waiting on a user.
 
 ## notification_store.py
 

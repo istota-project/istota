@@ -426,7 +426,7 @@ def request_destination(config, *, request_id: str, user_id: str, caps) -> str:
 def _finish_request(config, request_id: str, *, record=None, reason: str | None = None) -> None:
     from istota.transport.sms._types import REACHED_PROVIDER, SmsDeliveryRecord
     from istota.transport.whatsapp._types import REACHED_META
-    from istota.notification_resolvers import task_alert
+    from istota.notifications.resolvers import task_alert
     from istota.transport._alerts import push_off_surface
 
     state = "failed"
@@ -467,7 +467,7 @@ def _finish_request(config, request_id: str, *, record=None, reason: str | None 
             else:
                 message_relays._close_relay(conn, row["relay_id"], state=state, reason=reason or "delivery_failed")
         if changed and row["relay_id"] and state == "uncertain":
-            from istota.notification_resolvers.message_relay import write
+            from istota.notifications.resolvers.message_relay import write
 
             write(conn, conn.execute("SELECT * FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone())
         if changed and state != "sent" and not row["relay_id"]:
@@ -799,7 +799,7 @@ async def present_question(config, *, task, success: bool) -> bool:
     """
     from istota.relay import relays as message_relays
     from istota.events import EventWriter
-    from istota.notification_resolvers import confirmation, task_alert
+    from istota.notifications.resolvers import confirmation, task_alert
 
     with db.get_db(config.db_path) as conn:
         row = held_question(conn, task.id)

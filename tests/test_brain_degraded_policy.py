@@ -222,7 +222,7 @@ class TestSleepCycleSkipsWhenDegraded:
         alerts = []
 
         with patch("istota.memory.sleep_cycle.make_brain") as mock_make, patch(
-            "istota.notifications.send_operator_alert",
+            "istota.notifications.delivery.send_operator_alert",
             side_effect=lambda c, m, **k: alerts.append(m),
         ):
             mock_make.return_value.resolve_model_name.return_value = "m"
@@ -370,7 +370,7 @@ class TestSharedBlockSkipsWhenDegraded:
         alerts = []
 
         with patch("istota.brain.make_brain") as mock_make, patch(
-            "istota.notifications.send_operator_alert",
+            "istota.notifications.delivery.send_operator_alert",
             side_effect=lambda c, m, **k: alerts.append(m),
         ):
             mock_make.return_value.resolve_model_name.return_value = "m"

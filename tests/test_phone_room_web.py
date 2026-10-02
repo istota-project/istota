@@ -364,8 +364,8 @@ class TestThePinnedDefaultAndRelays:
 
 class TestTheBellItem:
     def test_a_phone_question_has_no_buttons(self, db_path, tmp_path):
-        from istota.notification_resolvers import confirmation
-        from istota.notification_sources import NotificationRow
+        from istota.notifications.resolvers import confirmation
+        from istota.notifications.sources import NotificationRow
 
         config = _config(db_path, tmp_path)
         with db.get_db(db_path) as conn:

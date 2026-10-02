@@ -1459,7 +1459,7 @@ def _write_billing_alerts(conn, user_id: str, task_id) -> tuple[object, ...]:
     prints it in full, which is the private operator surface for it.
     """
     from ...config import load_admin_users  # noqa: PLC0415
-    from ...notification_resolvers import task_alert  # noqa: PLC0415
+    from istota.notifications.resolvers import task_alert  # noqa: PLC0415
 
     readers = [user_id]
     try:

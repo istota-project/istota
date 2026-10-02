@@ -13,7 +13,7 @@ the argument set handed to ``write_notification``, the ``resolve_by_object``
 call and the integer coercion of ``object_id``. Those were identical in every
 file bar a noun, and three of the six documented that by pointing at a fourth.
 
-Nothing is imported here. :func:`istota.notification_sources._register_all` does
+Nothing is imported here. :func:`istota.notifications.sources._register_all` does
 the importing, explicitly and once per process, so the registry never depends on
 which surface happened to import what first. A producer imports its own source
 module directly — these are cheap by construction (no imports at module scope

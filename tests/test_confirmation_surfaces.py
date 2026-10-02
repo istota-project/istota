@@ -192,7 +192,7 @@ class TestPromptRouting:
             return True, None
 
         envelope, email = _gated_mail(id="44")
-        with patch("istota.notifications.send_confirmation_prompt", side_effect=_probe):
+        with patch("istota.notifications.delivery.send_confirmation_prompt", side_effect=_probe):
             task_ids = _poll(config, envelope, email)
 
         assert len(task_ids) == 1
@@ -211,7 +211,7 @@ class TestPromptRouting:
         config.email = _email_config()
 
         envelope, email = _gated_mail(id="42")
-        with patch("istota.notifications._send_talk", new=AsyncMock(return_value=77)):
+        with patch("istota.notifications.delivery._send_talk", new=AsyncMock(return_value=77)):
             task_ids = _poll(config, envelope, email)
 
         with db.get_db(config.db_path) as conn:
@@ -224,7 +224,7 @@ class TestPromptRouting:
         config.email = _email_config()
 
         envelope, email = _gated_mail(id="43")
-        with patch("istota.notifications._send_talk", new=AsyncMock(return_value=1)):
+        with patch("istota.notifications.delivery._send_talk", new=AsyncMock(return_value=1)):
             task_ids = _poll(config, envelope, email)
 
         with db.get_db(config.db_path) as conn:
@@ -792,7 +792,7 @@ def _inbox_row(conn, task_id, user_id):
     drifted from theirs would fail here rather than quietly listing nothing.
     """
     from istota import confirmations as confirmations_mod
-    from istota.notification_resolvers import confirmation as confirmation_source
+    from istota.notifications.resolvers import confirmation as confirmation_source
 
     task = db.get_task(conn, task_id)
     confirmation_source.write(
@@ -806,7 +806,7 @@ def _inbox_row(conn, task_id, user_id):
 class TestWebConfirmations:
     @pytest.fixture(autouse=True)
     def _registry(self):
-        from istota import notification_sources
+        from istota.notifications import sources as notification_sources
 
         notification_sources.reset_registry()
         yield

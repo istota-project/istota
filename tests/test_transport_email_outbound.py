@@ -1107,7 +1107,7 @@ class TestDeliveryLegApprovalGate:
         with (
             patch("istota.transport.email.outbound.reply_to_email"),
             patch("istota.transport.email.outbound.send_email"),
-            patch("istota.notifications.send_notification") as mock_notify,
+            patch("istota.notifications.delivery.send_notification") as mock_notify,
         ):
             await deliver_email_result(config, task, "")
 
@@ -1136,7 +1136,7 @@ class TestDeliveryLegApprovalGate:
             patch("istota.transport.email.outbound.reply_to_email") as mock_reply,
             patch("istota.transport.email.outbound.send_email"),
             patch(
-                "istota.notifications.send_notification",
+                "istota.notifications.delivery.send_notification",
                 side_effect=RuntimeError("talk is down"),
             ),
         ):

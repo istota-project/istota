@@ -11,7 +11,9 @@ import sqlite3
 
 import pytest
 
-from istota import db, notification_sources as sources, notification_store as store
+from istota import db
+from istota.notifications import sources
+from istota.notifications import store
 from istota.config import Config, UserConfig
 
 
@@ -273,7 +275,7 @@ class TestDeliverPending:
     def test_stamps_last_delivered_at_only_on_a_successful_send(
         self, conn, config, monkeypatch
     ):
-        from istota import notifications
+        from istota.notifications import delivery as notifications
 
         sent = _write(conn, dedup_key="task:1")
         unsent = _write(conn, dedup_key="task:2")
@@ -296,7 +298,7 @@ class TestDeliverPending:
         assert _row(conn, unsent.notification_id)["last_delivered_at"] is None
 
     def test_skips_results_that_must_not_deliver(self, conn, config, monkeypatch):
-        from istota import notifications
+        from istota.notifications import delivery as notifications
 
         first = _write(conn)
         repeat = _write(conn)
@@ -314,7 +316,7 @@ class TestDeliverPending:
         assert _row(conn, first.notification_id)["last_delivered_at"] is None
 
     def test_a_raising_send_does_not_escape(self, conn, config, monkeypatch):
-        from istota import notifications
+        from istota.notifications import delivery as notifications
 
         result = _write(conn)
         conn.commit()
@@ -332,7 +334,7 @@ class TestDeliverPending:
 
 class TestRaiseNotification:
     def test_writes_and_delivers_on_its_own_connection(self, config, monkeypatch):
-        from istota import notifications
+        from istota.notifications import delivery as notifications
 
         db.init_db(config.db_path)
         calls = []
@@ -796,12 +798,12 @@ class TestConcurrentWrite:
 class TestPurpose:
     def test_the_purpose_list_matches_the_delivery_layer(self):
         """`DELIVERY_PURPOSES` is a copy; this is what stops it drifting."""
-        from istota import notifications
+        from istota.notifications import delivery as notifications
 
         assert sources.DELIVERY_PURPOSES == notifications.PURPOSES
 
     def test_an_unknown_purpose_falls_back(self, conn, config, monkeypatch):
-        from istota import notifications
+        from istota.notifications import delivery as notifications
 
         result = _write(conn, purpose="urgent-ish")
         assert result.purpose == "alert"
@@ -820,7 +822,7 @@ class TestPurpose:
 class TestDeliveryVerifiesTheRow:
     def test_a_rolled_back_write_is_not_delivered(self, config, monkeypatch):
         """The result is handed back on the caller's *open* transaction."""
-        from istota import notifications
+        from istota.notifications import delivery as notifications
 
         db.init_db(config.db_path)
         calls = []
@@ -844,7 +846,7 @@ class TestDeliveryVerifiesTheRow:
         assert calls == []
 
     def test_a_row_closed_before_delivery_is_not_delivered(self, config, monkeypatch):
-        from istota import notifications
+        from istota.notifications import delivery as notifications
 
         db.init_db(config.db_path)
         calls = []

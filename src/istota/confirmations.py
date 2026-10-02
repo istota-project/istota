@@ -214,7 +214,7 @@ def _close_notification(conn, task: db.Task, by: str) -> None:
     resolver is the backstop if it ever misses — the panel then flips the row to
     `stale` on the next read rather than showing an answered question.
     """
-    from .notification_resolvers import confirmation as confirmation_source
+    from istota.notifications.resolvers import confirmation as confirmation_source
 
     confirmation_source.resolve_for_task(conn, task.user_id, task.id, by=by)
 
@@ -237,7 +237,7 @@ def cancel_for_conversation(
     touched. Both callers hold a write transaction — the Talk poller wraps its
     whole batch in one — so opening a connection here would deadlock against it.
     """
-    from .notification_resolvers import confirmation as confirmation_source
+    from istota.notifications.resolvers import confirmation as confirmation_source
 
     refs = db._room_ref_tokens(conn, conversation_token, include_surface_refs=False)
     marks = ", ".join("?" for _ in refs)

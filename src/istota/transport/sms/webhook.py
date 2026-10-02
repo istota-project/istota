@@ -292,7 +292,7 @@ async def deliver_event_response(
         if result.command_text:
             # The command is already a turn in the room; its reply joins it,
             # after the send and whatever the send returned.
-            from ...notifications import mirror_phone_command_reply
+            from istota.notifications.delivery import mirror_phone_command_reply
 
             await asyncio.to_thread(
                 mirror_phone_command_reply, config, "sms", result.user_id,

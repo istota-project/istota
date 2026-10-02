@@ -25,7 +25,9 @@ from pathlib import Path
 
 import pytest
 
-from istota import db, notification_sources as sources, notification_store as store
+from istota import db
+from istota.notifications import sources
+from istota.notifications import store
 from istota.config import Config, UserConfig
 from istota.health import garmin as gm
 from istota.health import garmin_sync
@@ -79,7 +81,7 @@ def _sends(monkeypatch, *, delivered=True):
         calls.append((user_id, text, kwargs.get("purpose")))
         return delivered
 
-    monkeypatch.setattr("istota.notifications.send_notification", _send)
+    monkeypatch.setattr("istota.notifications.delivery.send_notification", _send)
     return calls
 
 
@@ -222,7 +224,7 @@ class TestGarminTokenExpiry:
             probe.check()
             return real_raise(cfg, user_id, **kwargs)
 
-        monkeypatch.setattr("istota.notification_store.raise_notification", _spy)
+        monkeypatch.setattr("istota.notifications.store.raise_notification", _spy)
         _sends(monkeypatch)
 
         garmin_sync.sync_garmin(
@@ -319,7 +321,7 @@ class TestGarminTokenExpiry:
         ctx = _ctx(config)
         gm.set_adapter_factory(_AuthFailAdapter)
         monkeypatch.setattr(
-            "istota.notification_store.raise_notification",
+            "istota.notifications.store.raise_notification",
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("inbox down")),
         )
 

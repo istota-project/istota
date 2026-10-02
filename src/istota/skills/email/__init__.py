@@ -2417,7 +2417,7 @@ def _outbound_gate(
     named at the hold below.
     """
     from ... import db, outbound_drafts as drafts
-    from ...notification_resolvers import outbound_draft as draft_source
+    from istota.notifications.resolvers import outbound_draft as draft_source
     from ...outbound_policy import effective_policy, recipients_require_hold
 
     user_id = os.environ.get("ISTOTA_USER_ID", "").strip()

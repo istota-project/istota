@@ -8554,7 +8554,7 @@ def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
         # reason: the reason comes from the sidecar, a `CheckResult` is
         # rendered into the boot log and the admin Health pane, and a Baileys
         # error string is one of the places a number turns up.
-        from .notification_resolvers.task_alert import _slug
+        from istota.notifications.resolvers.task_alert import _slug
 
         fatal = _slug(status.get("fatal_reason"), fallback="unknown")
         # **The one condition with no other surface** (ISSUE-501). The sidecar

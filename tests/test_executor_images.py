@@ -865,7 +865,7 @@ class TestVisionDroppedNote:
         with db.get_db(config.db_path) as conn:
             task = _task(conn, attachments=[str(img)])
             with patch("istota.executor.make_brain", side_effect=fake_make_brain), \
-                 patch("istota.notifications.send_notification", lambda *a, **k: None):
+                 patch("istota.notifications.delivery.send_notification", lambda *a, **k: None):
                 ok, result, _a, _t = execute_task(task, config, [], conn=conn)
         reset_availability_breaker()
         return ok, result

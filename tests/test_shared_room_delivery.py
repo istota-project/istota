@@ -22,7 +22,8 @@ import logging
 
 import pytest
 
-from istota import db, notifications, user_profiles
+from istota import db, user_profiles
+from istota.notifications import delivery as notifications
 from istota.config import Config, NextcloudConfig, TalkConfig, UserConfig
 from istota.transport.registry import make_registry
 from istota.transport.routing import resolve_delivery_plan

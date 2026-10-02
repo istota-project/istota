@@ -54,9 +54,9 @@ from . import _common
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from ..config import Config
-    from ..notification_sources import NotificationRow, NotificationView
-    from ..notification_store import RaiseResult
+    from istota.config import Config
+    from istota.notifications.sources import NotificationRow, NotificationView
+    from istota.notifications.store import RaiseResult
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +228,7 @@ def reconnect_href(service: str) -> str:
 
 def body_for(service: str, reason: str = "") -> str:
     """The stored body, which is also what the push says."""
-    from ..confirmations import flatten
+    from istota.confirmations import flatten
 
     label = label_for(service)
     detail = flatten(reason or "")[:200]
@@ -261,7 +261,7 @@ def write(
     reason: str = "",
 ) -> "RaiseResult | None":
     """Write the row on the caller's connection, inside its transaction."""
-    from ..notification_store import write_notification
+    from istota.notifications.store import write_notification
 
     return write_notification(conn, user_id, **_row_kwargs(service, reason))
 
@@ -293,7 +293,7 @@ def raise_for_service(
     :func:`_log_swallowed` for the split.
     """
     try:
-        from ..notification_store import raise_notification
+        from istota.notifications.store import raise_notification
 
         return raise_notification(config, user_id, **_row_kwargs(service, reason))
     except Exception as exc:
@@ -318,8 +318,8 @@ def write_for_service(
     locked database the same way.
     """
     try:
-        from .. import db
-        from ..notification_store import write_notification
+        from istota import db
+        from istota.notifications.store import write_notification
 
         with db.get_db(db_path) as conn:
             write_notification(conn, user_id, **_row_kwargs(service, reason))
@@ -347,7 +347,7 @@ def close_for_service(db_path: "Path", user_id: str, service: str, *, by: str) -
     anything else is logged as the defect it is.
     """
     try:
-        from .. import db
+        from istota import db
 
         # A short lock budget rather than `get_db`'s 30-second default. This runs
         # from `store_tokens`, which `acquire_client` calls while holding a
@@ -368,7 +368,7 @@ class ConnectedServiceResolver:
     def resolve(
         self, config: "Config", conn: "sqlite3.Connection", row: "NotificationRow",
     ) -> "NotificationView | None":
-        from ..notification_sources import NotificationAction, NotificationView
+        from istota.notifications.sources import NotificationAction, NotificationView
 
         service = str(row.object_id or "").strip()
         if service not in SERVICES:
@@ -424,7 +424,7 @@ def _is_connected(
     if service == "vault":
         return _vault_is_working(config, user_id, conn)
     if service == "garmin":
-        from ..health import garmin
+        from istota.health import garmin
 
         return bool(garmin.get_status(db_path, user_id).get("connected"))
     if service == "nextcloud":
@@ -434,7 +434,7 @@ def _is_connected(
         # by the store's liveness sweep and must not depend on that. A row that
         # is present but undecryptable reads as connected here and is deleted by
         # the next `get_access_token`, which raises the row again.
-        from .. import web_tokens
+        from istota import web_tokens
 
         return web_tokens.token_status(db_path, user_id) is not None
     return False

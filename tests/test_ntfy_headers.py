@@ -12,7 +12,7 @@ from email.header import decode_header
 import httpx
 import pytest
 
-from istota.ntfy_headers import (
+from istota.notifications.ntfy_headers import (
     MAX_ENCODED_WORD_CHARS,
     ascii_header_value,
     encode_header_value,

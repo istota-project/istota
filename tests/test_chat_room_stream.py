@@ -251,7 +251,7 @@ def _raise_notification(*, user_id="alice", task_id=4242):
     Actionable, so one row moves both halves of the frame's payload and a
     handler that reported only `open` would fail here.
     """
-    from istota.notification_resolvers import confirmation as confirmation_source
+    from istota.notifications.resolvers import confirmation as confirmation_source
 
     with db.get_db(_db_path()) as conn:
         return confirmation_source.write(
@@ -735,7 +735,7 @@ class TestRoomStreamSSE:
 
         def on_check(n):
             if n == 2:
-                from istota import notification_store
+                from istota.notifications import store as notification_store
 
                 with db.get_db(_db_path()) as c:
                     notification_store.resolve_notification(

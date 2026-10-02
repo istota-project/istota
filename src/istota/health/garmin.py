@@ -571,7 +571,7 @@ def _close_reconnect_notification(db_path: Path, user_id: str) -> None:
     and nothing at this depth can tell which surface is above it. Naming one
     would be a guess recorded as a fact.
     """
-    from istota.notification_resolvers import connected_service
+    from istota.notifications.resolvers import connected_service
 
     connected_service.close_for_service(
         db_path, user_id, SECRET_SERVICE, by="system",

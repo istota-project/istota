@@ -462,8 +462,8 @@ def record_outcome(config, result: int, problems: list[str]) -> None:
     longer read for it. Written, never pushed: this runs from a one-shot CLI in
     the offline window, with every service stopped. Never raises.
     """
-    from .notification_resolvers import task_alert  # noqa: PLC0415
-    from .notification_store import resolve_notification  # noqa: PLC0415
+    from istota.notifications.resolvers import task_alert  # noqa: PLC0415
+    from istota.notifications.store import resolve_notification  # noqa: PLC0415
 
     if result not in (EXIT_OK, EXIT_PARTIAL):
         return

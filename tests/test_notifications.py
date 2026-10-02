@@ -1,4 +1,4 @@
-"""Configuration loading for istota.notifications module."""
+"""Configuration loading for istota.notifications.delivery module."""
 
 from unittest.mock import AsyncMock, patch
 
@@ -11,7 +11,7 @@ from istota.config import (
     NextcloudConfig,
     UserConfig,
 )
-from istota.notifications import (
+from istota.notifications.delivery import (
     _send_email,
     _send_ntfy,
     _send_talk,
@@ -189,7 +189,7 @@ class TestSendConfirmationPrompt:
             mock_client = AsyncMock()
             mock_client.send_message.return_value = {"id": 99}
             MockClient.return_value = mock_client
-            from istota.notifications import send_confirmation_prompt
+            from istota.notifications.delivery import send_confirmation_prompt
             delivered, msg_id = send_confirmation_prompt(
                 config, "alice", "Confirm?", conversation_token="room1",
             )
@@ -197,7 +197,7 @@ class TestSendConfirmationPrompt:
 
     def test_undeliverable_reports_not_delivered(self):
         config = Config(users={"alice": UserConfig()})
-        from istota.notifications import send_confirmation_prompt
+        from istota.notifications.delivery import send_confirmation_prompt
         assert send_confirmation_prompt(config, "alice", "Confirm?") == (False, None)
 
     def test_routing_table_decides_the_surface(self):
@@ -206,7 +206,7 @@ class TestSendConfirmationPrompt:
             nextcloud=NextcloudConfig(url="https://nc.example.com"),
             users={"alice": UserConfig(routing={"alert": "ntfy"})},
         )
-        from istota import notifications
+        from istota.notifications import delivery as notifications
         with (
             patch.object(notifications, "_send_ntfy", return_value=True) as ntfy,
             patch.object(notifications, "_send_talk", new=AsyncMock(return_value=1)) as talk,
@@ -277,7 +277,7 @@ class TestSendNtfyShim:
 
 
 class TestSendNotification:
-    @patch("istota.notifications._send_talk")
+    @patch("istota.notifications.delivery._send_talk")
     def test_talk_surface(self, mock_talk):
         mock_talk.return_value = True
         config = Config(users={"alice": UserConfig()})
@@ -285,7 +285,7 @@ class TestSendNotification:
         assert result is True
         mock_talk.assert_called_once()
 
-    @patch("istota.notifications._send_email")
+    @patch("istota.notifications.delivery._send_email")
     def test_email_surface(self, mock_email):
         mock_email.return_value = True
         config = Config(users={"alice": UserConfig()})
@@ -293,8 +293,8 @@ class TestSendNotification:
         assert result is True
         mock_email.assert_called_once()
 
-    @patch("istota.notifications._send_email")
-    @patch("istota.notifications._send_talk")
+    @patch("istota.notifications.delivery._send_email")
+    @patch("istota.notifications.delivery._send_talk")
     def test_both_surface(self, mock_talk, mock_email):
         mock_talk.return_value = True
         mock_email.return_value = True
@@ -304,7 +304,7 @@ class TestSendNotification:
         mock_talk.assert_called_once()
         mock_email.assert_called_once()
 
-    @patch("istota.notifications._send_ntfy")
+    @patch("istota.notifications.delivery._send_ntfy")
     def test_ntfy_surface(self, mock_ntfy):
         mock_ntfy.return_value = True
         config = Config(users={"alice": UserConfig()})
@@ -312,9 +312,9 @@ class TestSendNotification:
         assert result is True
         mock_ntfy.assert_called_once()
 
-    @patch("istota.notifications._send_ntfy")
-    @patch("istota.notifications._send_email")
-    @patch("istota.notifications._send_talk")
+    @patch("istota.notifications.delivery._send_ntfy")
+    @patch("istota.notifications.delivery._send_email")
+    @patch("istota.notifications.delivery._send_talk")
     def test_all_surface(self, mock_talk, mock_email, mock_ntfy):
         mock_talk.return_value = True
         mock_email.return_value = True
@@ -326,14 +326,14 @@ class TestSendNotification:
         mock_email.assert_called_once()
         mock_ntfy.assert_called_once()
 
-    @patch("istota.notifications._send_talk")
+    @patch("istota.notifications.delivery._send_talk")
     def test_returns_false_when_delivery_fails(self, mock_talk):
         mock_talk.return_value = False
         config = Config(users={"alice": UserConfig()})
         result = send_notification(config, "alice", "msg", surface="talk")
         assert result is False
 
-    @patch("istota.notifications._send_talk")
+    @patch("istota.notifications.delivery._send_talk")
     def test_passes_conversation_token(self, mock_talk):
         mock_talk.return_value = True
         config = Config(users={"alice": UserConfig()})
@@ -342,7 +342,7 @@ class TestSendNotification:
         # conversation_token is passed as positional arg to _send_talk
         assert mock_talk.call_args[0][3] == "room1" or "room1" in str(mock_talk.call_args)
 
-    @patch("istota.notifications._send_ntfy")
+    @patch("istota.notifications.delivery._send_ntfy")
     def test_passes_priority_and_tags(self, mock_ntfy):
         mock_ntfy.return_value = True
         config = Config(users={"alice": UserConfig()})
@@ -359,8 +359,8 @@ class TestSendNotificationPurposeRouting:
     """The per-user routing table is consulted when a purpose (not an explicit
     surface) is given — this is what makes routing={'alert': 'ntfy'} live."""
 
-    @patch("istota.notifications._send_ntfy")
-    @patch("istota.notifications._send_talk")
+    @patch("istota.notifications.delivery._send_ntfy")
+    @patch("istota.notifications.delivery._send_talk")
     def test_purpose_routes_alert_to_ntfy(self, mock_talk, mock_ntfy):
         mock_ntfy.return_value = True
         config = Config(users={"alice": UserConfig(routing={"alert": "ntfy"})})
@@ -369,8 +369,8 @@ class TestSendNotificationPurposeRouting:
         mock_ntfy.assert_called_once()
         mock_talk.assert_not_called()
 
-    @patch("istota.notifications._send_ntfy")
-    @patch("istota.notifications._send_talk")
+    @patch("istota.notifications.delivery._send_ntfy")
+    @patch("istota.notifications.delivery._send_talk")
     def test_purpose_routes_to_multiple_surfaces(self, mock_talk, mock_ntfy):
         mock_talk.return_value = True
         mock_ntfy.return_value = True
@@ -379,7 +379,7 @@ class TestSendNotificationPurposeRouting:
         mock_talk.assert_called_once()
         mock_ntfy.assert_called_once()
 
-    @patch("istota.notifications._send_talk")
+    @patch("istota.notifications.delivery._send_talk")
     def test_explicit_surface_overrides_purpose(self, mock_talk):
         mock_talk.return_value = True
         # routing says ntfy, but an explicit surface= wins.
@@ -387,7 +387,7 @@ class TestSendNotificationPurposeRouting:
         send_notification(config, "alice", "msg", surface="talk", purpose="alert")
         mock_talk.assert_called_once()
 
-    @patch("istota.notifications._send_talk")
+    @patch("istota.notifications.delivery._send_talk")
     def test_purpose_falls_back_to_legacy_alerts_channel(self, mock_talk):
         mock_talk.return_value = True
         config = Config(users={"alice": UserConfig(alerts_channel="achan")})
@@ -525,7 +525,7 @@ class TestEffectiveLogDestinations:
 
     def test_never_raises_on_registry_failure(self):
         config = Config(users={"alice": UserConfig(log_channel="lchan")})
-        with patch("istota.notifications.make_registry", side_effect=RuntimeError("boom")):
+        with patch("istota.notifications.delivery.make_registry", side_effect=RuntimeError("boom")):
             assert effective_log_destinations(config, "alice") == []
 
 
@@ -563,8 +563,8 @@ class TestResolveConversationTokenRouting:
 
 
 class TestSendNotificationConversationTokenOverride:
-    @patch("istota.notifications._send_email")
-    @patch("istota.notifications._send_talk")
+    @patch("istota.notifications.delivery._send_email")
+    @patch("istota.notifications.delivery._send_talk")
     def test_conversation_token_overrides_bare_talk(self, mock_talk, mock_email):
         mock_talk.return_value = True
         mock_email.return_value = True
@@ -587,7 +587,7 @@ class TestWebSurface:
 
     def test_send_web_posts_into_default_room(self, tmp_path):
         from istota import db
-        from istota.notifications import _send_web
+        from istota.notifications.delivery import _send_web
         config = self._config(tmp_path)
         assert _send_web(config, "alice", "hello", title="Alert") is True
         with db.get_db(config.db_path) as conn:
@@ -598,7 +598,7 @@ class TestWebSurface:
 
     def test_send_web_explicit_token(self, tmp_path):
         from istota import db
-        from istota.notifications import _send_web
+        from istota.notifications.delivery import _send_web
         config = self._config(tmp_path)
         with db.get_db(config.db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "ideas")
@@ -606,7 +606,7 @@ class TestWebSurface:
         with db.get_db(config.db_path) as conn:
             assert len(db.list_system_messages(conn, room.token)) == 1
 
-    @patch("istota.notifications._send_web")
+    @patch("istota.notifications.delivery._send_web")
     def test_send_notification_web_surface(self, mock_web, tmp_path):
         mock_web.return_value = True
         config = self._config(tmp_path)
@@ -671,12 +671,12 @@ class TestTheTitleIsNotRepeated:
     COMPOSED = f"{TITLE}\n\n{BODY}"
 
     def test_the_helper_drops_a_leading_title(self):
-        from istota.notifications import strip_leading_title
+        from istota.notifications.delivery import strip_leading_title
 
         assert strip_leading_title(self.COMPOSED, self.TITLE) == self.BODY
 
     def test_the_helper_leaves_an_unprefixed_message_alone(self):
-        from istota.notifications import strip_leading_title
+        from istota.notifications.delivery import strip_leading_title
 
         assert strip_leading_title(self.BODY, self.TITLE) == self.BODY
         assert strip_leading_title(self.BODY, None) == self.BODY
@@ -687,19 +687,19 @@ class TestTheTitleIsNotRepeated:
         Stripping there would deliver an empty notification, which is worse than
         a repeated label.
         """
-        from istota.notifications import strip_leading_title
+        from istota.notifications.delivery import strip_leading_title
 
         assert strip_leading_title(self.TITLE, self.TITLE) == self.TITLE
 
     def test_a_body_that_merely_starts_with_similar_text_is_untouched(self):
         """Anchored on the whole title plus the blank line, not on a prefix."""
-        from istota.notifications import strip_leading_title
+        from istota.notifications.delivery import strip_leading_title
 
         message = "Security alert — task #991 is a different task"
         assert strip_leading_title(message, self.TITLE) == message
 
     def test_ntfy_gets_the_body_and_the_title_separately(self):
-        from istota import notifications
+        from istota.notifications import delivery as notifications
 
         config = Config(users={"alice": UserConfig()})
         with patch.object(notifications, "_send_ntfy", return_value=True) as ntfy:
@@ -711,7 +711,7 @@ class TestTheTitleIsNotRepeated:
         assert ntfy.call_args.kwargs["title"] == self.TITLE
 
     def test_email_gets_the_body_under_the_subject(self):
-        from istota import notifications
+        from istota.notifications import delivery as notifications
 
         config = Config(
             email=EmailConfig(enabled=True, bot_email="bot@test.com"),
@@ -732,7 +732,7 @@ class TestTheTitleIsNotRepeated:
         Removing the prefix everywhere would leave a Talk reader with an
         unlabelled notice.
         """
-        from istota import notifications
+        from istota.notifications import delivery as notifications
 
         config = Config(
             nextcloud=NextcloudConfig(url="https://nc.example.com"),
@@ -761,7 +761,7 @@ class TestTheTitleIsNotRepeated:
         the body carried the label too, dropping the argument was cosmetic; now
         it would lose the label outright.
         """
-        from istota import notifications
+        from istota.notifications import delivery as notifications
 
         config = Config(users={"alice": UserConfig()})
         with patch.object(notifications, "_send_web", return_value=True) as web:
@@ -781,7 +781,7 @@ class TestTheTitleIsNotRepeated:
         unmatched would have left the highest-volume alert in the tree showing
         the doubling this whole change removes.
         """
-        from istota.notifications import strip_leading_title
+        from istota.notifications.delivery import strip_leading_title
 
         title = "Heartbeat Alert: disk"
         message = f"**{title}**\n\nDisk at 95%"
@@ -789,7 +789,8 @@ class TestTheTitleIsNotRepeated:
 
     def test_the_real_heartbeat_alert_does_not_repeat_its_label(self):
         """Through the producer, not a reconstruction of its format string."""
-        from istota import heartbeat, notifications
+        from istota import heartbeat
+        from istota.notifications import delivery as notifications
 
         check = heartbeat.HeartbeatCheck(
             name="disk", type="shell-command", config={}, channel="ntfy",

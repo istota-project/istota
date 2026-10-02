@@ -27,8 +27,8 @@ from istota.transport.email.inbound import (
 from istota.skills.email import Email, EmailConfig, EmailEnvelope
 
 _INBOUND = "istota.transport.email.inbound"
-_PROMPT = "istota.notifications.send_confirmation_prompt"
-_ALERT = "istota.notifications.send_notification"
+_PROMPT = "istota.notifications.delivery.send_confirmation_prompt"
+_ALERT = "istota.notifications.delivery.send_notification"
 
 
 @pytest.fixture(autouse=True)

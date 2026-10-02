@@ -186,7 +186,7 @@ def note_credential_lost(config: "Config", user_id: str, reason: str) -> None:
     and an inbox failure must not become a failed web request.
     """
     try:
-        from .notification_resolvers import connected_service  # noqa: PLC0415
+        from istota.notifications.resolvers import connected_service  # noqa: PLC0415
 
         connected_service.raise_for_service(config, user_id, _SERVICE, reason)
     except Exception:  # noqa: BLE001 — see the docstring
@@ -216,7 +216,7 @@ def close_credential_notice(db_path: Path, user_id: str, *, by: str) -> None:
     The resolver is the backstop behind both, not the other way round.
     """
     try:
-        from .notification_resolvers import connected_service  # noqa: PLC0415
+        from istota.notifications.resolvers import connected_service  # noqa: PLC0415
 
         connected_service.close_for_service(db_path, user_id, _SERVICE, by=by)
     except Exception:  # noqa: BLE001 — must not be able to fail a login

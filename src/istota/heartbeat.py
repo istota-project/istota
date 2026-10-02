@@ -1012,7 +1012,7 @@ def effective_alert_surface(config: "Config", user_id: str, check: HeartbeatChec
     """
     if check.channel:
         return check.channel
-    from .notifications import surface_for_purpose
+    from istota.notifications.delivery import surface_for_purpose
     return surface_for_purpose(config, user_id, "alert")
 
 
@@ -1028,7 +1028,7 @@ def send_heartbeat_alert(
 
     Returns True if alert was sent successfully.
     """
-    from .notifications import send_notification
+    from istota.notifications.delivery import send_notification
 
     message = f"**Heartbeat Alert: {check.name}**\n\n{result.message}"
 
@@ -1122,7 +1122,7 @@ def check_heartbeats(conn, config: "Config") -> list[str]:
                     # "delivery failed". Bumping consecutive_errors for an
                     # unconfigured channel turns a config gap into a fake
                     # alert-pipeline outage; we log instead and move on.
-                    from .notifications import is_channel_configured
+                    from istota.notifications.delivery import is_channel_configured
 
                     alert_surface = effective_alert_surface(config, user_id, check)
                     if not is_channel_configured(

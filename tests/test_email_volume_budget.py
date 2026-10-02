@@ -160,8 +160,8 @@ def _run_poll(config, mailbox, download=None, notifications=None, upload=None):
         patch("istota.transport.email.inbound.ensure_user_directories_v2"),
         patch("istota.transport.email.inbound.upload_file_to_inbox_v2",
               upload or MagicMock()),
-        patch("istota.notifications.send_confirmation_prompt", _fake_prompt),
-        patch("istota.notifications.send_notification", _fake_notify),
+        patch("istota.notifications.delivery.send_confirmation_prompt", _fake_prompt),
+        patch("istota.notifications.delivery.send_notification", _fake_notify),
     ):
         return poll_emails(config), sent
 

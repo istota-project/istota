@@ -806,7 +806,7 @@ def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
         return token
     if not is_synthetic_email_thread_token(token):
         return token
-    from ..notifications import resolve_conversation_token
+    from istota.notifications.delivery import resolve_conversation_token
     return resolve_conversation_token(config, task.user_id) or token
 
 
@@ -903,7 +903,7 @@ def routed_notification_room(
     """
     try:
         from .. import db
-        from ..notifications import resolve_destinations
+        from istota.notifications.delivery import resolve_destinations
         for dest in resolve_destinations(config, user_id, "notification"):
             room = _room_for_destination(conn, config, user_id, dest)
             if room and not db.room_is_shared(conn, room):
@@ -940,7 +940,7 @@ def _room_for_destination(
     if surface == "room":
         candidate = channel
     elif surface == "talk":
-        from ..notifications import resolve_conversation_token
+        from istota.notifications.delivery import resolve_conversation_token
         # `conn` is passed, not left to be reopened: since ISSUE-477 that
         # resolver reads the user's configured default room, and the web branch
         # below states the rule — resolving a transcript room must not take a

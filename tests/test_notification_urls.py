@@ -26,17 +26,17 @@ import pytest
 
 from istota import (
     db,
-    notification_sources as sources,
-    notification_store as store,
     outbound_drafts as drafts,
 )
+from istota.notifications import sources
+from istota.notifications import store
 from istota.config import Config, UserConfig
-from istota.notification_resolvers import confirmation as confirmation_source
-from istota.notification_resolvers import connected_service as service_source
-from istota.notification_resolvers import cron_job as cron_source
-from istota.notification_resolvers import health_panel as panel_source
-from istota.notification_resolvers import outbound_draft as draft_source
-from istota.notification_resolvers import task_alert as task_alert_source
+from istota.notifications.resolvers import confirmation as confirmation_source
+from istota.notifications.resolvers import connected_service as service_source
+from istota.notifications.resolvers import cron_job as cron_source
+from istota.notifications.resolvers import health_panel as panel_source
+from istota.notifications.resolvers import outbound_draft as draft_source
+from istota.notifications.resolvers import task_alert as task_alert_source
 
 try:
     import authlib  # noqa: F401

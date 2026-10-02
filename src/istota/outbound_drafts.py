@@ -430,7 +430,7 @@ def _close_notification(conn: sqlite3.Connection, user_id: str, draft_id: int,
     *raise* this is safe in the email skill's subprocess too. The store never
     raises, and the resolver is the backstop if this is ever missed.
     """
-    from .notification_resolvers import outbound_draft as draft_source
+    from istota.notifications.resolvers import outbound_draft as draft_source
 
     draft_source.resolve_for_draft(conn, user_id, draft_id, by=by)
 

@@ -17,7 +17,7 @@ Four helpers, each replacing a body that was byte-identical bar a noun:
   permanently, with only one of the two closable. ``task_alert`` builds its five
   keys through ``_slug`` and does not use this.
 - :func:`row_kwargs` — the argument set handed to
-  :func:`istota.notification_store.write_notification`. Every default here is
+  :func:`istota.notifications.store.write_notification`. Every default here is
   that function's own default, so a source omitting a key and a source passing
   it as ``None`` are the same call.
 - :func:`resolve_for` — the close, which is one ``resolve_by_object`` call in
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     import logging
     import sqlite3
 
-    from ..notification_sources import NotificationRow
+    from istota.notifications.sources import NotificationRow
 
 
 def object_dedup_key(prefix: str, value: object) -> str:
@@ -111,7 +111,7 @@ def resolve_for(
     by: str,
 ) -> int:
     """Close this user's open row for one object. Returns the rows closed."""
-    from ..notification_store import resolve_by_object
+    from istota.notifications.store import resolve_by_object
 
     return resolve_by_object(
         conn, user_id, source, object_type, str(object_id), by=by,

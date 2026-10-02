@@ -373,8 +373,8 @@ def test_revocation_after_answer_does_not_retract_its_return(setup):
 
 
 def test_resolver_never_uses_stored_private_notification_text(setup):
-    from istota.notification_resolvers.message_relay import RESOLVER, write
-    from istota.notification_store import _row_to_notification
+    from istota.notifications.resolvers.message_relay import RESOLVER, write
+    from istota.notifications.store import _row_to_notification
     config = setup[0]
     relay = answered(setup)
     with db.get_db(config.db_path) as conn:
@@ -553,7 +553,7 @@ def test_body_free_expiry_notice_targets_frozen_origin_then_deduplicates(setup, 
     with db.get_db(config.db_path) as conn:
         conn.execute("UPDATE message_relays SET expires_at=datetime('now','-1 second')")
     send = Mock(return_value=True)
-    monkeypatch.setattr('istota.notifications.send_notification', send)
+    monkeypatch.setattr('istota.notifications.delivery.send_notification', send)
     asyncio.run(requests.drain_requests(config))
     asyncio.run(requests.drain_requests(config))
     assert send.call_count == 1

@@ -133,17 +133,17 @@ from .nextcloud import avatars as nc_avatars
 from .nextcloud._http import nc_configured
 from .nextcloud_api import hydrate_user_configs
 from .modules import MODULE_NAMES
-from .notification_resolvers import confirmation as confirmation_source
-from .notification_resolvers import cron_job as cron_job_source
-from .notification_resolvers import task_alert as task_alert_source
-from .notification_store import (
+from istota.notifications.resolvers import confirmation as confirmation_source
+from istota.notifications.resolvers import cron_job as cron_job_source
+from istota.notifications.resolvers import task_alert as task_alert_source
+from istota.notifications.store import (
     RaiseResult,
     deliver_pending,
     mark_delivered,
     sweep_expired_alerts,
     sweep_retention,
 )
-from .notifications import effective_log_destinations, send_notification
+from istota.notifications.delivery import effective_log_destinations, send_notification
 from istota.sandbox.process_group import kill_group_if_live
 from .session.session_log import (
     SWEEP_STATE_KEY,
@@ -4181,7 +4181,7 @@ def process_one_task(
         # so a failed post has nothing to record. Best-effort and gated on room
         # existence inside the helper — the delivery has already happened.
         if post_talk_mirror_body and response_msg_id:
-            from .notifications import mirror_talk_to_room
+            from istota.notifications.delivery import mirror_talk_to_room
             mirror_talk_to_room(
                 config, talk_token, post_talk_mirror_body,
                 talk_message_id=response_msg_id,
@@ -6138,12 +6138,12 @@ def _record_session_log_sweep(config: Config, result: SweepResult) -> None:
 def _operator_alert_user(config: Config) -> str | None:
     """Pick a user to receive operator-level scheduler alerts.
 
-    Thin delegate to :func:`istota.notifications.operator_alert_user` (the
+    Thin delegate to :func:`istota.notifications.delivery.operator_alert_user` (the
 canonical home) so scheduler-internal callers and tests keep their import
 path. Prefers the first admin user (sorted for determinism); falls back to
     the first configured user. ``None`` when no users are configured.
     """
-    from .notifications import operator_alert_user
+    from istota.notifications.delivery import operator_alert_user
 
     return operator_alert_user(config)
 

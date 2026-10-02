@@ -9,7 +9,9 @@ the row was reopened and re-delivered.
 
 import pytest
 
-from istota import db, notification_sources as sources, notification_store as store
+from istota import db
+from istota.notifications import sources
+from istota.notifications import store
 from istota.config import Config, UserConfig
 
 

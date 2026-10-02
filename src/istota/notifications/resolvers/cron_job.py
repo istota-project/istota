@@ -91,9 +91,9 @@ from . import _common
 if TYPE_CHECKING:
     import sqlite3
 
-    from ..config import Config
-    from ..notification_sources import NotificationRow, NotificationView
-    from ..notification_store import RaiseResult
+    from istota.config import Config
+    from istota.notifications.sources import NotificationRow, NotificationView
+    from istota.notifications.store import RaiseResult
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,7 @@ def title_for(job_name: str, fail_count: int) -> str:
     `_sync_module_jobs` lifts the suspension whether or not anything was fixed.
     The count is what is true either way.
     """
-    from ..confirmations import flatten
+    from istota.confirmations import flatten
 
     name = flatten(job_name or "")[:_NAME_CHARS] or "a scheduled job"
     if is_module_job(job_name or ""):
@@ -165,7 +165,7 @@ def body_for(job_name: str, cron_expression: str, last_error: str | None) -> str
     to dismiss it, and a dismissed row is the one shape that would deliver again
     on the next suspension (see :func:`write`).
     """
-    from ..confirmations import flatten
+    from istota.confirmations import flatten
 
     name = flatten(job_name or "")[:_NAME_CHARS] or "the job"
     cron = flatten(cron_expression or "")[:_NAME_CHARS]
@@ -245,7 +245,7 @@ def note_for(job_name: str) -> str:
     wrong verb. The one that changes anything is `!cron disable`, which stops
     the retry loop; `disabled_at` is what makes it stick (ISSUE-392).
     """
-    from ..confirmations import flatten
+    from istota.confirmations import flatten
 
     raw = job_name or ""
     if is_module_job(raw):
@@ -295,7 +295,7 @@ def _same_outage_already_closed(
     failed comparison returns False and the notification is written. The cost of
     a wrong False is one extra push; the cost of a wrong True is silence.
     """
-    from ..notification_store import STATE_OPEN
+    from istota.notifications.store import STATE_OPEN
 
     try:
         found = conn.execute(
@@ -340,7 +340,7 @@ def write(
     closed — see :func:`_same_outage_already_closed`, which is what stops the
     dismiss-then-re-suspend path delivering once per rescue cycle.
     """
-    from ..notification_store import write_notification
+    from istota.notifications.store import write_notification
 
     if is_module_job(job_name) and _same_outage_already_closed(
         conn, user_id, job_id,
@@ -426,8 +426,8 @@ class CronJobResolver:
     def resolve(
         self, config: "Config", conn: "sqlite3.Connection", row: "NotificationRow",
     ) -> "NotificationView | None":
-        from .. import db
-        from ..notification_sources import NotificationView
+        from istota import db
+        from istota.notifications.sources import NotificationView
 
         job_id = _job_id(row)
         if job_id is None:

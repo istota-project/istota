@@ -1,6 +1,6 @@
 """The notification inbox: the durable set of what is currently waiting on a user.
 
-Not to be confused with :mod:`istota.notifications`, which is *delivery* and is
+Not to be confused with :mod:`istota.notifications.delivery`, which is *delivery* and is
 untouched by this module. The naming follows `secrets_store.py`: this is the
 store, that is the dispatcher. Raising a notification writes a row here and,
 separately, fans out through the delivery layer — so a user with no alerts
@@ -39,15 +39,16 @@ import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterable
 
-from . import db, notification_sources as sources
-from .notification_sources import (
+from istota import db
+from istota.notifications import sources
+from istota.notifications.sources import (
     NotificationAction,
     NotificationRow,
     NotificationView,
 )
 
 if TYPE_CHECKING:
-    from .config import Config
+    from istota.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -389,7 +390,7 @@ def deliver_pending(config: "Config", results: Iterable[RaiseResult | None]) -> 
     buffer, on the connection the stamp needs anyway.
     """
     try:
-        from .notifications import send_notification
+        from istota.notifications.delivery import send_notification
 
         pending = [r for r in (results or []) if r is not None and r.deliver]
         if not pending:

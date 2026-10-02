@@ -913,8 +913,8 @@ def _settle(config, claim: dict, talk_id: int | None) -> None:
 
 def _finish(config, request_id: str, reason: str) -> None:
     """Close a request that could not be delivered, and tell its requester."""
-    from istota.notification_resolvers import task_alert
-    from istota.notification_store import deliver_pending
+    from istota.notifications.resolvers import task_alert
+    from istota.notifications.store import deliver_pending
 
     state = "expired" if reason == "queue_expired" else "failed"
     notice = None

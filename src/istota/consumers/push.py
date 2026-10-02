@@ -52,7 +52,7 @@ class PushNotificationSubscriber:
             body = ""
 
         try:
-            from ..notifications import send_notification
+            from istota.notifications.delivery import send_notification
             send_notification(
                 self._config, self._task.user_id, body or title,
                 surface="ntfy", title=title,

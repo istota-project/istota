@@ -8326,8 +8326,8 @@ def _backfill_notifications(conn: sqlite3.Connection) -> None:
     """
     from . import confirmations  # noqa: PLC0415 — `confirmations` imports db
     from . import outbound_drafts as drafts  # noqa: PLC0415
-    from .notification_resolvers import confirmation as confirmation_source  # noqa: PLC0415
-    from .notification_resolvers import outbound_draft as draft_source  # noqa: PLC0415
+    from istota.notifications.resolvers import confirmation as confirmation_source  # noqa: PLC0415
+    from istota.notifications.resolvers import outbound_draft as draft_source  # noqa: PLC0415
 
     try:
         already = conn.execute(
