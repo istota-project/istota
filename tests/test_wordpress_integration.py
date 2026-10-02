@@ -286,5 +286,8 @@ def test_an_options_page_round_trip(live, capsys):
 @pytest.mark.skipif(not BLOG, reason="ISTOTA_WP_TEST_BLOG not set (not a network)")
 def test_network_sites(live, capsys):
     """Needs the istota-connector plugin network-activated, and a super admin."""
-    out = ok(capsys, "network", "sites")
+    code, out = cli(capsys, "network", "sites")
+    if out.get("reason") == "permission_denied":
+        pytest.skip("network sites needs a super admin; the test account is not one")
+    assert code == 0 and out.get("status") == "ok", out
     assert out["count"] >= 2 and any(site["id"] == 1 for site in out["sites"]), out
