@@ -42,7 +42,13 @@ export type Segment =
   // reported failure needs: the durable record of a model substitution is the
   // italic note `executor._append_model_note` appends to the reply on a dropped
   // pin, plus the model in the turn's meta from the `done` event.
-  | { kind: 'notice'; id: string; text: string };
+  | { kind: 'notice'; id: string; text: string }
+  // The question a task parked on (ISSUE-592). Its own kind so it is never the
+  // answer and never dropped as short narration once the confirmed re-run
+  // streams below it. `outcome` is unset while the question is open.
+  | { kind: 'gate'; id: string; text: string; outcome?: GateOutcome };
+
+export type GateOutcome = 'approved' | 'declined';
 
 // One structured !search result. Mirrors the backend `_build_search_data`
 // per-result shape; a conversation card carries the `task_id` the client jumps
@@ -191,6 +197,12 @@ export interface ChatMessage {
   taskId?: number;
   status?: string;
   confirmation?: boolean;
+  // The `seq` of the question this message parked on, when it arrived over
+  // this message's own stream. Approving resumes the stream past it, keeping
+  // the turn as rendered rather than rebuilding it from seq 0 (ISSUE-592).
+  gateSeq?: number;
+  // Set by approve, read once when the stream reopens: the seq to resume after.
+  resumeAfterSeq?: number;
   error?: boolean;
   streaming: boolean;
   // Ack verb shown before the first segment exists.
@@ -398,6 +410,9 @@ export function answerText(m: ChatMessage): string {
   for (let i = m.segments.length - 1; i >= 0; i--) {
     const s = m.segments[i];
     if (s.kind === 'text') return s.text;
+    // Text above a question was written before it was answered, so it is never
+    // the answer of the run that follows it (ISSUE-592).
+    if (s.kind === 'gate') return '';
   }
   return '';
 }
@@ -416,6 +431,30 @@ function setTrailingText(m: ChatMessage, text: string): void {
   }
 }
 
+/** Put the question a task parked on into the turn as a gate segment. The
+ * trailing open text block is that question as it streamed, so it becomes the
+ * gate (the canonical prompt replacing the streamed one, as `result` replaces
+ * the streamed answer); otherwise the gate is appended. */
+function placeGate(m: ChatMessage, prompt: string, outcome?: GateOutcome): void {
+  const last = m.segments[m.segments.length - 1];
+  const gate: Segment = { kind: 'gate', id: nextTextId(), text: prompt, outcome };
+  if (last && last.kind === 'text' && !last.settled) m.segments[m.segments.length - 1] = gate;
+  else m.segments.push(gate);
+}
+
+/** Record how the open question was answered, on the last gate in the turn.
+ * Returns whether there was one to mark. */
+export function answerGate(m: ChatMessage, outcome: GateOutcome): boolean {
+  for (let i = m.segments.length - 1; i >= 0; i--) {
+    const s = m.segments[i];
+    if (s.kind === 'gate') {
+      s.outcome = outcome;
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Mark every still-running tool finished. The Claude Code brain never emits
  * tool_end, so without this a tool chip would spin forever once the task
  * completes. `success` stays as-is (undefined → neutral "done"). */
@@ -430,7 +469,7 @@ export function finalizeTools(m: ChatMessage): void {
 export function isRenderable(seg: Segment): boolean {
   if (seg.kind === 'tool') return true;
   // A notice has no settled/unsettled life — it is emitted complete and stays.
-  if (seg.kind === 'notice') return seg.text.trim() !== '';
+  if (seg.kind === 'notice' || seg.kind === 'gate') return seg.text.trim() !== '';
   if (seg.settled && seg.text.trim() === '') return false;
   return true;
 }
@@ -458,7 +497,8 @@ export const SUBSTANTIAL_TEXT_CHARS = 280;
 export type RenderGroup =
   | { kind: 'prose'; id: string; text: string }
   | { kind: 'activity'; id: string; steps: Segment[] }
-  | { kind: 'notice'; id: string; text: string };
+  | { kind: 'notice'; id: string; text: string }
+  | { kind: 'gate'; id: string; text: string; outcome?: GateOutcome };
 
 /** Reduce an assistant turn's ordered segments into the body's render groups —
  * substantial prose blocks and activity chips, interleaved in the model's true
@@ -505,6 +545,13 @@ export function renderGroups(m: ChatMessage, threshold = SUBSTANTIAL_TEXT_CHARS)
       }
       return;
     }
+    if (s.kind === 'gate') {
+      // The question the turn stopped on, however short, so the confirmed
+      // re-run below it never reads as a fresh answer (ISSUE-592).
+      flushTools();
+      groups.push({ kind: 'gate', id: s.id, text: s.text, outcome: s.outcome });
+      return;
+    }
     if (s.kind === 'thinking') return; // reasoning never renders in the body
     // A whitespace-only block never renders (mirrors isRenderable's
     // empty-settled suppression) — including an empty trailing answer, which
@@ -539,7 +586,10 @@ export function renderGroups(m: ChatMessage, threshold = SUBSTANTIAL_TEXT_CHARS)
 export function messageCopyText(m: ChatMessage): string {
   if (m.role !== 'assistant') return m.text;
   return renderGroups(m)
-    .filter((g): g is Extract<RenderGroup, { kind: 'prose' }> => g.kind === 'prose')
+    .filter(
+      (g): g is Extract<RenderGroup, { kind: 'prose' | 'gate' }> =>
+        g.kind === 'prose' || g.kind === 'gate',
+    )
     .map((g) => g.text.trim())
     .filter(Boolean)
     .join('\n\n');
@@ -676,12 +726,22 @@ export function applyEvent(m: ChatMessage, kind: string, payload: Record<string,
 
     case 'confirmation': {
       const prompt = String(payload.prompt ?? '');
-      setTrailingText(m, prompt);
+      placeGate(m, prompt);
       m.text = prompt;
       m.confirmation = true;
       m.status = 'pending_confirmation';
       m.progress = undefined;
       m.streaming = false;
+      finalizeTools(m);
+      break;
+    }
+
+    case 'confirmed': {
+      // The same question, answered: `confirmations.approve` relabels the
+      // `confirmation` row in place, so a replay of a confirmed task renders
+      // the approved prompt above the re-run instead of re-arming the card.
+      placeGate(m, String(payload.prompt ?? ''), 'approved');
+      m.confirmation = false;
       finalizeTools(m);
       break;
     }

@@ -192,8 +192,67 @@ describe('applyEvent reducer', () => {
     feed(m, [['confirmation', { prompt: 'Send this email?' }]]);
     expect(m.confirmation).toBe(true);
     expect(m.status).toBe('pending_confirmation');
-    expect(answerText(m)).toBe('Send this email?');
+    expect(m.text).toBe('Send this email?');
+    expect(m.segments).toEqual([
+      expect.objectContaining({ kind: 'gate', text: 'Send this email?', outcome: undefined }),
+    ]);
     expect(m.streaming).toBe(false);
+  });
+
+  // ISSUE-592: the question is its own segment, so the work above it stays
+  // and the confirmed re-run continues below it.
+  it('the question replaces only its own streamed text, never earlier work', () => {
+    const m = freshAssistant();
+    feed(m, [
+      ['text_delta', { text: long('A') }],
+      ['tool_start', { tool_call_id: 't1', tool_name: 'Bash', description: 'list' }],
+      ['tool_end', { tool_call_id: 't1', success: true }],
+      ['text_delta', { text: 'May I delete it?' }],
+      ['confirmation', { prompt: 'May I delete it?' }],
+    ]);
+    expect(m.segments.map((s) => s.kind)).toEqual(['text', 'tool', 'gate']);
+    expect(texts(m)[0].text).toBe(long('A'));
+  });
+
+  it('a replayed confirmed question renders answered, with no card', () => {
+    const m = freshAssistant();
+    feed(m, [
+      ['tool_start', { tool_call_id: 't1', tool_name: 'Bash', description: 'list' }],
+      ['confirmed', { prompt: 'May I?' }],
+      ['task_started', {}],
+      ['text_delta', { text: 'Done.' }],
+      ['result', { text: 'Done.' }],
+    ]);
+    expect(m.confirmation).toBe(false);
+    expect(m.segments.map((s) => s.kind)).toEqual(['tool', 'gate', 'text']);
+    expect(m.segments[1]).toMatchObject({ kind: 'gate', outcome: 'approved' });
+    expect(answerText(m)).toBe('Done.');
+  });
+
+  it('a confirmed run stopped before it wrote anything is marked cancelled', () => {
+    const m = freshAssistant();
+    feed(m, [
+      ['text_delta', { text: long('A') }],
+      ['tool_start', { tool_call_id: 't1', tool_name: 'Bash', description: 'list' }],
+      ['confirmed', { prompt: 'May I?' }],
+      ['task_started', {}],
+      ['cancelled', {}],
+    ]);
+    expect(m.segments.map((s) => s.kind)).toEqual(['text', 'tool', 'gate', 'text']);
+    expect(m.text).toBe('_(cancelled)_');
+  });
+
+  it('a short question still renders once the re-run streams below it', () => {
+    const m = freshAssistant();
+    feed(m, [
+      ['confirmed', { prompt: 'Ok?' }],
+      ['task_started', {}],
+      ['result', { text: 'Done.' }],
+    ]);
+    const groups = renderGroups(m);
+    expect(groups.map((g) => g.kind)).toEqual(['gate', 'prose']);
+    expect(groups[0]).toMatchObject({ text: 'Ok?', outcome: 'approved' });
+    expect(messageCopyText(m)).toBe('Ok?\n\nDone.');
   });
 
   it('done finalizes running tools without a tool_end', () => {

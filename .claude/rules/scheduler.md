@@ -244,7 +244,7 @@ The `whatsapp_requests` gate drains durable requests on the runtime that owns Ba
 | `monarch_synced_transactions`, `csv_imported_transactions` | Dead copies (ISSUE-427); live ones are in the money DB |
 | `task_usage` | One row per brain attempt; not FK'd to `tasks` so it outlives cleanup; `task_id` NULL for task-less calls (`origin` names them), may dangle. `UNIQUE(task_id, attempt_seq) WHERE task_id IS NOT NULL`. Context fields NULL when unmeasured, never 0. Aggregates filter `has_totals = 1` and `initial_context_tokens IS NOT NULL` independently |
 | `task_usage_models` | Per-model split; FK decorative, so `prune_old_usage` deletes children first. Native brain has no split; `--by model` uses the parent's `model` |
-| `task_events` | `UNIQUE(task_id, seq)`; kept across retries and confirms (ISSUE-235): `confirmations.approve` prunes only `confirmation`/`done` via `delete_task_events_by_kind`. Bulk retention in `cleanup_old_tasks`; `db.delete_task_events` has no caller |
+| `task_events` | `UNIQUE(task_id, seq)`; kept across retries and confirms (ISSUE-235): `confirmations.approve` relabels `confirmation` to `confirmed` in place and prunes only `done` (ISSUE-592). A park keeps its `text_delta`/`thinking` rows; the re-run's terminal prune takes them, and a declined or expired question keeps them until `cleanup_old_tasks`. Bulk retention in `cleanup_old_tasks`; `db.delete_task_events` has no caller |
 | `web_chat_rooms` | `UNIQUE(user_id, token)`, one handle per participant (ISSUE-134) |
 | `room_members` | `PRIMARY KEY (room_token, user_id)` (ISSUE-134); visibility via `list_member_rooms` |
 | `web_chat_messages` | Legacy, no reader or writer; kept only because `delete_web_chat_room` clears it; dropping needs a migration |

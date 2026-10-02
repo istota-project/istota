@@ -6822,6 +6822,25 @@ def _trace_tool_descriptions(execution_trace: str | None, actions_taken: str | N
     return []
 
 
+def _settle_gates(segments: list[dict], status: str) -> None:
+    """Stamp each gate segment with how it was answered (ISSUE-592).
+
+    The re-run stamps the gate it answers (``confirmations.trace_with_gate``),
+    and that stamp wins. Otherwise a gate with anything after it was approved,
+    since only an approval runs on. The last one, when nothing follows it, is
+    the question the task stopped on: still open while the task is parked and
+    declined when it was cancelled. An expired question is cancelled too and
+    reads as declined; the trace cannot tell the two apart."""
+    last = len(segments) - 1
+    for i, seg in enumerate(segments):
+        if seg["kind"] != "gate" or "outcome" in seg:
+            continue
+        if i < last or status not in ("pending_confirmation", "cancelled"):
+            seg["outcome"] = "approved"
+        elif status == "cancelled":
+            seg["outcome"] = "declined"
+
+
 def _trace_segments(
     execution_trace: str | None,
     actions_taken: str | None,
@@ -6846,6 +6865,7 @@ def _trace_segments(
     intermediate text block the model produced before the interruption
     (ISSUE-183).
     """
+    from . import confirmations
     result = result or ""
     segments: list[dict] = []
     parsed_trace = False
@@ -6873,7 +6893,13 @@ def _trace_segments(
                         segments.append({"kind": "text", "text": e.get("text") or ""})
                     elif etype == "tool":
                         segments.append({"kind": "tool", "text": e.get("text") or ""})
+                    elif etype == confirmations.GATE_TRACE_TYPE:
+                        seg = {"kind": "gate", "text": e.get("text") or ""}
+                        if e.get("outcome") == "approved":
+                            seg["outcome"] = "approved"
+                        segments.append(seg)
                     # cm_boundary (and anything else) is skipped.
+                _settle_gates(segments, status)
         except (ValueError, TypeError):
             parsed_trace = False
     if not parsed_trace:
@@ -6916,13 +6942,19 @@ def _assistant_message_dict(row, text: str, status: str, *, confirmation: bool =
     the task has been retention-deleted those columns are NULL and the turn
     degrades to a plain `text` bubble. `_row_get` tolerates either source."""
     created_at = _turn_created_at(row)
+    trace = _row_get(row, "execution_trace")
+    actions = _row_get(row, "actions_taken")
     if confirmation:
-        return {
+        out = {
             "role": "assistant", "text": text, "task_id": _row_get(row, "task_id") or _row_get(row, "id"),
             "status": status, "confirmation": True, "created_at": created_at,
         }
-    trace = _row_get(row, "execution_trace")
-    actions = _row_get(row, "actions_taken")
+        # The parked attempt's work, ending on the open question (ISSUE-592).
+        # A row parked before the trace was stored at the park has none, and
+        # renders the prompt alone as it always did.
+        if trace:
+            out["segments"] = _trace_segments(trace, actions, "", status=status)
+        return out
     out = {
         "role": "assistant", "text": text,
         "task_id": _row_get(row, "task_id") or _row_get(row, "id"),

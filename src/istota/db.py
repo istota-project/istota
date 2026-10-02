@@ -2073,17 +2073,26 @@ def set_task_confirmation(
     conn: sqlite3.Connection,
     task_id: int,
     confirmation_prompt: str,
+    *,
+    actions_taken: str | None = None,
+    execution_trace: str | None = None,
 ) -> None:
-    """Set task to pending confirmation status."""
+    """Set task to pending confirmation status.
+
+    The trace is the parked attempt's work, ending in its gate entry
+    (``confirmations.trace_with_gate``); the confirmed re-run builds on it, so
+    a reload shows what ran before the question (ISSUE-592)."""
     conn.execute(
         """
         UPDATE tasks
         SET status = 'pending_confirmation',
             confirmation_prompt = ?,
+            actions_taken = COALESCE(?, actions_taken),
+            execution_trace = COALESCE(?, execution_trace),
             updated_at = datetime('now')
         WHERE id = ?
         """,
-        (confirmation_prompt, task_id),
+        (confirmation_prompt, actions_taken, execution_trace, task_id),
     )
 
 
@@ -3439,9 +3448,9 @@ def has_task_event_kind(conn: sqlite3.Connection, task_id: int, kind: str) -> bo
     answers "did an earlier attempt already say this". That is what keeps a
     once-per-turn notice from being repeated by the retry ladder (ISSUE-361).
 
-    Meaningless for a kind something prunes (``text_delta``, ``thinking``,
-    ``confirmation``, ``done`` — see ``delete_task_events_by_kind``): a pruned
-    row reads as never emitted.
+    Meaningless for a kind something prunes or relabels (``text_delta``,
+    ``thinking``, ``confirmation``, ``done`` — see ``delete_task_events_by_kind``
+    and ``confirmations.approve``): a pruned row reads as never emitted.
     """
     row = conn.execute(
         "SELECT 1 FROM task_events WHERE task_id = ? AND kind = ? LIMIT 1",
@@ -3457,14 +3466,16 @@ def delete_task_events(conn: sqlite3.Connection, task_id: int) -> int:
     task's event log spans every attempt, so the live stream survives a retry
     (``EventWriter`` resumes ``seq`` via ``get_max_task_event_seq`` rather than
     resetting to 1) and a confirmed re-run keeps the parked attempt's work
-    instead of erasing it (ISSUE-235 — ``confirmations.approve`` prunes that
-    attempt's ``confirmation``/``done`` by kind, and nothing else). Retention is
+    instead of erasing it (ISSUE-235, ISSUE-592 — ``confirmations.approve``
+    relabels that attempt's ``confirmation`` to ``confirmed`` and prunes its
+    ``done``, and nothing else). Retention is
     the one thing that still drops these rows wholesale, in bulk SQL over the
     whole expired set (``cleanup_old_tasks``), not one task at a time here.
 
     Kept as the tested single-task primitive. Before reaching for it, note that
-    ``task_events`` is the only durable record of a task parked at
-    ``pending_confirmation``: the park path persists no ``execution_trace``.
+    ``task_events`` is the only record of what a parked task streamed: the
+    park path stores the attempt's ``execution_trace``, but that carries no
+    deltas, thinking or progress lines.
     """
     cursor = conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
     return cursor.rowcount
@@ -3482,6 +3493,18 @@ def delete_task_events_by_kind(
     connection-handling convention (caller supplies the connection)."""
     cursor = conn.execute(
         "DELETE FROM task_events WHERE task_id = ? AND kind = ?", (task_id, kind),
+    )
+    return cursor.rowcount
+
+
+def relabel_task_events_kind(
+    conn: sqlite3.Connection, task_id: int, kind: str, new_kind: str,
+) -> int:
+    """Rename a task's events of one kind in place, keeping ``seq`` and payload.
+    Returns the row count."""
+    cursor = conn.execute(
+        "UPDATE task_events SET kind = ? WHERE task_id = ? AND kind = ?",
+        (new_kind, task_id, kind),
     )
     return cursor.rowcount
 

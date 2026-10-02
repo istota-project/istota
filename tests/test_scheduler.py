@@ -2579,6 +2579,111 @@ class TestProcessOneTask:
         assert "result" in kinds and "done" in kinds  # lifecycle survives
 
     @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_a_web_park_keeps_what_it_showed_above_the_question(
+        self, mock_arun, db_path, tmp_path,
+    ):
+        """Parking, approving and re-running keeps the first pass (ISSUE-592).
+
+        The park used to prune the streamed text and store no trace, so the
+        confirmed re-run replayed and reloaded as if it were the whole answer.
+        """
+        import json
+        from istota import confirmations
+
+        config = self._make_config(db_path, tmp_path)
+        config.scheduler.event_log_enabled = True
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="clean up", user_id="testuser", source_type="web",
+                conversation_token="webtok", output_target="web",
+            )
+        prompt = "I need your confirmation before deleting the file. Reply yes or no."
+        first = json.dumps([
+            {"type": "text", "text": "Looked at the folder."},
+            {"type": "tool", "text": "Listed files"},
+            {"type": "text", "text": prompt},
+        ])
+        second = json.dumps([{"type": "tool", "text": "Deleted file"},
+                             {"type": "text", "text": "Done."}])
+
+        def fake_exec(task, config, user_resources, *, dry_run=False,
+                      event_writer=None, workspace_dir=None, **kw):
+            if task.confirmed_at is None:
+                if event_writer is not None:
+                    event_writer.emit("text_delta", {"text": "Looked at the folder."})
+                return (True, prompt, None, first)
+            return (True, "Done.", None, second)
+
+        with patch("istota.scheduler.execute_task", side_effect=fake_exec):
+            task_id, _ = process_one_task(config)
+            with db.get_db(db_path) as conn:
+                parked = db.get_task(conn, task_id)
+                kinds = [e["kind"] for e in db.get_task_events(conn, task_id)]
+            assert parked.status == "pending_confirmation"
+            # The streamed text survives the park, for the re-run's replay.
+            assert "text_delta" in kinds
+            assert json.loads(parked.execution_trace) == [
+                {"type": "text", "text": "Looked at the folder."},
+                {"type": "tool", "text": "Listed files"},
+                {"type": "gate", "text": prompt},
+            ]
+
+            with db.get_db(db_path) as conn:
+                confirmations.approve(conn, db.get_task(conn, task_id))
+            process_one_task(config)
+
+        with db.get_db(db_path) as conn:
+            done = db.get_task(conn, task_id)
+        assert done.status == "completed"
+        assert json.loads(done.execution_trace) == [
+            {"type": "text", "text": "Looked at the folder."},
+            {"type": "tool", "text": "Listed files"},
+            {"type": "gate", "text": prompt, "outcome": "approved"},
+            {"type": "tool", "text": "Deleted file"},
+            {"type": "text", "text": "Done."},
+        ]
+
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_a_confirmed_run_that_asks_again_keeps_the_first_pass_once(
+        self, mock_arun, db_path, tmp_path,
+    ):
+        """A second park stores the first pass once, not merged twice."""
+        import json
+        from istota import confirmations
+
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="clean up", user_id="testuser", source_type="web",
+                conversation_token="webtok", output_target="web",
+            )
+        q1 = "I need your confirmation before deleting the file. Reply yes or no."
+        q2 = "I need your confirmation before emptying the trash. Reply yes or no."
+        runs = iter([
+            (q1, [{"type": "tool", "text": "a"}, {"type": "text", "text": q1}]),
+            (q2, [{"type": "tool", "text": "b"}, {"type": "text", "text": q2}]),
+        ])
+
+        def fake_exec(task, config, user_resources, **kw):
+            prompt, trace = next(runs)
+            return (True, prompt, None, json.dumps(trace))
+
+        with patch("istota.scheduler.execute_task", side_effect=fake_exec):
+            task_id, _ = process_one_task(config)
+            with db.get_db(db_path) as conn:
+                confirmations.approve(conn, db.get_task(conn, task_id))
+            process_one_task(config)
+
+        with db.get_db(db_path) as conn:
+            parked = db.get_task(conn, task_id)
+        assert parked.status == "pending_confirmation"
+        assert json.loads(parked.execution_trace) == [
+            {"type": "tool", "text": "a"},
+            {"type": "gate", "text": q1, "outcome": "approved"},
+            {"type": "tool", "text": "b"}, {"type": "gate", "text": q2},
+        ]
+
+    @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_long_web_result_reaches_result_event_whole(self, mock_arun, db_path, tmp_path):
         # A several-thousand-word answer must reach the stream surface uncut:
         # the `result` task event (the web-chat deliverable) carries the full

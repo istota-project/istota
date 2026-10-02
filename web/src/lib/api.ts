@@ -2902,7 +2902,13 @@ export interface ChatHistoryMessage {
   // Ordered, interleaved segment list (`text` / `tool`) for a finished turn,
   // derived server-side from the execution trace, so history reconstructs the
   // same interleaved layout as the live stream. `tools` is kept as a fallback.
-  segments?: { kind: 'text' | 'tool'; text: string }[];
+  // A `gate` is the question a task parked on, with how it was answered
+  // (ISSUE-592); `outcome` is absent while it is still open.
+  segments?: {
+    kind: 'text' | 'tool' | 'gate';
+    text: string;
+    outcome?: 'approved' | 'declined';
+  }[];
   duration_seconds?: number | null;
   // The model that produced this answer (canonical ID), null when unknown.
   model?: string | null;
