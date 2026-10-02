@@ -24,7 +24,7 @@ SIGKILL ends it. :func:`install_force_quit` closes that by aborting the open
 transports, which is what lets ``wait_closed()`` return.
 
 Both of those are backstops. The ordinary path is that the streams end
-themselves: :mod:`istota.web_shutdown` wraps the stop signals from the web app's
+themselves: :mod:`istota.webui.shutdown` wraps the stop signals from the web app's
 lifespan and the SSE generators return when they see it, so the shutdown has
 nothing left to wait for and nothing left to cancel. Without it every Ctrl-C ran
 the graceful window out in full and then logged a ``CancelledError`` traceback
@@ -42,7 +42,7 @@ import os
 import threading
 from pathlib import Path
 
-from . import web_shutdown
+from istota.webui import shutdown as web_shutdown
 from .config import Config
 
 logger = logging.getLogger("istota.serve")
@@ -163,7 +163,7 @@ def build_uvicorn_server(host: str, port: int):
     """
     import uvicorn
 
-    from .web_app import app as _web_app
+    from istota.webui.app import app as _web_app
 
     _maybe_mount_webhooks(_web_app)
 
@@ -265,7 +265,7 @@ def _maybe_mount_webhooks(web_app) -> None:
     (:mod:`istota.location.ingest_signal`) is the reload path in this shape,
     and it is the one that works in every shape.
     """
-    from .web_app import _config as web_config
+    from istota.webui.app import _config as web_config
 
     if not web_config:
         return
@@ -279,7 +279,7 @@ def _maybe_mount_webhooks(web_app) -> None:
     if not location_enabled and not sms_enabled and not whatsapp_enabled:
         return
     try:
-        from . import webhook_receiver
+        from istota.webui import webhook_receiver
 
         paths = {getattr(route, "path", "") for route in web_app.routes}
         attached = False
@@ -325,7 +325,7 @@ def run_serve(
     failure).
     """
     from . import scheduler
-    from .web_app import app, assert_no_auth_bind_safe, is_loopback_host
+    from istota.webui.app import app, assert_no_auth_bind_safe, is_loopback_host
 
     bind_port = port if port is not None else config.web.port
 

@@ -176,7 +176,7 @@ def _make_config(tmp_path, **chat_kwargs):
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod.app.state.istota_config = config
     mod._oauth = MagicMock()
@@ -185,7 +185,7 @@ def _patch_app(config):
 
 
 async def _login(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
     )
@@ -203,7 +203,7 @@ async def stream_client(tmp_path):
 
 
 def _db_path():
-    import istota.web_app as mod
+    import istota.webui.app as mod
     return mod._config.db_path
 
 
@@ -392,7 +392,7 @@ class TestRoomEventsBatchHelper:
     """Direct unit coverage of the batch helper the SSE generator drives."""
 
     def test_gate_short_circuits_without_touching_the_join(self, tmp_path, monkeypatch):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         _patch_app(_make_config(tmp_path))
         called = []
         real = db.list_room_events_since
@@ -410,7 +410,7 @@ class TestRoomEventsBatchHelper:
 @_needs_web_deps
 class TestRoomSnapshotAndDelta:
     def test_snapshot_is_read_only_and_skips_handleless_rooms(self, tmp_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         config = _make_config(tmp_path)
         _patch_app(config)
         with db.get_db(config.db_path) as conn:
@@ -436,7 +436,7 @@ class TestRoomSnapshotAndDelta:
         The colour is read off the *handle*, not the registry row, because it
         is per-user; every other field in this dict comes from the registry.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
         config = _make_config(tmp_path)
         _patch_app(config)
         with db.get_db(config.db_path) as conn:
@@ -452,7 +452,7 @@ class TestRoomSnapshotAndDelta:
         """The half the snapshot key exists for: `_room_delta_frames` compares
         whole dicts, so carrying the key is exactly what makes the change
         propagate."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         config = _make_config(tmp_path)
         _patch_app(config)
         with db.get_db(config.db_path) as conn:
@@ -469,7 +469,7 @@ class TestRoomSnapshotAndDelta:
                 and f["room"]["color"] == "rose"]
 
     def test_delta_reports_rename_add_and_remove(self):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         before = {"a": {"id": 1, "token": "a", "name": "old", "origin": "web",
                         "model": None, "effort": None},
                   "b": {"id": 2, "token": "b", "name": "b", "origin": "talk",
@@ -484,7 +484,7 @@ class TestRoomSnapshotAndDelta:
         assert {"action": "remove", "token": "b", "id": 2} in frames
 
     def test_identical_snapshots_produce_no_frames(self):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         snap = {"a": {"id": 1, "token": "a", "name": "a", "origin": "web",
                       "model": None, "effort": None}}
         assert mod._room_delta_frames(snap, dict(snap)) == []
@@ -519,7 +519,7 @@ class _FakeRequest:
 
 async def _drain(request, **kwargs) -> str:
     """Run the room-stream generator to its (disconnect-driven) end."""
-    import istota.web_app as mod
+    import istota.webui.app as mod
     resp = await mod.chat_room_stream(request, user={"username": "alice"}, **kwargs)
     assert resp.media_type == "text/event-stream"
     assert resp.headers["x-accel-buffering"] == "no"
@@ -773,7 +773,7 @@ class TestRoomStreamSSE:
         blanks the bell over items still waiting. The 2s timeout makes that
         likelier, not rarer.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         await self._setup(tmp_path, room_stream_room_check_seconds=0.001)
         _raise_notification()
@@ -812,7 +812,7 @@ class TestRoomStreamSSE:
             assert _frame(buf, "drafts")["drafts"] == []
 
     async def test_connection_gauge_released_on_disconnect(self, tmp_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         await self._setup(tmp_path)
         before = mod._room_stream_conn_delta(0)
         await _drain(_FakeRequest(disconnect_after=1))
@@ -826,7 +826,7 @@ class TestRoomStreamSSE:
         stays permanently true and the per-user visibility join runs every tick
         instead of the O(1) MAX(id) probe.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
         room = await self._setup(tmp_path)
         _post(room["token"], body="mine")
         with db.get_db(_db_path()) as conn:
@@ -859,7 +859,7 @@ class TestRoomStreamSSE:
     ):
         import sqlite3 as _sqlite3
 
-        import istota.web_app as mod
+        import istota.webui.app as mod
         room = await self._setup(tmp_path)
         _post(room["token"], body="after the lock")
         calls = {"n": 0}
@@ -911,7 +911,7 @@ class TestRoomStreamConfig:
 @_needs_web_deps
 class TestAdminChatGauge:
     def test_connection_gauge_round_trips(self, tmp_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         _patch_app(_make_config(tmp_path))
         before = mod._admin_chat_section()["room_stream_connections"]
         mod._room_stream_conn_delta(1)
@@ -920,7 +920,7 @@ class TestAdminChatGauge:
         assert mod._admin_chat_section()["room_stream_connections"] == before
 
     def test_gauge_never_goes_negative(self, tmp_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         _patch_app(_make_config(tmp_path))
         for _ in range(5):
             mod._room_stream_conn_delta(-1)
@@ -931,7 +931,7 @@ class TestAdminChatGauge:
 class TestRoomStreamShutdown:
     """The session-lived stream a browser tab always holds open.
 
-    Nothing server-side ends it, so before `istota.web_shutdown` every shutdown
+    Nothing server-side ends it, so before `istota.webui.shutdown` every shutdown
     ran the graceful window out and then cancelled this generator — which
     uvicorn logs as `ERROR: Exception in ASGI application` with a
     `CancelledError` traceback, on an ordinary Ctrl-C.
@@ -939,7 +939,7 @@ class TestRoomStreamShutdown:
 
     @pytest.fixture(autouse=True)
     def _clean_shutdown_state(self):
-        from istota import web_shutdown
+        from istota.webui import shutdown as web_shutdown
         web_shutdown.reset_for_tests()
         yield
         web_shutdown.reset_for_tests()
@@ -960,7 +960,7 @@ class TestRoomStreamShutdown:
     async def test_a_stop_signal_ends_the_stream(self, tmp_path):
         import asyncio
 
-        from istota import web_shutdown
+        from istota.webui import shutdown as web_shutdown
 
         await self._setup(tmp_path)
 
@@ -988,7 +988,7 @@ class TestRoomStreamShutdown:
         """
         import asyncio
 
-        from istota import web_shutdown
+        from istota.webui import shutdown as web_shutdown
 
         await self._setup(tmp_path, room_stream_poll_interval_ms=30_000)
 

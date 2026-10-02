@@ -1386,14 +1386,14 @@ def cmd_email(args):
 
 
 def _auth_policy(config):
-    from .web_auth import policy_from_config
+    from istota.webui.auth import policy_from_config
 
     return policy_from_config(config)
 
 
 def _auth_read_password(args, policy, *, email, user_id):
     import getpass
-    from .web_auth import password_policy_error
+    from istota.webui.auth import password_policy_error
 
     if sys.stdin.isatty():
         password = getpass.getpass("New password: ")
@@ -1411,7 +1411,7 @@ def _auth_read_password(args, policy, *, email, user_id):
 
 
 def _auth_link_origin(config, print_link):
-    from .web_origin import external_origin
+    from istota.webui.origin import external_origin
 
     hostname, scheme = external_origin(config)
     if not print_link and not config.email.enabled:
@@ -1420,7 +1420,8 @@ def _auth_link_origin(config, print_link):
 
 
 def _auth_issue_link(config, identity, purpose, print_link):
-    from . import web_auth, web_auth_mail
+    from istota.webui import auth as web_auth
+    from istota.webui import auth_mail as web_auth_mail
 
     origin = _auth_link_origin(config, print_link)
     options = {
@@ -1443,7 +1444,7 @@ def _auth_issue_link(config, identity, purpose, print_link):
 
 def cmd_auth(args):
     """Manage web identities separately from profiles and routing addresses."""
-    from . import web_auth
+    from istota.webui import auth as web_auth
 
     config = load_config(Path(args.config) if args.config else None)
     db_path = config.db_path
@@ -4028,7 +4029,7 @@ def _bot_icon_max_bytes(config) -> int:
 
 def cmd_bot_icon_set(args):
     """Store an image file as the deployment's bot icon."""
-    from istota import avatars
+    from istota.webui import avatars
 
     config = load_config(Path(args.config) if args.config else None)
     path = Path(args.path)
@@ -4065,7 +4066,7 @@ def cmd_bot_icon_set(args):
 
 def cmd_bot_icon_clear(args):
     """Remove the bot icon. The web UI reverts to the initial chip."""
-    from istota import avatars
+    from istota.webui import avatars
 
     config = load_config(Path(args.config) if args.config else None)
     try:
@@ -4078,7 +4079,7 @@ def cmd_bot_icon_clear(args):
 
 def cmd_bot_icon_show(args):
     """Report what is stored — never the bytes."""
-    from istota import avatars
+    from istota.webui import avatars
 
     config = load_config(Path(args.config) if args.config else None)
     try:

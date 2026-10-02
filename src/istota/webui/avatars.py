@@ -494,7 +494,7 @@ HEADER_UNOBSERVED = "unobserved"
 
 def write_import_state(conn: sqlite3.Connection, state: dict) -> None:
     """Record what the tick that just finished did. Replaces the previous row."""
-    from . import db as _db
+    from istota import db as _db
 
     _db.shared_kv_set(
         conn,
@@ -513,7 +513,7 @@ def read_import_state(conn: sqlite3.Connection) -> dict | None:
     take the daemon's start-up path with it. A row nobody can read is
     indistinguishable, for the operator, from no row at all.
     """
-    from . import db as _db
+    from istota import db as _db
 
     row = _db.shared_kv_get(conn, IMPORT_STATE_NAMESPACE, IMPORT_STATE_KEY)
     if row is None:

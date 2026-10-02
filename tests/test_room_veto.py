@@ -856,7 +856,7 @@ class TestOnWeb:
         from httpx import ASGITransport, AsyncClient
 
         from istota.config import SiteConfig, WebConfig
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         path = tmp_path / "web.db"
         db.init_db(path)

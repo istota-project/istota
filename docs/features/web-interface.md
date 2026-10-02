@@ -145,7 +145,7 @@ TLS is required — session cookies are set with `secure=true` and the registere
 ### 5. Run
 
 ```bash
-uvicorn istota.web_app:app --no-access-log --host 127.0.0.1 --port 8766
+uvicorn istota.webui.app:app --no-access-log --host 127.0.0.1 --port 8766
 ```
 
 The Ansible role installs this as the `istota-web` systemd service:

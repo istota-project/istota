@@ -434,7 +434,7 @@ def _is_connected(
         # by the store's liveness sweep and must not depend on that. A row that
         # is present but undecryptable reads as connected here and is deleted by
         # the next `get_access_token`, which raises the row again.
-        from istota import web_tokens
+        from istota.webui import tokens as web_tokens
 
         return web_tokens.token_status(db_path, user_id) is not None
     return False

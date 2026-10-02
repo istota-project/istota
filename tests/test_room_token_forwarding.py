@@ -89,7 +89,7 @@ def test_old_descriptor_and_shared_delivery(room_db):
 
 
 def test_web_handle_lookup_and_route_use_current_token(room_db, monkeypatch):
-    from istota import web_app
+    from istota.webui import app as web_app
     monkeypatch.setattr(web_app, "_config", Config(db_path=room_db))
     with db.get_db(room_db) as conn:
         handle = conn.execute("INSERT INTO web_chat_rooms (user_id, token, name) VALUES (?, ?, ?) RETURNING id", ("alice", NEW, "Room")).fetchone()[0]
@@ -126,7 +126,7 @@ def test_history_reads_old_tasks_without_crossing_epoch(room_db, source):
 
 async def test_chat_route_reads_migrated_handle_with_authorization(room_db, monkeypatch):
     from httpx import ASGITransport, AsyncClient
-    from istota import web_app
+    from istota.webui import app as web_app
 
     config = Config(db_path=room_db)
     monkeypatch.setattr(web_app, "_config", config)
@@ -183,7 +183,7 @@ def test_forwarding_does_not_claim_an_existing_rooms_history(room_db):
 
 @pytest.mark.parametrize("collision", [False, True])
 async def test_revoked_member_cannot_read_through_old_handle(room_db, monkeypatch, collision):
-    from istota import web_app
+    from istota.webui import app as web_app
 
     monkeypatch.setattr(web_app, "_config", Config(db_path=room_db))
     with db.get_db(room_db) as conn:
@@ -202,7 +202,7 @@ async def test_revoked_member_cannot_read_through_old_handle(room_db, monkeypatc
 
 
 def test_renaming_old_handle_updates_current_room(room_db, monkeypatch):
-    from istota import web_app
+    from istota.webui import app as web_app
 
     monkeypatch.setattr(web_app, "_config", Config(db_path=room_db))
     with db.get_db(room_db) as conn:

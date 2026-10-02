@@ -1161,7 +1161,7 @@ class WebMapConfig:
     A seam rather than a literal (ISSUE-334): the location maps used to name
     CARTO's tile host in the frontend bundle, and when CARTO started
     watermarking keyless requests there was no way to change it without a code
-    edit. Resolution lives in `istota.map_basemap`, which the web endpoint and
+    edit. Resolution lives in `istota.webui.map_basemap`, which the web endpoint and
     the `web.basemap` doctor check both read, so the checker cannot pass while
     the map is blank.
 

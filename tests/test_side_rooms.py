@@ -221,7 +221,7 @@ class TestTheSideRoom:
             assert handle is None or handle.token != side.token
 
     def test_the_web_route_refuses_a_second_member(self, env, monkeypatch):
-        from istota import web_app
+        from istota.webui import app as web_app
         config, shared = env["config"], env["shared"]
         monkeypatch.setattr(web_app, "_config", config)
         with db.get_db(config.db_path) as conn:
@@ -594,7 +594,7 @@ class TestTheSideRoomStaysPrivate:
                                            request_key="w1", text="hi")
 
     def test_it_is_never_promoted_to_talk(self, env, monkeypatch):
-        from istota import web_app
+        from istota.webui import app as web_app
         config, shared = env["config"], env["shared"]
         monkeypatch.setattr(web_app, "_config", config)
         with db.get_db(config.db_path) as conn:

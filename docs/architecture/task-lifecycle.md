@@ -18,7 +18,7 @@ Tasks enter the queue from multiple sources:
 | Source | Entry point | `source_type` |
 |---|---|---|
 | Talk message | Talk poller (`transport/talk/inbound.py`) | `talk` |
-| Web chat | Web POST → `ingest_message` (`web_app.py`) | `web` |
+| Web chat | Web POST → `ingest_message` (`webui/app.py`) | `web` |
 | Email | Email poller (`transport/email/inbound.py`) | `email` |
 | TASKS.md file | File poller (`tasks_file_poller.py`) | `istota_file` |
 | CLI | `istota task` command (`cli.py`) | `cli` |

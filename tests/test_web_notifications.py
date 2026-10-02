@@ -74,7 +74,7 @@ def _make_config(tmp_path):
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod.app.state.istota_config = config
     mod._oauth = MagicMock()
@@ -83,7 +83,7 @@ def _patch_app(config):
 
 
 async def _login(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
     )
@@ -101,7 +101,7 @@ async def client(tmp_path):
 
 
 def _db_path():
-    import istota.web_app as mod
+    import istota.webui.app as mod
     return mod._config.db_path
 
 
@@ -479,7 +479,7 @@ class TestSeen:
         below that number would refuse a batch an honest client did render.
         """
         from istota.notifications.store import LIVENESS_SCAN_MAX
-        from istota.web_app import _SEEN_BATCH_MAX
+        from istota.webui.app import _SEEN_BATCH_MAX
         assert _SEEN_BATCH_MAX >= LIVENESS_SCAN_MAX
 
     async def test_an_oversized_version_string_is_a_422(self, client):
@@ -500,7 +500,7 @@ class TestSeen:
     async def test_a_real_timestamp_fits_the_version_cap(self, client):
         """The cap must not refuse the value the store actually writes."""
         from istota import db as _db
-        from istota.web_app import _SEEN_VERSION_MAX_CHARS
+        from istota.webui.app import _SEEN_VERSION_MAX_CHARS
         assert len(_db.iso_utc_now()) <= _SEEN_VERSION_MAX_CHARS
 
         cookies = await _login(client, "alice")

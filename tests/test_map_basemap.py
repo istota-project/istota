@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from istota.map_basemap import (
+from istota.webui.map_basemap import (
     PROVIDERS,
     BasemapSpec,
     resolve_basemap,

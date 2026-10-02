@@ -599,7 +599,7 @@ class TestFailedEmailTurnStillRenders:
         the mirror image of ISSUE-136."""
         pytest.importorskip("fastapi")
         pytest.importorskip("authlib")
-        from istota import web_app
+        from istota.webui import app as web_app
 
         web_app._config = Config()
         web_app._config.db_path = db_path
@@ -630,7 +630,7 @@ class TestFailedEmailTurnStillRenders:
         the gate withholds."""
         pytest.importorskip("fastapi")
         pytest.importorskip("authlib")
-        from istota import web_app
+        from istota.webui import app as web_app
 
         web_app._config = Config()
         web_app._config.db_path = db_path

@@ -116,7 +116,7 @@ def _config(tmp_path):
 
 
 async def _login(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username}
@@ -210,7 +210,7 @@ class TestClaudeCodeInPlay:
     """
 
     def _section(self, tmp_path, monkeypatch, *, kind, fallback, calls=None):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         def _spy(config, **kwargs):
             if calls is not None:
@@ -257,7 +257,7 @@ class TestClaudeCodeInPlay:
 
     def test_a_config_with_no_brain_block_draws_nothing(self, tmp_path, monkeypatch):
         """Read defensively: erring toward no card beats erring toward an empty one."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         monkeypatch.setattr(su, "get_snapshot", lambda config, **kw: _snapshot())
         config = _config(tmp_path)
@@ -269,7 +269,7 @@ class TestSubscriptionSection:
     """`_admin_subscription_section` — the payload the card is typed against."""
 
     def test_a_reading_renders_the_documented_shape(self, tmp_path, monkeypatch):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         _patch_snapshot(monkeypatch, _snapshot())
 
@@ -315,7 +315,7 @@ class TestSubscriptionSection:
         the TOML and not carried here is a threshold the dashboard ignores
         without ever saying it did.
         """
-        from istota import web_app
+        from istota.webui import app as web_app
 
         _patch_snapshot(monkeypatch, _snapshot())
         config = _config(tmp_path)
@@ -355,7 +355,7 @@ class TestSubscriptionSection:
         every weaker test that could be written here — while tinting every tile
         amber at 1%, which is the regression this exists to catch.
         """
-        from istota import web_app
+        from istota.webui import app as web_app
 
         _patch_snapshot(monkeypatch, _snapshot())
         config = _config(tmp_path)
@@ -378,7 +378,7 @@ class TestSubscriptionSection:
         card paints a full window red while doctor calls the same reading OK.
         The loader is where a nonsense threshold is corrected.
         """
-        from istota import web_app
+        from istota.webui import app as web_app
 
         _patch_snapshot(monkeypatch, _snapshot())
         config = _config(tmp_path)
@@ -396,7 +396,7 @@ class TestSubscriptionSection:
         Reading the wall clock here would measure a cached snapshot's age
         against a different moment than the rest of the dashboard's timestamps.
         """
-        from istota import web_app
+        from istota.webui import app as web_app
 
         calls = _patch_snapshot(monkeypatch, _snapshot())
 
@@ -412,7 +412,7 @@ class TestSubscriptionSection:
         Doctor renders the same pair for the same reason — an old real reading
         beats no reading, as long as the surface admits it is old.
         """
-        from istota import web_app
+        from istota.webui import app as web_app
 
         _patch_snapshot(
             monkeypatch,
@@ -453,7 +453,7 @@ class TestSubscriptionSection:
         permanent and named nothing anyone could act on. The reason now lives on
         `runtime.subscription_usage`, as a SKIP.
         """
-        from istota import web_app
+        from istota.webui import app as web_app
 
         _patch_snapshot(
             monkeypatch,
@@ -473,7 +473,7 @@ class TestSubscriptionSection:
         from the dashboard; `runtime.subscription_usage` reports the shape change
         as a SKIP naming what happened.
         """
-        from istota import web_app
+        from istota.webui import app as web_app
 
         _patch_snapshot(
             monkeypatch,
@@ -497,7 +497,7 @@ class TestSubscriptionSection:
         tells an operator nothing, and there is nowhere downstream to notice.
         Doctor guards the same case for the same reason.
         """
-        from istota import web_app
+        from istota.webui import app as web_app
 
         _patch_snapshot(monkeypatch, _snapshot(windows=(), source="fetch", error=""))
 
@@ -508,7 +508,7 @@ class TestSubscriptionSection:
     def test_a_window_with_no_reset_keeps_its_nulls(self, tmp_path, monkeypatch):
         """`resets_at: null` is a real state — the card says "no reset
         scheduled" rather than inventing a countdown."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         _patch_snapshot(
             monkeypatch,
@@ -569,12 +569,12 @@ class TestFetchedAtRendering:
         ],
     )
     def test_an_unusable_stamp_renders_as_null(self, value):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         assert web_app._iso_utc_from_epoch(value) is None
 
     def test_a_real_stamp_renders_as_iso_utc(self):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         assert (
             web_app._iso_utc_from_epoch(FETCHED.timestamp()) == "2026-08-22T16:35:12Z"

@@ -1,10 +1,11 @@
-"""Tests for the admin log reader (`istota.admin_logs`)."""
+"""Tests for the admin log reader (`istota.webui.admin_logs`)."""
 
 from pathlib import Path
 
 import pytest
 
-from istota import admin_logs, db
+from istota import db
+from istota.webui import admin_logs
 from istota.config import Config, LoggingConfig
 
 

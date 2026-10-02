@@ -569,7 +569,8 @@ _EXPECTED = {
 
 def _openers():
     from istota import db as framework_db
-    from istota import user_briefings, user_profiles, web_tokens
+    from istota import user_briefings, user_profiles
+    from istota.webui import tokens as web_tokens
     from istota.credentials import store as secrets_store
     from istota.briefings import db as briefings_db
     from istota.feeds import db as feeds_db
@@ -712,7 +713,7 @@ class TestTheFrameworkGeocodeConnectionKeepsAShortBudget:
             assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
 
     def test_the_web_day_summary_call_site_asks_for_five(self, tmp_path, monkeypatch):
-        from istota import web_app
+        from istota.webui import app as web_app
         from istota.location import db as location_db
 
         seen: list[float] = []
@@ -860,11 +861,11 @@ class TestNoSecondCopy:
     CONVERTED = [
         "db.py",
         "doctor.py",
-        "web_app.py",
+        "webui/app.py",
         "credentials/store.py",
         "user_briefings.py",
         "user_profiles.py",
-        "web_tokens.py",
+        "webui/tokens.py",
         "briefings/db.py",
         "feeds/db.py",
         "health/db.py",

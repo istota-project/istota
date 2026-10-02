@@ -23,7 +23,7 @@ def db_path(tmp_path):
 
 @pytest.fixture
 def web_config(db_path):
-    from istota import web_app
+    from istota.webui import app as web_app
 
     web_app._config = Config()
     web_app._config.db_path = db_path
@@ -150,7 +150,7 @@ class TestSharedTalkRoomVisibleToAllMembers:
         """The shared-room bug: erin registered the room first; dave's later
         turns must still make him a member and surface the room in his web list.
         """
-        from istota import web_app
+        from istota.webui import app as web_app
         from istota.transport.ingest import record_inbound
 
         with db.get_db(db_path) as conn:
@@ -182,7 +182,7 @@ class TestSharedTalkRoomVisibleToAllMembers:
         assert "r77" in dave_rooms
 
     def test_each_member_gets_their_own_web_handle(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             db.register_room(conn, "r77", "erin", origin="talk", name="#team")
@@ -212,7 +212,7 @@ class TestPerUserHideDoesNotAffectOthers:
     def test_talk_room_delete_only_removes_requesters_membership(
         self, web_config, db_path
     ):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             db.register_room(conn, "r77", "erin", origin="talk", name="#team")
@@ -235,7 +235,7 @@ class TestPerUserHideDoesNotAffectOthers:
     ):
         """Hiding an imported room writes a dismissal tombstone, so the poll's
         membership re-seed can't resurface it (only re-engagement does)."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             db.register_room(conn, "r77", "dave", origin="talk", name="#team")
@@ -311,7 +311,7 @@ class TestReviewFixes:
     def test_rehidden_then_readded_room_not_reported_archived(
         self, web_config, db_path
     ):
-        from istota import web_app
+        from istota.webui import app as web_app
         from istota.transport.ingest import record_inbound
 
         with db.get_db(db_path) as conn:
@@ -336,7 +336,7 @@ class TestReviewFixes:
     def test_hard_delete_removes_all_participant_handles_no_empty_list(
         self, web_config, db_path
     ):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             # A web-origin room carol created, that bob also became a member of

@@ -361,7 +361,7 @@ class TestConfigLoadPathStaysCheap:
         "module,absent",
         [
             ("istota.sandbox.forge_bin", ("istota.skills", "istota.config")),
-            ("istota.static_dir", ("fastapi", "istota.web_app", "istota.config")),
+            ("istota.webui.static_dir", ("fastapi", "istota.webui.app", "istota.config")),
             # `doctor` imports `subscription_usage` lazily, so it stays cheap
             # for the config-load path that imports `doctor` itself.
             ("istota.doctor", ("istota.usage.subscription",)),
@@ -504,14 +504,15 @@ class TestConfigLoadPathStaysCheap:
         build.mkdir()
         (build / "index.html").write_text("<!doctype html>")
         monkeypatch.setenv("ISTOTA_WEB_STATIC_DIR", str(build))
-        monkeypatch.delitem(sys.modules, "istota.web_app", raising=False)
+        monkeypatch.delitem(sys.modules, "istota.webui.app", raising=False)
         config = make_config(web=WebConfig(enabled=True))
         assert run_checks(config, only=("web.static",))[0].status == OK
-        assert "istota.web_app" not in sys.modules
+        assert "istota.webui.app" not in sys.modules
 
     def test_web_app_and_doctor_resolve_the_same_static_dir(self):
         """One implementation, two callers — the point of the leaf."""
-        from istota import static_dir, web_app
+        from istota.webui import static_dir
+        from istota.webui import app as web_app
 
         assert web_app._resolve_static_dir() == static_dir.resolve_static_dir()
 
@@ -4331,7 +4332,7 @@ class TestAvatarImport:
 
     @staticmethod
     def _record(db_path, header, **counts):
-        from istota import avatars
+        from istota.webui import avatars
         from istota import db as db_module
 
         state = {"at": _now_iso(), "users": 1, "imported": 0, "no_custom": 0,
@@ -4392,7 +4393,7 @@ class TestAvatarImport:
             assert named in r.detail
 
     def test_reports_the_recorded_state(self, make_config, db_path):
-        from istota import avatars
+        from istota.webui import avatars
         from istota import db as db_module
 
         recorded_at = _now_iso()

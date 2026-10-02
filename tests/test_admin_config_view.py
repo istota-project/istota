@@ -1,10 +1,10 @@
-"""Tests for the read-only admin config view (`istota.admin_config_view`)."""
+"""Tests for the read-only admin config view (`istota.webui.admin_config_view`)."""
 
 from pathlib import Path
 
 import pytest
 
-from istota import admin_config_view as view
+from istota.webui import admin_config_view as view
 from istota.config import Config
 
 

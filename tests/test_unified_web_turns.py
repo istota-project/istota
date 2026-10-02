@@ -102,7 +102,7 @@ class TestWebDeliveryWritesCanonicalStore:
 @_needs_web_deps
 class TestDisplayLoaderCrossSurface:
     def _loader(self, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         web_app._config = Config()
         web_app._config.db_path = db_path
         return web_app._chat_room_messages
@@ -122,7 +122,7 @@ class TestDisplayLoaderCrossSurface:
         assert ("assistant", "web a") in texts
 
     def test_rename_propagates_to_registry(self, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         web_app._config = Config()
         web_app._config.db_path = db_path
         with db.get_db(db_path) as conn:
@@ -132,7 +132,7 @@ class TestDisplayLoaderCrossSurface:
             assert db.get_room(conn, room.token).name == "New Name"
 
     def test_archive_propagates_to_registry(self, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         web_app._config = Config()
         web_app._config.db_path = db_path
         with db.get_db(db_path) as conn:

@@ -23,7 +23,7 @@ MARKER = "fixture-marker-value"
 
 @pytest.fixture
 async def signed_client(client, monkeypatch, config):  # noqa: F811 -- imported fixtures
-    import istota.web_app as mod
+    import istota.webui.app as mod
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
     # The shared fixture is multi-user and unsandboxed, which the store's
     # isolation gate refuses without the operator's opt-in.

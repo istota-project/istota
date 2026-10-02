@@ -69,7 +69,7 @@ def _make_config(tmp_path, db_path, *, floor="untrusted", user_setting=""):
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod.app.state.istota_config = config
     mock_oauth = MagicMock()
@@ -103,7 +103,7 @@ async def client(app):
 
 
 async def _login(client, username="alice"):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
         "user_id": username,
     })
@@ -515,7 +515,7 @@ class TestEdit:
             assert outbound_drafts.get(conn, draft_id).body == "original"
 
     async def test_an_oversized_body_is_rejected(self, client, app, db_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         draft_id = _hold(db_path, body="original")
         cookies = await _login(client)
 
@@ -775,7 +775,7 @@ class TestEventTail:
         """A client reading an absent key as "none held" would clear the
         approval cards on every transient lock — and the snapshot runs on the
         2s stream busy timeout, so contention is the ordinary failure."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         _hold(db_path, room_token="rm1")
         cookies = await _login(client)
 
@@ -1036,7 +1036,7 @@ class TestStreamBudget:
     async def test_rows_past_the_budget_become_stubs(
         self, client, app, db_path,
     ):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         first = _hold(db_path, room_token="rm1", body="x" * 4000)
         second = _hold(db_path, room_token="rm1", body="y" * 4000)
         cookies = await _login(client)
@@ -1060,7 +1060,7 @@ class TestStreamBudget:
         """`task_id` is the placement key. Without it a stub moves its own card
         out of its turn and into the fallback list, and back again when the full
         row lands — which destroys the component and any edit in progress."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         _hold(db_path, room_token="rm1", task_id=7, body="x" * 4000)
         second = _hold(db_path, room_token="rm1", task_id=9, body="y" * 4000)
         cookies = await _login(client)
@@ -1077,7 +1077,7 @@ class TestStreamBudget:
     ):
         """`GET /chat/drafts` is what a stubbed frame sends the client to, so
         capping it too would leave the body unreachable."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         _hold(db_path, room_token="rm1", body="x" * 4000)
         _hold(db_path, room_token="rm1", body="y" * 4000)
         cookies = await _login(client)

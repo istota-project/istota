@@ -963,7 +963,7 @@ class TestLiveCancellation:
                         args="",
                     )))
             else:
-                import istota.web_app as web_app
+                import istota.webui.app as web_app
 
                 monkeypatch.setattr(web_app, "_config", config)
                 web_app._chat_cancel_task(task_id)

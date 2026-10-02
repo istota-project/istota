@@ -19,9 +19,9 @@ from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
 if TYPE_CHECKING:
-    from .config import Config
+    from istota.config import Config
 
-logger = logging.getLogger("istota.chat_files")
+logger = logging.getLogger("istota.webui.chat_files")
 
 
 class ChatFileError(Exception):
@@ -60,7 +60,7 @@ def resolve_chat_file(config: "Config | None", username: str, path: str) -> Path
     and the realpath check afterwards rejects a symlink *inside* the workspace
     that points out of it — which no amount of string normalization can see.
     """
-    from .nextcloud._http import (
+    from istota.nextcloud._http import (
         PathScopeError,
         resolve_scoped_path,
         workspace_root as nc_workspace_root,

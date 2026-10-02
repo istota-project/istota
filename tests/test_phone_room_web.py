@@ -77,7 +77,7 @@ def _group_room(conn, host="alice", jid="120363000000000001@g.us"):
 
 @pytest.fixture
 async def client(db_path, tmp_path):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     config = _config(db_path, tmp_path)
     mod._config = config
     mod.app.state.istota_config = config
@@ -89,7 +89,7 @@ async def client(db_path, tmp_path):
 
 
 async def _login(client, username="alice"):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
     )

@@ -1041,10 +1041,10 @@ class TestPinnedAgainstTheSeams:
         `_attempt` does too, which is what puts `delete_message` in the set for
         both the user and the bot credential.
         """
-        # Read rather than imported: `istota.web_app` needs fastapi and authlib,
+        # Read rather than imported: `istota.webui.app` needs fastapi and authlib,
         # which are an optional extra, and this pin has to hold in the default
         # suite whether or not they are installed.
-        source = (Path(async_runtime.__file__).parent / "web_app.py").read_text()
+        source = (Path(async_runtime.__file__).parent / "webui" / "app.py").read_text()
         called = set(re.findall(
             r"\b(?:user_)?client\.([a-z_][a-z_0-9]*)\(", source,
         )) - NOT_A_TALK_CLIENT

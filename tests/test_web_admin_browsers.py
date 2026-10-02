@@ -11,7 +11,7 @@ from tests.test_web_admin_logs import _make_config, _patch_app, _login
     (None, {"alice"}, 401), ("bob", {"alice"}, 403), ("alice", set(), 403),
 ])
 async def test_admin_gate(tmp_path, monkeypatch, username, admins, status):
-    from istota import admin_browsers
+    from istota.webui import admin_browsers
     fetch = AsyncMock()
     monkeypatch.setattr(admin_browsers, "snapshot", fetch)
     app = _patch_app(_make_config(tmp_path, admins=admins))
@@ -24,7 +24,7 @@ async def test_admin_gate(tmp_path, monkeypatch, username, admins, status):
 
 
 async def test_discovery_through_admin_endpoint(tmp_path, monkeypatch):
-    from istota import admin_browsers
+    from istota.webui import admin_browsers
     config = _make_config(tmp_path)
     config.browser.enabled = True
     config.browser.api_url = "http://browser:9223"
@@ -56,7 +56,7 @@ async def test_discovery_through_admin_endpoint(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("mode", ["disabled", "unavailable", "missing_url", "bad_payload"])
 async def test_discovery_states(monkeypatch, mode):
-    from istota import admin_browsers
+    from istota.webui import admin_browsers
     from istota.config import BrowserConfig
     config = BrowserConfig(enabled=mode != "disabled", vnc_url="")
     real_client = httpx.AsyncClient
@@ -92,12 +92,12 @@ async def test_discovery_states(monkeypatch, mode):
     "https://console.example.com/vnc.html#password=placeholder",
 ])
 def test_console_rejects_relative_urls_and_credentials(url):
-    from istota.admin_browsers import _console_url
+    from istota.webui.admin_browsers import _console_url
     assert _console_url(url) == ""
 
 
 async def test_timeout_is_unavailable(monkeypatch):
-    from istota import admin_browsers
+    from istota.webui import admin_browsers
     from istota.config import BrowserConfig
     real_client = httpx.AsyncClient
 

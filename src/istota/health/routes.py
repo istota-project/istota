@@ -54,7 +54,7 @@ from istota.health.units import (
 )
 from istota.notifications.resolvers import health_panel as notification_health_panel
 from istota.lib.timestamps import iso_now as _now
-from istota.web_router_stubs import (  # noqa: F401
+from istota.webui.router_stubs import (  # noqa: F401
     make_get_user_context,
     require_auth,  # re-exported: `web_app.py` keys `dependency_overrides` on it
     verify_origin,
@@ -2968,7 +2968,7 @@ def _user_tz(request: Request, user_id: str) -> str | None:
 
 
 # Garmin auth (status / connect / mfa / disconnect) moved to the
-# module-agnostic router in ``istota.garmin_routes`` — Garmin is a
+# module-agnostic router in ``istota.webui.garmin_routes`` — Garmin is a
 # cross-module connected service, so its auth surface is no longer gated on
 # the health module. ``/garmin/sync`` stays here: it is a health consumer
 # (daily summaries into the health stats table), not auth.

@@ -5,7 +5,9 @@ import tomllib
 import pytest
 from starlette.requests import Request
 
-from istota import db, doctor, web_app, web_auth
+from istota import db, doctor
+from istota.webui import app as web_app
+from istota.webui import auth as web_auth
 from istota.config import Config
 from tests.test_ansible_config_template import load_config_from, render
 

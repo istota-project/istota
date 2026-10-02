@@ -18,7 +18,7 @@ import secrets
 import sqlite3
 import traceback
 
-from .db import get_db
+from istota.db import get_db
 
 logger = logging.getLogger(__name__)
 _N, _R, _P = 32768, 8, 1
@@ -212,7 +212,7 @@ def upsert_identity(
                 raise ValueError("No user profile for this identity")
             if not valid_new_user_id(user_id):
                 raise ValueError("New user IDs must be 1–32 lowercase letters, digits, dots, underscores or hyphens, starting with a letter or digit; they become directory names.")
-            from .user_profiles import UserProfile, insert_profile
+            from istota.user_profiles import UserProfile, insert_profile
             insert_profile(conn, UserProfile(user_id=user_id, display_name=display_name or user_id))
         identity = _get_identity(conn, user_id)
         if identity is None:

@@ -285,7 +285,7 @@ def test_binding_replacement_after_claim_cannot_retarget_question(setup, monkeyp
 @pytest.mark.asyncio
 async def test_web_admin_cannot_approve_another_users_relay(setup, monkeypatch):
     from fastapi import HTTPException
-    from istota import web_app
+    from istota.webui import app as web_app
     config, ident, _, sent = setup
     hold(setup)
     park(setup)

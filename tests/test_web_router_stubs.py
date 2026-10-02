@@ -20,7 +20,8 @@ import pytest
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from istota import garmin_routes, web_router_stubs
+from istota.webui import garmin_routes
+from istota.webui import router_stubs as web_router_stubs
 from istota.briefings import routes as briefings_routes
 from istota.feeds import routes as feeds_routes
 from istota.health import routes as health_routes
@@ -89,7 +90,7 @@ class TestTheFiveRoutersShareOneObject:
         Five keys mapping to two values is now two keys mapping to two values;
         a router wanting its own gate declares one of its own, as
         ``briefings.require_admin`` does."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         overrides = web_app.app.dependency_overrides
         assert overrides[web_router_stubs.require_auth] is web_app._require_api_auth
@@ -251,7 +252,7 @@ class TestNoSixthCopy:
         root = pathlib.Path(__file__).resolve().parents[1] / "src" / "istota"
         offenders: list[str] = []
         for path in sorted(root.rglob("*.py")):
-            if path.name == "web_router_stubs.py":
+            if path.relative_to(root).as_posix() == "webui/router_stubs.py":
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
@@ -283,7 +284,7 @@ class TestNoSixthCopy:
         root = pathlib.Path(__file__).resolve().parents[1] / "src" / "istota"
         offenders: list[str] = []
         for path in sorted(root.rglob("*.py")):
-            if path.name == "web_router_stubs.py":
+            if path.relative_to(root).as_posix() == "webui/router_stubs.py":
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
@@ -301,7 +302,7 @@ class TestNoSixthCopy:
         the walk above is asserting the absence of something that never was."""
         source = (
             pathlib.Path(__file__).resolve().parents[1]
-            / "src" / "istota" / "web_router_stubs.py"
+            / "src" / "istota" / "webui" / "router_stubs.py"
         ).read_text()
         defined = {
             n.name for n in ast.walk(ast.parse(source))
@@ -314,7 +315,7 @@ class TestNoSixthCopy:
         green against every copy it is supposed to catch."""
         source = (
             pathlib.Path(__file__).resolve().parents[1]
-            / "src" / "istota" / "web_router_stubs.py"
+            / "src" / "istota" / "webui" / "router_stubs.py"
         ).read_text()
         tree = ast.parse(source)
         hits = [

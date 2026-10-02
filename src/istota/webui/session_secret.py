@@ -5,12 +5,12 @@ import secrets
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
-from .config import normalize_auth_methods
+from istota.config import normalize_auth_methods
 
 if TYPE_CHECKING:
-    from .config import Config
+    from istota.config import Config
 
-logger = logging.getLogger("istota.web_session_secret")
+logger = logging.getLogger("istota.webui.session_secret")
 ALLOW_INSECURE_SESSION_ENV = "ISTOTA_WEB_ALLOW_INSECURE_SESSION"
 
 

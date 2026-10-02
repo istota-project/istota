@@ -15,7 +15,8 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, web_app
+from istota import db
+from istota.webui import app as web_app
 from istota.rooms import speech_gate
 from istota.config import BrainConfig, Config, NativeBrainConfig
 from istota.executor import build_oneshot_completer, build_speech_gate_completer

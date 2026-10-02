@@ -54,6 +54,6 @@ def resolve_static_dir() -> Path:
     here = Path(__file__).resolve()
     return pick_static_dir(
         os.environ.get("ISTOTA_WEB_STATIC_DIR", ""),
-        here.parent.parent.parent / "web" / "build",
-        here.parent / "web_static",
+        here.parent.parent.parent.parent / "web" / "build",
+        here.parent.parent / "web_static",
     )

@@ -401,7 +401,7 @@ def db_path(tmp_path):
 
 @pytest.fixture
 def web_config(db_path):
-    from istota import web_app
+    from istota.webui import app as web_app
 
     web_app._config = Config()
     web_app._config.db_path = db_path
@@ -417,7 +417,7 @@ def _promoted_room(conn, user_id: str = "alice", talk_ref: str = "talkref1") -> 
 
 class TestHidingAPromotedRoom:
     def test_delete_hides_rather_than_destroying(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             token = _promoted_room(conn)
@@ -451,7 +451,7 @@ class TestHidingAPromotedRoom:
         """The mechanism that brought the room back: the poll registers a Talk
         conversation it finds no registry row for. With the room and its
         tombstone still there, there is nothing to re-register."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             token = _promoted_room(conn)
@@ -469,7 +469,7 @@ class TestHidingAPromotedRoom:
         assert token not in {r["token"] for r in web_app._chat_list_rooms("alice")}
 
     def test_archiving_a_promoted_room_writes_a_tombstone(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             token = _promoted_room(conn)
@@ -486,7 +486,7 @@ class TestHidingAPromotedRoom:
     def test_unarchiving_a_promoted_room_clears_the_tombstone(
         self, web_config, db_path
     ):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             token = _promoted_room(conn)
@@ -510,7 +510,7 @@ class TestHidingAPromotedRoom:
         set `rooms.archived`. The tombstone arm never clears that, and
         `list_member_rooms` subtracts it too — so without this the room stays
         hidden with no control left that could bring it back."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             token = _promoted_room(conn)
@@ -533,7 +533,7 @@ class TestHidingAPromotedRoom:
         """On a Talk-origin room that flag is `archive_orphaned_talk_rooms`
         saying the bot left the conversation — a fact about the deployment, not
         this user's hide, and not theirs to clear."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             db.register_room(conn, "r77", "alice", origin="talk", name="#team")
@@ -556,7 +556,7 @@ class TestHidingAPromotedRoom:
         conversation it names (ISSUE-401), and this predicate reads the row
         rather than probing Nextcloud — so such a room can no longer be
         hard-deleted from web. Reconnecting it is the promote button's job."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             token = _promoted_room(conn, talk_ref="deadref")
@@ -572,7 +572,7 @@ class TestHidingAPromotedRoom:
     def test_an_unpromoted_web_room_is_still_hard_deleted(self, web_config, db_path):
         # The widened branch must not swallow the plain case: a web room with
         # no Talk conversation behind it has nothing to preserve.
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "scratch")

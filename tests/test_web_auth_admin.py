@@ -11,7 +11,8 @@ from httpx import ASGITransport, AsyncClient
 from itsdangerous import TimestampSigner
 import pytest
 
-from istota import db, user_profiles, web_auth
+from istota import db, user_profiles
+from istota.webui import auth as web_auth
 from istota.config import Config, SiteConfig, WebConfig
 
 pytest.importorskip("authlib")
@@ -20,7 +21,7 @@ pytest.importorskip("fastapi")
 
 @pytest.fixture
 def configured(db_path, monkeypatch):
-    from istota import web_app as mod
+    from istota.webui import app as mod
     config = Config(db_path=db_path, site=SiteConfig(hostname="example.com"),
                     web=WebConfig(auth=["email", "nextcloud"]), admin_users={"alice"})
     monkeypatch.setattr(mod, "_config", config)

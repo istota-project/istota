@@ -36,9 +36,9 @@ import httpx
 from istota.lib import sqlite_util
 
 if TYPE_CHECKING:
-    from .config import Config
+    from istota.config import Config
 
-logger = logging.getLogger("istota.web_tokens")
+logger = logging.getLogger("istota.webui.tokens")
 
 # Same length floor and scrypt parameters as secrets_store._derive_fernet_key
 # (the reference implementation) — but a distinct salt, so the two keyspaces

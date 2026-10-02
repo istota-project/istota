@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from istota import db, web_tokens
+from istota import db
+from istota.webui import tokens as web_tokens
 from istota.config import Config, SiteConfig, UserConfig, WebConfig
 
 try:
@@ -46,7 +47,7 @@ def _make_config(tmp_path, token_storage="encrypted"):
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod.app.state.istota_config = config
     mod._oauth = MagicMock()
@@ -63,7 +64,7 @@ TOKEN_RESPONSE = {
 
 
 async def _login(client, token_response=None):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value=dict(token_response or TOKEN_RESPONSE),
     )

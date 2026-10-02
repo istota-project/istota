@@ -473,7 +473,7 @@ class TestGuestReplyThroughTheScheduler:
         prunes the parked `done`, so a client still watching the task stream
         must be given a terminal frame by the backstop rather than wait on
         one nothing will write."""
-        import istota.web_app as web_app
+        import istota.webui.app as web_app
         config, ident, _ = _run_guest_task(tmp_path, monkeypatch, fake_talk, "held")
         assert fake_talk.calls_to("grp", method="delete_message")
         with db.get_db(config.db_path) as conn:

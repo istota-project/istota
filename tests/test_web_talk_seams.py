@@ -28,7 +28,8 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, web_tokens
+from istota import db
+from istota.webui import tokens as web_tokens
 from istota.config import NextcloudConfig, WebConfig
 
 from .support.rooms import promoted_room
@@ -51,14 +52,14 @@ FRESH = "fresh-at"
 
 @pytest.fixture
 def web_app_module(monkeypatch, make_config, db_path):
-    """`istota.web_app` with `_config` pointed at the double's own database.
+    """`istota.webui.app` with `_config` pointed at the double's own database.
 
     The module global is how every one of these functions finds its config —
     they run inside a request, not with one passed in — so a test that forgets
     it gets a silent early return rather than a failure.
     """
     monkeypatch.setenv(web_tokens._KEY_ENV_VAR, KEY)
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     config = make_config(
         db_path=db_path,
@@ -657,7 +658,7 @@ class TestTheMessageDelete:
         """
         _store(db_path, "live-at")
 
-        with caplog.at_level("INFO", logger="istota.web_app"):
+        with caplog.at_level("INFO", logger="istota.webui.app"):
             await web_app_module._delete_from_talk("alice", "no-such-room", "5150")
 
         assert "may not have propagated" in caplog.text
@@ -672,7 +673,7 @@ class TestTheMessageDelete:
         fake_talk_web.bearer_rejections["live-at"] = 403
         fake_talk_web.bearer_rejections[None] = 403
 
-        with caplog.at_level("INFO", logger="istota.web_app"):
+        with caplog.at_level("INFO", logger="istota.webui.app"):
             await web_app_module._delete_from_talk("alice", room.talk_ref, "5150")
 
         assert "talk refused" in caplog.text
@@ -693,7 +694,7 @@ class TestTheMessageDelete:
         fake_talk_web.bearer_rejections["live-at"] = 403
         fake_talk_web.bearer_rejections[None] = 502
 
-        with caplog.at_level("INFO", logger="istota.web_app"):
+        with caplog.at_level("INFO", logger="istota.webui.app"):
             await web_app_module._delete_from_talk("alice", room.talk_ref, "5150")
 
         assert "may not have propagated" in caplog.text

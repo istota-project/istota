@@ -244,7 +244,7 @@ class TestPinnedAgainstTheProducers:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("name", ["Ideas", "  Ideas  ", ""])
     async def test_promoted_room_matches_create_plus_promote(self, two_dbs, name):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         produced, built = two_dbs
         config = Config()

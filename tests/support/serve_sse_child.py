@@ -7,9 +7,9 @@ and the one where the shutdown hang lives. Argv:
 Nothing here imports the web app. The three mechanisms under test are the
 ``timeout_graceful_shutdown`` value, :func:`istota.serve.install_force_quit`,
 and — with ``shutdown_aware`` set — the pair the web app itself uses:
-:func:`istota.web_shutdown.install_signal_hook` from the lifespan, and a
+:func:`istota.webui.shutdown.install_signal_hook` from the lifespan, and a
 generator that sleeps through
-:func:`istota.web_shutdown.sleep_unless_shutdown`. The aware and unaware
+:func:`istota.webui.shutdown.sleep_unless_shutdown`. The aware and unaware
 generators are otherwise identical, so a test can run the same stream both ways.
 """
 
@@ -22,7 +22,8 @@ from starlette.applications import Starlette
 from starlette.responses import StreamingResponse
 from starlette.routing import Route
 
-from istota import serve, web_shutdown
+from istota import serve
+from istota.webui import shutdown as web_shutdown
 
 _POLL = 0.2
 

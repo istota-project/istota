@@ -7,7 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .config import Config
+    from istota.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +57,8 @@ def send_auth_email(config: Config, to: str, subject: str, plain: str, html: str
         logger.warning("Auth email is not configured")
         return False
     try:
-        from .email_support import get_email_config
-        from .skills.email import send_email
+        from istota.email_support import get_email_config
+        from istota.skills.email import send_email
 
         send_email(to=to, subject=subject, body=plain, html_body=html,
                    config=get_email_config(config), from_addr=config.email.bot_email,

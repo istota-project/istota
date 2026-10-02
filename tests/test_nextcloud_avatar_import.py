@@ -26,7 +26,8 @@ import httpx
 import pytest
 from PIL import Image
 
-from istota import avatars, db, scheduler
+from istota import db, scheduler
+from istota.webui import avatars
 from istota.config import Config, NextcloudConfig, SchedulerConfig, WebConfig
 from istota.nextcloud import avatars as nc_avatars
 from istota.nextcloud._http import OcsError

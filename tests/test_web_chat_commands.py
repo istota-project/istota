@@ -42,7 +42,7 @@ def _make_config(tmp_path):
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod.app.state.istota_config = config
     mod._oauth = MagicMock()
@@ -51,7 +51,7 @@ def _patch_app(config):
 
 
 async def _login(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
     )
@@ -94,7 +94,7 @@ class TestChatCommandsApi:
 
     async def test_includes_model_aliases(self, chat_client):
         from istota.brain import make_brain
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(chat_client, "alice")
         resp = await chat_client.get("/istota/api/chat/commands", cookies=cookies)
         assert resp.status_code == 200
@@ -139,7 +139,7 @@ class TestChatCommandsApi:
         assert names.isdisjoint(set(commands._COMMAND_ALIASES))
 
     async def test_degrades_when_aliases_fail(self, chat_client, monkeypatch):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(chat_client, "alice")
 
         class _BadBrain:
@@ -178,7 +178,7 @@ class TestSelectableBrains:
     async def test_it_lists_the_operators_kinds_with_labels_and_namespaces(
         self, chat_client,
     ):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.brain = _brain_config(
             kind="claude_code", room_selectable=["native", "claude_code"],
         )
@@ -195,14 +195,14 @@ class TestSelectableBrains:
         assert by_kind["native"]["model_namespace"] == "openai_compat"
 
     async def test_the_shipped_default_offers_nothing(self, chat_client):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.brain = _brain_config(kind="claude_code")
         cookies = await _login(chat_client, "alice")
         resp = await chat_client.get("/istota/api/chat/commands", cookies=cookies)
         assert resp.json()["selectable_brains"] == []
 
     async def test_a_name_that_cannot_be_built_is_dropped(self, chat_client):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.brain = _brain_config(
             kind="claude_code", room_selectable=["native", "no-such-brain"],
         )
@@ -217,7 +217,7 @@ class TestSelectableBrains:
         list off the raw setting instead offers `native` twice and drops
         ` tmux_claude ` entirely — a kind the operator configured and the PATCH
         accepts, missing from the only control that can set it."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.brain = _brain_config(
             kind="claude_code",
             room_selectable=["native", "native", " tmux_claude "],
@@ -236,7 +236,7 @@ class TestSelectableBrains:
         against that function, so a catalogue built from anything else offers a
         kind the save then refuses with a 400."""
         from istota.brain import room_selectable_kinds
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.brain = _brain_config(
             kind="claude_code",
             room_selectable=["native", "tmux_claude", "no-such-brain"],
@@ -255,7 +255,7 @@ class TestSelectableBrains:
         has since dropped from the allowlist. Answering "unknown" for either
         makes the client over-lock its model select and drop an edit the server
         would have kept."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.brain = _brain_config(
             kind="claude_code", room_selectable=["native"],
         )
@@ -274,7 +274,7 @@ class TestSelectableBrains:
         """`resolve_brain_kind("web", …)`, not the bare `[brain] kind`: a
         `source_type_overrides` entry for the web lane is what an unpinned room
         there actually runs, and it is what the clearing rule compares against."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.brain = _brain_config(
             kind="claude_code",
             source_type_overrides={"web": "native"},
@@ -285,7 +285,7 @@ class TestSelectableBrains:
         assert resp.json()["inherited_brain"]["kind"] == "native"
 
     async def test_a_non_admin_gets_none_of_the_three(self, chat_client):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.brain = _brain_config(
             kind="claude_code", room_selectable=["native"],
         )
@@ -307,7 +307,7 @@ class TestSelectableBrains:
         """The per-kind guard, which the allowlist filter cannot stand in for:
         a name it admits can still fail to build (a `tmux_claude` on a host
         with no tmux). One bad kind must not empty the picker."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.brain = _brain_config(
             kind="claude_code", room_selectable=["native", "tmux_claude"],
         )
@@ -324,7 +324,7 @@ class TestSelectableBrains:
         assert [b["kind"] for b in resp.json()["selectable_brains"]] == ["native"]
 
     async def test_a_non_admin_is_offered_none(self, chat_client):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.brain = _brain_config(
             kind="claude_code", room_selectable=["native"],
         )
@@ -363,7 +363,7 @@ class TestSelectableBrains:
         and answering "unknown" there drops a model edit the server would have
         kept.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.brain = _brain_config(
             kind="claude_code", room_selectable=["native"],
         )
@@ -389,7 +389,7 @@ class TestModelAliasesFollowTheRoom:
     catalogue has no room of its own, so `room_id` is what scopes it."""
 
     async def test_a_pinned_room_gets_its_own_namespace(self, chat_client):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from istota.config import NativeBrainConfig
         mod._config.brain = _brain_config(
             kind="claude_code", room_selectable=["native"],
@@ -413,7 +413,7 @@ class TestModelAliasesFollowTheRoom:
     async def test_the_same_room_unpinned_gets_the_deployments(self, chat_client):
         """The control. Same request, same deployment; only the room's brain
         differs, so a catalogue that simply stopped resolving fails here."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.brain = _brain_config(
             kind="claude_code", room_selectable=["native"],
         )
@@ -428,7 +428,7 @@ class TestModelAliasesFollowTheRoom:
     async def test_no_room_id_is_the_deployment_default(self, chat_client):
         """The composer's own autocomplete asks without a room, and that is
         the answer every caller got before rooms could pin a brain."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.brain = _brain_config(
             kind="claude_code", room_selectable=["native"],
         )
@@ -444,7 +444,7 @@ class TestModelAliasesFollowTheRoom:
         """#548: the room picker labelled the unpinned choice "Default model"
         with no id, so nothing on it showed the default had moved past what
         the aliases pointed at. Resolved the way the admin Models card does."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from istota.config import ClaudeCodeBrainConfig
 
         mod._config.brain = _brain_config(
@@ -455,7 +455,7 @@ class TestModelAliasesFollowTheRoom:
         assert resp.json()["default_model"] == OPUS
 
     async def test_no_configured_default_publishes_none(self, chat_client):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.brain = _brain_config(kind="claude_code")
         cookies = await _login(chat_client, "alice")
         resp = await chat_client.get("/istota/api/chat/commands", cookies=cookies)
@@ -466,7 +466,7 @@ class TestModelAliasesFollowTheRoom:
     ):
         """The command list is this endpoint's primary product, so a room id
         that resolves to nothing must not take it down with a 404."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.brain = _brain_config(kind="claude_code")
         cookies = await _login(chat_client, "alice")
         resp = await chat_client.get(

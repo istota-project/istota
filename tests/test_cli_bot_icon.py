@@ -23,7 +23,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from istota import avatars, db
+from istota import db
+from istota.webui import avatars
 
 
 class _FakeArgs:

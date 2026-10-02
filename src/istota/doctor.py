@@ -4714,7 +4714,7 @@ def check_basemap(config: "Config", probe: bool) -> CheckResult:
     certainty. ``probe`` is accepted to satisfy the ``Check`` protocol and is
     unused.
     """
-    from .map_basemap import resolve_basemap
+    from istota.webui.map_basemap import resolve_basemap
 
     web = getattr(config, "web", None)
     if not web or not web.enabled:
@@ -4799,7 +4799,8 @@ def check_avatar_import(config: "Config", probe: bool) -> CheckResult:
     deployment where nobody has set a Nextcloud avatar. `probe` is accepted to
     satisfy the `Check` protocol and is unused.
     """
-    from . import avatars, db
+    from istota import db
+    from istota.webui import avatars
     from .nextcloud.avatars import CUSTOM_AVATAR_HEADER
 
     name = "web.avatar_import"
@@ -4956,7 +4957,9 @@ def _avatar_tick_is_stale(at: object, interval: int) -> str | None:
 
 def check_web_auth(config: "Config", probe: bool = True) -> list[CheckResult]:
     """Report login prerequisites without importing the web app or sending mail."""
-    from . import user_profiles, web_auth, web_session_secret
+    from istota import user_profiles
+    from istota.webui import auth as web_auth
+    from istota.webui import session_secret as web_session_secret
     from .config import normalize_auth_methods
 
     methods = config.web.auth
@@ -5054,7 +5057,7 @@ def check_web_static(config: "Config", probe: bool) -> CheckResult:
     # starlette and httpx (+56 MB RSS, permanently, in the scheduler process)
     # and runs a second full `load_config()` at import time. A diagnostic does
     # not get to cost that.
-    from .static_dir import resolve_static_dir
+    from istota.webui.static_dir import resolve_static_dir
 
     index = Path(resolve_static_dir()) / "index.html"
     if not index.is_file():
@@ -5136,7 +5139,7 @@ def check_web_build_current(config: "Config", probe: bool) -> CheckResult:
     # Function-local like every other package import in this module: nothing
     # here may land on the config-load path's import graph.
     from istota.sandbox.git_hardening import GIT_HARDENING
-    from .static_dir import resolve_static_dir
+    from istota.webui.static_dir import resolve_static_dir
 
     version_file = Path(resolve_static_dir()) / "_app" / "version.json"
     try:
@@ -9737,7 +9740,7 @@ def config_secrets(config: "Config") -> list[str]:
     answer to "is this field a credential", rather than a second list here that
     drifts from the one the config page uses.
     """
-    from .admin_config_view import is_secret_field
+    from istota.webui.admin_config_view import is_secret_field
 
     found: list[str] = []
 

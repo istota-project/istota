@@ -56,7 +56,7 @@ def _make_config(tmp_path, *, admins=("alice",), log_output="both") -> Config:
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     mod._config = config
     mod.app.state.istota_config = config
@@ -67,7 +67,7 @@ def _patch_app(config):
 
 
 async def _login(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username}
@@ -280,7 +280,7 @@ class _FakeRequest:
 
 
 async def _drain_stream(source_id: str, cursor: str, request, **kwargs) -> str:
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     # Every filter param is passed explicitly: calling the endpoint as a plain
     # function bypasses FastAPI's dependency resolution, so a `Query(...)`
@@ -304,7 +304,7 @@ async def _drain_stream(source_id: str, cursor: str, request, **kwargs) -> str:
 class TestLogStream:
     @pytest.fixture(autouse=True)
     def _fast_poll(self, monkeypatch):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         monkeypatch.setattr(mod, "_LOG_STREAM_POLL_SECONDS", 0.001)
 
@@ -352,7 +352,7 @@ class TestLogStream:
         assert [r["message"] for r in frame["records"]] == ["fresh"]
 
     async def test_idle_stream_emits_a_keepalive(self, env, monkeypatch):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         config, client, cookies = env
         _log_path(config).write_text(_line("2026-07-31 10:00:00", "INFO", "a", "only"))
@@ -407,10 +407,10 @@ class TestLogStream:
     async def test_a_stop_signal_ends_the_stream(self, env):
         """The tail polls until the client goes away, so on a restart it was
         cancelled at the graceful-shutdown timeout and the `CancelledError`
-        reached uvicorn's log as a traceback. See `istota.web_shutdown`."""
+        reached uvicorn's log as a traceback. See `istota.webui.shutdown`."""
         import asyncio
 
-        from istota import web_shutdown
+        from istota.webui import shutdown as web_shutdown
 
         config, client, cookies = env
         _log_path(config).write_text(_line("2026-07-31 10:00:00", "INFO", "a", "x"))

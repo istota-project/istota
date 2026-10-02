@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from .config import Config
+    from istota.config import Config
 
 # Substring patterns marking a field name as a credential. Mirrors
 # `executor._CREDENTIAL_ENV_PATTERNS`; `PASS` also catches `app_password` and a
@@ -103,7 +103,7 @@ def _mask_phone_number(number: Any) -> str:
     This module is imported by the web app on a request path and holds no
     package imports at module scope; `user_profiles` opens databases.
     """
-    from .user_profiles import mask_phone_number
+    from istota.user_profiles import mask_phone_number
 
     return mask_phone_number(str(number or ""))
 

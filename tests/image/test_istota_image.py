@@ -543,7 +543,7 @@ class TestGroupCTheGeneratedConfig:
         # packaged layout that moved the build output would leave the literal
         # green and 404 the whole UI.
         script = (
-            "python -c 'from istota.static_dir import resolve_static_dir; "
+            "python -c 'from istota.webui.static_dir import resolve_static_dir; "
             "print(resolve_static_dir())'"
         )
         resolved = assert_ok(

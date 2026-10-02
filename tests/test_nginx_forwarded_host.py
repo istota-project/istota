@@ -76,7 +76,7 @@ class TestTheProxiesForwardThePort:
 
 
 try:
-    import authlib  # noqa: F401 - probe: `istota.web_app` needs it to import
+    import authlib  # noqa: F401 - probe: `istota.webui.app` needs it to import
     import fastapi  # noqa: F401 - probe
     _has_web_deps = True
 except ImportError:  # pragma: no cover - the lean install, which has no web
@@ -98,7 +98,7 @@ class TestTheDirectoryRedirectCarriesNoAuthority:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
-        from istota.web_app import _CacheHeaderStatics
+        from istota.webui.app import _CacheHeaderStatics
 
         root = tmp_path / "build"
         (root / "chat").mkdir(parents=True)
@@ -143,17 +143,17 @@ class TestRelativeLocation:
     """The rewrite itself, including the two cases it declines."""
 
     def test_an_absolute_url_loses_its_authority(self):
-        from istota.web_app import _relative_location
+        from istota.webui.app import _relative_location
 
         assert _relative_location("http://h:8282/istota/chat/") == "/istota/chat/"
 
     def test_query_and_fragment_survive(self):
-        from istota.web_app import _relative_location
+        from istota.webui.app import _relative_location
 
         assert _relative_location("https://h/p?a=1#f") == "/p?a=1#f"
 
     def test_an_already_relative_location_is_declined(self):
-        from istota.web_app import _relative_location
+        from istota.webui.app import _relative_location
 
         assert _relative_location("/istota/chat/") is None
 
@@ -161,6 +161,6 @@ class TestRelativeLocation:
         """`//evil.example/` is a *reference to another host*, not a path. Its
         first segment would be read as an authority, so a request under a
         doubled slash must keep the absolute form it already had."""
-        from istota.web_app import _relative_location
+        from istota.webui.app import _relative_location
 
         assert _relative_location("http://h//evil.example/x/") is None

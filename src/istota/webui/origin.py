@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .config import Config
+    from istota.config import Config
 
 
 def external_origin(config: Config | None) -> tuple[str, str]:

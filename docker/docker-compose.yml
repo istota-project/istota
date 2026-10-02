@@ -659,7 +659,7 @@ services:
         fi
         mkdir -p /app/config
         ln -sf /data/config/config.toml /app/config/config.toml
-        exec uv run uvicorn istota.web_app:app --no-access-log --host 0.0.0.0 --port "$${WEB_PORT}"
+        exec uv run uvicorn istota.webui.app:app --no-access-log --host 0.0.0.0 --port "$${WEB_PORT}"
     command: []
     restart: unless-stopped
 
@@ -920,7 +920,7 @@ services:
         # would hold the token however nginx is configured. nginx is told not
         # to log that path too; this is the half nginx cannot reach. The
         # receiver logs each event itself under a stable name, without it.
-        exec uv run uvicorn istota.webhook_receiver:app --host 0.0.0.0 --port "$${ISTOTA_WEBHOOKS_PORT}" --no-access-log
+        exec uv run uvicorn istota.webui.webhook_receiver:app --host 0.0.0.0 --port "$${ISTOTA_WEBHOOKS_PORT}" --no-access-log
     command: []
     restart: unless-stopped
 

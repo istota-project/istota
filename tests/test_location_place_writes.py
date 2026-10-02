@@ -409,7 +409,7 @@ class TestTheTwoSurfacesWriteTheSameGeofence:
 
     def test_learn_with_backfill_matches_the_web_create_route(self, tmp_path):
         from istota.skills.location import cmd_learn
-        from istota.web_app import _location_create_place
+        from istota.webui.app import _location_create_place
 
         skill_db = _seed(tmp_path, "skill")
         web_db = _seed(tmp_path, "web")
@@ -427,7 +427,7 @@ class TestTheTwoSurfacesWriteTheSameGeofence:
 
     def test_update_with_backfill_matches_the_web_update_route(self, tmp_path):
         from istota.skills.location import cmd_learn, cmd_update
-        from istota.web_app import _location_create_place, _location_update_place
+        from istota.webui.app import _location_create_place, _location_update_place
 
         skill_db = _seed(tmp_path, "skill2")
         web_db = _seed(tmp_path, "web2")

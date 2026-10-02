@@ -560,7 +560,7 @@ class TestAuxGapFill:
     def _web_app(self, db_path, config):
         pytest.importorskip("fastapi")
         pytest.importorskip("authlib")
-        from istota import web_app
+        from istota.webui import app as web_app
 
         web_app._config = config
         return web_app

@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from .config import Config
+    from istota.config import Config
 
 # Deliberately no module-level `logger`: three public functions take a
 # `logger=` filter argument, which would shadow it inside exactly the code most
@@ -431,7 +431,7 @@ def _skipped_record(path: Path, offset: int, byte_count: int) -> LogRecord:
         cursor=_file_cursor(path, offset),
         timestamp=None,
         level="WARNING",
-        logger="istota.admin_logs",
+        logger="istota.webui.admin_logs",
         message=(
             f"[log viewer] skipped {byte_count} bytes of a single line longer "
             f"than the read window."

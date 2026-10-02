@@ -27,7 +27,7 @@ import pytest
 from istota import db
 from istota.notifications import sources
 from istota.notifications import store
-from istota import web_tokens
+from istota.webui import tokens as web_tokens
 from istota.config import Config, UserConfig, WebConfig
 from istota.notifications.resolvers import connected_service
 
@@ -477,7 +477,7 @@ class TestTheRotationHole:
         self._refresh_then_fail_to_persist(config, monkeypatch)
         _sends(monkeypatch)
 
-        with caplog.at_level("ERROR", logger="istota.web_tokens"):
+        with caplog.at_level("ERROR", logger="istota.webui.tokens"):
             web_tokens.get_access_token(config.db_path, config, "alice")
 
         assert any(r.levelname == "ERROR" for r in caplog.records)

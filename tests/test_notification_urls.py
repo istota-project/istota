@@ -260,7 +260,7 @@ def test_an_unsafe_view_is_downgraded_not_emitted(config, conn, caplog, view_kwa
 
 @pytest.mark.skipif(not _has_web_deps, reason="web dependencies not installed")
 def test_every_emitted_path_names_a_real_api_route(config, conn):
-    from istota import web_app
+    from istota.webui import app as web_app
 
     task_id = db.create_task(
         conn, prompt="do it", user_id="alice", source_type="web",

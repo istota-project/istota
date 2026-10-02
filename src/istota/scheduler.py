@@ -93,7 +93,8 @@ def _warn_once(key: str, message: str) -> None:
     _warned_keys.add(key)
     logger.warning("%s", message)
 
-from istota import avatars, confirmations, db
+from istota import confirmations, db
+from istota.webui import avatars
 from istota.rooms import speech_gate
 from .brain import (
     make_brain,
@@ -102,7 +103,7 @@ from .brain import (
     split_effort,
 )
 from .build_info import build_description
-from .chat_files import check_chat_file_links
+from istota.webui.chat_files import check_chat_file_links
 from .consumers import (
     LogChannelSubscriber,
     PushNotificationSubscriber,

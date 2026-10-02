@@ -363,7 +363,7 @@ class TestLLMContextIsolation:
 @_needs_web_deps
 class TestWebReaderRendersNonconversationalPost:
     def test_subtask_post_renders_as_bot_bubble(self, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         from istota.config import Config
 
         web_app._config = Config()

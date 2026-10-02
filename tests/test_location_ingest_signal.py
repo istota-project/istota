@@ -54,7 +54,7 @@ class TestReceiverReloadsOnSignal:
         wr._sentinel_stamp = 0.0
 
     def test_changed_sentinel_triggers_one_reload(self, tmp_path, monkeypatch):
-        from istota import webhook_receiver as wr
+        from istota.webui import webhook_receiver as wr
         from istota.config import Config
         from istota.location import ingest_signal
 
@@ -70,7 +70,7 @@ class TestReceiverReloadsOnSignal:
         assert len(calls) == 1, "the stamp was not claimed, so it reloaded twice"
 
     def test_no_sentinel_means_no_reload(self, tmp_path, monkeypatch):
-        from istota import webhook_receiver as wr
+        from istota.webui import webhook_receiver as wr
         from istota.config import Config
 
         cfg = Config(db_path=tmp_path / "istota.db")
@@ -83,7 +83,7 @@ class TestReceiverReloadsOnSignal:
         assert calls == []
 
     def test_unloaded_config_is_a_no_op(self, monkeypatch):
-        from istota import webhook_receiver as wr
+        from istota.webui import webhook_receiver as wr
 
         wr._config = None
         calls = []

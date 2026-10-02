@@ -15,7 +15,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from istota import db, web_tokens
+from istota import db
+from istota.webui import tokens as web_tokens
 from istota.config import Config, SiteConfig, UserConfig, WebConfig
 
 try:
@@ -87,7 +88,7 @@ TOKEN_RESPONSE = {
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     mod._config = config
     mod.app.state.istota_config = config
@@ -114,7 +115,7 @@ async def _client_for(config):
 
 
 async def _callback(client, token_response=None):
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value=dict(token_response or TOKEN_RESPONSE),
@@ -313,7 +314,7 @@ class TestTheRedirectAllowlist:
     phishing hop off the login flow. The mapping is a fixed table, not a URL."""
 
     def test_a_known_key_maps_to_its_path(self):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         assert mod._post_login_target("settings") == "/istota/settings/connections"
 
@@ -327,6 +328,6 @@ class TestTheRedirectAllowlist:
         123,
     ])
     def test_anything_else_falls_back_to_the_app_root(self, hostile):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         assert mod._post_login_target(hostile) == "/istota/"

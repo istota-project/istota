@@ -10,7 +10,7 @@ from tests.test_web_app import app, client, config  # noqa: F401 -- shared web f
 
 @pytest.fixture
 async def signed_client(client, monkeypatch, config):  # noqa: F811 -- imported fixtures
-    import istota.web_app as mod
+    import istota.webui.app as mod
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
     # The shared fixture is multi-user and unsandboxed; the delete route is
     # behind the store's isolation gate, which needs the operator's opt-in here.

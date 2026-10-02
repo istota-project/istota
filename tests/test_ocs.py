@@ -440,7 +440,7 @@ class TestBestEffortCallersKeepTheirOldAnswer:
         assert client.edit_message.await_count == 1
 
     def test_post_as_user_returns_none_and_logs(self, caplog, monkeypatch):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         # A class, not a lambda or a MagicMock: `_post_as_user` resolves
         # `TalkClient` through `istota.talk`, and `transport/talk/inbound`
@@ -472,7 +472,8 @@ class TestBestEffortCallersKeepTheirOldAnswer:
         """An unreadable create answer has always produced the route's 502
         "Nextcloud created no conversation" — `{}` had no token. An escaping
         OcsError would make it a bare 500 instead."""
-        from istota import db, web_app
+        from istota import db
+        from istota.webui import app as web_app
 
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
@@ -505,7 +506,7 @@ class TestOauthUserinfo:
         """It used to reduce to `{}`, so the login answered "user not
         configured" — a 403 naming the wrong fault. The caller catches this
         and answers 502."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         config = Config(nextcloud=NextcloudConfig(url=NC_URL))
         config.web.oauth2_userinfo_endpoint = f"{NC_URL}/ocs/v2.php/cloud/user"
@@ -520,7 +521,7 @@ class TestOauthUserinfo:
         web_app._config = config
         try:
             with pytest.MonkeyPatch.context() as mp:
-                mp.setattr("istota.web_app.httpx.AsyncClient", lambda **k: http)
+                mp.setattr("istota.webui.app.httpx.AsyncClient", lambda **k: http)
                 with pytest.raises(OcsError) as excinfo:
                     asyncio.run(web_app._nc_oauth2_userinfo(
                         {"access_token": "at"},
@@ -534,7 +535,7 @@ class TestOauthUserinfo:
         {"data": []}}` is a shape a working Nextcloud emits. It collapsed to
         `{}` and the login answered "user not configured"; switching that to a
         502 would be an unannounced change on the sign-in path."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         config = Config(nextcloud=NextcloudConfig(url=NC_URL))
         config.web.oauth2_userinfo_endpoint = f"{NC_URL}/ocs/v2.php/cloud/user"
@@ -549,7 +550,7 @@ class TestOauthUserinfo:
         web_app._config = config
         try:
             with pytest.MonkeyPatch.context() as mp:
-                mp.setattr("istota.web_app.httpx.AsyncClient", lambda **k: http)
+                mp.setattr("istota.webui.app.httpx.AsyncClient", lambda **k: http)
                 out = asyncio.run(web_app._nc_oauth2_userinfo({"access_token": "at"}))
         finally:
             web_app._config = original
@@ -559,7 +560,7 @@ class TestOauthUserinfo:
         """The caller logs this error. A `oauth2_userinfo_endpoint` pointed at
         the token endpoint answers JSON with no `ocs` key and a bearer token in
         it, and the body prefix would carry that straight into the log."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         config = Config(nextcloud=NextcloudConfig(url=NC_URL))
         config.web.oauth2_userinfo_endpoint = f"{NC_URL}/ocs/v2.php/cloud/user"
@@ -578,7 +579,7 @@ class TestOauthUserinfo:
         web_app._config = config
         try:
             with pytest.MonkeyPatch.context() as mp:
-                mp.setattr("istota.web_app.httpx.AsyncClient", lambda **k: http)
+                mp.setattr("istota.webui.app.httpx.AsyncClient", lambda **k: http)
                 with pytest.raises(OcsError) as excinfo:
                     asyncio.run(web_app._nc_oauth2_userinfo({"access_token": "at"}))
         finally:
@@ -591,7 +592,7 @@ class TestOauthUserinfo:
         assert "HTTP 200" in message
 
     def test_a_real_envelope_still_yields_the_identity(self):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         config = Config(nextcloud=NextcloudConfig(url=NC_URL))
         config.web.oauth2_userinfo_endpoint = f"{NC_URL}/ocs/v2.php/cloud/user"
@@ -606,7 +607,7 @@ class TestOauthUserinfo:
         web_app._config = config
         try:
             with pytest.MonkeyPatch.context() as mp:
-                mp.setattr("istota.web_app.httpx.AsyncClient", lambda **k: http)
+                mp.setattr("istota.webui.app.httpx.AsyncClient", lambda **k: http)
                 out = asyncio.run(web_app._nc_oauth2_userinfo({"access_token": "at"}))
         finally:
             web_app._config = original

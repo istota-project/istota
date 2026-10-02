@@ -34,7 +34,7 @@ The SMS and WhatsApp rows are the exception to the credential-proxy sentence int
 
 `ISTOTA_SECRET_KEY` is the master encryption key for the `secrets` table and `google_oauth_tokens`. It must be at least 32 characters; the key is scrypt-derived into a Fernet key at runtime. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"`.
 
-`ISTOTA_WEB_TOKEN_KEY` is a *separate* key, env-only, used by `web_tokens.py` for the per-user Nextcloud tokens the web UI stores when `[web] token_storage = "encrypted"`. It derives with a different salt, so the two key custodies stay independent — the web tier holding user tokens does not imply access to everything in the secrets table.
+`ISTOTA_WEB_TOKEN_KEY` is a *separate* key, env-only, used by `webui/tokens.py` for the per-user Nextcloud tokens the web UI stores when `[web] token_storage = "encrypted"`. It derives with a different salt, so the two key custodies stay independent — the web tier holding user tokens does not imply access to everything in the secrets table.
 
 ### Provisioning global credentials
 

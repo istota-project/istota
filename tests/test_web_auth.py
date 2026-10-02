@@ -9,7 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, user_profiles, web_auth as auth
+from istota import db, user_profiles
+from istota.webui import auth
 
 
 PASSWORD = "a long example passphrase"

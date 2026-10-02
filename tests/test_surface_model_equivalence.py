@@ -215,7 +215,7 @@ SITES = (
     ),
     Site(
         name="web_app._user_row_display foreign marker",
-        module="istota.web_app",
+        module="istota.webui.app",
         function="_user_row_display",
         # The only site that reads the predicate **negated**, to mark a row as
         # foreign to the room. Takes the raw `messages.origin_surface` column

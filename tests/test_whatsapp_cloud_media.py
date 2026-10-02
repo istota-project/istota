@@ -788,7 +788,7 @@ class TestTheSignedRouteStagesAndAnswers:
 
         from fastapi.testclient import TestClient
 
-        from istota import webhook_receiver
+        from istota.webui import webhook_receiver
 
         config = _config(tmp_path)
         _bind(config)

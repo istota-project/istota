@@ -66,7 +66,7 @@ def _config(db_path, tmp_path):
 
 @pytest.fixture
 async def client(db_path, tmp_path):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     config = _config(db_path, tmp_path)
     mod._config = config
     mod.app.state.istota_config = config
@@ -78,7 +78,7 @@ async def client(db_path, tmp_path):
 
 
 async def _login(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
     )
@@ -337,7 +337,7 @@ class TestRowsSayWhoMayDeleteThem:
         assert all("deletable" not in m for m in resp.json()["messages"])
 
     async def test_the_live_stream_carries_the_same_mark(self, client, db_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         room = _shared_room(db_path)
         with db.get_db(db_path) as conn:
             _row(conn, room.token, "alice", "streamed from alice")
@@ -383,40 +383,40 @@ def _talk_room_with_guest(db_path, ref="talkref1"):
 class TestSettingsRefuseASharedRoom:
     @pytest.fixture(autouse=True)
     def _config(self, db_path, tmp_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config = _config(db_path, tmp_path)
 
     def test_a_web_route_to_a_shared_room_is_refused(self, db_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         room = _shared_room(db_path)
         with pytest.raises(ValueError, match="shared"):
             mod._validate_descriptor_rooms(f"web:{room.token}", "alice")
 
     def test_a_web_route_to_a_private_room_is_accepted(self, db_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         room = _private_room(db_path)
         mod._validate_descriptor_rooms(f"web:{room.token}", "alice")
 
     def test_a_talk_route_to_a_room_with_a_guest_is_refused(self, db_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         ref = _talk_room_with_guest(db_path)
         with pytest.raises(ValueError, match="shared"):
             mod._validate_descriptor_rooms(f"talk:{ref}", "alice")
 
     def test_a_briefing_token_into_a_shared_room_is_refused(self, db_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         ref = _talk_room_with_guest(db_path)
         with pytest.raises(ValueError, match="shared"):
             mod._validate_talk_route_token(ref, "alice")
 
     def test_an_alerts_channel_into_a_shared_room_is_refused(self, db_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         ref = _talk_room_with_guest(db_path)
         with pytest.raises(ValueError, match="shared"):
             mod._validate_talk_channel(ref, "alice")
 
     def test_a_default_room_pin_on_a_shared_room_is_refused(self, db_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         room = _shared_room(db_path)
         with pytest.raises(ValueError, match="shared"):
             mod._validate_default_room(room.token, "alice")
@@ -461,7 +461,7 @@ class TestSettingsRefuseASharedRoom:
         assert moved.status_code == 400
 
     def test_the_web_picker_counts_a_talk_guest_as_sharing(self, db_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         ref = _talk_room_with_guest(db_path)
         with db.get_db(db_path) as conn:
             db.ensure_web_chat_handle(conn, "alice", ref, "family")
@@ -469,7 +469,7 @@ class TestSettingsRefuseASharedRoom:
         assert listed[ref]["shared"] is True
 
     def test_the_talk_picker_marks_a_shared_conversation(self, db_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         ref = _talk_room_with_guest(db_path)
         with db.get_db(db_path) as conn:
             db.add_room_member(conn, ref, "alice")

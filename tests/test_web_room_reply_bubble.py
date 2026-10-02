@@ -112,7 +112,7 @@ class TestStoreWebRoomTurn:
 @_needs_web_deps
 class TestWebReaderRendersReplyAsBubble:
     def test_reply_renders_as_assistant_bubble_not_system(self, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         web_app._config = Config()
         web_app._config.db_path = db_path

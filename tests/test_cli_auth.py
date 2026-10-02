@@ -5,7 +5,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from istota import cli, db, user_profiles, web_auth
+from istota import cli, db, user_profiles
+from istota.webui import auth as web_auth
 from istota.config import Config
 
 PASSWORD = "a long example passphrase"
@@ -178,7 +179,7 @@ def test_send_disabled_and_missing_origin_issue_nothing(config, identity, invoke
 
 @pytest.mark.parametrize("verb,purpose", [("add", "enrol"), ("invite", "enrol"), ("reset", "reset")])
 def test_send_uses_shared_mail(config, identity, invoke, monkeypatch, verb, purpose):
-    from istota import web_auth_mail
+    from istota.webui import auth_mail as web_auth_mail
     config.email.enabled = True
     calls = []
     monkeypatch.setattr(web_auth_mail, "send_auth_email", lambda *args: calls.append(args) or True)
@@ -201,7 +202,7 @@ def test_first_admin_printed_invite_is_created(config, invoke):
 
 
 def test_smtp_failure_reports_failure_keeps_token(config, identity, invoke, monkeypatch):
-    from istota import web_auth_mail
+    from istota.webui import auth_mail as web_auth_mail
     config.email.enabled = True
     sent = []
     monkeypatch.setattr(web_auth_mail, "send_auth_email", lambda *args: sent.append(args) and False)
@@ -240,7 +241,7 @@ def test_link_lifetime_uses_config(config, identity, invoke):
 @pytest.mark.parametrize("host,scheme", [("bot.example.com", "https"), ("localhost:8766", "http"),
                                         ("127.0.0.1:8766", "http")])
 def test_origin_shared_with_web_redirects(config, host, scheme):
-    from istota.web_origin import external_origin
+    from istota.webui.origin import external_origin
     config.site.hostname = host
     assert external_origin(config) == (host, scheme)
 
@@ -262,7 +263,7 @@ def test_database_error_is_operator_failure(config, invoke):
 
 @pytest.mark.parametrize("purpose", ["enrol", "reset"])
 def test_cli_mail_refuses_changed_recipient_snapshot(config, identity, monkeypatch, purpose):
-    from istota import web_auth_mail
+    from istota.webui import auth_mail as web_auth_mail
     from unittest.mock import Mock
 
     config.email.enabled = True

@@ -460,7 +460,7 @@ class TestTheWebProducerRecordsIt:
         """`web_app._config` is a module global, so it is restored rather than
         assigned — a test that leaves it pointing at its own tmp_path config
         changes what every later test in the same xdist worker reads."""
-        from istota import web_app
+        from istota.webui import app as web_app
         monkeypatch.setattr(web_app, "_config", _config(db_path, tmp_path, **kw))
         return web_app
 

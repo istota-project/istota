@@ -109,7 +109,7 @@ Guardrails on this path: subtask creation is **admin-only**, prompt-only (never 
 | `transport/email/inbound.py` | Polls INBOX via IMAP, creates tasks from known senders, downloads attachments (the EmailTransport inbound body) |
 | `transport/whatsapp/` | One business phone number behind a provider seam: `whatsapp_cloud` (Meta's Cloud API webhook) or `baileys` (a paired WhatsApp Web session driven by a Node sidecar). Inbound resolves the sender to a user binding; outbound is one message per logical response |
 | `transport/sms/` | One service number through Twilio or Telnyx. Signed provider webhooks create tasks; outbound is segment-budgeted and tracked through delivery callbacks |
-| `web_app.py` (`/api/chat/*`) | In-app web chat: POST → `ingest_message` creates a `source_type="web"` task; SSE tails `task_events` |
+| `webui/app.py` (`/api/chat/*`) | In-app web chat: POST → `ingest_message` creates a `source_type="web"` task; SSE tails `task_events` |
 | `repl/` | Interactive terminal loop (`istota repl`); each line is an inline `source_type="repl"` task streamed to the terminal |
 | `tasks_file_poller.py` | Watches TASKS.md files for changes, identifies tasks by SHA-256 content hash |
 | `cli.py` | Direct task execution (`istota task "prompt" -u USER -x`), supports `--dry-run` |
@@ -175,8 +175,8 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 | `shared_file_organizer.py` | Scans for files shared with the bot, auto-organizes by owner |
 | `nextcloud_client.py` | Shared Nextcloud HTTP plumbing (OCS + WebDAV) |
 | `nextcloud_api.py` | Enriches user configs from Nextcloud OCS API at startup |
-| `web_app.py` | Authenticated web interface (FastAPI + Nextcloud OAuth2) |
-| `webhook_receiver.py` | FastAPI webhook receiver (Overland GPS) |
+| `webui/app.py` | Authenticated web interface (FastAPI + Nextcloud OAuth2) |
+| `webui/webhook_receiver.py` | FastAPI webhook receiver (Overland GPS) |
 | `devbox/proxy.py` | Per-user host-side credential proxy for the devbox container |
 | `logging_setup.py` | Centralized logging configuration (console, file, rotation) |
 

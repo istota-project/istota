@@ -52,7 +52,7 @@ def _make_config(tmp_path):
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod.app.state.istota_config = config
     mod._oauth = MagicMock()
@@ -61,7 +61,7 @@ def _patch_app(config):
 
 
 async def _login(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
     )
@@ -79,7 +79,7 @@ async def chat_client(tmp_path):
 
 
 def _db_path():
-    import istota.web_app as mod
+    import istota.webui.app as mod
     return mod._config.db_path
 
 

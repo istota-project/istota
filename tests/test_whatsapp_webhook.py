@@ -182,7 +182,7 @@ def _post_headers(raw: bytes, *, secret: str = APP_SECRET, signature=None):
 
 def _receiver(config, monkeypatch):
     """The real FastAPI app with this test's config bound into it."""
-    from istota import webhook_receiver
+    from istota.webui import webhook_receiver
 
     monkeypatch.setattr(webhook_receiver, "_config", config)
     return TestClient(webhook_receiver.app)

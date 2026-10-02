@@ -39,7 +39,7 @@ from istota.briefings.models import (
 )
 from istota.briefings.sources.browse import BROWSE_PRESETS
 from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
-from istota.web_router_stubs import make_get_user_context, require_auth, verify_origin
+from istota.webui.router_stubs import make_get_user_context, require_auth, verify_origin
 
 
 logger = logging.getLogger(__name__)

@@ -21,11 +21,11 @@ WorkingDirectory={{ istota_repo_dir }}
 # restart with a browser tab open sat out the full TimeoutStopSec and died on
 # SIGKILL. The flag makes uvicorn cancel the stragglers instead.
 #
-# It is a backstop now rather than the mechanism: istota.web_shutdown wraps this
+# It is a backstop now rather than the mechanism: istota.webui.shutdown wraps this
 # unit's SIGTERM and the streams end themselves, so an ordinary restart has
 # nothing left to drain and nothing to cancel. Keep the flag — it is what bounds
 # a stream that does not observe the notice.
-ExecStart={{ istota_home }}/.venv/bin/uvicorn {{ istota_package }}.web_app:app --no-access-log --host 127.0.0.1 --port {{ istota_web_port }} --timeout-graceful-shutdown {{ istota_web_graceful_shutdown_seconds }}
+ExecStart={{ istota_home }}/.venv/bin/uvicorn {{ istota_package }}.webui.app:app --no-access-log --host 127.0.0.1 --port {{ istota_web_port }} --timeout-graceful-shutdown {{ istota_web_graceful_shutdown_seconds }}
 Restart=always
 RestartSec=5
 

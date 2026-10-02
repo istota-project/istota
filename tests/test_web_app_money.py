@@ -76,7 +76,7 @@ def _istota_config(tmp_path, *, with_money: bool = False) -> Config:
 
 
 def _patch_app(config: Config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod._oauth = MagicMock()
     mod._oauth.nextcloud = MagicMock()
@@ -110,7 +110,7 @@ async def client_without_money(app_without_money):
 
 
 async def _login_as(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": username})
     resp = await client.get("/istota/callback", follow_redirects=False)
     return resp.cookies

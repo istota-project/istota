@@ -27,7 +27,7 @@ from istota.money._loader import UserNotFoundError, resolve_for_user
 from istota.money.cli import UserContext
 from istota.money.config_store import FILING_STATUSES
 from istota.money.core.tax_data import load_tax_rates
-from istota.web_router_stubs import require_auth, verify_origin
+from istota.webui.router_stubs import require_auth, verify_origin
 
 logger = logging.getLogger(__name__)
 

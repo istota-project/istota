@@ -14,7 +14,7 @@ too late to be the signal. So the signal is made here instead. The handler
 uvicorn installed for SIGINT/SIGTERM is wrapped once at startup
 (:func:`install_signal_hook`, called from the web app's lifespan, which is the
 one place that covers both ``istota serve`` and a plain
-``uvicorn istota.web_app:app``), and a stream that sleeps through
+``uvicorn istota.webui.app:app``), and a stream that sleeps through
 :func:`sleep_unless_shutdown` wakes immediately and returns. Its response then
 completes normally, so there is nothing left for uvicorn to cancel.
 
@@ -50,7 +50,7 @@ import asyncio
 import logging
 import signal
 
-logger = logging.getLogger("istota.web_shutdown")
+logger = logging.getLogger("istota.webui.shutdown")
 
 _shutting_down = False
 # One entry per stream currently sleeping. Each carries its own loop, so the

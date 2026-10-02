@@ -233,7 +233,7 @@ Talk, email (signup addresses route `routing_method="signup"` first; `.claude/ru
 
 ## User-scoped Nextcloud OAuth (post-as-user + read sync)
 
-The key reaches the web unit only (Ansible `web-secrets.env`, Docker `/data/.web_token_key`); `web_tokens.py` has its own salt and `web_user_tokens`. `get_access_token` refreshes within 60s under a per-user lock (`invalid_grant` deletes, transient failures keep). Consumers: post-as-user mirroring, web→Talk read push (`_mark_read_as_user`, same 401 retry as `_post_as_user`), Talk→web read pull.
+The key reaches the web unit only (Ansible `web-secrets.env`, Docker `/data/.web_token_key`); `webui/tokens.py` has its own salt and `web_user_tokens`. `get_access_token` refreshes within 60s under a per-user lock (`invalid_grant` deletes, transient failures keep). Consumers: post-as-user mirroring, web→Talk read push (`_mark_read_as_user`, same 401 retry as `_post_as_user`), Talk→web read pull.
 
 **No web→Talk unread leg**: system and bot messages count in Talk's `unreadMessages` but never reach `messages`, and `db.initialize_room_read_state` seeds cursors, so the obvious guard is unsound and a push without `lastReadMessage` marks everything read. It needs seeded-vs-earned provenance.
 

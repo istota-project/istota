@@ -1010,7 +1010,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         """)
         # User-scoped Nextcloud OAuth pair, encrypted with the *web-only* key
         # (ISTOTA_WEB_TOKEN_KEY — not the shared ISTOTA_SECRET_KEY). Written and
-        # decrypted only by the web process (istota.web_tokens); the scheduler
+        # decrypted only by the web process (istota.webui.tokens); the scheduler
         # reads nothing here. expires_at is plaintext ISO UTC so refresh checks
         # don't need a decrypt.
         conn.execute("""

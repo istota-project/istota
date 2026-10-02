@@ -5,7 +5,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 import httpx
 
-from .config import BrowserConfig
+from istota.config import BrowserConfig
 
 
 def _console_url(value: str) -> str:

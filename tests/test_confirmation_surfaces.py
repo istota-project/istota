@@ -765,7 +765,7 @@ def _web_config(tmp_path):
 async def web_client(tmp_path):
     if not _has_web_deps:
         pytest.skip("web dependencies not installed")
-    import istota.web_app as mod
+    import istota.webui.app as mod
     config = _web_config(tmp_path)
     mod._config = config
     mod.app.state.istota_config = config
@@ -777,7 +777,7 @@ async def web_client(tmp_path):
 
 
 async def _login(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
     )
@@ -828,7 +828,7 @@ class TestWebConfirmations:
         """The ISSUE-241 property, on the surface that carries it now: a
         web-only user can see an email gate at all, and the body the gate is
         withholding is not in the payload."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(web_client, "alice")
 
         with db.get_db(mod._config.db_path) as conn:
@@ -859,7 +859,7 @@ class TestWebConfirmations:
 
     @pytest.mark.asyncio
     async def test_only_the_callers_own_gates_are_listed(self, web_client):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(web_client, "alice")
 
         with db.get_db(mod._config.db_path) as conn:
@@ -877,7 +877,7 @@ class TestWebConfirmations:
     async def test_confirming_from_the_inbox_releases_the_task(self, web_client):
         """The inbox names an existing producer path rather than a dispatcher
         of its own, so this is the same POST the in-transcript card makes."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(web_client, "alice")
 
         with db.get_db(mod._config.db_path) as conn:
@@ -917,7 +917,7 @@ class TestWebRoomUnfreeze:
         token is untouched — only a confirmation the user has visibly moved on
         from is cancelled.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(web_client, "alice")
         rooms = (await web_client.get("/istota/api/chat/rooms", cookies=cookies)).json()
         room = rooms["rooms"][0]
@@ -951,7 +951,7 @@ class TestWebRoomUnfreeze:
         question that send produced, which is the outcome the idempotency key
         exists to prevent.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(web_client, "alice")
         rooms = (await web_client.get("/istota/api/chat/rooms", cookies=cookies)).json()
         room = rooms["rooms"][0]

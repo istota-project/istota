@@ -19,7 +19,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from istota import db, web_app
+from istota import db
+from istota.webui import app as web_app
 from istota.usage.telemetry import BrainUsage, ModelUsage
 
 NOW = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)

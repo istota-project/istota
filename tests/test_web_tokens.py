@@ -7,7 +7,8 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from istota import db, web_tokens
+from istota import db
+from istota.webui import tokens as web_tokens
 from istota.config import Config, WebConfig
 
 KEY = "x" * 64

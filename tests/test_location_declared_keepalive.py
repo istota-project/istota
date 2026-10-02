@@ -78,7 +78,7 @@ def _measured_feature(ts: str, lon: float, lat: float) -> dict:
 
 
 def _feed(path: Path, features: list[dict]) -> list[dict]:
-    from istota.webhook_receiver import _process_feature
+    from istota.webui.webhook_receiver import _process_feature
 
     with location_db.connect(path) as conn:
         for f in features:

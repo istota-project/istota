@@ -1,4 +1,4 @@
-"""The stop notice the SSE streams observe (`istota.web_shutdown`).
+"""The stop notice the SSE streams observe (`istota.webui.shutdown`).
 
 The end-to-end proof that this ends a real stream under a real uvicorn is
 `tests/test_serve_shutdown.py`. These cover the pieces that file cannot see:
@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from istota import web_shutdown
+from istota.webui import shutdown as web_shutdown
 
 
 @pytest.fixture(autouse=True)
@@ -224,12 +224,12 @@ class TestInstallSignalHook:
 
 class TestLifespanWiring:
     """The hook is installed from the web app's lifespan, which is the one
-    startup path `istota serve` and a plain `uvicorn istota.web_app:app` share.
+    startup path `istota serve` and a plain `uvicorn istota.webui.app:app` share.
     Wired anywhere else it would cover one of them and not the other."""
 
     def test_the_lifespan_installs_the_hook(self, monkeypatch):
         pytest.importorskip("fastapi")
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         calls: list[int] = []
         monkeypatch.setattr(mod, "_reload_config", lambda app: None)

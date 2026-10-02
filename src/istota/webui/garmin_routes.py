@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from istota.health import garmin as health_garmin
-from istota.web_router_stubs import require_auth, verify_origin
+from istota.webui.router_stubs import require_auth, verify_origin
 
 
 router = APIRouter()

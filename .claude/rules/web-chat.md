@@ -3,7 +3,7 @@ paths:
   - "web/src/lib/stores/chat.ts"
   - "web/src/lib/components/chat/**"
   - "src/istota/transport/web/**"
-  - "src/istota/web_app.py"
+  - "src/istota/webui/app.py"
 ---
 
 # Web chat surface
@@ -130,7 +130,7 @@ Console at `/chat`. Rooms are per-user channel tokens in `web_chat_rooms`, each 
 
 ### App shell, render model, unread, order
 
-- `_app/immutable/` immutable for a year, the rest `no-cache`; a new build shows a Reload toast. The Ansible unit passes `--timeout-graceful-shutdown` (Docker has no equivalent); SSE generators also observe `istota.web_shutdown`.
+- `_app/immutable/` immutable for a year, the rest `no-cache`; a new build shows a Reload toast. The Ansible unit passes `--timeout-graceful-shutdown` (Docker has no equivalent); SSE generators also observe `istota.webui.shutdown`.
 - **Segments** (`segments.ts`): `text`/`tool`/`thinking`/`notice`/`gate`. `renderGroups` keeps prose ≥ `SUBSTANTIAL_TEXT_CHARS`, coalesces tools into one `ActivityTrace`, drops short narration; live and `execution_trace` turns build the same groups. `notice` (`brain_fallback`, ISSUE-278) is a `.banner warn` group, excluded from copy and from `Message.svelte`'s streaming cue, live-only.
 - **`gate`** (ISSUE-592) is the question a task parked on, always rendered and copied, with `outcome` (`approved`/`declined`) once answered. The live `confirmation` event turns the trailing open text block into it; a replayed `confirmed` event (approve relabels the row in place) renders it approved with no card. Approving keeps the turn: `confirm` marks the gate and reopens the stream past `gateSeq`, the seq the question arrived at, and only a turn drawn from history (no `gateSeq`) is emptied and replayed from seq 0. Reloads match because the park stores the attempt's trace ending in a `gate` entry and `confirmations.trace_with_gate` keeps it ahead of the re-run's trace; `web_app._settle_gates` derives each gate's outcome from position and task status.
 - **Unread**: `db.count_unread_messages` past `room_read_state`, excluding `role='user'`; `db.initialize_room_read_state` seeds; `_chat_mark_room_read`; active room held at 0.

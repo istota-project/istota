@@ -433,7 +433,7 @@ class TestCancelEndpointsSignalTheGroup:
         assert sent == [(4242, signal.SIGTERM)]
 
     def test_web_cancel_signals_the_group(self, tmp_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from istota.config import Config, UserConfig
 
         db_path = tmp_path / "test.db"
@@ -454,7 +454,7 @@ class TestCancelEndpointsSignalTheGroup:
         original = mod._config
         mod._config = config
         try:
-            with patch("istota.web_app.kill_process_group",
+            with patch("istota.webui.app.kill_process_group",
                        side_effect=lambda pid, sig: sent.append((pid, sig))):
                 mod._chat_cancel_task(task_id)
         finally:
@@ -467,7 +467,7 @@ class TestCancelEndpointsSignalTheGroup:
         # cancel racing a task that just finished reads the pre-clear row. With
         # a group kill that mistake costs a whole group, so the status is
         # checked too — `cmd_stop` already selects on it, this path did not.
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from istota.config import Config, UserConfig
 
         db_path = tmp_path / "test.db"
@@ -493,7 +493,7 @@ class TestCancelEndpointsSignalTheGroup:
         original = mod._config
         mod._config = config
         try:
-            with patch("istota.web_app.kill_process_group",
+            with patch("istota.webui.app.kill_process_group",
                        side_effect=lambda pid, sig: sent.append((pid, sig))):
                 mod._chat_cancel_task(task_id)
         finally:
