@@ -3730,8 +3730,8 @@ def check_room_scope_confinement(config: "Config", probe: bool) -> CheckResult:
         name, WARN,
         "tasks run without a sandbox here, so a guest's turn in a shared room "
         "loses the host's data in the prompt, the skills and the environment "
-        "only, not on the filesystem: a shell command can still read the host's "
-        "files",
+        "only, not on the filesystem: a shell command can still read and write "
+        "the host's files, CRON.md included",
         remedy="Run istota on Linux with bubblewrap (the Ansible deployment), or "
         "do not let guests into rooms on this deployment.",
     )

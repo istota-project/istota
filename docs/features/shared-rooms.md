@@ -63,11 +63,13 @@ One thing is left out. In a shared room the bot does not load your personal memo
 Two kinds of task run with less:
 
 - **A guest's turn** runs as the room's host and reaches nothing of the host's: no workspace, no private skill, no memory. Only skills that read nothing personal (the room's own tools, untrusted-input handling) and the room's `CHANNEL.md` are available.
-- **A task nobody asked in the room** is restricted the same way, since its answer lands in the room with no member asking there: a scheduled job, a briefing or a subtask whose conversation is a shared room, or an outside correspondent's reply to an email the bot sent from that room.
+- **A task nobody asked in the room** is restricted the same way, since its answer lands in the room with no member asking there: a subtask whose conversation is a shared room, a scheduled job or briefing aimed at a shared room you are not a member of, or an outside correspondent's reply to an email the bot sent from that room.
+
+Your own scheduled jobs (`CRON.md`) and briefings that post into a shared room you are a member of run as your turn there does: setting the job to post in that room is the same decision as asking there. They leave your personal memory out of the prompt in the same way.
 
 Other participants' messages in the conversation history are shown to the model as content from someone else, not as instructions, so a co-member cannot use the transcript to steer your turn.
 
-On a deployment with no bubblewrap sandbox (the shipped Docker stack, macOS, the standalone install), what a guest's turn loses is removed from the prompt, the skill list and the environment, but the task's own tools can still read the host's files on disk. `istota doctor` warns about this. See [security](../deployment/security.md).
+On a deployment with no bubblewrap sandbox (the shipped Docker stack, macOS, the standalone install), what a guest's turn loses is removed from the prompt, the skill list and the environment, but the task's own tools can still read and write the host's files on disk, including `CRON.md`, whose jobs run as the host. `istota doctor` warns about this. See [security](../deployment/security.md).
 
 ## What the bot is told
 
