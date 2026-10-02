@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import pytest
 
-from istota import db, side_rooms
-from istota.whatsapp_requests import RequestError
+from istota import db
+from istota.rooms import side_rooms
+from istota.relay.requests import RequestError
 
 from .test_shared_room_restriction import (
     HEALTH_DB,

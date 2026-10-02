@@ -11,7 +11,7 @@ import sqlite3
 import unicodedata
 import uuid
 
-from . import db
+from istota import db
 
 MAX_CONTENT_CHARS = 2000
 QUEUE_DEADLINE_SECONDS = 600
@@ -99,7 +99,7 @@ def _store_request(
     their own `origin` and `destination` here, where a relay keeps them on its
     `message_relays` row.
     """
-    from . import message_relays
+    from istota.relay import relays as message_relays
 
     _validate_input(request_key, text)
     if kind not in KINDS:
@@ -252,7 +252,7 @@ def _request_response(row) -> dict:
 def enqueue_self_send(conn, config, *, actor_user_id: str, task_id: int,
                  request_key: str, text: str) -> dict:
     """Persist a self-send; only the daemon may attempt its delivery."""
-    from .transport.whatsapp.outbound import (
+    from istota.transport.whatsapp.outbound import (
         active_adapter, _destination, render_whatsapp_result, render_template_result,
         template_available,
     )
@@ -354,7 +354,7 @@ def admit_request(conn, config, *, request_id: str, user_id: str,
         raise RequestError("request_unavailable")
     room = number = None
     if surface == "room":
-        from . import relay_destinations
+        from istota.relay import destinations as relay_destinations
         room = relay_destinations.check_room(conn, config, recipient_user_id=user_id,
                                              fingerprint=row["binding_fingerprint"])
     elif surface == "sms":
@@ -362,7 +362,7 @@ def admit_request(conn, config, *, request_id: str, user_id: str,
     else:
         _check_binding(conn, config, row)
     if row["kind"] == "relay_question":
-        from . import message_relays
+        from istota.relay import relays as message_relays
         if (relay is None or relay["state"] != "queued" or not row["approved_at"]
                 or row["approved_digest"] != row["preview_digest"]
                 or text_hash(row["preview"] or "") != row["approved_digest"]
@@ -413,7 +413,7 @@ def admit_sms_question(conn, config, *, relay_id: str, user_id: str, status: str
 
 def request_destination(config, *, request_id: str, user_id: str, caps) -> str:
     """Check and address the same binding snapshot after the ledger claim."""
-    from .transport.whatsapp.outbound import _destination
+    from istota.transport.whatsapp.outbound import _destination
 
     with db.get_db(config.db_path) as conn:
         row = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=? AND recipient_user_id=?",
@@ -424,10 +424,10 @@ def request_destination(config, *, request_id: str, user_id: str, caps) -> str:
 
 
 def _finish_request(config, request_id: str, *, record=None, reason: str | None = None) -> None:
-    from .transport.sms._types import REACHED_PROVIDER, SmsDeliveryRecord
-    from .transport.whatsapp._types import REACHED_META
-    from .notification_resolvers import task_alert
-    from .transport._alerts import push_off_surface
+    from istota.transport.sms._types import REACHED_PROVIDER, SmsDeliveryRecord
+    from istota.transport.whatsapp._types import REACHED_META
+    from istota.notification_resolvers import task_alert
+    from istota.transport._alerts import push_off_surface
 
     state = "failed"
     if record is not None:
@@ -458,7 +458,7 @@ def _finish_request(config, request_id: str, *, record=None, reason: str | None 
             (state, reason, request_id),
         ).rowcount
         if changed and row["relay_id"]:
-            from . import message_relays
+            from istota.relay import relays as message_relays
             if state in ("sent", "uncertain"):
                 if conn.execute("UPDATE message_relays SET state=? WHERE id=? AND state IN ('queued','sending','uncertain')",
                                 ("waiting" if state == "sent" else "uncertain", row["relay_id"])).rowcount:
@@ -467,7 +467,7 @@ def _finish_request(config, request_id: str, *, record=None, reason: str | None 
             else:
                 message_relays._close_relay(conn, row["relay_id"], state=state, reason=reason or "delivery_failed")
         if changed and row["relay_id"] and state == "uncertain":
-            from .notification_resolvers.message_relay import write
+            from istota.notification_resolvers.message_relay import write
 
             write(conn, conn.execute("SELECT * FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone())
         if changed and state != "sent" and not row["relay_id"]:
@@ -513,16 +513,16 @@ def _pending_requests(config, limit: int) -> list[dict]:
 
 async def drain_requests(config, *, limit: int = 20) -> int:
     """Bounded daemon-only poll; SQLite work stays off the shared event loop."""
-    from .transport.whatsapp.outbound import deliver_whatsapp
+    from istota.transport.whatsapp.outbound import deliver_whatsapp
 
     rows = await asyncio.to_thread(_pending_requests, config, max(0, min(limit, 100)))
     for row in rows:
         if row["kind"] in ROOM_KINDS:
-            from . import side_rooms
+            from istota.rooms import side_rooms
             await side_rooms.deliver_request(config, row)
             continue
         if row["relay_id"]:
-            from . import message_relays
+            from istota.relay import relays as message_relays
             await message_relays.deliver_question(config, row)
             continue
         try:
@@ -534,12 +534,12 @@ async def drain_requests(config, *, limit: int = 20) -> int:
             await asyncio.to_thread(_finish_request, config, row["id"], reason=str(exc))
         else:
             await asyncio.to_thread(_finish_request, config, row["id"], record=record)
-    from .message_relays import reconcile_reply_candidates
-    from .transport.whatsapp.webhook import deliver_event_responses
+    from istota.relay.relays import reconcile_reply_candidates
+    from istota.transport.whatsapp.webhook import deliver_event_responses
 
     replies = await asyncio.to_thread(reconcile_reply_candidates, config, limit=limit)
     await deliver_event_responses(config, replies)
-    from .message_relays import poll_relays
+    from istota.relay.relays import poll_relays
 
     await poll_relays(config, limit=limit)
     return len(rows)
@@ -650,7 +650,7 @@ def _queue_question(conn, *, request_id: str, relay_id: str | None, digest: str,
     A `room_post` has no relay row; its approval is the request's own
     `approved_digest`, which delivery checks against the preview.
     """
-    from . import message_relays
+    from istota.relay import relays as message_relays
     conn.execute(
         "UPDATE whatsapp_skill_requests SET state='queued',approved_at=datetime('now'),approved_digest=?,"
         "queue_deadline=datetime('now',?),updated_at=datetime('now') WHERE id=?",
@@ -667,7 +667,8 @@ def _queue_question(conn, *, request_id: str, relay_id: str | None, digest: str,
 def hold_question(conn, config, *, actor_user_id: str, task_id: int,
                   recipient_user_id: str, request_key: str, text: str,
                   via: str | None = None) -> dict:
-    from . import message_relays, relay_destinations
+    from istota.relay import relays as message_relays
+    from istota.relay import destinations as relay_destinations
 
     _validate_input(request_key, text)
     task = db.get_task(conn, task_id)
@@ -718,11 +719,11 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
             preview += f"Message:\n{service}"
         # Phone previews must fit intact. No approval of a shortened preview.
         if origin["surface"] == "sms":
-            from .transport.sms.outbound import render_sms
+            from istota.transport.sms.outbound import render_sms
             if render_sms(preview, config.sms.max_segments).text != preview:
                 raise RequestError("invalid_preview")
         if origin["surface"] == "whatsapp":
-            from .transport.whatsapp.outbound import active_adapter
+            from istota.transport.whatsapp.outbound import active_adapter
             adapter = active_adapter(config)
             if adapter is None or len(preview) > adapter.caps.service_body_limit:
                 raise RequestError("invalid_preview")
@@ -748,7 +749,7 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
 
 def park_question(conn, config, *, task) -> dict | None:
     """Persist a deterministic preview and its exact association together."""
-    from . import message_relays
+    from istota.relay import relays as message_relays
     with write_transaction(conn):
         row = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE origin_task_id=? AND state='held'", (task.id,)).fetchone()
         if row is None:
@@ -771,7 +772,7 @@ def park_question(conn, config, *, task) -> dict | None:
 
 def approve_request(conn, *, task, request_id: str, preview_digest: str) -> None:
     """Only the currently displayed immutable request receives authority."""
-    from . import message_relays
+    from istota.relay import relays as message_relays
     with write_transaction(conn):
         current = db.get_task(conn, task.id)
         row = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=?", (request_id,)).fetchone()
@@ -796,9 +797,9 @@ async def present_question(config, *, task, success: bool) -> bool:
     Keep this separate from result routing: output overrides, mirrors and log
     subscribers must never acquire the persisted preview.
     """
-    from . import message_relays
-    from .events import EventWriter
-    from .notification_resolvers import confirmation, task_alert
+    from istota.relay import relays as message_relays
+    from istota.events import EventWriter
+    from istota.notification_resolvers import confirmation, task_alert
 
     with db.get_db(config.db_path) as conn:
         row = held_question(conn, task.id)
@@ -840,7 +841,7 @@ async def present_question(config, *, task, success: bool) -> bool:
             # can read this event. Log and push subscribers receive no preview.
             writer.emit("confirmation", {"prompt": parked["preview"]})
         else:
-            from .transport import make_registry
+            from istota.transport import make_registry
             delivery_config = config
             if origin["surface"] == "whatsapp":
                 # A preview is an exact approval document. A Cloud template

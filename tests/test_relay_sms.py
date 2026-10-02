@@ -3,7 +3,9 @@ import asyncio
 
 import pytest
 
-from istota import db, message_relays as relays, whatsapp_requests as requests
+from istota import db
+from istota.relay import relays
+from istota.relay import requests
 from istota.transport.sms import sms_conversation_token
 from istota.transport.sms.providers._types import SmsDeliveryEvent, SmsSendFailure, SmsSendResult
 from istota.transport.sms.webhook import handle_provider_event

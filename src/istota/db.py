@@ -2112,7 +2112,7 @@ def confirm_task(conn: sqlite3.Connection, task_id: int) -> None:
 
 def cancel_task(conn: sqlite3.Connection, task_id: int) -> None:
     """Cancel a task (sets status to 'cancelled')."""
-    from .message_relays import close_task_questions
+    from istota.relay.relays import close_task_questions
     close_task_questions(conn, task_id)
     conn.execute(
         """
@@ -2135,8 +2135,8 @@ def cancel_pending_confirmations(
     Called when a new task is created in the same conversation, indicating the
     user has moved on from the pending confirmation.
     """
-    from .message_relays import close_task_questions
-    from .whatsapp_requests import write_transaction
+    from istota.relay.relays import close_task_questions
+    from istota.relay.requests import write_transaction
     refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
     marks = ", ".join("?" for _ in refs)
     with write_transaction(conn):
@@ -9515,7 +9515,7 @@ def expire_stale_confirmations(conn: sqlite3.Connection, timeout_minutes: int) -
         (timeout_minutes,),
     )
     rows = cursor.fetchall()
-    from .message_relays import close_task_questions
+    from istota.relay.relays import close_task_questions
     for row in rows:
         close_task_questions(conn, row["id"], reason="confirmation_expired")
     return [

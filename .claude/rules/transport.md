@@ -3,7 +3,7 @@ paths:
   - "src/istota/transport/**"
   - "src/istota/email_support.py"
   - "src/istota/notifications.py"
-  - "src/istota/surfaces.py"
+  - "src/istota/rooms/surfaces.py"
 ---
 
 # Transport abstraction (`src/istota/transport/`)
@@ -27,7 +27,7 @@ A uniform seam over messaging surfaces. Inbound, a `Transport` normalizes messag
 
 `make_registry(config)` does no I/O, so `send_notification` can build one on demand. Talk, email, sms, whatsapp register on `enabled`; the rest always, gated per user later. `_surface_for_source_type` is the **delivery** map: email, sms, whatsapp, repl, web map to themselves (web resolves to no push transport); everything else → `talk`.
 
-## The room model (`src/istota/surfaces.py`)
+## The room model (`src/istota/rooms/surfaces.py`)
 
 A room is one conversation bound to several surfaces. Four questions:
 
@@ -70,7 +70,7 @@ A room can hold several humans: a Talk group, a multi-member web room, a Baileys
 
 **Delivery refuses a shared room for personal content** (SG 10). `routing.refuse_shared_rooms` drops a talk or web leg whose canonical room is shared, for every purpose, exempting only the room the task ran in. Order in `resolve_delivery_plan`: `side_rooms.pin_plan`, refusal, reply-to-origin fallback. Notifications apply it per purpose including log; `send_notification(task_room=)` exempts the conversational notice. `db._usable_as_delivery_default` and `db.configured_default_room` skip shared rooms. `record_inbound` refuses a mirror-only email turn into a shared or vetoed room (`withheld_from_room`). Briefings get no exemption.
 
-**The veto** (D8, D12), `room_veto.py`: any participant's `!<bot name> off` stops recording until a member's `!<bot name> on` and every vetoer agreed or left; routed ahead of the guest-command filter. Removing the bot from a WhatsApp group is a veto with no vetoer row. The web app queues replies in `room_notices`; the scheduler's `room-notices` gate posts them and the one-time announcement.
+**The veto** (D8, D12), `rooms/veto.py`: any participant's `!<bot name> off` stops recording until a member's `!<bot name> on` and every vetoer agreed or left; routed ahead of the guest-command filter. Removing the bot from a WhatsApp group is a veto with no vetoer row. The web app queues replies in `room_notices`; the scheduler's `room-notices` gate posts them and the one-time announcement.
 
 ## Phone rooms (SMS and private WhatsApp)
 

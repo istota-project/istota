@@ -26,7 +26,7 @@ def task(conn, user="alice"):
 
 
 def store(conn, task_id, **overrides):
-    from istota.whatsapp_requests import _store_request
+    from istota.relay.requests import _store_request
     args = dict(actor_user_id="alice", task_id=task_id, request_key="one",
                 kind="self_send", recipient_user_id="alice", text="hello",
                 service_body="hello", template_body=None,
@@ -59,7 +59,7 @@ def test_fresh_schema_and_upgrade_match(tmp_path, path):
 
 
 def test_replay_scope_conflict_and_rollback(path):
-    from istota.whatsapp_requests import RequestError, get_request
+    from istota.relay.requests import RequestError, get_request
     with db.get_db(path) as conn:
         ident = task(conn)
         first = store(conn, ident)
@@ -92,14 +92,14 @@ def test_concurrent_keys_create_one_record(path):
 
 @pytest.mark.parametrize("key,text", [("", "ok"), ("bad key", "ok"), ("a"*65, "ok"), ("ok", " "), ("ok", "x"*2001), ("ok", "\x00\x01")])
 def test_input_bounds(path, key, text):
-    from istota.whatsapp_requests import RequestError
+    from istota.relay.requests import RequestError
     with db.get_db(path) as conn:
         with pytest.raises(RequestError):
             store(conn, task(conn), request_key=key, text=text)
 
 
 def test_task_deletion_and_cleanup_leave_identity(path):
-    from istota.whatsapp_requests import cleanup_content, get_request
+    from istota.relay.requests import cleanup_content, get_request
     with db.get_db(path) as conn:
         ident = task(conn)
         req = store(conn, ident)
@@ -115,7 +115,7 @@ def test_task_deletion_and_cleanup_leave_identity(path):
 
 
 def test_cleanup_does_not_commit_callers_transaction(path):
-    from istota.whatsapp_requests import cleanup_content
+    from istota.relay.requests import cleanup_content
     with db.get_db(path) as conn:
         ident = task(conn)
         store(conn, ident)

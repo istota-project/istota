@@ -654,7 +654,7 @@ def _channel_notes_shared() -> bool:
     shared: a fence on a private room's notes costs a marker.
     """
     from istota import db
-    from istota.room_scopes import channel_notes_shared
+    from istota.rooms.scopes import channel_notes_shared
 
     db_path = os.environ.get("ISTOTA_DB_PATH", "")
     if not db_path or not Path(db_path).is_file():
@@ -700,7 +700,7 @@ def cmd_show(args) -> int:
         # the prompt block and `kv --group` do (multiplayer D22).
         text = frame_untrusted(text, GROUP_MEMORY_LABEL)
     elif target.kind == _CHANNEL and _channel_notes_shared():
-        from istota.room_scopes import CHANNEL_NOTES_LABEL
+        from istota.rooms.scopes import CHANNEL_NOTES_LABEL
 
         text = frame_untrusted(text, CHANNEL_NOTES_LABEL)
     print(text, end="" if text.endswith("\n") else "\n")

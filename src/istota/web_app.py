@@ -5735,9 +5735,9 @@ def _chat_answer_confirmation(
             return None
 
         if res.task.whatsapp_confirmation_request_id:
-            from . import message_relays
+            from istota.relay import relays as message_relays
             from .async_runtime import run_coro
-            from .whatsapp_requests import RequestError
+            from istota.relay.requests import RequestError
             try:
                 origin = message_relays.private_origin(conn, _config, actor_user_id=username,
                                                        surface="web", conversation_token=token)
@@ -5851,7 +5851,8 @@ def _chat_update_room(
     with no model pin survives, because the rule returns early with nothing to
     lose.
     """
-    from . import db, room_policy
+    from istota import db
+    from istota.rooms import policy as room_policy
     with db.get_db(_config.db_path) as conn:
         room = db.get_web_chat_room(conn, room_id)
         if room is None or room.user_id != username:
@@ -6104,7 +6105,8 @@ def _room_sharing(conn, reg, username: str) -> dict:
     records a host found gone, the sticky loss D14 describes; ``host`` None is
     what the chat page shows as a hostless room.
     """
-    from . import db, room_policy
+    from istota import db
+    from istota.rooms import policy as room_policy
 
     off = _room_off(conn, reg)
     if reg is None or not db.room_is_shared(conn, reg.token):
@@ -6134,7 +6136,7 @@ def _room_off(conn, reg) -> dict | None:
     is when it may have become private. A guest is named by the display name
     they chose; the members of the room are the ones reading it.
     """
-    from . import room_veto
+    from istota.rooms import veto as room_veto
 
     state = room_veto.switched_off(conn, reg.token if reg is not None else None)
     if state is None:
@@ -6266,7 +6268,8 @@ def _chat_users_directory() -> list[dict]:
 
 def _chat_claim_host(username: str, room_id: int) -> tuple[int, dict]:
     """`!room host` from the web: a member claims a room that lost its host."""
-    from . import db, room_policy
+    from istota import db
+    from istota.rooms import policy as room_policy
 
     with db.get_db(_config.db_path) as conn:
         found = _chat_member_room(conn, username, room_id)
@@ -6294,7 +6297,8 @@ def _chat_room_group(
     `room_policy.group_link_refusal`, the rule `!room group` asks, and a
     refused body changes nothing.
     """
-    from . import db, room_policy
+    from istota import db
+    from istota.rooms import policy as room_policy
 
     with db.get_db(_config.db_path) as conn:
         found = _chat_member_room(conn, username, room_id)
@@ -6634,7 +6638,7 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
             return "not_found", None
         # Binding a Talk conversation changes where every member's room
         # lives, so in a shared room it is the host's call.
-        from .room_policy import settings_refusal
+        from istota.rooms.policy import settings_refusal
         if settings_refusal(conn, token, username):
             return "refused", None
         existing = db.get_room_binding(conn, token, "talk")
@@ -7312,7 +7316,7 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
     changes.
     """
     from .email_support import parse_email_prompt  # noqa: PLC0415
-    from .surfaces import is_room_member  # noqa: PLC0415
+    from istota.rooms.surfaces import is_room_member  # noqa: PLC0415
 
     body = row["body"]
     out: dict = {"text": body}
@@ -7772,7 +7776,8 @@ def _chat_relay_reply(username: str, token: str, reply_to_msg_id: int) -> bool:
     answer itself is decided again inside `_chat_create_web_task`'s write
     transaction.
     """
-    from . import db, message_relays
+    from istota import db
+    from istota.relay import relays as message_relays
     with db.get_db(_config.db_path) as conn:
         return message_relays.relay_for_room_reply(
             conn, actor_user_id=username, room_token=token, message_id=reply_to_msg_id,
@@ -7786,7 +7791,8 @@ def _chat_room_veto(username: str, token: str, verb: str):
     sent from here: the WhatsApp bridge lives in the scheduler, so a send from
     this process would settle its ledger row `failed`.
     """
-    from . import db, room_veto
+    from istota import db
+    from istota.rooms import veto as room_veto
     from .transport._types import ParticipantRef
 
     with db.get_db(_config.db_path) as conn:
@@ -7801,7 +7807,8 @@ def _chat_room_veto(username: str, token: str, verb: str):
 
 
 def _chat_room_off(token: str) -> bool:
-    from . import db, room_veto
+    from istota import db
+    from istota.rooms import veto as room_veto
 
     with db.get_db(_config.db_path) as conn:
         return room_veto.is_vetoed(conn, token)
@@ -7831,7 +7838,8 @@ def _chat_create_web_task(
     answer: `relay_answer` is the exact text offered, and the task is created
     by `message_relays.accept_room_reply` in this same transaction.
     """
-    from . import confirmations, db, message_relays
+    from istota import confirmations, db
+    from istota.relay import relays as message_relays
     from .transport import classify_ahead, record_inbound
     from .transport.web import addressed_to_bot_in_text
     chat = _config.web.chat
@@ -8758,7 +8766,7 @@ async def chat_update_room(
     # member of a shared room can see.
     color = _UNSET
     if "color" in data:
-        from .room_colors import is_room_color
+        from istota.rooms.colors import is_room_color
         color = str(data["color"] or "").strip().lower() or None
         if color is not None and not is_room_color(color):
             return JSONResponse({"error": "unknown color"}, status_code=400)
@@ -8766,7 +8774,7 @@ async def chat_update_room(
     # `_chat_update_room` checks with the rule `!room guests` uses.
     guest_reply = _UNSET
     if "guest_reply" in data:
-        from .room_policy import GUEST_REPLY_VALUES
+        from istota.rooms.policy import GUEST_REPLY_VALUES
         guest_reply = str(data["guest_reply"] or "").strip().lower()
         if guest_reply not in GUEST_REPLY_VALUES:
             return JSONResponse({"error": "invalid guest_reply"}, status_code=400)
@@ -9662,7 +9670,7 @@ async def chat_send_message(
     # switched off nothing else is taken (D12): no turn, no command, no
     # confirmation answer. A member reading on web is a principal, so their
     # `on` counts as one.
-    from . import room_veto
+    from istota.rooms import veto as room_veto
 
     veto_verb = None if attachments else room_veto.parse_command(text, _config.bot_name)
     if veto_verb is not None:
@@ -13519,7 +13527,7 @@ def _relay_delivery_options(user_id: str) -> list[dict]:
     A failure to answer greys out every destination but the default, rather
     than failing the whole settings page over one control.
     """
-    from .relay_destinations import relay_delivery_options
+    from istota.relay.destinations import relay_delivery_options
 
     try:
         with _db.get_db(_config.db_path) as conn:

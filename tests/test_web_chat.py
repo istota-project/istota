@@ -258,7 +258,7 @@ class TestWebChatRoomsDB:
         assert found.id == room.id
 
     def test_count_recent_web_sends(self, conn):
-        from istota.speech_gate import GateDecision, record_decision
+        from istota.rooms.speech_gate import GateDecision, record_decision
 
         room = db.create_web_chat_room(conn, "alice", "general")
         for _ in range(3):
@@ -874,7 +874,7 @@ class TestChatMessagesApi:
     async def test_a_turn_the_gate_declines_is_recorded_with_no_stream(
         self, chat_client, monkeypatch,
     ):
-        from istota.speech_gate import GateDecision
+        from istota.rooms.speech_gate import GateDecision
 
         monkeypatch.setattr(
             "istota.transport.ingest.speech_gate.should_speak",
@@ -907,7 +907,7 @@ class TestChatMessagesApi:
     async def test_the_send_says_whether_it_named_the_bot(
         self, chat_client, monkeypatch,
     ):
-        from istota.speech_gate import GateDecision
+        from istota.rooms.speech_gate import GateDecision
 
         seen: list[bool] = []
 
@@ -928,7 +928,7 @@ class TestChatMessagesApi:
         self, chat_client, monkeypatch,
     ):
         """The cap counted tasks, so a turn the gate declined was free."""
-        from istota.speech_gate import GateDecision
+        from istota.rooms.speech_gate import GateDecision
 
         monkeypatch.setattr(
             "istota.transport.ingest.speech_gate.should_speak",
@@ -951,7 +951,7 @@ class TestChatMessagesApi:
         itself is the only thing that can put the turn in a bound Talk room."""
         from unittest.mock import AsyncMock
 
-        from istota.speech_gate import GateDecision
+        from istota.rooms.speech_gate import GateDecision
 
         monkeypatch.setattr(
             "istota.transport.ingest.speech_gate.should_speak",

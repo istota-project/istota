@@ -47,8 +47,8 @@ from typing import Callable
 
 import pytest
 
-from istota import surfaces
-from istota.surfaces import (
+from istota.rooms import surfaces
+from istota.rooms.surfaces import (
     is_room_member,
     is_room_view,
     origin_surface_for_source_type,

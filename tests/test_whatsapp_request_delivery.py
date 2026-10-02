@@ -5,7 +5,8 @@ from datetime import timedelta
 
 import pytest
 
-from istota import db, whatsapp_requests as requests
+from istota import db
+from istota.relay import requests
 from istota.transport.whatsapp import outbound
 from istota.transport.whatsapp._types import WhatsAppSendResult
 from .test_whatsapp_delivery import _config, _bind

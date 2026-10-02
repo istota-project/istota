@@ -1,7 +1,8 @@
 """The recipient's inbox row for a relay question: what it shows and what closes it."""
 import pytest
 
-from istota import db, message_relays as relays
+from istota import db
+from istota.relay import relays
 from istota.notification_resolvers import relay_question
 from istota.notification_sources import NotificationRow, invalid_paths
 from . import test_relay_questions

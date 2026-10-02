@@ -40,7 +40,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
-from ... import commands, confirmations, db, room_veto
+from istota import commands, confirmations, db
+from istota.rooms import veto as room_veto
 from ...config import Config
 from istota.lib.http_headers import header_value
 from ..ingest import record_phone_turn
@@ -1032,7 +1033,7 @@ def _dispatch_inbound(
     if room_veto.is_vetoed(conn, token):
         return WhatsAppEventResult("vetoed", user_id=user_id)
 
-    from ...message_relays import match_whatsapp_reply
+    from istota.relay.relays import match_whatsapp_reply
 
     relay_result = match_whatsapp_reply(conn, config, actor_user_id=user_id, event=event)
     if relay_result is not None:

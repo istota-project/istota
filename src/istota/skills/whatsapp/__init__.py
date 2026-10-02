@@ -14,7 +14,7 @@ from .._cli import parse_and_resolve, run_skill_cli
 def _dispatch(args):
     from ... import db
     from ...config import load_config
-    from ...whatsapp_requests import enqueue_self_send, get_request, RequestError
+    from istota.relay.requests import enqueue_self_send, get_request, RequestError
 
     actor = os.environ.get("ISTOTA_USER_ID", "")
     task = os.environ.get("ISTOTA_TASK_ID", "")

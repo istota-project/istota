@@ -17,9 +17,10 @@ from .._cli import parse_and_resolve, run_skill_cli
 
 
 def _dispatch(args):
-    from ... import db, side_rooms
+    from istota import db
+    from istota.rooms import side_rooms
     from ...config import load_config
-    from ...whatsapp_requests import RequestError
+    from istota.relay.requests import RequestError
 
     actor = os.environ.get("ISTOTA_USER_ID", "")
     task = os.environ.get("ISTOTA_TASK_ID", "")

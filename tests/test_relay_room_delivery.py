@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from istota import db, message_relays as relays, whatsapp_requests as requests
+from istota import db
+from istota.relay import relays
+from istota.relay import requests
 from istota.notification_resolvers import relay_question
 from . import test_relay_questions
 from .support.talk_double import FakeTalkClient, talk_bot_client

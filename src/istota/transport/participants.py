@@ -20,7 +20,7 @@ import sqlite3
 from typing import TYPE_CHECKING
 
 from .. import db
-from ..surfaces import is_room_member_for
+from istota.rooms.surfaces import is_room_member_for
 from ._types import ParticipantRef
 
 if TYPE_CHECKING:

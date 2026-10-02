@@ -271,9 +271,9 @@ def _translated(value: str, handler: str, old: str, new: str) -> str:
 
 def _destination_hash(destination: dict) -> str:
     if destination.get("kind") == "side_room":
-        from .side_rooms import _fingerprint
+        from istota.rooms.side_rooms import _fingerprint
         return _fingerprint(destination["room_token"], destination["parent"])
-    from .relay_destinations import destination_fingerprint
+    from istota.relay.destinations import destination_fingerprint
     return destination_fingerprint(destination)
 
 

@@ -343,8 +343,9 @@ class TestTheTextedTurn:
 
 class TestThePinnedDefaultAndRelays:
     def test_a_relay_never_lands_in_a_pinned_phone_room(self, db_path, tmp_path):
-        from istota import relay_destinations, user_profiles
-        from istota.whatsapp_requests import RequestError
+        from istota import user_profiles
+        from istota.relay import destinations as relay_destinations
+        from istota.relay.requests import RequestError
 
         config = _config(db_path, tmp_path)
         with db.get_db(db_path) as conn:

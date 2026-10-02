@@ -494,7 +494,7 @@ def provision_user_rooms(
     runtime loop — this runs from the CLI during a deploy, not inside the
     scheduler.
     """
-    from .talk import TalkClient
+    from istota.talk import TalkClient
 
     bot_user_id = config.nextcloud.username
 
@@ -552,7 +552,7 @@ def read_provisioned_records(
     deploy step, and refusing to provision because bookkeeping was unreadable
     would be worse than the duplicate this exists to prevent.
     """
-    from . import db
+    from istota import db
 
     try:
         if not Path(db_path).exists():
@@ -586,7 +586,7 @@ def record_provisioned_rooms(
     before this record existed. The caller reports the failure rather than
     acting on it.
     """
-    from . import db
+    from istota import db
 
     entries = [
         (r.name, {"token": r.token, "invite_failed": r.record_invite_failed})
@@ -619,7 +619,7 @@ def pending_channel_rooms(
     second room called ``logs`` created beside it and then left unused. Rooms
     with no channel role (``general``) are always kept.
     """
-    from . import user_profiles
+    from istota import user_profiles
 
     profile = user_profiles.get_profile(db_path, user_id)
     if profile is None:
@@ -656,7 +656,7 @@ def seed_channel_profile(
     ``force`` re-points a column from whatever rooms are passed in, ignoring
     both rules. That is the deliberate re-provisioning path, never the default.
     """
-    from . import user_profiles
+    from istota import user_profiles
 
     profile = user_profiles.get_profile(db_path, user_id)
     updates: dict[str, str] = {}

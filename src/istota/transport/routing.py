@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, NamedTuple
 # The static room-model table. A stdlib-only leaf that imports nothing, so a
 # module-level import here costs nothing and introduces no cycle — unlike
 # `db`, which this module deliberately imports per function.
-from ..surfaces import (
+from istota.rooms.surfaces import (
     UserTurnMirror as UserTurnMirrorMode,
     is_room_member,
     origin_surface_for_source_type,
@@ -1527,7 +1527,7 @@ def resolve_delivery_plan(
     # there is the held `room post` verb. Before the shared-room refusal, which
     # would otherwise drop the parent first and leave the pin nothing to
     # substitute the side room for.
-    from ..side_rooms import pin_plan
+    from istota.rooms.side_rooms import pin_plan
     resolved = pin_plan(config, task, resolved)
 
     # Only the room the task ran in may receive it if that room is shared. A

@@ -20,7 +20,8 @@ from email.utils import parseaddr
 
 from imap_tools import AND, U
 
-from ... import confirmations, db, room_veto
+from istota import confirmations, db
+from istota.rooms import veto as room_veto
 from ...config import CONFIRM_SENDER_MATCH_POLICIES, Config
 from ...email_ownership import (
     bot_addressed_in_to,

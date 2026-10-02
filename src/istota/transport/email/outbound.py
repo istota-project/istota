@@ -15,7 +15,8 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
-from ... import db, room_veto
+from istota import db
+from istota.rooms import veto as room_veto
 from ...email_support import get_email_config
 from istota.lib.llm_json import find_fenced_block
 from ...notification_resolvers import outbound_draft as draft_source

@@ -934,7 +934,7 @@ class TestSubtaskAudienceInheritance:
         assert child.guest_participant_id == 3
 
     def test_a_group_chat_subtask_resolves_no_group(self, config, db_path):
-        from istota.room_scopes import task_group_ids
+        from istota.rooms.scopes import task_group_ids
 
         with db.get_db(db_path) as conn:
             db.register_room(conn, "room1", "alice", origin="talk", name="r")

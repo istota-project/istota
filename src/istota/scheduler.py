@@ -93,7 +93,8 @@ def _warn_once(key: str, message: str) -> None:
     _warned_keys.add(key)
     logger.warning("%s", message)
 
-from . import avatars, confirmations, db, speech_gate
+from istota import avatars, confirmations, db
+from istota.rooms import speech_gate
 from .brain import (
     make_brain,
     resolve_brain_kind,
@@ -161,7 +162,7 @@ from .transport import (
     resolve_delivery_plan,
     transcript_room_for_task,
 )
-from .surfaces import (
+from istota.rooms.surfaces import (
     is_room_member,
     is_room_view,
     origin_surface_for_source_type,
@@ -2815,7 +2816,7 @@ def process_one_task(
         db.reset_attempt_tool_calls(conn, task_id)
         # A held draft was never published. A reclaimed/retried attempt must
         # not inherit it; approved requests are already queued and unaffected.
-        from .message_relays import close_task_questions
+        from istota.relay.relays import close_task_questions
         close_task_questions(conn, task_id, reason="attempt_restarted")
 
         # Get user resources
@@ -3174,8 +3175,8 @@ def process_one_task(
     if success:
         result = check_chat_file_links(config, task.user_id, result, task_id=task_id)
 
-    from . import side_rooms as side_rooms_mod
-    from .whatsapp_requests import held_question, present_question
+    from istota.rooms import side_rooms as side_rooms_mod
+    from istota.relay.requests import held_question, present_question
     with db.get_db(config.db_path) as conn:
         relay_question = held_question(conn, task_id)
     if relay_question and not dry_run:
@@ -3252,7 +3253,7 @@ def process_one_task(
     # answer is not recorded there and does not reach it. Progress it posted
     # while running is not taken back.
     if not dry_run:
-        from .room_veto import task_room_vetoed
+        from istota.rooms.veto import task_room_vetoed
         with db.get_db(config.db_path) as conn:
             vetoed = task_room_vetoed(conn, task)
             if vetoed:
@@ -3316,7 +3317,7 @@ def process_one_task(
 
     # Where a shared-room task's confirmation went instead of the room, when
     # it parked on one (multiplayer D4). Its Talk view is posted at the tail.
-    from . import side_rooms
+    from istota.rooms import side_rooms
     side_confirmation: "side_rooms.ConfirmationRoute | None" = None
 
     # A once-job whose table row was deleted inside the transaction below, and
@@ -8816,12 +8817,12 @@ def build_interval_gates(
         )
 
     def _whatsapp_requests(now: float) -> None:
-        from .whatsapp_requests import drain_requests
+        from istota.relay.requests import drain_requests
 
         run_coro(drain_requests(config))
 
     def _room_notices(now: float) -> None:
-        from .room_veto import drain_room_notices
+        from istota.rooms.veto import drain_room_notices
 
         run_coro(drain_room_notices(config))
 

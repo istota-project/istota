@@ -2835,7 +2835,7 @@ class TestTalkParticipants:
 
     @pytest.mark.asyncio
     async def test_a_guest_turn_is_recorded_as_a_guest(self, make_config):
-        from istota import room_policy
+        from istota.rooms import policy as room_policy
 
         config = make_config()
         config.users = {"alice": UserConfig(), "bob": UserConfig()}

@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from .. import db
-    from ..speech_gate import GateDecision
+    from istota.rooms.speech_gate import GateDecision
 
 # referenceId prefix stamped on a web-origin user turn the web process posted
 # into Talk *as the user* (post-as-user mirroring). The Talk poller drops any
@@ -222,7 +222,7 @@ class TransportCapabilities:
     into a room would be committing a content-safety failure, not a routing one.
 
     All three room fields are also declared, per surface name, in the
-    ``istota.surfaces`` leaf, which is what a caller with no ``Config`` and no
+    ``istota.rooms.surfaces`` leaf, which is what a caller with no ``Config`` and no
     instantiated transport reads — ``web_app._user_row_display`` and the
     scheduler's confirmation gate ask what role a surface *plays*, not whether
     this deployment has one running. The declaration stays here because
@@ -250,7 +250,7 @@ class TransportCapabilities:
     # Room view + where that view's transcript lives; None = not a room view.
     room_view: Literal["external", "canonical"] | None = None
     # What an inbound message here does to the room registry; None = never a
-    # room turn. `istota.surfaces` spells this one `room_role`.
+    # room turn. `istota.rooms.surfaces` spells this one `room_role`.
     inbound_room_role: Literal["member", "guest"] | None = None
     # How an external room view carries a turn authored elsewhere; None = it
     # carries none. Meaningless unless `room_view == "external"`.

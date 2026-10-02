@@ -5,7 +5,9 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, message_relays as relays, whatsapp_requests as requests
+from istota import db
+from istota.relay import relays
+from istota.relay import requests
 from istota.transport.whatsapp import whatsapp_conversation_token
 from istota.transport.whatsapp.webhook import _inbound_event, handle_whatsapp_batch
 from istota.transport.whatsapp.baileys_protocol import inbound_event

@@ -220,4 +220,4 @@ A group the bot is in becomes a room on Baileys (multiplayer Stage 18, D6); gene
 
 ## Task sends
 
-`whatsapp_requests.py` owns task intent. The `whatsapp` skill persists a self-send under the proxy's trusted identity; it never calls an adapter and takes no address. `drain_requests` delivers through the ledger and its gates. Self-sends survive task failure; keys are immutable and user/task-scoped; retained hashes stop resurrection; receipts update request status in the ledger transaction. `whatsapp status` refuses relay rows. Relay questions share the table and, for WhatsApp destinations, this ledger; rules in `relay.md`.
+`relay/requests.py` owns task intent. The `whatsapp` skill persists a self-send under the proxy's trusted identity; it never calls an adapter and takes no address. `drain_requests` delivers through the ledger and its gates. Self-sends survive task failure; keys are immutable and user/task-scoped; retained hashes stop resurrection; receipts update request status in the ledger transaction. `whatsapp status` refuses relay rows. Relay questions share the table and, for WhatsApp destinations, this ledger; rules in `relay.md`.

@@ -5,7 +5,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from istota import db, message_relays as relays
+from istota import db
+from istota.relay import relays
 from istota.config import TalkConfig, WebConfig
 from . import test_relay_room_delivery
 from .test_relay_room_delivery import bind_talk, question_rows, relay, release, rows

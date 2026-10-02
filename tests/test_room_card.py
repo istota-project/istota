@@ -20,7 +20,8 @@ the request already fences their words.
 
 import pytest
 
-from istota import db, executor, room_policy
+from istota import db, executor
+from istota.rooms import policy as room_policy
 from istota.config import Config, NextcloudConfig, UserConfig
 from istota.executor import build_prompt, room_card
 

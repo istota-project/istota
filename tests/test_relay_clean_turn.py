@@ -12,7 +12,9 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, message_relays as relays, whatsapp_requests as requests
+from istota import db
+from istota.relay import relays
+from istota.relay import requests
 from istota.agent.events import PRIVATE_RELAY_TOOL_DESCRIPTION, _describe_tool_use
 from istota.brain._events import ToolEndEvent, ToolUseEvent, parse_stream_line
 from istota.config import Config, NextcloudConfig, SchedulerConfig, TalkConfig, EmailConfig

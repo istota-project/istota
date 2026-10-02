@@ -28,7 +28,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from . import db
+from istota import db
 from .speech_gate import normalize_mode
 
 GUEST_REPLY_VALUES = ("off", "held", "direct")

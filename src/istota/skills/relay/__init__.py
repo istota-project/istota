@@ -15,10 +15,11 @@ VIA_CHOICES = ("room", "whatsapp", "sms")
 
 
 def _dispatch(args):
-    from ... import db, message_relays
+    from istota import db
+    from istota.relay import relays as message_relays
     from ...async_runtime import run_coro
     from ...config import load_config
-    from ...whatsapp_requests import RequestError, get_request, hold_question, write_transaction
+    from istota.relay.requests import RequestError, get_request, hold_question, write_transaction
 
     actor = os.environ.get("ISTOTA_USER_ID", "")
     task = os.environ.get("ISTOTA_TASK_ID", "")

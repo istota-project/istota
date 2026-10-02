@@ -18,8 +18,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from . import db, user_profiles
-from .whatsapp_requests import RequestError, binding_fingerprint, text_hash
+from istota import db, user_profiles
+from istota.relay.requests import RequestError, binding_fingerprint, text_hash
 
 KINDS = tuple(value for value in user_profiles.RELAY_DELIVERY_VALUES if value)
 
@@ -27,7 +27,7 @@ _LABEL_MAX = 80
 
 
 def label_text(value: str) -> str:
-    from .confirmations import flatten
+    from istota.confirmations import flatten
 
     return flatten(value)[:_LABEL_MAX]
 
@@ -65,7 +65,7 @@ def _room(conn, config, recipient_user_id: str) -> dict:
 
 
 def _whatsapp(conn, config, recipient_user_id: str) -> dict:
-    from .transport.whatsapp.outbound import active_adapter, _destination
+    from istota.transport.whatsapp.outbound import active_adapter, _destination
 
     if not config.whatsapp.enabled:
         raise RequestError("whatsapp_unavailable")
@@ -199,7 +199,7 @@ def fit_question(config, destination: dict, wording: str) -> tuple[str, str | No
     """
     kind = destination["kind"]
     if kind == "whatsapp":
-        from .transport.whatsapp.outbound import (
+        from istota.transport.whatsapp.outbound import (
             active_adapter, render_template_result, render_whatsapp_result, template_available,
         )
         adapter = active_adapter(config)
@@ -215,11 +215,11 @@ def fit_question(config, destination: dict, wording: str) -> tuple[str, str | No
                 template = candidate
         return service, template
     if kind == "room":
-        from .transport.talk import TalkTransport
+        from istota.transport.talk import TalkTransport
         if destination.get("talk_ref") and len(wording) > TalkTransport.capabilities.max_message_length:
             raise RequestError("invalid_rendering")
         return wording, None
-    from .transport.sms.outbound import render_sms
+    from istota.transport.sms.outbound import render_sms
     if render_sms(wording, config.sms.max_segments).text != wording:
         raise RequestError("invalid_rendering")
     return wording, None

@@ -6,7 +6,8 @@ import asyncio
 import logging
 import sqlite3
 
-from ... import commands, confirmations, db, room_veto
+from istota import commands, confirmations, db
+from istota.rooms import veto as room_veto
 from ...config import Config
 from ...user_profiles import is_e164, short_fingerprint
 from ..ingest import record_phone_turn
@@ -180,7 +181,7 @@ def handle_provider_event(
     # Ahead of the bare-answer parse and the `!` command dispatch, which
     # refuses `reply` off a room: `!relay reply ID yes` answers the relay and
     # can never approve a parked task.
-    from ...message_relays import _REPLY_NOTICES, match_sms_reply
+    from istota.relay.relays import _REPLY_NOTICES, match_sms_reply
 
     relay_reply = match_sms_reply(
         conn, config, actor_user_id=user_id,

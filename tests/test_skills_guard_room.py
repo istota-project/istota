@@ -109,7 +109,7 @@ class TestTheSkillsCliReadsTheRoom:
     def test_an_unreadable_database_withholds_everything(self, env, monkeypatch, capsys):
         config, shared, _solo = env
         _task_in(config, monkeypatch, shared)
-        monkeypatch.setattr("istota.room_scopes.withheld_for_task",
+        monkeypatch.setattr("istota.rooms.scopes.withheld_for_task",
                             lambda *a, **k: (_ for _ in ()).throw(OSError("gone")))
         assert _list(capsys) == {"weather"}
 

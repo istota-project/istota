@@ -51,10 +51,10 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import db
-from .room_scopes import canonical_token  # noqa: F401 — re-exported; one copy
+from istota import db
+from istota.rooms.scopes import canonical_token  # noqa: F401 — re-exported; one copy
 from istota.lib.untrusted import frame_untrusted
-from .whatsapp_requests import (
+from istota.relay.requests import (
     CLAIM_RECOVERY_SECONDS,
     ROOM_KINDS,
     RequestError,
@@ -83,7 +83,7 @@ def is_shared_room(conn, room_token: str, *, is_group_chat: bool = False) -> boo
 
 def room_label(room: db.Room | None) -> str:
     """A room's name for a header line: flattened, capped, never empty."""
-    from .confirmations import flatten
+    from istota.confirmations import flatten
 
     name = flatten(db.room_display_name(room, None) or "") if room else ""
     return name[:_LABEL_MAX] or "a shared room"
@@ -183,7 +183,7 @@ def pin_plan(config, task, plan: list) -> list:
                 kept.append(dest)
             if dropped and not kept:
                 # What would have gone to the parent goes to the side room.
-                from .transport.routing import Destination
+                from istota.transport.routing import Destination
                 kept.append(Destination("web", room.token, "push"))
             return kept
     except Exception as exc:
@@ -224,7 +224,7 @@ def talk_view(conn, config, user_id: str) -> str | None:
         if ref:
             return ref
     try:
-        from .transport.talk import get_dm_token
+        from istota.transport.talk import get_dm_token
     except ImportError:
         return None
     return get_dm_token(user_id)
@@ -248,7 +248,7 @@ async def push_to_talk_view(
     ref, header = await asyncio.to_thread(_resolve)
     if not ref:
         return None
-    from . import message_relays
+    from istota.relay import relays as message_relays
 
     try:
         await message_relays.verify_private_audience(
@@ -256,7 +256,7 @@ async def push_to_talk_view(
     except RequestError:
         logger.warning("side room Talk view for %s is not private; not posted", user_id)
         return None
-    from .transport.talk import TalkTransport
+    from istota.transport.talk import TalkTransport
 
     try:
         return await TalkTransport(config).deliver(ref, f"{header}\n\n{body}", reference_id=reference_id)
@@ -285,8 +285,8 @@ async def push_to_whatsapp_view(
     header = await asyncio.to_thread(_resolve)
     if header is None:
         return False
-    from .transport.whatsapp import REACHED_META
-    from .transport.whatsapp.outbound import current_destination, deliver_whatsapp
+    from istota.transport.whatsapp import REACHED_META
+    from istota.transport.whatsapp.outbound import current_destination, deliver_whatsapp
 
     if not await asyncio.to_thread(current_destination, config, user_id):
         return False
@@ -302,8 +302,8 @@ async def push_to_whatsapp_view(
 
 
 def _send_private_mail(config, *, to: str, subject: str, body: str) -> None:
-    from .email_support import get_email_config
-    from .skills.email import send_email
+    from istota.email_support import get_email_config
+    from istota.skills.email import send_email
 
     send_email(to=to, subject=subject, body=body, config=get_email_config(config),
                from_addr=config.email.bot_email)
@@ -359,7 +359,7 @@ def whatsapp_confirmation_body(prompt: str, task_id: int) -> str:
     answers it by id. The question is trimmed rather than the instruction,
     leaving room for the ``re: <room>`` header the view puts in front.
     """
-    from .transport.whatsapp.outbound import WHATSAPP_TEXT_LIMIT, render_whatsapp
+    from istota.transport.whatsapp.outbound import WHATSAPP_TEXT_LIMIT, render_whatsapp
 
     suffix = (f"\n\nTask #{task_id}. Reply `!confirm {task_id} yes` "
               f"or `!confirm {task_id} no`.")
@@ -436,7 +436,7 @@ def write_confirmation(conn, route: ConfirmationRoute, task, prompt: str) -> Non
 
 def _host_of(conn, room_token: str) -> str | None:
     """The room's host while present, read without recording a loss."""
-    from . import room_policy
+    from istota.rooms import policy as room_policy
 
     policy = room_policy.get_policy(conn, room_token)
     host = policy.host_user_id if policy is not None else None
@@ -454,7 +454,7 @@ def guest_reply_mode(conn, task) -> str | None:
     about its answer. None when the task's principal is no longer the room's
     host, and the answer then goes to nobody.
     """
-    from . import room_policy
+    from istota.rooms import policy as room_policy
 
     token = canonical_token(conn, task.conversation_token)
     if not token or _host_of(conn, token) != task.user_id:
@@ -494,8 +494,8 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
     no side room, a parent the host no longer reads, or an answer the post
     path would refuse — and the caller then cancels rather than posting.
     """
-    from .confirmations import flatten
-    from .whatsapp_requests import associate_confirmation
+    from istota.confirmations import flatten
+    from istota.relay.requests import associate_confirmation
 
     parent = canonical_token(conn, task.conversation_token)
     if not parent:
@@ -504,7 +504,7 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
         side = db.ensure_side_room(conn, parent, task.user_id)
         destination = _post_destination(conn, parent, task.user_id)
         if destination["talk_ref"]:
-            from .transport.talk import TalkTransport
+            from istota.transport.talk import TalkTransport
             if len(reply) > TalkTransport.capabilities.max_message_length:
                 raise RequestError("invalid_rendering")
         label, words = _guest_words(conn, task)
@@ -517,9 +517,9 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
             # On an email thread the post is a mail to these exact people, and
             # the host approving this preview approves that mail (D20): the
             # outbound gate does not hold a send that matches it.
-            from .room_veto import with_email_notice
-            from .transport.email import threads as email_threads
-            from .transport.email.outbound import recipients_of
+            from istota.rooms.veto import with_email_notice
+            from istota.transport.email import threads as email_threads
+            from istota.transport.email.outbound import recipients_of
 
             plan = email_threads.reply_all(conn, config, parent, task_id=task.id)
             if plan is None:
@@ -743,13 +743,13 @@ def side_answer_parent(conn, task) -> str | None:
 
 def _post_destination(conn, parent_token: str, user_id: str) -> dict:
     """The parent a post goes to, re-resolved the same way at hold and delivery."""
-    from .relay_destinations import destination_fingerprint
+    from istota.relay.destinations import destination_fingerprint
 
     room = db.get_room(conn, parent_token)
     if (room is None or room.archived or room.side_of
             or not db.is_room_member(conn, parent_token, user_id)):
         raise RequestError("parent_unavailable")
-    from .room_veto import is_vetoed
+    from istota.rooms.veto import is_vetoed
 
     if is_vetoed(conn, parent_token):
         # Switched off (D12): an approved post is refused, and the request
@@ -778,7 +778,7 @@ def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
     clean turn, with the recipient test swapped for "the text is the member's
     own words, verbatim in their prompt".
     """
-    from . import message_relays
+    from istota.relay import relays as message_relays
 
     _validate_input(request_key, text)
     task = _owned_running_task(conn, actor_user_id=actor_user_id, task_id=task_id)
@@ -798,10 +798,10 @@ def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
         message_relays.validate_origin(conn, config, actor_user_id=actor_user_id, origin=origin)
         destination = _post_destination(conn, side.side_of, actor_user_id)
         if destination["talk_ref"]:
-            from .transport.talk import TalkTransport
+            from istota.transport.talk import TalkTransport
             if len(text) > TalkTransport.capabilities.max_message_length:
                 raise RequestError("invalid_rendering")
-        from .confirmations import flatten
+        from istota.confirmations import flatten
         bot = flatten(getattr(config, "bot_name", "") or "") or "the assistant"
         preview = (f"Post this in {destination['label']} as {bot}?\n"
                    "Only the message below is posted, exactly as written. "
@@ -913,8 +913,8 @@ def _settle(config, claim: dict, talk_id: int | None) -> None:
 
 def _finish(config, request_id: str, reason: str) -> None:
     """Close a request that could not be delivered, and tell its requester."""
-    from .notification_resolvers import task_alert
-    from .notification_store import deliver_pending
+    from istota.notification_resolvers import task_alert
+    from istota.notification_store import deliver_pending
 
     state = "expired" if reason == "queue_expired" else "failed"
     notice = None
@@ -952,7 +952,7 @@ async def deliver_request(config, row) -> None:
     talk_id = None
     if claim["kind"] == "room_post":
         if claim["talk_ref"]:
-            from .transport.talk import TalkTransport
+            from istota.transport.talk import TalkTransport
             try:
                 talk_id = await TalkTransport(config).deliver(
                     claim["talk_ref"], claim["body"], reference_id=claim["reference"])
@@ -962,7 +962,7 @@ async def deliver_request(config, row) -> None:
             # The group itself (multiplayer D6). Like the Talk half, a failed
             # send does not fail the post: the canonical row is the post, and
             # the ledger row and its alert say what happened to the group.
-            from .transport.whatsapp.outbound import deliver_whatsapp
+            from istota.transport.whatsapp.outbound import deliver_whatsapp
             try:
                 await deliver_whatsapp(
                     config, logical_key=claim["reference"], user_id=claim["user_id"],
@@ -973,7 +973,7 @@ async def deliver_request(config, row) -> None:
             # The thread itself, as a reply-all through the outbound gate. As
             # with the other halves, the canonical row is the post; a held or
             # failed mail is reported by the gate and the send log.
-            from .transport.email.outbound import deliver_thread_post
+            from istota.transport.email.outbound import deliver_thread_post
             try:
                 await deliver_thread_post(
                     config, task_id=int(claim["task_id"]), room_token=claim["parent"],

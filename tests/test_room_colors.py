@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from istota.room_colors import ROOM_COLORS
+from istota.rooms.colors import ROOM_COLORS
 
 _WEB = Path(__file__).resolve().parent.parent / "web" / "src" / "lib"
 _TOKENS = _WEB / "styles" / "tokens.css"

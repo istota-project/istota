@@ -17,7 +17,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from istota import commands, confirmations, db, room_policy, side_rooms, speech_gate
+from istota import commands, confirmations, db
+from istota.rooms import policy as room_policy
+from istota.rooms import side_rooms
+from istota.rooms import speech_gate
 from istota.config import Config, NextcloudConfig, TalkConfig, UserConfig
 from istota.transport._types import ParticipantRef
 from istota.transport.ingest import record_inbound
@@ -329,7 +332,7 @@ class TestEmissaryReach:
         assert mixed == frozenset()
 
     def test_a_guest_task_never_counts_as_a_clean_turn(self, config):
-        from istota.whatsapp_requests import _clean_turn
+        from istota.relay.requests import _clean_turn
         with db.get_db(config.db_path) as conn:
             _group(conn)
             guest = _guest_turn(conn, config, "ask bob about it").task_id

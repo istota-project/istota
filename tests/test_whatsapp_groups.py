@@ -19,8 +19,10 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import confirmations, db, room_policy, side_rooms
-from istota import whatsapp_requests as requests
+from istota import confirmations, db
+from istota.rooms import policy as room_policy
+from istota.rooms import side_rooms
+from istota.relay import requests
 from istota.config import Config, UserConfig
 from istota.transport.registry import make_registry
 from istota.transport.routing import resolve_delivery_plan
@@ -558,7 +560,7 @@ class TestTheClassifierReachesTheGroup:
     is asked before the batch transaction and carried through to the gate."""
 
     def test_a_classifier_yes_creates_the_task(self, group):
-        from istota import speech_gate
+        from istota.rooms import speech_gate
 
         group.speech_gate.mode = "classifier"
         decision = speech_gate.GateDecision(

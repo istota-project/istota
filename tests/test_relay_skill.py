@@ -62,7 +62,7 @@ def test_status_is_for_relay_questions_and_whatsapp_status_is_for_self_sends(set
     from argparse import Namespace
     from istota.skills.relay import _dispatch as relay_dispatch
     from istota.skills.whatsapp import _dispatch as whatsapp_dispatch
-    from istota.whatsapp_requests import RequestError
+    from istota.relay.requests import RequestError
     import pytest
     config, ident, _, _ = setup
     held = test_relay_questions.hold(setup)
@@ -117,7 +117,7 @@ def test_list_from_a_talk_bound_room_checks_the_live_audience(setup, monkeypatch
     # is what decides; only the Nextcloud response is stubbed.
     from argparse import Namespace
     from istota.skills.relay import _dispatch
-    from istota.whatsapp_requests import RequestError
+    from istota.relay.requests import RequestError
     import pytest
     _talk_bound(setup, monkeypatch)
     held = test_relay_questions.hold(setup)
@@ -132,7 +132,7 @@ def test_list_from_a_talk_bound_room_checks_the_live_audience(setup, monkeypatch
 def test_an_unreachable_audience_is_not_reported_as_a_wrong_one(setup, monkeypatch):
     from argparse import Namespace
     from istota.skills.relay import _dispatch
-    from istota.whatsapp_requests import RequestError
+    from istota.relay.requests import RequestError
     import pytest
     _talk_bound(setup, monkeypatch)
     held = test_relay_questions.hold(setup)

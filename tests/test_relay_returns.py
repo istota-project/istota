@@ -5,7 +5,9 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, message_relays as relays, whatsapp_requests as requests
+from istota import db
+from istota.relay import relays
+from istota.relay import requests
 from . import test_relay_questions
 from .test_relay_answers import question, event, receive
 
@@ -189,7 +191,7 @@ def test_talk_restart_uses_readback_and_never_posts_again(setup, monkeypatch, se
     history = [{'id': 42, 'actorType': 'users', 'actorId': 'bot', 'referenceId': 'relay-return:' + relay}] if settled else []
     client = SimpleNamespace(send_message=post, fetch_chat_history=AsyncMock(return_value=history))
     monkeypatch.setattr('istota.transport.talk.get_talk_client', lambda config: client)
-    with patch('istota.message_relays._record_return', side_effect=RuntimeError('crash after send')):
+    with patch('istota.relay.relays._record_return', side_effect=RuntimeError('crash after send')):
         with pytest.raises(RuntimeError):
             asyncio.run(relays.deliver_returns(config))
     assert post.await_count == 1
@@ -417,7 +419,7 @@ def test_external_ledger_settlement_recovers_after_process_crash(setup, monkeypa
     monkeypatch.setattr('istota.transport.whatsapp.providers.whatsapp_cloud._send', wa_send)
     monkeypatch.setattr('istota.transport.whatsapp.baileys_bridge.active_bridge', lambda: SimpleNamespace(send=wa_send))
     monkeypatch.setattr('istota.transport.sms.providers.registry.make_provider_registry', lambda config: _providers(_adapter(sms_send)))
-    with patch('istota.message_relays._record_return', side_effect=RuntimeError('crash after send')):
+    with patch('istota.relay.relays._record_return', side_effect=RuntimeError('crash after send')):
         with pytest.raises(RuntimeError):
             asyncio.run(relays.deliver_returns(config))
     with db.get_db(config.db_path) as conn:

@@ -523,7 +523,7 @@ def _is_member(conn, group_id: str, user_id: str) -> bool:
 
 def _task_groups(conn, task) -> list[str]:
     """``room_scopes.task_group_ids``, with a database error read as none."""
-    from .room_scopes import task_group_ids
+    from istota.rooms.scopes import task_group_ids
 
     try:
         return task_group_ids(conn, task)

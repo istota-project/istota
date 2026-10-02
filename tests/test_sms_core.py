@@ -9,7 +9,8 @@ from dataclasses import replace
 
 import pytest
 
-from istota import db, notifications, surfaces
+from istota import db, notifications
+from istota.rooms import surfaces
 from istota.notification_resolvers import confirmation as confirmation_source
 from istota.config import Config, SmsConfig, UserConfig
 from istota.transport import make_registry
@@ -2063,7 +2064,7 @@ class TestSmsRoomMint:
             assert conn.execute('SELECT count(*) FROM messages').fetchone()[0] == 1
 
     def test_canonical_sms_command_can_manage_relays(self, tmp_path):
-        from istota import message_relays
+        from istota.relay import relays as message_relays
         config = _config(tmp_path)
         sent = []
         providers = _providers(_adapter(
@@ -2082,8 +2083,8 @@ class TestSmsRoomMint:
 
     @pytest.mark.parametrize('change', ['shared', 'guest', 'archived', 'deleted', 'foreign'])
     def test_canonical_sms_relay_origin_requires_own_live_private_room(self, tmp_path, change):
-        from istota import message_relays
-        from istota.whatsapp_requests import RequestError
+        from istota.relay import relays as message_relays
+        from istota.relay.requests import RequestError
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
             result = handle_provider_event(conn, config, _inbound())
@@ -2104,8 +2105,8 @@ class TestSmsRoomMint:
                 message_relays.private_origin(conn, config, actor_user_id='alice', surface='sms', conversation_token=token)
 
     def test_relay_origin_survives_mint_but_not_delete_and_recreate(self, tmp_path):
-        from istota import message_relays
-        from istota.whatsapp_requests import RequestError
+        from istota.relay import relays as message_relays
+        from istota.relay.requests import RequestError
         config = _config(tmp_path)
         ref = sms_conversation_token('alice')
         with db.get_db(config.db_path) as conn:

@@ -48,9 +48,10 @@ import re
 import uuid
 from dataclasses import dataclass
 
-from . import db, room_policy
-from .transport import participants
-from .transport._types import ParticipantRef
+from istota import db
+from istota.rooms import policy as room_policy
+from istota.transport import participants
+from istota.transport._types import ParticipantRef
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,7 @@ def command_word(config) -> str:
 
 
 def _bot(config) -> str:
-    from .confirmations import flatten
+    from istota.confirmations import flatten
 
     return flatten(getattr(config, "bot_name", "") or "") or "The assistant"
 
@@ -357,7 +358,7 @@ def announcement_text(conn, config, room_token: str) -> str:
     """The fixed announcement, from the room's tables and the deployment's names."""
     host = _host(conn, room_token)
     user = getattr(config, "users", {}).get(host) if host else None
-    from .confirmations import flatten
+    from istota.confirmations import flatten
 
     who = flatten(getattr(user, "display_name", None) or host or "") or "this room's host"
     word = command_word(config)
@@ -376,7 +377,7 @@ def announcement_text(conn, config, room_token: str) -> str:
 
 
 def _claim_announcements(config, limit: int) -> list[dict]:
-    from .whatsapp_requests import write_transaction
+    from istota.relay.requests import write_transaction
 
     claims: list[dict] = []
     with db.get_db(config.db_path) as conn:
@@ -429,13 +430,13 @@ async def push_to_room(config, *, room_token: str, text: str, reference: str,
     best-effort: a failed post is logged, and the row stands for the room.
     """
     if talk_ref:
-        from .transport.talk import TalkTransport
+        from istota.transport.talk import TalkTransport
         try:
             await TalkTransport(config).deliver(talk_ref, text, reference_id=reference)
         except Exception as exc:  # noqa: BLE001 — the row is the notice
             logger.warning("room %s: Talk notice failed: %s", room_token, exc)
     if whatsapp:
-        from .transport.whatsapp.outbound import deliver_whatsapp
+        from istota.transport.whatsapp.outbound import deliver_whatsapp
         try:
             await deliver_whatsapp(config, logical_key=reference, user_id=owner,
                                    text=text, group_room=room_token)
@@ -460,7 +461,7 @@ def queue_notice(conn, room_token: str, outcome: VetoOutcome) -> None:
 
 
 def _claim_notices(config, limit: int) -> list[dict]:
-    from .whatsapp_requests import write_transaction
+    from istota.relay.requests import write_transaction
 
     claims: list[dict] = []
     with db.get_db(config.db_path) as conn:

@@ -6,9 +6,9 @@ import json
 import logging
 import sqlite3
 
-from . import db
+from istota import db
 
-from .whatsapp_requests import CONTENT_RETENTION_DAYS, RequestError, write_transaction
+from istota.relay.requests import CONTENT_RETENTION_DAYS, RequestError, write_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +153,7 @@ def _close_relay(conn: sqlite3.Connection, relay_id: str, *, state: str, reason:
                (SELECT id FROM whatsapp_skill_requests WHERE relay_id=?)""", (relay_id,),
         )
     if changed:
-        from .notification_resolvers.message_relay import write
+        from istota.notification_resolvers.message_relay import write
 
         relay = conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone()
         write(conn, relay)
@@ -162,7 +162,7 @@ def _close_relay(conn: sqlite3.Connection, relay_id: str, *, state: str, reason:
 
 
 def _resolve_recipient_notice(conn, relay) -> None:
-    from .notification_resolvers import relay_question
+    from istota.notification_resolvers import relay_question
 
     relay_question.resolve_for_relay(conn, relay["recipient_user_id"], relay["id"], by="system")
 
@@ -212,9 +212,9 @@ def private_origin(conn, config, *, actor_user_id: str, surface: str,
     Talk participants require a fresh server check via verify_private_audience before
     displaying content. The local membership table alone omits unknown users.
     """
-    from .transport.whatsapp import whatsapp_conversation_token
-    from .transport.sms import sms_conversation_token
-    from .whatsapp_requests import binding_fingerprint, text_hash
+    from istota.transport.whatsapp import whatsapp_conversation_token
+    from istota.transport.sms import sms_conversation_token
+    from istota.relay.requests import binding_fingerprint, text_hash
 
     if actor_user_id not in config.users:
         raise RequestError("unsupported_origin")
@@ -235,7 +235,7 @@ def private_origin(conn, config, *, actor_user_id: str, surface: str,
         return {"surface": surface, "channel": talk.surface_ref if surface == "talk" else room.token,
                 "room_token": room.token, "talk_ref": talk.surface_ref if talk else None}
     if surface in ("sms", "whatsapp"):
-        from . import room_policy
+        from istota.rooms import policy as room_policy
 
         surface_ref = (sms_conversation_token(actor_user_id) if surface == "sms"
                        else whatsapp_conversation_token(actor_user_id))
@@ -298,7 +298,7 @@ async def verify_private_audience(config, *, actor_user_id: str, origin: dict) -
     """Fresh external audience check, called outside the claim transaction."""
     if not origin.get("talk_ref"):
         return
-    from .talk import TalkClient
+    from istota.talk import TalkClient
 
     client = TalkClient(config)
     try:
@@ -316,7 +316,7 @@ async def verify_private_audience(config, *, actor_user_id: str, origin: dict) -
         if participant.get("actorType") != "users" or not participant.get("actorId"):
             raise RequestError("unsupported_origin")
         actors.add(participant["actorId"])
-    from .transport.talk import _bot_actor_ids
+    from istota.transport.talk import _bot_actor_ids
 
     if actor_user_id not in actors or len(actors) != 2 or not (actors - {actor_user_id}) <= _bot_actor_ids(config):
         raise RequestError("unsupported_origin")
@@ -363,21 +363,21 @@ _REPLY_NOTICES = {
 
 def answer_body(relay, text: str) -> str:
     """One stable attribution header outside the exact authorized answer."""
-    from .confirmations import flatten
+    from istota.confirmations import flatten
 
     return f"Answer from {flatten(relay['recipient_user_id'])}:\n\n{text}"
 
 
 def _answer_fits(config, relay, text: str) -> bool:
-    from .transport.whatsapp.outbound import WHATSAPP_TEXT_LIMIT
-    from .transport.sms.outbound import _gsm7_units, _utf16_units, _segment_count
+    from istota.transport.whatsapp.outbound import WHATSAPP_TEXT_LIMIT
+    from istota.transport.sms.outbound import _gsm7_units, _utf16_units, _segment_count
 
     body = answer_body(relay, text)
     if len(body) > WHATSAPP_TEXT_LIMIT:
         return False
     origin = json.loads(relay["origin"])
     if origin["surface"] == "talk":
-        from .transport.talk import TalkTransport
+        from istota.transport.talk import TalkTransport
 
         if len(body) > (TalkTransport.capabilities.max_message_length or 4000):
             return False
@@ -411,7 +411,7 @@ def _destination_current(conn, config, relay, *, actor_user_id: str, surface: st
     A room answer checks membership only: the reply was authored inside the
     room, and the live Talk participant check runs at delivery.
     """
-    from .whatsapp_requests import binding_fingerprint, text_hash
+    from istota.relay.requests import binding_fingerprint, text_hash
 
     kind = _SURFACE_KIND.get(surface)
     if kind is None or relay["surface"] != kind:
@@ -570,8 +570,8 @@ def create_recipient_task(conn, config, relay, *, surface: str, actor_user_id: s
     it from there. A rejected reply carries a bounded snapshot of its own
     question and outcome in the user half instead.
     """
-    from .transport._types import IncomingMessage
-    from .transport.ingest import ingest_message, record_inbound
+    from istota.transport._types import IncomingMessage
+    from istota.transport.ingest import ingest_message, record_inbound
 
     context = None if outcome == "accepted" else _context(relay, outcome)
     # A relay reply answers a question the bot posted, so it is addressed to the
@@ -596,14 +596,14 @@ def create_recipient_task(conn, config, relay, *, surface: str, actor_user_id: s
             addressed_to_bot=True,
         ))
     elif surface == "whatsapp":
-        from .transport.whatsapp.webhook import record_whatsapp_turn
+        from istota.transport.whatsapp.webhook import record_whatsapp_turn
 
         task_id = record_whatsapp_turn(
             conn, config, actor_user_id, text, attachments=attachments or [],
             reply_to_content=context,
         ).task_id
     elif surface == "sms":
-        from .transport.sms.webhook import record_sms_turn
+        from istota.transport.sms.webhook import record_sms_turn
 
         task_id = record_sms_turn(
             conn, config, actor_user_id, text, reply_to_content=context,
@@ -624,7 +624,7 @@ def create_recipient_task(conn, config, relay, *, surface: str, actor_user_id: s
 
 def _reply_task(conn, config, *, actor_user_id: str, inbound_id: str, text: str,
                 relay, outcome: str, attachments=None):
-    from .transport.whatsapp.webhook import WhatsAppEventResult, MEDIA_ONLY_PROMPT
+    from istota.transport.whatsapp.webhook import WhatsAppEventResult, MEDIA_ONLY_PROMPT
 
     task_id = create_recipient_task(
         conn, config, relay, surface="whatsapp", actor_user_id=actor_user_id,
@@ -656,7 +656,7 @@ def parse_reply_command(text: str) -> tuple[bool, str | None, str]:
 
 def match_whatsapp_reply(conn, config, *, actor_user_id: str, event):
     """Handle only explicit relay replies, before bare YES/NO or commands."""
-    from .transport.whatsapp.webhook import WhatsAppEventResult
+    from istota.transport.whatsapp.webhook import WhatsAppEventResult
 
     text = event.text or ""
     command, relay_id, answer = parse_reply_command(text)
@@ -794,7 +794,7 @@ def reconcile_return_delivery(conn, *, logical_key: str, status: str, message_id
             "WHERE id=? AND state='answered' AND return_state IN ('sending','uncertain','delivered')", (relay_id,),
         ).rowcount
         if changed:
-            from .notification_resolvers.message_relay import write
+            from istota.notification_resolvers.message_relay import write
 
             write(conn, conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone())
     elif status in ("accepted", "queued", "sent", "delivered", "read"):
@@ -823,7 +823,7 @@ def write_recipient_notice(conn, relay_id: str):
     Returns the write result for a caller that pushes it; one that does not
     (a phone destination, whose message is its own push) drops it.
     """
-    from .notification_resolvers import relay_question
+    from istota.notification_resolvers import relay_question
 
     relay = conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone()
     if relay is None or relay["state"] not in relay_question.OPEN_STATES:
@@ -838,7 +838,7 @@ async def deliver_question(config, row) -> None:
     with a fixed reason; nothing here retargets.
     """
     import asyncio
-    from .whatsapp_requests import _finish_request, logical_key
+    from istota.relay.requests import _finish_request, logical_key
 
     try:
         with db.get_db(config.db_path) as conn:
@@ -851,8 +851,8 @@ async def deliver_question(config, row) -> None:
             await _deliver_room_question(config, row)
             return
         if relay["surface"] == "sms":
-            from .transport.sms.outbound import deliver_sms
-            from .transport.sms.providers.registry import make_provider_registry
+            from istota.transport.sms.outbound import deliver_sms
+            from istota.transport.sms.providers.registry import make_provider_registry
             try:
                 providers = await asyncio.to_thread(make_provider_registry, config)
             except (ImportError, ValueError):
@@ -862,7 +862,7 @@ async def deliver_question(config, row) -> None:
                 text="", relay_question_id=row["relay_id"],
             )
         else:
-            from .transport.whatsapp.outbound import deliver_whatsapp
+            from istota.transport.whatsapp.outbound import deliver_whatsapp
             record = await deliver_whatsapp(
                 config, logical_key=logical_key(row), user_id=row["recipient_user_id"],
                 text="", task_id=None, request_id=row["id"],
@@ -891,7 +891,7 @@ async def _deliver_room_question(config, row) -> None:
     never posts a second time.
     """
     import asyncio
-    from .notification_store import deliver_pending
+    from istota.notification_store import deliver_pending
 
     fresh = row["state"] == "queued"
     if fresh:
@@ -917,7 +917,7 @@ async def _deliver_room_question(config, row) -> None:
 
 
 def _claim_room_question(config, request_id: str, fresh: bool):
-    from .whatsapp_requests import CLAIM_RECOVERY_SECONDS, admit_request
+    from istota.relay.requests import CLAIM_RECOVERY_SECONDS, admit_request
 
     with db.get_db(config.db_path) as conn:
         with write_transaction(conn):
@@ -964,7 +964,7 @@ def _mark_question_sent(conn, request_id: str) -> None:
 
 async def _post_room_question(config, claim, *, fresh: bool):
     """The Talk half: a post the first time, a readback on recovery."""
-    from .transport.talk import TalkTransport, get_talk_client
+    from istota.transport.talk import TalkTransport, get_talk_client
 
     transport = TalkTransport(config)
     reference = "relay-question:" + claim["relay_id"]
@@ -1006,8 +1006,8 @@ def return_payload(conn, config, *, relay_id: str, actor_user_id: str, surface: 
 
 
 def return_whatsapp_destination(config, *, relay_id: str, actor_user_id: str, caps) -> str:
-    from .whatsapp_requests import binding_fingerprint
-    from .transport.whatsapp.outbound import _destination
+    from istota.relay.requests import binding_fingerprint
+    from istota.transport.whatsapp.outbound import _destination
 
     with db.get_db(config.db_path) as conn:
         relay = conn.execute("SELECT origin FROM message_relays WHERE id=? AND asker_user_id=? AND return_state='sending'",
@@ -1026,12 +1026,12 @@ def _settle_return(conn, relay_id: str, state: str, *, message_id=None, error=No
         (state, str(message_id) if message_id is not None else None, error, relay_id, state),
     ).rowcount
     if changed and state == "delivered":
-        from .notification_store import resolve_by_object
+        from istota.notification_store import resolve_by_object
 
         resolve_by_object(conn, user_id=conn.execute("SELECT asker_user_id FROM message_relays WHERE id=?", (relay_id,)).fetchone()[0],
                           source="message_relay", object_type="message_relay", object_id=relay_id, by="delivered")
     if changed and state in ("blocked", "uncertain"):
-        from .notification_resolvers.message_relay import write
+        from istota.notification_resolvers.message_relay import write
 
         write(conn, conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone())
 
@@ -1101,7 +1101,7 @@ async def _external_return(config, relay, *, fresh):
     surface = origin["surface"]
     reference = relay["return_reference"]
     if surface == "talk":
-        from .transport.talk import TalkTransport, get_talk_client
+        from istota.transport.talk import TalkTransport, get_talk_client
 
         transport = TalkTransport(config)
         if fresh:
@@ -1119,13 +1119,13 @@ async def _external_return(config, relay, *, fresh):
         # isn't still alive. Recovery never starts a second external call.
         return (_delivery_outcome(record[0]), record[1]) if record else ("uncertain", None)
     if surface == "whatsapp":
-        from .transport.whatsapp.outbound import deliver_whatsapp
+        from istota.transport.whatsapp.outbound import deliver_whatsapp
 
         record = await deliver_whatsapp(config, logical_key=reference, user_id=relay["asker_user_id"],
                                         text="", relay_return_id=relay["id"])
         return _delivery_outcome(record.status), record.meta_message_id
-    from .transport.sms.outbound import deliver_sms
-    from .transport.sms.providers.registry import make_provider_registry
+    from istota.transport.sms.outbound import deliver_sms
+    from istota.transport.sms.providers.registry import make_provider_registry
 
     providers = await asyncio.to_thread(make_provider_registry, config)
     record = await deliver_sms(config, providers, logical_key=reference, user_id=relay["asker_user_id"],
@@ -1160,7 +1160,7 @@ async def deliver_returns(config, *, limit: int = 20) -> int:
 
 
 def _sweep_relays(config, limit):
-    from .whatsapp_requests import cleanup_content
+    from istota.relay.requests import cleanup_content
 
     with db.get_db(config.db_path) as conn:
         expire_relays(conn, limit=limit)
@@ -1189,8 +1189,8 @@ async def poll_relays(config, *, limit: int = 20):
 async def deliver_relay_notices(config, *, limit: int = 20):
     """Retry only body-free notices; never reroute a private answer."""
     import asyncio
-    from .notification_store import RaiseResult, deliver_pending, mark_delivered
-    from .notifications import send_notification
+    from istota.notification_store import RaiseResult, deliver_pending, mark_delivered
+    from istota.notifications import send_notification
 
     with db.get_db(config.db_path) as conn:
         rows = [dict(row) for row in conn.execute(

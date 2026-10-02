@@ -2611,8 +2611,8 @@ class TestWhatsAppRoomMint:
 
     def test_canonical_relay_command_and_descriptor_lifecycle(self, tmp_path):
         import asyncio
-        from istota import message_relays
-        from istota.whatsapp_requests import RequestError
+        from istota.relay import relays as message_relays
+        from istota.relay.requests import RequestError
         from istota.transport.whatsapp.webhook import resolve_event_response
         config = _config(tmp_path)
         _bind(config, bsuid=USER_BSUID, send_id=USER_BSUID)
@@ -2640,8 +2640,8 @@ class TestWhatsAppRoomMint:
 
     @pytest.mark.parametrize("change", ["shared", "guest", "archived", "foreign"])
     def test_relay_origin_requires_own_live_private_binding(self, tmp_path, change):
-        from istota import message_relays
-        from istota.whatsapp_requests import RequestError
+        from istota.relay import relays as message_relays
+        from istota.relay.requests import RequestError
         config = _config(tmp_path)
         _bind(config, bsuid=USER_BSUID)
         first = _handle(config, _text_payload())[0]

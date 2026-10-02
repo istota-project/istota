@@ -35,7 +35,9 @@ import hashlib
 import logging
 from typing import TYPE_CHECKING
 
-from ... import confirmations, db, room_policy, room_veto
+from istota import confirmations, db
+from istota.rooms import policy as room_policy
+from istota.rooms import veto as room_veto
 from .. import participants
 from .._types import ParticipantRef
 from ..ingest import record_inbound
@@ -45,7 +47,7 @@ from ._types import InboundWhatsAppEvent, WhatsAppGroupMember, WhatsAppGroupRost
 
 if TYPE_CHECKING:
     from ...config import Config
-    from ...speech_gate import GateDecision
+    from istota.rooms.speech_gate import GateDecision
     from .webhook import WhatsAppEventResult
 
 logger = logging.getLogger(__name__)
@@ -330,7 +332,7 @@ def classify_group_event(config: "Config", event) -> "GateDecision | None":
     text = (getattr(event, "text", None) or "").strip()
     if not text or text.startswith("!"):
         return None
-    from ... import speech_gate
+    from istota.rooms import speech_gate
     from ..ingest import classify_ahead
 
     if speech_gate.normalize_mode(config.speech_gate.mode) != "classifier":

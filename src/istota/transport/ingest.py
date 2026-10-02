@@ -20,8 +20,11 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Sequence
 
-from .. import db, room_policy, room_veto, speech_gate
-from ..surfaces import is_room_member_for
+from istota import db
+from istota.rooms import policy as room_policy
+from istota.rooms import veto as room_veto
+from istota.rooms import speech_gate
+from istota.rooms.surfaces import is_room_member_for
 from istota.lib.untrusted import frame_untrusted
 from . import participants
 from ._types import IncomingMessage, ParticipantRef

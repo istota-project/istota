@@ -19,7 +19,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from istota import db, room_policy
+from istota import db
+from istota.rooms import policy as room_policy
 from istota.config import Config, SiteConfig, UserConfig, WebConfig
 
 try:

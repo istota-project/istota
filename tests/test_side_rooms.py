@@ -12,10 +12,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from istota import confirmations, db, side_rooms
-from istota import whatsapp_requests as requests
+from istota import confirmations, db
+from istota.rooms import side_rooms
+from istota.relay import requests
 from istota.config import Config, NextcloudConfig, TalkConfig, UserConfig
-from istota.whatsapp_requests import RequestError
+from istota.relay.requests import RequestError
 
 from .support.rooms import plain_talk_room
 from .support.talk_double import FakeTalkClient, talk_bot_client

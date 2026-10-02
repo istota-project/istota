@@ -40,7 +40,8 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, surfaces, web_app
+from istota import db, web_app
+from istota.rooms import surfaces
 from istota.transport import routing
 from istota.transport.routing import Destination
 

@@ -12,7 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from istota import commands, confirmations, db, room_policy
+from istota import commands, confirmations, db
+from istota.rooms import policy as room_policy
 from istota.config import (
     Config,
     NextcloudConfig,

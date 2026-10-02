@@ -32,7 +32,7 @@ import logging
 import sqlite3
 from collections.abc import Mapping
 
-from . import db
+from istota import db
 
 logger = logging.getLogger(__name__)
 
@@ -236,8 +236,8 @@ def channel_notes_shared(
 
 def _is_own_push_token(user_id: str, token: str) -> bool:
     """Whether ``token`` is ``user_id``'s own SMS or WhatsApp 1:1 token."""
-    from .transport.sms import sms_conversation_token
-    from .transport.whatsapp import whatsapp_conversation_token
+    from istota.transport.sms import sms_conversation_token
+    from istota.transport.whatsapp import whatsapp_conversation_token
 
     return token in (
         sms_conversation_token(user_id), whatsapp_conversation_token(user_id),
@@ -281,7 +281,7 @@ def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
     if not groups or not task.conversation_token:
         return groups
 
-    from . import room_policy
+    from istota.rooms import policy as room_policy
 
     room_token = canonical_token(conn, task.conversation_token)
     if room_token is None:

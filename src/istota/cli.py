@@ -3817,7 +3817,7 @@ def cmd_nextcloud_provision_rooms(args):
     Docker install (ISSUE-115). Idempotent, and prints a `STATE:` line so the
     Ansible role can report `changed` off it the way `user ensure` does.
     """
-    from istota import provision_rooms as provision_rooms_mod
+    from istota.rooms import provision as provision_rooms_mod
 
     config = load_config(Path(args.config) if args.config else None)
     nc = config.nextcloud

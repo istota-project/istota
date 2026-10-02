@@ -3,7 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from istota import db, room_policy, room_scopes
+from istota import db
+from istota.rooms import policy as room_policy
+from istota.rooms import scopes as room_scopes
 from istota.config import Config
 from istota.transport import routing
 

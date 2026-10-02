@@ -7,7 +7,7 @@ to `istota user ensure` when the operator had already put tokens in inventory,
 so out of the box `log_channel` stayed empty, `effective_log_destinations`
 returned `[]`, and the execution log was off.
 
-The fix is a shared, testable implementation — `istota.provision_rooms`, driven
+The fix is a shared, testable implementation — `istota.rooms.provision`, driven
 by `istota nextcloud provision-rooms` — plus an Ansible task that calls it. The
 tests below pin the three properties that make it safe to run on every deploy:
 idempotence by participant-scoped lookup, group (not public) rooms, and seeding
@@ -54,7 +54,7 @@ def _fake_client(rooms=None, participants=None, created_token="newtok"):
 class TestFindRoomForUser:
     @pytest.mark.asyncio
     async def test_reuses_room_the_user_is_already_in(self):
-        from istota.provision_rooms import find_room_for_user
+        from istota.rooms.provision import find_room_for_user
 
         client = _fake_client(
             rooms=[{"token": "tok1", "displayName": "logs"}],
@@ -66,7 +66,7 @@ class TestFindRoomForUser:
     async def test_ignores_same_named_room_of_another_user(self):
         # The bot sits in every user's rooms, so a bare name match would hand
         # alice bob's #logs on a shared Nextcloud. Participation is the scope.
-        from istota.provision_rooms import find_room_for_user
+        from istota.rooms.provision import find_room_for_user
 
         client = _fake_client(
             rooms=[{"token": "bobs", "displayName": "logs"}],
@@ -76,7 +76,7 @@ class TestFindRoomForUser:
 
     @pytest.mark.asyncio
     async def test_matches_on_name_when_displayname_absent(self):
-        from istota.provision_rooms import find_room_for_user
+        from istota.rooms.provision import find_room_for_user
 
         client = _fake_client(
             rooms=[{"token": "tok1", "name": "alerts"}],
@@ -88,7 +88,7 @@ class TestFindRoomForUser:
     async def test_skips_group_actor_with_matching_id(self):
         # A circle/group actor whose id happens to equal the user id is not
         # the user; only `users`-type actors count.
-        from istota.provision_rooms import find_room_for_user
+        from istota.rooms.provision import find_room_for_user
 
         client = _fake_client(
             rooms=[{"token": "tok1", "displayName": "logs"}],
@@ -105,7 +105,7 @@ class TestFindRoomForUser:
 class TestEnsureRoom:
     @pytest.mark.asyncio
     async def test_creates_group_room_and_invites_user(self):
-        from istota.provision_rooms import GROUP_ROOM_TYPE, ensure_room
+        from istota.rooms.provision import GROUP_ROOM_TYPE, ensure_room
 
         client = _fake_client(created_token="fresh")
         result = await ensure_room(client, "general", "alice")
@@ -122,13 +122,13 @@ class TestEnsureRoom:
         # Talk types: 1 = one-to-one, 2 = group, 3 = public. #logs carries the
         # verbose execution log; a public room is joinable by anyone holding
         # its token, so this must stay 2.
-        from istota.provision_rooms import GROUP_ROOM_TYPE
+        from istota.rooms.provision import GROUP_ROOM_TYPE
 
         assert GROUP_ROOM_TYPE == 2
 
     @pytest.mark.asyncio
     async def test_existing_room_is_not_recreated(self):
-        from istota.provision_rooms import ensure_room
+        from istota.rooms.provision import ensure_room
 
         client = _fake_client(
             rooms=[{"token": "tok1", "displayName": "general"}],
@@ -144,7 +144,7 @@ class TestEnsureRoom:
     async def test_invite_failure_still_returns_the_created_room(self):
         # The room exists once create returns; losing the token because the
         # invite failed would create a duplicate on the next run.
-        from istota.provision_rooms import ensure_room
+        from istota.rooms.provision import ensure_room
 
         client = _fake_client(created_token="fresh")
         client.add_participant = AsyncMock(side_effect=RuntimeError("boom"))
@@ -155,7 +155,7 @@ class TestEnsureRoom:
 
     @pytest.mark.asyncio
     async def test_missing_token_in_create_response_raises(self):
-        from istota.provision_rooms import ProvisionError, ensure_room
+        from istota.rooms.provision import ProvisionError, ensure_room
 
         client = _fake_client()
         client.create_conversation = AsyncMock(return_value={})
@@ -168,7 +168,7 @@ class TestOrphanAdoption:
 
     @pytest.mark.asyncio
     async def test_adopts_a_bot_only_room_and_retries_the_invite(self):
-        from istota.provision_rooms import ensure_room
+        from istota.rooms.provision import ensure_room
 
         client = _fake_client(
             rooms=[{"token": "orphan", "displayName": "logs", "type": 2}],
@@ -185,7 +185,7 @@ class TestOrphanAdoption:
     async def test_a_failed_invite_does_not_mint_a_room_per_run(self):
         # The bug this guards: run 1 creates `logs` and the invite fails; run 2
         # must find that room rather than create a second one, for ever.
-        from istota.provision_rooms import ensure_room
+        from istota.rooms.provision import ensure_room
 
         client = _fake_client(created_token="T1")
         client.add_participant = AsyncMock(side_effect=RuntimeError("no permission"))
@@ -209,7 +209,7 @@ class TestOrphanAdoption:
     @pytest.mark.asyncio
     async def test_never_adopts_another_users_room(self):
         # bob's #logs has bob in it, so it is not an orphan of alice's.
-        from istota.provision_rooms import ensure_room
+        from istota.rooms.provision import ensure_room
 
         client = _fake_client(
             rooms=[{"token": "bobs", "displayName": "logs", "type": 2}],
@@ -230,7 +230,7 @@ class TestOrphanAdoption:
     async def test_adopts_nothing_without_a_bot_id(self):
         # Without knowing who the bot is, "bot-only" is unknowable — so don't
         # guess. Creating a duplicate is recoverable; stealing a room is not.
-        from istota.provision_rooms import ensure_room
+        from istota.rooms.provision import ensure_room
 
         client = _fake_client(
             rooms=[{"token": "orphan", "displayName": "logs", "type": 2}],
@@ -243,7 +243,7 @@ class TestOrphanAdoption:
     @pytest.mark.asyncio
     async def test_empty_participant_list_is_not_an_orphan(self):
         # More likely a failed read than a real room.
-        from istota.provision_rooms import ensure_room
+        from istota.rooms.provision import ensure_room
 
         client = _fake_client(
             rooms=[{"token": "unknown", "displayName": "logs", "type": 2}],
@@ -283,14 +283,14 @@ class TestRealisticRoomList:
 
     @pytest.mark.asyncio
     async def test_picks_the_group_room_not_the_one_to_one(self):
-        from istota.provision_rooms import find_room_for_user
+        from istota.rooms.provision import find_room_for_user
 
         client = _fake_client(rooms=self.ROOMS, participants=self.PARTICIPANTS)
         assert await find_room_for_user(client, "logs", "alice") == "alices"
 
     @pytest.mark.asyncio
     async def test_a_guest_participant_is_not_the_user(self):
-        from istota.provision_rooms import find_room_for_user
+        from istota.rooms.provision import find_room_for_user
 
         client = _fake_client(
             rooms=[{"token": "t", "type": 2, "displayName": "logs"}],
@@ -304,7 +304,7 @@ class TestProvisionRooms:
     async def test_fetches_the_room_list_once_for_all_names(self):
         # Three names used to mean three identical full-list GETs per user, and
         # the Ansible loop runs one process per user.
-        from istota.provision_rooms import provision_rooms
+        from istota.rooms.provision import provision_rooms
 
         client = _fake_client()
         client.create_conversation = AsyncMock(
@@ -315,7 +315,7 @@ class TestProvisionRooms:
 
     @pytest.mark.asyncio
     async def test_provisions_the_three_defaults_in_order(self):
-        from istota.provision_rooms import DEFAULT_ROOMS, provision_rooms
+        from istota.rooms.provision import DEFAULT_ROOMS, provision_rooms
 
         assert DEFAULT_ROOMS == ("general", "logs", "alerts")
         client = _fake_client()
@@ -342,7 +342,7 @@ def db_path(tmp_path):
 
 class TestSeedChannels:
     def test_seeds_log_and_alerts_from_room_tokens(self, db_path):
-        from istota.provision_rooms import ProvisionedRoom, seed_channel_profile
+        from istota.rooms.provision import ProvisionedRoom, seed_channel_profile
 
         rooms = [
             ProvisionedRoom(name="general", token="g", created=True),
@@ -360,7 +360,7 @@ class TestSeedChannels:
     def test_never_overwrites_an_operator_pinned_channel(self, db_path):
         # The Ansible role runs `user ensure` (inventory values) before this,
         # so a pinned token must survive every redeploy.
-        from istota.provision_rooms import ProvisionedRoom, seed_channel_profile
+        from istota.rooms.provision import ProvisionedRoom, seed_channel_profile
 
         user_profiles.update_profile_with_status(
             db_path, "alice", log_channel="pinned"
@@ -378,7 +378,7 @@ class TestSeedChannels:
         assert profile.alerts_channel == "a"
 
     def test_second_run_is_a_noop(self, db_path):
-        from istota.provision_rooms import ProvisionedRoom, seed_channel_profile
+        from istota.rooms.provision import ProvisionedRoom, seed_channel_profile
 
         rooms = [
             ProvisionedRoom(name="logs", token="l", created=True),
@@ -391,7 +391,7 @@ class TestSeedChannels:
         assert state == "noop"
 
     def test_room_without_a_channel_mapping_is_ignored(self, db_path):
-        from istota.provision_rooms import ProvisionedRoom, seed_channel_profile
+        from istota.rooms.provision import ProvisionedRoom, seed_channel_profile
 
         seeded, _ = seed_channel_profile(
             db_path, "alice", [ProvisionedRoom(name="general", token="g", created=True)]
@@ -403,7 +403,7 @@ class TestSeedChannels:
         # opt-in (`effective_log_destinations`). A room that already existed
         # with the user in it must not re-enable it. That is the ISSUE-102
         # timezone clobber in a new place.
-        from istota.provision_rooms import ProvisionedRoom, seed_channel_profile
+        from istota.rooms.provision import ProvisionedRoom, seed_channel_profile
 
         user_profiles.update_profile_with_status(db_path, "alice", log_channel="")
         rooms = [ProvisionedRoom(name="logs", token="l", created=False, invited=False)]
@@ -417,7 +417,7 @@ class TestSeedChannels:
         # Run 1 created the room but the invite failed, so nothing was seeded.
         # Run 2 adopts it and the invite lands — that is this user's first
         # usable #logs, so it seeds.
-        from istota.provision_rooms import ProvisionedRoom, seed_channel_profile
+        from istota.rooms.provision import ProvisionedRoom, seed_channel_profile
 
         rooms = [ProvisionedRoom(name="logs", token="l", created=False, adopted=True)]
         seeded, _ = seed_channel_profile(db_path, "alice", rooms)
@@ -425,14 +425,14 @@ class TestSeedChannels:
 
     def test_does_not_seed_a_room_the_invite_failed_for(self, db_path):
         # The bot could post there; the user could not read it. Worse than off.
-        from istota.provision_rooms import ProvisionedRoom, seed_channel_profile
+        from istota.rooms.provision import ProvisionedRoom, seed_channel_profile
 
         rooms = [ProvisionedRoom(name="logs", token="l", created=True, invited=False)]
         seeded, _ = seed_channel_profile(db_path, "alice", rooms)
         assert seeded == {}
 
     def test_force_repoints_an_existing_channel(self, db_path):
-        from istota.provision_rooms import ProvisionedRoom, seed_channel_profile
+        from istota.rooms.provision import ProvisionedRoom, seed_channel_profile
 
         user_profiles.update_profile_with_status(db_path, "alice", log_channel="old")
         rooms = [ProvisionedRoom(name="logs", token="new", created=False, invited=False)]
@@ -444,14 +444,14 @@ class TestSeedChannels:
 
 class TestPendingChannelRooms:
     def test_keeps_everything_when_no_profile_exists(self, db_path):
-        from istota.provision_rooms import DEFAULT_ROOMS, pending_channel_rooms
+        from istota.rooms.provision import DEFAULT_ROOMS, pending_channel_rooms
 
         assert pending_channel_rooms(db_path, "alice", DEFAULT_ROOMS) == DEFAULT_ROOMS
 
     def test_drops_a_channel_room_whose_column_is_already_set(self, db_path):
         # An operator pinned log_channel to a hand-made room. Creating a second
         # room called `logs` beside it and never using it is pure litter.
-        from istota.provision_rooms import DEFAULT_ROOMS, pending_channel_rooms
+        from istota.rooms.provision import DEFAULT_ROOMS, pending_channel_rooms
 
         user_profiles.update_profile_with_status(db_path, "alice", log_channel="pinned")
         assert pending_channel_rooms(db_path, "alice", DEFAULT_ROOMS) == (
@@ -459,7 +459,7 @@ class TestPendingChannelRooms:
         )
 
     def test_general_is_never_dropped(self, db_path):
-        from istota.provision_rooms import pending_channel_rooms
+        from istota.rooms.provision import pending_channel_rooms
 
         user_profiles.update_profile_with_status(
             db_path, "alice", log_channel="p", alerts_channel="q"
@@ -506,7 +506,8 @@ class TestProvisionRoomsCli:
     def test_prints_state_and_seeds_the_profile(
         self, cfg_file, db_path, monkeypatch, capsys
     ):
-        from istota import cli, provision_rooms as pr
+        from istota import cli
+        from istota.rooms import provision as pr
 
         monkeypatch.setattr(
             pr,
@@ -525,7 +526,8 @@ class TestProvisionRoomsCli:
         assert profile.alerts_channel == "tok-alerts"
 
     def test_repeat_run_reports_noop(self, cfg_file, db_path, monkeypatch, capsys):
-        from istota import cli, provision_rooms as pr
+        from istota import cli
+        from istota.rooms import provision as pr
 
         monkeypatch.setattr(
             pr,
@@ -545,7 +547,8 @@ class TestProvisionRoomsCli:
     def test_skips_creating_a_room_for_a_pinned_channel(
         self, cfg_file, db_path, monkeypatch, capsys
     ):
-        from istota import cli, provision_rooms as pr
+        from istota import cli
+        from istota.rooms import provision as pr
 
         user_profiles.update_profile_with_status(db_path, "alice", log_channel="pinned")
         asked = {}
@@ -566,7 +569,8 @@ class TestProvisionRoomsCli:
     def test_warns_and_reports_a_stranded_room(
         self, cfg_file, db_path, monkeypatch, capsys
     ):
-        from istota import cli, provision_rooms as pr
+        from istota import cli
+        from istota.rooms import provision as pr
 
         monkeypatch.setattr(
             pr,
@@ -587,7 +591,8 @@ class TestProvisionRoomsCli:
     def test_no_seed_leaves_the_profile_alone(
         self, cfg_file, db_path, monkeypatch, capsys
     ):
-        from istota import cli, provision_rooms as pr
+        from istota import cli
+        from istota.rooms import provision as pr
 
         monkeypatch.setattr(
             pr,
@@ -607,7 +612,8 @@ class TestProvisionRoomsCli:
     ):
         # The whole ISSUE-342 loop through the entry point an operator runs:
         # run one records what it provisioned, run two is handed it back.
-        from istota import cli, provision_rooms as pr
+        from istota import cli
+        from istota.rooms import provision as pr
 
         seen: list = []
 
@@ -632,7 +638,8 @@ class TestProvisionRoomsCli:
     ):
         # The room exists and the user cannot read it. Printing `existing` and
         # `STATE: noop` tells the Ansible `failed_when` nothing is wrong.
-        from istota import cli, provision_rooms as pr
+        from istota import cli
+        from istota.rooms import provision as pr
 
         monkeypatch.setattr(
             pr,
@@ -655,7 +662,8 @@ class TestProvisionRoomsCli:
     def test_a_successful_re_invite_reports_updated(
         self, cfg_file, db_path, monkeypatch, capsys
     ):
-        from istota import cli, provision_rooms as pr
+        from istota import cli
+        from istota.rooms import provision as pr
 
         monkeypatch.setattr(
             pr,
@@ -682,7 +690,8 @@ class TestProvisionRoomsCli:
         # back on name matching for them, which is the bug.
         import pytest as _pytest
 
-        from istota import cli, provision_rooms as pr
+        from istota import cli
+        from istota.rooms import provision as pr
 
         def fake_provision(config, user_id, names, known_records=None, resolved=None):
             resolved.append(
@@ -705,7 +714,8 @@ class TestProvisionRoomsCli:
     ):
         # The repair path for an install that already has the duplicate: the
         # record is empty and the kept room's name matches nothing.
-        from istota import cli, provision_rooms as pr
+        from istota import cli
+        from istota.rooms import provision as pr
 
         def explode(*a, **kw):  # pragma: no cover - must not be reached
             raise AssertionError("--adopt must not provision")
@@ -885,12 +895,12 @@ class TestProvisionedTokenRecord:
 
     def test_the_namespace_is_reserved_from_the_model(self):
         from istota.kv_namespaces import is_reserved_namespace
-        from istota.provision_rooms import PROVISIONED_NAMESPACE
+        from istota.rooms.provision import PROVISIONED_NAMESPACE
 
         assert is_reserved_namespace(PROVISIONED_NAMESPACE)
 
     def test_record_and_read_round_trip(self, tmp_path):
-        from istota.provision_rooms import (
+        from istota.rooms.provision import (
             ProvisionedRoom,
             read_provisioned_records,
             record_provisioned_rooms,
@@ -910,7 +920,7 @@ class TestProvisionedTokenRecord:
         } == {"general": "G1", "logs": "L1"}
 
     def test_a_changed_token_overwrites_the_record(self, tmp_path):
-        from istota.provision_rooms import (
+        from istota.rooms.provision import (
             ProvisionedRoom,
             read_provisioned_records,
             record_provisioned_rooms,
@@ -933,7 +943,7 @@ class TestProvisionedTokenRecord:
         # a bare string there is a traceback rather than a value.
         import json
 
-        from istota.provision_rooms import (
+        from istota.rooms.provision import (
             PROVISIONED_NAMESPACE,
             ProvisionedRoom,
             record_provisioned_rooms,
@@ -952,7 +962,7 @@ class TestProvisionedTokenRecord:
         assert json.loads(raw["value"]) == {"token": "G1", "invite_failed": False}
 
     def test_a_bare_string_from_an_earlier_version_is_still_read(self, tmp_path):
-        from istota.provision_rooms import (
+        from istota.rooms.provision import (
             PROVISIONED_NAMESPACE,
             read_provisioned_records,
         )
@@ -964,7 +974,7 @@ class TestProvisionedTokenRecord:
         assert read_provisioned_records(db_path, "alice")["general"].token == "G1"
 
     def test_the_record_is_per_user(self, tmp_path):
-        from istota.provision_rooms import (
+        from istota.rooms.provision import (
             ProvisionedRoom,
             read_provisioned_records,
             record_provisioned_rooms,
@@ -979,7 +989,7 @@ class TestProvisionedTokenRecord:
         assert read_provisioned_records(db_path, "bob") == {}
 
     def test_a_room_with_no_token_is_not_recorded(self, tmp_path):
-        from istota.provision_rooms import (
+        from istota.rooms.provision import (
             ProvisionedRoom,
             read_provisioned_records,
             record_provisioned_rooms,
@@ -996,7 +1006,7 @@ class TestProvisionedTokenRecord:
     def test_recording_against_a_missing_db_does_not_raise(self, tmp_path):
         # Bookkeeping runs after the rooms already exist on Talk, so a DB
         # failure here must not turn a successful provision into a failed play.
-        from istota.provision_rooms import ProvisionedRoom, record_provisioned_rooms
+        from istota.rooms.provision import ProvisionedRoom, record_provisioned_rooms
 
         assert record_provisioned_rooms(
             tmp_path / "nope.db", "alice",
@@ -1004,7 +1014,7 @@ class TestProvisionedTokenRecord:
         ) is False
 
     def test_reading_a_missing_db_returns_empty(self, tmp_path):
-        from istota.provision_rooms import read_provisioned_records
+        from istota.rooms.provision import read_provisioned_records
 
         assert read_provisioned_records(tmp_path / "nope.db", "alice") == {}
 
@@ -1015,7 +1025,7 @@ class TestRenameDoesNotDuplicate:
         # The ISSUE-342 regression: `general` was renamed to `#general` in the
         # web UI, which propagated to Talk. The next deploy found no group room
         # called `general` and made one.
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 2}],
@@ -1034,7 +1044,7 @@ class TestRenameDoesNotDuplicate:
         # recorded, so this run knows. It is retried in place. A bot-only room
         # with *no* recorded failure is a room the user left and is left alone;
         # that half is ISSUE-408, in `tests/test_leaving_a_room_sticks.py`.
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 2}],
@@ -1055,7 +1065,7 @@ class TestRenameDoesNotDuplicate:
         # An empty `log_channel` is a user-chosen state (ISSUE-115). Reusing a
         # recorded room must not count as making it usable, or a deploy would
         # switch the execution log back on.
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "L1", "displayName": "#logs", "type": 2}],
@@ -1074,7 +1084,7 @@ class TestRenameDoesNotDuplicate:
         # same-named room under a *different* token, so reusing it is
         # distinguishable from simply creating one. Against an empty room list
         # this test would pass whether the fallback ran or not.
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G2", "displayName": "general", "type": 2}],
@@ -1090,7 +1100,7 @@ class TestRenameDoesNotDuplicate:
 
     @pytest.mark.asyncio
     async def test_a_recorded_token_gone_with_no_name_match_creates(self):
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _fake_client(rooms=[], created_token="G2")
         result = await ensure_room(
@@ -1105,7 +1115,7 @@ class TestRenameDoesNotDuplicate:
         # so requiring type 2 here would reject it, the name match would fail
         # too (it was renamed — the whole premise), and the duplicate is back.
         # Only the DM-ish types are refused on this path.
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 3}],
@@ -1123,7 +1133,7 @@ class TestRenameDoesNotDuplicate:
         # Other humans are in it, so the user left a shared room. Re-adding them
         # on every deploy is the ISSUE-102 clobber shape, and unlike logs/alerts
         # there is no column they could clear to opt out.
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 2}],
@@ -1145,7 +1155,7 @@ class TestRenameDoesNotDuplicate:
         # `_is_orphan` already treats an empty list as more likely a failed read
         # than a real room; the two paths must not disagree about the same
         # evidence.
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 2}],
@@ -1164,7 +1174,7 @@ class TestRenameDoesNotDuplicate:
         # `invited=False` on this path meant both "already in it" and "tried and
         # failed", and the CLI's stranded predicate reads only created/adopted —
         # so a room the user cannot read printed `existing` and the play passed.
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 2}],
@@ -1183,7 +1193,7 @@ class TestRenameDoesNotDuplicate:
     async def test_a_recorded_token_pointing_at_a_one_to_one_is_ignored(self):
         # Talk puts the other party's user id in `name` for a DM. A recorded
         # token must not resurrect one as a channel.
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G1", "displayName": "alice", "type": 1}],
@@ -1199,7 +1209,7 @@ class TestRenameDoesNotDuplicate:
     @pytest.mark.asyncio
     async def test_no_record_still_matches_by_name(self):
         # The first-provision path is unchanged.
-        from istota.provision_rooms import ensure_room
+        from istota.rooms.provision import ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G1", "displayName": "general", "type": 2}],
@@ -1211,7 +1221,7 @@ class TestRenameDoesNotDuplicate:
 
     @pytest.mark.asyncio
     async def test_provision_rooms_threads_the_record_through(self):
-        from istota.provision_rooms import ProvisionedRecord, provision_rooms
+        from istota.rooms.provision import ProvisionedRecord, provision_rooms
 
         client = _fake_client(
             rooms=[

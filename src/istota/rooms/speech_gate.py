@@ -46,11 +46,11 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Iterable, Literal, Sequence
 
-from . import db
+from istota import db
 from istota.lib.llm_json import candidate_json_blocks
 from istota.lib.untrusted import frame_untrusted
 
-logger = logging.getLogger("istota.speech_gate")
+logger = logging.getLogger("istota.rooms.speech_gate")
 
 GateMode = Literal["off", "mention", "classifier"]
 MODES: tuple[str, ...] = ("off", "mention", "classifier")

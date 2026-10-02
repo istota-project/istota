@@ -28,7 +28,7 @@ from . import email_support
 from . import secrets_vault
 from . import task_cgroup
 from . import task_env
-from .room_scopes import CHANNEL_NOTES_LABEL as CHANNEL_MEMORY_LABEL
+from istota.rooms.scopes import CHANNEL_NOTES_LABEL as CHANNEL_MEMORY_LABEL
 from .claude_runtime_env import (
     CLAUDE_RUNTIME_ENV_VARS,  # used by `_PROXY_LOOKUP_BLOCKED` below, and
     # re-exported: the drift guard reads it beside `build_clean_env`.
@@ -5994,7 +5994,7 @@ def _side_room_prompt(
     path that does not exist, since opening one would create it. Never raises.
     """
     try:
-        from .side_rooms import parent_context, task_side_room
+        from istota.rooms.side_rooms import parent_context, task_side_room
 
         def _read(c):
             side = task_side_room(c, task)
@@ -6033,7 +6033,7 @@ def _backstage_prompt(config: Config, task: "db.Task", conn) -> str:
     so no other prompt changes. Never raises.
     """
     try:
-        from .side_rooms import backstage_room
+        from istota.rooms.side_rooms import backstage_room
 
         with db.get_db_if_present(config.db_path, conn) as c:
             if c is None:
@@ -6246,8 +6246,8 @@ def room_card(
     if not task.conversation_token:
         return ""
     try:
-        from . import room_policy
-        from .side_rooms import canonical_token
+        from istota.rooms import policy as room_policy
+        from istota.rooms.side_rooms import canonical_token
 
         def _read(c):
             token = canonical_token(c, task.conversation_token)
@@ -7181,7 +7181,7 @@ You have access to:
     # block's separators behind. One blank line between whatever is present.
     relay_context = ""
     if task.source_type in ("whatsapp", "web", "talk", "sms"):
-        from .message_relays import recipient_context
+        from istota.relay.relays import recipient_context
 
         # Optional, like room_identity_line: a failed read must cost the relay
         # framing, not the task. Logged loudly because an answer then reaches
@@ -7373,7 +7373,7 @@ def _task_withheld_scopes(
     (ISSUE-576). A database that does not exist holds no room; one that cannot
     be opened withholds every scope from a task whose answer depends on it.
     """
-    from . import room_scopes
+    from istota.rooms import scopes as room_scopes
 
     try:
         with db.get_db_if_present(config.db_path, conn) as c:
@@ -7401,7 +7401,7 @@ def _ambient_memory_off(
     A database that does not exist holds no room. One that cannot be opened
     leaves the memory out, as an unreadable audience does.
     """
-    from . import room_scopes
+    from istota.rooms import scopes as room_scopes
 
     if task.guest_participant_id is not None or task.audience == "mixed" \
             or task.is_group_chat:
@@ -7431,7 +7431,7 @@ def _resolve_task_groups(
     any error resolves to the empty set: group material that cannot be shown
     to belong in this room does not load.
     """
-    from . import room_scopes
+    from istota.rooms import scopes as room_scopes
 
     try:
         with db.get_db_if_present(config.db_path, conn) as c:
@@ -7460,7 +7460,7 @@ def _channel_memory_is_shared(config: Config, task: db.Task, conn) -> bool:
         return True
     if not task.conversation_token:
         return False
-    from .room_scopes import channel_notes_shared
+    from istota.rooms.scopes import channel_notes_shared
 
     def _read(c) -> bool:
         return channel_notes_shared(c, task.conversation_token)

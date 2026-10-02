@@ -4,7 +4,9 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, confirmations, message_relays as relays, whatsapp_requests as requests
+from istota import db, confirmations
+from istota.relay import relays
+from istota.relay import requests
 from istota.config import UserConfig
 from istota.transport.whatsapp._types import WhatsAppSendResult
 from .test_whatsapp_delivery import _config, _bind

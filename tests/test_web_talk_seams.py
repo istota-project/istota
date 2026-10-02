@@ -146,7 +146,7 @@ class TestThePostAsUserMirror:
         self, fake_talk_web, web_app_module, db_path, room, monkeypatch, mode,
     ):
         from dataclasses import replace
-        from istota import surfaces
+        from istota.rooms import surfaces
 
         monkeypatch.setitem(surfaces.SURFACES, "talk", replace(
             surfaces.SURFACES["talk"], user_turn_mirror=mode,
