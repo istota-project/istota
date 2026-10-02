@@ -49,9 +49,15 @@ _ACF_SELECTORS = frozenset({"acf_fc_layout"})
 
 
 def _connector_ability(ctx, name: str) -> dict:
+    # `describe` caches whether the connector is there; when this read says
+    # otherwise, the cache is dropped so the next `describe` agrees.
+    cached = ctx.cache.get("describe")
+    cached_says = cached.get("connector") if isinstance(cached, dict) else None
     try:
-        return fetch_ability(ctx, name)
+        ability = fetch_ability(ctx, name)
     except WordPressError as exc:
+        if exc.reason in ("unknown_route", "not_found") and cached_says is True:
+            ctx.cache.drop()
         if exc.reason == "unknown_route":
             raise WordPressError(
                 "This site has no Abilities API (WordPress 6.9 or later), which the "
@@ -65,6 +71,9 @@ def _connector_ability(ctx, name: str) -> dict:
                 "connector_missing", install=INSTALL,
             ) from None
         raise
+    if cached_says is False:
+        ctx.cache.drop()
+    return ability
 
 
 def _run(args, ctx, name: str, value, *, read: bool = False, **kwargs):
@@ -165,11 +174,21 @@ def cmd_options_update(args) -> dict:
             "acf_not_in_rest", fields=unknown,
         )
     changes = "; ".join(
-        f"{name} from {shown_json(fence_tree(current[name]))} to "
+        # Cut, then fence once: fencing first lets the cut drop a closing marker.
+        f"{name} from {fence(shown_json(current[name]))} to "
         f"{shown_json(_shown(value, args.uploads))}"
         for name, value in args.acf_values.items()
     )
     ability = _connector_ability(ctx, OPTIONS_UPDATE)
+    notes = annotations(ability)
+    # The plugin marks its write neither readonly nor destructive, which keeps
+    # it on POST with a JSON body and a would line that is not understated.
+    if notes.get("readonly") is True or notes.get("destructive") is True:
+        raise WordPressError(
+            f"The site's {OPTIONS_UPDATE} is not marked the way the istota-connector "
+            f"plugin marks it, so this verb will not run it.",
+            "connector_mismatch",
+        )
     hint = lookup(ctx, "options", "get", "--page", page)
     described = f"update the options page {quoted(page)}: {changes}"
     # Gated here, ahead of the uploads; `run_ability` asks the same question

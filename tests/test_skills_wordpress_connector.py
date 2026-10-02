@@ -174,13 +174,27 @@ class TestOptionsGet:
         assert out["reason"] == "connector_mismatch"
         assert connector.runs == []
 
-    def test_an_update_the_site_marks_readonly_is_still_gated(self, env, capsys, connector):
+    @pytest.mark.parametrize("notes", [{"readonly": True},
+                                       {"destructive": True, "idempotent": True}])
+    def test_an_update_the_site_marks_otherwise_is_refused(self, env, capsys, connector, notes):
+        # Either would move the write off POST, and the would line would
+        # understate a destructive one.
         env.site.routes[("GET", f"{ABILITIES}/{OPTIONS_UPDATE}")] = {
-            "name": OPTIONS_UPDATE, "label": "x", "meta": {"annotations": {"readonly": True}}}
-        _, out = run(["options", "update", "--page", "acf-options", "--acf-set", "hero=3"],
-                     capsys)
-        assert out["reason"] == "confirmation_required"
+            "name": OPTIONS_UPDATE, "label": "x", "meta": {"annotations": notes}}
+        _, out = run(["options", "update", "--page", "acf-options", "--acf-set", "hero=3",
+                      "--confirmed"], capsys)
+        assert out["reason"] == "connector_mismatch"
         assert writes(env.site) == []
+
+    def test_describe_learns_of_a_plugin_installed_since_it_cached(self, env, capsys):
+        _, out = run(["describe"], capsys)
+        assert out["connector"] is False
+        Connector(env.site)
+        env.site.routes[("GET", ABILITIES)] = [
+            {"name": name, "label": name} for name in Connector.NOTES]
+        run(["options", "get", "--page", "acf-options"], capsys)
+        _, out = run(["describe"], capsys)
+        assert out["connector"] is True
 
     @pytest.mark.parametrize("page", ["", "acf options", "../x", "a" * 200, "a/b"])
     def test_a_bad_page_slug_spends_no_vault_fetch(self, env, capsys, page):
@@ -209,6 +223,20 @@ class TestOptionsUpdate:
         assert line.count("[UNTRUSTED WORDPRESS CONTENT") == 1
         assert [r.method for r in connector.runs] == ["GET"]
         assert writes(env.site) == []
+
+    @pytest.mark.parametrize("value", [
+        "x" * 700,
+        {f"k{i}": "hi" for i in range(7)},
+        [HOSTILE] * 20,
+    ])
+    def test_a_long_current_value_keeps_its_fence_closed(self, env, capsys, connector, value):
+        connector.fields["frontend_url"] = value
+        _, out = run([*self.ARGV, "--acf-set", 'frontend_url="y"'], capsys)
+        [line] = out["would"]
+        assert line.count("[UNTRUSTED WORDPRESS CONTENT") == 1
+        assert line.count(CLOSE) == 1
+        # What follows the fence is the skill's own text, outside it.
+        assert line.index(CLOSE) < line.index(' to "y"')
 
     def test_confirmed_it_posts_the_fields_once_and_reads_them_back(
             self, env, capsys, connector, acf_file):
@@ -372,6 +400,16 @@ class TestThePlugin:
         assert re.search(r"'show_in_rest'\s*=>\s*true\b", body)
         assert "'permission_callback'" in body
         assert "'input_schema'" in body and "'output_schema'" in body
+
+    def test_the_site_cap_matches_what_the_skill_asks_for(self):
+        from istota.skills.wordpress.connector import NETWORK_SITES_LIMIT
+
+        cap = re.search(r"const ISTOTA_CONNECTOR_MAX_SITES = (\d+);", PLUGIN.read_text())
+        assert cap and int(cap.group(1)) == NETWORK_SITES_LIMIT
+
+    def test_the_site_list_is_this_network_only(self):
+        text = PLUGIN.read_text()
+        assert text.count("get_sites(") == text.count("'network_id' => get_current_network_id()")
 
     def test_the_permissions_are_the_ones_the_spec_names(self):
         text = PLUGIN.read_text()

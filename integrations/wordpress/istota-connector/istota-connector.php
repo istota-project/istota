@@ -179,7 +179,7 @@ function istota_connector_network_sites( $input ) {
 		$number = max( 1, min( ISTOTA_CONNECTOR_MAX_SITES, absint( $input['number'] ) ) );
 	}
 	$sites = array();
-	foreach ( get_sites( array( 'number' => $number ) ) as $site ) {
+	foreach ( get_sites( array( 'number' => $number, 'network_id' => get_current_network_id() ) ) as $site ) {
 		$sites[] = array(
 			'id'       => (int) $site->blog_id,
 			'domain'   => $site->domain,
@@ -191,7 +191,7 @@ function istota_connector_network_sites( $input ) {
 		);
 	}
 	return array(
-		'total' => (int) get_sites( array( 'count' => true ) ),
+		'total' => (int) get_sites( array( 'count' => true, 'network_id' => get_current_network_id() ) ),
 		'sites' => $sites,
 	);
 }
