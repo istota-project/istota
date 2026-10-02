@@ -177,7 +177,7 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 | `nextcloud_api.py` | Enriches user configs from Nextcloud OCS API at startup |
 | `web_app.py` | Authenticated web interface (FastAPI + Nextcloud OAuth2) |
 | `webhook_receiver.py` | FastAPI webhook receiver (Overland GPS) |
-| `devbox_proxy.py` | Per-user host-side credential proxy for the devbox container |
+| `devbox/proxy.py` | Per-user host-side credential proxy for the devbox container |
 | `logging_setup.py` | Centralized logging configuration (console, file, rotation) |
 
 ## Browser container

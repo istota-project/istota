@@ -12,7 +12,7 @@ shim directory, so the framing lives in one file rather than being written out
 a third time here: a module, a vendored container copy and an inlined client
 copy would be three places for one wire format, and ``sync-devbox-lib.sh``
 covers one of them. Run as a script the module is the sibling file; imported as
-``istota.devbox_exec_client`` it is the package's own.
+``istota.devbox.exec_client`` it is the package's own.
 
 Exit codes
 ----------
@@ -114,7 +114,7 @@ if __package__ in (None, ""):
     # is the one whose framing it was tested against.
     import devbox_exec_protocol as proto  # type: ignore[import-not-found]
 else:
-    from . import devbox_exec_protocol as proto
+    from istota.devbox import exec_protocol as proto
 
 
 PREFIX = "istota-devbox-exec"

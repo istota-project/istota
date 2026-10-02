@@ -11,7 +11,7 @@
 # before reaching its `assert` goes red on a *missing* file and is still
 # incapable of noticing one that genuinely differs. So this perturbs the copy
 # rather than removing it. The module is present, readable, and still imports —
-# only its bytes differ from `src/istota/devbox_exec_protocol.py`.
+# only its bytes differ from `src/istota/devbox/exec_protocol.py`.
 #
 # Usage:
 #

@@ -17,7 +17,7 @@ import json
 
 import pytest
 
-from istota.devbox_proxy_protocol import (
+from istota.devbox.proxy_protocol import (
     ACTION_FORGE_TOKEN,
     ACTION_GIT_CREDENTIAL,
     ACTION_PING,

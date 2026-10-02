@@ -81,8 +81,8 @@ _FORGE_CLI_SOURCE = Path(__file__).resolve().parents[2] / "sandbox" / "forge_cli
 # not one: a single standalone script would put the wire format in three places
 # (module, vendored container copy, client) with `scripts/sync-devbox-lib.sh`
 # covering only one of them.
-_EXEC_CLIENT_SOURCE = Path(__file__).resolve().parents[2] / "devbox_exec_client.py"
-_EXEC_PROTOCOL_SOURCE = Path(__file__).resolve().parents[2] / "devbox_exec_protocol.py"
+_EXEC_CLIENT_SOURCE = Path(__file__).resolve().parents[2] / "devbox" / "exec_client.py"
+_EXEC_PROTOCOL_SOURCE = Path(__file__).resolve().parents[2] / "devbox" / "exec_protocol.py"
 
 # What the client is installed as. The shims exec it by absolute path, so the
 # name is only what an operator sees in a listing.

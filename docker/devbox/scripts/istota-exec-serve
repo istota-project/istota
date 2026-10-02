@@ -76,7 +76,7 @@ would otherwise read as a guarantee against the container, which it is not.
 
 stdlib only, and it imports nothing from ``istota``: this runs in a container
 with no such package. The one module it needs travels as a vendored, byte-
-identical copy of ``src/istota/devbox_exec_protocol.py``, kept in step by
+identical copy of ``src/istota/devbox/exec_protocol.py``, kept in step by
 ``scripts/sync-devbox-lib.sh``.
 
 Driven end to end by ``tests/test_devbox_exec_server.py``, on the host, with no

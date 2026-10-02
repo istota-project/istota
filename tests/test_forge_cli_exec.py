@@ -540,7 +540,7 @@ class TestDevboxBackend:
         """The seam between the two copies of the action name. forge_cli.py
         cannot import istota, so it carries its own ``ACTION_FORGE_TOKEN``;
         this is where a rename on one side would go unnoticed."""
-        from istota.devbox_proxy_protocol import ALL_ACTIONS
+        from istota.devbox.proxy_protocol import ALL_ACTIONS
 
         assert ACTION_FORGE_TOKEN in ALL_ACTIONS
         wrapper, real, cfg = deployed

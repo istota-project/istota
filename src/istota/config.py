@@ -1046,7 +1046,7 @@ class DeveloperConfig:
     # rendered value being relied on.
     gh_bin_path: str = "/usr/local/bin/gh"
     glab_bin_path: str = "/usr/local/bin/glab"
-    # Devbox credential proxy. See src/istota/devbox_proxy.py + the
+    # Devbox credential proxy. See src/istota/devbox/proxy.py + the
     # `devbox-credential-proxy` spec for the design. It answers two things
     # for the container: a git credential (injected server-side, so git
     # never holds the token) and, for `gh` / `glab`, the forge token itself

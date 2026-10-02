@@ -30,7 +30,7 @@ import uuid
 
 import pytest
 
-from istota import devbox_exec_protocol as proto
+from istota.devbox import exec_protocol as proto
 from istota.skills import devbox
 
 pytestmark = pytest.mark.integration

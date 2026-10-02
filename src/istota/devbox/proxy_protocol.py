@@ -1,7 +1,7 @@
 """Wire protocol for the devbox credential proxy.
 
 Pure data + serialization. No sockets, no asyncio, no httpx — importable
-from both the daemon (`istota.devbox_proxy`) and tests without pulling in
+from both the daemon (`istota.devbox.proxy`) and tests without pulling in
 any I/O machinery.
 
 Framing: one JSON object per line, terminated by ``\\n``. Requests are

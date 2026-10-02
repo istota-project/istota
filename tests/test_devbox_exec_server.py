@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from istota.devbox_exec_protocol import (
+from istota.devbox.exec_protocol import (
     ERR_BAD_REQUEST,
     ERR_COMMAND_NOT_FOUND,
     ERR_NO_SUCH_CWD,

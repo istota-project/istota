@@ -26,7 +26,7 @@ def authorized_container_peer(monkeypatch):
     # These tests cover dispatch and lifecycle after authentication. Real
     # socket peer checks and Docker identity live in test_devbox_proxy_peer.
     from unittest.mock import AsyncMock
-    monkeypatch.setattr("istota.devbox_proxy._peer_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr("istota.devbox.proxy._peer_allowed", AsyncMock(return_value=True))
 
 
 @pytest.fixture()
@@ -43,7 +43,7 @@ def sock_path():
     finally:
         shutil.rmtree(dirpath, ignore_errors=True)
 
-from istota.devbox_proxy import (
+from istota.devbox.proxy import (
     DevboxProxyContext,
     handle_connection,
     handle_forge_token,
@@ -51,7 +51,7 @@ from istota.devbox_proxy import (
     handle_ping,
     serve,
 )
-from istota.devbox_proxy_protocol import (
+from istota.devbox.proxy_protocol import (
     decode_response,
     encode_request,
 )
@@ -261,7 +261,7 @@ def caplog_at(level):
     """
     import logging
 
-    logger = logging.getLogger("istota.devbox_proxy.audit")
+    logger = logging.getLogger("istota.devbox.proxy.audit")
     records = []
 
     class _Collector(logging.Handler):
@@ -573,7 +573,7 @@ class TestEndToEnd:
         traverse), and that the dir itself is not world-accessible.
         """
 
-        from istota.devbox_proxy import _default_socket_path
+        from istota.devbox.proxy import _default_socket_path
 
         class _Dev:
             devbox_proxy_socket_dir = str(tmp_path)
@@ -700,7 +700,7 @@ class TestHostNormalization:
     ])
     @pytest.mark.asyncio
     async def test_github_host_variants_resolve(self, host):
-        from istota.devbox_proxy import _provider_for_host
+        from istota.devbox.proxy import _provider_for_host
 
         ctx = _ctx()
         assert _provider_for_host(host, ctx) == "github"
@@ -711,7 +711,7 @@ class TestHostNormalization:
     ])
     @pytest.mark.asyncio
     async def test_gitlab_host_variants_resolve(self, host):
-        from istota.devbox_proxy import _provider_for_host
+        from istota.devbox.proxy import _provider_for_host
 
         ctx = _ctx()
         assert _provider_for_host(host, ctx) == "gitlab"
@@ -745,7 +745,7 @@ class TestRequestParsing:
 
     @pytest.mark.asyncio
     async def test_oversized_request_returns_bad_request(self, sock_path):
-        from istota.devbox_proxy_protocol import MAX_REQUEST_BYTES
+        from istota.devbox.proxy_protocol import MAX_REQUEST_BYTES
 
         ctx = _ctx()
 
@@ -816,9 +816,9 @@ class TestAuditLog:
         import logging
 
         ctx = _ctx()
-        with caplog.at_level(logging.INFO, logger="istota.devbox_proxy.audit"):
+        with caplog.at_level(logging.INFO, logger="istota.devbox.proxy.audit"):
             await handle_ping({"action": "ping"}, ctx)
-        records = [r for r in caplog.records if r.name == "istota.devbox_proxy.audit"]
+        records = [r for r in caplog.records if r.name == "istota.devbox.proxy.audit"]
         assert len(records) == 1
         msg = records[0].getMessage()
         assert "devbox_proxy" in msg
@@ -832,7 +832,7 @@ class TestAuditLog:
         import logging
 
         ctx = _ctx()
-        with caplog.at_level(logging.INFO, logger="istota.devbox_proxy.audit"):
+        with caplog.at_level(logging.INFO, logger="istota.devbox.proxy.audit"):
             await handle_git_credential(
                 {
                     "action": "git_credential", "op": "get",
@@ -840,7 +840,7 @@ class TestAuditLog:
                 },
                 ctx,
             )
-        records = [r for r in caplog.records if r.name == "istota.devbox_proxy.audit"]
+        records = [r for r in caplog.records if r.name == "istota.devbox.proxy.audit"]
         assert len(records) == 1
         msg = records[0].getMessage()
         assert "action=git_credential" in msg
@@ -853,7 +853,7 @@ class TestAuditLog:
         import logging
 
         ctx = _ctx()
-        with caplog.at_level(logging.INFO, logger="istota.devbox_proxy.audit"):
+        with caplog.at_level(logging.INFO, logger="istota.devbox.proxy.audit"):
             await handle_git_credential(
                 {
                     "action": "git_credential", "op": "get",
@@ -861,7 +861,7 @@ class TestAuditLog:
                 },
                 ctx,
             )
-        records = [r for r in caplog.records if r.name == "istota.devbox_proxy.audit"]
+        records = [r for r in caplog.records if r.name == "istota.devbox.proxy.audit"]
         assert len(records) == 1
         msg = records[0].getMessage()
         # Q2 resolution: cross-host attempts emit a no_token audit line.
@@ -873,14 +873,14 @@ class TestAuditLog:
         import logging
 
         ctx = _ctx()
-        with caplog.at_level(logging.INFO, logger="istota.devbox_proxy.audit"):
+        with caplog.at_level(logging.INFO, logger="istota.devbox.proxy.audit"):
             resp = decode_response(
                 await handle_forge_token(
                     {"action": "forge_token", "provider": "github"}, ctx,
                 )
             )
         assert resp["token"] == "GH-TOKEN"
-        records = [r for r in caplog.records if r.name == "istota.devbox_proxy.audit"]
+        records = [r for r in caplog.records if r.name == "istota.devbox.proxy.audit"]
         assert len(records) == 1
         msg = records[0].getMessage()
         assert "action=forge_token" in msg
@@ -899,7 +899,7 @@ class TestAuditLog:
 
         ctx = _ctx()
         forged = "x\ndevbox_proxy user=alice action=forge_token result=ok dur_ms=1"
-        with caplog.at_level(logging.INFO, logger="istota.devbox_proxy.audit"):
+        with caplog.at_level(logging.INFO, logger="istota.devbox.proxy.audit"):
             resp = decode_response(
                 await handle_forge_token(
                     {"action": "forge_token", "provider": forged}, ctx,
@@ -907,7 +907,7 @@ class TestAuditLog:
             )
         assert resp["ok"] is False
         assert resp["error"] == "unknown_provider"
-        records = [r for r in caplog.records if r.name == "istota.devbox_proxy.audit"]
+        records = [r for r in caplog.records if r.name == "istota.devbox.proxy.audit"]
         assert len(records) == 1
         msg = records[0].getMessage()
         assert "result=unknown_provider" in msg
@@ -919,11 +919,11 @@ class TestAuditLog:
         import logging
 
         ctx = _ctx()
-        with caplog.at_level(logging.INFO, logger="istota.devbox_proxy.audit"):
+        with caplog.at_level(logging.INFO, logger="istota.devbox.proxy.audit"):
             await handle_forge_token(
                 {"action": "forge_token", "provider": "z" * 100_000}, ctx,
             )
-        records = [r for r in caplog.records if r.name == "istota.devbox_proxy.audit"]
+        records = [r for r in caplog.records if r.name == "istota.devbox.proxy.audit"]
         msg = records[0].getMessage()
         assert len(msg) < 500, "a 16 MiB provider must not become a 16 MiB log line"
         assert "truncated" in msg
@@ -978,7 +978,7 @@ class TestAuditLog:
     async def test_audit_log_file_fanout(self, tmp_path):
         """When ``developer.devbox_proxy_audit_log`` is set, audit lines
         also land in a regular file."""
-        from istota.devbox_proxy import configure_audit_log
+        from istota.devbox.proxy import configure_audit_log
 
         audit_path = tmp_path / "audit.log"
         handler_added = configure_audit_log(str(audit_path))
@@ -988,7 +988,7 @@ class TestAuditLog:
         finally:
             # Tear down the handler we added — keep the test isolated.
             import logging
-            logging.getLogger("istota.devbox_proxy.audit").removeHandler(handler_added)
+            logging.getLogger("istota.devbox.proxy.audit").removeHandler(handler_added)
             handler_added.close()
 
         contents = audit_path.read_text()

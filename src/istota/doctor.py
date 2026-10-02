@@ -5712,7 +5712,7 @@ def _exec_transport_request(
     """
     import socket as socket_module  # noqa: PLC0415 - a leaf import on a probe path
 
-    from . import devbox_exec_protocol as proto  # noqa: PLC0415
+    from istota.devbox import exec_protocol as proto  # noqa: PLC0415
 
     sock = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
     try:
@@ -5972,7 +5972,7 @@ def _container_backend_result(config: "Config", backend: str, config_module) -> 
 
 def _container_probe_results(config: "Config", config_module, users: list[str]) -> list[CheckResult]:
     """Transport, identity and uv_cache, from one connection per user."""
-    from . import devbox_exec_protocol as proto  # noqa: PLC0415
+    from istota.devbox import exec_protocol as proto  # noqa: PLC0415
 
     timeout = min(
         float(

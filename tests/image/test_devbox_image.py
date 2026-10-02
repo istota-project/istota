@@ -58,7 +58,7 @@ SOURCE_OF_TRUTH = REPO / "src" / "istota" / "sandbox" / "forge_cli.py"
 
 EXEC_LIB = "/usr/local/lib/istota_devbox_exec"
 EXEC_PROTOCOL_IN_IMAGE = f"{EXEC_LIB}/istota_devbox_exec_protocol.py"
-EXEC_PROTOCOL_SOURCE = REPO / "src" / "istota" / "devbox_exec_protocol.py"
+EXEC_PROTOCOL_SOURCE = REPO / "src" / "istota" / "devbox" / "exec_protocol.py"
 EXEC_SERVER = "/usr/local/bin/istota-exec-serve"
 EXEC_SUPERVISOR = "/usr/local/bin/istota-exec-run"
 
@@ -487,7 +487,7 @@ class TestTheExecTransportIsInstalled:
 
         assert actual == expected, (
             "docker/devbox/lib/istota_devbox_exec_protocol.py has drifted from "
-            "src/istota/devbox_exec_protocol.py; run scripts/sync-devbox-lib.sh"
+            "src/istota/devbox/exec_protocol.py; run scripts/sync-devbox-lib.sh"
         )
 
 

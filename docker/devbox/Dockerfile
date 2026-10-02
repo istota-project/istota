@@ -285,7 +285,7 @@ RUN set -eux; \
 # reports failure whatever it did.
 #
 # Three files, and the split is the same one `istota_forge_cli.py` already has:
-# the protocol module is vendored from `src/istota/devbox_exec_protocol.py`
+# the protocol module is vendored from `src/istota/devbox/exec_protocol.py`
 # because Docker cannot COPY from outside its build context, and
 # `scripts/sync-devbox-lib.sh` is what keeps the copy honest. It goes under
 # /usr/local/lib/istota_devbox_exec/ rather than beside the server, because the
