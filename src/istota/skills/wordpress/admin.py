@@ -308,6 +308,15 @@ _SLUG_RE = re.compile(r"\A[a-z0-9-]{1,100}\Z")
 _NETWORK_REFUSALS = frozenset({"validation_error", "request_refused"})
 
 
+def _network_refused(exc: WordPressError, plugin: str) -> WordPressError:
+    return WordPressError(
+        f"The site refused to network-activate {plugin} through core REST: "
+        f"{exc} Either the site is not a multisite network, or core REST cannot "
+        f"network-activate there; on a network, use the network admin instead.",
+        "unsupported_on_multisite", **exc.extra,
+    )
+
+
 def plugin_id(value: str) -> str:
     """The plugin as the route takes it; ``akismet/akismet.php`` is accepted."""
     text = value.strip()
@@ -363,12 +372,7 @@ def _plugin_status(args, new_status: str) -> dict:
                                       idempotent=True)
     except WordPressError as exc:
         if new_status == "network-active" and exc.reason in _NETWORK_REFUSALS:
-            raise WordPressError(
-                f"The site refused to network-activate {args.plugin} through core REST: "
-                f"{exc} Either the site is not a multisite network, or core REST cannot "
-                f"network-activate there; on a network, use the network admin instead.",
-                "unsupported_on_multisite", **exc.extra,
-            ) from None
+            raise _network_refused(exc, args.plugin) from None
         raise
     if not isinstance(after, dict):
         raise WordPressError("The site answered with something that is not a plugin.",
@@ -418,6 +422,10 @@ def cmd_plugins_install(args) -> dict:
                                        json={"slug": slug, "status": status}, base=ctx.base,
                                        idempotent=False, timeout=UPLOAD_TIMEOUT)
     except WordPressError as exc:
+        # Parameter validation runs before core's install callback, so a
+        # refused `network-active` installed nothing.
+        if status == "network-active" and exc.reason == "validation_error":
+            raise _network_refused(exc, slug) from None
         lookup_hint(exc, hint)
         raise
     if not isinstance(plugin, dict):

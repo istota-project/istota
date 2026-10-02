@@ -340,6 +340,17 @@ class TestPluginInstall:
         assert out["lookup"] == "plugins list --site blog"
         assert len(writes(env.site)) == 1
 
+    def test_network_install_on_a_single_site_is_unsupported(self, env, capsys):
+        env.site.routes[("GET", PLUGINS)] = []
+        env.site.routes[("POST", PLUGINS)] = httpx.Response(
+            400, json={"code": "rest_invalid_param", "message": "Invalid parameter(s): status",
+                       "data": {"params": {"status": "no"}}})
+        code, out = run(["plugins", "install", "--slug", "hello-dolly", "--activate",
+                         "--network", "--confirmed"], capsys)
+        assert code == 1 and out["reason"] == "unsupported_on_multisite"
+        assert "not a multisite network" in out["error"]
+        assert len(writes(env.site)) == 1
+
     @pytest.mark.parametrize("argv", [
         ["plugins", "install", "--slug", "../x", "--confirmed"],
         ["plugins", "install", "--slug", "Hello Dolly", "--confirmed"],

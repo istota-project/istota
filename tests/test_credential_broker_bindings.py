@@ -184,13 +184,16 @@ def test_vault_list_names_whole_entries_in_the_snapshot(tmp_path, monkeypatch):
     import tempfile
     from pathlib import Path
     from istota.config import Config
-    from istota.credential_shim import list_entries
+    from istota.credential_shim import ProxyError, list_entries
     from istota.skill_proxy import SkillProxy
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
     database = tmp_path / "data.db"
     db.init_db(database)
+    # `blogfield` belongs to wordpress_blog by the parser's record alone: a
+    # grouping by name suffix would list it as an entry of its own.
     fields = {"wordpress_blog": None, "wordpress_blog_username": "wordpress_blog",
-              "wordpress_nopw_url": "wordpress_nopw", "hidden": None}
+              "blogfield": "wordpress_blog", "wordpress_nopw_url": "wordpress_nopw",
+              "hidden": None}
     for key, entry in fields.items():
         secrets_store.upsert_secret(database, "alice", "vault_entries", key, "fixture")
         if entry:
@@ -208,6 +211,11 @@ def test_vault_list_names_whole_entries_in_the_snapshot(tmp_path, monkeypatch):
         with SkillProxy(socket, {}, {}, config=Config(db_path=database), user_id="alice",
                         vault_credentials={}):
             assert list_entries() == []
+        # A proxy that cannot group says nothing, and the shim refuses rather
+        # than answering "no entries".
+        with SkillProxy(socket, {}, {}, vault_credentials=snapshot):
+            with pytest.raises(ProxyError):
+                list_entries()
 
 
 def test_forge_sync_replaces_and_removes_bindings(tmp_path):

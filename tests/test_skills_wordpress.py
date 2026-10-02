@@ -29,6 +29,8 @@ PASSWORD = "SENTINEL-wp-app-password-77c1"
 PUBLIC_IP = "93.184.216.34"
 HOST = "wp.example.test"
 CLOSE = "[END UNTRUSTED WORDPRESS CONTENT]"
+#: Saved before any fixture replaces it.
+REAL_LIST_ENTRIES = wp._list_entries
 
 TYPES = {
     "post": {"slug": "post", "name": "Posts", "rest_base": "posts",
@@ -174,13 +176,14 @@ class TestSites:
         assert code == 0 and out["sites"] == []
 
     def test_a_listing_the_proxy_cannot_give_is_refused_not_empty(self, env, capsys, monkeypatch):
-        def broken():
-            raise sites.SiteError("Could not list the vault's entries: x",
-                                  "vault_credential_refused")
+        import istota.credential_shim as shim
 
-        monkeypatch.setattr(wp, "_list_entries", broken)
+        # The real wrapper and shim, under a proxy that omits `entries`.
+        monkeypatch.setattr(wp, "_list_entries", REAL_LIST_ENTRIES)
+        monkeypatch.setattr(shim, "_request", lambda payload, **kw: {"names": []})
         code, out = run(["sites"], capsys)
         assert code == 1 and out["reason"] == "vault_credential_refused"
+        assert "did not list vault entries" in out["error"]
 
 
 class TestSelectSite:
