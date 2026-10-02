@@ -67,7 +67,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 
 ### Forge commands
 
-Git work uses the real `gh` and `glab` binaries, not hand-written REST wrappers. Both run behind `forge_cli.py`, which decides which forge it is from `argv[0]`, checks the argv against a code-owned deny policy, fetches the token from whichever credential socket is present, and execs the real binary with the token in its own environment. `[developer] forge_cli_extra_denied` extends the policy and `forge_cli_permit` punctures it — each entry there removes an accident guard.
+Git work uses the real `gh` and `glab` binaries, not hand-written REST wrappers. Both run behind `sandbox/forge_cli.py`, which decides which forge it is from `argv[0]`, checks the argv against a code-owned deny policy, fetches the token from whichever credential socket is present, and execs the real binary with the token in its own environment. `[developer] forge_cli_extra_denied` extends the policy and `forge_cli_permit` punctures it — each entry there removes an accident guard.
 
 The CLIs need wider token scopes than the old wrappers did: GitLab `api` plus `write_repository`, GitHub `repo`. A token scoped for the previous path fails on every forge command.
 

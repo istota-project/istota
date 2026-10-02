@@ -31,7 +31,7 @@ proxy, which is why it answers the same for an admin and a non-admin.
 import os
 
 from istota.skills._cli import fail as _fail, parse_and_resolve, run_skill_cli
-from istota.untrusted import frame_untrusted
+from istota.lib.untrusted import frame_untrusted
 
 # A room's name is third-party text. On a shared Talk room any participant can
 # rename it, and the name then lands in a running agent's context — so it is
@@ -39,7 +39,7 @@ from istota.untrusted import frame_untrusted
 #
 # Its own label rather than that one's: these names come from the registry and a
 # web room's is not Nextcloud content at all. What the two listings share is the
-# fence (`istota.untrusted`), which is where the behaviour that matters lives —
+# fence (`istota.lib.untrusted`), which is where the behaviour that matters lives —
 # the markers cannot be closed from inside the name.
 UNTRUSTED_LABEL = "ROOM NAME"
 

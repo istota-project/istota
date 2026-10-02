@@ -13,8 +13,8 @@ from email.utils import parseaddr
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-from . import sqlite_util
-from .user_scope import is_scopable_user_id
+from istota.lib import sqlite_util
+from istota.sandbox.user_scope import is_scopable_user_id
 
 logger = logging.getLogger("istota.db")
 
@@ -1010,7 +1010,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         """)
         # User-scoped Nextcloud OAuth pair, encrypted with the *web-only* key
         # (ISTOTA_WEB_TOKEN_KEY — not the shared ISTOTA_SECRET_KEY). Written and
-        # decrypted only by the web process (istota.web_tokens); the scheduler
+        # decrypted only by the web process (istota.webui.tokens); the scheduler
         # reads nothing here. expires_at is plaintext ISO UTC so refresh checks
         # don't need a decrypt.
         conn.execute("""
@@ -2112,7 +2112,7 @@ def confirm_task(conn: sqlite3.Connection, task_id: int) -> None:
 
 def cancel_task(conn: sqlite3.Connection, task_id: int) -> None:
     """Cancel a task (sets status to 'cancelled')."""
-    from .message_relays import close_task_questions
+    from istota.relay.relays import close_task_questions
     close_task_questions(conn, task_id)
     conn.execute(
         """
@@ -2135,8 +2135,8 @@ def cancel_pending_confirmations(
     Called when a new task is created in the same conversation, indicating the
     user has moved on from the pending confirmation.
     """
-    from .message_relays import close_task_questions
-    from .whatsapp_requests import write_transaction
+    from istota.relay.relays import close_task_questions
+    from istota.relay.requests import write_transaction
     refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
     marks = ", ".join("?" for _ in refs)
     with write_transaction(conn):
@@ -3186,7 +3186,7 @@ def backfill_room_messages_from_talk_cache(
     # store — the cache holds the *raw* body, so without this the recovered
     # transcript leaks literal placeholder tokens to the web UI (ISSUE-132). The
     # live inbound path already resolves; only this cache-recovery path didn't.
-    from .talk import clean_message_content
+    from istota.nextcloud.talk import clean_message_content
 
     def _resolved(row) -> str:
         params = row["message_parameters"]
@@ -8325,9 +8325,9 @@ def _backfill_notifications(conn: sqlite3.Connection) -> None:
     `istota init` retries the whole pass.
     """
     from . import confirmations  # noqa: PLC0415 — `confirmations` imports db
-    from . import outbound_drafts as drafts  # noqa: PLC0415
-    from .notification_resolvers import confirmation as confirmation_source  # noqa: PLC0415
-    from .notification_resolvers import outbound_draft as draft_source  # noqa: PLC0415
+    from istota.mail import drafts  # noqa: PLC0415
+    from istota.notifications.resolvers import confirmation as confirmation_source  # noqa: PLC0415
+    from istota.notifications.resolvers import outbound_draft as draft_source  # noqa: PLC0415
 
     try:
         already = conn.execute(
@@ -9024,7 +9024,7 @@ def get_google_token(conn: sqlite3.Connection, user_id: str) -> dict | None:
     if not row:
         return None
 
-    from istota import secrets_store
+    from istota.credentials import store as secrets_store
 
     if not secrets_store.secret_key_available():
         logger.warning(
@@ -9066,7 +9066,7 @@ def upsert_google_token(
     $ISTOTA_SECRET_KEY. Raises if the key is unavailable -- writing plaintext
     is exactly what this table no longer tolerates.
     """
-    from istota import secrets_store
+    from istota.credentials import store as secrets_store
 
     fernet = secrets_store._get_fernet()
     access_ct = fernet.encrypt(access_token.encode("utf-8"))
@@ -9119,7 +9119,7 @@ def _migrate_google_oauth_encryption(conn: sqlite3.Connection) -> int:
     if not rows:
         return 0
 
-    from istota import secrets_store
+    from istota.credentials import store as secrets_store
 
     if not secrets_store.secret_key_available():
         logger.info(
@@ -9515,7 +9515,7 @@ def expire_stale_confirmations(conn: sqlite3.Connection, timeout_minutes: int) -
         (timeout_minutes,),
     )
     rows = cursor.fetchall()
-    from .message_relays import close_task_questions
+    from istota.relay.relays import close_task_questions
     for row in rows:
         close_task_questions(conn, row["id"], reason="confirmation_expired")
     return [

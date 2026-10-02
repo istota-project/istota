@@ -30,8 +30,8 @@ from pathlib import Path
 
 import pytest
 
-from istota import credential_shim
-from istota.skill_proxy import SkillProxy
+from istota.sandbox import credential_shim
+from istota.sandbox.skill_proxy import SkillProxy
 from istota.skills import _cli
 from istota.skills._credref import (
     MODE,
@@ -310,7 +310,7 @@ class TestResolution:
 
     def test_the_request_declares_mode_skill_and_logs_at_info(self, proxy, caplog):
         proxy()
-        with caplog.at_level(logging.INFO, logger="istota.skill_proxy"):
+        with caplog.at_level(logging.INFO, logger="istota.sandbox.skill_proxy"):
             drive(build(), ["go", "--secret", "github_pat"], Recorder())
         records = [
             r for r in caplog.records if "vault_credential task_id" in r.getMessage()
@@ -396,7 +396,7 @@ class TestTheRefusal:
     ):
         proxy()
         handler = Recorder()
-        with caplog.at_level(logging.DEBUG, logger="istota.skill_proxy"):
+        with caplog.at_level(logging.DEBUG, logger="istota.sandbox.skill_proxy"):
             with pytest.raises(SystemExit):
                 drive(build(form=PAIR), ["go", "--secret", "acme_password"], handler)
         assert refusal_of(capsys)["reason"] == "vault_credential_refused"

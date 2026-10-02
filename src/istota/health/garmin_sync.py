@@ -381,7 +381,7 @@ def _note_token_expired(
     point of this source is that there is no second chance to notice. Same split
     the email skill CLI takes for a held outbound draft.
     """
-    from istota.notification_resolvers import connected_service
+    from istota.notifications.resolvers import connected_service
 
     gm.mark_token_error(framework_db_path, ctx.user_id, reason)
     if config is None:

@@ -43,7 +43,7 @@ import os
 import subprocess
 import sys
 
-from istota.process_group import kill_group_if_live
+from istota.sandbox.process_group import kill_group_if_live
 
 __all__ = ["ocr_image_out_of_process", "child_argv", "DEFAULT_TIMEOUT_SECONDS"]
 
@@ -68,7 +68,7 @@ def child_argv(path: str) -> list[str]:
     """The exact argv the child is spawned with.
 
     Split out so the module it names can be asserted without a subprocess. The
-    entry point is `istota.ocr_leaf`, a top-level stdlib+Pillow+pytesseract
+    entry point is `istota.lib.ocr_leaf`, a top-level stdlib+Pillow+pytesseract
     leaf, and deliberately **not** `istota.skills.transcribe`: importing that
     runs `istota/skills/__init__.py`, which star-imports every skill and pulled
     `caldav` and `niquests` into this process — 0.22s of the 0.41s each spawn
@@ -81,7 +81,7 @@ def child_argv(path: str) -> list[str]:
         # not the place to inherit an import surface from it.
         "-P",
         "-m",
-        "istota.ocr_leaf",
+        "istota.lib.ocr_leaf",
         "ocr",
         # Deliberately no `--preprocess`. Automatic OCR runs the normal mode
         # once; a second enhanced pass would double the work for every image on

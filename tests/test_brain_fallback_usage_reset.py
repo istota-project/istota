@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
-import istota.subscription_usage as su
+import istota.usage.subscription as su
 import pytest
 
 from istota.brain import BrainResult, report_brain_result, reset_availability_breaker

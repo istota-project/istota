@@ -31,8 +31,8 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from istota import sqlite_util
-from istota.timestamps import iso_now
+from istota.lib import sqlite_util
+from istota.lib.timestamps import iso_now
 from istota.money.core import rules as rule_engine
 from istota.money.core.models import (
     ClientConfig,
@@ -2305,7 +2305,7 @@ def save_monarch(
     """Save :class:`MonarchConfig` to the DB.
 
     Credentials are NOT persisted here — they belong to the encrypted
-    ``secrets`` table managed by :mod:`istota.secrets_store`.
+    ``secrets`` table managed by :mod:`istota.credentials.store`.
 
     **Two profiles bound to one ledger share one rule scope**, and that is the
     one shape this cannot round-trip. Their maps used to be `profile_id`-keyed

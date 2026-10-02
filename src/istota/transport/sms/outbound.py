@@ -11,7 +11,7 @@ import sqlite3
 
 from ... import db
 from ...config import Config
-from ...timestamps import iso_now as _now
+from istota.lib.timestamps import iso_now as _now
 from ._types import RenderedSms, SmsDeliveryRecord
 from .providers._types import (
     SmsDeliveryEvent,
@@ -214,7 +214,7 @@ def _deliver_sms_blocking(
 
     question = None
     if relay_question_id is not None:
-        from ...whatsapp_requests import RequestError, admit_sms_question
+        from istota.relay.requests import RequestError, admit_sms_question
 
         if relay_return_id is not None or logical_key != "relay-question:" + relay_question_id:
             raise RequestError("request_unavailable")
@@ -223,8 +223,8 @@ def _deliver_sms_blocking(
                                           user_id=user_id, status="check")
         rendered = _exact_rendering(question["service"])
     elif relay_return_id is not None:
-        from ...message_relays import return_payload
-        from ...whatsapp_requests import RequestError, text_hash
+        from istota.relay.relays import return_payload
+        from istota.relay.requests import RequestError, text_hash
 
         if logical_key != "relay-return:" + relay_return_id:
             raise RequestError("return_unavailable")
@@ -970,7 +970,7 @@ def apply_delivery_event(conn, event):
             "VALUES (?, ?, ?) ON CONFLICT(phone_number) DO UPDATE SET updated_at = excluded.updated_at",
             (updated["to_number"], now, now),
         )
-    from ...message_relays import reconcile_question_delivery, reconcile_return_delivery
+    from istota.relay.relays import reconcile_question_delivery, reconcile_return_delivery
 
     reconcile_question_delivery(conn, logical_key=updated["logical_key"], status=updated["status"])
     reconcile_return_delivery(conn, logical_key=updated["logical_key"], status=updated["status"], message_id=updated["provider_message_id"])

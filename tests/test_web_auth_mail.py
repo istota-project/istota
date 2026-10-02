@@ -11,7 +11,7 @@ from istota.config import Config
 @pytest.mark.parametrize("builder,ttl,unit", [("build_enrol_email", 168, "hours"),
                                                ("build_reset_email", 1, "hour")])
 def test_bodies_carry_same_link_and_escape_html(builder, ttl, unit):
-    from istota import web_auth_mail
+    from istota.webui import auth_mail as web_auth_mail
     link = "https://bot.example.com/istota/auth/set-password?token=example&other=value"
     subject, plain, rich = getattr(web_auth_mail, builder)("Example bot", "<Alice>", link, ttl)
     assert "Example bot" in subject
@@ -21,7 +21,7 @@ def test_bodies_carry_same_link_and_escape_html(builder, ttl, unit):
 
 
 def test_sign_in_code_mail_carries_a_code_and_no_link():
-    from istota import web_auth_mail
+    from istota.webui import auth_mail as web_auth_mail
     subject, plain, rich = web_auth_mail.build_sign_in_code_email("Example <bot>", "<Alice>", "042917", 10)
     # In the subject and alone on a line: what one-time-code autofill reads from Mail.
     assert subject == "042917 is your Example <bot> sign-in code"
@@ -32,7 +32,7 @@ def test_sign_in_code_mail_carries_a_code_and_no_link():
 
 
 def test_disabled_mail_returns_false_and_logs(caplog):
-    from istota.web_auth_mail import send_auth_email
+    from istota.webui.auth_mail import send_auth_email
     config = Config()
     config.email.enabled = False
     with patch("istota.skills.email.send_email") as send:
@@ -42,7 +42,7 @@ def test_disabled_mail_returns_false_and_logs(caplog):
 
 
 def test_send_uses_multipart_and_sanitizes_failures(caplog):
-    from istota.web_auth_mail import send_auth_email
+    from istota.webui.auth_mail import send_auth_email
     config = Config()
     config.email.enabled = True
     config.email.bot_email = "bot@example.com"

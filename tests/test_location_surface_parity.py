@@ -1,7 +1,7 @@
 """The two location surfaces answer the same question the same way.
 
 The location query pipeline used to exist twice: once in
-``skills/location/__init__.py`` for the model and once in ``web_app.py``
+``skills/location/__init__.py`` for the model and once in ``webui/app.py``
 for the browser. The two copies drifted — the web copy snapped a stop to
 its saved place's centre and the skill copy did not, the skill copy
 carried the ``road``/``neighborhood``/``suburb`` enrichment and
@@ -175,7 +175,7 @@ def _run_skill(fn, loc_db, framework_db, **args):
 
 def _run_web(fn, framework_db, *call_args, **call_kwargs):
     """Call a web query helper with ``_config`` pointed at its framework db."""
-    from istota import web_app
+    from istota.webui import app as web_app
 
     with patch.object(web_app, "_config", SimpleNamespace(db_path=framework_db)), \
             patch("geopy.geocoders.Nominatim",
@@ -187,7 +187,7 @@ def _run_web(fn, framework_db, *call_args, **call_kwargs):
 class TestDaySummaryParity:
     def test_the_two_surfaces_return_the_same_day_summary(self, tmp_path):
         from istota.skills.location import cmd_day_summary
-        from istota.web_app import _location_query_day_summary
+        from istota.webui.app import _location_query_day_summary
 
         skill_loc, skill_fw = _seed(tmp_path, "skill")
         web_loc, web_fw = _seed(tmp_path, "web")
@@ -206,7 +206,7 @@ class TestDaySummaryParity:
         branch) and one reverse-geocoded stop (the enrichment branch), so
         the assertion above is comparing something.
         """
-        from istota.web_app import _location_query_day_summary
+        from istota.webui.app import _location_query_day_summary
 
         web_loc, web_fw = _seed(tmp_path, "web")
         summary = _run_web(_location_query_day_summary, web_fw,
@@ -230,7 +230,7 @@ class TestDaySummaryParity:
 
     def test_a_geocoded_stop_carries_the_address_parts(self, tmp_path):
         """The behaviour the web copy gains."""
-        from istota.web_app import _location_query_day_summary
+        from istota.webui.app import _location_query_day_summary
 
         web_loc, web_fw = _seed(tmp_path, "web")
         summary = _run_web(_location_query_day_summary, web_fw,
@@ -263,7 +263,7 @@ class TestDaySummaryParity:
     def test_the_local_day_ends_before_a_naive_twenty_four_hours_would(self, tmp_path):
         """Spring forward: the day is 23 hours and the 07:30Z ping is outside it."""
         from istota.skills.location import cmd_day_summary
-        from istota.web_app import _location_query_day_summary
+        from istota.webui.app import _location_query_day_summary
 
         skill_loc, skill_fw = _seed(tmp_path, "skill")
         web_loc, web_fw = _seed(tmp_path, "web")
@@ -275,7 +275,7 @@ class TestDaySummaryParity:
 
     def test_an_empty_day_returns_the_same_keys_on_both_surfaces(self, tmp_path):
         from istota.skills.location import cmd_day_summary
-        from istota.web_app import _location_query_day_summary
+        from istota.webui.app import _location_query_day_summary
 
         skill_loc, skill_fw = _seed(tmp_path, "skill")
         web_loc, web_fw = _seed(tmp_path, "web")
@@ -295,7 +295,7 @@ class TestDaySummaryParity:
 class TestCurrentParity:
     def test_the_two_surfaces_return_the_same_current_position(self, tmp_path):
         from istota.skills.location import cmd_current
-        from istota.web_app import _location_query_current
+        from istota.webui.app import _location_query_current
 
         skill_loc, skill_fw = _seed(tmp_path, "skill")
         web_loc, web_fw = _seed(tmp_path, "web")
@@ -314,7 +314,7 @@ class TestCurrentParity:
 
     def test_current_reports_the_wifi_the_ping_carried(self, tmp_path):
         """The web copy selected the column and dropped it on the way out."""
-        from istota.web_app import _location_query_current
+        from istota.webui.app import _location_query_current
 
         web_loc, web_fw = _seed(tmp_path, "web")
         current = _run_web(_location_query_current, web_fw, str(web_loc))
@@ -332,7 +332,7 @@ class TestCurrentParity:
 
     def test_an_empty_database_answers_the_same_on_both_surfaces(self, tmp_path):
         from istota.skills.location import cmd_current
-        from istota.web_app import _location_query_current
+        from istota.webui.app import _location_query_current
 
         empty_loc = tmp_path / "empty-location.db"
         location_db.init_db(empty_loc)
@@ -348,7 +348,7 @@ class TestCurrentParity:
 class TestPlacesParity:
     def test_the_two_surfaces_return_the_same_places(self, tmp_path):
         from istota.skills.location import cmd_places
-        from istota.web_app import _location_query_places
+        from istota.webui.app import _location_query_places
 
         skill_loc, skill_fw = _seed(tmp_path, "skill")
         web_loc, web_fw = _seed(tmp_path, "web")
@@ -364,7 +364,7 @@ class TestPlacesParity:
 class TestHistoryParity:
     def test_the_two_surfaces_return_the_same_pings_for_a_day(self, tmp_path):
         from istota.skills.location import cmd_history
-        from istota.web_app import _location_query_pings
+        from istota.webui.app import _location_query_pings
 
         skill_loc, skill_fw = _seed(tmp_path, "skill")
         web_loc, web_fw = _seed(tmp_path, "web")
@@ -385,7 +385,7 @@ class TestHistoryParity:
         undated branch is newest-first and its dated branch matches it.
         """
         from istota.skills.location import cmd_history
-        from istota.web_app import _location_query_pings
+        from istota.webui.app import _location_query_pings
 
         skill_loc, skill_fw = _seed(tmp_path, "skill")
         web_loc, web_fw = _seed(tmp_path, "web")
@@ -407,7 +407,7 @@ class TestHistoryParity:
         different rows, which is what makes this a query parameter.
         """
         from istota.skills.location import cmd_history
-        from istota.web_app import _location_query_pings
+        from istota.webui.app import _location_query_pings
 
         skill_loc, skill_fw = _seed(tmp_path, "skill")
         web_loc, web_fw = _seed(tmp_path, "web")
@@ -426,7 +426,7 @@ class TestHistoryParity:
 
     def test_an_unknown_sort_direction_raises(self, tmp_path):
         """A typo must not answer with the other end of the day."""
-        from istota.location_logic import location_history
+        from istota.location.logic import location_history
 
         loc_db, _ = _seed(tmp_path, "skill")
         with pytest.raises(ValueError):
@@ -435,7 +435,7 @@ class TestHistoryParity:
 
     def test_the_undated_branch_agrees_on_both_surfaces(self, tmp_path):
         from istota.skills.location import cmd_history
-        from istota.web_app import _location_query_pings
+        from istota.webui.app import _location_query_pings
 
         skill_loc, skill_fw = _seed(tmp_path, "skill")
         web_loc, web_fw = _seed(tmp_path, "web")
@@ -458,7 +458,7 @@ class TestSharedHelpers:
     """
 
     def test_a_date_object_names_the_same_day_as_its_iso_string(self, tmp_path):
-        from istota.location_logic import location_day_summary
+        from istota.location.logic import location_day_summary
 
         loc_db, _ = _seed(tmp_path, "skill")
         as_string = location_day_summary(str(loc_db), day=DAY, tz=TZ)
@@ -467,7 +467,7 @@ class TestSharedHelpers:
         assert as_date == as_string
 
     def test_a_tzinfo_object_reports_its_own_key(self, tmp_path):
-        from istota.location_logic import location_day_summary
+        from istota.location.logic import location_day_summary
 
         loc_db, _ = _seed(tmp_path, "skill")
         summary = location_day_summary(
@@ -483,7 +483,7 @@ class TestSharedHelpers:
         `timezone` field keeps saying what was asked for. Only `None` — nobody
         asked at all — reports the default as the answer.
         """
-        from istota.location_logic import resolve_timezone
+        from istota.location.logic import resolve_timezone
 
         zone, name = resolve_timezone("")
         assert name == ""
@@ -511,7 +511,7 @@ class TestNeitherSurfaceQueriesPingsItself:
 
     SURFACES = (
         "src/istota/skills/location/__init__.py",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
     )
 
     # A statement against the table, rather than the bare table name — which

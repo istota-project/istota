@@ -21,10 +21,10 @@ from __future__ import annotations
 import pytest
 
 from istota import db
-from istota import notification_sources as sources
-from istota import notification_store as store
+from istota.notifications import sources
+from istota.notifications import store
 from istota.config import Config, UserConfig
-from istota.notification_resolvers import confirmation as confirmation_source
+from istota.notifications.resolvers import confirmation as confirmation_source
 
 TOTAL_ROWS = 60
 DEAD_ROWS = 55

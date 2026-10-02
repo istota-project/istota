@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from istota.usage_render import COST_PLACEHOLDER, fmt_context, fmt_int, render_cost
+from istota.usage.render import COST_PLACEHOLDER, fmt_context, fmt_int, render_cost
 
 
 @pytest.mark.parametrize(

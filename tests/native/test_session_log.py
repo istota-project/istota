@@ -1521,10 +1521,10 @@ def _istota_imports(module) -> list[str]:
     reached: list[str] = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("istota"):
-            # `from istota import du` — the module is `istota`, the leaf is the
-            # alias, and it is the alias that says what was reached.
-            if node.module == "istota":
-                reached.extend(f"istota.{a.name}" for a in node.names)
+            # `from istota.lib import du` — the module is a package, the leaf is
+            # the alias, and it is the alias that says what was reached.
+            if node.module in ("istota", "istota.lib"):
+                reached.extend(f"{node.module}.{a.name}" for a in node.names)
             else:
                 reached.append(node.module)
         elif isinstance(node, ast.Import):
@@ -1539,7 +1539,7 @@ def test_the_module_reaches_nothing_but_llm_types_and_du():
     quietly makes it not one — and this module is imported from the agent loop's
     hot path.
 
-    `istota.du` was added when the du-style walk moved out of here; it is itself
+    `istota.lib.du` was added when the du-style walk moved out of here; it is itself
     a leaf that imports nothing from the package, which the second assertion
     below requires rather than assumes. Without that, widening this list is how
     the guard stops meaning anything: a permitted leaf that later grows a
@@ -1547,9 +1547,9 @@ def test_the_module_reaches_nothing_but_llm_types_and_du():
     approved.
     """
     reached = _istota_imports(session_log)
-    assert reached == ["istota.du", "istota.llm.types"]
+    assert reached == ["istota.lib.du", "istota.llm.types"]
 
-    from istota import du
+    from istota.lib import du
 
     assert _istota_imports(du) == [], (
         "du is no longer a leaf, so session_log is no longer one either"

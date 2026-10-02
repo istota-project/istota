@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from istota import db, web_tokens
+from istota import db
+from istota.webui import tokens as web_tokens
 from istota.config import Config, SiteConfig, UserConfig, WebConfig
 
 try:
@@ -52,7 +53,7 @@ def _make_config(tmp_path, token_storage="encrypted"):
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod.app.state.istota_config = config
     mod._oauth = MagicMock()
@@ -61,7 +62,7 @@ def _patch_app(config):
 
 
 async def _login(client, username="alice"):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
     )
@@ -70,7 +71,7 @@ async def _login(client, username="alice"):
 
 
 def _mock_talk_client(monkeypatch, posted_id=777, send_error=None):
-    """Patch istota.talk.TalkClient with a recording factory."""
+    """Patch istota.nextcloud.talk.TalkClient with a recording factory."""
     constructed = []
     instance = MagicMock()
     if send_error is not None:
@@ -83,14 +84,14 @@ def _mock_talk_client(monkeypatch, posted_id=777, send_error=None):
         constructed.append({"bearer_token": bearer_token, "timeout": timeout})
         return instance
 
-    import istota.talk
-    monkeypatch.setattr(istota.talk, "TalkClient", factory)
+    import istota.nextcloud.talk
+    monkeypatch.setattr(istota.nextcloud.talk, "TalkClient", factory)
     return constructed, instance
 
 
 @pytest.fixture(autouse=True)
 def _reset_locks():
-    import istota.web_app as mod
+    import istota.webui.app as mod
     web_tokens._refresh_locks.clear()
     mod._talk_read_pull_state.clear()
     yield

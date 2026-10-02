@@ -426,7 +426,7 @@ from unittest.mock import patch
 from istota import room_relocate
 c.db_path = pathlib.Path('/tmp/{old}.db')
 c.users = {{'testuser': c.users['testuser']}}
-with patch('istota.room_mount_reconcile._move_dav'):
+with patch('istota.maintenance.room_mount_reconcile._move_dav'):
     assert room_relocate.reconcile_mount(c) == 0
 assert (c.workspace_path / 'Channels' / {new!r} / 'CHANNEL.md').exists(), 'MOVE was a no-op'
 """
@@ -435,10 +435,10 @@ assert (c.workspace_path / 'Channels' / {new!r} / 'CHANNEL.md').exists(), 'MOVE 
         actual = "\n" + f"""
 from unittest.mock import patch
 from istota import room_relocate, storage
-from istota.room_mount_reconcile import dav_request
+from istota.maintenance.room_mount_reconcile import dav_request
 c.db_path = pathlib.Path('/tmp/{old}.db')
 c.users = {{'testuser': c.users['testuser']}}
-with patch('istota.room_mount_reconcile.os.rename', side_effect=AssertionError('FUSE rename')), patch('istota.room_mount_reconcile.dav_request', wraps=dav_request) as requests:
+with patch('istota.maintenance.room_mount_reconcile.os.rename', side_effect=AssertionError('FUSE rename')), patch('istota.maintenance.room_mount_reconcile.dav_request', wraps=dav_request) as requests:
     assert room_relocate.reconcile_mount(c) == 0
 assert any(call.args[1] == 'MOVE' for call in requests.call_args_list)
 assert not (c.workspace_path / 'Channels' / {old!r}).exists()
@@ -479,7 +479,7 @@ from unittest.mock import patch
 from istota import room_relocate
 c.db_path = pathlib.Path('/tmp/{old}.db')
 c.users = {{'testuser': c.users['testuser']}}
-with patch('istota.room_mount_reconcile.os.rename', side_effect=AssertionError('FUSE rename')):
+with patch('istota.maintenance.room_mount_reconcile.os.rename', side_effect=AssertionError('FUSE rename')):
     assert room_relocate.reconcile_mount(c) == 0
     assert room_relocate.reconcile_mount(c) == 0
 print('SWEEP', 'done')

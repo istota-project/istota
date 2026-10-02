@@ -4,8 +4,9 @@ import sqlite3
 
 import pytest
 
-from istota import db, room_relocate
-from istota.relay_destinations import destination_fingerprint
+from istota import db
+from istota.maintenance import room_relocate
+from istota.relay.destinations import destination_fingerprint
 
 
 @pytest.fixture
@@ -173,7 +174,7 @@ def test_requests_rebind_same_destination_and_preserve_approval(database):
         side = legacy(conn, "side-old", "web")
         destination = {"kind": "room", "room_token": old, "talk_ref": old, "label": old}
         request(conn, "post", destination, origin={"surface": "talk", "room_token": old, "channel": old, "talk_ref": old})
-        from istota.side_rooms import _fingerprint
+        from istota.rooms.side_rooms import _fingerprint
         request(conn, "whisper", {"kind": "side_room", "room_token": side, "parent": old},
                 fingerprint=_fingerprint(side, old), kind="side_whisper",
                 origin={"surface": "web", "channel": side, "room_token": side})
@@ -330,7 +331,7 @@ def test_cli_dry_run_and_run(database):
     with db.get_db(database) as conn:
         legacy(conn)
     before = snapshot(database)
-    command = [sys.executable, "-m", "istota.room_relocate", "--db-path", str(database)]
+    command = [sys.executable, "-m", "istota.maintenance.room_relocate", "--db-path", str(database)]
     dry = subprocess.run([*command, "--dry-run"], text=True, capture_output=True)
     assert dry.returncode == 0, dry.stderr
     assert "pending: old-talk" in dry.stdout

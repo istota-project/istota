@@ -88,8 +88,9 @@ def _room_withheld(config, user_id: str, skill_index) -> frozenset[str]:
     """
     from pathlib import Path
 
-    from istota import db, room_scopes
-    from istota.skill_host_paths import WITHHELD_SCOPES_VAR
+    from istota import db
+    from istota.rooms import scopes as room_scopes
+    from istota.sandbox.host_paths import WITHHELD_SCOPES_VAR
 
     raw = os.environ.get(WITHHELD_SCOPES_VAR, "")
     withheld = {part.strip() for part in raw.split(",") if part.strip()}

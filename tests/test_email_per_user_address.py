@@ -3,7 +3,7 @@
 import pytest
 
 from istota.config import Config
-from istota.email_support import per_user_address
+from istota.mail.support import per_user_address
 
 
 def _config(*, enabled=True, bot_email="istota@bot.example.com"):

@@ -20,7 +20,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from istota import admin_config_view, db, doctor, user_profiles
+from istota import db, doctor, user_profiles
+from istota.webui import admin_config_view
 from istota.config import (
     Config,
     WhatsAppCloudConfig,

@@ -65,15 +65,15 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-from istota.atomic_write import write_text_atomic
+from istota.lib.atomic_write import write_text_atomic
 from istota.skills._cli import emit, error_envelope, parse_and_resolve, status_exit_code
 from istota.skills._group_access import (
     GROUP_MEMORY_LABEL,
     group_access_denied,
     group_refusal,
 )
-from istota.untrusted import frame_untrusted
-from istota.user_scope import is_scopable_user_id
+from istota.lib.untrusted import frame_untrusted
+from istota.sandbox.user_scope import is_scopable_user_id
 from istota.memory.curation.audit import (
     write_audit_log,
     write_group_audit_log,
@@ -654,7 +654,7 @@ def _channel_notes_shared() -> bool:
     shared: a fence on a private room's notes costs a marker.
     """
     from istota import db
-    from istota.room_scopes import channel_notes_shared
+    from istota.rooms.scopes import channel_notes_shared
 
     db_path = os.environ.get("ISTOTA_DB_PATH", "")
     if not db_path or not Path(db_path).is_file():
@@ -700,7 +700,7 @@ def cmd_show(args) -> int:
         # the prompt block and `kv --group` do (multiplayer D22).
         text = frame_untrusted(text, GROUP_MEMORY_LABEL)
     elif target.kind == _CHANNEL and _channel_notes_shared():
-        from istota.room_scopes import CHANNEL_NOTES_LABEL
+        from istota.rooms.scopes import CHANNEL_NOTES_LABEL
 
         text = frame_untrusted(text, CHANNEL_NOTES_LABEL)
     print(text, end="" if text.endswith("\n") else "\n")

@@ -33,7 +33,7 @@ def db_path(tmp_path):
 
 
 def _loader(db_path):
-    from istota import web_app
+    from istota.webui import app as web_app
     web_app._config = Config()
     web_app._config.db_path = db_path
     return web_app._chat_room_messages

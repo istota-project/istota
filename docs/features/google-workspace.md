@@ -119,7 +119,7 @@ The bot invokes `istota-skill google_workspace <args>` (the skill wrapper); the 
 
 ## Scopes reference
 
-One row per service, matching `src/istota/google_scopes.py` — the single table the picker, the granted-scope display and this document all read.
+One row per service, matching `src/istota/credentials/google_scopes.py` — the single table the picker, the granted-scope display and this document all read.
 
 | Service | Read-only | Read and write |
 |---|---|---|

@@ -1184,7 +1184,7 @@ class TestTheViewTheAttachLoopReads:
         """A refusal saying "the sandbox binds (unresolvable)" names a
         collision nobody observed, which an operator cannot act on."""
         config = self._config(tmp_path, sockets)
-        from istota import sandbox_plan
+        from istota.sandbox import plan as sandbox_plan
 
         def _explode(cfg, path):
             raise RuntimeError("no")

@@ -30,7 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
-from . import avatars, sqlite_util
+from istota.webui import avatars
+from istota.lib import sqlite_util
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,7 @@ class UserProfile:
     # Per-user Google Workspace scope selection: {service -> off|readonly|full},
     # clamped at connect time to the operator's [google_workspace] scopes
     # ceiling. Empty is "unset" and resolves to the whole ceiling, which is
-    # what every user had before the picker existed. See istota.google_scopes.
+    # what every user had before the picker existed. See istota.credentials.google_scopes.
     google_scopes: dict[str, str] = field(default_factory=dict)
 
 

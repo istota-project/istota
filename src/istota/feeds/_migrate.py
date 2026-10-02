@@ -34,7 +34,7 @@ from istota.feeds.sanitize import (
     html_to_text,
     remove_images,
 )
-from istota.timestamps import iso_now as _iso_now
+from istota.lib.timestamps import iso_now as _iso_now
 
 
 logger = logging.getLogger(__name__)

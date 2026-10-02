@@ -6,7 +6,7 @@ import tempfile
 
 from istota import db
 from istota.config import Config
-from istota.skill_proxy import SkillProxy
+from istota.sandbox.skill_proxy import SkillProxy
 from istota.skills._loader import capability_disabled_skills, load_skill_index
 from . import test_relay_questions
 from .test_whatsapp_skill import call
@@ -62,7 +62,7 @@ def test_status_is_for_relay_questions_and_whatsapp_status_is_for_self_sends(set
     from argparse import Namespace
     from istota.skills.relay import _dispatch as relay_dispatch
     from istota.skills.whatsapp import _dispatch as whatsapp_dispatch
-    from istota.whatsapp_requests import RequestError
+    from istota.relay.requests import RequestError
     import pytest
     config, ident, _, _ = setup
     held = test_relay_questions.hold(setup)
@@ -109,7 +109,7 @@ def _talk_bound(setup, monkeypatch):
 
 def _participants(monkeypatch, **mock):
     from unittest.mock import AsyncMock
-    monkeypatch.setattr('istota.talk.TalkClient.get_participants', AsyncMock(**mock))
+    monkeypatch.setattr('istota.nextcloud.talk.TalkClient.get_participants', AsyncMock(**mock))
 
 
 def test_list_from_a_talk_bound_room_checks_the_live_audience(setup, monkeypatch):
@@ -117,7 +117,7 @@ def test_list_from_a_talk_bound_room_checks_the_live_audience(setup, monkeypatch
     # is what decides; only the Nextcloud response is stubbed.
     from argparse import Namespace
     from istota.skills.relay import _dispatch
-    from istota.whatsapp_requests import RequestError
+    from istota.relay.requests import RequestError
     import pytest
     _talk_bound(setup, monkeypatch)
     held = test_relay_questions.hold(setup)
@@ -132,7 +132,7 @@ def test_list_from_a_talk_bound_room_checks_the_live_audience(setup, monkeypatch
 def test_an_unreachable_audience_is_not_reported_as_a_wrong_one(setup, monkeypatch):
     from argparse import Namespace
     from istota.skills.relay import _dispatch
-    from istota.whatsapp_requests import RequestError
+    from istota.relay.requests import RequestError
     import pytest
     _talk_bound(setup, monkeypatch)
     held = test_relay_questions.hold(setup)
@@ -161,7 +161,7 @@ def test_the_proxy_hands_the_relay_skill_the_nextcloud_credential(tmp_path):
 def test_a_task_that_never_selected_relay_still_gives_its_cli_the_credential(tmp_path, make_task):
     # Relay is a menu skill, so it reaches the proxy's credential map only by
     # auto-authorization on the credential being present. Drive that seam.
-    from istota import task_env
+    from istota.sandbox import task_env
     from istota.config import SecurityConfig
     index = load_skill_index(Path(__file__).parents[1] / 'src/istota/skills')
     (tmp_path / 'db').mkdir()

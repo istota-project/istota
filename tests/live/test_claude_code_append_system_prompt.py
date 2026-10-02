@@ -45,8 +45,8 @@ import pytest
 
 from istota.brain._types import BrainRequest
 from istota.brain.claude_code import ClaudeCodeBrain, build_claude_cli_flags
-from istota.process_group import kill_group_if_live
-from istota.subscription_usage import resolve_token
+from istota.sandbox.process_group import kill_group_if_live
+from istota.usage.subscription import resolve_token
 
 from .stream_json import answer_text, iter_frames, transcript_summary
 

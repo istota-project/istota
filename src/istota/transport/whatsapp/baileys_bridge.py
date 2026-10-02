@@ -70,7 +70,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ... import du
+from istota.lib import du
 from ...config import Config
 from . import (
     baileys_protocol as proto,
@@ -1378,7 +1378,8 @@ def stage_inbound_media(
     # Function-scope, matching `_apply_batch_to_db` one class down: this
     # module is imported by the pairing CLI and by `doctor`, and neither has
     # any reason to pay for the database graph.
-    from ... import db, sqlite_util  # noqa: PLC0415
+    from istota import db  # noqa: PLC0415
+    from istota.lib import sqlite_util  # noqa: PLC0415
 
     incoming = event.media
     if incoming is None or incoming.error is not None:

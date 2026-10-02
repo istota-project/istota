@@ -14,7 +14,7 @@ import pytest
 
 from istota import db, executor
 from istota.config import Config
-from istota.room_scopes import task_group_ids
+from istota.rooms.scopes import task_group_ids
 
 
 @pytest.fixture
@@ -120,7 +120,7 @@ class TestInARoom:
         assert task_group_ids(conn, _task("r4")) == []
 
     def test_an_unregistered_room_loads_nothing_and_says_why(self, conn, caplog):
-        with caplog.at_level(logging.DEBUG, logger="istota.room_scopes"):
+        with caplog.at_level(logging.DEBUG, logger="istota.rooms.scopes"):
             assert task_group_ids(conn, _task("nosuch")) == []
         assert any("group_memory_skipped reason=room_members_unknown" in r.getMessage()
                    and "nosuch" in r.getMessage() for r in caplog.records)

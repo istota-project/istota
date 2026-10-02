@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pytest
 
-from istota import forge_bin
+from istota.sandbox import forge_bin
 from istota.config import DeveloperConfig
 from istota.skills.developer import _resolve_real_bin
 

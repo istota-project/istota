@@ -689,7 +689,7 @@ run_native_tier() {
     # cgroup.subtree_control. In a throwaway container that is the point of the
     # file; on a real host it rearranges the machine's own cgroup tree, and on
     # a deployment that tree is where the daemon's per-task cgroups live
-    # (`task_cgroup.py`, ISSUE-285). So ISTOTA_TEST_CGROUP_ROOT stays unset and
+    # (`sandbox/cgroup.py`, ISSUE-285). So ISTOTA_TEST_CGROUP_ROOT stays unset and
     # the cgroup tests skip themselves, which is already their documented
     # best-effort behaviour. A developer who wants them runs this under
     # `systemd-run --user -p Delegate=yes`.

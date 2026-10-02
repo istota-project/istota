@@ -30,8 +30,8 @@ import pytest
 from istota import db
 from istota.config import Config, SecurityConfig
 from istota.executor import build_bwrap_cmd, image_bind_roots, native_fs_roots
-from istota.sandbox_plan import SandboxProfile, build_mount_plan
-from istota.user_scope import scoped_user_dir
+from istota.sandbox.plan import SandboxProfile, build_mount_plan
+from istota.sandbox.user_scope import scoped_user_dir
 
 #: Every component that does not name a child of the root. `""` and `"."` are
 #: dropped by `PurePath`, `".."` is a child by name and the parent on disk, and
@@ -419,7 +419,7 @@ class TestTheHostPathAllowlist:
     def test_a_user_id_that_does_not_scope_yields_no_user_root(
         self, config, monkeypatch, user_id,
     ):
-        from istota import skill_host_paths
+        from istota.sandbox import host_paths as skill_host_paths
 
         mount = config.workspace_path
         monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
@@ -435,7 +435,7 @@ class TestTheHostPathAllowlist:
         ), f"user_id={user_id!r} reaches bob's directory: {roots}"
 
     def test_an_ordinary_user_id_still_gets_its_own_root(self, config, monkeypatch):
-        from istota import skill_host_paths
+        from istota.sandbox import host_paths as skill_host_paths
 
         mount = config.workspace_path
         monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
@@ -509,7 +509,7 @@ class TestTheMemorySkillRoots:
 
     @pytest.mark.parametrize("user_id", [i for i in BAD_IDS if i.strip()])
     def test_index_file_roots_drop_the_users_root(self, config, monkeypatch, user_id):
-        from istota.skill_host_paths import env_host_roots
+        from istota.sandbox.host_paths import env_host_roots
 
         mount = config.workspace_path
         monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
@@ -525,7 +525,7 @@ class TestTheMemorySkillRoots:
         )
 
     def test_index_file_roots_keep_an_ordinary_users_own(self, config, monkeypatch):
-        from istota.skill_host_paths import env_host_roots
+        from istota.sandbox.host_paths import env_host_roots
 
         mount = config.workspace_path
         monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))

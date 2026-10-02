@@ -10,7 +10,7 @@ import struct
 
 import pytest
 
-from istota import tool_server_protocol as proto
+from istota.sandbox import tool_server_protocol as proto
 
 
 def _frame(payload: bytes) -> bytes:

@@ -12,10 +12,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from istota import confirmations, db, side_rooms
-from istota import whatsapp_requests as requests
+from istota import confirmations, db
+from istota.rooms import side_rooms
+from istota.relay import requests
 from istota.config import Config, NextcloudConfig, TalkConfig, UserConfig
-from istota.whatsapp_requests import RequestError
+from istota.relay.requests import RequestError
 
 from .support.rooms import plain_talk_room
 from .support.talk_double import FakeTalkClient, talk_bot_client
@@ -47,7 +48,7 @@ def env(tmp_path, monkeypatch):
         db.add_web_room_member(conn, shared, "bob")
     talk = FakeTalkClient(config.db_path)
     participants = AsyncMock(return_value=PARTICIPANTS_ALICE)
-    monkeypatch.setattr("istota.talk.TalkClient.get_participants", participants)
+    monkeypatch.setattr("istota.nextcloud.talk.TalkClient.get_participants", participants)
     with patch("istota.transport.talk.get_talk_client", talk_bot_client(talk)):
         yield dict(config=config, shared=shared, talk=talk, participants=participants)
 
@@ -220,7 +221,7 @@ class TestTheSideRoom:
             assert handle is None or handle.token != side.token
 
     def test_the_web_route_refuses_a_second_member(self, env, monkeypatch):
-        from istota import web_app
+        from istota.webui import app as web_app
         config, shared = env["config"], env["shared"]
         monkeypatch.setattr(web_app, "_config", config)
         with db.get_db(config.db_path) as conn:
@@ -483,7 +484,7 @@ class TestSharedRoomConfirmations:
         config.scheduler = SchedulerConfig()
         config.workspace_path = tmp_path / "mount"
         config.workspace_path.mkdir()
-        monkeypatch.setattr("istota.talk.TalkClient.get_participants",
+        monkeypatch.setattr("istota.nextcloud.talk.TalkClient.get_participants",
                             AsyncMock(return_value=PARTICIPANTS_ALICE))
         fake_talk.db_path = config.db_path
         with db.get_db(config.db_path) as conn:
@@ -593,7 +594,7 @@ class TestTheSideRoomStaysPrivate:
                                            request_key="w1", text="hi")
 
     def test_it_is_never_promoted_to_talk(self, env, monkeypatch):
-        from istota import web_app
+        from istota.webui import app as web_app
         config, shared = env["config"], env["shared"]
         monkeypatch.setattr(web_app, "_config", config)
         with db.get_db(config.db_path) as conn:

@@ -1,4 +1,4 @@
-"""Normalization and the two avatar stores (`src/istota/avatars.py`).
+"""Normalization and the two avatar stores (`src/istota/webui/avatars.py`).
 
 Stage 1 of the profile-icons spec. Everything here runs against real Pillow and
 a real SQLite file: `normalize` is an untrusted-image decode path, so a test
@@ -15,8 +15,9 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageFile, JpegImagePlugin
 
-from istota import avatars, user_profiles
-from istota.avatars import AvatarError
+from istota import user_profiles
+from istota.webui import avatars
+from istota.webui.avatars import AvatarError
 
 
 # --- image fixtures ---------------------------------------------------------

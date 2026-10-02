@@ -73,7 +73,7 @@ class TestTheConfiguredRoomIsHonouredByEveryBareWebCaller:
         assert default_web_room_token(config, "alice") == "room-pinned"
 
     def test_the_bare_web_alert_route(self, tmp_path):
-        from istota.notifications import send_notification
+        from istota.notifications.delivery import send_notification
 
         config, general = self._setup(tmp_path)
         config.users["alice"] = UserConfig(routing={"alert": "web"})
@@ -83,7 +83,7 @@ class TestTheConfiguredRoomIsHonouredByEveryBareWebCaller:
             assert db.list_system_messages(conn, general.token) == []
 
     def test_the_bare_web_log_route(self, tmp_path):
-        from istota.notifications import effective_log_destinations
+        from istota.notifications.delivery import effective_log_destinations
 
         config, _ = self._setup(tmp_path)
         config.users["alice"] = UserConfig(routing={"log": "web"})
@@ -116,7 +116,7 @@ class TestTheConfiguredRoomAnswersPerSurface:
     view on, and for no other — a web-only room is not a Talk conversation."""
 
     def test_a_web_only_room_is_ignored_by_a_bare_talk(self, tmp_path):
-        from istota.notifications import resolve_conversation_token
+        from istota.notifications.delivery import resolve_conversation_token
 
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
@@ -127,7 +127,7 @@ class TestTheConfiguredRoomAnswersPerSurface:
         assert resolve_conversation_token(config, "alice") is None
 
     def test_a_promoted_room_answers_for_both(self, tmp_path):
-        from istota.notifications import resolve_conversation_token
+        from istota.notifications.delivery import resolve_conversation_token
 
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
@@ -164,7 +164,7 @@ class TestTheTalkRungSitsBelowTheProvisionedChannels:
     every existing Talk user's alerts out of their alerts channel on upgrade."""
 
     def test_alerts_channel_still_wins(self, tmp_path):
-        from istota.notifications import resolve_conversation_token
+        from istota.notifications.delivery import resolve_conversation_token
 
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
@@ -174,7 +174,7 @@ class TestTheTalkRungSitsBelowTheProvisionedChannels:
         assert resolve_conversation_token(config, "alice") == "nc-alerts"
 
     def test_an_explicit_talk_route_still_wins(self, tmp_path):
-        from istota.notifications import resolve_conversation_token
+        from istota.notifications.delivery import resolve_conversation_token
 
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
@@ -185,7 +185,7 @@ class TestTheTalkRungSitsBelowTheProvisionedChannels:
 
     def test_it_beats_the_briefing_token(self, tmp_path):
         from istota.config import BriefingConfig
-        from istota.notifications import resolve_conversation_token
+        from istota.notifications.delivery import resolve_conversation_token
 
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
@@ -239,7 +239,7 @@ class TestAConfiguredRoomThatIsGoneFallsBackToTheHeuristic:
             assert db.default_web_room(conn, "alice").token == general.token
 
     def test_an_archived_room_falls_back_on_talk_too(self, tmp_path):
-        from istota.notifications import resolve_conversation_token
+        from istota.notifications.delivery import resolve_conversation_token
 
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
@@ -365,7 +365,7 @@ class TestBothSurfacesNameTheSameRoom:
     Talk delivered to the pinned room."""
 
     def test_a_talk_only_room_is_honoured_on_web_too(self, tmp_path):
-        from istota.notifications import resolve_conversation_token
+        from istota.notifications.delivery import resolve_conversation_token
         from istota.transport.web import default_web_room_token
 
         config = _config(tmp_path)
@@ -443,7 +443,7 @@ class TestTheResolverTakesTheCallersConnection:
     the 30s busy timeout on a path reached per destination per message."""
 
     def test_it_uses_a_connection_that_is_passed(self, tmp_path):
-        from istota.notifications import resolve_conversation_token
+        from istota.notifications.delivery import resolve_conversation_token
 
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
@@ -487,7 +487,7 @@ class TestTheBackfillLeavesTalkAlone:
 
     def test_a_talk_bound_room_is_not_pinned(self, tmp_path):
         from istota.config import BriefingConfig
-        from istota.notifications import resolve_conversation_token
+        from istota.notifications.delivery import resolve_conversation_token
 
         config = _config(tmp_path)
         self._profile_with_room(config, talk_bound=True)

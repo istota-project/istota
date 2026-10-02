@@ -820,7 +820,7 @@ def cmd_export_csv(args: argparse.Namespace) -> None:
     resolved path — reopening the argument would re-walk the symlinks the
     resolution settled.
     """
-    from istota.skill_host_paths import write_resolved
+    from istota.sandbox.host_paths import write_resolved
 
     resolved = Path(args.output) if args.output else None
 
@@ -925,7 +925,7 @@ def cmd_garmin_sync(args: argparse.Namespace) -> None:
        through ``_run_garmin_sync_inprocess``, which runs in the daemon
        process where the key naturally lives.
     """
-    from istota import secrets_store
+    from istota.credentials import store as secrets_store
 
     if secrets_store.secret_key_available():
         _cmd_garmin_sync_direct(args)
@@ -1695,7 +1695,7 @@ def cmd_import_immunizations(args: argparse.Namespace) -> None:
     if missing_date:
         # Name the lines. A row can land here because the source printed no
         # date at all *or* because it printed one that is not a real day
-        # (2026-02-31, 13/45/2026 — see istota.date_parse), and "missing
+        # (2026-02-31, 13/45/2026 — see istota.lib.date_parse), and "missing
         # date_given" reads as a lie against a line that visibly has one.
         offenders = "; ".join(
             rows[i]["source_line"] or rows[i]["name"] for i in missing_date[:5]

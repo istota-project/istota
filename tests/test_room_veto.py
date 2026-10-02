@@ -19,8 +19,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from istota import confirmations, db, room_policy, room_veto, side_rooms
-from istota import whatsapp_requests as requests
+from istota import confirmations, db
+from istota.rooms import policy as room_policy
+from istota.rooms import veto as room_veto
+from istota.rooms import side_rooms
+from istota.relay import requests
 from istota.config import Config, NextcloudConfig, TalkConfig, UserConfig
 from istota.transport._types import ParticipantRef
 from istota.transport.ingest import classify_ahead, record_inbound
@@ -853,7 +856,7 @@ class TestOnWeb:
         from httpx import ASGITransport, AsyncClient
 
         from istota.config import SiteConfig, WebConfig
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         path = tmp_path / "web.db"
         db.init_db(path)

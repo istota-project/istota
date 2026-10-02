@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 
 
-from istota import db_relocate
+from istota.maintenance import db_relocate
 from istota.config import Config, UserConfig
 
 

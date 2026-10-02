@@ -392,20 +392,20 @@ class TestPathScoping:
 
 class TestLegacyShim:
     def test_ocs_get_returns_none_instead_of_raising(self, nc_config):
-        from istota.nextcloud_client import ocs_get as legacy_get
+        from istota.nextcloud.compat import ocs_get as legacy_get
 
         resp = _ocs_response(None, status_code=997, message="")
         with patch("istota.nextcloud._http.httpx.get", return_value=resp):
             assert legacy_get(nc_config, "/cloud/users/alice") is None
 
     def test_ocs_post_returns_none_instead_of_raising(self, nc_config):
-        from istota.nextcloud_client import ocs_post as legacy_post
+        from istota.nextcloud.compat import ocs_post as legacy_post
 
         with patch("istota.nextcloud._http.httpx.post", side_effect=OSError("down")):
             assert legacy_post(nc_config, "/shares", data={}) is None
 
     def test_ocs_delete_returns_false_instead_of_raising(self, nc_config):
-        from istota.nextcloud_client import ocs_delete as legacy_delete
+        from istota.nextcloud.compat import ocs_delete as legacy_delete
 
         with patch("istota.nextcloud._http.httpx.delete", side_effect=OSError("down")):
             assert legacy_delete(nc_config, "/shares/1") is False
@@ -425,7 +425,7 @@ class TestLegacyShim:
             assert hasattr(pkg, name), name
 
     def test_shim_exports_every_legacy_name(self):
-        import istota.nextcloud_client as shim
+        import istota.nextcloud.compat as shim
 
         for name in (
             "ocs_get",

@@ -40,7 +40,7 @@ from pathlib import Path
 
 import pytest
 
-from istota import devbox_exec_protocol as proto
+from istota.devbox import exec_protocol as proto
 from istota.skills import devbox
 from tests.support.skill_cli import run_skill_main
 
@@ -52,7 +52,7 @@ _EXECUTOR = _REPO / "src" / "istota" / "executor.py"
 # `execute_task` into `task_env` and this scan silently found nothing:
 # the sibling "has a reader" guard then passed vacuously, which is the
 # worse half. A further extraction has to be added here or go red.
-_ENV_SOURCES = (_EXECUTOR, _REPO / "src" / "istota" / "task_env.py")
+_ENV_SOURCES = (_EXECUTOR, _REPO / "src" / "istota" / "sandbox" / "task_env.py")
 
 
 _SERVER = _REPO / "docker/devbox/scripts/istota-exec-serve"
@@ -832,7 +832,7 @@ class TestTheConnectBudgetComesFromConfig:
     def test_the_two_clients_agree_on_the_ack_budget(self):
         """Two clients of one server disagreeing about how long a slow spawn may
         take shows up as one reporting an outage the other does not see."""
-        from istota import devbox_exec_client
+        from istota.devbox import exec_client as devbox_exec_client
 
         assert devbox.ACK_TIMEOUT_SECONDS == devbox_exec_client.ACK_TIMEOUT_SECONDS
 

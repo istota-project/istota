@@ -364,7 +364,7 @@ class TestInsertPing:
 @_needs_fastapi
 class TestReceiverScrub:
     def test_a_declared_point_stores_no_altitude(self, tmp_path):
-        from istota.webhook_receiver import _process_feature
+        from istota.webui.webhook_receiver import _process_feature
 
         path = _init_db(tmp_path)
         with location_db.connect(path) as conn:
@@ -381,7 +381,7 @@ class TestReceiverScrub:
     def test_a_declared_point_keeps_everything_else(self, tmp_path):
         """The coordinate and its 1 m accuracy are load-bearing for place
         matching — only the altitude is fabricated."""
-        from istota.webhook_receiver import _process_feature
+        from istota.webui.webhook_receiver import _process_feature
 
         path = _init_db(tmp_path)
         with location_db.connect(path) as conn:
@@ -395,7 +395,7 @@ class TestReceiverScrub:
         assert latest.wifi == "home-ssid"
 
     def test_a_measured_point_keeps_its_altitude(self, tmp_path):
-        from istota.webhook_receiver import _process_feature
+        from istota.webui.webhook_receiver import _process_feature
 
         path = _init_db(tmp_path)
         with location_db.connect(path) as conn:
@@ -413,7 +413,7 @@ class TestReceiverScrub:
 
     def test_a_measured_point_at_minus_one_metre_keeps_it(self, tmp_path):
         """Matching on the value rather than the marker would eat this."""
-        from istota.webhook_receiver import _process_feature
+        from istota.webui.webhook_receiver import _process_feature
 
         path = _init_db(tmp_path)
         with location_db.connect(path) as conn:
@@ -431,7 +431,7 @@ class TestReceiverScrub:
         """iOS's documented "this vertical fix is invalid" signal, and the same
         negative-sentinel convention speed and course already get scrubbed by.
         """
-        from istota.webhook_receiver import _process_feature
+        from istota.webui.webhook_receiver import _process_feature
 
         path = _init_db(tmp_path)
         with location_db.connect(path) as conn:
@@ -449,7 +449,7 @@ class TestReceiverScrub:
 
     def test_stock_overland_sends_neither_key(self, tmp_path):
         """The regression that matters: no wifi_zone, no vertical_accuracy."""
-        from istota.webhook_receiver import _process_feature
+        from istota.webui.webhook_receiver import _process_feature
 
         path = _init_db(tmp_path)
         with location_db.connect(path) as conn:

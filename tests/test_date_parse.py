@@ -9,7 +9,7 @@ from datetime import date
 
 import pytest
 
-from istota.date_parse import is_future_date, parse_loose_date
+from istota.lib.date_parse import is_future_date, parse_loose_date
 
 
 class TestTheIsoBranchValidates:

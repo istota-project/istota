@@ -15,7 +15,7 @@ Both of those are backstops, and both are loud: running the graceful window out
 ends in uvicorn cancelling the ASGI task, and uvicorn logs any exception out of
 an ASGI app — ``CancelledError`` included — as ``ERROR: Exception in ASGI
 application`` with a full traceback. So the ordinary path is the third case
-here: the stream sees the stop signal (``istota.web_shutdown``) and ends itself,
+here: the stream sees the stop signal (``istota.webui.shutdown``) and ends itself,
 leaving the shutdown nothing to wait on and nothing to cancel.
 
 So these run a real uvicorn in a subprocess with a real SSE client attached and

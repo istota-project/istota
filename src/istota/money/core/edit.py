@@ -11,7 +11,7 @@ Three pieces live here:
 
 * :func:`new_txn_id` — UUID generator for the ``id:`` metadata.
 * :func:`_ledger_lock` — exclusive flock serializing ledger writes, over the
-  shared :func:`istota.file_lock.exclusive_lock` that
+  shared :func:`istota.lib.file_lock.exclusive_lock` that
   :func:`istota.money.work._work_lock` also uses. The web editor and the
   scheduler's Monarch sync both mutate the ledger tree; without this they race.
 * :func:`backfill_ledger_ids` / :func:`edit_transaction` (later stages).
@@ -23,8 +23,8 @@ import re as _re
 from contextlib import contextmanager
 from pathlib import Path
 
-from istota.atomic_write import write_text_atomic
-from istota.file_lock import exclusive_lock
+from istota.lib.atomic_write import write_text_atomic
+from istota.lib.file_lock import exclusive_lock
 
 from .ids import new_txn_id
 from .ledger import run_bean_check

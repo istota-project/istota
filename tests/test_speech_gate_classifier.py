@@ -15,7 +15,9 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, speech_gate, web_app
+from istota import db
+from istota.webui import app as web_app
+from istota.rooms import speech_gate
 from istota.config import BrainConfig, Config, NativeBrainConfig
 from istota.executor import build_oneshot_completer, build_speech_gate_completer
 from istota.transport import IncomingMessage, classify_ahead, ingest_message
@@ -325,7 +327,7 @@ class TestTheCompleterAndItsUsage:
 
 class TestTheDashboardCounter:
     def test_a_speech_gate_row_is_not_counted_as_unmeasured_context(self, config):
-        from istota.usage import BrainUsage
+        from istota.usage.telemetry import BrainUsage
 
         with db.get_db(config.db_path) as conn:
             db.insert_task_usage(

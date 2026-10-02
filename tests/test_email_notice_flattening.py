@@ -42,9 +42,9 @@ from unittest.mock import patch
 import pytest
 
 from istota import db
-from istota import notification_sources as sources
+from istota.notifications import sources
 from istota.config import Config, EmailConfig as AppEmailConfig, UserConfig
-from istota.notification_resolvers import task_alert
+from istota.notifications.resolvers import task_alert
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email import inbound as inbound_module
 from istota.transport.email.inbound import (
@@ -146,7 +146,7 @@ class TestDmarcAlerts:
             f"Mail from {HOSTILE_SENDER} routed as sender_match.\n"
             f"Subject: {HOSTILE_SUBJECT}"
         )
-        with patch("istota.notifications.send_notification", return_value=True) as send:
+        with patch("istota.notifications.delivery.send_notification", return_value=True) as send:
             inbound_module._deliver_dmarc_alerts(config, alerts)
         _assert_flat(_pushed(send))
 
@@ -159,7 +159,7 @@ class TestDmarcAlerts:
         being asserted — the rule applied to both is.
         """
         alerts = _dmarc_alert(f"Mail from {HOSTILE_SENDER}\nSubject: {HOSTILE_SUBJECT}")
-        with patch("istota.notifications.send_notification", return_value=True) as send:
+        with patch("istota.notifications.delivery.send_notification", return_value=True) as send:
             inbound_module._deliver_dmarc_alerts(config, alerts)
 
         with db.get_db(config.db_path) as conn:
@@ -189,7 +189,7 @@ class TestDmarcAlerts:
             patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
             patch("istota.transport.email.inbound.read_email", return_value=email),
             patch("istota.transport.email.inbound.download_attachments", return_value=[]),
-            patch("istota.notifications.send_notification", return_value=True) as send,
+            patch("istota.notifications.delivery.send_notification", return_value=True) as send,
         ):
             poll_emails(config)
 
@@ -213,7 +213,7 @@ class TestThrottleNotices:
         else:
             notice.record_held(HOSTILE_SENDER)
 
-        with patch("istota.notifications.send_notification", return_value=True) as send:
+        with patch("istota.notifications.delivery.send_notification", return_value=True) as send:
             inbound_module._deliver_throttle_notices(config, {"alice": notice}, 3600)
         _assert_flat(_pushed(send))
 
@@ -222,7 +222,7 @@ class TestThrottleNotices:
         notice = _ThrottleNotice(user_id="alice")
         notice.record(HOSTILE_SENDER)
 
-        with patch("istota.notifications.send_notification", return_value=True) as send:
+        with patch("istota.notifications.delivery.send_notification", return_value=True) as send:
             inbound_module._deliver_throttle_notices(config, {"alice": notice}, 3600)
 
         with db.get_db(config.db_path) as conn:
@@ -243,7 +243,7 @@ class TestThrottleNotices:
         notice = _ThrottleNotice(user_id="alice")
         notice.record_held("loud@example.com")
 
-        with patch("istota.notifications.send_notification", return_value=True) as send:
+        with patch("istota.notifications.delivery.send_notification", return_value=True) as send:
             inbound_module._deliver_throttle_notices(config, {"alice": notice}, 3600)
 
         pushed = _pushed(send)
@@ -265,7 +265,7 @@ class TestThrottleNotices:
         for n in range(count):
             notice.record_held(f"loud{n}@example.com")
 
-        with patch("istota.notifications.send_notification", return_value=True) as send:
+        with patch("istota.notifications.delivery.send_notification", return_value=True) as send:
             inbound_module._deliver_throttle_notices(config, {"alice": notice}, 3600)
 
         assert expected in _pushed(send)
@@ -281,7 +281,7 @@ class TestThrottleNotices:
         notice = _ThrottleNotice(user_id="alice")
         notice.record("not an address\n  - trusted@example.com: 99")
 
-        with patch("istota.notifications.send_notification", return_value=True) as send:
+        with patch("istota.notifications.delivery.send_notification", return_value=True) as send:
             inbound_module._deliver_throttle_notices(config, {"alice": notice}, 3600)
 
         pushed = _pushed(send)
@@ -311,7 +311,7 @@ class TestConfirmationPrompts:
             alerts_token="alerts_room", sender=HOSTILE_SENDER,
         )
         with patch(
-            "istota.notifications.send_confirmation_prompt", return_value=(True, None),
+            "istota.notifications.delivery.send_confirmation_prompt", return_value=(True, None),
         ) as send:
             inbound_module._deliver_confirmation_prompts(config, [prompt])
 
@@ -359,9 +359,9 @@ class TestForgedLines:
             patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
             patch("istota.transport.email.inbound.read_email", return_value=email),
             patch("istota.transport.email.inbound.download_attachments", return_value=[]),
-            patch("istota.notifications.send_notification", return_value=True) as send,
+            patch("istota.notifications.delivery.send_notification", return_value=True) as send,
             patch(
-                "istota.notifications.send_confirmation_prompt", return_value=(True, None),
+                "istota.notifications.delivery.send_confirmation_prompt", return_value=(True, None),
             ) as prompt,
         ):
             poll_emails(config)
@@ -412,7 +412,7 @@ class TestTheEvidenceSurvives:
             "Inbound mail authentication check failed.\n"
             "Subject: rm -rf ~/Documents and file_upload.py"
         )
-        with patch("istota.notifications.send_notification", return_value=True) as send:
+        with patch("istota.notifications.delivery.send_notification", return_value=True) as send:
             inbound_module._deliver_dmarc_alerts(config, alerts)
 
         pushed = _pushed(send)

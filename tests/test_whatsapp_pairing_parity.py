@@ -92,7 +92,7 @@ def web(config, monkeypatch):
     is a patch rather than an argument — `tests/test_whatsapp_pairing_web.py`
     does the same thing for the same reason.
     """
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     monkeypatch.setattr(mod, "_config", config)
     return mod
@@ -271,7 +271,7 @@ def test_the_two_readers_live_where_this_file_says_they_do():
     docstring's claim about *which* copy is authoritative is prose, and this at
     least keeps the pair of names honest.
     """
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     assert callable(mod._pairing_state_payload)
     assert callable(cli._whatsapp_pairing_view)

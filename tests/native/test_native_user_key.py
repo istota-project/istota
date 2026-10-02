@@ -20,7 +20,7 @@ def _cfg(tmp_path):
 
 def test_user_secret_overrides_instance_key(tmp_path):
     native = NativeBrainConfig(model="m", api_key="instance-key")
-    with patch("istota.secrets_store.get_secret", return_value="user-key"):
+    with patch("istota.credentials.store.get_secret", return_value="user-key"):
         out = _native_with_user_key(native, _cfg(tmp_path), "alice")
     assert out.api_key == "user-key"
     assert out.model == "m"  # everything else preserved
@@ -30,13 +30,13 @@ def test_user_secret_overrides_instance_key(tmp_path):
 
 def test_falls_back_to_instance_key(tmp_path):
     native = NativeBrainConfig(model="m", api_key="instance-key")
-    with patch("istota.secrets_store.get_secret", return_value=None):
+    with patch("istota.credentials.store.get_secret", return_value=None):
         out = _native_with_user_key(native, _cfg(tmp_path), "alice")
     assert out.api_key == "instance-key"
 
 
 def test_secret_lookup_error_falls_back(tmp_path):
     native = NativeBrainConfig(model="m", api_key="instance-key")
-    with patch("istota.secrets_store.get_secret", side_effect=RuntimeError("no key")):
+    with patch("istota.credentials.store.get_secret", side_effect=RuntimeError("no key")):
         out = _native_with_user_key(native, _cfg(tmp_path), "alice")
     assert out.api_key == "instance-key"

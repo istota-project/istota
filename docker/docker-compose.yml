@@ -582,7 +582,7 @@ services:
       # istota service on first boot).
       ISTOTA_SECRET_KEY: ${ISTOTA_SECRET_KEY:-}
       # Web session cookie signing key. Operator-supplied value wins; when
-      # unset, web_app.py reads web.session_secret_key from config.toml, which
+      # unset, webui/app.py reads web.session_secret_key from config.toml, which
       # the istota service generates on first boot and persists on the
       # istota_data volume (survives rebuilds without -v). There is no insecure
       # default — the web service refuses to start with neither (ISSUE-124).
@@ -659,7 +659,7 @@ services:
         fi
         mkdir -p /app/config
         ln -sf /data/config/config.toml /app/config/config.toml
-        exec uv run uvicorn istota.web_app:app --no-access-log --host 0.0.0.0 --port "$${WEB_PORT}"
+        exec uv run uvicorn istota.webui.app:app --no-access-log --host 0.0.0.0 --port "$${WEB_PORT}"
     command: []
     restart: unless-stopped
 
@@ -920,7 +920,7 @@ services:
         # would hold the token however nginx is configured. nginx is told not
         # to log that path too; this is the half nginx cannot reach. The
         # receiver logs each event itself under a stable name, without it.
-        exec uv run uvicorn istota.webhook_receiver:app --host 0.0.0.0 --port "$${ISTOTA_WEBHOOKS_PORT}" --no-access-log
+        exec uv run uvicorn istota.webui.webhook_receiver:app --host 0.0.0.0 --port "$${ISTOTA_WEBHOOKS_PORT}" --no-access-log
     command: []
     restart: unless-stopped
 

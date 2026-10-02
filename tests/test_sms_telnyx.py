@@ -427,7 +427,7 @@ def test_telnyx_route_uses_fixed_public_url_and_returns_without_provider_send(
 ):
     from fastapi.testclient import TestClient
 
-    from istota import webhook_receiver as receiver
+    from istota.webui import webhook_receiver as receiver
     from istota.transport.sms.providers.registry import make_provider_registry
 
     config = _config(tmp_path)
@@ -462,7 +462,7 @@ def test_telnyx_route_uses_fixed_public_url_and_returns_without_provider_send(
 def test_telnyx_route_rejects_oversize_and_bad_signatures(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
-    from istota import webhook_receiver as receiver
+    from istota.webui import webhook_receiver as receiver
     from istota.transport.sms.providers.registry import make_provider_registry
 
     config = _config(tmp_path)

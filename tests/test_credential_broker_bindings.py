@@ -2,7 +2,9 @@
 
 import pytest
 
-from istota import db, secrets_store, secrets_vault
+from istota import db
+from istota.credentials import store as secrets_store
+from istota.credentials import vault as secrets_vault
 from tests.test_secrets_vault import _new_db, _read
 
 
@@ -13,7 +15,7 @@ from tests.test_secrets_vault import _new_db, _read
     ("[2001:db8::1]", "[2001:db8::1]"),
 ])
 def test_vault_bare_authority_binds_for_https(url, host):
-    from istota.credential_broker.bindings import https_host, parse_binding
+    from istota.credentials.broker.bindings import https_host, parse_binding
     assert parse_binding(url, {}, [])["hosts"] == [host]
     assert parse_binding(url, {}, [], source="local") == {
         **parse_binding(url, {}, []), "source": "local",
@@ -56,13 +58,13 @@ def test_vault_metadata_is_not_a_credential(tmp_path):
     ("https://portal.example.com", "user@evil.example"),
 ])
 def test_invalid_binding_fails_closed(url, hosts):
-    from istota.credential_broker.bindings import parse_binding
+    from istota.credentials.broker.bindings import parse_binding
     binding = parse_binding(url, {"istota_hosts": hosts}, [])
     assert binding["hosts"] == []
 
 
 def test_proxy_authorization_is_never_allowed():
-    from istota.credential_broker.bindings import parse_binding
+    from istota.credentials.broker.bindings import parse_binding
     binding = parse_binding("https://example.com", {
         "istota_headers": "Proxy-Authorization, Authorization",
     }, [])
@@ -70,7 +72,7 @@ def test_proxy_authorization_is_never_allowed():
 
 
 def test_sync_updates_and_deletes_bindings_with_values(tmp_path, monkeypatch):
-    from istota.credential_broker.bindings import get_binding
+    from istota.credentials.broker.bindings import get_binding
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
     database = tmp_path / "data.db"
     db.init_db(database)
@@ -96,7 +98,7 @@ def test_sync_updates_and_deletes_bindings_with_values(tmp_path, monkeypatch):
 
 def test_forge_bindings_use_config_without_vault():
     from istota.config import DeveloperConfig
-    from istota.credential_broker.bindings import forge_bindings
+    from istota.credentials.broker.bindings import forge_bindings
     config = DeveloperConfig(gitlab_token="fixture-token", github_token="fixture-token")
     bindings = forge_bindings(config)
     assert bindings["forge.github"]["hosts"] == ["api.github.com", "github.com"]
@@ -110,7 +112,7 @@ def test_binding_write_rolls_back_value_on_failure(tmp_path, monkeypatch):
     database = tmp_path / "data.db"
     db.init_db(database)
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
-    from istota.credential_broker import bindings
+    from istota.credentials.broker import bindings
     def fail(*args):
         raise RuntimeError("binding write failed")
     monkeypatch.setattr(bindings, "put_binding", fail)
@@ -121,7 +123,7 @@ def test_binding_write_rolls_back_value_on_failure(tmp_path, monkeypatch):
 
 
 def test_sync_sweep_removes_binding_but_truncation_holds_it(tmp_path, monkeypatch):
-    from istota.credential_broker.bindings import get_binding, parse_binding
+    from istota.credentials.broker.bindings import get_binding, parse_binding
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
     database = tmp_path / "data.db"
     db.init_db(database)
@@ -152,8 +154,8 @@ def test_proxy_resolves_live_value_and_hosts_together(tmp_path, monkeypatch):
     import tempfile
     from pathlib import Path
     from istota.config import Config
-    from istota.credential_broker.bindings import parse_binding
-    from istota.skill_proxy import SkillProxy
+    from istota.credentials.broker.bindings import parse_binding
+    from istota.sandbox.skill_proxy import SkillProxy
     from istota.skills._credref import _resolve_name
     from tests.test_vault_credential_fetch import request
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
@@ -184,8 +186,8 @@ def test_vault_list_names_whole_entries_in_the_snapshot(tmp_path, monkeypatch):
     import tempfile
     from pathlib import Path
     from istota.config import Config
-    from istota.credential_shim import ProxyError, list_entries
-    from istota.skill_proxy import SkillProxy
+    from istota.sandbox.credential_shim import ProxyError, list_entries
+    from istota.sandbox.skill_proxy import SkillProxy
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
     database = tmp_path / "data.db"
     db.init_db(database)
@@ -220,7 +222,7 @@ def test_vault_list_names_whole_entries_in_the_snapshot(tmp_path, monkeypatch):
 
 def test_forge_sync_replaces_and_removes_bindings(tmp_path):
     from istota.config import DeveloperConfig
-    from istota.credential_broker.bindings import get_binding, sync_forge_bindings
+    from istota.credentials.broker.bindings import get_binding, sync_forge_bindings
     database = tmp_path / "data.db"
     db.init_db(database)
     config = DeveloperConfig(gitlab_token="fixture-token")
@@ -233,7 +235,7 @@ def test_forge_sync_replaces_and_removes_bindings(tmp_path):
 
 
 def test_empty_value_still_revokes_hosts_and_reveal(tmp_path, monkeypatch):
-    from istota.credential_broker.bindings import get_binding
+    from istota.credentials.broker.bindings import get_binding
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
     database = tmp_path / "data.db"
     db.init_db(database)
@@ -259,9 +261,9 @@ def test_empty_value_still_revokes_hosts_and_reveal(tmp_path, monkeypatch):
 def test_list_columns_include_unbound_and_forge(tmp_path, monkeypatch, capsys):
     import tempfile
     from pathlib import Path
-    from istota import credential_shim
+    from istota.sandbox import credential_shim
     from istota.config import Config, DeveloperConfig
-    from istota.skill_proxy import SkillProxy
+    from istota.sandbox.skill_proxy import SkillProxy
     database = tmp_path / "data.db"
     db.init_db(database)
     config = Config(db_path=database, developer=DeveloperConfig(github_token="fixture-token"))
@@ -297,7 +299,7 @@ def test_empty_custom_metadata_roundtrips_as_none(tmp_path):
     ("http://[2001:db8::1]:8080/", "http://[2001:db8::1]:8080"),
 ])
 def test_http_vault_metadata_keeps_scheme(url, host):
-    from istota.credential_broker.bindings import https_host, parse_binding
+    from istota.credentials.broker.bindings import https_host, parse_binding
     assert parse_binding(url, {}, [])["hosts"] == [host]
     assert parse_binding(url, {}, [], source="local")["hosts"] == [host]
     assert parse_binding(url, {}, [], source="config")["hosts"] == []
@@ -306,7 +308,7 @@ def test_http_vault_metadata_keeps_scheme(url, host):
 
 
 def test_removing_custom_field_preserves_entry_grant(tmp_path, monkeypatch):
-    from istota.credential_broker import grants
+    from istota.credentials.broker import grants
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
     database = tmp_path / "data.db"
     db.init_db(database)

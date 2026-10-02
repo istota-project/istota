@@ -16,7 +16,7 @@ format, and the caller that asks has no converter behind it (ISSUE-520).
 import pytest
 
 from istota.image_attachments import IMAGE_EXTENSIONS
-from istota.image_sniff import (
+from istota.lib.image_sniff import (
     DECODABLE_MEDIA_TYPES,
     EXTENSION_BY_MEDIA_TYPE,
     INLINE_MEDIA_TYPES,

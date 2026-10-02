@@ -7,7 +7,8 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from istota import db, web_tokens
+from istota import db
+from istota.webui import tokens as web_tokens
 from istota.config import Config, WebConfig
 
 KEY = "x" * 64
@@ -87,7 +88,7 @@ class TestKeyHandling:
         assert web_tokens.delete_tokens(db_path, "alice") is False
 
     def test_distinct_salt_from_secrets_store(self):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         assert web_tokens._SCRYPT_SALT != secrets_store._SCRYPT_SALT
 
 

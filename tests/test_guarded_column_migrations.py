@@ -230,7 +230,7 @@ class TestNoSecondImplementation:
     # and `test_the_exemptions_are_still_real` cannot see it either, because
     # the top-level `db.py` supplies a hit for the whole name.
     EXEMPT = {
-        "sqlite_util.py": "the helper; this is where the statement is built",
+        "lib/sqlite_util.py": "the helper; this is where the statement is built",
         "db.py": (
             "the `monarch_synced_transactions` loop, which is ISSUE-427's "
             "vestigial pair and is left standing untouched"

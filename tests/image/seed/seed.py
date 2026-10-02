@@ -21,7 +21,7 @@ import sqlite3
 import sys
 
 from istota.config import load_config
-from istota.db_relocate import legacy_db_path
+from istota.maintenance.db_relocate import legacy_db_path
 
 MODULE = "feeds"
 

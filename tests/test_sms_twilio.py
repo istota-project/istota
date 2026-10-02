@@ -285,7 +285,7 @@ def test_twilio_route_uses_configured_public_url_and_persists_event(
 ):
     from fastapi.testclient import TestClient
 
-    from istota import webhook_receiver as receiver
+    from istota.webui import webhook_receiver as receiver
     from istota.transport.sms.providers.registry import make_provider_registry
 
     config = _config(tmp_path)
@@ -321,7 +321,7 @@ def test_twilio_route_uses_configured_public_url_and_persists_event(
 def test_twilio_route_rejects_oversize_and_bad_signatures(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
-    from istota import webhook_receiver as receiver
+    from istota.webui import webhook_receiver as receiver
     from istota.transport.sms.providers.registry import make_provider_registry
 
     config = _config(tmp_path)

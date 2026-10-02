@@ -489,7 +489,7 @@ Error:
 {result}
 """
 
-            from .email_support import get_email_config
+            from istota.mail.support import get_email_config
             email_config = get_email_config(config)
             send_email(
                 to=to_addr,

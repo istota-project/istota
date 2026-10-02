@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import logging
 
-from istota import host_pressure, scheduler
+from istota import scheduler
+from istota.maintenance import host_pressure
 from istota.config import SchedulerConfig
 from istota.scheduler import _emit_host_pressure_breadcrumb
 

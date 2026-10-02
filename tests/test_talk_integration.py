@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from istota.config import load_config
-from istota.talk import TalkClient
+from istota.nextcloud.talk import TalkClient
 
 # Load config from project root — skip all tests if missing or misconfigured
 _CONFIG_PATHS = [

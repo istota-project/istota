@@ -13,7 +13,8 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, secrets_store
+from istota import db
+from istota.credentials import store as secrets_store
 from istota.config import (
     Config,
     LocationReceiverConfig,
@@ -49,7 +50,7 @@ def test_token_map_built_from_secrets_table(db_path):
         "bob":   UserConfig(display_name="Bob"),
     })
 
-    from istota import webhook_receiver as wr
+    from istota.webui import webhook_receiver as wr
 
     with patch.object(wr, "load_config", return_value=cfg):
         wr.reload_config()
@@ -67,7 +68,7 @@ def test_disabled_module_excluded_from_token_map(db_path):
         "bob":   UserConfig(display_name="Bob", disabled_modules=["location"]),
     })
 
-    from istota import webhook_receiver as wr
+    from istota.webui import webhook_receiver as wr
 
     with patch.object(wr, "load_config", return_value=cfg):
         wr.reload_config()
@@ -85,9 +86,19 @@ def test_user_without_ingest_token_skipped(db_path):
         "bob":   UserConfig(display_name="Bob"),
     })
 
-    from istota import webhook_receiver as wr
+    from istota.webui import webhook_receiver as wr
 
     with patch.object(wr, "load_config", return_value=cfg):
         wr.reload_config()
 
     assert wr._token_map == {"bob-tok": "bob"}
+
+
+def test_the_old_module_path_serves_the_same_app():
+    """Units rendered before the `webui/` move start uvicorn on the old path,
+    and the auto-update cron restarts them without re-rendering."""
+    pytest.importorskip("fastapi")
+    import istota.webhook_receiver as stub  # move-modules: keep
+    from istota.webui import webhook_receiver
+
+    assert stub.app is webhook_receiver.app

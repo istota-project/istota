@@ -11,9 +11,11 @@ from types import SimpleNamespace
 import pytest
 from pykeepass import create_database
 
-from istota import db, secrets_store, secrets_vault
+from istota import db
+from istota.credentials import store as secrets_store
+from istota.credentials import vault as secrets_vault
 from istota.config import load_config
-from istota.secrets_vault import (
+from istota.credentials.vault import (
     PasswordPolicy,
     VaultChanged,
     VaultWriteRefused,

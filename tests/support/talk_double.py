@@ -37,11 +37,11 @@ room half way through a scenario and the next call must see the new binding.
 same reason: a test repoints or extends them mid-scenario.
 
 **The web process is reached by a second patch, not by this module's first one.**
-`web_app.py` constructs `TalkClient(...)` directly in eight places — including
+`webui/app.py` constructs `TalkClient(...)` directly in eight places — including
 `_chat_promote_to_talk`, which *creates* the promoted shape, and `_post_as_user`,
 which posts a web turn to the room's Talk ref — and each takes a per-user OAuth
 bearer token, so there is no factory to patch. `talk_client_factory` stands in at
-`istota.talk.TalkClient` for exactly those, and the `fake_talk_web` fixture
+`istota.nextcloud.talk.TalkClient` for exactly those, and the `fake_talk_web` fixture
 installs it. `fake_talk` alone does not: a web test using only that fixture still
 reaches the real client. The one remaining *function-local* `get_talk_client`
 import (`commands`' `!search`) is *reached* by `fake_talk` patching
@@ -251,7 +251,7 @@ class TalkConstruction:
 
 
 class FakeTalkClient:
-    """Stands in for `istota.talk.TalkClient` at both of its seams.
+    """Stands in for `istota.nextcloud.talk.TalkClient` at both of its seams.
 
     Only the methods the patched seams actually call are implemented — the two
     `get_talk_client` importers (`transport/talk/__init__.py` and
@@ -829,7 +829,7 @@ def talk_bot_client(client: FakeTalkClient):
 
 
 def talk_client_factory(client: FakeTalkClient):
-    """A stand-in for `istota.talk.TalkClient` at its construction sites.
+    """A stand-in for `istota.nextcloud.talk.TalkClient` at its construction sites.
 
     `web_app` builds a bearer client per attempt (`TalkClient(_config,
     bearer_token=access, timeout=5)`) and closes it in a `finally`, so there is

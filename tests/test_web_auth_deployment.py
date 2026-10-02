@@ -9,7 +9,8 @@ import pytest
 import yaml
 from jinja2 import Environment
 
-from istota import db, doctor, user_profiles, web_auth
+from istota import db, doctor, user_profiles
+from istota.webui import auth as web_auth
 from istota.config import Config, WebConfig
 from testbed import profiles
 from testbed.stack import render_config

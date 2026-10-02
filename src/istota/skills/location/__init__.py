@@ -89,13 +89,13 @@ def _tz_name(args) -> str:
 
 
 def cmd_current(args):
-    from istota.location_logic import location_current
+    from istota.location.logic import location_current
 
     print(json.dumps(location_current(_get_location_db_path())))
 
 
 def cmd_history(args):
-    from istota.location_logic import location_history, resolve_timezone, utc_day_bounds
+    from istota.location.logic import location_history, resolve_timezone, utc_day_bounds
 
     since = until = None
     if args.date:
@@ -119,7 +119,7 @@ def cmd_history(args):
 
 
 def cmd_places(args):
-    from istota.location_logic import location_places
+    from istota.location.logic import location_places
 
     print(json.dumps(location_places(_get_location_db_path())["places"]))
 
@@ -144,7 +144,7 @@ def _learn_coordinates(args, conn):
     Returns ``(lat, lon, source, cluster)``.
     """
     from istota.location import db as location_db
-    from istota.location_logic import CLUSTER_EXCLUSION_METERS, resolve_cluster_for_point
+    from istota.location.logic import CLUSTER_EXCLUSION_METERS, resolve_cluster_for_point
 
     lat = getattr(args, "lat", None)
     lon = getattr(args, "lon", None)
@@ -191,7 +191,7 @@ def _learn_coordinates(args, conn):
 
 def cmd_learn(args):
     from istota.location import db as location_db
-    from istota.location_logic import assign_pings_to_place
+    from istota.location.logic import assign_pings_to_place
 
     conn = _connect_location()
     try:
@@ -325,7 +325,7 @@ def cmd_update(args):
     geo_changed = any(k in updates for k in ("lat", "lon", "radius_meters"))
     reassigned = None
     if geo_changed and getattr(args, "backfill", False):
-        from istota.location_logic import assign_pings_to_place
+        from istota.location.logic import assign_pings_to_place
 
         reassigned = assign_pings_to_place(
             conn, place.id, updated.lat, updated.lon, updated.radius_meters,
@@ -434,7 +434,7 @@ def cmd_attendance(args):
         get_events,
     )
     from istota.location import db as location_db
-    from istota.location_logic import resolve_timezone
+    from istota.location.logic import resolve_timezone
     from datetime import timedelta
 
     conn = _connect_location()
@@ -610,7 +610,7 @@ def cmd_day_summary(args):
     """
     from istota.geo import reverse_geocode
     from istota.location import db as location_db
-    from istota.location_logic import location_day_summary
+    from istota.location.logic import location_day_summary
 
     framework_path = Path(_get_framework_db_path())
     with location_db.with_geocode_conn(framework_path) as framework_conn:
@@ -625,7 +625,7 @@ def cmd_day_summary(args):
 
 def cmd_discover(args):
     """Find clusters of stationary pings not assigned to any place."""
-    from istota.location_logic import _location_discover_places
+    from istota.location.logic import _location_discover_places
 
     db_path = _get_location_db_path()
     min_pings = getattr(args, "min_pings", None) or 10
@@ -635,7 +635,7 @@ def cmd_discover(args):
 
 def cmd_dismiss_cluster(args):
     """Mark a cluster zone as dismissed so it stops surfacing in discover."""
-    from istota.location_logic import _location_dismiss_cluster
+    from istota.location.logic import _location_dismiss_cluster
 
     db_path = _get_location_db_path()
     radius = getattr(args, "radius", None) or 100
@@ -648,7 +648,7 @@ def cmd_dismiss_cluster(args):
 
 def cmd_list_dismissed(args):
     """List all dismissed cluster zones."""
-    from istota.location_logic import _location_list_dismissed
+    from istota.location.logic import _location_list_dismissed
 
     db_path = _get_location_db_path()
     result = _location_list_dismissed(db_path)
@@ -657,7 +657,7 @@ def cmd_list_dismissed(args):
 
 def cmd_restore_dismissed(args):
     """Un-dismiss a cluster zone by id."""
-    from istota.location_logic import _location_restore_dismissed
+    from istota.location.logic import _location_restore_dismissed
 
     db_path = _get_location_db_path()
     deleted = _location_restore_dismissed(db_path, args.cluster_id)
@@ -668,7 +668,7 @@ def cmd_restore_dismissed(args):
 
 def cmd_place_stats(args):
     """Visit statistics for a place."""
-    from istota.location_logic import _location_place_stats
+    from istota.location.logic import _location_place_stats
     from istota.location import db as location_db
 
     db_path = _get_location_db_path()
@@ -708,7 +708,7 @@ def cmd_import_garmin_tracks(args):
       ``istota-skill`` call runs host-side through the proxy, and location.db
       is not in the sandbox at all.)
     """
-    from istota import secrets_store
+    from istota.credentials import store as secrets_store
 
     user_id = os.environ.get("ISTOTA_USER_ID", "")
     if not user_id:

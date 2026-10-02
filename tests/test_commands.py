@@ -11,7 +11,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from istota import db
-from istota import subscription_usage as _subscription_usage
+from istota.usage import subscription as _subscription_usage
 from istota.commands import (
     COMMANDS, _COMMAND_ALIASES, _MAX_TASK_ID_DIGITS,
     CommandContext, CommandResult,
@@ -2507,7 +2507,7 @@ def _recent_iso(hours_ago=1):
 
 
 def _window(key="session", label="5-hour", percent=40.0, resets_at=None, resets_in=None):
-    from istota import subscription_usage as su
+    from istota.usage import subscription as su
 
     return su.UsageWindow(
         key=key,
@@ -2521,7 +2521,7 @@ def _window(key="session", label="5-hour", percent=40.0, resets_at=None, resets_
 def _snapshot(windows=None, *, spend=None, source="cache", error="", age=0.0):
     import time
 
-    from istota import subscription_usage as su
+    from istota.usage import subscription as su
 
     return su.UsageSnapshot(
         fetched_at=time.time() - age,

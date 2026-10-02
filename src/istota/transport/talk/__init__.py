@@ -1,7 +1,7 @@
 """Nextcloud Talk surface.
 
 This package is the home for everything Talk-specific that sits above the
-low-level HTTP/OCS client (``istota.talk.TalkClient``):
+low-level HTTP/OCS client (``istota.nextcloud.talk.TalkClient``):
 
 - ``TalkTransport`` (here) — the bidirectional seam: outbound ``deliver`` /
   ``edit`` / ``resolve_target`` (the one place outside the CLI that constructs
@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from ...async_runtime import get_talk_client
-from ...talk import split_message
+from istota.nextcloud.talk import split_message
 from .._types import IncomingMessage, TransportCapabilities
 from .inbound import get_dm_token, poll_talk_conversations
 

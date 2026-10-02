@@ -1163,7 +1163,7 @@ class TestDeferredGarminImport:
     def test_runs_import_and_notifies(self, tmp_path, monkeypatch):
         from istota import scheduler_deferred as sd
         from istota.location import garmin_import as gi
-        import istota.notifications as notif
+        import istota.notifications.delivery as notif
 
         user_dir = self._write_op(tmp_path, days_back=14)
         config = Config(temp_dir=tmp_path)
@@ -1203,7 +1203,7 @@ class TestDeferredGarminImport:
         from istota import scheduler_deferred as sd
         from istota.health import garmin as gm
         from istota.location import garmin_import as gi
-        import istota.notifications as notif
+        import istota.notifications.delivery as notif
 
         config = Config(temp_dir=tmp_path)
         purposes = []
@@ -1238,7 +1238,7 @@ class TestDeferredGarminImport:
         """
         from istota import scheduler_deferred as sd
         from istota.location import garmin_import as gi
-        import istota.notifications as notif
+        import istota.notifications.delivery as notif
 
         config = Config(temp_dir=tmp_path)
         config.users["alice"] = UserConfig(
@@ -1263,7 +1263,7 @@ class TestDeferredGarminImport:
     def test_no_activities_message(self, tmp_path, monkeypatch):
         from istota import scheduler_deferred as sd
         from istota.location import garmin_import as gi
-        import istota.notifications as notif
+        import istota.notifications.delivery as notif
 
         user_dir = self._write_op(tmp_path)
         config = Config(temp_dir=tmp_path)
@@ -5222,7 +5222,7 @@ class TestTaskAttemptContract(_TaskPathEnvHarness):
 
         # Imported inside ``execute_task`` from ``.skill_proxy``, the same as
         # ``BrainRequest`` below, so the patch goes on the defining module.
-        monkeypatch.setattr("istota.skill_proxy.SkillProxy", FakeProxy)
+        monkeypatch.setattr("istota.sandbox.skill_proxy.SkillProxy", FakeProxy)
         monkeypatch.setattr("istota.executor.subprocess.run", fake_run)
         monkeypatch.setattr("istota.brain.BrainRequest", spy_request)
 
@@ -6933,7 +6933,7 @@ class TestDeferredOperations:
         ]
         (user_temp / f"task_{task_id}_user_alerts.json").write_text(json.dumps(alerts))
 
-        with patch("istota.notifications.send_notification") as mock_notify:
+        with patch("istota.notifications.delivery.send_notification") as mock_notify:
             mock_notify.return_value = True
             count = _process_deferred_user_alerts(config, task, user_temp)
 
@@ -7009,7 +7009,7 @@ class TestDeferredOperations:
         alerts = [{"message": "Phishing attempt detected", "type": "security"}]
         (user_temp / f"task_{task_id}_user_alerts.json").write_text(json.dumps(alerts))
 
-        with patch("istota.notifications.send_notification") as mock_notify:
+        with patch("istota.notifications.delivery.send_notification") as mock_notify:
             mock_notify.return_value = True
             _process_deferred_user_alerts(config, task, user_temp)
 
@@ -7031,7 +7031,7 @@ class TestDeferredOperations:
         alerts = [{"message": ""}, {"not_message": "oops"}, {"message": "Real alert"}]
         (user_temp / f"task_{task_id}_user_alerts.json").write_text(json.dumps(alerts))
 
-        with patch("istota.notifications.send_notification") as mock_notify:
+        with patch("istota.notifications.delivery.send_notification") as mock_notify:
             mock_notify.return_value = True
             count = _process_deferred_user_alerts(config, task, user_temp)
 
@@ -7052,7 +7052,7 @@ class TestDeferredOperations:
         alerts = [42, "hello", None, {"message": "Real alert", "type": "security"}]
         (user_temp / f"task_{task_id}_user_alerts.json").write_text(json.dumps(alerts))
 
-        with patch("istota.notifications.send_notification") as mock_notify:
+        with patch("istota.notifications.delivery.send_notification") as mock_notify:
             mock_notify.return_value = True
             count = _process_deferred_user_alerts(config, task, user_temp)
 
@@ -7077,7 +7077,7 @@ class TestDeferredOperations:
         ]
         (user_temp / f"task_{task_id}_user_alerts.json").write_text(json.dumps(alerts))
 
-        with patch("istota.notifications.send_notification") as mock_notify:
+        with patch("istota.notifications.delivery.send_notification") as mock_notify:
             mock_notify.return_value = True
             count = _process_deferred_user_alerts(config, task, user_temp)
 

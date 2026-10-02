@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from istota import db
-from istota.ocs import OcsError
+from istota.nextcloud.ocs import OcsError
 from istota.config import Config, NextcloudConfig, SiteConfig, UserConfig, WebConfig
 
 try:
@@ -57,7 +57,7 @@ def _make_config(tmp_path):
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod.app.state.istota_config = config
     mod._oauth = MagicMock()
@@ -66,7 +66,7 @@ def _patch_app(config):
 
 
 async def _login(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
     )
@@ -85,7 +85,7 @@ async def chat_client(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _reset_bg_tasks():
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._bg_tasks.clear()
     yield
     mod._bg_tasks.clear()
@@ -94,13 +94,13 @@ def _reset_bg_tasks():
 async def _drain_bg():
     """Talk propagation is fire-and-forget, so it is still pending when the
     response lands. Every assertion about it has to wait for it."""
-    import istota.web_app as mod
+    import istota.webui.app as mod
     while mod._bg_tasks:
         await asyncio.gather(*list(mod._bg_tasks))
 
 
 def _db_path():
-    import istota.web_app as mod
+    import istota.webui.app as mod
     return mod._config.db_path
 
 
@@ -265,7 +265,7 @@ class TestDeletionTailOnEvents:
 
 @contextlib.contextmanager
 def _fake_talk_class(client):
-    """Stand `client` in at `istota.talk.TalkClient`, the seam this path uses.
+    """Stand `client` in at `istota.nextcloud.talk.TalkClient`, the seam this path uses.
 
     `_delete_from_talk` builds both of its clients itself as of ISSUE-407 —
     patching `async_runtime.get_talk_client`, which is what these tests used to
@@ -274,7 +274,7 @@ def _fake_talk_class(client):
     the fourth is what caught it.
     """
     client.aclose = AsyncMock()
-    with patch("istota.talk.TalkClient", return_value=client):
+    with patch("istota.nextcloud.talk.TalkClient", return_value=client):
         yield client
 
 

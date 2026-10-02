@@ -333,7 +333,7 @@ def _frame_untrusted(text: str) -> str:
     """Put one string inside the delimiter pair, and keep it there.
 
     Framed **unconditionally**, including an empty string. The shared fence
-    (`istota.untrusted`) returns `""` for a falsy body, which is right for the
+    (`istota.lib.untrusted`) returns `""` for a falsy body, which is right for the
     skills built on it — a fence around nothing is noise in every row of a
     listing — and wrong here: the property this verb has to hold is that every
     tool result it returns is inside the pair, and a rule with an exception in

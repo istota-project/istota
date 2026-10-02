@@ -14,7 +14,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from istota import credential_shim, db
+from istota import db
+from istota.sandbox import credential_shim
 from istota.config import (
     Config,
     DeveloperConfig,
@@ -93,7 +94,7 @@ def _run_task(config, admin_users=None):
     db.init_db(config.db_path)
 
     with patch("istota.executor.subprocess.run") as mock_run, \
-            patch("istota.skill_proxy.SkillProxy") as mock_proxy:
+            patch("istota.sandbox.skill_proxy.SkillProxy") as mock_proxy:
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
         mock_proxy.return_value.__enter__ = lambda s: s
         mock_proxy.return_value.__exit__ = lambda s, *a: False

@@ -10,10 +10,12 @@ the first time.
 
 import pytest
 
-from istota import db, doctor, secrets_store, secrets_vault
+from istota import db, doctor
+from istota.credentials import store as secrets_store
+from istota.credentials import vault as secrets_vault
 from istota.config import Config
-from istota.credential_broker import grants
-from istota.credential_broker.bindings import parse_binding
+from istota.credentials.broker import grants
+from istota.credentials.broker.bindings import parse_binding
 from tests.test_secrets_vault import _new_db, _read
 
 

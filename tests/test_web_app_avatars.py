@@ -50,8 +50,9 @@ if _has_web_deps:
 
 from PIL import Image
 
-from istota import avatars, db
-from istota.avatars import AvatarError
+from istota import db
+from istota.webui import avatars
+from istota.webui.avatars import AvatarError
 from istota.config import Config, SiteConfig, UserConfig, WebConfig
 
 ORIGIN = {"origin": "https://example.com"}
@@ -103,7 +104,7 @@ def _make_config(tmp_path, db_path):
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod.app.state.istota_config = config
     mock_oauth = MagicMock()
@@ -138,7 +139,7 @@ async def client(app):
 
 async def _login(client, username="alice"):
     """Log `client` in as `username`. One client is one browser session."""
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
         "user_id": username,
     })
@@ -390,7 +391,7 @@ class TestTheAcceptListIsStatedOnce:
     def test_the_typescript_copy_equals_the_python_one(self):
         """Two languages, one list, and nothing else holding them equal.
 
-        Same treatment `usage_render.py` and `usageFormat.ts` get: the client
+        Same treatment `usage/render.py` and `usageFormat.ts` get: the client
         offers what the server accepts, so a format added on one side and not
         the other leaves the picker narrower than the endpoint (a format the
         user cannot choose) or wider (one they find out about after uploading).
@@ -440,7 +441,7 @@ class TestUploadBounds:
     async def test_a_declared_length_over_the_cap_is_refused_before_the_decode(
         self, alice, config, monkeypatch,
     ):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         config.web.max_avatar_kb = 1
         called = []
@@ -474,7 +475,7 @@ class TestUploadBounds:
         green. This is the property that check exists for, asserted where it
         is visible: nothing is pulled off the stream.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         pulled = []
 
@@ -492,7 +493,7 @@ class TestUploadBounds:
 
     async def test_the_stream_stops_at_the_cap_and_reads_no_further(self):
         """A declared length is a claim; the running total is the enforcement."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         pulled = []
 
@@ -513,7 +514,7 @@ class TestUploadBounds:
     async def test_a_part_over_the_cap_is_refused_by_the_second_check(
         self, alice, config,
     ):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         # Under the stream limit (cap + multipart allowance) and over the cap
         # itself, so this can only be caught by the byte check on the part.
@@ -561,7 +562,7 @@ class TestUploadBounds:
         `Request.stream()` raises `ClientDisconnect`, which the route does not
         catch, so an aborted upload logged a traceback per attempt.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from starlette.requests import ClientDisconnect
 
         class _Req:
@@ -649,7 +650,7 @@ class TestDecodeIsSerialized:
     async def test_the_control_reaches_two_on_a_wider_pool(
         self, alice, bob, monkeypatch,
     ):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             monkeypatch.setattr(mod, "_avatar_decode_executor", pool)
@@ -730,7 +731,7 @@ class TestMeCarriesTheHashes:
 
 # --- the admin bot-icon writes ----------------------------------------------
 #
-# Stage 5. The first mutating admin routes in `web_app.py`, though not in the
+# Stage 5. The first mutating admin routes in `webui/app.py`, though not in the
 # app: they copy `briefings/routes.py`'s `require_admin` + `verify_origin`
 # pair. What is asserted here is that the gate is real on both verbs, that the
 # body takes the same two size checks the user's own upload does rather than a
@@ -805,7 +806,7 @@ class TestAdminBotIconWrites:
         # The admin route must take `_read_avatar_upload`'s two checks rather
         # than a second copy of them: the cap has to bite before the body
         # exists in memory, and `len(raw)` is too late.
-        import istota.avatars as avatars_mod
+        import istota.webui.avatars as avatars_mod
         calls = []
         monkeypatch.setattr(
             avatars_mod, "normalize",
@@ -905,7 +906,7 @@ class TestAdminBotIconClear:
 
 @pytest.fixture(autouse=True)
 def _clear_login_icon_memo():
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._login_icon_memo = None
     yield
     mod._login_icon_memo = None
@@ -948,7 +949,7 @@ class TestTheLoginPageMark:
         self, client, db_path, monkeypatch,
     ):
         _seed_bot_icon(db_path)
-        import istota.avatars as avatars_mod
+        import istota.webui.avatars as avatars_mod
         blob_reads = []
         real = avatars_mod.get_bot_avatar
         monkeypatch.setattr(
@@ -1014,7 +1015,7 @@ class TestTheLoginPageMark:
         assert "/istota/octopus-sigil.webp" in resp.text
 
     async def test_the_error_card_carries_the_same_mark(self, client, db_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         image, _ = _seed_bot_icon(db_path)
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(
             side_effect=RuntimeError("boom"),

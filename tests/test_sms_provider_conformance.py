@@ -216,7 +216,7 @@ def test_callback_only_http_route_updates_delivery_but_rejects_inbound_work(
 ):
     from fastapi.testclient import TestClient
 
-    from istota import webhook_receiver as receiver
+    from istota.webui import webhook_receiver as receiver
     from istota.transport.sms.providers.registry import make_provider_registry
 
     config = _config(tmp_path, provider)
@@ -271,7 +271,7 @@ def test_webhook_receiver_depends_only_on_common_provider_contract():
     The wrappers stay in the scan so a provider-specific branch added back into
     one of them is still caught.
     """
-    from istota import webhook_receiver
+    from istota.webui import webhook_receiver
 
     source = (
         source_of(webhook_receiver._receive_sms)
@@ -365,7 +365,7 @@ def test_sms_adapter_conformance_classifies_and_scrubs_failures(
 def test_inbound_database_failure_rolls_back_mint_and_retry_creates_one_room(tmp_path, monkeypatch):
     import sqlite3
     from fastapi.testclient import TestClient
-    from istota import webhook_receiver as receiver
+    from istota.webui import webhook_receiver as receiver
     from istota.transport.sms.providers.registry import make_provider_registry
 
     config = _config(tmp_path, 'twilio')

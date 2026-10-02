@@ -38,7 +38,8 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from istota import db, notification_sources as sources
+from istota import db
+from istota.notifications import sources
 from istota.config import (
     Config,
     EmailConfig,
@@ -47,7 +48,7 @@ from istota.config import (
     TalkConfig,
     UserConfig,
 )
-from istota.notification_resolvers import task_alert
+from istota.notifications.resolvers import task_alert
 from istota.scheduler import process_one_task
 
 from .support.rooms import plain_talk_room, promoted_room
@@ -329,7 +330,7 @@ class TestAMirrorLegIsNotAlerted:
         self, mock_run, config, fake_talk, promoted,
     ):
         _timeout(fake_talk, promoted.talk_ref)
-        # `output_target="room"` is what the web composer queues (`web_app.py`),
+        # `output_target="room"` is what the web composer queues (`webui/app.py`),
         # and it is what produces the mirror leg at all: the room fan-out is a
         # meta-destination, not a source-type default.
         task_id = _queue(
@@ -465,7 +466,7 @@ class TestAConfirmationPromptThatNeverLanded:
         _timeout(fake_talk, plain.talk_ref)
         _queue(config, plain.canonical)
         with patch(
-            "istota.notifications.send_notification", return_value=True,
+            "istota.notifications.delivery.send_notification", return_value=True,
         ) as send:
             _run(config, result=self.QUESTION)
 
@@ -478,7 +479,7 @@ class TestAConfirmationPromptThatNeverLanded:
         _timeout(fake_talk, plain.talk_ref)
         _queue(config, plain.canonical)
         with (
-            patch("istota.notifications.send_notification", return_value=True),
+            patch("istota.notifications.delivery.send_notification", return_value=True),
             patch(
                 "istota.scheduler.send_notification", return_value=True,
             ) as generic,
@@ -505,7 +506,7 @@ class TestAConfirmationPromptThatNeverLanded:
                 output_target=f"room:{promoted.canonical}",
             )
         with patch(
-            "istota.notifications.send_notification", return_value=True,
+            "istota.notifications.delivery.send_notification", return_value=True,
         ) as send:
             _run(config, result=self.QUESTION)
 
@@ -520,7 +521,7 @@ class TestAConfirmationPromptThatNeverLanded:
         parking branch made and this must not undo."""
         task_id = _queue(config, plain.canonical)
         with patch(
-            "istota.notifications.send_notification", return_value=True,
+            "istota.notifications.delivery.send_notification", return_value=True,
         ) as send:
             _run(config, result=self.QUESTION)
 

@@ -51,7 +51,7 @@ def _left_room():
 class TestProvisioningRespectsALeave:
     @pytest.mark.asyncio
     async def test_a_room_whose_invite_landed_is_not_re_invited(self):
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _left_room()
         result = await ensure_room(
@@ -71,7 +71,7 @@ class TestProvisioningRespectsALeave:
         # The ISSUE-342 self-heal, which the fix must not cost: a room this
         # tool created and could not add the user to is bot-only for a reason
         # that has nothing to do with anybody leaving.
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _left_room()
         result = await ensure_room(
@@ -87,7 +87,7 @@ class TestProvisioningRespectsALeave:
         # Every record written before this change carries no outcome. Reading
         # the absence as "may have failed" would re-invite the reporter on
         # their very next deploy, which is the bug.
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _left_room()
         result = await ensure_room(
@@ -100,7 +100,7 @@ class TestProvisioningRespectsALeave:
 
     @pytest.mark.asyncio
     async def test_a_failed_retry_is_recorded_as_still_failed(self):
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _left_room()
         client.add_participant = _client().add_participant
@@ -115,7 +115,7 @@ class TestProvisioningRespectsALeave:
 
     @pytest.mark.asyncio
     async def test_a_landed_retry_clears_the_failure(self):
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _left_room()
         result = await ensure_room(
@@ -134,7 +134,7 @@ class TestProvisioningRespectsALeave:
     async def test_a_created_room_whose_invite_failed_reports_it(self):
         client = _client(rooms=[])
         client.add_participant.side_effect = RuntimeError("nope")
-        from istota.provision_rooms import ensure_room
+        from istota.rooms.provision import ensure_room
 
         result = await ensure_room(client, "general", "alice", bot_user_id="bot")
         assert (result.created, result.invited, result.invite_failed) == (
@@ -143,7 +143,7 @@ class TestProvisioningRespectsALeave:
 
     @pytest.mark.asyncio
     async def test_a_room_the_user_is_in_reports_no_failure(self):
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 2}],
@@ -167,7 +167,7 @@ class TestARunThatObservedNothingRecordsNothing:
         # One transient Talk error on the participant read was enough: the
         # empty list is treated as a failed read, nothing is attempted, and the
         # run used to record `invite_failed=False` over the True that was there.
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 2}],
@@ -186,7 +186,7 @@ class TestARunThatObservedNothingRecordsNothing:
 
     @pytest.mark.asyncio
     async def test_a_left_shared_room_keeps_a_recorded_failure(self):
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 2}],
@@ -207,7 +207,7 @@ class TestARunThatObservedNothingRecordsNothing:
     async def test_seeing_the_user_in_the_room_clears_a_recorded_failure(self):
         # The one arm that settles it without attempting anything: they are in
         # the room, so whatever an earlier run recorded, nothing is outstanding.
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         client = _client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 2}],
@@ -222,7 +222,7 @@ class TestARunThatObservedNothingRecordsNothing:
 
     @pytest.mark.asyncio
     async def test_a_left_room_with_no_recorded_failure_stays_that_way(self):
-        from istota.provision_rooms import ProvisionedRecord, ensure_room
+        from istota.rooms.provision import ProvisionedRecord, ensure_room
 
         result = await ensure_room(
             _left_room(), "general", "alice", bot_user_id="bot",
@@ -234,7 +234,7 @@ class TestARunThatObservedNothingRecordsNothing:
         self, tmp_path,
     ):
         """Through the writer, since that is where the two could diverge."""
-        from istota.provision_rooms import (
+        from istota.rooms.provision import (
             ProvisionedRoom,
             read_provisioned_records,
             record_provisioned_rooms,
@@ -262,7 +262,8 @@ class TestTheDeployReportsALeftRoom:
     def test_a_left_room_is_named_without_failing_the_deploy(
         self, tmp_path, monkeypatch, capsys,
     ):
-        from istota import cli, provision_rooms as pr
+        from istota import cli
+        from istota.rooms import provision as pr
 
         cfg = tmp_path / "config.toml"
         db_path = tmp_path / "istota.db"
@@ -305,7 +306,7 @@ class TestTheProvisioningRecord:
         return path
 
     def test_the_outcome_round_trips(self, db_path):
-        from istota.provision_rooms import (
+        from istota.rooms.provision import (
             ProvisionedRoom,
             read_provisioned_records,
             record_provisioned_rooms,
@@ -324,7 +325,7 @@ class TestTheProvisioningRecord:
     def test_a_legacy_json_string_value_reads_as_no_failure(self, db_path):
         import json
 
-        from istota.provision_rooms import (
+        from istota.rooms.provision import (
             PROVISIONED_NAMESPACE,
             read_provisioned_records,
         )
@@ -339,7 +340,7 @@ class TestTheProvisioningRecord:
         assert got["general"].invite_failed is False
 
     def test_a_legacy_bare_string_value_reads_as_no_failure(self, db_path):
-        from istota.provision_rooms import (
+        from istota.rooms.provision import (
             PROVISIONED_NAMESPACE,
             read_provisioned_records,
         )
@@ -352,7 +353,7 @@ class TestTheProvisioningRecord:
         assert got["general"].invite_failed is False
 
     def test_an_unreadable_record_provisions_by_name(self, tmp_path):
-        from istota.provision_rooms import read_provisioned_records
+        from istota.rooms.provision import read_provisioned_records
 
         assert read_provisioned_records(tmp_path / "nope.db", "alice") == {}
 
@@ -360,7 +361,7 @@ class TestTheProvisioningRecord:
     async def test_a_deploy_after_a_leave_leaves_membership_alone(self, db_path):
         """End to end through the record: a run that put the user in the room,
         then the user leaves, then another deploy."""
-        from istota.provision_rooms import (
+        from istota.rooms.provision import (
             provision_rooms,
             read_provisioned_records,
             record_provisioned_rooms,
@@ -400,7 +401,7 @@ def db_path(tmp_path):
 
 @pytest.fixture
 def web_config(db_path):
-    from istota import web_app
+    from istota.webui import app as web_app
 
     web_app._config = Config()
     web_app._config.db_path = db_path
@@ -416,7 +417,7 @@ def _promoted_room(conn, user_id: str = "alice", talk_ref: str = "talkref1") -> 
 
 class TestHidingAPromotedRoom:
     def test_delete_hides_rather_than_destroying(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             token = _promoted_room(conn)
@@ -450,7 +451,7 @@ class TestHidingAPromotedRoom:
         """The mechanism that brought the room back: the poll registers a Talk
         conversation it finds no registry row for. With the room and its
         tombstone still there, there is nothing to re-register."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             token = _promoted_room(conn)
@@ -468,7 +469,7 @@ class TestHidingAPromotedRoom:
         assert token not in {r["token"] for r in web_app._chat_list_rooms("alice")}
 
     def test_archiving_a_promoted_room_writes_a_tombstone(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             token = _promoted_room(conn)
@@ -485,7 +486,7 @@ class TestHidingAPromotedRoom:
     def test_unarchiving_a_promoted_room_clears_the_tombstone(
         self, web_config, db_path
     ):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             token = _promoted_room(conn)
@@ -509,7 +510,7 @@ class TestHidingAPromotedRoom:
         set `rooms.archived`. The tombstone arm never clears that, and
         `list_member_rooms` subtracts it too — so without this the room stays
         hidden with no control left that could bring it back."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             token = _promoted_room(conn)
@@ -532,7 +533,7 @@ class TestHidingAPromotedRoom:
         """On a Talk-origin room that flag is `archive_orphaned_talk_rooms`
         saying the bot left the conversation — a fact about the deployment, not
         this user's hide, and not theirs to clear."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             db.register_room(conn, "r77", "alice", origin="talk", name="#team")
@@ -555,7 +556,7 @@ class TestHidingAPromotedRoom:
         conversation it names (ISSUE-401), and this predicate reads the row
         rather than probing Nextcloud — so such a room can no longer be
         hard-deleted from web. Reconnecting it is the promote button's job."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             token = _promoted_room(conn, talk_ref="deadref")
@@ -571,7 +572,7 @@ class TestHidingAPromotedRoom:
     def test_an_unpromoted_web_room_is_still_hard_deleted(self, web_config, db_path):
         # The widened branch must not swallow the plain case: a web room with
         # no Talk conversation behind it has nothing to preserve.
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "scratch")

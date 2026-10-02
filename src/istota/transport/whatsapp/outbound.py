@@ -676,7 +676,7 @@ def _claim(
                 caps=caps,
             )
         if request_id is not None:
-            from ...whatsapp_requests import admit_request
+            from istota.relay.requests import admit_request
 
             bodies.update(admit_request(
                 conn, config, request_id=request_id, user_id=user_id,
@@ -684,8 +684,8 @@ def _claim(
                 ignore_opt_out=ignore_opt_out,
             ))
         if relay_return_id is not None:
-            from ...message_relays import return_payload
-            from ...whatsapp_requests import RequestError
+            from istota.relay.relays import return_payload
+            from istota.relay.requests import RequestError
 
             if logical_key != "relay-return:" + relay_return_id or send_kind != "service":
                 raise RequestError("return_template_unavailable")
@@ -1185,7 +1185,7 @@ async def _send_claimed(
                 _group_destination_now, config, group_room,
             )
         elif relay_return_id is not None:
-            from ...message_relays import return_whatsapp_destination
+            from istota.relay.relays import return_whatsapp_destination
 
             destination = await asyncio.to_thread(return_whatsapp_destination, config, relay_id=relay_return_id,
                                                   actor_user_id=user_id, caps=adapter.caps)
@@ -1194,7 +1194,7 @@ async def _send_claimed(
                 current_destination, config, user_id, adapter.caps,
             )
         else:
-            from ...whatsapp_requests import request_destination, RequestError
+            from istota.relay.requests import request_destination, RequestError
 
             try:
                 destination = await asyncio.to_thread(
@@ -1459,7 +1459,7 @@ def _write_billing_alerts(conn, user_id: str, task_id) -> tuple[object, ...]:
     prints it in full, which is the private operator surface for it.
     """
     from ...config import load_admin_users  # noqa: PLC0415
-    from ...notification_resolvers import task_alert  # noqa: PLC0415
+    from istota.notifications.resolvers import task_alert  # noqa: PLC0415
 
     readers = [user_id]
     try:
@@ -1759,9 +1759,9 @@ def apply_delivery_event(
     updated = conn.execute(
         "SELECT * FROM sent_whatsapp WHERE id = ?", (row["id"],),
     ).fetchone()
-    from ...message_relays import reconcile_question_delivery, reconcile_return_delivery
+    from istota.relay.relays import reconcile_question_delivery, reconcile_return_delivery
 
-    from ...whatsapp_requests import reconcile_self_send_delivery
+    from istota.relay.requests import reconcile_self_send_delivery
 
     reconcile_self_send_delivery(conn, logical_key=updated["logical_key"], status=updated["status"], error_code=updated["error_code"])
     reconcile_question_delivery(conn, logical_key=updated["logical_key"], status=updated["status"])

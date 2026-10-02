@@ -159,7 +159,7 @@ ENV PATH="/home/dev/.cargo/bin:/home/dev/.local/bin:${PATH}"
 
 # Layer 5: forge CLIs. The real `gh` and `glab` live under
 # /usr/local/lib/istota_forge/ and are reached only through the wrapper — the
-# same src/istota/forge_cli.py the sandbox uses, vendored here because Docker
+# same src/istota/sandbox/forge_cli.py the sandbox uses, vendored here because Docker
 # cannot COPY from outside its build context (scripts/sync-devbox-lib.sh keeps
 # the copy honest and a test fails when the two drift).
 #
@@ -285,7 +285,7 @@ RUN set -eux; \
 # reports failure whatever it did.
 #
 # Three files, and the split is the same one `istota_forge_cli.py` already has:
-# the protocol module is vendored from `src/istota/devbox_exec_protocol.py`
+# the protocol module is vendored from `src/istota/devbox/exec_protocol.py`
 # because Docker cannot COPY from outside its build context, and
 # `scripts/sync-devbox-lib.sh` is what keeps the copy honest. It goes under
 # /usr/local/lib/istota_devbox_exec/ rather than beside the server, because the

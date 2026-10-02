@@ -24,7 +24,7 @@ from tests.test_skills_wordpress import CLOSE, HOSTILE, body_of, run
 from tests.test_skills_wordpress_connector import ABILITIES, Connector
 from tests.test_skills_wordpress_media import PNG, Media, own, writes
 
-from istota.untrusted import MARKER_REDACTION, frame_untrusted
+from istota.lib.untrusted import MARKER_REDACTION, frame_untrusted
 
 env = base.env
 

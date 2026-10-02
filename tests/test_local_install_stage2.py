@@ -263,7 +263,7 @@ class TestRunServe:
         monkeypatch.setattr(sched, "run_daemon", fake_daemon)
         fake_server = _FakeServer()
         monkeypatch.setattr(serve, "build_uvicorn_server", lambda host, port: fake_server)
-        from istota import web_app
+        from istota.webui import app as web_app
         original_run = fake_server.run
 
         def run_with_launch_marker():
@@ -417,7 +417,8 @@ class TestSupervisorShutdownNotice:
         self, tmp_path, monkeypatch,
     ):
         import istota.scheduler as sched
-        from istota import serve, web_shutdown
+        from istota import serve
+        from istota.webui import shutdown as web_shutdown
 
         cfg = _standalone_config(tmp_path)
 

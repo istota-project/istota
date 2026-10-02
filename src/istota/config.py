@@ -19,7 +19,7 @@ from .config_mapper import (
     coerce_int,
     report_unknown,
 )
-from .user_scope import paths_overlap, scoped_user_dir
+from istota.sandbox.user_scope import paths_overlap, scoped_user_dir
 
 if TYPE_CHECKING:
     import sqlite3
@@ -211,7 +211,7 @@ class EmailConfig:
     # so this is the operator's minimum rather than a default. `untrusted` on a
     # fresh install: the gate exists because prose rules against committing on
     # the principal's behalf lose to context pressure, and an install that ships
-    # with it off has no gate at all. See istota.outbound_policy.
+    # with it off has no gate at all. See istota.mail.outbound_policy.
     outbound_approval_floor: str = "untrusted"
 
     @property
@@ -1021,7 +1021,7 @@ class DeveloperConfig:
     github_default_owner: str = ""  # Default org/user for resolving short repo names
     github_reviewer: str = ""     # GitHub username to request as PR reviewer
     author_credit: str = ""       # Appended to every commit message (e.g., "Co-Authored-By: Name <email>")
-    # Forge CLI wrapper (src/istota/forge_cli.py). The real `gh` and `glab`
+    # Forge CLI wrapper (src/istota/sandbox/forge_cli.py). The real `gh` and `glab`
     # run behind a wrapper that injects the token and checks the argv against
     # a policy. The policy is code-owned rather than config-owned because it
     # is a safety default, not a preference; these two knobs extend and
@@ -1046,7 +1046,7 @@ class DeveloperConfig:
     # rendered value being relied on.
     gh_bin_path: str = "/usr/local/bin/gh"
     glab_bin_path: str = "/usr/local/bin/glab"
-    # Devbox credential proxy. See src/istota/devbox_proxy.py + the
+    # Devbox credential proxy. See src/istota/devbox/proxy.py + the
     # `devbox-credential-proxy` spec for the design. It answers two things
     # for the container: a git credential (injected server-side, so git
     # never holds the token) and, for `gh` / `glab`, the forge token itself
@@ -1055,7 +1055,7 @@ class DeveloperConfig:
     devbox_proxy_enabled: bool = True
     devbox_proxy_socket_dir: str = "/var/run/istota"
     devbox_proxy_audit_log: str = ""   # empty = journal only; set to a path for file fan-out
-    # Worktree reaping (ISSUE-288, src/istota/worktree_reaper.py). Nothing used
+    # Worktree reaping (ISSUE-288, src/istota/maintenance/worktree_reaper.py). Nothing used
     # to remove a task's worktree, so `repos_dir` accumulated gigabyte
     # checkouts with no owner. The sweep runs from the *scheduler*, on
     # `scheduler.worktree_reap_interval` — not from the developer skill's
@@ -1161,7 +1161,7 @@ class WebMapConfig:
     A seam rather than a literal (ISSUE-334): the location maps used to name
     CARTO's tile host in the frontend bundle, and when CARTO started
     watermarking keyless requests there was no way to change it without a code
-    edit. Resolution lives in `istota.map_basemap`, which the web endpoint and
+    edit. Resolution lives in `istota.webui.map_basemap`, which the web endpoint and
     the `web.basemap` doctor check both read, so the checker cannot pass while
     the map is blank.
 
@@ -1567,7 +1567,7 @@ class SecurityConfig:
     # would cover it. `executor.resolve_sandbox_cache_dir` owns every one of
     # those rules and never raises.
     sandbox_cache_dir: str = ""
-    # Bounding what the key above creates (ISSUE-317, src/istota/sandbox_cache_sweeper.py).
+    # Bounding what the key above creates (ISSUE-317, src/istota/maintenance/sandbox_cache_sweeper.py).
     # Moving the caches onto disk is what makes them *persist*, and nothing
     # pruned them: the sweep runs from the scheduler on
     # `scheduler.sandbox_cache_sweep_interval` and gives each per-user cache the
@@ -1896,7 +1896,7 @@ class ClaudeCodeBrainConfig:
     subscription deployment the dashboard's cost column is deliberately blank (a
     plan-equivalent list price is not spend), so the real budget is the
     rate-limit windows Anthropic reports at ``GET /api/oauth/usage``.
-    ``istota.subscription_usage`` fetches them; the doctor check, the ``/admin``
+    ``istota.usage.subscription`` fetches them; the doctor check, the ``/admin``
     card and ``!usage`` render them.
 
     Every field is defaulted, so an absent ``[brain.claude_code]`` block is the
@@ -2223,7 +2223,7 @@ class Config:
         ``workspace / "Users" / uid`` idiom inlined across the codebase — not a
         storage abstraction (no backend switch).
 
-        **Scoped through :func:`~istota.user_scope.scoped_user_dir`, not
+        **Scoped through :func:`~istota.sandbox.user_scope.scoped_user_dir`, not
         joined.** The join is not the check it reads as: ``.`` is discarded,
         an absolute component replaces the root and ``..`` is a child by name
         and the parent on disk, so ``{workspace}/Users`` — every user's directory
@@ -2672,8 +2672,8 @@ class Config:
         if self.db_path is None or not Path(self.db_path).exists():
             return False
         try:
-            from . import secrets_store  # noqa: PLC0415 - import cost
-            from .secrets_vault import (  # noqa: PLC0415 - import cost
+            from istota.credentials import store as secrets_store  # noqa: PLC0415 - import cost
+            from istota.credentials.vault import (  # noqa: PLC0415 - import cost
                 VAULT_PASSPHRASE_KEY,
                 VAULT_PASSPHRASE_SERVICE,
             )
@@ -3461,7 +3461,7 @@ def _validate_outbound_approval_floor(raw: object) -> str:
     who deliberately wrote ``off``. A typo in a security floor should stop the
     process, not pick a policy on the operator's behalf.
     """
-    from .outbound_policy import VALID_POLICIES
+    from istota.mail.outbound_policy import VALID_POLICIES
 
     value = raw if isinstance(raw, str) else ""
     value = value.strip()
@@ -5668,7 +5668,7 @@ def _migrate_obsolete_resources(config: "Config") -> None:
     """
     try:
         from . import db as _db  # noqa: PLC0415
-        from . import secrets_store as _ss  # noqa: PLC0415
+        from istota.credentials import store as _ss  # noqa: PLC0415
     except Exception:  # pragma: no cover - defensive
         return
 

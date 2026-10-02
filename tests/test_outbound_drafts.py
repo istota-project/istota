@@ -10,9 +10,10 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, outbound_drafts as drafts
+from istota import db
+from istota.mail import drafts
 from istota.config import Config, EmailConfig, UserConfig
-from istota.outbound_drafts import (
+from istota.mail.drafts import (
     DraftError,
     DraftNotFound,
     DraftNotPending,

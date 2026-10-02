@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from istota.user_scope import is_within
+from istota.sandbox.user_scope import is_within
 
 
 class ToolPathError(Exception):

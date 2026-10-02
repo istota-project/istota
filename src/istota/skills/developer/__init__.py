@@ -2,17 +2,17 @@
 
 Creates the task's own subtree of ``repos_dir`` (``{repos_dir}/{user_id}`` —
 the only part of that tree the sandbox binds) and sweeps it for credentials
-embedded in remote URLs, stripping them (:mod:`istota.git_remote_scrub`,
+embedded in remote URLs, stripping them (:mod:`istota.sandbox.git_remote_scrub`,
 ISSUE-270) before generating anything. Then generates, inside the task's user
 temp directory:
 
 - the per-platform git-credential-helper scripts and the ``GIT_CONFIG_*``
   vars that point git at them. With the broker enabled, helpers emit literal
   placeholders. Otherwise they fetch their token by shelling out
-  to the framework credential shim (:mod:`istota.credential_shim`), which
+  to the framework credential shim (:mod:`istota.sandbox.credential_shim`), which
   ``task_env`` writes; this hook generated its own socket client until that
   program existed;
-- ``gh`` and ``glab``, copies of :mod:`istota.forge_cli` that wrap the real
+- ``gh`` and ``glab``, copies of :mod:`istota.sandbox.forge_cli` that wrap the real
   binaries, and the policy file they read;
 - a seeded, read-only config directory per CLI.
 
@@ -47,21 +47,21 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from istota import config as istota_config
-from istota.atomic_write import write_text_atomic
+from istota.lib.atomic_write import write_text_atomic
 # Where the framework credential shim lands, from the module that defines the
 # rule. A stdlib-only leaf, so this costs the skill subprocess nothing.
-from istota.credential_shim import shim_path as credential_shim_path
+from istota.sandbox.credential_shim import shim_path as credential_shim_path
 
 # The forge-binary resolution rule lives in a stdlib-only leaf so `doctor` can
 # reach it without importing `istota.skills` (whose __init__ star-imports every
 # skill, ~190ms) on the `load_config` path. Re-exported under the old private
 # names because this module's own call sites and the tests use them.
-from istota.forge_bin import FALLBACK_BIN as _FALLBACK_BIN  # noqa: F401 - re-export
-from istota.forge_bin import IMAGE_BIN as _IMAGE_BIN  # noqa: F401 - re-export
-from istota.forge_bin import resolve_real_bin as _resolve_real_bin
-from istota.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
-from istota.git_remote_scrub import scrub_and_report
-from istota.user_scope import scoped_user_dir
+from istota.sandbox.forge_bin import FALLBACK_BIN as _FALLBACK_BIN  # noqa: F401 - re-export
+from istota.sandbox.forge_bin import IMAGE_BIN as _IMAGE_BIN  # noqa: F401 - re-export
+from istota.sandbox.forge_bin import resolve_real_bin as _resolve_real_bin
+from istota.sandbox.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
+from istota.sandbox.git_remote_scrub import scrub_and_report
+from istota.sandbox.user_scope import scoped_user_dir
 
 logger = logging.getLogger("istota.skills.developer")
 
@@ -75,14 +75,14 @@ logger = logging.getLogger("istota.skills.developer")
 SANDBOX_CACHE_ROOT_NAME = ".package-caches"
 
 # Where the canonical wrapper lives, for copying into the task's .developer.
-_FORGE_CLI_SOURCE = Path(__file__).resolve().parents[2] / "forge_cli.py"
+_FORGE_CLI_SOURCE = Path(__file__).resolve().parents[2] / "sandbox" / "forge_cli.py"
 
 # The exec transport's client and the protocol module it imports. Two files,
 # not one: a single standalone script would put the wire format in three places
 # (module, vendored container copy, client) with `scripts/sync-devbox-lib.sh`
 # covering only one of them.
-_EXEC_CLIENT_SOURCE = Path(__file__).resolve().parents[2] / "devbox_exec_client.py"
-_EXEC_PROTOCOL_SOURCE = Path(__file__).resolve().parents[2] / "devbox_exec_protocol.py"
+_EXEC_CLIENT_SOURCE = Path(__file__).resolve().parents[2] / "devbox" / "exec_client.py"
+_EXEC_PROTOCOL_SOURCE = Path(__file__).resolve().parents[2] / "devbox" / "exec_protocol.py"
 
 # What the client is installed as. The shims exec it by absolute path, so the
 # name is only what an operator sees in a listing.
@@ -481,7 +481,7 @@ def setup_env(ctx) -> dict[str, str]:
     use_proxy = config.security.skill_proxy_enabled
     use_broker = config.security.credential_broker.enabled
     # The five-line socket client this function used to generate as a string
-    # literal is now `istota.credential_shim`, written by `task_env` as a
+    # literal is now `istota.sandbox.credential_shim`, written by `task_env` as a
     # framework program with four verbs — of which `env` is this one's
     # behaviour byte for byte. Two socket clients for one protocol is the
     # duplication `AGENTS.md` opens with.

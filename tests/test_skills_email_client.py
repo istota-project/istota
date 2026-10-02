@@ -17,7 +17,7 @@ from istota import db
 from istota.config import Config
 from istota.config import EmailConfig as AppEmailConfig
 from istota.config import UserConfig
-from istota.email_ownership import (
+from istota.mail.ownership import (
     extract_user_from_recipient,
     owner_in_scope,
     parse_message_ids,
@@ -39,7 +39,7 @@ from istota.skills.email import (
     list_emails,
     search_emails,
 )
-from istota.untrusted import MARKER_REDACTION
+from istota.lib.untrusted import MARKER_REDACTION
 
 BOT = "bot@example.com"
 

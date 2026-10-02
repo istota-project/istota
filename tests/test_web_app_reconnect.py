@@ -15,7 +15,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from istota import db, web_tokens
+from istota import db
+from istota.webui import tokens as web_tokens
 from istota.config import Config, SiteConfig, UserConfig, WebConfig
 
 try:
@@ -52,7 +53,7 @@ def _registry():
     """Autouse, not inline in the one test that needs it: an inline teardown is
     skipped when an assertion above it fails, leaking a populated registry into
     every later test on the worker. The suite runs `-n auto`."""
-    from istota import notification_sources as sources
+    from istota.notifications import sources
 
     sources.reset_registry()
     yield
@@ -87,7 +88,7 @@ TOKEN_RESPONSE = {
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     mod._config = config
     mod.app.state.istota_config = config
@@ -114,7 +115,7 @@ async def _client_for(config):
 
 
 async def _callback(client, token_response=None):
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value=dict(token_response or TOKEN_RESPONSE),
@@ -247,10 +248,10 @@ class TestItRestoresTheCredential:
     async def test_it_closes_the_reconnect_notice(self, tmp_path, keyed, monkeypatch):
         """End to end through the seam the notification half of this fix adds:
         the row raised when the credential died is closed by the reconnect."""
-        from istota.notification_resolvers import connected_service
+        from istota.notifications.resolvers import connected_service
 
         monkeypatch.setattr(
-            "istota.notifications.send_notification", lambda *a, **k: True,
+            "istota.notifications.delivery.send_notification", lambda *a, **k: True,
         )
         config = _make_config(tmp_path)
         async with await _client_for(config) as client:
@@ -283,10 +284,10 @@ class TestDeliberateDisconnect:
         """A user who disconnects on purpose has answered the notice. Closing
         happens in the settings handler rather than in `delete_tokens`, which is
         also the self-heal deletion path that *raises* it."""
-        from istota.notification_resolvers import connected_service
+        from istota.notifications.resolvers import connected_service
 
         monkeypatch.setattr(
-            "istota.notifications.send_notification", lambda *a, **k: True,
+            "istota.notifications.delivery.send_notification", lambda *a, **k: True,
         )
         config = _make_config(tmp_path)
         async with await _client_for(config) as client:
@@ -313,7 +314,7 @@ class TestTheRedirectAllowlist:
     phishing hop off the login flow. The mapping is a fixed table, not a URL."""
 
     def test_a_known_key_maps_to_its_path(self):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         assert mod._post_login_target("settings") == "/istota/settings/connections"
 
@@ -327,6 +328,6 @@ class TestTheRedirectAllowlist:
         123,
     ])
     def test_anything_else_falls_back_to_the_app_root(self, hostile):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         assert mod._post_login_target(hostile) == "/istota/"

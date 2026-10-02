@@ -433,7 +433,7 @@ class TestConfirmationGate:
             patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
             patch("istota.transport.email.inbound.read_email", return_value=email),
             patch("istota.transport.email.inbound.download_attachments", return_value=[]),
-            patch("istota.notifications.send_confirmation_prompt", return_value=(False, None)),
+            patch("istota.notifications.delivery.send_confirmation_prompt", return_value=(False, None)),
             patch("istota.transport.email.inbound.ingest_message", side_effect=_spy),
         ):
             task_ids = email_inbound.poll_emails(config)
@@ -599,7 +599,7 @@ class TestFailedEmailTurnStillRenders:
         the mirror image of ISSUE-136."""
         pytest.importorskip("fastapi")
         pytest.importorskip("authlib")
-        from istota import web_app
+        from istota.webui import app as web_app
 
         web_app._config = Config()
         web_app._config.db_path = db_path
@@ -630,7 +630,7 @@ class TestFailedEmailTurnStillRenders:
         the gate withholds."""
         pytest.importorskip("fastapi")
         pytest.importorskip("authlib")
-        from istota import web_app
+        from istota.webui import app as web_app
 
         web_app._config = Config()
         web_app._config.db_path = db_path

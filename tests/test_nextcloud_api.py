@@ -1,10 +1,10 @@
-"""Configuration loading for istota.nextcloud_api module."""
+"""Configuration loading for istota.nextcloud.user_metadata module."""
 
 from unittest.mock import patch, MagicMock
 
 
 from istota.config import Config, NextcloudConfig, UserConfig
-from istota.nextcloud_api import (
+from istota.nextcloud.user_metadata import (
     fetch_user_info,
     fetch_user_timezone,
     hydrate_user_configs,
@@ -16,7 +16,7 @@ class TestFetchUserInfo:
         config = Config()
         assert fetch_user_info(config, "alice") is None
 
-    @patch("istota.nextcloud_client.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.get")
     def test_success(self, mock_get):
         mock_get.return_value = MagicMock(
             status_code=200,
@@ -40,7 +40,7 @@ class TestFetchUserInfo:
         assert result == {"displayname": "Alice Smith", "email": "alice@example.com"}
         mock_get.assert_called_once()
 
-    @patch("istota.nextcloud_client.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.get")
     def test_http_error(self, mock_get):
         mock_get.return_value.raise_for_status.side_effect = Exception("404")
         config = Config(nextcloud=NextcloudConfig(
@@ -57,7 +57,7 @@ class TestFetchUserTimezone:
         config = Config()
         assert fetch_user_timezone(config, "alice") is None
 
-    @patch("istota.nextcloud_client.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.get")
     def test_success(self, mock_get):
         mock_get.return_value = MagicMock(
             status_code=200,
@@ -75,7 +75,7 @@ class TestFetchUserTimezone:
         result = fetch_user_timezone(config, "alice")
         assert result == "America/New_York"
 
-    @patch("istota.nextcloud_client.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.get")
     def test_empty_timezone(self, mock_get):
         mock_get.return_value = MagicMock(
             status_code=200,
@@ -90,7 +90,7 @@ class TestFetchUserTimezone:
         ))
         assert fetch_user_timezone(config, "alice") is None
 
-    @patch("istota.nextcloud_client.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.get")
     def test_error(self, mock_get):
         mock_get.side_effect = Exception("connection error")
         config = Config(nextcloud=NextcloudConfig(
@@ -107,8 +107,8 @@ class TestHydrateUserConfigs:
         hydrate_user_configs(config)
         assert config.users["alice"].display_name == "Alice"
 
-    @patch("istota.nextcloud_api.fetch_user_timezone")
-    @patch("istota.nextcloud_api.fetch_user_info")
+    @patch("istota.nextcloud.user_metadata.fetch_user_timezone")
+    @patch("istota.nextcloud.user_metadata.fetch_user_info")
     def test_fills_empty_display_name(self, mock_info, mock_tz):
         mock_info.return_value = {"displayname": "Alice S.", "email": ""}
         mock_tz.return_value = None
@@ -119,8 +119,8 @@ class TestHydrateUserConfigs:
         hydrate_user_configs(config)
         assert config.users["alice"].display_name == "Alice S."
 
-    @patch("istota.nextcloud_api.fetch_user_timezone")
-    @patch("istota.nextcloud_api.fetch_user_info")
+    @patch("istota.nextcloud.user_metadata.fetch_user_timezone")
+    @patch("istota.nextcloud.user_metadata.fetch_user_info")
     def test_nc_display_name_overrides_config(self, mock_info, mock_tz):
         mock_info.return_value = {"displayname": "Alice S.", "email": ""}
         mock_tz.return_value = None
@@ -131,8 +131,8 @@ class TestHydrateUserConfigs:
         hydrate_user_configs(config)
         assert config.users["alice"].display_name == "Alice S."
 
-    @patch("istota.nextcloud_api.fetch_user_timezone")
-    @patch("istota.nextcloud_api.fetch_user_info")
+    @patch("istota.nextcloud.user_metadata.fetch_user_timezone")
+    @patch("istota.nextcloud.user_metadata.fetch_user_info")
     def test_merges_email(self, mock_info, mock_tz):
         mock_info.return_value = {"displayname": "", "email": "alice@nc.com"}
         mock_tz.return_value = None
@@ -144,8 +144,8 @@ class TestHydrateUserConfigs:
         assert "alice@nc.com" in config.users["alice"].email_addresses
         assert "alice@work.com" in config.users["alice"].email_addresses
 
-    @patch("istota.nextcloud_api.fetch_user_timezone")
-    @patch("istota.nextcloud_api.fetch_user_info")
+    @patch("istota.nextcloud.user_metadata.fetch_user_timezone")
+    @patch("istota.nextcloud.user_metadata.fetch_user_info")
     def test_skips_duplicate_email_case_insensitive(self, mock_info, mock_tz):
         mock_info.return_value = {"displayname": "", "email": "Alice@Work.com"}
         mock_tz.return_value = None
@@ -156,8 +156,8 @@ class TestHydrateUserConfigs:
         hydrate_user_configs(config)
         assert len(config.users["alice"].email_addresses) == 1
 
-    @patch("istota.nextcloud_api.fetch_user_timezone")
-    @patch("istota.nextcloud_api.fetch_user_info")
+    @patch("istota.nextcloud.user_metadata.fetch_user_timezone")
+    @patch("istota.nextcloud.user_metadata.fetch_user_info")
     def test_fills_default_timezone(self, mock_info, mock_tz):
         mock_info.return_value = None
         mock_tz.return_value = "Europe/Berlin"
@@ -168,8 +168,8 @@ class TestHydrateUserConfigs:
         hydrate_user_configs(config)
         assert config.users["alice"].timezone == "Europe/Berlin"
 
-    @patch("istota.nextcloud_api.fetch_user_timezone")
-    @patch("istota.nextcloud_api.fetch_user_info")
+    @patch("istota.nextcloud.user_metadata.fetch_user_timezone")
+    @patch("istota.nextcloud.user_metadata.fetch_user_info")
     def test_nc_timezone_does_not_override_user_set(self, mock_info, mock_tz):
         # Seed-only (ISSUE-102): a timezone the user set in the Istota UI
         # (any non-default value) wins over Nextcloud and survives restarts.
@@ -182,8 +182,8 @@ class TestHydrateUserConfigs:
         hydrate_user_configs(config)
         assert config.users["alice"].timezone == "America/New_York"
 
-    @patch("istota.nextcloud_api.fetch_user_timezone")
-    @patch("istota.nextcloud_api.fetch_user_info")
+    @patch("istota.nextcloud.user_metadata.fetch_user_timezone")
+    @patch("istota.nextcloud.user_metadata.fetch_user_info")
     def test_api_failure_graceful(self, mock_info, mock_tz):
         mock_info.return_value = None
         mock_tz.return_value = None

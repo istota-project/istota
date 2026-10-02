@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from istota.atomic_write import atomic_writer, write_bytes_atomic, write_text_atomic
+from istota.lib.atomic_write import atomic_writer, write_bytes_atomic, write_text_atomic
 
 REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src" / "istota"
@@ -103,7 +103,7 @@ class TestFailure:
         def boom(src, dst):
             raise OSError("EXDEV")
 
-        monkeypatch.setattr("istota.atomic_write.os.replace", boom)
+        monkeypatch.setattr("istota.lib.atomic_write.os.replace", boom)
         with pytest.raises(OSError):
             write_text_atomic(target, "x")
         assert list(tmp_path.iterdir()) == []
@@ -233,6 +233,9 @@ class TestTheStagingName:
         assert names[0] != names[1]
 
 
+#: The one module allowed to publish with `os.replace`, relative to `SRC`.
+_OWNER = "lib/atomic_write.py"
+
 #: Files that publish with `os.replace` and are deliberately not copies of
 #: `atomic_writer`, each with what it needs that the helper does not do.
 _NOT_A_COPY = {
@@ -240,7 +243,7 @@ _NOT_A_COPY = {
     # parsed back and verified before the rename, and the rename is refused if
     # the live file changed underneath it. `atomic_writer` takes a path and
     # publishes whatever the body wrote.
-    "secrets_vault.py",
+    "credentials/vault.py",
 }
 
 
@@ -259,10 +262,15 @@ class TestNoSecondCopy:
             for p in SRC.rglob("*.py")
             if "os.replace(" in p.read_text(encoding="utf-8")
         )
-        assert [h for h in hits if h not in _NOT_A_COPY] == ["atomic_write.py"], (
+        assert [h for h in hits if h not in _NOT_A_COPY] == [_OWNER], (
             "a new temp-file-then-rename writer appeared; call "
             "atomic_write.write_text_atomic / write_bytes_atomic instead"
         )
+
+    def test_every_allowlisted_path_exists(self):
+        """A path that no longer exists would let the guard pass checking nothing."""
+        missing = [rel for rel in (_OWNER, *_NOT_A_COPY) if not (SRC / rel).is_file()]
+        assert missing == []
 
     def test_every_exemption_still_renames(self):
         """A stale exemption is how a guard quietly stops guarding."""

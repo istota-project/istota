@@ -259,7 +259,7 @@ class TestTheWrapperRefusalNamesTheShape:
     nothing about why it is missing."""
 
     def test_the_no_proxy_message_names_both_deployments(self):
-        from istota.forge_cli import NoProxyError, fetch_forge_credentials
+        from istota.sandbox.forge_cli import NoProxyError, fetch_forge_credentials
 
         with pytest.raises(NoProxyError) as excinfo:
             fetch_forge_credentials("github", {}, {})
@@ -268,7 +268,7 @@ class TestTheWrapperRefusalNamesTheShape:
         assert "docker-compose" in message or "docker compose" in message
 
     def test_it_does_not_lead_with_a_bare_socket_path(self):
-        from istota.forge_cli import NoProxyError, fetch_forge_credentials
+        from istota.sandbox.forge_cli import NoProxyError, fetch_forge_credentials
 
         with pytest.raises(NoProxyError) as excinfo:
             fetch_forge_credentials("gitlab", {}, {})

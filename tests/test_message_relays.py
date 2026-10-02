@@ -24,7 +24,7 @@ def hold(conn, task_id, recipient="bob", actor="alice", **kwargs):
 
 
 def test_block_is_directional_and_closes_only_unanswered(path):
-    from istota.message_relays import block, is_blocked, get_relay, list_blocks
+    from istota.relay.relays import block, is_blocked, get_relay, list_blocks
     with db.get_db(path) as conn:
         req = hold(conn, task(conn))
         assert get_relay(conn, actor_user_id="eve", relay_id=req["relay_id"]) is None
@@ -38,8 +38,8 @@ def test_block_is_directional_and_closes_only_unanswered(path):
 
 
 def test_ask_needs_no_grant_and_a_block_leaves_no_request(path):
-    from istota.message_relays import block, unblock
-    from istota.whatsapp_requests import RequestError
+    from istota.relay.relays import block, unblock
+    from istota.relay.requests import RequestError
     with db.get_db(path) as conn:
         block(conn, actor_user_id="bob", asker_user_id="alice")
         with pytest.raises(RequestError, match="recipient_unavailable"):
@@ -50,8 +50,8 @@ def test_ask_needs_no_grant_and_a_block_leaves_no_request(path):
 
 
 def test_block_refuses_self_and_wildcard(path):
-    from istota.message_relays import block
-    from istota.whatsapp_requests import RequestError
+    from istota.relay.relays import block
+    from istota.relay.requests import RequestError
     with db.get_db(path) as conn:
         for target in ("bob", "*", ""):
             with pytest.raises(RequestError, match="invalid_user"):
@@ -59,7 +59,7 @@ def test_block_refuses_self_and_wildcard(path):
 
 
 def test_pair_and_task_reservations_are_atomic(path):
-    from istota.whatsapp_requests import RequestError
+    from istota.relay.requests import RequestError
     with db.get_db(path) as conn:
         ident = task(conn)
         req = hold(conn, ident)
@@ -72,7 +72,7 @@ def test_pair_and_task_reservations_are_atomic(path):
 
 
 def test_scoped_held_preview_association(path):
-    from istota.whatsapp_requests import RequestError, associate_confirmation
+    from istota.relay.requests import RequestError, associate_confirmation
     with db.get_db(path) as conn:
         ident = task(conn)
         req = hold(conn, ident)
@@ -88,7 +88,7 @@ def test_scoped_held_preview_association(path):
 
 @pytest.mark.parametrize("side,cap", [("asker", 10), ("recipient", 20)])
 def test_open_count_caps(path, side, cap):
-    from istota.whatsapp_requests import RequestError
+    from istota.relay.requests import RequestError
     with db.get_db(path) as conn:
         for n in range(cap):
             actor = "alice" if side == "asker" else f"asker{n}"
@@ -102,7 +102,7 @@ def test_open_count_caps(path, side, cap):
 
 
 def test_concurrent_pair_has_one_winner(path):
-    from istota.whatsapp_requests import RequestError
+    from istota.relay.requests import RequestError
     with db.get_db(path) as conn:
         ids = [task(conn), task(conn)]
     barrier = Barrier(2)
@@ -130,8 +130,8 @@ def test_delete_task_cancels_held_and_retains_tombstone(path):
 
 
 def test_undelivered_answer_retention_is_bounded(path):
-    from istota.whatsapp_requests import cleanup_content
-    from istota.message_relays import get_relay
+    from istota.relay.requests import cleanup_content
+    from istota.relay.relays import get_relay
     with db.get_db(path) as conn:
         req = hold(conn, task(conn))
         conn.execute("UPDATE message_relays SET state='answered', answer_text='  exact answer  ', answered_at=datetime('now','-31 days'), content_expires_at=datetime('now','-1 days'), return_state='blocked' WHERE id=?", (req["relay_id"],))
@@ -142,7 +142,7 @@ def test_undelivered_answer_retention_is_bounded(path):
 
 
 def test_candidate_limits_raw_text_and_restart(path):
-    from istota.message_relays import store_reply_candidate
+    from istota.relay.relays import store_reply_candidate
     with db.get_db(path) as conn:
         req = hold(conn, task(conn))
         args = dict(actor_user_id="bob", provider="baileys", quoted_id="provider-question", text="  yes\n")
@@ -161,7 +161,7 @@ def test_candidate_limits_raw_text_and_restart(path):
 
 
 def test_answered_relay_survives_a_block(path):
-    from istota.message_relays import block, unblock
+    from istota.relay.relays import block, unblock
     with db.get_db(path) as conn:
         req = hold(conn, task(conn))
         conn.execute("UPDATE message_relays SET state='answered',answer_text='answer',return_state='pending' WHERE id=?", (req["relay_id"],))
@@ -174,8 +174,8 @@ def test_answered_relay_survives_a_block(path):
 
 
 def test_cancel_is_scoped_and_does_not_commit(path):
-    from istota.message_relays import cancel_relay, get_relay
-    from istota.whatsapp_requests import RequestError
+    from istota.relay.relays import cancel_relay, get_relay
+    from istota.relay.requests import RequestError
     with db.get_db(path) as conn:
         req = hold(conn, task(conn))
     with db.get_db(path) as conn:
@@ -201,7 +201,7 @@ def test_migration_turns_revoked_grants_into_blocks(tmp_path):
     db.init_db(old)
     db.init_db(old)
     with db.get_db(old) as conn:
-        from istota.message_relays import is_blocked
+        from istota.relay.relays import is_blocked
         assert is_blocked(conn, actor_user_id="bob", asker_user_id="alice")
         assert not is_blocked(conn, actor_user_id="bob", asker_user_id="carol")
         assert conn.execute("SELECT blocked_at FROM relay_blocks").fetchone()[0] == "2026-02-01"

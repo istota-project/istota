@@ -14,7 +14,8 @@ from datetime import date, datetime, timedelta, timezone, tzinfo
 
 from typing import TYPE_CHECKING
 
-from . import db, room_policy
+from istota import db
+from istota.rooms import policy as room_policy
 from .brain import (
     Brain,
     EFFORT_LEVELS,
@@ -26,20 +27,20 @@ from .brain import (
     room_selectable_kinds,
 )
 from .memory import search as memory_search_mod
-from .process_group import kill_process_group
+from istota.sandbox.process_group import kill_process_group
 from .config import Config
 # The static room-model table: a stdlib-only leaf importing nothing, so it
 # costs this module — which is imported on the Talk polling path — nothing.
-from .surfaces import is_room_member
+from istota.rooms.surfaces import is_room_member
 # The cost-render rule, imported rather than copied. It already has two
 # implementations — this one and `web/src/lib/usageFormat.ts` — pinned against
 # each other by a parity test; a third, inside a surface, is exactly what those
 # tests exist to prevent. `usage_render` is a stdlib-only leaf, so it costs this
 # module (imported on the Talk polling path) nothing to take at import time.
-from .usage_render import COST_PLACEHOLDER, fmt_int, render_cost
+from istota.usage.render import COST_PLACEHOLDER, fmt_int, render_cost
 
 if TYPE_CHECKING:
-    from .subscription_usage import Spend, UsageSnapshot, UsageWindow
+    from istota.usage.subscription import Spend, UsageSnapshot, UsageWindow
     from .transport.registry import TransportRegistry
 
 logger = logging.getLogger("istota.commands")
@@ -834,8 +835,8 @@ async def cmd_confirm(ctx: CommandContext):
         return confirmations.ambiguity_listing(conn, pending)
 
     if task.whatsapp_confirmation_request_id:
-        from . import message_relays
-        from .whatsapp_requests import RequestError
+        from istota.relay import relays as message_relays
+        from istota.relay.requests import RequestError
         try:
             origin = message_relays.private_origin(conn, ctx.config, actor_user_id=user_id,
                                                    surface=ctx.surface, conversation_token=ctx.conversation_token)
@@ -1560,7 +1561,7 @@ async def cmd_room(ctx: CommandContext):
 
 def _room_host(conn, token: str, user_id: str) -> str:
     """`!room host`: claim a room that has lost its host (multiplayer D14)."""
-    from . import room_policy
+    from istota.rooms import policy as room_policy
 
     outcome = room_policy.claim_host(conn, token, user_id)
     if outcome == "claimed":
@@ -1580,7 +1581,7 @@ def _room_group(conn, room, user_id: str, value: str) -> str:
     host's own groups (`room_policy.group_link_refusal`, which the web PATCH
     asks too).
     """
-    from . import room_policy
+    from istota.rooms import policy as room_policy
 
     value = value.strip()
     if room.side_of:
@@ -1610,7 +1611,7 @@ def _room_group(conn, room, user_id: str, value: str) -> str:
 
 def _room_guests(conn, token: str, user_id: str, value: str) -> str:
     """`!room guests <off|held|direct>`: how guests are answered. Host only."""
-    from . import room_policy
+    from istota.rooms import policy as room_policy
 
     policy = room_policy.ensure_policy(conn, token)
     if policy is None:
@@ -1791,7 +1792,7 @@ async def cmd_usage(ctx: CommandContext):
     if is_admin:
         # Imported here, not at module scope: `commands` is imported on the Talk
         # polling path and `subscription_usage` pulls in urllib and subprocess.
-        from . import subscription_usage
+        from istota.usage import subscription as subscription_usage
 
         # One clock for the fetch, the cache freshness and the age footer.
         now = time.time()
@@ -2233,7 +2234,7 @@ async def cmd_cron(ctx: CommandContext):
         if not job:
             return f"No scheduled job named '{job_name}' found."
         # Write to CRON.md (source of truth); DB updated on next sync
-        from .notification_resolvers import cron_job as cron_job_source
+        from istota.notifications.resolvers import cron_job as cron_job_source
 
         if is_module_job:
             db.enable_scheduled_job(conn, job.id)
@@ -2271,7 +2272,7 @@ async def cmd_cron(ctx: CommandContext):
         if not job:
             return f"No scheduled job named '{job_name}' found."
         # Write to CRON.md (source of truth); DB updated on next sync
-        from .notification_resolvers import cron_job as cron_job_source
+        from istota.notifications.resolvers import cron_job as cron_job_source
 
         # Closed here too, and `disable` is the case the resolver cannot cover:
         # disabling by hand writes the user's column and leaves the scheduler's
@@ -3646,7 +3647,7 @@ async def cmd_drafts(ctx: CommandContext):
     """
     import asyncio
 
-    from . import outbound_drafts as drafts
+    from istota.mail import drafts
 
     conn, user_id = ctx.conn, ctx.user_id
     words = ctx.args.split()
@@ -3793,7 +3794,7 @@ def _relay_reply_in_room(ctx: CommandContext, origin: dict) -> str:
     """
     import json
     import uuid
-    from . import message_relays
+    from istota.relay import relays as message_relays
 
     parsed = re.match(r"^reply +(\S+)(?: (.*))?$", ctx.args, re.DOTALL)
     if ctx.surface not in ("web", "talk") or parsed is None:
@@ -3825,8 +3826,8 @@ _RELAY_APPROVAL_TEXT = {
 
 @command("relay", "Manage private relays: `!relay reply RELAY_ID <answer>`, `!relay block USER_ID`, `!relay unblock USER_ID`, `!relay blocked`, `!relay list`, `!relay show RELAY_ID`, `!relay cancel RELAY_ID`")
 async def cmd_relay(ctx: CommandContext):
-    from . import message_relays
-    from .whatsapp_requests import RequestError
+    from istota.relay import relays as message_relays
+    from istota.relay.requests import RequestError
 
     try:
         origin = message_relays.private_origin(ctx.conn, ctx.config, actor_user_id=ctx.user_id,
@@ -3834,7 +3835,7 @@ async def cmd_relay(ctx: CommandContext):
         await message_relays.verify_private_audience(ctx.config, actor_user_id=ctx.user_id, origin=origin)
     except RequestError:
         return "Relay commands require a verified private conversation."
-    from .whatsapp_requests import write_transaction
+    from istota.relay.requests import write_transaction
     with write_transaction(ctx.conn):
         try:
             message_relays.validate_origin(ctx.conn, ctx.config, actor_user_id=ctx.user_id, origin=origin)

@@ -12,7 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from istota import commands, confirmations, db, room_policy
+from istota import commands, confirmations, db
+from istota.rooms import policy as room_policy
 from istota.config import (
     Config,
     NextcloudConfig,
@@ -251,7 +252,7 @@ class TestRoomSettingsCommands:
 
 @pytest.fixture
 async def client(tmp_path):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     config = _config(tmp_path, admins=("bob",))
     mod._config = config
     mod.app.state.istota_config = config
@@ -264,7 +265,7 @@ async def client(tmp_path):
 
 
 async def _login(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
     )

@@ -49,7 +49,7 @@ def conn(tmp_path):
 @_needs_web_deps
 class TestTraceSegments:
     def _fn(self):
-        from istota.web_app import _trace_segments
+        from istota.webui.app import _trace_segments
         return _trace_segments
 
     def test_ordered_trace_skips_cm_boundary_and_canonicalizes_answer(self):
@@ -258,7 +258,7 @@ class TestWebChatRoomsDB:
         assert found.id == room.id
 
     def test_count_recent_web_sends(self, conn):
-        from istota.speech_gate import GateDecision, record_decision
+        from istota.rooms.speech_gate import GateDecision, record_decision
 
         room = db.create_web_chat_room(conn, "alice", "general")
         for _ in range(3):
@@ -496,7 +496,7 @@ class TestWebChatConfig:
     def test_sse_poll_interval_wired(self, tmp_path):
         """The SSE generator's poll cadence must come from config, not a
         hardcoded constant."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         config = _make_config(tmp_path)
         config.web.chat.sse_poll_interval_ms = 750
         mod._config = config
@@ -528,7 +528,7 @@ def _make_config(tmp_path):
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod.app.state.istota_config = config
     mod._oauth = MagicMock()
@@ -537,7 +537,7 @@ def _patch_app(config):
 
 
 async def _login(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
     )
@@ -862,7 +862,7 @@ class TestChatMessagesApi:
         assert body["task_id"] is not None
         assert "stream_url" in body
         # The task is a source_type=web task on the room token.
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             task = db.get_task(c, body["task_id"])
         assert task.source_type == "web"
@@ -874,7 +874,7 @@ class TestChatMessagesApi:
     async def test_a_turn_the_gate_declines_is_recorded_with_no_stream(
         self, chat_client, monkeypatch,
     ):
-        from istota.speech_gate import GateDecision
+        from istota.rooms.speech_gate import GateDecision
 
         monkeypatch.setattr(
             "istota.transport.ingest.speech_gate.should_speak",
@@ -890,7 +890,7 @@ class TestChatMessagesApi:
         assert body["status"] == "recorded"
         assert body["task_id"] is None
         assert "stream_url" not in body
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             row = c.execute(
                 "SELECT task_id, body FROM messages WHERE id = ?", (body["message_id"],),
@@ -907,7 +907,7 @@ class TestChatMessagesApi:
     async def test_the_send_says_whether_it_named_the_bot(
         self, chat_client, monkeypatch,
     ):
-        from istota.speech_gate import GateDecision
+        from istota.rooms.speech_gate import GateDecision
 
         seen: list[bool] = []
 
@@ -918,7 +918,7 @@ class TestChatMessagesApi:
         monkeypatch.setattr("istota.transport.ingest.speech_gate.should_speak", _spy)
         cookies = await _login(chat_client, "alice")
         room = await self._room(chat_client, cookies)
-        import istota.web_app as mod
+        import istota.webui.app as mod
         bot = mod._config.bot_name
         await self._send(chat_client, cookies, room["id"], text=f"@{bot} hello")
         await self._send(chat_client, cookies, room["id"], text="hello bob")
@@ -928,13 +928,13 @@ class TestChatMessagesApi:
         self, chat_client, monkeypatch,
     ):
         """The cap counted tasks, so a turn the gate declined was free."""
-        from istota.speech_gate import GateDecision
+        from istota.rooms.speech_gate import GateDecision
 
         monkeypatch.setattr(
             "istota.transport.ingest.speech_gate.should_speak",
             lambda **_kw: GateDecision(False, "mode_mention"),
         )
-        import istota.web_app as mod
+        import istota.webui.app as mod
         monkeypatch.setattr(mod._config.web.chat, "rate_limit_messages", 2)
         cookies = await _login(chat_client, "alice")
         room = await self._room(chat_client, cookies)
@@ -951,13 +951,13 @@ class TestChatMessagesApi:
         itself is the only thing that can put the turn in a bound Talk room."""
         from unittest.mock import AsyncMock
 
-        from istota.speech_gate import GateDecision
+        from istota.rooms.speech_gate import GateDecision
 
         monkeypatch.setattr(
             "istota.transport.ingest.speech_gate.should_speak",
             lambda **_kw: GateDecision(False, "mode_mention"),
         )
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mirror = AsyncMock()
         monkeypatch.setattr(mod, "_mirror_web_turn_as_user", mirror)
         cookies = await _login(chat_client, "alice")
@@ -991,7 +991,7 @@ class TestChatMessagesApi:
         assert first.status_code == second.status_code == 200
         assert second.json()["task_id"] == first.json()["task_id"]
 
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             rows = c.execute(
                 "SELECT id FROM messages WHERE room_token = ? AND role = 'user'",
@@ -1013,7 +1013,7 @@ class TestChatMessagesApi:
         second = await self._send(chat_client, cookies, room["id"], text="two", client_msg_id="")
         assert first.json()["task_id"] != second.json()["task_id"]
 
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             stored = [
                 r["client_msg_id"] for r in c.execute(
@@ -1041,7 +1041,7 @@ class TestChatMessagesApi:
         """Rooms are shared and the key is arbitrary client text, so a
         co-member reusing one must not have their message dropped — nor be
         handed a task they aren't authorized to read."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from istota import db as _db
 
         alice = await _login(chat_client, "alice")
@@ -1090,7 +1090,7 @@ class TestChatMessagesApi:
         )
         assert a.json()["task_id"] != b.json()["task_id"]
 
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             stored = [
                 r["client_msg_id"] for r in c.execute(
@@ -1105,7 +1105,7 @@ class TestChatMessagesApi:
         cookies = await _login(chat_client, "alice")
         room = await self._room(chat_client, cookies)
         await self._send(chat_client, cookies, room["id"], text="no key here")
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             row = c.execute(
                 "SELECT client_msg_id FROM messages WHERE room_token = ? "
@@ -1127,7 +1127,7 @@ class TestChatMessagesApi:
     async def _upload_path(self, username: str, filename: str) -> str:
         """A real file under the user's web-chat upload root, so the send's
         attachment validation accepts it."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         root = mod._chat_upload_roots(username)[0]
         root.mkdir(parents=True, exist_ok=True)
         path = root / filename
@@ -1149,7 +1149,7 @@ class TestChatMessagesApi:
         assert resp.status_code == 200
         task_id = resp.json()["task_id"]
         assert task_id is not None
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             task = db.get_task(c, task_id)
         assert task.attachments == [audio]
@@ -1167,7 +1167,7 @@ class TestChatMessagesApi:
             headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 200
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             task = db.get_task(c, resp.json()["task_id"])
         assert "receipt-99.png" in task.prompt
@@ -1209,7 +1209,7 @@ class TestChatMessagesApi:
         room transcript as a system message with a stable notif_id and no
         task_id — the user sees it on the next room load."""
         from istota import db
-        from istota.web_app import _config
+        from istota.webui.app import _config
         cookies = await _login(chat_client, "alice")
         room = await self._room(chat_client, cookies)
         # Bot-delivered notifications now land in the canonical messages store
@@ -1231,7 +1231,7 @@ class TestChatMessagesApi:
 
     async def test_notification_answer_is_preserved_once_in_history(self, chat_client):
         import json
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from istota.session.result import _compose_full_result
 
         cookies = await _login(chat_client, "alice")
@@ -1270,7 +1270,7 @@ class TestChatMessagesApi:
         done state across reloads / room switches (ISSUE-122)."""
         import json
 
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         cookies = await _login(chat_client, "alice")
         room = await self._room(chat_client, cookies)
@@ -1319,7 +1319,7 @@ class TestChatMessagesApi:
     async def test_completed_task_history_carries_model(self, chat_client):
         """A completed web task surfaces the model that produced it, so the
         chat-message meta shows it on reload (verification-added test)."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         cookies = await _login(chat_client, "alice")
         room = await self._room(chat_client, cookies)
@@ -1343,7 +1343,7 @@ class TestChatMessagesApi:
     async def test_history_completed_task_without_model_returns_null(self, chat_client):
         """A completed web task with no recorded model returns model=None, not
         an error or a missing key (verification-added test)."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         cookies = await _login(chat_client, "alice")
         room = await self._room(chat_client, cookies)
@@ -1398,7 +1398,7 @@ class TestChatMessagesApi:
         assert all(m["text"] == "" and m["status"] == "pending" for m in assistants)
 
     async def test_rate_limit_returns_429(self, chat_client):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.web.chat.rate_limit_messages = 2
         cookies = await _login(chat_client, "alice")
         room = await self._room(chat_client, cookies)
@@ -1480,7 +1480,7 @@ class TestChatMessagesApi:
         assert resp.status_code == 200
         body = resp.json()
         assert body["task_id"] is not None
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             task = db.get_task(c, body["task_id"])
         assert task.model  # canonical Opus id
@@ -1516,7 +1516,7 @@ class TestChatMessagesApi:
             cookies=cookies, headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 200
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             task = db.get_task(c, resp.json()["task_id"])
         assert task.attachments == [path]
@@ -1548,7 +1548,7 @@ class TestChatAttachmentPersistence:
         return (await client.get("/istota/api/chat/rooms", cookies=cookies)).json()["rooms"][0]
 
     async def _upload_path(self, username: str, filename: str) -> str:
-        import istota.web_app as mod
+        import istota.webui.app as mod
         root = mod._chat_upload_roots(username)[0]
         root.mkdir(parents=True, exist_ok=True)
         path = root / filename
@@ -1627,7 +1627,7 @@ class TestChatAttachmentPersistence:
             "attachment_names": ["invoice.pdf"],
         })
         task_id = resp.json()["task_id"]
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             c.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         user_msgs = [m for m in await self._history(chat_client, cookies, room)
@@ -1741,7 +1741,7 @@ class TestChatAttachmentLinks:
             "text": "file this", "attachments": [up["path"]],
             "attachment_names": ["invoice.pdf"],
         })
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             c.execute("DELETE FROM tasks WHERE id = ?", (resp.json()["task_id"],))
         user_msgs = [m for m in await self._history(chat_client, cookies, room)
@@ -1753,7 +1753,7 @@ class TestChatAttachmentLinks:
         under `/Users/<uid>/`, so the endpoint can't serve it."""
         cookies = await _login(chat_client, "alice")
         room = await self._room(chat_client, cookies)
-        import istota.web_app as mod
+        import istota.webui.app as mod
         root = mod._chat_upload_roots("alice")[1]
         root.mkdir(parents=True, exist_ok=True)
         (root / "stray.png").write_bytes(b"\x00")
@@ -1791,7 +1791,7 @@ class TestChatAttachmentLinks:
         """Rooms are shared. Bob may see alice's chip, but `/chat/files` is
         scoped to the caller's own workspace and would refuse the path — so it
         must not be offered as a link to him."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         alice = await _login(chat_client, "alice")
         room = await self._room(chat_client, alice)
         up = await self._upload(chat_client, alice, "note.txt")
@@ -1887,7 +1887,7 @@ class TestChatDeleteApi:
 @_needs_web_deps
 class TestChatTaskActions:
     async def _seed_task(self, username, status="running"):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             room = db.ensure_default_web_chat_room(c, username)
             tid = db.create_task(
@@ -1903,7 +1903,7 @@ class TestChatTaskActions:
         Mirrors what `scheduler` emits on that path: the work, then the question
         and the terminal frame (`:2441`, `:2452`).
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
         kinds = ("task_started", "tool_start", "tool_end", "confirmation", "done")
         with db.get_db(mod._config.db_path) as c:
             for seq, kind in enumerate(kinds, start=1):
@@ -1925,7 +1925,7 @@ class TestChatTaskActions:
         cookies = await _login(chat_client, "alice")
         tid = await self._seed_task("alice", status="pending_confirmation")
         await self._seed_parked_pass(tid)
-        import istota.web_app as mod
+        import istota.webui.app as mod
         resp = await chat_client.post(
             f"/istota/api/chat/tasks/{tid}/confirm", cookies=cookies,
             headers={"origin": "https://example.com"},
@@ -1951,7 +1951,7 @@ class TestChatTaskActions:
         cookies = await _login(chat_client, "alice")
         tid = await self._seed_task("alice", status="pending_confirmation")
         await self._seed_parked_pass(tid)
-        import istota.web_app as mod
+        import istota.webui.app as mod
         resp = await chat_client.post(
             f"/istota/api/chat/tasks/{tid}/confirm", cookies=cookies,
             headers={"origin": "https://example.com"},
@@ -1977,7 +1977,7 @@ class TestChatTaskActions:
         cookies = await _login(chat_client, "alice")
         tid = await self._seed_task("alice", status="pending_confirmation")
         await self._seed_parked_pass(tid)
-        import istota.web_app as mod
+        import istota.webui.app as mod
         resp = await chat_client.post(
             f"/istota/api/chat/tasks/{tid}/confirm", cookies=cookies,
             headers={"origin": "https://example.com"},
@@ -2001,7 +2001,7 @@ class TestChatTaskActions:
             headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 200
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             assert db.get_task(c, tid).status == "cancelled"
 
@@ -2013,7 +2013,7 @@ class TestChatTaskActions:
             headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 200
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             flag = c.execute(
                 "SELECT cancel_requested FROM tasks WHERE id = ?", (tid,)
@@ -2039,7 +2039,7 @@ class TestChatTaskActions:
         """
         cookies = await _login(chat_client, "alice")
         tid = await self._seed_task("alice", status="running")
-        import istota.web_app as mod
+        import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             c.execute(
                 "INSERT INTO task_events (task_id, seq, kind, payload) VALUES (?,1,'tool_start','{}')",
@@ -2111,7 +2111,7 @@ class TestChatAttachments:
         """The name comes from the client, so it is sanitised rather than
         trusted: no separators, no traversal, no leading dot."""
         import os
-        from istota.web_app import _attachment_stem
+        from istota.webui.app import _attachment_stem
 
         assert _attachment_stem("../../../etc/passwd") == "passwd"
         assert _attachment_stem("..") == ""
@@ -2137,7 +2137,7 @@ class TestChatAttachments:
     async def test_unnamed_upload_still_stores(self, chat_client):
         """A name that sanitises to nothing falls back to a plain random one."""
         import os
-        from istota.web_app import _save_chat_attachment
+        from istota.webui.app import _save_chat_attachment
         path = _save_chat_attachment("alice", "...", b"x")
         assert os.path.exists(path)
         assert not os.path.basename(path).startswith("-")
@@ -2170,7 +2170,7 @@ class TestChatAttachments:
         assert resp.status_code == 400
 
     async def test_oversize_rejected(self, chat_client):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config.web.chat.max_attachment_mb = 0  # everything is too big
         cookies = await _login(chat_client, "alice")
         resp = await chat_client.post(
@@ -2330,7 +2330,7 @@ class TestChatFileDownload:
     async def test_no_mount_says_so_rather_than_500ing(self, chat_client):
         """An rclone deployment has no local workspace; the refusal has to name
         the alternative instead of surfacing as a crash."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         saved = mod._config.workspace_path
         mod._config.workspace_path = None
         try:
@@ -2571,7 +2571,7 @@ class TestTheHeadReadSurvivesASwapUnderIt:
     """
 
     def _download(self, monkeypatch, target):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         monkeypatch.setattr(
             mod, "_resolve_chat_file", lambda username, path: target,
@@ -2583,7 +2583,7 @@ class TestTheHeadReadSurvivesASwapUnderIt:
     ):
         """O_NOFOLLOW. Without it the read leaves the workspace the check just
         confined it to — the control below is what says so."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         outside = tmp_path / "outside-secret.txt"
         outside.write_bytes(_PNG_BYTES)
@@ -2605,7 +2605,7 @@ class TestTheHeadReadSurvivesASwapUnderIt:
         """O_NONBLOCK plus the S_ISREG test on the descriptor. An open that
         blocked here would hold a worker from the pool the SSE ticks share,
         so the failure is the web process rather than this request."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         fifo = tmp_path / "swapped.png"
         os.mkfifo(fifo)
@@ -2687,7 +2687,7 @@ class TestTheRoomPatchValidatesInTheRoomsNamespace:
 @_needs_web_deps
 class TestRoomModelAllowed:
     def test_it_answers_for_the_brain_it_is_given(self, tmp_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from istota.config import BrainConfig, NativeBrainConfig
 
         _patch_app(_make_config(tmp_path))
@@ -2704,7 +2704,7 @@ class TestRoomModelAllowed:
         """#548: a deployment default no alias pointed at could not be pinned
         from web, while `!room model` accepted it through the same brain's
         canonical passthrough. The two writers now agree."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from istota.config import BrainConfig
 
         _patch_app(_make_config(tmp_path))
@@ -2714,7 +2714,7 @@ class TestRoomModelAllowed:
 
     def test_alias_names_and_effort_suffixes_are_refused(self, tmp_path):
         """The PATCH stores a canonical id; effort is its own field."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from istota.config import BrainConfig
 
         _patch_app(_make_config(tmp_path))
@@ -2726,7 +2726,7 @@ class TestRoomModelAllowed:
     def test_an_unbuildable_brain_rejects_everything(self, tmp_path):
         """The validator degrades to "reject all" rather than to "accept all" —
         an unusable answer must not widen what may be written."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from istota.config import BrainConfig
 
         _patch_app(_make_config(tmp_path))
@@ -3224,7 +3224,7 @@ class TestTheBrainRidesEveryRoomPayload:
         assert entry["brain"] == "native"
 
     async def test_the_stream_snapshot_carries_it(self, client_and_config):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         client, config = client_and_config
         cookies = await _login(client, "alice")
@@ -3249,7 +3249,7 @@ class TestTheBrainRidesEveryRoomPayload:
         """A fourth producer the spec's list predates. `_promoted_room_dict`'s
         own docstring gives the reason `model` and `effort` ride it, and the
         brain is the same kind of standing room default."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from istota.config import BrainConfig
 
         config = _make_config(tmp_path)

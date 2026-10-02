@@ -10,7 +10,7 @@
  * captured by running `render_cost` against it. Regenerate with:
  *
  *     uv run python - <<'PY'
- *     from istota.usage_render import render_cost
+ *     from istota.usage.render import render_cost
  *     for c in CASES: print(c, render_cost(c))
  *     PY
  *

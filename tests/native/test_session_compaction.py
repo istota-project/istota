@@ -476,7 +476,7 @@ class _FakeToolServer:
     The tool call exists only to make the loop take a second turn, so nothing
     here asserts anything was written. Faking it keeps an out-of-process
     dependency out of a test whose subject is compaction: `_start_tool_server`
-    otherwise spawns `python -m istota.tool_server` with `env={}` (the request
+    otherwise spawns `python -m istota.sandbox.tool_server` with `env={}` (the request
     carries none), which works only while the project is installed into the
     running interpreter — and when it does not, the failure surfaces as
     "expected exactly one compaction, got 0" rather than as "the tool server

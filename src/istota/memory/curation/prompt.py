@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from ...llm_json import strip_fences
+from istota.lib.llm_json import strip_fences
 from .parser import serialize_sectioned_doc
 from .types import SectionedDoc
 
@@ -159,7 +159,7 @@ def strip_json_fences(text: str) -> str:
 
     Kept under this name because it is part of ``memory.curation``'s public
     surface (``__init__`` re-exports it and ``sleep_cycle`` imports it from
-    there). The rule itself is :func:`istota.llm_json.strip_fences`, which
+    there). The rule itself is :func:`istota.lib.llm_json.strip_fences`, which
     the health explainer's own copy of this also became.
     """
     return strip_fences(text)

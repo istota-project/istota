@@ -193,7 +193,7 @@ class TestCaldavConfig:
         redaction. `password` is caught by the name patterns rather than by a
         path entry, so this is a control that it really is caught rather than
         a restatement of the list."""
-        from istota.admin_config_view import build_config_view
+        from istota.webui.admin_config_view import build_config_view
 
         cfg = Config(caldav=CaldavConfig(
             url="https://dav.fastmail.com", username="u", password="app-pw",
@@ -289,7 +289,7 @@ def _standalone_config(tmp_path):
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod.app.state.istota_config = config
     return mod.app
@@ -297,17 +297,17 @@ def _patch_app(config):
 
 class TestLoopbackGuard:
     def test_guard_noop_for_nextcloud_auth(self):
-        from istota.web_app import assert_no_auth_bind_safe
+        from istota.webui.app import assert_no_auth_bind_safe
         # Must not raise even on a public host when auth is on.
         assert_no_auth_bind_safe(["nextcloud"], "0.0.0.0")
 
     def test_guard_allows_loopback(self):
-        from istota.web_app import assert_no_auth_bind_safe
+        from istota.webui.app import assert_no_auth_bind_safe
         for host in ("127.0.0.1", "::1", "localhost"):
             assert_no_auth_bind_safe(["none"], host)
 
     def test_guard_refuses_non_loopback(self):
-        from istota.web_app import assert_no_auth_bind_safe
+        from istota.webui.app import assert_no_auth_bind_safe
         with pytest.raises(RuntimeError):
             assert_no_auth_bind_safe(["none"], "0.0.0.0")
         with pytest.raises(RuntimeError):
@@ -338,7 +338,7 @@ class TestNoAuthWebMode:
     async def test_verify_origin_noop_without_origin_header(self, tmp_path):
         # In no-auth mode _verify_origin is a no-op even with no Origin header
         # (which would normally raise a 403 "missing origin").
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config = _standalone_config(tmp_path)
 
         class _FakeReq:
@@ -348,7 +348,7 @@ class TestNoAuthWebMode:
         assert mod._verify_origin(_FakeReq()) is None
 
     async def test_require_api_auth_returns_local_user_directly(self, tmp_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cfg = _standalone_config(tmp_path)
         mod._config = cfg
 
@@ -400,7 +400,7 @@ class TestNextcloudAuthRegression:
 @_needs_web_deps
 class TestAdminRuntimeSection:
     def _run(self, cfg):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config = cfg
         return mod._admin_runtime_section()
 
@@ -445,7 +445,7 @@ class TestAdminRuntimeSection:
 
 class TestAdminModelsSection:
     def _run(self, cfg):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config = cfg
         return mod._admin_models_section()
 
@@ -534,7 +534,7 @@ class TestAdminModelsSection:
 
 class TestAdminStorageSection:
     def _run(self, cfg):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config = cfg
         return mod._admin_storage_section(cfg.db_path)
 
@@ -562,7 +562,7 @@ class TestAdminStorageSection:
             workspace_path=mount,
             nextcloud_mount_path=mount,
         )
-        monkeypatch.setattr("istota.web_app.os.path.ismount", lambda path: False)
+        monkeypatch.setattr("istota.webui.app.os.path.ismount", lambda path: False)
 
         out = self._run(cfg)
         assert out["nextcloud_mount_healthy"] is False

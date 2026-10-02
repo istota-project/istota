@@ -23,7 +23,7 @@ def db_path(tmp_path):
 
 @pytest.fixture
 def web_config(db_path):
-    from istota import web_app
+    from istota.webui import app as web_app
     cfg = Config()
     cfg.db_path = db_path
     cfg.nextcloud = NextcloudConfig(url="https://nc.example", username="bot", app_password="pw")
@@ -39,7 +39,7 @@ def web_config(db_path):
 class TestTalkClientRoomMethods:
     @pytest.mark.asyncio
     async def test_create_conversation_posts_v4_room(self):
-        from istota.talk import TalkClient
+        from istota.nextcloud.talk import TalkClient
         cfg = Config()
         cfg.nextcloud = NextcloudConfig(url="https://nc.example", username="bot", app_password="pw")
         client = TalkClient(cfg)
@@ -57,7 +57,7 @@ class TestTalkClientRoomMethods:
 
     @pytest.mark.asyncio
     async def test_add_participant_posts_participants(self):
-        from istota.talk import TalkClient
+        from istota.nextcloud.talk import TalkClient
         cfg = Config()
         cfg.nextcloud = NextcloudConfig(url="https://nc.example", username="bot", app_password="pw")
         client = TalkClient(cfg)
@@ -73,7 +73,7 @@ class TestTalkClientRoomMethods:
 
     @pytest.mark.asyncio
     async def test_rename_conversation_puts_room(self):
-        from istota.talk import TalkClient
+        from istota.nextcloud.talk import TalkClient
         cfg = Config()
         cfg.nextcloud = NextcloudConfig(url="https://nc.example", username="bot", app_password="pw")
         client = TalkClient(cfg)
@@ -111,11 +111,11 @@ def _fake_talk_client():
 class TestPromote:
     @pytest.mark.asyncio
     async def test_promote_web_room_creates_talk_binding(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
         fake = _fake_talk_client()
-        with patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             status, result = await web_app._chat_promote_to_talk("alice", room.id)
         assert status == "ok"
         assert result is not None
@@ -132,12 +132,12 @@ class TestPromote:
         # after the OCS create, before the best-effort add_participant/seed
         # steps. If add_participant fails, the binding still exists, so a
         # re-promote is a no-op rather than spawning a second Talk room.
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
         fake = _fake_talk_client()
         fake.add_participant = AsyncMock(side_effect=RuntimeError("NC down"))
-        with patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             status, result = await web_app._chat_promote_to_talk("alice", room.id)
         assert status == "ok"
         assert result is not None
@@ -147,43 +147,43 @@ class TestPromote:
         # A second promote attempt sees the binding, finds the conversation
         # still there, and creates no new Talk room.
         fake2 = _fake_talk_client()
-        with patch("istota.talk.TalkClient", return_value=fake2):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake2):
             again_status, _ = await web_app._chat_promote_to_talk("alice", room.id)
         assert again_status == "live"
         fake2.create_conversation.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_promote_rejects_already_bound(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
             db.add_room_binding(conn, room.token, "talk", "existing")
         fake = _fake_talk_client()
-        with patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             status, _ = await web_app._chat_promote_to_talk("alice", room.id)
         assert status == "live"
         fake.create_conversation.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_promote_rejects_talk_origin_room(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             db.register_room(conn, "cpz", "alice", origin="talk", name="#x")
             handle = db.ensure_web_chat_handle(conn, "alice", "cpz", "#x")
         fake = _fake_talk_client()
-        with patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             status, _ = await web_app._chat_promote_to_talk("alice", handle.id)
         assert status == "not_found"
 
     @pytest.mark.asyncio
     async def test_promote_unknown_room(self, web_config):
-        from istota import web_app
+        from istota.webui import app as web_app
         assert await web_app._chat_promote_to_talk("alice", 99999) == ("not_found", None)
 
 
 class TestTalkBindingLookup:
     def test_room_talk_binding(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
             db.add_room_binding(conn, room.token, "talk", "ttok")

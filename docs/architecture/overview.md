@@ -109,7 +109,7 @@ Guardrails on this path: subtask creation is **admin-only**, prompt-only (never 
 | `transport/email/inbound.py` | Polls INBOX via IMAP, creates tasks from known senders, downloads attachments (the EmailTransport inbound body) |
 | `transport/whatsapp/` | One business phone number behind a provider seam: `whatsapp_cloud` (Meta's Cloud API webhook) or `baileys` (a paired WhatsApp Web session driven by a Node sidecar). Inbound resolves the sender to a user binding; outbound is one message per logical response |
 | `transport/sms/` | One service number through Twilio or Telnyx. Signed provider webhooks create tasks; outbound is segment-budgeted and tracked through delivery callbacks |
-| `web_app.py` (`/api/chat/*`) | In-app web chat: POST → `ingest_message` creates a `source_type="web"` task; SSE tails `task_events` |
+| `webui/app.py` (`/api/chat/*`) | In-app web chat: POST → `ingest_message` creates a `source_type="web"` task; SSE tails `task_events` |
 | `repl/` | Interactive terminal loop (`istota repl`); each line is an inline `source_type="repl"` task streamed to the terminal |
 | `tasks_file_poller.py` | Watches TASKS.md files for changes, identifies tasks by SHA-256 content hash |
 | `cli.py` | Direct task execution (`istota task "prompt" -u USER -x`), supports `--dry-run` |
@@ -124,7 +124,6 @@ Guardrails on this path: subtask creation is **admin-only**, prompt-only (never 
 | `brain/` | Pluggable model-invocation backend: `Brain` Protocol + `make_brain` factory, `BrainRequest`/`BrainResult` types, stream events, `ClaudeCodeBrain` (subprocess + stream-json + transient-API retry), and `NativeBrain` (Istota's in-process agent loop). The native loop's machinery lives in `llm/` (provider abstraction), `agent/` (the loop + tool dispatch), and `session/` (turn state + compaction). |
 | `context.py` | Selects relevant conversation history using hybrid recent + LLM-triaged approach |
 | `skills/_loader.py` | Loads skill documentation selectively: `always_include`, source types, file types, sticky skills, companions. Keyword and resource matching are deliberately *not* selectors |
-| `stream_parser.py` | Backward-compat shim — re-exports stream event types from `brain/_events.py` |
 
 ### Storage and state
 
@@ -149,11 +148,11 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 
 | Module | Purpose |
 |---|---|
-| `talk.py` | Async HTTP client for Nextcloud Talk API (send, poll, download attachments) |
+| `nextcloud/talk.py` | Async HTTP client for Nextcloud Talk API (send, poll, download attachments) |
 | `async_runtime.py` | One persistent asyncio loop + one pooled httpx client for all Talk I/O (`run_coro`, `get_talk_client` singleton); started/stopped by `run_daemon` |
-| `notifications.py` | **Delivery.** Unified dispatcher for Talk, email and ntfy; per-user purpose-keyed routing table. Distinct from the two below, which are the inbox |
-| `notification_store.py` | **The inbox.** The `notifications` table — the durable open set of what is waiting on a user, behind the app-bar bell. The write and the send are two separate calls, so a push that reached nobody leaves the row intact |
-| `notification_sources.py` | The resolver seam behind the inbox: one resolver per source, returning `None` for an object that is gone. That single value is the whole anti-staleness story, so an item answered over Talk can never render stale |
+| `notifications/delivery.py` | **Delivery.** Unified dispatcher for Talk, email and ntfy; per-user purpose-keyed routing table. Distinct from the two below, which are the inbox |
+| `notifications/store.py` | **The inbox.** The `notifications` table — the durable open set of what is waiting on a user, behind the app-bar bell. The write and the send are two separate calls, so a push that reached nobody leaves the row intact |
+| `notifications/sources.py` | The resolver seam behind the inbox: one resolver per source, returning `None` for an object that is gone. That single value is the whole anti-staleness story, so an item answered over Talk can never render stale |
 | `events.py` | Task-event-streaming: `TaskEvent`, `EventWriter`, `EventSubscriber` + the `task_events` log that feeds every output surface |
 | `consumers/` | Event consumers: `TalkEventSubscriber`, `LogChannelSubscriber`, `PushNotificationSubscriber` |
 | `commands.py` | Surface-agnostic `!command` dispatch (`CommandContext` + registry), handled synchronously across Talk / web / CLI |
@@ -164,7 +163,7 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 |---|---|
 | `feeds/` | Native RSS/Atom/Tumblr/Are.na — poller, per-user SQLite, routes, OPML |
 | `health/` | Body stats, lab panels, biomarker trends, Garmin sync, immunizations, medical history |
-| `location/` (+ `location_logic.py`) | GPS pings, place detection, visit logging, cluster discovery |
+| `location/` (+ `location/logic.py`) | GPS pings, place detection, visit logging, cluster discovery |
 | `money` (vendored) | Beancount ledger, invoicing, transactions, work log, investment portfolio |
 | `briefings/` | Block/source briefings — per-user SQLite, source resolvers, generation, reader and settings routes |
 
@@ -174,11 +173,11 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 |---|---|
 | `heartbeat.py` | Evaluates health checks from HEARTBEAT.md |
 | `shared_file_organizer.py` | Scans for files shared with the bot, auto-organizes by owner |
-| `nextcloud_client.py` | Shared Nextcloud HTTP plumbing (OCS + WebDAV) |
-| `nextcloud_api.py` | Enriches user configs from Nextcloud OCS API at startup |
-| `web_app.py` | Authenticated web interface (FastAPI + Nextcloud OAuth2) |
-| `webhook_receiver.py` | FastAPI webhook receiver (Overland GPS) |
-| `devbox_proxy.py` | Per-user host-side credential proxy for the devbox container |
+| `nextcloud/compat.py` | Shared Nextcloud HTTP plumbing (OCS + WebDAV) |
+| `nextcloud/user_metadata.py` | Enriches user configs from Nextcloud OCS API at startup |
+| `webui/app.py` | Authenticated web interface (FastAPI + Nextcloud OAuth2) |
+| `webui/webhook_receiver.py` | FastAPI webhook receiver (Overland GPS) |
+| `devbox/proxy.py` | Per-user host-side credential proxy for the devbox container |
 | `logging_setup.py` | Centralized logging configuration (console, file, rotation) |
 
 ## Browser container

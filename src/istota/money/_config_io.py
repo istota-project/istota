@@ -12,7 +12,7 @@ import tomli
 # Where the fence starts and ends is `toml_fence`'s to say (ISSUE-386). The
 # expression that used to live here anchored neither marker, so a backtick
 # run anywhere after the fence opened ended the block early.
-from ..toml_fence import find_toml_block
+from istota.lib.toml_fence import find_toml_block
 
 
 def read_toml_config(path: Path) -> dict:

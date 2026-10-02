@@ -111,7 +111,7 @@ def _run_task(config: Config, user_id: str = "alice") -> dict:
     db.init_db(config.db_path)
 
     with patch("istota.executor.subprocess.run") as mock_run, \
-            patch("istota.skill_proxy.SkillProxy") as mock_proxy:
+            patch("istota.sandbox.skill_proxy.SkillProxy") as mock_proxy:
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
         mock_proxy.return_value.__enter__ = lambda s: s
         mock_proxy.return_value.__exit__ = lambda s, *a: False
@@ -266,7 +266,7 @@ def test_cli_immediate_execution_admits_grants_without_lock(tmp_path, monkeypatc
     (config.temp_dir / "alice").mkdir(parents=True)
     db.init_db(config.db_path)
     monkeypatch.setattr(cli, "load_config", lambda path: config)
-    with patch("istota.executor.subprocess.run") as model, patch("istota.skill_proxy.SkillProxy"):
+    with patch("istota.executor.subprocess.run") as model, patch("istota.sandbox.skill_proxy.SkillProxy"):
         model.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
         cli.cmd_task(_Args(execute=True, conversation_token="room-a"))
     with db.get_db(config.db_path) as conn:

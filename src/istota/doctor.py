@@ -62,12 +62,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit, urlunsplit
 
-from . import du, sqlite_util
-from .user_scope import is_within, paths_overlap
+from istota.lib import du
+from istota.lib import sqlite_util
+from istota.sandbox.user_scope import is_within, paths_overlap
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; a runtime import is a cycle
     from .config import Config
-    from .subscription_usage import UsageSnapshot, UsageWindow
+    from istota.usage.subscription import UsageSnapshot, UsageWindow
 
 logger = logging.getLogger(__name__)
 
@@ -409,7 +410,7 @@ def _native_key_holders(config: "Config") -> int:
     that helper opens the database read-write *and commits*, and against a
     missing file it creates a zero-byte database that later reads as corruption
     rather than as absence. So this goes through
-    :func:`~istota.sqlite_util.connect_read_only` like every other
+    :func:`~istota.lib.sqlite_util.connect_read_only` like every other
     database-touching check here, which refuses the write and refuses to create.
 
     **What that helper does not buy is sidecar avoidance, which is the reverse
@@ -439,7 +440,7 @@ def _native_key_holders(config: "Config") -> int:
     """
     conn = None
     try:
-        from . import secrets_store
+        from istota.credentials import store as secrets_store
 
         if not secrets_store.secret_key_available():
             return 0
@@ -589,7 +590,7 @@ def check_framework_db(config: "Config", probe: bool) -> CheckResult:
     """
     import sqlite3
 
-    from .db_health import quick_check
+    from istota.maintenance.db_health import quick_check
 
     db_path = Path(config.db_path)
     if not db_path.exists():
@@ -616,7 +617,7 @@ def check_framework_db(config: "Config", probe: bool) -> CheckResult:
             "runtime.framework_db",
             FAIL,
             f"{db_path} could not be opened: {exc}",
-            remedy="Restore the database from a snapshot (`python -m istota.db_restore`).",
+            remedy="Restore the database from a snapshot (`python -m istota.maintenance.db_restore`).",
         )
     try:
         issues = quick_check(conn)
@@ -636,7 +637,7 @@ def check_framework_db(config: "Config", probe: bool) -> CheckResult:
             "runtime.framework_db",
             FAIL,
             f"{db_path} failed quick_check: {exc}",
-            remedy="Restore the database from a snapshot (`python -m istota.db_restore`).",
+            remedy="Restore the database from a snapshot (`python -m istota.maintenance.db_restore`).",
         )
     finally:
         conn.close()
@@ -647,7 +648,7 @@ def check_framework_db(config: "Config", probe: bool) -> CheckResult:
             f"{db_path}: quick_check reported {len(issues)} issue(s)",
             remedy=(
                 "The scheduler's db-health sweep attempts a REINDEX; if it does not "
-                "clear, restore from a snapshot (`python -m istota.db_restore`)."
+                "clear, restore from a snapshot (`python -m istota.maintenance.db_restore`)."
             ),
         )
     if not tables:
@@ -1313,7 +1314,7 @@ def _overlaps(a: Path, b: Path) -> bool:
     written rather than case-folded: the comparison would then be wrong on
     every case-*sensitive* filesystem, which is where bubblewrap runs and
     therefore where a bind exists at all — which is also why the shared
-    :func:`~istota.user_scope.paths_overlap` it delegates to is lexical.
+    :func:`~istota.sandbox.user_scope.paths_overlap` it delegates to is lexical.
 
     Kept as a named local rather than replaced by that import at its call
     sites, because the case-folding caveat above is about *this* comparison
@@ -1918,7 +1919,7 @@ def check_subscription_usage(config: "Config", probe: bool) -> CheckResult:
             "utilization cannot be observed without a network request (probe disabled)",
         )
 
-    from . import subscription_usage
+    from istota.usage import subscription as subscription_usage
 
     # One clock for the fetch, the countdowns and the staleness age. Reading the
     # wall clock twice would let a cached snapshot's age be measured against a
@@ -2111,7 +2112,7 @@ def check_task_failure_rate(config: "Config", probe: bool) -> CheckResult:
             name,
             FAIL,
             f"{db_path} could not be opened: {exc}",
-            remedy="Restore the database from a snapshot (`python -m istota.db_restore`).",
+            remedy="Restore the database from a snapshot (`python -m istota.maintenance.db_restore`).",
         )
     try:
         row = conn.execute(_RECENT_TASK_OUTCOMES_SQL).fetchone()
@@ -2133,7 +2134,7 @@ def check_task_failure_rate(config: "Config", probe: bool) -> CheckResult:
             name,
             FAIL,
             f"{db_path} could not be read: {exc}",
-            remedy="Restore the database from a snapshot (`python -m istota.db_restore`).",
+            remedy="Restore the database from a snapshot (`python -m istota.maintenance.db_restore`).",
         )
     finally:
         conn.close()
@@ -2161,7 +2162,7 @@ _MODEL_PROBE_MARKER = "healthcheck-ok"
 def _read_user_resources(config: "Config", user_id: str) -> list:
     """The user's resource rows, for the probe's sandbox plan. Never raises.
 
-    Through :func:`~istota.sqlite_util.connect_read_only` rather than through
+    Through :func:`~istota.lib.sqlite_util.connect_read_only` rather than through
     ``db.get_db``, which connects read-write and *commits* on exit. That is
     :func:`check_framework_db`'s rule, and a check reached from the same CLI
     does not get an exemption from it for being a port of daemon-side code.
@@ -2655,7 +2656,7 @@ def check_secret_key(config: "Config", probe: bool) -> CheckResult:
     value or any prefix of it: a ``CheckResult`` is rendered into the boot log
     and the admin dashboard.
     """
-    from . import secrets_store  # noqa: PLC0415
+    from istota.credentials import store as secrets_store  # noqa: PLC0415
 
     name = "security.secret_key"
     var = "ISTOTA_SECRET_KEY"
@@ -2772,7 +2773,7 @@ def _stored_secret_count(config: "Config") -> int:
     are real, and an empty scope would then read as an empty store and soften
     the verdict on the deployment that most needs it.
 
-    Through :func:`~istota.sqlite_util.connect_read_only` like every other
+    Through :func:`~istota.lib.sqlite_util.connect_read_only` like every other
     database-touching check here, for the half of
     :func:`_native_key_holders`'s reason that survived ISSUE-458: an ordinary
     read-write open would, against a missing file, create a zero-byte database
@@ -2902,7 +2903,8 @@ def _vault_users(config: "Config") -> dict[str, str]:
     False for that user, which is the same direction the gate it mirrors
     degrades in.
     """
-    from . import secrets_store, secrets_vault  # noqa: PLC0415
+    from istota.credentials import store as secrets_store  # noqa: PLC0415
+    from istota.credentials import vault as secrets_vault  # noqa: PLC0415
 
     users = getattr(config, "users", None) or {}
     found: dict[str, str] = {}
@@ -3008,7 +3010,9 @@ def check_credential_vault(config: "Config", probe: bool) -> list[CheckResult]:
             )
         ]
 
-    from . import secrets_store, secrets_vault, storage  # noqa: PLC0415
+    from istota import storage  # noqa: PLC0415
+    from istota.credentials import store as secrets_store  # noqa: PLC0415
+    from istota.credentials import vault as secrets_vault  # noqa: PLC0415
 
     return [
         _vault_library_result(prefix),
@@ -3115,7 +3119,7 @@ def check_vault_contents(config: "Config", probe: bool) -> CheckResult:
             "(see security.credential_vault.library)",
         )
 
-    from . import secrets_vault  # noqa: PLC0415
+    from istota.credentials import vault as secrets_vault  # noqa: PLC0415
 
     return _vault_contents_result(config, secrets_vault, name, users)
 
@@ -3677,7 +3681,7 @@ def _ptrace_scope(path: Path = _PTRACE_SCOPE) -> int | None:
 
 def check_vault_isolation(config: "Config", probe: bool) -> CheckResult:
     """Report existing vaults blocked by the multi-user isolation policy."""
-    from . import secrets_vault
+    from istota.credentials import vault as secrets_vault
 
     name = "security.vault_isolation"
     if not secrets_vault.vault_has_other_users(config) or not config.any_vault_configured():
@@ -3741,10 +3745,10 @@ def check_credential_broker(config: "Config", probe: bool) -> list[CheckResult]:
     """Read broker readiness without generating a CA or fetching secret values."""
     import sqlite3
     from cryptography.hazmat.primitives import serialization
-    from .credential_broker import ca
-    from .credential_broker.bindings import credential_groups, credential_name, get_entry_binding
-    from .credential_broker.grants import AUTO_GRANT_DECLINED, auto_grant_marker, get_grant
-    from . import peer_process
+    from istota.credentials.broker import ca
+    from istota.credentials.broker.bindings import credential_groups, credential_name, get_entry_binding
+    from istota.credentials.broker.grants import AUTO_GRANT_DECLINED, auto_grant_marker, get_grant
+    from istota.sandbox import peer_process
 
     prefix = "security.credential_broker"
     if not config.security.credential_broker.enabled:
@@ -3845,7 +3849,7 @@ def check_proxy_peer_check(config: "Config", probe: bool) -> CheckResult:
     name = "security.proxy_peer_check"
     if not getattr(config.security, "skill_proxy_enabled", True):
         return CheckResult(name, SKIP, "[security] skill_proxy_enabled = false")
-    from . import peer_process
+    from istota.sandbox import peer_process
 
     if not peer_process.supported():
         return CheckResult(
@@ -4147,7 +4151,7 @@ def _resolved_forge_bin(dev, name: str) -> str:
     # The leaf, not `skills.developer` — reaching the same function through the
     # skill package costs ~190ms of import on every `load_config`, which is the
     # exact expense `probe=False` exists to avoid.
-    from .forge_bin import resolve_real_bin
+    from istota.sandbox.forge_bin import resolve_real_bin
 
     configured = dev.gh_bin_path if name == "gh" else dev.glab_bin_path
     return resolve_real_bin(configured, name)
@@ -4437,7 +4441,7 @@ def check_forge_policy(config: "Config", probe: bool) -> CheckResult:
     if dev is None:
         return CheckResult("developer.forge_policy", SKIP, reason)
     try:
-        from .forge_cli import FORGE_GITHUB, FORGE_GITLAB, unmatched_permits
+        from istota.sandbox.forge_cli import FORGE_GITHUB, FORGE_GITLAB, unmatched_permits
 
         dead = unmatched_permits(
             [FORGE_GITHUB, FORGE_GITLAB],
@@ -4710,7 +4714,7 @@ def check_basemap(config: "Config", probe: bool) -> CheckResult:
     certainty. ``probe`` is accepted to satisfy the ``Check`` protocol and is
     unused.
     """
-    from .map_basemap import resolve_basemap
+    from istota.webui.map_basemap import resolve_basemap
 
     web = getattr(config, "web", None)
     if not web or not web.enabled:
@@ -4795,7 +4799,8 @@ def check_avatar_import(config: "Config", probe: bool) -> CheckResult:
     deployment where nobody has set a Nextcloud avatar. `probe` is accepted to
     satisfy the `Check` protocol and is unused.
     """
-    from . import avatars, db
+    from istota import db
+    from istota.webui import avatars
     from .nextcloud.avatars import CUSTOM_AVATAR_HEADER
 
     name = "web.avatar_import"
@@ -4952,7 +4957,9 @@ def _avatar_tick_is_stale(at: object, interval: int) -> str | None:
 
 def check_web_auth(config: "Config", probe: bool = True) -> list[CheckResult]:
     """Report login prerequisites without importing the web app or sending mail."""
-    from . import user_profiles, web_auth, web_session_secret
+    from istota import user_profiles
+    from istota.webui import auth as web_auth
+    from istota.webui import session_secret as web_session_secret
     from .config import normalize_auth_methods
 
     methods = config.web.auth
@@ -5050,7 +5057,7 @@ def check_web_static(config: "Config", probe: bool) -> CheckResult:
     # starlette and httpx (+56 MB RSS, permanently, in the scheduler process)
     # and runs a second full `load_config()` at import time. A diagnostic does
     # not get to cost that.
-    from .static_dir import resolve_static_dir
+    from istota.webui.static_dir import resolve_static_dir
 
     index = Path(resolve_static_dir()) / "index.html"
     if not index.is_file():
@@ -5131,8 +5138,8 @@ def check_web_build_current(config: "Config", probe: bool) -> CheckResult:
         return CheckResult("web.build_current", SKIP, "[web] enabled = false")
     # Function-local like every other package import in this module: nothing
     # here may land on the config-load path's import graph.
-    from .git_hardening import GIT_HARDENING
-    from .static_dir import resolve_static_dir
+    from istota.sandbox.git_hardening import GIT_HARDENING
+    from istota.webui.static_dir import resolve_static_dir
 
     version_file = Path(resolve_static_dir()) / "_app" / "version.json"
     try:
@@ -5708,7 +5715,7 @@ def _exec_transport_request(
     """
     import socket as socket_module  # noqa: PLC0415 - a leaf import on a probe path
 
-    from . import devbox_exec_protocol as proto  # noqa: PLC0415
+    from istota.devbox import exec_protocol as proto  # noqa: PLC0415
 
     sock = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
     try:
@@ -5968,7 +5975,7 @@ def _container_backend_result(config: "Config", backend: str, config_module) -> 
 
 def _container_probe_results(config: "Config", config_module, users: list[str]) -> list[CheckResult]:
     """Transport, identity and uv_cache, from one connection per user."""
-    from . import devbox_exec_protocol as proto  # noqa: PLC0415
+    from istota.devbox import exec_protocol as proto  # noqa: PLC0415
 
     timeout = min(
         float(
@@ -7359,7 +7366,7 @@ def _signaling_settings(config: "Config", timeout: float):
     from .transport.talk import signaling as sig
 
     async def _fetch():
-        from .talk import TalkClient
+        from istota.nextcloud.talk import TalkClient
 
         client = TalkClient(config, timeout=timeout)
         try:
@@ -8550,7 +8557,7 @@ def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
         # reason: the reason comes from the sidecar, a `CheckResult` is
         # rendered into the boot log and the admin Health pane, and a Baileys
         # error string is one of the places a number turns up.
-        from .notification_resolvers.task_alert import _slug
+        from istota.notifications.resolvers.task_alert import _slug
 
         fatal = _slug(status.get("fatal_reason"), fallback="unknown")
         # **The one condition with no other surface** (ISSUE-501). The sidecar
@@ -9733,7 +9740,7 @@ def config_secrets(config: "Config") -> list[str]:
     answer to "is this field a credential", rather than a second list here that
     drifts from the one the config page uses.
     """
-    from .admin_config_view import is_secret_field
+    from istota.webui.admin_config_view import is_secret_field
 
     found: list[str] = []
 

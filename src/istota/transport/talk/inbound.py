@@ -12,10 +12,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ... import confirmations, db, room_veto, speech_gate
+from istota import confirmations, db
+from istota.rooms import veto as room_veto
+from istota.rooms import speech_gate
 from ...async_runtime import get_talk_client
 from ...config import Config
-from ...talk import TalkClient, clean_message_content
+from istota.nextcloud.talk import TalkClient, clean_message_content
 from .._types import WEBMIRROR_REF_PREFIX, IncomingMessage, ParticipantRef
 from ..ingest import classify_ahead, ingest_message
 from ..participants import classify as classify_participant
@@ -1901,7 +1903,7 @@ async def _process_poll_results(
                 # approve a parked task. The task is created here, in this
                 # transaction, rather than by the ingest below.
                 if engaged and reply_to_talk_id is not None:
-                    from ... import message_relays
+                    from istota.relay import relays as message_relays
 
                     relay = message_relays.relay_for_room_reply(
                         conn, actor_user_id=actor_id, room_token=room_token,
@@ -2058,8 +2060,8 @@ async def handle_confirmation_reply(
         return False
 
     if res.task.whatsapp_confirmation_request_id:
-        from ... import message_relays
-        from ...whatsapp_requests import RequestError
+        from istota.relay import relays as message_relays
+        from istota.relay.requests import RequestError
         try:
             origin = message_relays.private_origin(conn, config, actor_user_id=actor_id,
                                                    surface="talk", conversation_token=room_token)

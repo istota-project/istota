@@ -92,7 +92,7 @@ class TestTheDismissalArmStaysOutOfTheCore:
         """Talk has no dismissal of its own: a hide is a fact about the web
         sidebar. A `visible_room`-based core would drop the pin here and send
         the alert to the briefing token or the auto-DM instead."""
-        from istota.notifications import resolve_conversation_token
+        from istota.notifications.delivery import resolve_conversation_token
 
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:

@@ -12,7 +12,7 @@ import pytest
 
 from istota import db
 from istota.config import Config
-from istota.speech_gate import GateDecision
+from istota.rooms.speech_gate import GateDecision
 from istota.transport import IncomingMessage, ingest_message
 from istota.transport.ingest import InboundResult, record_inbound
 

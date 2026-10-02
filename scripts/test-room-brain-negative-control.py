@@ -124,14 +124,14 @@ CONTROLS: list[tuple[str, str, str, str]] = [
     ),
     (
         "PATCH validates against the deployment brain",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
         "            if model not in _known_room_models(room_brain):",
         "            if model not in _known_room_models(_config.brain):",
     ),
     # ---- Stage 4, the web surface ----
     (
         "PATCH admin gate removed",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
         '        if not _config.is_admin(user["username"]):\n'
         "            return JSONResponse(",
         "        if False:\n"
@@ -139,13 +139,13 @@ CONTROLS: list[tuple[str, str, str, str]] = [
     ),
     (
         "PATCH allowlist check removed",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
         "            if brain not in room_selectable_kinds(_config.brain):",
         "            if False:",
     ),
     (
         "PATCH clears the pin before applying the model, not after",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
         "            if model is not _UNSET or effort is not _UNSET:",
         "            if brain is not _UNSET:\n"
         "                _reg = db.get_room(conn, updated.token)\n"
@@ -163,49 +163,49 @@ CONTROLS: list[tuple[str, str, str, str]] = [
     ),
     (
         "PATCH response drops the brain",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
         '        d["brain"] = reg.brain if reg else None',
         "        pass",
     ),
     (
         "the room listing drops the brain",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
         '            d["brain"] = r.brain\n',
         "",
     ),
     (
         "the stream snapshot drops the brain",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
         '                "brain": r.brain,\n',
         "",
     ),
     (
         "the promote response drops the brain",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
         '        d["brain"] = reg.brain\n',
         "",
     ),
     (
         "selectable_brains ignores the admin gate",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
         "        if not _config.is_admin(username):\n            return empty",
         "        if False:\n            return empty",
     ),
     (
         "the inherited brain ignores the lane rule",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
         '        inherited_kind = resolve_brain_kind("web", _config.brain).kind',
         "        inherited_kind = _config.brain.kind",
     ),
     (
         "brain_namespaces narrowed to the offered kinds",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
         "            for kind in sorted(KNOWN_BRAIN_KINDS)",
         "            for kind in sorted(room_selectable_kinds(_config.brain))",
     ),
     (
         "the crossing clear reports nothing about the effort",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
         '                        cleared = ["model"] + (["effort"] if reg.effort else [])',
         '                        cleared = ["model"]',
     ),
@@ -216,19 +216,19 @@ CONTROLS: list[tuple[str, str, str, str]] = [
         # cannot fail when what it has actually found is two mechanisms
         # covering one case.
         "selectable_brains offers a kind that cannot be built",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
         "            for kind in sorted(room_selectable_kinds(_config.brain))",
         "            for kind in sorted(_config.brain.room_selectable)",
     ),
     (
         "selectable_brains has no per-kind guard",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
         "            except Exception:  # noqa: BLE001 — one bad kind is not the whole list",
         "            except ZeroDivisionError:",
     ),
     (
         "/chat/commands ignores room_id",
-        "src/istota/web_app.py",
+        "src/istota/webui/app.py",
         "    if room_id is not None:\n"
         '        room = await asyncio.to_thread(_chat_owned_room, user["username"], room_id)',
         "    if False:\n"

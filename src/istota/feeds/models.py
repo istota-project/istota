@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from istota.retry_after import parse_retry_after as _parse_retry_after
-from istota.retry_after import retry_after_from_headers as _retry_after_from_headers
+from istota.lib.retry_after import parse_retry_after as _parse_retry_after
+from istota.lib.retry_after import retry_after_from_headers as _retry_after_from_headers
 
 
 # URL-scheme prefixes that bypass the RSS poller and route to native API
@@ -192,7 +192,7 @@ def poll_host(url: str, source_type: str = "") -> str:
 def parse_retry_after(raw: object, *, now: "datetime | None" = None) -> int | None:
     """``Retry-After`` in whole seconds, or ``None`` when the header is unusable.
 
-    A thin adapter over :func:`istota.retry_after.parse_retry_after`, which is
+    A thin adapter over :func:`istota.lib.retry_after.parse_retry_after`, which is
     the one implementation and holds every judgement about malformed input.
     This exists only to speak the feeds module's own vocabulary: a ``datetime``
     base rather than a POSIX timestamp, and whole seconds rather than a float,

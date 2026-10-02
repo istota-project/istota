@@ -179,7 +179,7 @@ class TestTheDefaultRoomIsOneTheUserIsAloneIn:
 
     def test_a_room_someone_else_reads_is_never_the_default(self, tmp_path):
         from istota.config import UserConfig
-        from istota.notifications import send_notification
+        from istota.notifications.delivery import send_notification
 
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
@@ -301,7 +301,7 @@ class TestTheDefaultRoomIsOneTheUserIsAloneIn:
         # alert has to go somewhere, and the user's own room — visible again — is
         # a better answer than a duplicate `general` or a dropped alert.
         from istota.config import UserConfig
-        from istota.notifications import send_notification
+        from istota.notifications.delivery import send_notification
 
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:

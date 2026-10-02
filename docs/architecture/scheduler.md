@@ -87,7 +87,7 @@ The line goes to its own logger (`istota.scheduler.pressure`), so a multi-day se
 
 It costs six small file reads plus a `statvfs` and a `stat` per tmpfs mount, so it stays on the loop thread rather than paying for a thread every interval. `host_pressure_enabled = false` turns it off; so does an interval of 0. On a platform with no PSI interface (macOS, a kernel without `CONFIG_PSI`) it says so once and then no-ops.
 
-`host_pressure.py` is a stdlib-only leaf. Every reader takes its `/proc` root as a parameter and none of them raise. `python -m istota.host_pressure --snapshot` produces the threshold snapshot that attributes shmem to mounts, containers and `memfd` fd holders.
+`maintenance/host_pressure.py` is a stdlib-only leaf. Every reader takes its `/proc` root as a parameter and none of them raise. `python -m istota.maintenance.host_pressure --snapshot` produces the threshold snapshot that attributes shmem to mounts, containers and `memfd` fd holders.
 
 ### Admission gate
 
@@ -101,7 +101,7 @@ A shut gate logs `dispatch_admission_closed` once on the first closed tick and t
 
 ### Per-task cgroups
 
-`task_cgroup.py` puts each task's subprocesses in `<unit cgroup>/task-<id>/` with `memory.max`, `pids.max` and `cpu.max` set from `task_memory_max_mb` (2048), `task_pids_max` (512) and `task_cpu_max_percent` (200, a percentage of one core). A tree that overruns is OOM-killed inside its own group: one failed task instead of a host-wide event. `MemoryHigh=` on the unit bounds the daemon as a whole and does nothing about this case, and bwrap gives a task filesystem and network isolation with no resource isolation at all.
+`sandbox/cgroup.py` puts each task's subprocesses in `<unit cgroup>/task-<id>/` with `memory.max`, `pids.max` and `cpu.max` set from `task_memory_max_mb` (2048), `task_pids_max` (512) and `task_cpu_max_percent` (200, a percentage of one core). A tree that overruns is OOM-killed inside its own group: one failed task instead of a host-wide event. `MemoryHigh=` on the unit bounds the daemon as a whole and does nothing about this case, and bwrap gives a task filesystem and network isolation with no resource isolation at all.
 
 The directory is a **sibling** of the daemon's own leaf, not a child of it. cgroup v2 forbids a non-root cgroup from both holding processes and enabling controllers for its children, so a `task-<id>/` made inside the daemon's cgroup would be created successfully and then contain no `memory.max` — containment that never engages and never reports. `Delegate=memory pids cpu` plus `DelegateSubgroup=supervisor` on the scheduler unit is what makes the sibling shape available; `resolve_root()` walks up from `/proc/self/cgroup` to the `.service` / `.scope` component to find it.
 
@@ -188,13 +188,13 @@ A related invariant: `worker_pid` is cleared on *every* transition out of `runni
 
 One persistent, typed event stream per task feeds every output surface. `process_one_task` builds an `EventWriter` (`events.py`) per brain-path task and subscribes the in-process consumers (`TalkEventSubscriber`, `LogChannelSubscriber`, `PushNotificationSubscriber`) before passing the writer to `execute_task(event_writer=…)`. The executor adapts the brain's `StreamEvent` stream into `TaskEvent`s, persisted to the `task_events` table (WAL, shared scheduler ⇄ web). When the task reaches a non-retry terminal state the scheduler emits the terminal event (`confirmation` / `result` / `cancelled` / `error` + `done`) and calls `writer.finish()`.
 
-**Retry continuity:** on a retry-eligible failure the event log is kept (not wiped). The retry branch emits a `progress_text` "⏳ Attempt failed — retrying in N min…" notice, and the next attempt's `EventWriter` resumes `seq` from `db.get_max_task_event_seq` so it stays monotonic across attempts and a watching web client survives the retry instead of hanging on "Working…". The SSE / snapshot endpoints synthesize a terminal frame from the task row (`web_app._synthetic_terminal_events`) for any terminal-without-`done` gap (e.g. a crash that skipped `finish()`).
+**Retry continuity:** on a retry-eligible failure the event log is kept (not wiped). The retry branch emits a `progress_text` "⏳ Attempt failed — retrying in N min…" notice, and the next attempt's `EventWriter` resumes `seq` from `db.get_max_task_event_seq` so it stays monotonic across attempts and a watching web client survives the retry instead of hanging on "Working…". The SSE / snapshot endpoints synthesize a terminal frame from the task row (`webui.app._synthetic_terminal_events`) for any terminal-without-`done` gap (e.g. a crash that skipped `finish()`).
 
 Config under `[scheduler]`: `progress_show_tool_use`, `progress_show_text`, `event_log_enabled`, `stream_text_gate_chars`, `push_notification_threshold_seconds`, `push_notification_sources`.
 
 ## Delivery routing
 
-Where a task's result goes is resolved by `transport.routing.resolve_delivery_plan(config, task, registry)`, which turns a task into an ordered, deduplicated, channel-resolved list of destinations. Precedence: explicit `output_target` > reply-to-origin (interactive source types) > source-type default > drop. `process_one_task` builds the plan once and fans out to every push destination; `stream` destinations (REPL, web) contribute no push work — the `task_events` log is the delivery. Separately, a per-user **purpose-keyed routing table** (`UserConfig.routing`, purposes `reply`/`alert`/`log`/`briefing`/`notification`) routes *notifications* via `notifications.send_notification(..., purpose=…)`. See the [Transport abstraction](overview.md) and `.claude/rules/transport.md`.
+Where a task's result goes is resolved by `transport.routing.resolve_delivery_plan(config, task, registry)`, which turns a task into an ordered, deduplicated, channel-resolved list of destinations. Precedence: explicit `output_target` > reply-to-origin (interactive source types) > source-type default > drop. `process_one_task` builds the plan once and fans out to every push destination; `stream` destinations (REPL, web) contribute no push work — the `task_events` log is the delivery. Separately, a per-user **purpose-keyed routing table** (`UserConfig.routing`, purposes `reply`/`alert`/`log`/`briefing`/`notification`) routes *notifications* via `notifications.delivery.send_notification(..., purpose=…)`. See the [Transport abstraction](overview.md) and `.claude/rules/transport.md`.
 
 ## Deferred DB operations
 

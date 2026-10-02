@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import json
 import re
-from istota.untrusted import MARKER_REDACTION, has_marker, unframe_untrusted
+from istota.lib.untrusted import MARKER_REDACTION, has_marker, unframe_untrusted
 
 from . import media
 from .client import LABEL, WordPressError

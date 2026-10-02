@@ -4,7 +4,7 @@ Provides a CLI for extracting text from images:
     python -m istota.skills.transcribe ocr /path/to/image.png
     python -m istota.skills.transcribe ocr /path/to/image.png --preprocess
 
-The OCR itself lives in `istota.ocr_leaf` and is re-exported here. The daemon's
+The OCR itself lives in `istota.lib.ocr_leaf` and is re-exported here. The daemon's
 automatic attachment OCR spawns that leaf directly, because importing this
 package runs `istota/skills/__init__.py` and star-imports every skill —
 measured at 0.22s per spawn, on a pass that runs once per image. Keeping the
@@ -14,7 +14,7 @@ child drifting apart; see the leaf's own docstring for the rule it keeps.
 
 import argparse
 
-from istota.ocr_leaf import ocr_image, preprocess_image, text_from_data
+from istota.lib.ocr_leaf import ocr_image, preprocess_image, text_from_data
 
 from istota.skills._cli import parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import READ, host_path
@@ -31,7 +31,7 @@ __all__ = [
 def cmd_ocr(args) -> dict:
     """Run Tesseract OCR on an image file.
 
-    A thin adapter over `istota.ocr_leaf.ocr_image`: this half owns the argparse
+    A thin adapter over `istota.lib.ocr_leaf.ocr_image`: this half owns the argparse
     namespace the skill CLI produces, the leaf owns the OCR.
     """
     return ocr_image(args.image_path, preprocess=args.preprocess)

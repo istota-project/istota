@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-from istota.network_proxy import (
+from istota.sandbox.network_proxy import (
     BRIDGE_PORT,
     NetworkProxy,
     write_bridge_script,
@@ -228,7 +228,7 @@ class TestBridgeScript:
 
 class TestNetworkProxyPeers:
     def test_unregistered_peer_never_opens_upstream(self, proxy_sock):
-        with patch("istota.network_proxy.socket.create_connection") as upstream:
+        with patch("istota.sandbox.network_proxy.socket.create_connection") as upstream:
             with NetworkProxy(proxy_sock, {"example.com:443"}):
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                     client.settimeout(5)
@@ -264,7 +264,7 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 assert "502 Bad Gateway" in output
 
     def test_missing_peer_identity_is_refused(self, proxy_sock, monkeypatch):
-        monkeypatch.setattr("istota.peer_process.peer_pid", lambda conn: None)
+        monkeypatch.setattr("istota.sandbox.peer_process.peer_pid", lambda conn: None)
         with NetworkProxy(proxy_sock, {"example.com:443"}, trusted_roots={os.getpid()}):
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 client.settimeout(5)
@@ -272,7 +272,7 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 assert b"403 Forbidden" in client.recv(4096)
 
     def test_registration_after_connect_is_waited_for(self, proxy_sock, monkeypatch):
-        from istota import peer_process
+        from istota.sandbox import peer_process
 
         connected = threading.Event()
         real_peer_pid = peer_process.peer_pid

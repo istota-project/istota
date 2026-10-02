@@ -10,9 +10,9 @@ from zoneinfo import ZoneInfo
 
 from .config import Config
 from .db import ConversationMessage, TalkMessage
-from .llm_json import find_fenced_block
-from .untrusted import frame_untrusted
-from .talk import clean_message_content
+from istota.lib.llm_json import find_fenced_block
+from istota.lib.untrusted import frame_untrusted
+from istota.nextcloud.talk import clean_message_content
 
 # What a triage inference reports it spent. The caller supplies the sink because
 # it is the caller that knows which task, user and source_type the row belongs

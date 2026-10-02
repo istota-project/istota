@@ -12,12 +12,12 @@ from pathlib import Path
 from . import db
 from . import user_profiles
 from .build_info import version_label
-from .user_scope import is_scopable_user_id
+from istota.sandbox.user_scope import is_scopable_user_id
 from .config import load_config
 from .logging_setup import setup_logging
 from .executor import execute_task
 from .scheduler import process_one_task, check_briefings, _task_heartbeat
-from .email_support import get_email_config
+from istota.mail.support import get_email_config
 from .transport.email import poll_emails
 from .skills.email import list_emails, send_email
 from .storage import (
@@ -39,7 +39,7 @@ from .tasks_file_poller import (
     discover_tasks_files,
     poll_user_tasks_file,
 )
-from .usage_render import (
+from istota.usage.render import (
     COST_PLACEHOLDER,
     fmt_context,
     fmt_int,
@@ -73,7 +73,7 @@ def cmd_init(args):
     db.init_db(config.db_path)
     print(f"Database initialized at {config.db_path}")
     if getattr(args, "relocate_rooms", False):
-        from .room_relocate import migrate_database, reconcile_mount, record_outcome
+        from istota.maintenance.room_relocate import migrate_database, reconcile_mount, record_outcome
         problems: list[str] = []
         result = migrate_database(config.db_path, problems=problems)
         if result == 0:
@@ -892,8 +892,8 @@ def cmd_secret(args):
     Everywhere else ``ensure`` prints the decision (created / updated / noop)
     and ``list`` prints (service, key, last_updated) tuples only.
     """
-    from . import secrets_store
-    from .secret_schema import all_known_services, known_service_keys
+    from istota.credentials import store as secrets_store
+    from istota.credentials.schema import all_known_services, known_service_keys
 
     config = load_config(Path(args.config) if args.config else None)
     db_path = config.db_path
@@ -951,7 +951,7 @@ def cmd_secret(args):
         sys.exit(1)
 
     if args.action == "ensure":
-        from . import secrets_vault
+        from istota.credentials import vault as secrets_vault
 
         if args.service == "vault" and args.key == "passphrase":
             refusal = secrets_vault.vault_isolation_refusal(config, args.user)
@@ -1008,7 +1008,8 @@ def _secret_ensure_value(config, args) -> str:
     one command the documentation tells every operator to run, and the failure
     would look exactly like the floor working.
     """
-    from . import secrets_store, secrets_vault
+    from istota.credentials import store as secrets_store
+    from istota.credentials import vault as secrets_vault
 
     is_vault_passphrase = (
         args.service == secrets_vault.VAULT_PASSPHRASE_SERVICE
@@ -1087,7 +1088,8 @@ def _secret_ensure_value(config, args) -> str:
 
 def _cmd_secret_vault_new(config, args) -> None:
     """Create one vault entry from an operator shell without printing values."""
-    from . import secrets_vault, storage
+    from istota import storage
+    from istota.credentials import vault as secrets_vault
 
     if not args.user or args.user not in config.users or not args.slug:
         print("Error: vault-new needs a configured --user and --slug", file=sys.stderr)
@@ -1152,7 +1154,7 @@ def _cmd_secret_vault(config, args) -> None:
     prints a credential value: counts, service names, key names and group names
     only, which is the same rule the sync's own log lines follow.
     """
-    from . import secrets_vault
+    from istota.credentials import vault as secrets_vault
 
     if args.user and args.user not in config.users:
         # Otherwise a typo'd id reaches `config.users.get(...)` -> None and is
@@ -1195,7 +1197,7 @@ def _cmd_secret_vault(config, args) -> None:
 
 def _print_vault_sync(result) -> None:
     """One user's sync, as lines. Counts and names, never a value."""
-    from . import secrets_vault
+    from istota.credentials import vault as secrets_vault
 
     if result.outcome == secrets_vault.OUTCOME_NOT_CONFIGURED:
         print(f"{result.user_id}: no vault configured")
@@ -1268,7 +1270,7 @@ def _print_vault_sync(result) -> None:
 
 def _print_vault_status(report) -> None:
     """One user's vault, as lines. Names and counts, never a value."""
-    from . import secrets_vault
+    from istota.credentials import vault as secrets_vault
 
     if not report.configured:
         print(f"{report.user_id}: no vault configured")
@@ -1384,14 +1386,14 @@ def cmd_email(args):
 
 
 def _auth_policy(config):
-    from .web_auth import policy_from_config
+    from istota.webui.auth import policy_from_config
 
     return policy_from_config(config)
 
 
 def _auth_read_password(args, policy, *, email, user_id):
     import getpass
-    from .web_auth import password_policy_error
+    from istota.webui.auth import password_policy_error
 
     if sys.stdin.isatty():
         password = getpass.getpass("New password: ")
@@ -1409,7 +1411,7 @@ def _auth_read_password(args, policy, *, email, user_id):
 
 
 def _auth_link_origin(config, print_link):
-    from .web_origin import external_origin
+    from istota.webui.origin import external_origin
 
     hostname, scheme = external_origin(config)
     if not print_link and not config.email.enabled:
@@ -1418,7 +1420,8 @@ def _auth_link_origin(config, print_link):
 
 
 def _auth_issue_link(config, identity, purpose, print_link):
-    from . import web_auth, web_auth_mail
+    from istota.webui import auth as web_auth
+    from istota.webui import auth_mail as web_auth_mail
 
     origin = _auth_link_origin(config, print_link)
     options = {
@@ -1441,7 +1444,7 @@ def _auth_issue_link(config, identity, purpose, print_link):
 
 def cmd_auth(args):
     """Manage web identities separately from profiles and routing addresses."""
-    from . import web_auth
+    from istota.webui import auth as web_auth
 
     config = load_config(Path(args.config) if args.config else None)
     db_path = config.db_path
@@ -1809,7 +1812,7 @@ def cmd_user_ensure(args):
                     sys.exit(1)
         updates["default_room"] = room
     if args.route is not None:
-        from .notifications import PURPOSES
+        from istota.notifications.delivery import PURPOSES
         from .transport import parse_output_target
         routing: dict[str, str] = {}
         for entry in args.route:
@@ -1854,7 +1857,7 @@ def cmd_user_ensure(args):
         updates["email_reply_routing"] = args.email_reply_routing
     outbound_approval = getattr(args, "outbound_approval", None)
     if outbound_approval is not None:
-        from .outbound_policy import VALID_POLICIES
+        from istota.mail.outbound_policy import VALID_POLICIES
 
         # "" is a real value: unset, meaning "follow the operator's
         # [email] outbound_approval_floor". It is not the same as "off", which
@@ -2536,7 +2539,7 @@ def _whatsapp_attach_refusal(config) -> str | None:
             f"their own working directory. Set {culprit} to an absolute path."
         )
     try:
-        from . import sandbox_plan
+        from istota.sandbox import plan as sandbox_plan
 
         bound = sandbox_plan.sandbox_bound_reason(config, relay)
     except Exception:  # noqa: BLE001 — same reason
@@ -3817,7 +3820,7 @@ def cmd_nextcloud_provision_rooms(args):
     Docker install (ISSUE-115). Idempotent, and prints a `STATE:` line so the
     Ansible role can report `changed` off it the way `user ensure` does.
     """
-    from istota import provision_rooms as provision_rooms_mod
+    from istota.rooms import provision as provision_rooms_mod
 
     config = load_config(Path(args.config) if args.config else None)
     nc = config.nextcloud
@@ -4026,7 +4029,7 @@ def _bot_icon_max_bytes(config) -> int:
 
 def cmd_bot_icon_set(args):
     """Store an image file as the deployment's bot icon."""
-    from istota import avatars
+    from istota.webui import avatars
 
     config = load_config(Path(args.config) if args.config else None)
     path = Path(args.path)
@@ -4063,7 +4066,7 @@ def cmd_bot_icon_set(args):
 
 def cmd_bot_icon_clear(args):
     """Remove the bot icon. The web UI reverts to the initial chip."""
-    from istota import avatars
+    from istota.webui import avatars
 
     config = load_config(Path(args.config) if args.config else None)
     try:
@@ -4076,7 +4079,7 @@ def cmd_bot_icon_clear(args):
 
 def cmd_bot_icon_show(args):
     """Report what is stored — never the bytes."""
-    from istota import avatars
+    from istota.webui import avatars
 
     config = load_config(Path(args.config) if args.config else None)
     try:

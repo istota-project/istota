@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterator
 
-from istota import sqlite_util
+from istota.lib import sqlite_util
 from istota.location.models import (
     Cluster,
     LocationPing,

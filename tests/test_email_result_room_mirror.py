@@ -30,7 +30,7 @@ def conn(config):
 
 class TestMirrorWrite:
     def test_writes_a_system_row_carrying_the_talk_id(self, config, conn):
-        from istota.notifications import mirror_talk_to_room
+        from istota.notifications.delivery import mirror_talk_to_room
 
         db.register_room(conn, "dmtoken1", "alice", origin="talk")
         conn.commit()
@@ -43,7 +43,7 @@ class TestMirrorWrite:
         assert msgs[0].external_ids == {"talk": "414"}
 
     def test_unregistered_room_is_a_noop(self, config):
-        from istota.notifications import mirror_talk_to_room
+        from istota.notifications.delivery import mirror_talk_to_room
 
         mirror_talk_to_room(config, "ghosttoken", "x", talk_message_id=1)
         with db.get_db(config.db_path) as c:

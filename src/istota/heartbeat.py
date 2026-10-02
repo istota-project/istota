@@ -14,8 +14,8 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from . import db
-from .shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
-from .toml_fence import find_toml_block
+from istota.sandbox.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
+from istota.lib.toml_fence import find_toml_block
 
 if TYPE_CHECKING:
     from .config import Config
@@ -215,7 +215,7 @@ def _watched_stat(config: "Config", user_id: str, file_path: str) -> os.stat_res
     as itself rather than followed. None covers both "refused" and "absent",
     and the message says not found either way, so a refusal discloses nothing.
     """
-    from .skill_host_paths import owner_path_parts  # noqa: PLC0415
+    from istota.sandbox.host_paths import owner_path_parts  # noqa: PLC0415
     from .skills._loader import open_overlay_dir  # noqa: PLC0415 - import cycle
 
     parts = owner_path_parts(file_path, user_id)
@@ -1012,7 +1012,7 @@ def effective_alert_surface(config: "Config", user_id: str, check: HeartbeatChec
     """
     if check.channel:
         return check.channel
-    from .notifications import surface_for_purpose
+    from istota.notifications.delivery import surface_for_purpose
     return surface_for_purpose(config, user_id, "alert")
 
 
@@ -1028,7 +1028,7 @@ def send_heartbeat_alert(
 
     Returns True if alert was sent successfully.
     """
-    from .notifications import send_notification
+    from istota.notifications.delivery import send_notification
 
     message = f"**Heartbeat Alert: {check.name}**\n\n{result.message}"
 
@@ -1122,7 +1122,7 @@ def check_heartbeats(conn, config: "Config") -> list[str]:
                     # "delivery failed". Bumping consecutive_errors for an
                     # unconfigured channel turns a config gap into a fake
                     # alert-pipeline outage; we log instead and move on.
-                    from .notifications import is_channel_configured
+                    from istota.notifications.delivery import is_channel_configured
 
                     alert_surface = effective_alert_surface(config, user_id, check)
                     if not is_channel_configured(

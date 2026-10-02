@@ -91,7 +91,7 @@ web = [
     "authlib>=1.3.0",
     "itsdangerous>=2.1.0",
     "python-multipart>=0.0.9",
-    # Named because `web_app.py` imports it directly rather than through
+    # Named because `webui/app.py` imports it directly rather than through
     # fastapi's re-exports — SessionMiddleware at module scope, and the
     # multipart parser internals a couple of handlers reach into. It arrives as
     # a fastapi transitive either way, so this changes no install; it is here so
@@ -271,11 +271,11 @@ select = ["E4", "E7", "E9", "F"]
 
 [tool.ruff.lint.per-file-ignores]
 # Both files carry module-level setup before their local imports (constants and
-# a helper in scheduler.py, route-adjacent import clusters deep in web_app.py).
+# a helper in scheduler.py, route-adjacent import clusters deep in webui/app.py).
 # Hoisting the imports in a 5,000- and a 6,600-line module is a refactor with
 # real circular-import risk, not a lint fix.
 "src/istota/scheduler.py" = ["E402"]
-"src/istota/web_app.py" = ["E402"]
+"src/istota/webui/app.py" = ["E402"]
 # Tests legitimately import after a sys.path tweak or a pytest.importorskip.
 "tests/**" = ["E402"]
 

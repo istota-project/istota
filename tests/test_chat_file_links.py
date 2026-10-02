@@ -13,7 +13,7 @@ import pytest
 from unittest.mock import patch
 
 from istota import db
-from istota.chat_files import ChatFileError, check_chat_file_links, resolve_chat_file
+from istota.webui.chat_files import ChatFileError, check_chat_file_links, resolve_chat_file
 from istota.config import (
     Config,
     EmailConfig,

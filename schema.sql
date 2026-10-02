@@ -1792,7 +1792,7 @@ CREATE INDEX IF NOT EXISTS idx_task_usage_models_model  ON task_usage_models(mod
 
 -- The notification inbox: what is currently waiting on a user.
 --
--- Distinct from `src/istota/notifications.py`, which is *delivery*. This table
+-- Distinct from `src/istota/notifications/delivery.py`, which is *delivery*. This table
 -- is the durable open set behind the bell; raising a notification writes a row
 -- here and, separately, fans out through the delivery layer. A user with no
 -- alerts channel loses nothing, because the bell is always there.

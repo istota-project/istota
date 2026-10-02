@@ -26,7 +26,8 @@ import httpx
 import pytest
 from PIL import Image
 
-from istota import avatars, db, scheduler
+from istota import db, scheduler
+from istota.webui import avatars
 from istota.config import Config, NextcloudConfig, SchedulerConfig, WebConfig
 from istota.nextcloud import avatars as nc_avatars
 from istota.nextcloud._http import OcsError
@@ -878,7 +879,7 @@ class TestTheRecordedState:
             assert avatars.import_probe_state(conn) == {"alice": ""}
 
     def test_the_state_lives_in_a_namespace_the_model_may_not_touch(self):
-        from istota.kv_namespaces import is_reserved_namespace
+        from istota.sandbox.kv_namespaces import is_reserved_namespace
 
         assert is_reserved_namespace(avatars.IMPORT_STATE_NAMESPACE)
 

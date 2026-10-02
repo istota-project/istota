@@ -570,7 +570,7 @@ class NextcloudService:
         be staging a state the product does not produce.
 
         Group (2) rather than public (3) for the reason `entrypoint.sh` and
-        `provision_rooms.py` both give: a public room is joinable by anyone
+        `rooms/provision.py` both give: a public room is joinable by anyone
         holding its token.
 
         The token is recorded, and that record is `reset`'s entire scope.

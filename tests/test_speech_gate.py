@@ -9,9 +9,10 @@ import sqlite3
 
 import pytest
 
-from istota import db, speech_gate
+from istota import db
+from istota.rooms import speech_gate
 from istota.config import Config, SchedulerConfig, SpeechGateConfig, load_config
-from istota.speech_gate import (
+from istota.rooms.speech_gate import (
     RUNG_ADDRESSED,
     RUNG_AGENT_AUTHOR,
     RUNG_CLASSIFIER,

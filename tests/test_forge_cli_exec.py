@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from istota.forge_cli import (
+from istota.sandbox.forge_cli import (
     ACTION_FORGE_TOKEN,
     EXIT_CREDENTIAL,
     EXIT_DENIED,
@@ -33,7 +33,7 @@ from istota.forge_cli import (
 
 SENTINEL = "ghp_sentineltokenvalue0000000000000000"
 
-_MODULE = Path(__file__).resolve().parent.parent / "src/istota/forge_cli.py"
+_MODULE = Path(__file__).resolve().parent.parent / "src/istota/sandbox/forge_cli.py"
 
 # Prints what the wrapper handed it. Anything not echoed here is, as far as the
 # assertions are concerned, not in the child's environment.
@@ -151,7 +151,7 @@ def _write_policy(bin_dir, real_bin, cfg, *, forge="github", **overrides):
     model chooses. Tests that want a different setting change the file, the
     same way the deployment does.
     """
-    from istota.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
+    from istota.sandbox.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
 
     policy = {}
     for name in (FORGE_GITHUB, FORGE_GITLAB):
@@ -540,7 +540,7 @@ class TestDevboxBackend:
         """The seam between the two copies of the action name. forge_cli.py
         cannot import istota, so it carries its own ``ACTION_FORGE_TOKEN``;
         this is where a rename on one side would go unnoticed."""
-        from istota.devbox_proxy_protocol import ALL_ACTIONS
+        from istota.devbox.proxy_protocol import ALL_ACTIONS
 
         assert ACTION_FORGE_TOKEN in ALL_ACTIONS
         wrapper, real, cfg = deployed

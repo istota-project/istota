@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from istota import db, message_relays as relays, whatsapp_requests as requests
+from istota import db
+from istota.relay import relays
+from istota.relay import requests
 from . import test_relay_questions, test_whatsapp_request_delivery
 from .test_relay_questions import hold, approve
 from .test_relay_returns import origin_setup
@@ -126,14 +128,14 @@ def test_cancel_during_completion_finishes_task_and_events(setup):
 
 
 def test_talk_bot_actor_can_differ_from_login_without_allowing_a_third_user(setup, monkeypatch):
-    from istota.whatsapp_requests import RequestError
+    from istota.relay.requests import RequestError
     config = setup[0]
     origin_setup(setup, 'talk', monkeypatch)
     config.nextcloud.username = 'bot@example.com'
     config.talk.bot_username = 'bot'
     origin = {'talk_ref': 'private-talk'}
     asyncio.run(relays.verify_private_audience(config, actor_user_id='alice', origin=origin))
-    monkeypatch.setattr('istota.talk.TalkClient.get_participants', AsyncMock(return_value=[
+    monkeypatch.setattr('istota.nextcloud.talk.TalkClient.get_participants', AsyncMock(return_value=[
         {'actorType': 'users', 'actorId': name} for name in ('alice', 'bot', 'carol')]))
     with pytest.raises(RequestError, match='unsupported_origin'):
         asyncio.run(relays.verify_private_audience(config, actor_user_id='alice', origin=origin))

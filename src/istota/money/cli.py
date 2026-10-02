@@ -182,7 +182,7 @@ def _require_data_dir(ctx: Context) -> Path:
 def _get_db_conn(ctx: Context):
     if not ctx.db_path:
         return None
-    from istota import sqlite_util
+    from istota.lib import sqlite_util
     from istota.money.db import init_db
     ctx.db_path.parent.mkdir(parents=True, exist_ok=True)
     init_db(ctx.db_path)

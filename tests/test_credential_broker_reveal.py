@@ -9,11 +9,12 @@ import threading
 
 import pytest
 
-from istota import db, secrets_store
+from istota import db
+from istota.credentials import store as secrets_store
 from istota.config import Config
-from istota.credential_broker import grants
-from istota.credential_broker.bindings import parse_binding
-from istota.skill_proxy import SkillProxy
+from istota.credentials.broker import grants
+from istota.credentials.broker.bindings import parse_binding
+from istota.sandbox.skill_proxy import SkillProxy
 from tests import test_skill_credential_fd as _credential_fd
 from tests import test_vault_credential_fetch as _vault_fetch
 from tests.test_skill_credential_fd import start_proxy
@@ -75,7 +76,7 @@ def test_live_reveal_revocation_and_missing_metadata(config, sock_path):
 @pytest.mark.parametrize("mode", ["read", "inject", "skill"])
 def test_audit_default_is_value_free_and_records_all_public_modes(config, sock_path, caplog, mode):
     config.security.credential_broker.enforce_reveal = False
-    with caplog.at_level(logging.INFO, logger="istota.skill_proxy"):
+    with caplog.at_level(logging.INFO, logger="istota.sandbox.skill_proxy"):
         with proxy(sock_path, config=config, user_id="alice"):
             reply = request(sock_path, {"type": "vault_credential", "name": "github_pat", "mode": mode})
     assert reply["value"] == VAULT["github_pat"]

@@ -25,7 +25,7 @@ import pytest
 
 from istota import db
 from istota.config import Config, EmailConfig, UserConfig
-from istota.email_support import parse_email_prompt
+from istota.mail.support import parse_email_prompt
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email.inbound import poll_emails
 

@@ -853,7 +853,7 @@ def _flatten(tasks: list) -> list:
 
 
 class TestTheReposRelocationTask:
-    """The role invokes `istota.repos_relocate`, and how it reads the answer.
+    """The role invokes `istota.maintenance.repos_relocate`, and how it reads the answer.
 
     The migrator is where the judgement lives — which admin owns a clone, and
     whether it is safe to move one at all — so the role's whole job is to run it
@@ -945,7 +945,7 @@ class TestTheReposRelocationTask:
         # and the migrator are different languages, and a renamed reason would
         # otherwise leave the play matching a token nothing prints — which
         # fails open, back to a hard failure on every busy host.
-        from istota.repos_relocate import REFUSE_LIVE_TASKS
+        from istota.maintenance.repos_relocate import REFUSE_LIVE_TASKS
 
         assert f"refusal: {REFUSE_LIVE_TASKS}" in condition, (
             "the rule keys on something other than the migrator's own reason "
@@ -1057,7 +1057,7 @@ class TestTheReposRelocationTask:
         the config, restart" — precisely the run that puts the per-user binds on
         a host whose clones are still at the old depth. A migrator skipped there
         lands the split and skips the migration on the path most likely to carry
-        it. `istota.db_relocate` and the location migrator are ungated the same
+        it. `istota.maintenance.db_relocate` and the location migrator are ungated the same
         way.
         """
         assert not any(

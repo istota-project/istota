@@ -23,7 +23,9 @@ from pathlib import Path
 
 import pytest
 
-from istota import doctor, secrets_store, subscription_usage
+from istota import doctor
+from istota.usage import subscription as subscription_usage
+from istota.credentials import store as secrets_store
 from istota import executor as doctor_executor
 from istota.doctor import (
     CHECKS,
@@ -358,11 +360,11 @@ class TestConfigLoadPathStaysCheap:
     @pytest.mark.parametrize(
         "module,absent",
         [
-            ("istota.forge_bin", ("istota.skills", "istota.config")),
-            ("istota.static_dir", ("fastapi", "istota.web_app", "istota.config")),
+            ("istota.sandbox.forge_bin", ("istota.skills", "istota.config")),
+            ("istota.webui.static_dir", ("fastapi", "istota.webui.app", "istota.config")),
             # `doctor` imports `subscription_usage` lazily, so it stays cheap
             # for the config-load path that imports `doctor` itself.
-            ("istota.doctor", ("istota.subscription_usage",)),
+            ("istota.doctor", ("istota.usage.subscription",)),
         ],
         ids=["forge_bin", "static_dir", "doctor"],
     )
@@ -502,19 +504,20 @@ class TestConfigLoadPathStaysCheap:
         build.mkdir()
         (build / "index.html").write_text("<!doctype html>")
         monkeypatch.setenv("ISTOTA_WEB_STATIC_DIR", str(build))
-        monkeypatch.delitem(sys.modules, "istota.web_app", raising=False)
+        monkeypatch.delitem(sys.modules, "istota.webui.app", raising=False)
         config = make_config(web=WebConfig(enabled=True))
         assert run_checks(config, only=("web.static",))[0].status == OK
-        assert "istota.web_app" not in sys.modules
+        assert "istota.webui.app" not in sys.modules
 
     def test_web_app_and_doctor_resolve_the_same_static_dir(self):
         """One implementation, two callers — the point of the leaf."""
-        from istota import static_dir, web_app
+        from istota.webui import static_dir
+        from istota.webui import app as web_app
 
         assert web_app._resolve_static_dir() == static_dir.resolve_static_dir()
 
     def test_developer_skill_and_doctor_resolve_the_same_binary(self):
-        from istota import forge_bin
+        from istota.sandbox import forge_bin
         from istota.skills import developer
 
         assert developer._resolve_real_bin is forge_bin.resolve_real_bin
@@ -1010,7 +1013,7 @@ class TestFrameworkDb:
 
     def test_does_not_repair(self, make_config, tmp_path, monkeypatch):
         """Doctor is a diagnostic. `check_db_health` owns the REINDEX."""
-        from istota import db_health
+        from istota.maintenance import db_health
 
         db_path = _sqlite_with_table(tmp_path / "istota.db")
 
@@ -1624,7 +1627,7 @@ def _drive_usage(
     through rather than frozen, since the check computes the staleness age
     against the same clock it hands the module.
     """
-    from istota import subscription_usage as su
+    from istota.usage import subscription as su
 
     if darwin_blob is not None:
         monkeypatch.setattr(su.platform, "system", lambda: "Darwin")
@@ -1865,7 +1868,7 @@ class TestSubscriptionUsage:
         """`get_snapshot` cannot return this today, so the never-FAIL guard is
         driven directly: unguarded it is an IndexError, which `run_checks`
         turns into the one status this check must never produce."""
-        from istota import subscription_usage as su
+        from istota.usage import subscription as su
 
         monkeypatch.setattr(
             su,
@@ -1878,7 +1881,7 @@ class TestSubscriptionUsage:
 
     def _seed_cache(self, config, age_seconds, percent=40):
         """Write a good cache entry `age_seconds` old, as a fetch would have."""
-        from istota import subscription_usage as su
+        from istota.usage import subscription as su
 
         now = time.time()
         windows, spend = su.parse_usage(json.loads(_usage_body(percent)), now_ts=now)
@@ -1987,7 +1990,7 @@ class TestProxyPeerCheck:
         return make_config(users={f"u{i}": UserConfig() for i in range(n)})
 
     def test_fails_where_no_peer_can_be_read(self, make_config, monkeypatch):
-        from istota import peer_process
+        from istota.sandbox import peer_process
 
         monkeypatch.setattr(peer_process, "supported", lambda: False)
         result = self._run(make_config())
@@ -2896,7 +2899,7 @@ class TestWrapperShadowing:
         per-task wrapper *is* a verbatim copy of that file."""
         import shutil as _shutil
 
-        from istota import forge_cli
+        from istota.sandbox import forge_cli
 
         wrapper = tmp_path / "path" / "gh"
         wrapper.parent.mkdir(parents=True, exist_ok=True)
@@ -2908,7 +2911,7 @@ class TestWrapperShadowing:
     def test_the_sentinel_is_near_the_top_of_both_copies_of_the_wrapper(self):
         """`_looks_like_the_wrapper` reads only the file's head, and the devbox
         image ships a byte-identical copy under another name."""
-        from istota import forge_cli
+        from istota.sandbox import forge_cli
 
         assert doctor._WRAPPER_SENTINEL in Path(forge_cli.__file__).read_bytes()[:8192]
         copy = Path(__file__).resolve().parents[1] / "docker/devbox/lib/istota_forge_cli.py"
@@ -3266,7 +3269,7 @@ class TestWebBuildCurrent:
         """Asserted on the argv, because behaviourally it cannot be observed:
         `git diff --quiet` runs no `diff.external` (measured), so this guards
         against a future change such as a dropped `--quiet`."""
-        from istota.git_hardening import GIT_HARDENING
+        from istota.sandbox.git_hardening import GIT_HARDENING
 
         self._checkout(tmp_path, monkeypatch)
         seen = []
@@ -4329,7 +4332,7 @@ class TestAvatarImport:
 
     @staticmethod
     def _record(db_path, header, **counts):
-        from istota import avatars
+        from istota.webui import avatars
         from istota import db as db_module
 
         state = {"at": _now_iso(), "users": 1, "imported": 0, "no_custom": 0,
@@ -4390,7 +4393,7 @@ class TestAvatarImport:
             assert named in r.detail
 
     def test_reports_the_recorded_state(self, make_config, db_path):
-        from istota import avatars
+        from istota.webui import avatars
         from istota import db as db_module
 
         recorded_at = _now_iso()

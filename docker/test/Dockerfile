@@ -96,7 +96,7 @@ RUN uv sync --frozen --no-install-project --group dev --extra test
 # `pythonpath = ["src", "."]` in pyproject.toml is NOT a substitute, and
 # assuming it was cost 47 failures on a clean `main`. That setting mutates
 # `sys.path` inside the pytest process and reaches no child of it — and the
-# native brain spawns `[sys.executable, "-m", "istota.tool_server"]` with the
+# native brain spawns `[sys.executable, "-m", "istota.sandbox.tool_server"]` with the
 # *task* env, which `build_clean_env` builds from PATH, HOME and
 # PYTHONUNBUFFERED. Neither the ini setting nor a `-e PYTHONPATH` on the
 # `docker run` reaches that spawn, so every native task in the tier died at the

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from istota import db_backup_relocate
+from istota.maintenance import db_backup_relocate
 from istota.config import Config, NextcloudConfig, SchedulerConfig
 
 

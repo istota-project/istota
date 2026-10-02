@@ -11,10 +11,11 @@ import pickle
 
 import pytest
 
-from istota import db, secrets_store
+from istota import db
+from istota.credentials import store as secrets_store
 from istota.config import Config
-from istota.credential_broker import grants
-from istota.credential_broker.bindings import parse_binding
+from istota.credentials.broker import grants
+from istota.credentials.broker.bindings import parse_binding
 from istota.skills._credref import ENTRY, SecretEntry, SecretValue
 from tests import test_skill_credential_fd as _credential_fd
 from tests import test_vault_credential_fetch as _vault_fetch
@@ -242,7 +243,7 @@ class TestThePrivateSkillRead:
 
 class TestALocalCredential:
     def test_a_credential_added_in_istota_reads_as_one_entry(self, config, sock_path):
-        from istota import local_credentials
+        from istota.credentials import local as local_credentials
         with db.get_db(config.db_path) as conn:
             local_credentials.create(conn, "alice", local_credentials.LocalCredential(
                 name="shop", value="entryvalue-local-pw", username="entryvalue-local-user",
@@ -287,19 +288,19 @@ class TestTheBox:
 
 class TestTheFieldKeys:
     def test_members_map_to_field_keys(self):
-        from istota.skill_proxy import entry_fields
+        from istota.sandbox.skill_proxy import entry_fields
         assert entry_fields("acme", {"acme": "p", "acme_username": "u", "acme_url": "w",
                                      "acme_pin": "1"}) == {
             "password": "p", "username": "u", "url": "w", "pin": "1"}
 
     def test_a_custom_field_named_password_keeps_its_full_name(self):
-        from istota.skill_proxy import entry_fields
+        from istota.sandbox.skill_proxy import entry_fields
         assert entry_fields("acme", {"acme_password": "custom"}) == {"acme_password": "custom"}
         assert entry_fields("acme", {"acme": "p", "acme_password": "custom"}) == {
             "password": "p", "acme_password": "custom"}
 
     def test_a_fallback_name_never_overwrites_another_field(self):
-        from istota.skill_proxy import entry_fields
+        from istota.sandbox.skill_proxy import entry_fields
         fields = entry_fields("acme", {"acme": "p", "acme_acme_password": "A",
                                        "acme_password": "B"})
         assert sorted(fields.values()) == ["A", "B", "p"]

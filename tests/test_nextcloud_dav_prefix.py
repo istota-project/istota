@@ -342,7 +342,7 @@ class TestTheOcsSharePath:
         """`storage.share_folder_with_user` goes through the shim, not through
         `shares.py`, so a mapping applied only to the latter would leave the
         one call the Docker shape makes on every boot still broken."""
-        from istota.nextcloud_client import ocs_create_share, ocs_list_shares
+        from istota.nextcloud.compat import ocs_create_share, ocs_list_shares
 
         with patch(
             "istota.nextcloud._http.httpx.post", return_value=_ocs_ok({"id": 1})
@@ -413,7 +413,7 @@ class TestTheOcsShareResponse:
         assert from_remote_path(config, logical) == logical
 
     def test_the_legacy_shim_inverts_too(self):
-        from istota.nextcloud_client import ocs_create_share, ocs_list_shares
+        from istota.nextcloud.compat import ocs_create_share, ocs_list_shares
 
         row = {"id": 4, "uid_owner": "istota", "path": "/Shared Files/Users/alice/istota"}
         with patch("istota.nextcloud._http.httpx.get", return_value=_ocs_ok([row])):

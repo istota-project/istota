@@ -27,7 +27,7 @@ import pytest
 
 from istota import db
 from istota.config import Config, UserConfig
-from istota.email_support import parse_email_prompt
+from istota.mail.support import parse_email_prompt
 
 try:
     import authlib  # noqa: F401
@@ -119,7 +119,7 @@ def db_path(tmp_path):
 
 @pytest.fixture
 def web_config(db_path):
-    from istota import web_app
+    from istota.webui import app as web_app
 
     cfg = Config(
         db_path=db_path,
@@ -201,7 +201,7 @@ def _user_row_diagnosis(page, token, rows) -> str:
             )
         )
 
-    from istota import web_app
+    from istota.webui import app as web_app
 
     with db.get_db(web_app._config.db_path) as conn:
         lines.append("messages:")
@@ -223,7 +223,7 @@ def _user_row_diagnosis(page, token, rows) -> str:
 @_needs_web_deps
 class TestPerRoomHistory:
     def _one_user_row(self, token):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         page = web_app._chat_room_messages("alice", token, 20)
         rows = [m for m in page["messages"] if m["role"] == "user"]
@@ -371,7 +371,7 @@ class TestRoomEventStream:
         """The stream and the aggregate panes share `_cross_room_message_dict`;
         a streamed row and a reloaded row must agree or the bubble changes
         author on refresh."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             db.register_room(conn, "roomtok", "alice", origin="talk")
@@ -407,7 +407,7 @@ class TestRoomEventStream:
 @_needs_web_deps
 class TestExternalOriginIsEmitted:
     def _one_user_row(self, token):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         page = web_app._chat_room_messages("alice", token, 20)
         rows = [m for m in page["messages"] if m["role"] == "user"]
@@ -548,7 +548,7 @@ class TestExternalOriginIsEmitted:
         # The dict rides the byte-budgeted room-event stream, and a subject is
         # an attacker-supplied header with no length of its own — the same
         # reason `_CROSS_ROOM_COLUMNS` truncates the reply excerpt in SQL.
-        from istota import web_app
+        from istota.webui import app as web_app
 
         prompt = PLAIN_PROMPT.replace("Subject: Hello", "Subject: " + "s" * 5000)
         with db.get_db(db_path) as conn:
@@ -562,7 +562,7 @@ class TestExternalOriginIsEmitted:
     def test_the_stream_agrees_with_the_reload(self, db_path, web_config):
         """Both SQL fragments select the column, or a turn is external in one
         view and ordinary in the other."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             db.register_room(conn, "roomtok", "alice", origin="talk")
@@ -600,7 +600,7 @@ class TestExternalOriginIsEmitted:
 @_needs_web_deps
 class TestAuthorIdIsEmitted:
     def _one_user_row(self, token):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         page = web_app._chat_room_messages("alice", token, 20)
         rows = [m for m in page["messages"] if m["role"] == "user"]
@@ -699,7 +699,7 @@ class TestAuthorIdIsEmitted:
     def test_the_stream_agrees_with_the_reload(self, db_path, web_config):
         """Both producers go through the one builder, so a co-member's face
         must not appear on a reload and vanish on the next streamed row."""
-        from istota import web_app
+        from istota.webui import app as web_app
 
         self._co_member_room(db_path, web_config)
         with db.get_db(db_path) as conn:

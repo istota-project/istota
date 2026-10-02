@@ -14,7 +14,8 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, speech_gate
+from istota import db
+from istota.rooms import speech_gate
 from istota.config import (
     Config,
     ConversationConfig,

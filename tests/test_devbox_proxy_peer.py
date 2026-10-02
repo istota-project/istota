@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from istota.devbox_proxy import serve
+from istota.devbox.proxy import serve
 @pytest.fixture
 def sock_path():
     with tempfile.TemporaryDirectory(prefix="dbpeer_", dir="/tmp") as directory:
@@ -55,7 +55,7 @@ async def test_same_uid_host_process_is_refused(sock_path, payload):
 
 @pytest.fixture
 def docker_peer(tmp_path, monkeypatch):
-    from istota import devbox_peer
+    from istota.devbox import peer as devbox_peer
     container_id = "a" * 64
     root = f"/system.slice/docker-{container_id}.scope"
     info = {"id": container_id, "pid": 987654, "running": True, "user": "alice"}
@@ -75,7 +75,8 @@ def docker_peer(tmp_path, monkeypatch):
 
 
 def check_peer(tmp_path):
-    from istota import devbox_peer, peer_process
+    from istota.devbox import peer as devbox_peer
+    from istota.sandbox import peer_process
     pid = os.getpid()
     return devbox_peer.peer_in_devbox(
         pid, peer_process.start_time(pid), user_id="alice",
@@ -122,7 +123,8 @@ def test_container_recreation_does_not_authorize_old_cgroup(tmp_path, docker_pee
 
 
 def test_recycled_peer_pid_is_refused(tmp_path, docker_peer):
-    from istota import devbox_peer, peer_process
+    from istota.devbox import peer as devbox_peer
+    from istota.sandbox import peer_process
     assert not devbox_peer.peer_in_devbox(
         os.getpid(), peer_process.start_time(os.getpid()) - 1,
         user_id="alice", container_name="custom-alice",
@@ -132,7 +134,7 @@ def test_recycled_peer_pid_is_refused(tmp_path, docker_peer):
 
 @pytest.mark.parametrize("failure", ["missing", "timeout", "malformed"])
 def test_docker_failure_is_refused(tmp_path, docker_peer, monkeypatch, failure):
-    from istota import devbox_peer
+    from istota.devbox import peer as devbox_peer
     def inspect(argv, **kwargs):
         if failure == "missing":
             raise FileNotFoundError()
@@ -144,11 +146,11 @@ def test_docker_failure_is_refused(tmp_path, docker_peer, monkeypatch, failure):
 
 
 async def test_real_socket_peer_uses_configured_container(sock_path, tmp_path, docker_peer, monkeypatch):
-    from istota import devbox_peer
+    from istota.devbox import peer as devbox_peer
     from tests.test_devbox_proxy import _client_round_trip
     _, _, _, calls = docker_peer
     monkeypatch.setattr(
-        "istota.devbox_proxy.peer_in_devbox",
+        "istota.devbox.proxy.peer_in_devbox",
         partial(devbox_peer.peer_in_devbox, proc_root=tmp_path),
     )
     config = SimpleNamespace(

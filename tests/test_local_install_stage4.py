@@ -27,7 +27,7 @@ _needs_web_deps = pytest.mark.skipif(
 @_needs_web_deps
 class TestStaticDirResolution:
     def test_env_override_wins(self, tmp_path):
-        from istota.web_app import _pick_static_dir
+        from istota.webui.app import _pick_static_dir
         repo = tmp_path / "repo"
         repo.mkdir()
         pkg = tmp_path / "pkg"
@@ -36,7 +36,7 @@ class TestStaticDirResolution:
         assert got == tmp_path / "env"
 
     def test_repo_build_preferred_over_packaged(self, tmp_path):
-        from istota.web_app import _pick_static_dir
+        from istota.webui.app import _pick_static_dir
         repo = tmp_path / "repo"
         repo.mkdir()
         pkg = tmp_path / "pkg"
@@ -44,14 +44,14 @@ class TestStaticDirResolution:
         assert _pick_static_dir("", repo, pkg) == repo
 
     def test_packaged_fallback_when_repo_absent(self, tmp_path):
-        from istota.web_app import _pick_static_dir
+        from istota.webui.app import _pick_static_dir
         repo = tmp_path / "repo"  # not created
         pkg = tmp_path / "pkg"
         pkg.mkdir()
         assert _pick_static_dir("", repo, pkg) == pkg
 
     def test_falls_back_to_repo_path_when_neither_exists(self, tmp_path):
-        from istota.web_app import _pick_static_dir
+        from istota.webui.app import _pick_static_dir
         repo = tmp_path / "repo"
         pkg = tmp_path / "pkg"
         assert _pick_static_dir("", repo, pkg) == repo
@@ -66,13 +66,13 @@ class TestStaticCacheControl:
     nothing fails loudly). The two classes need opposite policies."""
 
     def test_hashed_assets_are_immutable(self):
-        from istota.web_app import _static_cache_control
+        from istota.webui.app import _static_cache_control
         got = _static_cache_control("/istota/_app/immutable/entry/app.B53rWCQM.js")
         assert "immutable" in got
         assert "max-age=31536000" in got
 
     def test_shell_and_stable_names_revalidate(self):
-        from istota.web_app import _static_cache_control
+        from istota.webui.app import _static_cache_control
         for path in (
             "/istota/chat/",
             "/istota/index.html",
@@ -83,14 +83,14 @@ class TestStaticCacheControl:
 
     def test_classification_is_path_relative(self):
         """The mount strips the prefix, so the raw scope path may be relative."""
-        from istota.web_app import _static_cache_control
+        from istota.webui.app import _static_cache_control
         assert "immutable" in _static_cache_control("_app/immutable/chunks/x.js")
 
     def test_mounted_statics_stamp_the_header(self, tmp_path, monkeypatch):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
-        from istota.web_app import _CacheHeaderStatics
+        from istota.webui.app import _CacheHeaderStatics
         root = tmp_path / "build"
         (root / "_app" / "immutable").mkdir(parents=True)
         (root / "index.html").write_text("<html></html>")

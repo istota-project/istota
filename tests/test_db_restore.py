@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from istota import db, db_backup, db_restore
+from istota import db
+from istota.maintenance import db_backup
+from istota.maintenance import db_restore
 from istota.config import (
     Config,
     EmailConfig,

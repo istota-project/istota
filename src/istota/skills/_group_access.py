@@ -35,7 +35,7 @@ def group_access_denied(group_id: str) -> bool:
     not created (#570).
     """
     from istota import db
-    from istota.skill_host_paths import TASK_GROUPS_VAR
+    from istota.sandbox.host_paths import TASK_GROUPS_VAR
 
     user_id = os.environ.get("ISTOTA_USER_ID", "")
     db_path = os.environ.get("ISTOTA_DB_PATH", "")

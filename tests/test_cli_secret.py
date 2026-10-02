@@ -19,7 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from istota import db, secrets_store
+from istota import db
+from istota.credentials import store as secrets_store
 
 
 class _FakeArgs:

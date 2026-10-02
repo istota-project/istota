@@ -128,7 +128,7 @@ permissions = "write"
 > **Modules vs resources vs connected services.** The retired `feeds` / `money` / `monarch` / `karakeep` / `overland` resource types were split apart in the modules / connected services refactor:
 > - **Modules** (`feeds`, `money`, `location`, `health`, `briefings`) are on by default; opt out per user via `disabled_modules`. Module-owned secrets (Tumblr API key, Monarch session, Overland ingest token) live on the per-module settings page.
 > - **Connected services** (`karakeep`, `google_workspace`) are external API credentials in the encrypted `secrets` table.
-> - The scheduler auto-cleans the obsolete resource types from `user_resources` on startup; their TOML extras are migrated into `secrets` via `secrets_store.import_from_user_configs`.
+> - The scheduler auto-cleans the obsolete resource types from `user_resources` on startup; their TOML extras are migrated into `secrets` via `credentials.store.import_from_user_configs`.
 
 CalDAV calendars are auto-discovered from Nextcloud and don't need to be configured as resources.
 

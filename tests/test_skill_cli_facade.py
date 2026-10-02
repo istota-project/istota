@@ -356,7 +356,7 @@ class TestEverySkillRoutesThroughTheFacade:
 class TestOcrLeafKeepsItsOwnCopy:
     """The one deliberate copy of the epilogue, and the reason it stays.
 
-    `istota/ocr_leaf.py` is spawned once per attachment image and its contract
+    `istota/lib/ocr_leaf.py` is spawned once per attachment image and its contract
     is that it imports the standard library, Pillow and pytesseract and nothing
     from `istota`. Importing `skills._cli` would run `istota/skills/__init__.py`
     and star-import every skill, which is the 0.22s-per-spawn regression that
@@ -364,7 +364,7 @@ class TestOcrLeafKeepsItsOwnCopy:
     """
 
     def test_the_leaf_imports_nothing_from_the_package(self):
-        src = (SRC_DIR / "ocr_leaf.py").read_text()
+        src = (SRC_DIR / "lib" / "ocr_leaf.py").read_text()
         tree = ast.parse(src)
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("istota"):
@@ -374,7 +374,7 @@ class TestOcrLeafKeepsItsOwnCopy:
                     assert not alias.name.startswith("istota"), alias.name
 
     def test_it_still_carries_the_epilogue_it_may_not_share(self):
-        src = (SRC_DIR / "ocr_leaf.py").read_text()
+        src = (SRC_DIR / "lib" / "ocr_leaf.py").read_text()
         assert 'print(json.dumps({"status": "error", "error": str(e)}))' in src
 
 

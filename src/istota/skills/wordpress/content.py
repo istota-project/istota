@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-from istota.skill_host_paths import write_resolved
+from istota.sandbox.host_paths import write_resolved
 
 from . import acf, media
 from .client import WordPressError, fence, fence_tree, raw_text, selector, selectors

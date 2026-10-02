@@ -10,7 +10,8 @@ from datetime import timedelta
 from pathlib import Path
 
 
-from istota import db, db_backup
+from istota import db
+from istota.maintenance import db_backup
 from istota.config import (
     Config,
     EmailConfig,
@@ -586,7 +587,7 @@ class TestForceEntrypoint:
         cfg = _config(tmp_path)
         db.init_db(cfg.db_path)
         monkeypatch.setattr("istota.config.load_config", lambda: cfg)
-        monkeypatch.setattr(sys, "argv", ["istota.db_backup"])
+        monkeypatch.setattr(sys, "argv", ["istota.maintenance.db_backup"])
         rc = db_backup.main()
         assert rc == 0
         # A dated dir for today's real date exists (main() ignores the interval).

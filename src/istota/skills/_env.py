@@ -105,7 +105,7 @@ def _resolve_env_spec_primary(spec: EnvSpec, ctx: EnvContext) -> str | None:
         # Per-user encrypted secret resolved from the secrets table.
         if not spec.service or not spec.key:
             return None
-        from .. import secrets_store  # noqa: PLC0415
+        from istota.credentials import store as secrets_store  # noqa: PLC0415
 
         db_path = getattr(ctx.config, "db_path", None)
         user_id = getattr(ctx.task, "user_id", None)

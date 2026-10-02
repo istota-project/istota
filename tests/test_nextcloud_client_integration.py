@@ -12,7 +12,7 @@ import uuid
 import pytest
 
 from istota.config import Config, NextcloudConfig
-from istota.nextcloud_client import (
+from istota.nextcloud.compat import (
     ocs_create_public_link,
     ocs_create_share,
     ocs_delete_share,

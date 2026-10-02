@@ -110,7 +110,7 @@ The transport seam and its persistent-loop `TalkClient` keep owning inbound poll
 
 `talk share-file` is the verb that bridges the two surfaces: a Talk attachment is a share of type 10 whose `shareWith` is the conversation token.
 
-The skill CLI is a one-shot subprocess with no persistent asyncio runtime, so it uses `talk.transient_client(config)` — the single documented exemption to the "no `TalkClient` outside the singleton" invariant, recorded in `.claude/rules/transport.md`.
+The skill CLI is a one-shot subprocess with no persistent asyncio runtime, so it uses `nextcloud.talk.transient_client(config)` — the single documented exemption to the "no `TalkClient` outside the singleton" invariant, recorded in `.claude/rules/transport.md`.
 
 `talk search --token` restricts results to one conversation, and does so client-side. The unified-search provider's `from` parameter looks like the way to scope a search but means "the page I am currently on", so the provider *excludes* that conversation — passing the requested token there returns every room except the one asked for. The filter matches on each entry's `attributes.conversation` instead, over-fetching so `--limit` applies to the matching subset.
 
@@ -165,4 +165,4 @@ The client lives in `src/istota/nextcloud/`:
 | `dav.py` | PROPFIND, SEARCH, versions, trash, upload/download, favorites, quota |
 | `notifications.py` | Notifications and activity reads |
 
-`src/istota/nextcloud_client.py` remains as a back-compat shim holding the `None`-returning variants four best-effort daemon paths depend on: startup user hydration, the `ocs_share_folder` pre-check, the shared-file organizer's owner lookup, and `!search`. A Nextcloud hiccup must not fail daemon startup, so those keep the historical contract; only the CLI takes the raising path.
+`src/istota/nextcloud/compat.py` remains as a back-compat shim holding the `None`-returning variants four best-effort daemon paths depend on: startup user hydration, the `ocs_share_folder` pre-check, the shared-file organizer's owner lookup, and `!search`. A Nextcloud hiccup must not fail daemon startup, so those keep the historical contract; only the CLI takes the raising path.

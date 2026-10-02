@@ -15,11 +15,12 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
-from ... import db, room_veto
-from ...email_support import get_email_config
-from ...llm_json import find_fenced_block
-from ...notification_resolvers import outbound_draft as draft_source
-from ...notification_store import RaiseResult, deliver_pending
+from istota import db
+from istota.rooms import veto as room_veto
+from istota.mail.support import get_email_config
+from istota.lib.llm_json import find_fenced_block
+from istota.notifications.resolvers import outbound_draft as draft_source
+from istota.notifications.store import RaiseResult, deliver_pending
 from ...skills.email import reply_to_email, send_email
 from . import threads as email_threads
 
@@ -232,7 +233,7 @@ def _hold_if_unapproved(
     reports a genuine delivery failure. Refusing rather than sending is the
     point — a gate that fails open on a busy database is not a gate.
     """
-    from ...outbound_policy import effective_policy, recipients_require_hold
+    from istota.mail.outbound_policy import effective_policy, recipients_require_hold
 
     # Resolved before any connection is opened, so `off` costs no database —
     # matching the skill-side gate, where the same ordering keeps an unreachable
@@ -257,7 +258,7 @@ def _hold_if_unapproved(
             "trusted and every message will be held", task.user_id,
         )
 
-    from ... import outbound_drafts as drafts
+    from istota.mail import drafts
     from ...transport import routing
 
     try:
@@ -375,7 +376,7 @@ def _announce_hold(
     The old direct send survives as the fallback for a row that failed to write
     — the notice predates the inbox (ISSUE-246) and must not be lost with it.
     """
-    from ...notifications import send_notification
+    from istota.notifications.delivery import send_notification
 
     if notification is not None:
         deliver_pending(config, [notification])

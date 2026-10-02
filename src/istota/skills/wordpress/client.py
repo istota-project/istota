@@ -9,7 +9,7 @@ request passes, in order:
    what stops a model-edited site record, or a ``--blog`` host, from carrying the
    password somewhere else.
 2. **The SSRF guard.** The host is resolved, and the request is refused if *any*
-   address is non-public (`istota.net_guard.ip_is_public`, the rule the native
+   address is non-public (`istota.sandbox.net_guard.ip_is_public`, the rule the native
    WebFetch tool uses), unless the operator listed the exact host in
    ``[wordpress] private_hosts``. The connection is then made to the address
    that was checked, with the Host header and TLS SNI on the name, so DNS cannot
@@ -40,8 +40,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from istota.net_guard import ip_is_public
-from istota.untrusted import frame_untrusted
+from istota.sandbox.net_guard import ip_is_public
+from istota.lib.untrusted import frame_untrusted
 
 from .sites import SiteError, check_bound
 

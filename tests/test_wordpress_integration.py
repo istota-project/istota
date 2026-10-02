@@ -55,7 +55,7 @@ from istota import db
 from istota.config import Config, WordPressConfig
 from istota.skills import _credref
 from istota.skills import wordpress as wp
-from istota.untrusted import frame_untrusted
+from istota.lib.untrusted import frame_untrusted
 
 URL = os.environ.get("ISTOTA_WP_TEST_URL", "").strip()
 USER = os.environ.get("ISTOTA_WP_TEST_USER", "").strip()

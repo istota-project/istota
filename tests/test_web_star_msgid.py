@@ -86,7 +86,7 @@ class TestWebDoneCarriesMsgId:
         # parked past the real terminal frame gets a synthesized `done` — it too
         # must carry the star key.
         pytest.importorskip("fastapi")
-        from istota import web_app
+        from istota.webui import app as web_app
 
         with db.get_db(db_path) as conn:
             db.register_room(conn, "webroom", "testuser", origin="web")

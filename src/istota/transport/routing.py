@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, NamedTuple
 # The static room-model table. A stdlib-only leaf that imports nothing, so a
 # module-level import here costs nothing and introduces no cycle — unlike
 # `db`, which this module deliberately imports per function.
-from ..surfaces import (
+from istota.rooms.surfaces import (
     UserTurnMirror as UserTurnMirrorMode,
     is_room_member,
     origin_surface_for_source_type,
@@ -223,7 +223,7 @@ def _room_descriptor(conn, surface: str, task: "db.Task") -> str | None:
     """
     if conn is None or surface == "repl":
         return None
-    from ..email_support import is_synthetic_email_thread_token
+    from istota.mail.support import is_synthetic_email_thread_token
 
     candidates = [task.conversation_token, task.talk_delivery_token]
     try:
@@ -324,7 +324,7 @@ def origin_descriptor(task: "db.Task", conn=None) -> str | None:
     too. A genuine email-only thread carries a synthetic thread token → no origin.
     ``repl`` is never a pushable origin (the terminal is gone by reply time).
     """
-    from ..email_support import is_synthetic_email_thread_token
+    from istota.mail.support import is_synthetic_email_thread_token
     from .registry import _surface_for_source_type
     from ..db import is_canonical_room_token
 
@@ -792,7 +792,7 @@ def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
     trading it for a different failure mode.
     """
     from ..db import is_canonical_room_token
-    from ..email_support import is_synthetic_email_thread_token
+    from istota.mail.support import is_synthetic_email_thread_token
 
     if task.talk_delivery_token:
         return task.talk_delivery_token
@@ -806,7 +806,7 @@ def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
         return token
     if not is_synthetic_email_thread_token(token):
         return token
-    from ..notifications import resolve_conversation_token
+    from istota.notifications.delivery import resolve_conversation_token
     return resolve_conversation_token(config, task.user_id) or token
 
 
@@ -903,7 +903,7 @@ def routed_notification_room(
     """
     try:
         from .. import db
-        from ..notifications import resolve_destinations
+        from istota.notifications.delivery import resolve_destinations
         for dest in resolve_destinations(config, user_id, "notification"):
             room = _room_for_destination(conn, config, user_id, dest)
             if room and not db.room_is_shared(conn, room):
@@ -940,7 +940,7 @@ def _room_for_destination(
     if surface == "room":
         candidate = channel
     elif surface == "talk":
-        from ..notifications import resolve_conversation_token
+        from istota.notifications.delivery import resolve_conversation_token
         # `conn` is passed, not left to be reopened: since ISSUE-477 that
         # resolver reads the user's configured default room, and the web branch
         # below states the rule — resolving a transcript room must not take a
@@ -1527,7 +1527,7 @@ def resolve_delivery_plan(
     # there is the held `room post` verb. Before the shared-room refusal, which
     # would otherwise drop the parent first and leave the pin nothing to
     # substitute the side room for.
-    from ..side_rooms import pin_plan
+    from istota.rooms.side_rooms import pin_plan
     resolved = pin_plan(config, task, resolved)
 
     # Only the room the task ran in may receive it if that room is shared. A

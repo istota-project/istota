@@ -1,4 +1,4 @@
-"""The room-model table and its readers (`istota.surfaces`).
+"""The room-model table and its readers (`istota.rooms.surfaces`).
 
 Three properties, and the second is the one the leaf exists for. The readers
 are total — a value off a database row is whatever the row held, so every
@@ -18,7 +18,7 @@ import re
 
 import pytest
 
-from istota import surfaces
+from istota.rooms import surfaces
 from istota.config import Config
 from istota.transport import make_registry, registry as registry_module
 from istota.transport.registry import _surface_for_source_type

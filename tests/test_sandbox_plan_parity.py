@@ -42,7 +42,7 @@ from istota.executor import (
     native_fs_roots,
     sandbox_cache_is_derived,
 )
-from istota.sandbox_plan import (
+from istota.sandbox.plan import (
     Mount,
     MountPlan,
     SandboxProfile,

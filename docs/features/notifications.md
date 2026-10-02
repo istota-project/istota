@@ -6,7 +6,7 @@ Two things could be held for your answer — an email from an unknown sender, an
 
 ## Two things with similar names
 
-This page is about the **inbox**: `notification_store.py`, the `notifications` table, and the bell. It is not `notifications.py`, which is **delivery** — the dispatcher that sends a message out over Talk, email or ntfy.
+This page is about the **inbox**: `notifications/store.py`, the `notifications` table, and the bell. It is not `notifications/delivery.py`, which is **delivery** — the dispatcher that sends a message out over Talk, email or ntfy.
 
 Raising a notification does both, and they are separate: a row is written to the table, and separately the text fans out through the delivery layer. A user with no alerts channel loses nothing, because the bell is always there. A push that failed to send leaves the row untouched.
 

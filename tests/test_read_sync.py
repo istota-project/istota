@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from istota import db, web_tokens
+from istota import db
+from istota.webui import tokens as web_tokens
 from istota.config import Config, SiteConfig, UserConfig, WebConfig
 
 try:
@@ -50,7 +51,7 @@ def _make_config(tmp_path, token_storage="encrypted", sync_interval=60):
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod.app.state.istota_config = config
     mod._oauth = MagicMock()
@@ -59,7 +60,7 @@ def _patch_app(config):
 
 
 async def _login(client, username="alice"):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
     )
@@ -68,7 +69,7 @@ async def _login(client, username="alice"):
 
 
 def _mock_talk_client(monkeypatch, conversations=None):
-    """Patch istota.talk.TalkClient with a recording factory."""
+    """Patch istota.nextcloud.talk.TalkClient with a recording factory."""
     constructed = []
     instance = MagicMock()
     instance.mark_conversation_read = AsyncMock(return_value=True)
@@ -79,14 +80,14 @@ def _mock_talk_client(monkeypatch, conversations=None):
         constructed.append({"bearer_token": bearer_token, "timeout": timeout})
         return instance
 
-    import istota.talk
-    monkeypatch.setattr(istota.talk, "TalkClient", factory)
+    import istota.nextcloud.talk
+    monkeypatch.setattr(istota.nextcloud.talk, "TalkClient", factory)
     return constructed, instance
 
 
 @pytest.fixture(autouse=True)
 def _reset_module_state():
-    import istota.web_app as mod
+    import istota.webui.app as mod
     web_tokens._refresh_locks.clear()
     mod._talk_read_pull_state.clear()
     mod._bg_tasks.clear()
@@ -102,7 +103,7 @@ def keyed(monkeypatch):
 
 
 async def _drain_bg():
-    import istota.web_app as mod
+    import istota.webui.app as mod
     while mod._bg_tasks:
         await asyncio.gather(*list(mod._bg_tasks))
 
@@ -277,7 +278,7 @@ class TestTalkToWebPull:
             )
             web_only = _add_message(config, room_token, role="system")
 
-            import istota.web_app as mod
+            import istota.webui.app as mod
             mod._talk_read_pull_state.clear()  # first listing used the slot
             resp = await client.get("/istota/api/chat/rooms", cookies=cookies)
             rooms = resp.json()["rooms"]
@@ -301,7 +302,7 @@ class TestTalkToWebPull:
                 config, room_token, role="assistant",
                 external_ids={"talk": "500"},
             )
-            import istota.web_app as mod
+            import istota.webui.app as mod
             mod._talk_read_pull_state.clear()
             await client.get("/istota/api/chat/rooms", cookies=cookies)
 
@@ -346,7 +347,7 @@ class TestTalkToWebPull:
             cookies = await _login(client)
             room_id, room_token = await _default_room(client, config, cookies)
             _add_message(config, room_token, role="assistant")  # unstamped
-            import istota.web_app as mod
+            import istota.webui.app as mod
             mod._talk_read_pull_state.clear()
             await client.get("/istota/api/chat/rooms", cookies=cookies)
 

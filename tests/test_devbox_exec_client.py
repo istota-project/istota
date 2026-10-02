@@ -1,6 +1,6 @@
 """The devbox exec client, as a shim runs it: a subprocess, against a real server.
 
-``src/istota/devbox_exec_client.py`` is what every shimmed command becomes, so
+``src/istota/devbox/exec_client.py`` is what every shimmed command becomes, so
 the thing under test is the *process* — its exit status, its stdout and stderr
 bytes, and what it says when the transport fails. Calling ``main()`` in-process
 would test none of that, because the status a shim reports is a wait status and
@@ -18,6 +18,7 @@ alongside this file; each assertion there is a named test here.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import shlex
@@ -33,8 +34,8 @@ from pathlib import Path
 
 import pytest
 
-from istota import devbox_exec_client
-from istota.devbox_exec_protocol import (
+from istota.devbox import exec_client as devbox_exec_client
+from istota.devbox.exec_protocol import (
     PROTOCOL_VERSION,
     SIGPIPE_EXIT,
     STREAM_CONTROL,
@@ -49,8 +50,23 @@ from istota.devbox_exec_protocol import (
 
 from tests.test_devbox_exec_server import _start_server, _stop_server
 
-CLIENT = Path(__file__).resolve().parents[1] / "src/istota/devbox_exec_client.py"
-PROTOCOL = Path(__file__).resolve().parents[1] / "src/istota/devbox_exec_protocol.py"
+CLIENT_SOURCE = Path(__file__).resolve().parents[1] / "src/istota/devbox/exec_client.py"
+PROTOCOL = Path(__file__).resolve().parents[1] / "src/istota/devbox/exec_protocol.py"
+# Run as a script, the client imports its protocol as the file beside it under
+# this name (`_EXEC_PROTOCOL_NAME` in the developer skill). The source tree no
+# longer has that sibling, so the client runs from a `{dev_bin}`-shaped copy.
+PROTOCOL_NAME = "devbox_exec_protocol.py"
+
+
+def _install_client(dev_bin: Path) -> Path:
+    shutil.copy2(CLIENT_SOURCE, dev_bin / CLIENT_SOURCE.name)
+    shutil.copy2(PROTOCOL, dev_bin / PROTOCOL_NAME)
+    return dev_bin / CLIENT_SOURCE.name
+
+
+_DEV_BIN = Path(tempfile.mkdtemp(prefix="istota-exec-client-"))
+atexit.register(shutil.rmtree, _DEV_BIN, True)
+CLIENT = _install_client(_DEV_BIN)
 
 EXIT_NO_CONNECT = 120
 EXIT_UNSUPPORTED_PROTOCOL = 121
@@ -156,7 +172,7 @@ def _client_copy_with_short_backstop(base: Path, seconds: float = 2.0) -> Path:
     """A `{dev_bin}`-shaped copy of the client with a test-sized ack backstop."""
     dev_bin = base / "short-backstop"
     dev_bin.mkdir()
-    shutil.copy2(PROTOCOL, dev_bin / PROTOCOL.name)
+    shutil.copy2(PROTOCOL, dev_bin / PROTOCOL_NAME)
     source = CLIENT.read_text()
     edited = source.replace("ACK_TIMEOUT_SECONDS = 60.0", f"ACK_TIMEOUT_SECONDS = {seconds}")
     assert edited != source, "the backstop constant was renamed"
@@ -778,7 +794,7 @@ class TestTheClientIsACopyableLeaf:
         dev_bin = tmp_path / "dev_bin"
         dev_bin.mkdir()
         shutil.copy2(CLIENT, dev_bin / CLIENT.name)
-        shutil.copy2(PROTOCOL, dev_bin / PROTOCOL.name)
+        shutil.copy2(PROTOCOL, dev_bin / PROTOCOL_NAME)
         env = {
             k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")
         }

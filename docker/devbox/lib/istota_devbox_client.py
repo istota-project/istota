@@ -32,7 +32,7 @@ def socket_path() -> str:
 def request_line(action: str, **fields: Any) -> bytes:
     """Build the JSON request line the daemon expects.
 
-    Mirrors ``istota.devbox_proxy_protocol.encode_request`` but lives
+    Mirrors ``istota.devbox.proxy_protocol.encode_request`` but lives
     here so the shim image doesn't need to vendor the istota package.
     """
     payload = {"action": action, **fields}

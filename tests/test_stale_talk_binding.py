@@ -37,7 +37,7 @@ def db_path(tmp_path):
 
 @pytest.fixture
 def web_config(db_path):
-    from istota import web_app
+    from istota.webui import app as web_app
     cfg = Config()
     cfg.db_path = db_path
     cfg.nextcloud = NextcloudConfig(
@@ -75,7 +75,7 @@ def _talk_client(*, info_side_effect=None, info_return=None) -> MagicMock:
 def _user_probe(verdict: str):
     """Stub the user-scoped second stage, so a test can say what the requesting
     user sees without standing up the OAuth token store."""
-    from istota import web_app
+    from istota.webui import app as web_app
     return patch.object(
         web_app, "_talk_conversation_seen_by_user",
         AsyncMock(return_value=verdict),
@@ -259,12 +259,12 @@ class TestRePromoteOverADeadBinding:
     async def test_a_deleted_conversation_is_replaced(self, web_config, db_path):
         """The reported bug. The bound conversation is gone, so re-promoting
         mints a new one and points the binding at it."""
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
             db.add_room_binding(conn, room.token, "talk", "dead-tok")
         fake = _talk_client(info_side_effect=_http_error(404))
-        with patch("istota.talk.TalkClient", return_value=fake), _user_probe("gone"):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake), _user_probe("gone"):
             status, result = await web_app._chat_promote_to_talk("alice", room.id)
         assert status == "reconnected"
         assert result is not None and result["talk_token"] == "new-tok"
@@ -282,7 +282,7 @@ class TestRePromoteOverADeadBinding:
         reply's `replyTo` would carry one into the replacement, where the same
         number may belong to a different message."""
         import json
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
             db.add_room_binding(conn, room.token, "talk", "dead-tok")
@@ -293,7 +293,7 @@ class TestRePromoteOverADeadBinding:
             )
             mid = cur.lastrowid
         fake = _talk_client(info_side_effect=_http_error(404))
-        with patch("istota.talk.TalkClient", return_value=fake), _user_probe("gone"):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake), _user_probe("gone"):
             status, _ = await web_app._chat_promote_to_talk("alice", room.id)
         assert status == "reconnected"
         with db.get_db(db_path) as conn:
@@ -303,12 +303,12 @@ class TestRePromoteOverADeadBinding:
     async def test_a_live_conversation_is_left_alone(self, web_config, db_path):
         """The guard's original job, which must survive: no second Talk room
         for a room that is already properly bound."""
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
             db.add_room_binding(conn, room.token, "talk", "live-tok")
         fake = _talk_client(info_return={"token": "live-tok"})
-        with patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             status, result = await web_app._chat_promote_to_talk("alice", room.id)
         assert status == "live"
         fake.create_conversation.assert_not_awaited()
@@ -323,12 +323,12 @@ class TestRePromoteOverADeadBinding:
         """A probe that failed says nothing about the conversation. Refusing
         preserves a good binding; the alternative mints a Talk room on every
         transient blip."""
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
             db.add_room_binding(conn, room.token, "talk", "live-tok")
         fake = _talk_client(info_side_effect=httpx.ConnectError("no route"))
-        with patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             status, result = await web_app._chat_promote_to_talk("alice", room.id)
         assert status == "unreachable"
         assert result is None
@@ -341,7 +341,7 @@ class TestRePromoteOverADeadBinding:
     async def test_a_server_error_refuses_too(self, web_config, db_path):
         """Only 404 means gone. A 500 is Nextcloud having a bad day, and a 403
         is an auth fault that minting a new room would not fix."""
-        from istota import web_app
+        from istota.webui import app as web_app
         for status_code in (403, 500, 502):
             with db.get_db(db_path) as conn:
                 room = db.create_web_chat_room(conn, "alice", f"Ideas{status_code}")
@@ -351,7 +351,7 @@ class TestRePromoteOverADeadBinding:
                 db.add_room_binding(conn, room.token, "talk", ref)
                 assert db.get_room_binding(conn, room.token, "talk").surface_ref == ref
             fake = _talk_client(info_side_effect=_http_error(status_code))
-            with patch("istota.talk.TalkClient", return_value=fake):
+            with patch("istota.nextcloud.talk.TalkClient", return_value=fake):
                 status, _ = await web_app._chat_promote_to_talk("alice", room.id)
             assert status == "unreachable", f"HTTP {status_code} must not read as gone"
             fake.create_conversation.assert_not_awaited()
@@ -364,12 +364,12 @@ class TestRePromoteOverADeadBinding:
         win. The conversation is alive with its history and its other people;
         minting a replacement would fork it and strand the original behind a
         binding that no longer names it. Adding the bot back is the repair."""
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
             db.add_room_binding(conn, room.token, "talk", "live-tok")
         fake = _talk_client(info_side_effect=_http_error(404))
-        with patch("istota.talk.TalkClient", return_value=fake), _user_probe(
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake), _user_probe(
             "bot_removed"
         ):
             status, result = await web_app._chat_promote_to_talk("alice", room.id)
@@ -386,12 +386,12 @@ class TestRePromoteOverADeadBinding:
     ):
         """No user token, or a user probe that failed, leaves the two readings
         of the 404 unseparated — so nothing is replaced."""
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
             db.add_room_binding(conn, room.token, "talk", "live-tok")
         fake = _talk_client(info_side_effect=_http_error(404))
-        with patch("istota.talk.TalkClient", return_value=fake), _user_probe("unknown"):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake), _user_probe("unknown"):
             status, _ = await web_app._chat_promote_to_talk("alice", room.id)
         assert status == "unreachable"
         fake.create_conversation.assert_not_awaited()
@@ -402,11 +402,11 @@ class TestRePromoteOverADeadBinding:
     @pytest.mark.asyncio
     async def test_an_unbound_room_never_probes(self, web_config, db_path):
         """The ordinary first promote costs no extra OCS round trip."""
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
         fake = _talk_client()
-        with patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             status, result = await web_app._chat_promote_to_talk("alice", room.id)
         assert status == "ok"
         assert result is not None and result["talk_token"] == "new-tok"
@@ -418,7 +418,7 @@ class TestRePromoteOverADeadBinding:
         loser must leave the winner's ref in place — it has minted an orphan
         Talk room either way, and overwriting adds a *second* orphan while
         pointing the room at a conversation the other request is not using."""
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
             db.add_room_binding(conn, room.token, "talk", "dead-tok")
@@ -434,7 +434,7 @@ class TestRePromoteOverADeadBinding:
             return {"token": "new-tok"}
 
         fake.create_conversation = AsyncMock(side_effect=_create_then_race)
-        with patch("istota.talk.TalkClient", return_value=fake), _user_probe("gone"):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake), _user_probe("gone"):
             status, result = await web_app._chat_promote_to_talk("alice", room.id)
         assert status == "raced"
         with db.get_db(db_path) as conn:
@@ -457,11 +457,11 @@ class TestTheUserScopedProbe:
     async def test_the_user_still_seeing_it_means_only_the_bot_left(
         self, web_config,
     ):
-        from istota import web_app
+        from istota.webui import app as web_app
         fake = _talk_client(info_return={"token": "live-tok"})
-        with patch("istota.web_tokens.feature_enabled", return_value=True), patch(
-            "istota.web_tokens.get_access_token", return_value="user-token"
-        ), patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.webui.tokens.feature_enabled", return_value=True), patch(
+            "istota.webui.tokens.get_access_token", return_value="user-token"
+        ), patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             verdict = await web_app._talk_conversation_seen_by_user(
                 "live-tok", "alice",
             )
@@ -470,11 +470,11 @@ class TestTheUserScopedProbe:
 
     @pytest.mark.asyncio
     async def test_the_user_not_seeing_it_either_means_gone(self, web_config):
-        from istota import web_app
+        from istota.webui import app as web_app
         fake = _talk_client(info_side_effect=_http_error(404))
-        with patch("istota.web_tokens.feature_enabled", return_value=True), patch(
-            "istota.web_tokens.get_access_token", return_value="user-token"
-        ), patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.webui.tokens.feature_enabled", return_value=True), patch(
+            "istota.webui.tokens.get_access_token", return_value="user-token"
+        ), patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             verdict = await web_app._talk_conversation_seen_by_user(
                 "dead-tok", "alice",
             )
@@ -484,9 +484,9 @@ class TestTheUserScopedProbe:
     async def test_no_user_token_cannot_settle_it(self, web_config):
         """A deployment with no user tokens is a fact about the deployment, not
         about the conversation — so it must not read as 'gone'."""
-        from istota import web_app
-        with patch("istota.web_tokens.feature_enabled", return_value=True), patch(
-            "istota.web_tokens.get_access_token", return_value=None
+        from istota.webui import app as web_app
+        with patch("istota.webui.tokens.feature_enabled", return_value=True), patch(
+            "istota.webui.tokens.get_access_token", return_value=None
         ):
             verdict = await web_app._talk_conversation_seen_by_user(
                 "dead-tok", "alice",
@@ -495,8 +495,8 @@ class TestTheUserScopedProbe:
 
     @pytest.mark.asyncio
     async def test_the_feature_being_off_cannot_settle_it(self, web_config):
-        from istota import web_app
-        with patch("istota.web_tokens.feature_enabled", return_value=False):
+        from istota.webui import app as web_app
+        with patch("istota.webui.tokens.feature_enabled", return_value=False):
             verdict = await web_app._talk_conversation_seen_by_user(
                 "dead-tok", "alice",
             )
@@ -504,11 +504,11 @@ class TestTheUserScopedProbe:
 
     @pytest.mark.asyncio
     async def test_any_other_status_cannot_settle_it(self, web_config):
-        from istota import web_app
+        from istota.webui import app as web_app
         fake = _talk_client(info_side_effect=_http_error(403))
-        with patch("istota.web_tokens.feature_enabled", return_value=True), patch(
-            "istota.web_tokens.get_access_token", return_value="user-token"
-        ), patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.webui.tokens.feature_enabled", return_value=True), patch(
+            "istota.webui.tokens.get_access_token", return_value="user-token"
+        ), patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             verdict = await web_app._talk_conversation_seen_by_user(
                 "dead-tok", "alice",
             )
@@ -522,12 +522,12 @@ class TestPromoteRouteStatuses:
 
     @pytest.mark.asyncio
     async def test_live_is_not_a_404(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
             db.add_room_binding(conn, room.token, "talk", "live-tok")
         fake = _talk_client(info_return={"token": "live-tok"})
-        with patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             resp = await web_app.chat_promote_room(
                 room.id, user={"username": "alice"}, _csrf=None,
             )
@@ -536,12 +536,12 @@ class TestPromoteRouteStatuses:
 
     @pytest.mark.asyncio
     async def test_reconnected_carries_the_new_room(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
             db.add_room_binding(conn, room.token, "talk", "dead-tok")
         fake = _talk_client(info_side_effect=_http_error(404))
-        with patch("istota.talk.TalkClient", return_value=fake), _user_probe("gone"):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake), _user_probe("gone"):
             resp = await web_app.chat_promote_room(
                 room.id, user={"username": "alice"}, _csrf=None,
             )
@@ -556,12 +556,12 @@ class TestPromoteRouteStatuses:
         # Distinct from the 404, which means the room is not promotable at all.
         # `PromoteStatus` deliberately does not model this one, so the client
         # falls to its generic catch — which only works if it is an error status.
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
         fake = _talk_client()
         fake.create_conversation = AsyncMock(return_value={})
-        with patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             resp = await web_app.chat_promote_room(
                 room.id, user={"username": "alice"}, _csrf=None,
             )
@@ -571,7 +571,7 @@ class TestPromoteRouteStatuses:
 
     @pytest.mark.asyncio
     async def test_an_unknown_room_is_still_a_404(self, web_config):
-        from istota import web_app
+        from istota.webui import app as web_app
         resp = await web_app.chat_promote_room(
             99999, user={"username": "alice"}, _csrf=None,
         )

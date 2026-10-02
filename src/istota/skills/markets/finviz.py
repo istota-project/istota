@@ -14,8 +14,8 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from istota.browser_owner import browser_headers, with_browser_owner
-from istota.browser_admission import (
+from istota.browser.owner import browser_headers, with_browser_owner
+from istota.browser.admission import (
     BrowserAdmissionUnconfigured, BrowserQueueTimeout, browser_request,
 )
 

@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from istota import db, room_scopes
+from istota import db
+from istota.rooms import scopes as room_scopes
 from istota.skills._loader import load_skill_index
 from istota.skills._types import SkillMeta
 

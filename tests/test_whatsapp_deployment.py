@@ -483,7 +483,7 @@ class TestTheReceiverLogsNoVerifyToken:
         command = compose.split("  webhooks:", 1)[1]
         line = next(
             ln for ln in command.splitlines()
-            if "uvicorn istota.webhook_receiver:app" in ln
+            if "uvicorn istota.webui.webhook_receiver:app" in ln
         )
 
         assert "--no-access-log" in line

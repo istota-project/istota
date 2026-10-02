@@ -55,7 +55,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from ... import du, image_sniff
+from istota.lib import du
+from istota.lib import image_sniff
 from . import message_fingerprint
 
 if TYPE_CHECKING:  # pragma: no cover - typing only

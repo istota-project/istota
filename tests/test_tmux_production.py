@@ -29,7 +29,7 @@ from istota.brain.tmux_claude import (
     reset_circuit_breaker,
 )
 from istota.config import BrainConfig, TmuxBrainConfig
-from istota.shell_exec import PIPEFAIL_SHELLOPTS, SHELLOPTS_VAR
+from istota.sandbox.shell_exec import PIPEFAIL_SHELLOPTS, SHELLOPTS_VAR
 from tests.support.monotonic_spy import monotonic_spy
 from tests.support.sleep_spy import sleep_spy
 

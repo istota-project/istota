@@ -1,4 +1,4 @@
-"""Tests for istota.web_app — authenticated web interface."""
+"""Tests for istota.webui.app — authenticated web interface."""
 
 import json
 import re
@@ -73,7 +73,7 @@ def config(tmp_path):
 
 def _patch_app(config):
     """Inject config and mock OAuth into the web app module."""
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod.app.state.istota_config = config
     mock_oauth = MagicMock()
@@ -96,7 +96,7 @@ async def client(app):
 
 def _login_cookies(client, app):
     """Helper: perform OIDC callback and return session cookies."""
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
         "user_id": "alice",
     })
@@ -123,7 +123,7 @@ class TestLoginRoute:
         """The login, login-error and form pages share one card (ISSUE-569)."""
         import re
 
-        from istota import web_app
+        from istota.webui import app as web_app
 
         pages = [
             web_app._render_form_page("Bot", "Headline", "<p>body</p>", ""),
@@ -153,7 +153,7 @@ class TestLoginRoute:
         assert resp.text.count('href="/istota/login?go=1"') == 1
 
     async def test_login_page_escapes_bot_name(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         original = mod._config.bot_name
         mod._config.bot_name = '<script>alert(1)</script>'
@@ -165,7 +165,7 @@ class TestLoginRoute:
         assert "&lt;script&gt;" in resp.text
 
     async def test_login_with_go_redirects_to_oidc(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         from fastapi.responses import RedirectResponse
         mock_redirect = RedirectResponse(url="https://cloud.example.com/authorize?client_id=istota-web")
@@ -230,7 +230,7 @@ class TestAuthCardKeyboardDismiss:
         import shutil
         import subprocess
 
-        from istota import web_app
+        from istota.webui import app as web_app
 
         node = shutil.which("node")
         if not node:
@@ -243,7 +243,7 @@ class TestAuthCardKeyboardDismiss:
         return json.loads(result.stdout)
 
     def test_every_auth_card_carries_the_dismiss_script(self):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         pages = [
             web_app._render_form_page("Bot", "Check your email", "<p>body</p>", ""),
@@ -293,7 +293,7 @@ class TestAuthCardKeyboardDismiss:
 @_needs_web_deps
 class TestCallbackRoute:
     async def test_callback_valid_user_sets_session(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "alice",
@@ -305,7 +305,7 @@ class TestCallbackRoute:
         assert any("istota_session" in c for c in resp.headers.get_list("set-cookie"))
 
     async def test_callback_unknown_user_returns_403(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "unknown_person",
@@ -318,7 +318,7 @@ class TestCallbackRoute:
         """When NC's OAuth2 token response omits ``user_id`` (older NC or
         custom auth backend), the callback fetches identity from the OCS
         userinfo endpoint and discards the bearer token."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"access_token": "abc"})
         mod._nc_oauth2_userinfo = AsyncMock(return_value={
@@ -341,7 +341,7 @@ class TestCallbackRoute:
         unhandled it surfaces as a bare 500 with a traceback, which says
         nothing about how to recover.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from authlib.integrations.base_client.errors import MismatchingStateError
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(
@@ -356,7 +356,7 @@ class TestCallbackRoute:
     async def test_callback_provider_error_returns_400(self, client, app):
         """The provider declining (e.g. the user cancels consent) comes back as
         an OAuthError too, and is equally not a server fault."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from authlib.integrations.base_client.errors import OAuthError
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(
@@ -370,7 +370,7 @@ class TestCallbackRoute:
         """A token-endpoint failure is an upstream problem, so it must stay
         distinguishable from the 400s above rather than collapsing into one
         generic error — 502 matches what the userinfo fallback already returns."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(
             side_effect=RuntimeError("connection refused")
@@ -382,7 +382,7 @@ class TestCallbackRoute:
     async def test_callback_failure_does_not_leak_exception_text(self, client, app):
         """Whatever the provider put in the error, it is attacker-influenceable
         and reflected into a browser response, so it must not be echoed."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from authlib.integrations.base_client.errors import OAuthError
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(
@@ -411,7 +411,7 @@ class TestGoogleConnectRoute:
     """
 
     async def _connect(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         from fastapi.responses import RedirectResponse
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
@@ -482,7 +482,7 @@ class TestGoogleScopeSelection:
         return cfg
 
     async def _login(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "alice",
         })
@@ -490,7 +490,7 @@ class TestGoogleScopeSelection:
         return resp.cookies
 
     async def _connect(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from fastapi.responses import RedirectResponse
 
         mod._oauth.google.authorize_redirect = AsyncMock(
@@ -888,7 +888,7 @@ class TestUnauthenticatedAccess:
 @_needs_web_deps
 class TestApiMe:
     async def test_returns_user_info_with_feeds(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "alice",
@@ -907,7 +907,7 @@ class TestApiMe:
         assert data["features"]["feeds"] is True
 
     async def test_returns_no_feeds_for_user_without_feeds_resource(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "bob",
@@ -924,59 +924,59 @@ class TestApiMe:
 @_needs_web_deps
 class TestSanitizeHtml:
     def test_strips_disallowed_tags(self):
-        from istota.web_app import _sanitize_html
+        from istota.webui.app import _sanitize_html
         result = _sanitize_html('<div><script>alert(1)</script><p>Hello</p></div>')
         assert "<script>" not in result
         assert "<p>Hello</p>" in result
 
     def test_preserves_allowed_tags(self):
-        from istota.web_app import _sanitize_html
+        from istota.webui.app import _sanitize_html
         result = _sanitize_html('<p><strong>Bold</strong> and <em>italic</em></p>')
         assert "<strong>" in result
         assert "<em>" in result
 
     def test_strips_event_handler_attributes(self):
-        from istota.web_app import _sanitize_html
+        from istota.webui.app import _sanitize_html
         result = _sanitize_html('<p onmouseover="alert(1)">text</p>')
         assert "onmouseover" not in result
         assert "<p>" in result
         assert "text" in result
 
     def test_strips_event_handler_on_blockquote(self):
-        from istota.web_app import _sanitize_html
+        from istota.webui.app import _sanitize_html
         result = _sanitize_html('<blockquote onclick="alert(1)">quote</blockquote>')
         assert "onclick" not in result
         assert "<blockquote>" in result
 
     def test_strips_style_attribute(self):
-        from istota.web_app import _sanitize_html
+        from istota.webui.app import _sanitize_html
         result = _sanitize_html('<b style="color:red">bold</b>')
         assert "style" not in result
         assert "<b>" in result
 
     def test_blocks_javascript_href(self):
-        from istota.web_app import _sanitize_html
+        from istota.webui.app import _sanitize_html
         result = _sanitize_html('<a href="javascript:alert(1)">click</a>')
         assert "javascript" not in result
         assert "<a>" in result
 
     def test_blocks_javascript_href_case_insensitive(self):
-        from istota.web_app import _sanitize_html
+        from istota.webui.app import _sanitize_html
         result = _sanitize_html('<a href="JaVaScRiPt:alert(1)">click</a>')
         assert "javascript" not in result.lower()
 
     def test_allows_https_href(self):
-        from istota.web_app import _sanitize_html
+        from istota.webui.app import _sanitize_html
         result = _sanitize_html('<a href="https://example.com">link</a>')
         assert 'href="https://example.com"' in result
 
     def test_allows_mailto_href(self):
-        from istota.web_app import _sanitize_html
+        from istota.webui.app import _sanitize_html
         result = _sanitize_html('<a href="mailto:user@example.com">email</a>')
         assert "mailto:" in result
 
     def test_blocks_data_href(self):
-        from istota.web_app import _sanitize_html
+        from istota.webui.app import _sanitize_html
         result = _sanitize_html('<a href="data:text/html,<script>alert(1)</script>">click</a>')
         assert "data:" not in result
 
@@ -984,7 +984,7 @@ class TestSanitizeHtml:
 @_needs_web_deps
 class TestLogout:
     async def test_logout_clears_session(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "alice",
@@ -1006,7 +1006,7 @@ class TestCsrfOriginCheck:
     """Tests for Origin header CSRF protection on state-changing endpoints."""
 
     async def _login(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "alice",
         })
@@ -1046,7 +1046,7 @@ class TestCsrfOriginCheck:
 
     async def test_empty_hostname_returns_403(self, client, app):
         """When site.hostname is empty and Host header is missing, CSRF check must reject."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await self._login(client, app)
         # Clear hostname after login to test CSRF with no hostname
         original = mod._config.site.hostname
@@ -1068,7 +1068,7 @@ class TestSessionRotation:
     """Test that session is cleared before writing user info on login."""
 
     async def test_callback_clears_session_before_login(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         # Set pre-existing session data (simulating a pre-login session)
         # First, make a request to establish a session with some data
@@ -1103,7 +1103,7 @@ class TestAdminStats:
         return config
 
     async def _login(self, client, username):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": username,
         })
@@ -1540,7 +1540,7 @@ class TestAdminStats:
         ``sqlite_util`` module docstring); ``foreign_keys`` is the pragma
         evidence.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from istota.feeds import db as feeds_db
 
         config = self._config_with_admin(tmp_path)
@@ -1588,7 +1588,7 @@ class TestAdminStats:
         database under the user's module dir and then report the missing tables
         as a resolve error. ``_aggregate_module_db`` already skipped that case.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         config = self._config_with_admin(tmp_path)
         db_path = config.module_db_path("alice", "feeds")
@@ -1752,7 +1752,8 @@ class TestAdminStats:
         ``test_every_routable_interactive_source_is_interactive_here`` covers
         the missing direction by comparing against a set with other writers.
         """
-        from istota import db, web_app
+        from istota import db
+        from istota.webui import app as web_app
         for source in ("talk", "email", "web", "cli", "repl", "istota_file",
                        "sms", "whatsapp"):
             root = tmp_path / source
@@ -1793,7 +1794,7 @@ class TestAdminStats:
         (ISSUE-499), so a user whose only traffic was either read as never
         active and had their messages booked as scheduler ticks.
         """
-        from istota import web_app
+        from istota.webui import app as web_app
         from istota.transport import routing
         missing = routing._INTERACTIVE_SOURCE_TYPES - web_app._INTERACTIVE_SOURCES
         assert not missing, (
@@ -1929,7 +1930,7 @@ class TestAdminBrainStatus:
         reset_availability_breaker()
 
     def test_healthy_when_breaker_closed(self, tmp_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         self._reset_breaker()
         mod._config = self._config_with_fallback(tmp_path)
         section = mod._admin_brain_status_section()
@@ -1938,7 +1939,7 @@ class TestAdminBrainStatus:
         assert section["primary"] == "claude_code"
 
     def test_degraded_when_breaker_open(self, tmp_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._config = self._config_with_fallback(tmp_path)
         self._reset_breaker()
         self._open_breaker("claude_code")
@@ -1953,7 +1954,7 @@ class TestAdminBrainStatus:
 
     def test_degraded_from_scheduler_availability_state(self, tmp_path):
         """The web service has a separate process from the scheduler."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from istota.brain_availability import record_unavailable
 
         config = self._config_with_fallback(tmp_path)
@@ -1971,7 +1972,7 @@ class TestAdminBrainStatus:
         assert section["reason"] == "usage_limit"
 
     def test_degraded_with_no_fallback_configured(self, tmp_path):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from istota.config import BrainConfig
         config = self._config_with_fallback(tmp_path)
         config.brain = BrainConfig(kind="claude_code", fallback_cooldown_seconds=900)
@@ -1990,7 +1991,7 @@ class TestAdminBrainStatus:
     def test_cooldown_zero_never_degrades(self, tmp_path):
         # Stickiness disabled: the breaker is never consulted for skipping, so
         # there's no persistent degraded posture to display.
-        import istota.web_app as mod
+        import istota.webui.app as mod
         from istota.config import BrainConfig
         config = self._config_with_fallback(tmp_path)
         config.brain = BrainConfig(
@@ -2006,7 +2007,7 @@ class TestAdminBrainStatus:
             self._reset_breaker()
 
     async def _login(self, client, username):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": username,
         })
@@ -2045,7 +2046,7 @@ class TestTaskEventEndpoints:
         return config
 
     async def _login(self, client, username):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": username,
         })
@@ -2252,10 +2253,11 @@ class TestTaskEventEndpoints:
         """A stream tailing a task that is still running polls until the client
         goes away, so a shutdown could only end it by cancelling it — which
         reaches uvicorn's log as an `Exception in ASGI application` traceback.
-        See `istota.web_shutdown`."""
+        See `istota.webui.shutdown`."""
         import asyncio
 
-        from istota import db, web_shutdown
+        from istota import db
+        from istota.webui import shutdown as web_shutdown
         from istota.events import EventWriter
 
         config = self._config_with_admin(tmp_path)
@@ -2357,7 +2359,7 @@ class TestSessionSecretResolution:
     closed unless an explicit dev override is set."""
 
     def test_env_var_wins(self, monkeypatch):
-        from istota import web_app
+        from istota.webui import app as web_app
         monkeypatch.setenv("ISTOTA_WEB_SESSION_SECRET_KEY", "env-signing-key")
         # Even if config supplies one, the env var takes precedence.
         cfg = MagicMock()
@@ -2366,7 +2368,7 @@ class TestSessionSecretResolution:
         assert web_app._resolve_session_secret() == "env-signing-key"
 
     def test_falls_back_to_config_session_secret(self, monkeypatch):
-        from istota import web_app
+        from istota.webui import app as web_app
         monkeypatch.delenv("ISTOTA_WEB_SESSION_SECRET_KEY", raising=False)
         cfg = MagicMock()
         cfg.web.session_secret_key = "config-signing-key"
@@ -2374,7 +2376,7 @@ class TestSessionSecretResolution:
         assert web_app._resolve_session_secret() == "config-signing-key"
 
     def test_dev_override_yields_random_per_process_key(self, monkeypatch):
-        from istota import web_app
+        from istota.webui import app as web_app
         monkeypatch.delenv("ISTOTA_WEB_SESSION_SECRET_KEY", raising=False)
         monkeypatch.setenv("ISTOTA_WEB_ALLOW_INSECURE_SESSION", "1")
         cfg = MagicMock()
@@ -2388,7 +2390,7 @@ class TestSessionSecretResolution:
         assert web_app._resolve_session_secret() != secret
 
     def test_fails_closed_without_secret_or_override(self, monkeypatch):
-        from istota import web_app
+        from istota.webui import app as web_app
         monkeypatch.delenv("ISTOTA_WEB_SESSION_SECRET_KEY", raising=False)
         monkeypatch.delenv("ISTOTA_WEB_ALLOW_INSECURE_SESSION", raising=False)
         cfg = MagicMock()
@@ -2398,7 +2400,7 @@ class TestSessionSecretResolution:
             web_app._resolve_session_secret()
 
     def test_config_load_failure_is_not_fatal(self, monkeypatch):
-        from istota import web_app
+        from istota.webui import app as web_app
         monkeypatch.delenv("ISTOTA_WEB_SESSION_SECRET_KEY", raising=False)
         monkeypatch.setenv("ISTOTA_WEB_ALLOW_INSECURE_SESSION", "1")
 
@@ -2416,19 +2418,19 @@ class TestResolveTz:
     """Client-supplied timezone is accepted when valid, else falls back (ISSUE-049)."""
 
     def test_valid_client_tz_overrides_fallback(self):
-        from istota.web_app import _resolve_tz
+        from istota.webui.app import _resolve_tz
         assert _resolve_tz("Asia/Tokyo", "America/Los_Angeles") == "Asia/Tokyo"
 
     def test_empty_client_tz_returns_fallback(self):
-        from istota.web_app import _resolve_tz
+        from istota.webui.app import _resolve_tz
         assert _resolve_tz("", "America/Los_Angeles") == "America/Los_Angeles"
 
     def test_invalid_client_tz_returns_fallback(self):
-        from istota.web_app import _resolve_tz
+        from istota.webui.app import _resolve_tz
         assert _resolve_tz("Not/A/Real/Zone", "America/Los_Angeles") == "America/Los_Angeles"
 
     def test_malformed_client_tz_returns_fallback(self):
-        from istota.web_app import _resolve_tz
+        from istota.webui.app import _resolve_tz
         # Null bytes and other oddities should not crash
         assert _resolve_tz("../etc/passwd", "UTC") == "UTC"
 
@@ -2461,7 +2463,7 @@ class TestSettingsEndpoints:
         return cfg
 
     async def _login_alice(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "alice",
         })
@@ -2509,7 +2511,7 @@ class TestSettingsEndpoints:
         # The web surface is gone, but CLI/runtime validation must still
         # accept native_brain so `istota secret ensure -s native_brain` and
         # the executor's per-user-key overlay keep working.
-        from istota import secret_schema
+        from istota.credentials import schema as secret_schema
 
         assert "native_brain" in secret_schema.all_known_services()
         assert "api_key" in secret_schema.known_service_keys()["native_brain"]
@@ -2560,7 +2562,7 @@ class TestSettingsEndpoints:
         cfg = self._make_test_config(tmp_path)
         # Bob has every module disabled in the shared fixture.
         _patch_app(cfg)
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "bob",
         })
@@ -2590,7 +2592,7 @@ class TestSettingsEndpoints:
     async def test_services_never_returns_plaintext(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         secrets_store.set_secret(self._db_path, "alice", "monarch", "session_id", "secret-sid-x")
         cookies = await self._login_alice(client, app)
         resp = await client.get("/istota/api/settings/services", cookies=cookies)
@@ -2609,7 +2611,7 @@ class TestSettingsEndpoints:
         )
         assert resp.status_code == 200
         assert resp.json()["configured"] is True
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         assert secrets_store.get_secret(self._db_path, "alice", "monarch", "session_id") == "SID-alice"
 
     async def test_set_secret_rejects_unknown_service(self, tmp_path, client, app):
@@ -2662,7 +2664,7 @@ class TestSettingsEndpoints:
     async def test_delete_secret(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         secrets_store.set_secret(self._db_path, "alice", "monarch", "session_id", "SID-x")
         cookies = await self._login_alice(client, app)
         resp = await client.delete(
@@ -2698,7 +2700,7 @@ class TestSettingsEndpoints:
             cookies=cookies,
             headers={"origin": "https://example.com"},
         )
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         assert secrets_store.get_secret(self._db_path, "alice", "monarch", "session_id") == "SID-alice"
         assert secrets_store.get_secret(self._db_path, "bob", "monarch", "session_id") is None
 
@@ -2759,7 +2761,7 @@ class TestVaultOwnedServices:
         return cfg
 
     async def _login_alice(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "alice",
         })
@@ -2769,7 +2771,7 @@ class TestVaultOwnedServices:
     async def test_put_on_a_service_the_vault_used_to_own_writes(
         self, tmp_path, client, app,
     ):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._vault_config(tmp_path))
         cookies = await self._login_alice(client, app)
@@ -2795,7 +2797,7 @@ class TestVaultOwnedServices:
         writes into a typed service any more, so there is nothing for a refusal
         to protect.
         """
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         secrets_store.set_secret(
             self._db_path, "alice", "karakeep", "api_key", "already-stored",
@@ -2818,7 +2820,7 @@ class TestVaultOwnedServices:
         self, tmp_path, client, app,
     ):
         """The control. Without it the refusal could be refusing everything."""
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._vault_config(tmp_path))
         cookies = await self._login_alice(client, app)
@@ -2841,8 +2843,8 @@ class TestVaultOwnedServices:
         Bob declares no vault, so karakeep is his to write even while alice's
         vault owns the same service name.
         """
-        import istota.web_app as mod
-        from istota import secrets_store
+        import istota.webui.app as mod
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._vault_config(tmp_path))
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
@@ -2872,7 +2874,7 @@ class TestVaultOwnedServices:
         resolves to nothing is a refusal with no remedy behind it — the file
         they would be told to edit is one the daemon cannot read either.
         """
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         cfg = self._vault_config(tmp_path)
         cfg.users["alice"].vault_path = "no-such-dir/vault.kdbx"
@@ -3019,7 +3021,7 @@ class TestTheVaultWriteEndpoints:
         return cfg
 
     async def _login_alice(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "alice",
         })
@@ -3032,7 +3034,7 @@ class TestTheVaultWriteEndpoints:
 
     @pytest.mark.parametrize("allowed", [False, True])
     async def test_multi_user_vault_opt_in(self, tmp_path, client, app, monkeypatch, allowed):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         config = self._config(tmp_path, vault_path="config/vault.kdbx")
         config.users["bob"] = UserConfig()
@@ -3055,7 +3057,7 @@ class TestTheVaultWriteEndpoints:
 
     @pytest.mark.parametrize("allowed", [False, True])
     async def test_generic_vault_policy(self, tmp_path, client, app, monkeypatch, allowed):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         config = self._config(tmp_path)
         config.users["bob"] = UserConfig()
@@ -3107,7 +3109,7 @@ class TestTheVaultWriteEndpoints:
         )
         assert resp.status_code == 200, resp.text
 
-        import istota.web_app as mod
+        import istota.webui.app as mod
         assert storage.stored_vault_file(mod._config, "alice") == "work.kdbx"
         # And it is what the daemon will read, which is the half a stored value
         # alone does not establish.
@@ -3138,7 +3140,9 @@ class TestTheVaultWriteEndpoints:
         the `secrets` table. Both would be unanswerable any other way, and a
         parse in the web process is an Argon2id unlock on the event loop.
         """
-        from istota import db, secrets_store, secrets_vault
+        from istota import db
+        from istota.credentials import store as secrets_store
+        from istota.credentials import vault as secrets_vault
 
         cookies = await self._setup(tmp_path, client, app)
         self._folder(tmp_path, "personal.kdbx")
@@ -3180,7 +3184,9 @@ class TestTheVaultWriteEndpoints:
         """The control. Without it `unscoped` could be hardcoded True, and a
         record predating the field reads as False — which is right, since
         nothing was ever notified for it."""
-        from istota import db, secrets_store, secrets_vault
+        from istota import db
+        from istota.credentials import store as secrets_store
+        from istota.credentials import vault as secrets_vault
 
         cookies = await self._setup(tmp_path, client, app)
         self._folder(tmp_path, "personal.kdbx")
@@ -3213,8 +3219,9 @@ class TestTheVaultWriteEndpoints:
         flag is what makes the cut legible and the uncapped count beside it is
         what makes it add up.
         """
-        import istota.web_app as mod
-        from istota import secrets_store, secrets_vault
+        import istota.webui.app as mod
+        from istota.credentials import store as secrets_store
+        from istota.credentials import vault as secrets_vault
 
         cookies = await self._setup(tmp_path, client, app)
         self._folder(tmp_path, "personal.kdbx")
@@ -3255,7 +3262,7 @@ class TestTheVaultWriteEndpoints:
         )
         assert resp.status_code == 200
 
-        import istota.web_app as mod
+        import istota.webui.app as mod
         assert storage.stored_vault_file(mod._config, "alice") == ""
         assert storage.vault_location_for(
             mod._config, "alice"
@@ -3282,7 +3289,7 @@ class TestTheVaultWriteEndpoints:
         )
         assert resp.status_code == 400
 
-        import istota.web_app as mod
+        import istota.webui.app as mod
         assert storage.stored_vault_file(mod._config, "alice") == ""
 
     async def test_a_configured_vault_is_not_writable_from_here(
@@ -3307,7 +3314,7 @@ class TestTheVaultWriteEndpoints:
         )
         assert resp.status_code == 409
 
-        import istota.web_app as mod
+        import istota.webui.app as mod
         assert storage.stored_vault_file(mod._config, "alice") == ""
 
     async def test_every_mutating_route_needs_a_session(
@@ -3329,7 +3336,7 @@ class TestTheVaultWriteEndpoints:
         which are the user's own and neither of which a settings toggle should
         do for them.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         for route in mod.api_router.routes:
             if route.path == "/istota/api/settings/vault":
@@ -3340,7 +3347,7 @@ class TestTheVaultWriteEndpoints:
         # overrides, so the assertion is that each route declares it rather than
         # that a forged request is refused — which is `_verify_origin`'s own
         # subject and is tested where that lives.
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         # `route.path` carries `api_router`'s own `/istota/api` prefix.
         wanted = {
@@ -3362,7 +3369,8 @@ class TestTheVaultWriteEndpoints:
     async def test_generate_returns_the_value_once_and_stores_it(
         self, tmp_path, client, app,
     ):
-        from istota import secrets_store, secrets_vault
+        from istota.credentials import store as secrets_store
+        from istota.credentials import vault as secrets_vault
 
         cookies = await self._setup(tmp_path, client, app)
         resp = await client.put(
@@ -3388,7 +3396,8 @@ class TestTheVaultWriteEndpoints:
     async def test_a_typed_passphrase_is_held_to_the_cli_floor(
         self, tmp_path, client, app,
     ):
-        from istota import secrets_store, secrets_vault
+        from istota.credentials import store as secrets_store
+        from istota.credentials import vault as secrets_vault
 
         cookies = await self._setup(tmp_path, client, app)
         short = "x" * (secrets_vault.VAULT_PASSPHRASE_MIN_CHARS - 1)
@@ -3429,7 +3438,7 @@ class TestTheVaultWriteEndpoints:
         --generate` refuses that without `--force`; a click that did it silently
         would be the one irreversible thing on the settings page.
         """
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         cookies = await self._setup(tmp_path, client, app)
         first = (await client.put(
@@ -3465,7 +3474,7 @@ class TestTheVaultWriteEndpoints:
         "I rotated the file, here is the new passphrase" flow take a
         confirmation about losing a value the user has in front of them.
         """
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         cookies = await self._setup(tmp_path, client, app)
         await client.put(
@@ -3511,7 +3520,7 @@ class TestTheVaultWriteEndpoints:
         )
         assert resp.status_code == 409
 
-        import istota.web_app as mod
+        import istota.webui.app as mod
         assert storage.stored_vault_file(mod._config, "alice") == ""
 
     async def test_an_unanswerable_configuration_is_not_writable(
@@ -3526,7 +3535,7 @@ class TestTheVaultWriteEndpoints:
         to refuse rather than let the exception escape, since an escaping one
         is a 500 on a settings page rather than a refusal on one control.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         cookies = await self._setup(tmp_path, client, app)
         self._folder(tmp_path, "personal.kdbx")
@@ -3543,7 +3552,7 @@ class TestTheVaultWriteEndpoints:
     async def test_generate_and_a_typed_value_together_are_refused(
         self, tmp_path, client, app,
     ):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         cookies = await self._setup(tmp_path, client, app)
         resp = await client.put(
@@ -3600,7 +3609,7 @@ class TestTheVaultSettingsEndpoint:
         return cfg
 
     async def _login_alice(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "alice",
         })
@@ -3614,7 +3623,8 @@ class TestTheVaultSettingsEndpoint:
         the web unit is not the scheduler unit, so this is the only way the fact
         crosses. Writing it directly also keeps this class off `pykeepass`.
         """
-        from istota import db, secrets_vault
+        from istota import db
+        from istota.credentials import vault as secrets_vault
 
         with db.get_db(self._db_path) as conn:
             db.kv_set(
@@ -3630,7 +3640,7 @@ class TestTheVaultSettingsEndpoint:
     async def test_it_counts_created_vault_credentials_without_opening_the_file(
         self, tmp_path, client, app,
     ):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         secrets_store.set_secret(self._db_path, "alice", "vault", "passphrase", "x" * 40)
         secrets_store.set_secret(
@@ -3689,7 +3699,7 @@ class TestTheVaultSettingsEndpoint:
         the assertion is about its absence, because an empty list is what a
         reintroduced field would carry on the first render too.
         """
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         secrets_store.set_secret(
             self._db_path, "alice", "vault", "passphrase", "x" * 40,
@@ -3712,7 +3722,7 @@ class TestTheVaultSettingsEndpoint:
         self, tmp_path, client, app,
     ):
         """`_SYNC_STATE` is per-process and this process never runs a sync."""
-        from istota.secrets_vault import OUTCOME_OK
+        from istota.credentials.vault import OUTCOME_OK
 
         self._record(OUTCOME_OK)
         _patch_app(self._config(tmp_path))
@@ -3736,7 +3746,8 @@ class TestTheVaultSettingsEndpoint:
         A failure that erased the last-success stamp would make a vault broken
         for an hour indistinguishable from one that has never worked.
         """
-        from istota import db, secrets_vault
+        from istota import db
+        from istota.credentials import vault as secrets_vault
 
         self._record(secrets_vault.OUTCOME_OK)
         with db.get_db(self._db_path) as conn:
@@ -3811,7 +3822,7 @@ class TestTheVaultSettingsEndpoint:
         return — so nothing else here would go red if somebody dropped the flag
         and put a one-second key derivation on the web process's event loop.
         """
-        from istota import secrets_vault
+        from istota.credentials import vault as secrets_vault
 
         calls = []
 
@@ -3825,7 +3836,7 @@ class TestTheVaultSettingsEndpoint:
         cfg = self._config(tmp_path)
         vault = Path(cfg.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
         vault.write_bytes(b"not a KeePass database, but forty-odd real bytes")
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         secrets_store.set_secret(
             self._db_path, "alice", "vault", "passphrase", "x" * 40,
         )
@@ -3849,7 +3860,7 @@ class TestTheVaultSettingsEndpoint:
         remembering to extend the sweep, which is the opposite of how the field
         list would have to be maintained.
         """
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         passphrase = "endpoint-fixture-passphrase-not-a-real-one"
         secrets_store.set_secret(
@@ -3875,7 +3886,7 @@ class TestTheVaultSettingsEndpoint:
     ):
         """The shape every new user gets: a file in the folder and a
         passphrase, with nothing typed and nothing stored to select it."""
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         cfg = self._config(tmp_path, vault_path="")
         folder = (
@@ -3907,7 +3918,8 @@ class TestTheVaultSettingsEndpoint:
         what the dropdown is for. `problem` gated on `outcome` renders this as
         a working vault, which is the one thing it must not do.
         """
-        from istota import secrets_store, storage
+        from istota import storage
+        from istota.credentials import store as secrets_store
 
         cfg = self._config(tmp_path, vault_path="")
         folder = (
@@ -3974,7 +3986,7 @@ class TestGenerateIngestToken:
         return cfg
 
     async def _login(self, client, app, user_id="alice"):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": user_id,
         })
@@ -3996,7 +4008,7 @@ class TestGenerateIngestToken:
         # than pinning an exact length.
         assert len(token) >= 32
 
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         assert secrets_store.get_secret(
             self._db_path, "alice", "overland", "ingest_token",
         ) == token
@@ -4045,7 +4057,7 @@ class TestGenerateIngestToken:
 
     async def test_a_refused_generate_does_not_rotate_the_token(self, tmp_path, client, app):
         """Refusing after minting would cut off working devices for nothing."""
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         secrets_store.set_secret(
             self._db_path, "alice", "overland", "ingest_token", "still-working",
@@ -4057,7 +4069,7 @@ class TestGenerateIngestToken:
         ) == "still-working"
 
     async def test_generate_rotates_an_existing_token(self, tmp_path, client, app):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         secrets_store.set_secret(
             self._db_path, "alice", "overland", "ingest_token", "old-token",
         )
@@ -4129,7 +4141,7 @@ class TestGenerateIngestToken:
         )
         assert resp.status_code == 409
 
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         assert secrets_store.get_secret(
             self._db_path, "bob", "overland", "ingest_token",
         ) is None
@@ -4195,7 +4207,7 @@ class TestMonarchLoginRoute:
         return cfg
 
     async def _login_alice(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "alice",
         })
@@ -4205,7 +4217,7 @@ class TestMonarchLoginRoute:
     async def test_login_persists_cookies_on_success(
         self, monkeypatch, tmp_path, client, app,
     ):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         from istota.money._vendor.monarch_client import MonarchCookieAuth
 
         cfg = self._make_test_config(tmp_path)
@@ -4450,7 +4462,7 @@ class TestProfileEndpoints:
         supply a separate display name (NC's built-in OAuth2 token
         response does not carry display_name; production fetches it from
         OCS when the token's ``user_id`` is absent)."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"access_token": "stub"})
         mod._nc_oauth2_userinfo = AsyncMock(return_value={
             "id": username,
@@ -5029,7 +5041,7 @@ class TestProfileEndpoints:
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
         cookies = await self._login(client, "alice", "Alice")
-        import istota.web_app as mod
+        import istota.webui.app as mod
         assert mod._config.is_module_enabled("alice", "feeds") is True
         resp = await client.put(
             "/istota/api/settings/profile",
@@ -5928,7 +5940,8 @@ class TestProfileEndpoints:
         """The client spreads this response over its room record, so a save that
         did not touch the name must not answer with the handle's mint-time one —
         that would overwrite a correct sidebar entry (ISSUE-474)."""
-        from istota import db, web_app
+        from istota import db
+        from istota.webui import app as web_app
 
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
@@ -6013,7 +6026,7 @@ class TestBriefingEndpoints:
         return cfg
 
     async def _login(self, client):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "alice",
         })
@@ -6264,7 +6277,7 @@ class TestChatUnreadRoomIndicators:
         return cfg
 
     async def _login(self, client):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "alice",
         })
@@ -6283,7 +6296,7 @@ class TestChatUnreadRoomIndicators:
         room = self._room()
         # first listing seeds the cursor at the (empty) max → 0, then we add
         # two assistant messages that should count as unread on the next list.
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._chat_list_rooms("alice")  # first-surface init
         with db.get_db(self._db_path) as conn:
             db.add_message(conn, room.token, role="assistant", body="a1", origin_surface="web")
@@ -6312,7 +6325,7 @@ class TestChatUnreadRoomIndicators:
         from istota import db
         _patch_app(self._cfg(tmp_path))
         room = self._room()
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._chat_list_rooms("alice")
         with db.get_db(self._db_path) as conn:
             db.add_message(conn, room.token, role="assistant", body="a", origin_surface="web")
@@ -6348,7 +6361,7 @@ class TestChatUnreadRoomIndicators:
         from istota import db
         _patch_app(self._cfg(tmp_path))
         room = self._room()
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._chat_list_rooms("alice")
         with db.get_db(self._db_path) as conn:
             db.add_message(conn, room.token, role="user", body="my own turn", origin_surface="talk")
@@ -6385,7 +6398,7 @@ class TestBasemapEndpoint:
         return cfg
 
     async def _login_alice(self, client, app):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(
             return_value={"user_id": "alice"}
         )
@@ -6420,7 +6433,7 @@ class TestBasemapEndpoint:
         self, tmp_path, client, app,
     ):
         """The whole point of the settings input: paste a key, get a map."""
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._cfg(tmp_path))
         secrets_store.set_secret(self._db_path, "alice", "carto", "api_key", "alicekey")
@@ -6434,7 +6447,7 @@ class TestBasemapEndpoint:
         self, tmp_path, client, app,
     ):
         """The secrets store stays write-only to the browser as a *value*."""
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._cfg(tmp_path))
         secrets_store.set_secret(self._db_path, "alice", "carto", "api_key", "alicekey")
@@ -6445,7 +6458,7 @@ class TestBasemapEndpoint:
     async def test_one_users_key_does_not_reach_another_user(
         self, tmp_path, client, app,
     ):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._cfg(tmp_path))
         secrets_store.set_secret(self._db_path, "bob", "carto", "api_key", "bobkey")
@@ -6476,7 +6489,7 @@ class TestBasemapEndpoint:
     async def test_a_whitespace_key_does_not_override_a_working_deployment_key(
         self, tmp_path, client, app,
     ):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._cfg(tmp_path, provider="carto", api_key="deploykey"))
         secrets_store.set_secret(self._db_path, "alice", "carto", "api_key", "   ")
@@ -6489,7 +6502,7 @@ class TestBasemapEndpoint:
         self, tmp_path, client, app, monkeypatch,
     ):
         """A basemap that 500s is a blank rectangle, which is the failure again."""
-        import istota.secrets_store as store
+        import istota.credentials.store as store
 
         def _boom(*args, **kwargs):
             raise RuntimeError("db is gone")
@@ -6520,7 +6533,7 @@ class TestBasemapEndpoint:
         self, tmp_path, client, app,
     ):
         """A second field on `overland` would have flipped it to partial."""
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
 
         _patch_app(self._cfg(tmp_path))
         secrets_store.set_secret(
@@ -6547,3 +6560,13 @@ class TestBasemapEndpoint:
         assert resp.status_code == 200
         body = (await client.get("/istota/api/map/basemap", cookies=cookies)).json()
         assert "api_key=typed-in-the-ui" in body["dark"]
+
+
+@_needs_web_deps
+def test_the_old_module_path_serves_the_same_app():
+    """Units rendered before the `webui/` move start uvicorn on the old path,
+    and the auto-update cron restarts them without re-rendering."""
+    import istota.web_app as stub  # move-modules: keep
+    import istota.webui.app as app_module
+
+    assert stub.app is app_module.app

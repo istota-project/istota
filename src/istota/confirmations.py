@@ -214,7 +214,7 @@ def _close_notification(conn, task: db.Task, by: str) -> None:
     resolver is the backstop if it ever misses — the panel then flips the row to
     `stale` on the next read rather than showing an answered question.
     """
-    from .notification_resolvers import confirmation as confirmation_source
+    from istota.notifications.resolvers import confirmation as confirmation_source
 
     confirmation_source.resolve_for_task(conn, task.user_id, task.id, by=by)
 
@@ -237,7 +237,7 @@ def cancel_for_conversation(
     touched. Both callers hold a write transaction — the Talk poller wraps its
     whole batch in one — so opening a connection here would deadlock against it.
     """
-    from .notification_resolvers import confirmation as confirmation_source
+    from istota.notifications.resolvers import confirmation as confirmation_source
 
     refs = db._room_ref_tokens(conn, conversation_token, include_surface_refs=False)
     marks = ", ".join("?" for _ in refs)
@@ -286,7 +286,7 @@ def approve(
     """
     # Read the association under the writer lock, never trust a stale task
     # object or a confirmed_at timestamp from an earlier action.
-    from .whatsapp_requests import approve_request, text_hash, write_transaction
+    from istota.relay.requests import approve_request, text_hash, write_transaction
     with write_transaction(conn):
         current = db.get_task(conn, task.id)
         proposal = None
@@ -430,7 +430,7 @@ def resolve(
     if talk_response_id:
         task = db.get_pending_confirmation_by_response_id(conn, talk_response_id)
     if task is None and conversation_token:
-        from .side_rooms import canonical_token, is_shared_room
+        from istota.rooms.side_rooms import canonical_token, is_shared_room
 
         room_token = canonical_token(conn, conversation_token)
         # A shared room's questions are asked in its members' side rooms
@@ -476,8 +476,8 @@ def apply_answer(
     ``config`` is passed straight through to ``approve`` for attribution only.
     """
     if task.whatsapp_confirmation_request_id and by in ("web", "talk"):
-        from .message_relays import private_origin
-        from .whatsapp_requests import RequestError
+        from istota.relay.relays import private_origin
+        from istota.relay.requests import RequestError
         try:
             private_origin(conn, config, actor_user_id=task.user_id,
                            surface=by, conversation_token=conversation_token)

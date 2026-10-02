@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
-from istota import sqlite_util
+from istota.lib import sqlite_util
 from istota.feeds.image_dedupe import entry_seen_ts
 from istota.feeds.models import (
     DEFAULT_ENTRY_RETENTION_DAYS,
@@ -32,7 +32,7 @@ from istota.feeds.models import (
     parse_image_urls,
 )
 from istota.feeds.sanitize import image_identity
-from istota.timestamps import iso_now
+from istota.lib.timestamps import iso_now
 
 
 logger = logging.getLogger(__name__)

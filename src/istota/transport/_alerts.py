@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..config import Config
-    from ..notification_store import RaiseResult
+    from istota.notifications.store import RaiseResult
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ def write_delivery_failure(
     """
     import hashlib
 
-    from ..notification_resolvers import task_alert
+    from istota.notifications.resolvers import task_alert
 
     label = labels.get(status)
     if label is None:
@@ -114,8 +114,9 @@ def push_off_surface(
     handler — so an alert that cannot be pushed is a warning and the durable
     row stays open for the notification panel to render.
     """
-    from .. import db, notifications
-    from ..notification_store import mark_delivered
+    from istota import db
+    from istota.notifications import delivery as notifications
+    from istota.notifications.store import mark_delivered
 
     if raised is None or not raised.deliver or not raised.user_id:
         return False

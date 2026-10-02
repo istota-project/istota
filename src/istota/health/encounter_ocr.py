@@ -17,8 +17,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from istota.date_parse import is_future_date, parse_loose_date
-from istota.llm_json import candidate_json_blocks
+from istota.lib.date_parse import is_future_date, parse_loose_date
+from istota.lib.llm_json import candidate_json_blocks
 from istota.health._brain_call import call_health_brain
 
 

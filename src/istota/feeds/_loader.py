@@ -52,7 +52,7 @@ def _read_credential(
     if istota_config is None:
         return ""
     try:
-        from istota import secrets_store  # noqa: PLC0415
+        from istota.credentials import store as secrets_store  # noqa: PLC0415
 
         db_path = getattr(istota_config, "db_path", None)
         if db_path is None:

@@ -213,7 +213,7 @@ class TestInsertPingDedup:
 @_needs_fastapi
 class TestReceiverClientId:
     def test_client_id_is_stored_from_properties(self, tmp_path):
-        from istota.webhook_receiver import _process_feature
+        from istota.webui.webhook_receiver import _process_feature
 
         path = _init_db(tmp_path)
         with location_db.connect(path) as conn:
@@ -224,7 +224,7 @@ class TestReceiverClientId:
 
     def test_stock_overland_payload_still_ingests(self, tmp_path):
         """The regression that matters: no client_id key at all."""
-        from istota.webhook_receiver import _process_feature
+        from istota.webui.webhook_receiver import _process_feature
 
         path = _init_db(tmp_path)
         feature = {
@@ -262,7 +262,7 @@ class TestReceiverClientId:
         first one and be silently dropped — a tracker that looks healthy
         and records one row.
         """
-        from istota.webhook_receiver import _process_feature
+        from istota.webui.webhook_receiver import _process_feature
 
         path = _init_db(tmp_path)
         with location_db.connect(path) as conn:
@@ -280,7 +280,7 @@ class TestReceiverClientId:
         assert all(r[0] is None for r in rows)
 
     def test_replayed_batch_stores_one_ping(self, tmp_path):
-        from istota.webhook_receiver import _process_feature
+        from istota.webui.webhook_receiver import _process_feature
 
         path = _init_db(tmp_path)
         feature = _feature(-118.0, 34.0, client_id="dev-1")
@@ -300,7 +300,7 @@ class TestReceiverClientId:
         filter read. The replay must contribute nothing while a genuinely
         new point still contributes.
         """
-        from istota.webhook_receiver import _process_feature
+        from istota.webui.webhook_receiver import _process_feature
 
         path = _init_db(tmp_path)
         with location_db.connect(path) as conn:

@@ -359,8 +359,8 @@ class TestTheCopiedFiles:
 
         source_dir = Path(istota_config.__file__).resolve().parent
         for name, source in (
-            ("devbox-exec", "devbox_exec_client.py"),
-            ("devbox_exec_protocol.py", "devbox_exec_protocol.py"),
+            ("devbox-exec", "devbox/exec_client.py"),
+            ("devbox_exec_protocol.py", "devbox/exec_protocol.py"),
         ):
             copied = (user_temp / ".developer" / name).read_text()
             assert copied == (source_dir / source).read_text(), f"{name} drifted"

@@ -24,12 +24,12 @@ if TYPE_CHECKING:
     from .brain import BrainResult
 
 from . import db
-from . import email_support
-from . import secrets_vault
-from . import task_cgroup
-from . import task_env
-from .room_scopes import CHANNEL_NOTES_LABEL as CHANNEL_MEMORY_LABEL
-from .claude_runtime_env import (
+from istota.mail import support as email_support
+from istota.credentials import vault as secrets_vault
+from istota.sandbox import cgroup as task_cgroup
+from istota.sandbox import task_env
+from istota.rooms.scopes import CHANNEL_NOTES_LABEL as CHANNEL_MEMORY_LABEL
+from istota.sandbox.claude_runtime_env import (
     CLAUDE_RUNTIME_ENV_VARS,  # used by `_PROXY_LOOKUP_BLOCKED` below, and
     # re-exported: the drift guard reads it beside `build_clean_env`.
     without_claude_runtime_env,  # noqa: F401  — re-exported; `task_env` owns
@@ -37,7 +37,7 @@ from .claude_runtime_env import (
     # from here beside `build_clean_env`.
 )
 from .config import Config
-from .sandbox_plan import (
+from istota.sandbox.plan import (
     Mount,
     SandboxProfile,  # noqa: F401  — re-exported; heartbeat, commands and doctor import it from here
     build_mount_plan,
@@ -88,11 +88,11 @@ from .image_attachments import (
     prepare_image_attachments,
     render_ocr_context,
 )
-from .shell_exec import pipefail_env
-from .skill_host_paths import path_under_roots, workspace_roots
-from .user_scope import is_within, paths_overlap, scoped_user_dir
+from istota.sandbox.shell_exec import pipefail_env
+from istota.sandbox.host_paths import path_under_roots, workspace_roots
+from istota.sandbox.user_scope import is_within, paths_overlap, scoped_user_dir
 from .skills._group_access import GROUP_MEMORY_LABEL
-from .untrusted import frame_untrusted
+from istota.lib.untrusted import frame_untrusted
 from .skills.calendar import get_caldav_client, get_calendars_for_user
 from .skills.whisper.out_of_process import transcribe_audio_out_of_process
 
@@ -713,7 +713,7 @@ def get_task_control_dir(
     operator looking in the wrong place.
 
     **That unresolved root is why this is not a call to
-    :func:`~istota.user_scope.scoped_user_dir`**, and the difference is a
+    :func:`~istota.sandbox.user_scope.scoped_user_dir`**, and the difference is a
     widening rather than a nicety. That function compares
     ``candidate.resolve()`` against ``root.resolve() / user_id``, so a symlink
     at ``.control`` moves *both* sides and the equality holds: a control root
@@ -1012,7 +1012,7 @@ def _daemon_dirs(config: Config | None, user_id: str) -> tuple[Path, Path]:
     from the returned path alone is the kind of second copy that goes quietly
     wrong.
 
-    The containment test is :func:`~istota.user_scope.scoped_user_dir`, the
+    The containment test is :func:`~istota.sandbox.user_scope.scoped_user_dir`, the
     same call :func:`get_user_repos_dir` makes, and both halves of it matter
     because neither catches the other's cases: the lexical one refuses a
     component that never became a child (``.`` is dropped by ``PurePath``, an
@@ -1193,7 +1193,7 @@ def get_user_repos_dir(config: Config, user_id: str) -> Path | None:
     about it, and the last of those cannot import this module (it is a skill
     module; ``executor`` imports the skill package). The *containment* half is
     no longer restated there: both sides call
-    :func:`~istota.user_scope.scoped_user_dir`, which is a stdlib-only leaf a
+    :func:`~istota.sandbox.user_scope.scoped_user_dir`, which is a stdlib-only leaf a
     skill subprocess can reach. What is still stated twice is the *layout* —
     which configured root, joined with which id — and
     ``tests/test_sandbox.py::TestPerUserReposDir`` holds the two equal.
@@ -1205,7 +1205,7 @@ def get_user_repos_dir(config: Config, user_id: str) -> Path | None:
     does not, silently.
 
     What *is* checked is that the join did what it says —
-    :func:`~istota.user_scope.scoped_user_dir`, the same equality rule
+    :func:`~istota.sandbox.user_scope.scoped_user_dir`, the same equality rule
     ``sandbox_cache_sweeper`` uses and for the same reason. Truthiness alone
     lets three values through that resolve outside one user's subtree: ``.``
     collapses to the shared root, ``..`` to its parent, and an absolute
@@ -1439,7 +1439,7 @@ def _native_with_user_key(native_config, config: Config, user_id: str):
     import dataclasses
 
     try:
-        from . import secrets_store
+        from istota.credentials import store as secrets_store
 
         key = secrets_store.get_secret(
             config.db_path, user_id, "native_brain", "api_key"
@@ -1866,7 +1866,7 @@ def _fire_fallback_alert(config, task, primary_kind, fallback_kind, reason, wind
     say when the primary comes back.
     """
     try:
-        from . import notifications
+        from istota.notifications import delivery as notifications
 
         cooldown = int(round(window))
         if fallback_kind is not None:
@@ -2117,7 +2117,7 @@ def run_with_failover(
                         consume_circuit_open_alert,
                     )
                     if consume_circuit_open_alert():
-                        from . import notifications
+                        from istota.notifications import delivery as notifications
                         _tail = (
                             "falling back."
                             if _fallback_kind is not None
@@ -2451,7 +2451,7 @@ def _report_native_usage(on_usage, message, requested_model: str) -> None:
     saying the turn was free, which is a measurement.
     """
     try:
-        from istota import usage as usage_types
+        from istota.usage import telemetry as usage_types
         from istota.llm.catalog import get_model_info
         from istota.session.usage import TaskUsage
 
@@ -4044,7 +4044,7 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
     **It stays hand-written, and a test is what the extraction bought
     instead.** Making it a projection over the mount plan is an import cycle:
     it is called from inside :func:`resolve_sandbox_cache_dir`, which
-    :func:`~istota.sandbox_plan.build_mount_plan` itself calls. So
+    :func:`~istota.sandbox.plan.build_mount_plan` itself calls. So
     ``tests/test_sandbox_plan_parity.py::TestTheCacheAncestorList`` asserts the
     half that is available — every path named here is either a destination the
     plan actually mounts, or is deliberately broader than any one bind and says
@@ -4100,7 +4100,7 @@ def _source_and_venv_paths() -> tuple[Path, Path]:
 
     That cost nothing while the only things executed inside the sandbox were
     ``claude`` and ``bash``, both under the unconditional ``/usr`` bind.
-    ``istota.tool_server`` is the first thing istota runs in there with its own
+    ``istota.sandbox.tool_server`` is the first thing istota runs in there with its own
     interpreter (ISSUE-389), so the disagreement became "the tool server cannot
     start" — ``bwrap: execvp /venv/bin/python3: No such file or directory``,
     every native task, on any layout the convention does not describe. The
@@ -4271,7 +4271,7 @@ def mask_protected_paths(
     workspace, the source tree, the venv and the REPL workspace — are binds the
     plan already carries, and naming them again here is exactly the two-copies
     shape ISSUE-319 and ISSUE-320 each cost a filed bug. So
-    :func:`~istota.sandbox_plan.build_mount_plan` passes its own accumulated
+    :func:`~istota.sandbox.plan.build_mount_plan` passes its own accumulated
     mounts and this returns their ``Mount.protected`` entries. The Nextcloud
     mount **root** is the fifth and is added from the config either way,
     because it is the one protected path that is not a bind: the plan mounts
@@ -4784,11 +4784,11 @@ def build_bwrap_cmd(
     (non-Linux, bwrap not installed, or namespace creation denied).
 
     Three steps, and the middle one is where the policy lives.
-    :func:`~istota.sandbox_plan.build_mount_plan` decides every bind, mask and
+    :func:`~istota.sandbox.plan.build_mount_plan` decides every bind, mask and
     namespace flag — it holds the whole of what this function used to be down
     to the argv formatting, and its docstring documents ``profile``,
     ``authorized_skills`` and ``workspace_dir``.
-    :func:`~istota.sandbox_plan.render_bwrap_argv` turns that answer into argv
+    :func:`~istota.sandbox.plan.render_bwrap_argv` turns that answer into argv
     and decides nothing. The split exists so the native brain's file-tool
     roots, the cache bind's ancestor check and the mask's protected paths can
     project one answer instead of each restating a slice of it; the argv is
@@ -4862,7 +4862,7 @@ def native_fs_roots(
     written in Python — one that had to be kept in step with every bind
     ``build_bwrap_cmd`` emits, and one whose check and open were separate
     syscalls, so an ancestor could be swapped between them. The tools now run
-    inside ``istota.tool_server``, in the one bwrap namespace the attempt gets
+    inside ``istota.sandbox.tool_server``, in the one bwrap namespace the attempt gets
     (ISSUE-389), where a path outside the binds is *absent* rather than
     refused.
 
@@ -4883,8 +4883,8 @@ def native_fs_roots(
     sandbox masks those, and these tools have no masks.
 
     **It no longer restates them.** This function builds the same
-    :class:`~istota.sandbox_plan.MountPlan` ``build_bwrap_cmd`` renders and
-    hands it to :func:`~istota.sandbox_plan.project_fs_roots`, which is where
+    :class:`~istota.sandbox.plan.MountPlan` ``build_bwrap_cmd`` renders and
+    hands it to :func:`~istota.sandbox.plan.project_fs_roots`, which is where
     the four derivation rules live. A bind added to the plan reaches both
     consumers or neither, which is what ISSUE-319 and ISSUE-320 each cost a
     filed bug to discover. The plan is built with ``profile=NATIVE`` — the
@@ -5994,7 +5994,7 @@ def _side_room_prompt(
     path that does not exist, since opening one would create it. Never raises.
     """
     try:
-        from .side_rooms import parent_context, task_side_room
+        from istota.rooms.side_rooms import parent_context, task_side_room
 
         def _read(c):
             side = task_side_room(c, task)
@@ -6033,7 +6033,7 @@ def _backstage_prompt(config: Config, task: "db.Task", conn) -> str:
     so no other prompt changes. Never raises.
     """
     try:
-        from .side_rooms import backstage_room
+        from istota.rooms.side_rooms import backstage_room
 
         with db.get_db_if_present(config.db_path, conn) as c:
             if c is None:
@@ -6246,8 +6246,8 @@ def room_card(
     if not task.conversation_token:
         return ""
     try:
-        from . import room_policy
-        from .side_rooms import canonical_token
+        from istota.rooms import policy as room_policy
+        from istota.rooms.side_rooms import canonical_token
 
         def _read(c):
             token = canonical_token(c, task.conversation_token)
@@ -7181,7 +7181,7 @@ You have access to:
     # block's separators behind. One blank line between whatever is present.
     relay_context = ""
     if task.source_type in ("whatsapp", "web", "talk", "sms"):
-        from .message_relays import recipient_context
+        from istota.relay.relays import recipient_context
 
         # Optional, like room_identity_line: a failed read must cost the relay
         # framing, not the task. Logged loudly because an answer then reaches
@@ -7373,7 +7373,7 @@ def _task_withheld_scopes(
     (ISSUE-576). A database that does not exist holds no room; one that cannot
     be opened withholds every scope from a task whose answer depends on it.
     """
-    from . import room_scopes
+    from istota.rooms import scopes as room_scopes
 
     try:
         with db.get_db_if_present(config.db_path, conn) as c:
@@ -7401,7 +7401,7 @@ def _ambient_memory_off(
     A database that does not exist holds no room. One that cannot be opened
     leaves the memory out, as an unreadable audience does.
     """
-    from . import room_scopes
+    from istota.rooms import scopes as room_scopes
 
     if task.guest_participant_id is not None or task.audience == "mixed" \
             or task.is_group_chat:
@@ -7431,7 +7431,7 @@ def _resolve_task_groups(
     any error resolves to the empty set: group material that cannot be shown
     to belong in this room does not load.
     """
-    from . import room_scopes
+    from istota.rooms import scopes as room_scopes
 
     try:
         with db.get_db_if_present(config.db_path, conn) as c:
@@ -7460,7 +7460,7 @@ def _channel_memory_is_shared(config: Config, task: db.Task, conn) -> bool:
         return True
     if not task.conversation_token:
         return False
-    from .room_scopes import channel_notes_shared
+    from istota.rooms.scopes import channel_notes_shared
 
     def _read(c) -> bool:
         return channel_notes_shared(c, task.conversation_token)

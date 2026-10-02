@@ -8,9 +8,10 @@ direct conversation is the gate's first rung, not this default.
 
 import pytest
 
-from istota import db, message_relays
+from istota import db
+from istota.relay import relays as message_relays
 from istota.config import Config, TalkConfig
-from istota.speech_gate import GateDecision
+from istota.rooms.speech_gate import GateDecision
 from istota.transport import IncomingMessage, ingest_message
 from istota.transport.ingest import record_inbound
 from istota.transport.web import addressed_to_bot_in_text

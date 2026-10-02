@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from istota import cli, db
-from istota.usage import BrainUsage, ModelUsage
+from istota.usage.telemetry import BrainUsage, ModelUsage
 
 NOW = datetime.now(timezone.utc)
 

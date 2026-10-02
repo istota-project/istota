@@ -195,7 +195,7 @@ Blocks, their sources, and the archive of rendered results live in a per-user `b
 
 ### Module DB storage
 
-The framework `istota.db` and all five per-user module DBs (feeds, health, location, money, briefings) run **WAL on local disk**, at `Config.module_db_path(user_id, module)` — by default `{db_path.parent}/modules/{user}/{module}.db`. Only the `.db` files are local; user-facing workspace files (health uploads, money ledgers, feeds exports) stay on the Nextcloud mount. Module DBs were moved off the mount because WAL's mmap'd `-shm` file SIGBUSes on the rclone FUSE mount, which had forced them onto `journal_mode=DELETE` and left them with no reader/writer concurrency. `python -m istota.db_relocate` is the one-time idempotent migrator; `db_backup` snapshots the now-local DBs back to dated directories on the mount for off-host durability, and `db_restore` copies them back.
+The framework `istota.db` and all five per-user module DBs (feeds, health, location, money, briefings) run **WAL on local disk**, at `Config.module_db_path(user_id, module)` — by default `{db_path.parent}/modules/{user}/{module}.db`. Only the `.db` files are local; user-facing workspace files (health uploads, money ledgers, feeds exports) stay on the Nextcloud mount. Module DBs were moved off the mount because WAL's mmap'd `-shm` file SIGBUSes on the rclone FUSE mount, which had forced them onto `journal_mode=DELETE` and left them with no reader/writer concurrency. `python -m istota.maintenance.db_relocate` is the one-time idempotent migrator; `db_backup` snapshots the now-local DBs back to dated directories on the mount for off-host durability, and `db_restore` copies them back.
 
 ## Key operations
 

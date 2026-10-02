@@ -14,7 +14,8 @@ pytest.importorskip("authlib")
 pytest.importorskip("fastapi")
 from starlette.requests import Request
 
-from istota import db, user_profiles, web_auth
+from istota import db, user_profiles
+from istota.webui import auth as web_auth
 from istota.config import Config, SiteConfig, UserConfig, WebConfig
 
 PASSWORD = "a long example passphrase"
@@ -22,7 +23,7 @@ PASSWORD = "a long example passphrase"
 
 @pytest.fixture
 def configured(db_path, monkeypatch):
-    from istota import web_app as mod
+    from istota.webui import app as mod
 
     config = Config(db_path=db_path, site=SiteConfig(hostname="example.com"),
                     web=WebConfig(auth=["email", "nextcloud"]),
@@ -497,7 +498,7 @@ async def test_mail_requests_share_budget_and_delivered_codes_work(client, confi
 
 @pytest.mark.parametrize("purpose", ["reset", "login"])
 async def test_mail_request_responses_do_not_disclose_identity(client, configured, monkeypatch, purpose):
-    from istota import web_auth_mail
+    from istota.webui import auth_mail as web_auth_mail
 
     send = MagicMock(return_value=True)
     monkeypatch.setattr(web_auth_mail, "send_auth_email", send)
@@ -526,7 +527,7 @@ async def test_mail_csrf_refusal_does_no_work(client, configured, monkeypatch, p
 async def test_mail_lookup_runs_after_response_and_pending_addresses_coalesce(client, configured, monkeypatch, state):
     import asyncio
     import threading
-    from istota import web_auth_mail
+    from istota.webui import auth_mail as web_auth_mail
 
     if state == "unknown":
         web_auth.delete_identity(configured._config.db_path, "alice")
@@ -579,7 +580,7 @@ async def test_mail_lookup_runs_after_response_and_pending_addresses_coalesce(cl
 
 
 async def test_unknown_address_flood_does_not_spend_other_addresses_budget(client, configured, monkeypatch):
-    from istota import web_auth_mail
+    from istota.webui import auth_mail as web_auth_mail
 
     send = MagicMock(return_value=True)
     monkeypatch.setattr(web_auth_mail, "send_auth_email", send)

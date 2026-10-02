@@ -2,7 +2,7 @@
 
 This package is the home for everything email-specific that sits above the
 low-level IMAP/SMTP client (``istota.skills.email`` — email's equivalent of
-``istota.talk.TalkClient``):
+``istota.nextcloud.talk.TalkClient``):
 
 - ``EmailTransport`` (here) — the bidirectional seam: ``poll`` (inbound) /
   ``deliver`` (outbound) / ``resolve_target``.

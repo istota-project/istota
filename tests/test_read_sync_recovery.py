@@ -24,7 +24,8 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
-from istota import db, web_tokens
+from istota import db
+from istota.webui import tokens as web_tokens
 from istota.config import Config, SiteConfig, UserConfig, WebConfig
 
 try:
@@ -67,7 +68,7 @@ def _make_config(tmp_path, sync_interval=60):
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     mod._config = config
     mod.app.state.istota_config = config
@@ -77,7 +78,7 @@ def _patch_app(config):
 
 
 async def _login(client, username="alice"):
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
@@ -97,14 +98,14 @@ def _mock_talk_client(monkeypatch, conversations=None, mark=None):
         constructed.append({"bearer_token": bearer_token, "timeout": timeout})
         return instance
 
-    import istota.talk
-    monkeypatch.setattr(istota.talk, "TalkClient", factory)
+    import istota.nextcloud.talk
+    monkeypatch.setattr(istota.nextcloud.talk, "TalkClient", factory)
     return constructed, instance
 
 
 @pytest.fixture(autouse=True)
 def _reset_module_state():
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     web_tokens._refresh_locks.clear()
     mod._talk_read_pull_state.clear()
@@ -123,7 +124,7 @@ def keyed(monkeypatch):
 
 
 async def _drain_bg():
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     while mod._bg_tasks:
         await asyncio.gather(*list(mod._bg_tasks))
@@ -227,7 +228,7 @@ class TestThe401Retry:
         endpoint."""
         mark = AsyncMock(side_effect=[_http_error(404), _http_error(404)])
 
-        with caplog.at_level("WARNING", logger="istota.web_app"):
+        with caplog.at_level("WARNING", logger="istota.webui.app"):
             await self._run(tmp_path, monkeypatch, mark)
 
         assert any("404" in r.getMessage() for r in caplog.records), (
@@ -243,12 +244,12 @@ class TestTheDegradedConsumersSaySo:
     async def test_the_mirror_names_the_missing_token(
         self, tmp_path, keyed, monkeypatch, caplog,
     ):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         config = _make_config(tmp_path, sync_interval=0)
         _patch_app(config)
         # Feature on, no stored pair — the state the incident sat in for weeks.
-        with caplog.at_level("WARNING", logger="istota.web_app"):
+        with caplog.at_level("WARNING", logger="istota.webui.app"):
             with db.get_db(config.db_path) as conn:
                 db.register_room(conn, "roomtok", "alice", origin="web", name="Room")
                 db.add_room_binding(conn, "roomtok", "talk", "talkref9")
@@ -267,11 +268,11 @@ class TestTheDegradedConsumersSaySo:
     async def test_the_push_names_the_missing_token(
         self, tmp_path, keyed, monkeypatch, caplog,
     ):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         config = _make_config(tmp_path, sync_interval=0)
         _patch_app(config)
-        with caplog.at_level("WARNING", logger="istota.web_app"):
+        with caplog.at_level("WARNING", logger="istota.webui.app"):
             with db.get_db(config.db_path) as conn:
                 db.register_room(conn, "roomtok", "alice", origin="web", name="Room")
                 db.add_room_binding(conn, "roomtok", "talk", "talkref9")
@@ -289,7 +290,7 @@ class TestTheDegradedConsumersSaySo:
         loss — so nothing downstream can tell the two apart. An unconditional
         warning is therefore a line per send, forever, for every user on a
         deployment that enabled the feature after they last logged in."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         config = _make_config(tmp_path, sync_interval=0)
         _patch_app(config)
@@ -297,7 +298,7 @@ class TestTheDegradedConsumersSaySo:
             db.register_room(conn, "roomtok", "alice", origin="web", name="Room")
             db.add_room_binding(conn, "roomtok", "talk", "talkref9")
 
-        with caplog.at_level("WARNING", logger="istota.web_app"):
+        with caplog.at_level("WARNING", logger="istota.webui.app"):
             for _ in range(5):
                 await mod._push_read_to_talk("alice", "roomtok")
 
@@ -308,7 +309,7 @@ class TestTheDegradedConsumersSaySo:
     ):
         """"Once" must mean once per healthy period, not once per process — a
         credential that comes back and dies again is a second event."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         config = _make_config(tmp_path, sync_interval=0)
         _mock_talk_client(monkeypatch)
@@ -317,7 +318,7 @@ class TestTheDegradedConsumersSaySo:
             db.register_room(conn, "roomtok", "alice", origin="web", name="Room")
             db.add_room_binding(conn, "roomtok", "talk", "talkref9")
 
-        with caplog.at_level("WARNING", logger="istota.web_app"):
+        with caplog.at_level("WARNING", logger="istota.webui.app"):
             await mod._push_read_to_talk("alice", "roomtok")          # warns
             await mod._push_read_to_talk("alice", "roomtok")          # silent
             web_tokens.store_tokens(config.db_path, "alice", "at", "rt", 3600)
@@ -333,11 +334,11 @@ class TestTheDegradedConsumersSaySo:
         """The discriminating negative: a room with no Talk binding is not
         degraded, it is web-only, and warning about it would fire on every read
         in every such room."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         config = _make_config(tmp_path, sync_interval=0)
         _patch_app(config)
-        with caplog.at_level("WARNING", logger="istota.web_app"):
+        with caplog.at_level("WARNING", logger="istota.webui.app"):
             with db.get_db(config.db_path) as conn:
                 db.register_room(conn, "roomtok", "alice", origin="web", name="Room")
             await mod._push_read_to_talk("alice", "roomtok")

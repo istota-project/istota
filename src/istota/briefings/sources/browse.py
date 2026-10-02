@@ -31,8 +31,8 @@ import logging
 import re
 
 from istota.briefings.sources import GatheredSource, SourceContext
-from istota.browser_admission import browser_admission, browser_call, BrowserQueueTimeout
-from istota.browser_owner import browser_headers
+from istota.browser.admission import browser_admission, browser_call, BrowserQueueTimeout
+from istota.browser.owner import browser_headers
 
 
 logger = logging.getLogger(__name__)

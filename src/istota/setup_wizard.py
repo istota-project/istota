@@ -60,7 +60,7 @@ class Answers:
     #: The secrets store's master Fernet key. Generated here and *preserved*
     #: across a ``--force`` re-run; see ``_carry_forward_secrets``.
     secret_key: str = ""
-    #: ``web_tokens.py``'s separate Fernet key, for the ``web_user_tokens``
+    #: ``webui/tokens.py``'s separate Fernet key, for the ``web_user_tokens``
     #: rows under ``[web] token_storage = "encrypted"``. The wizard never
     #: *generates* one — that shape is opt-in and standalone does not use it —
     #: but it is carried forward when an existing env file has one, since the
@@ -877,7 +877,7 @@ def _carry_forward_secrets(a: Answers, env_path: Path, out=print) -> None:
     Three names, and the first two are keys with no recovery.
     ``ISTOTA_SECRET_KEY`` is the secrets store's master key (Garmin, Monarch,
     ntfy, the Google Workspace tokens). ``ISTOTA_WEB_TOKEN_KEY`` is a
-    *separate* key with identical semantics — ``web_tokens.py`` derives its own
+    *separate* key with identical semantics — ``webui/tokens.py`` derives its own
     Fernet from it for the ``web_user_tokens`` rows under ``[web]
     token_storage = "encrypted"`` — and the wizard has never written it, so it
     is only ever here because an operator added it and would be deleted by the
@@ -901,7 +901,7 @@ def _carry_forward_secrets(a: Answers, env_path: Path, out=print) -> None:
     unknown names through would resurrect variables the wizard has stopped
     writing; the file's own comment says only that these are preserved.
     """
-    from .secrets_store import _MIN_KEY_LEN
+    from istota.credentials.store import _MIN_KEY_LEN
 
     existing = _read_env_values(env_path)
 

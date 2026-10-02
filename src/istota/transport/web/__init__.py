@@ -148,7 +148,7 @@ class WebTransport:
         self._config = config
 
     async def poll(self) -> list[IncomingMessage]:
-        # Inbound is the /chat HTTP endpoint (web_app.py), not a poller.
+        # Inbound is the /chat HTTP endpoint (webui/app.py), not a poller.
         return []
 
     async def deliver(

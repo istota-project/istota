@@ -29,7 +29,7 @@ from istota.geo import haversine
 from istota.location import db as location_db
 
 if _has_fastapi:
-    from istota.webhook_receiver import resolve_place
+    from istota.webui.webhook_receiver import resolve_place
 
 
 def _init_db(tmp_path):
@@ -73,7 +73,7 @@ def _home_and_gym(conn):
 
 
 def _location_config(monkeypatch):
-    from istota import webhook_receiver as wr
+    from istota.webui import webhook_receiver as wr
     cfg = MagicMock()
     cfg.location.accuracy_threshold_m = 100.0
     cfg.location.visit_exit_minutes = 5.0
@@ -167,7 +167,7 @@ class TestPlaceNotesAPI:
         ({"notes": "   "}, None),
     ], ids=["persists_notes", "empty_notes_stored_as_null"])
     def test_create(self, tmp_path, fields, stored):
-        from istota.web_app import _location_create_place, _location_query_places
+        from istota.webui.app import _location_create_place, _location_query_places
 
         db_path = _init_loc_db(tmp_path)
         _location_create_place(str(db_path), {
@@ -182,7 +182,7 @@ class TestPlaceNotesAPI:
         ("", None),
     ], ids=["changes_notes", "empty_notes_clears_field"])
     def test_update(self, tmp_path, notes, stored):
-        from istota.web_app import _location_create_place, _location_update_place
+        from istota.webui.app import _location_create_place, _location_update_place
 
         db_path = _init_loc_db(tmp_path)
         created = _location_create_place(str(db_path), {
@@ -202,7 +202,7 @@ class TestDiscoverPlacesFiltersDismissed:
     ], ids=["unknown_cluster_appears", "dismissed_cluster_is_filtered",
             "distant_dismissal_does_not_filter"])
     def test_dismissal(self, tmp_path, dismissed, expected):
-        from istota.web_app import _location_discover_places
+        from istota.webui.app import _location_discover_places
 
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
@@ -217,7 +217,7 @@ class TestDiscoverPlacesFiltersDismissed:
             assert "radius_meters" in result["clusters"][0]
 
     def test_dismissed_zone_only_affects_owner(self, tmp_path):
-        from istota.web_app import _location_discover_places
+        from istota.webui.app import _location_discover_places
 
         # Per-user split: alice and bob now live in separate location.db
         # files. Seed both, dismiss in alice's only, assert isolation.
@@ -294,7 +294,7 @@ class TestPlaceStats:
     ], ids=["no_pings", "single_visit_from_pings", "gap_without_elsewhere_is_same_visit",
             "walkby_filtered"])
     def test_stats(self, tmp_path, times, expected):
-        from istota.web_app import _location_place_stats
+        from istota.webui.app import _location_place_stats
 
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
@@ -309,7 +309,7 @@ class TestPlaceStats:
 
     def test_two_visits_split_by_elsewhere(self, tmp_path):
         """Pings at another place during a gap should split into two visits."""
-        from istota.web_app import _location_place_stats
+        from istota.webui.app import _location_place_stats
 
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
@@ -333,7 +333,7 @@ class TestPlaceStats:
         """Per-user split: a place that doesn't exist in *this* db
         returns None. (The previous "wrong user" semantics is now
         implicit in choosing the wrong db file.)"""
-        from istota.web_app import _location_place_stats
+        from istota.webui.app import _location_place_stats
 
         alice_db = _init_loc_db(tmp_path, name="alice.db")
         bob_db = _init_loc_db(tmp_path, name="bob.db")
@@ -342,7 +342,7 @@ class TestPlaceStats:
         assert _location_place_stats(str(bob_db), pid) is None
 
     def test_nonexistent_place_returns_none(self, tmp_path):
-        from istota.web_app import _location_place_stats
+        from istota.webui.app import _location_place_stats
 
         db_path = _init_loc_db(tmp_path)
         assert _location_place_stats(str(db_path), 9999) is None
@@ -352,7 +352,7 @@ class TestPlaceStats:
 class TestPlaceUpdateReassignment:
     def test_move_place_reassigns_pings(self, tmp_path):
         """Moving a place center should reassign pings to match the new geofence."""
-        from istota.web_app import _location_update_place, _location_place_stats
+        from istota.webui.app import _location_update_place, _location_place_stats
 
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
@@ -379,7 +379,7 @@ class TestPlaceUpdateReassignment:
 
     def test_radius_change_reassigns_pings(self, tmp_path):
         """Expanding radius should pick up nearby unassigned pings."""
-        from istota.web_app import _location_update_place, _location_place_stats
+        from istota.webui.app import _location_update_place, _location_place_stats
 
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
@@ -455,7 +455,7 @@ class TestStateMachine:
     """Tests for the state machine logic in webhook_receiver."""
 
     def _process(self, conn, place_id, place, timestamp):
-        from istota.webhook_receiver import _update_state_machine
+        from istota.webui.webhook_receiver import _update_state_machine
         ping_id = location_db.insert_ping(conn, timestamp, 0.0, 0.0)
         _update_state_machine(conn, ping_id, place_id, place, timestamp)
         return ping_id
@@ -553,7 +553,7 @@ class TestOverlandPayloadParsing:
 
     def _ingest(self, tmp_path, coordinates, **properties):
         """Process one GeoJSON Feature; return (all pings, latest ping)."""
-        from istota.webhook_receiver import _process_feature
+        from istota.webui.webhook_receiver import _process_feature
 
         feature = {
             "type": "Feature",
@@ -824,7 +824,7 @@ class TestLocationPingsAPIAltitude:
     """The web pings endpoint feeds the map; it dropped altitude the same way."""
 
     def test_date_range_query_includes_altitude(self, tmp_path):
-        from istota.web_app import _location_query_pings
+        from istota.webui.app import _location_query_pings
 
         db_path = _seed_altitude(tmp_path)
         result = _location_query_pings(
@@ -837,7 +837,7 @@ class TestLocationPingsAPIAltitude:
 
     def test_default_query_includes_altitude(self, tmp_path):
         """The no-date branch is a separate SELECT and needs the column too."""
-        from istota.web_app import _location_query_pings
+        from istota.webui.app import _location_query_pings
 
         db_path = _seed_altitude(tmp_path)
         result = _location_query_pings(
@@ -850,7 +850,7 @@ class TestLocationPingsAPIAltitude:
     def test_current_query_includes_altitude(self, tmp_path):
         """`LocationPing.altitude` is a required field of the shared frontend type,
         so the current-location reader has to send it too — not only the CLI twin."""
-        from istota.web_app import _location_query_current
+        from istota.webui.app import _location_query_current
 
         db_path = _seed_altitude(tmp_path)
         _add_high_ping(db_path)
@@ -2195,7 +2195,7 @@ class TestAccuracyGate:
     ], ids=["low_accuracy_ping_not_assigned_to_place", "good_accuracy_ping_is_assigned",
             "null_accuracy_passes"])
     def test_accuracy_gate(self, tmp_path, monkeypatch, accuracy, assigned):
-        from istota import webhook_receiver as wr
+        from istota.webui import webhook_receiver as wr
         _location_config(monkeypatch)
 
         properties = {"timestamp": "2026-04-21T08:20:00Z"}
@@ -2228,7 +2228,7 @@ class TestDwellBasedExit:
         _location_config(monkeypatch)
 
     def _process(self, conn, place_id, place, timestamp):
-        from istota.webhook_receiver import _update_state_machine
+        from istota.webui.webhook_receiver import _update_state_machine
         ping_id = location_db.insert_ping(
             conn, timestamp, 0.0, 0.0, accuracy=10.0,
             place_id=place_id,
@@ -2626,7 +2626,7 @@ class TestGarminImportSkill:
     runs post-task."""
 
     def _run(self, args, env, monkeypatch):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         from istota.skills.location import cmd_import_garmin_tracks
 
         # Force the delegated path deterministically.

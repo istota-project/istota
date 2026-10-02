@@ -569,13 +569,13 @@ class TestNewsletterInlineLinks:
                 "</div></body></html>"
             )
 
-        monkeypatch.setattr("istota.email_support.get_email_config", lambda c: cfg.email)
+        monkeypatch.setattr("istota.mail.support.get_email_config", lambda c: cfg.email)
         monkeypatch.setattr("istota.skills.email.list_emails", lambda **kw: [_Env()])
         monkeypatch.setattr(
             "istota.skills.email.fetch_emails_full", lambda **kw: [_Full()],
         )
         monkeypatch.setattr(
-            "istota.email_ownership.resolve_email_owner", lambda config, conn, e: None,
+            "istota.mail.ownership.resolve_email_owner", lambda config, conn, e: None,
         )
         # The dispatcher caches resolver modules; call through it so the block
         # wiring is exercised, with the module's own names patched above.

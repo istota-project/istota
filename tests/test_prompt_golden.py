@@ -836,7 +836,7 @@ def _seed_room(config: Config, case: Case) -> None:
             ref = (sms_conversation_token if origin == "sms" else whatsapp_conversation_token)(USER)
             db.add_room_binding(conn, case.conversation_token, origin, ref)
         if case.shared:
-            from istota import room_policy
+            from istota.rooms import policy as room_policy
 
             db.add_web_room_member(conn, case.conversation_token, OTHER_USER)
             room_policy.ensure_policy(conn, case.conversation_token)

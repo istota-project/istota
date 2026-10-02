@@ -10,9 +10,12 @@ import pytest
 
 from pykeepass import create_database
 
-from istota import credential_shim, db, doctor, secrets_store, secrets_vault
+from istota import db, doctor
+from istota.credentials import store as secrets_store
+from istota.credentials import vault as secrets_vault
+from istota.sandbox import credential_shim
 from istota.config import Config, UserConfig
-from istota.skill_proxy import SkillProxy
+from istota.sandbox.skill_proxy import SkillProxy
 
 
 @pytest.fixture
@@ -52,7 +55,7 @@ def test_create_is_available_in_the_same_task_and_never_returns_password(tmp_pat
     config.db_path.parent.mkdir()
     db.init_db(config.db_path)
     secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
-    monkeypatch.setattr("istota.notification_store.deliver_pending", lambda *_: None)
+    monkeypatch.setattr("istota.notifications.store.deliver_pending", lambda *_: None)
     with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_credentials={}, vault_write_limit=2) as proxy:
         reply = _request(sock, {"type": "vault_create", "slug": "acme", "url": "https://acme.example"})
         assert reply == {
@@ -139,7 +142,7 @@ def test_stale_pending_signup_tag_recovers_from_the_vault(
             ("alice+acme",),
         )
 
-    monkeypatch.setattr("istota.notification_store.deliver_pending", lambda *_: None)
+    monkeypatch.setattr("istota.notifications.store.deliver_pending", lambda *_: None)
     with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
         reply = _request(sock, {"type": "vault_create", "slug": "acme"})
     with db.get_db(config.db_path) as conn:
@@ -207,7 +210,7 @@ def test_a_failed_apply_after_replace_still_returns_the_committed_entry(
     config.db_path.parent.mkdir()
     db.init_db(config.db_path)
     secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
-    monkeypatch.setattr("istota.notification_store.deliver_pending", lambda *_: None)
+    monkeypatch.setattr("istota.notifications.store.deliver_pending", lambda *_: None)
 
     def fail_apply(*_):
         raise sqlite3.OperationalError("database busy")
@@ -275,7 +278,7 @@ def test_a_name_held_by_a_local_credential_is_refused_before_the_file(
 ):
     """`create_entry`'s collision check reads the file; a local credential
     lives only in the store, so the proxy asks the store first."""
-    from istota.credential_broker.bindings import parse_binding
+    from istota.credentials.broker.bindings import parse_binding
 
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
     path = tmp_path / "vault.kdbx"
@@ -322,7 +325,7 @@ def test_a_vault_sourced_name_is_left_to_the_files_own_check(tmp_path, monkeypat
     secrets_store.set_secret(
         config.db_path, "alice", secrets_vault.VAULT_ENTRY_SERVICE, "generated_acme", "stale",
     )
-    monkeypatch.setattr("istota.notification_store.deliver_pending", lambda *_: None)
+    monkeypatch.setattr("istota.notifications.store.deliver_pending", lambda *_: None)
 
     with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
         reply = _request(sock, {"type": "vault_create", "slug": "acme"})

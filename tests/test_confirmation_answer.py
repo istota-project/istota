@@ -480,7 +480,7 @@ class TestTalkToRoomMirror:
         return config
 
     def _send(self, config, *, surface, message="Heads up"):
-        from istota import notifications
+        from istota.notifications import delivery as notifications
         with (
             patch.object(notifications, "_send_talk", new=AsyncMock(return_value=77)),
             patch.object(notifications, "_send_web", return_value=True),
@@ -536,7 +536,7 @@ class TestTalkToRoomMirror:
         would pass just as well if the mirror were writing the only row, or if
         the web leg had been deleted outright.
         """
-        from istota import notifications
+        from istota.notifications import delivery as notifications
         config = self._config(make_config)
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "2ay6qic9", "alice", origin="talk")
@@ -557,7 +557,7 @@ class TestTalkToRoomMirror:
     def test_a_promoted_rooms_two_names_are_not_two_rows(self, make_config):
         """A promoted room's Talk token differs from its own, so comparing the
         raw tokens let both legs write."""
-        from istota import notifications
+        from istota.notifications import delivery as notifications
         config = self._config(make_config)
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "canonical", "alice", origin="web")
@@ -599,7 +599,7 @@ class TestTalkToRoomMirror:
         self, make_config,
     ):
         """The Talk post has already happened. Best-effort, and loud in the log."""
-        from istota import notifications
+        from istota.notifications import delivery as notifications
         config = self._config(make_config)
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "2ay6qic9", "alice", origin="talk")
@@ -619,7 +619,7 @@ class TestTalkToRoomMirror:
     ):
         """The repro: the gate posts to `alerts_channel`, and the web reader of
         that same room saw nothing."""
-        from istota import notifications
+        from istota.notifications import delivery as notifications
         config = self._config(make_config)
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "2ay6qic9", "alice", origin="talk")
@@ -668,7 +668,7 @@ def _web_config(tmp_path):
 async def web_client(tmp_path):
     if not _has_web_deps:
         pytest.skip("web dependencies not installed")
-    import istota.web_app as mod
+    import istota.webui.app as mod
     config = _web_config(tmp_path)
     mod._config = config
     mod.app.state.istota_config = config
@@ -680,7 +680,7 @@ async def web_client(tmp_path):
 
 
 async def _login(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
     )
@@ -700,7 +700,7 @@ class TestWebAnswer:
         """The regression that motivated this: `_chat_create_web_task`
         room-scoped-cancels on a new message, so a same-room gate was cancelled
         by its own approval."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(web_client, "alice")
         room = await _default_room(web_client, cookies)
 
@@ -732,7 +732,7 @@ class TestWebAnswer:
     async def test_a_cross_room_email_gate_is_answered_from_any_room(self, web_client):
         """The `plus_address` case: parked under a synthetic thread token, so
         Path B cannot see it and Path C is what answers."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(web_client, "alice")
         room = await _default_room(web_client, cookies)
 
@@ -765,7 +765,7 @@ class TestWebAnswer:
     async def test_the_exchange_survives_a_reload(self, web_client):
         """An authorization decision deserves an answer after a refresh, which
         the `!command` inline-only precedent does not give."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(web_client, "alice")
         room = await _default_room(web_client, cookies)
 
@@ -792,7 +792,7 @@ class TestWebAnswer:
     async def test_yes_trust_is_reachable_from_the_composer(self, web_client):
         """The banner has no trust affordance at all, so this is the only place
         web gains one."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(web_client, "alice")
         room = await _default_room(web_client, cookies)
 
@@ -824,7 +824,7 @@ class TestWebAnswer:
         at something else. `_is_own_replay` cannot see this exchange — its
         lookup inner-joins `tasks` and these rows carry no task id.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(web_client, "alice")
         room = await _default_room(web_client, cookies)
 
@@ -867,7 +867,7 @@ class TestWebAnswer:
         """It answers nothing, and it is the one branch that consumes no
         question — so recording it would let a loop append rows without bound,
         this path returning before the rate limit in `_chat_create_web_task`."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(web_client, "alice")
         room = await _default_room(web_client, cookies)
 
@@ -887,7 +887,7 @@ class TestWebAnswer:
 
     @pytest.mark.asyncio
     async def test_several_open_gates_list_instead_of_answering(self, web_client):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(web_client, "alice")
         room = await _default_room(web_client, cookies)
 
@@ -911,7 +911,7 @@ class TestWebAnswer:
     ):
         """Path A on web: the mirrored row carries the Talk id, so a cited web
         reply walks back to `tasks.talk_response_id`."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(web_client, "alice")
         room = await _default_room(web_client, cookies)
 
@@ -937,7 +937,7 @@ class TestWebAnswer:
 
     @pytest.mark.asyncio
     async def test_another_users_gate_is_not_answerable(self, web_client):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         cookies = await _login(web_client, "alice")
         room = await _default_room(web_client, cookies)
 

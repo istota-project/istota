@@ -739,7 +739,7 @@ class TestTheOldDatabaseSurvives:
             # which reads `ISTOTA_CONFIG_PATH`. Passing `-c` would be an
             # argparse error that reads as a failed relocation.
             f"ISTOTA_CONFIG_PATH={upgrade.CONTAINER_CONFIG} "
-            "python -m istota.db_relocate"
+            "python -m istota.maintenance.db_relocate"
         )
         first = _docker_run(
             istota_image,

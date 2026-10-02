@@ -88,7 +88,7 @@ class TestMirrorRepostSuppression:
         self, mock_run, db_path, tmp_path, fake_talk, monkeypatch,
     ):
         from dataclasses import replace
-        from istota import surfaces
+        from istota.rooms import surfaces
 
         monkeypatch.setitem(surfaces.SURFACES, "talk", replace(
             surfaces.SURFACES["talk"], user_turn_mirror=None,

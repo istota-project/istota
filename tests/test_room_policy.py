@@ -17,7 +17,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from istota import commands, confirmations, db, room_policy, side_rooms, speech_gate
+from istota import commands, confirmations, db
+from istota.rooms import policy as room_policy
+from istota.rooms import side_rooms
+from istota.rooms import speech_gate
 from istota.config import Config, NextcloudConfig, TalkConfig, UserConfig
 from istota.transport._types import ParticipantRef
 from istota.transport.ingest import record_inbound
@@ -329,7 +332,7 @@ class TestEmissaryReach:
         assert mixed == frozenset()
 
     def test_a_guest_task_never_counts_as_a_clean_turn(self, config):
-        from istota.whatsapp_requests import _clean_turn
+        from istota.relay.requests import _clean_turn
         with db.get_db(config.db_path) as conn:
             _group(conn)
             guest = _guest_turn(conn, config, "ask bob about it").task_id
@@ -392,7 +395,7 @@ def _scheduler_config(tmp_path):
 def _run_guest_task(tmp_path, monkeypatch, fake_talk, guest_reply):
     from istota.scheduler import process_one_task
     config = _scheduler_config(tmp_path)
-    monkeypatch.setattr("istota.talk.TalkClient.get_participants",
+    monkeypatch.setattr("istota.nextcloud.talk.TalkClient.get_participants",
                         AsyncMock(return_value=GROUP_PARTICIPANTS))
     fake_talk.db_path = config.db_path
     with db.get_db(config.db_path) as conn:
@@ -470,7 +473,7 @@ class TestGuestReplyThroughTheScheduler:
         prunes the parked `done`, so a client still watching the task stream
         must be given a terminal frame by the backstop rather than wait on
         one nothing will write."""
-        import istota.web_app as web_app
+        import istota.webui.app as web_app
         config, ident, _ = _run_guest_task(tmp_path, monkeypatch, fake_talk, "held")
         assert fake_talk.calls_to("grp", method="delete_message")
         with db.get_db(config.db_path) as conn:

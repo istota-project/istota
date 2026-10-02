@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from istota.date_parse import parse_loose_date
+from istota.lib.date_parse import parse_loose_date
 from istota.health.models import ImmunizationRef
 
 
@@ -94,7 +94,7 @@ def parse_paste(
     reject those strings anyway (the bulk route with a 400 naming the ISO
     format, the skill's ``--confirm`` by refusing an import with a dateless
     row), so calling one ``high`` confidence only moved the refusal further
-    from the user. See :mod:`istota.date_parse`.
+    from the user. See :mod:`istota.lib.date_parse`.
     """
     alias_index = _build_alias_index(refs)
     out: list[ParsedImmunization] = []

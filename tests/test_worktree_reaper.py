@@ -35,8 +35,8 @@ from pathlib import Path
 import pytest
 from unittest.mock import patch
 
-from istota import worktree_reaper
-from istota.worktree_reaper import (
+from istota.maintenance import worktree_reaper
+from istota.maintenance.worktree_reaper import (
     parse_worktree_list,
     reap_and_report,
     reap_worktrees,
@@ -790,7 +790,7 @@ class TestHoldsBack:
         edit to either list cannot quietly reintroduce the overlap. A name the
         dirty check discounts must stay in the activity walk, because the walk
         is then the only guard left."""
-        import istota.worktree_reaper as mod
+        import istota.maintenance.worktree_reaper as mod
 
         assert not (mod._WALK_SKIP & mod._RECONSTRUCTIBLE_DIRS)
         assert ".git" in mod._WALK_SKIP
@@ -911,7 +911,7 @@ class TestHoldsBack:
         refusal is the last thing standing there, and `--force` would remove
         it. Simulated by making the dirty check lie, which is what a race
         looks like from here."""
-        import istota.worktree_reaper as mod
+        import istota.maintenance.worktree_reaper as mod
 
         repos_dir, bare, _ = repos
         path = _worktree(bare, "project--main", "origin/main")
@@ -1020,7 +1020,7 @@ class TestNeverRaises:
     def test_the_public_entry_point_swallows_an_exploding_sweep(self, tmp_path, monkeypatch):
         """`reap_worktrees` is the public entry and the one most callers use,
         so the guard lives there rather than only in `reap_and_report`."""
-        import istota.worktree_reaper as mod
+        import istota.maintenance.worktree_reaper as mod
 
         monkeypatch.setattr(
             mod, "_reap", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
@@ -1155,7 +1155,7 @@ class TestFailClosed:
     """Every "git could not answer" path holds the worktree."""
 
     def test_a_failing_dirty_check_holds(self, repos, monkeypatch):
-        import istota.worktree_reaper as mod
+        import istota.maintenance.worktree_reaper as mod
 
         repos_dir, bare, _ = repos
         path = _worktree(bare, "project--main", "origin/main")
@@ -1173,7 +1173,7 @@ class TestFailClosed:
         answers "not contained" and passes the question down. Without the
         monkeypatch this worktree is reaped, which is what keeps the assertion
         from being vacuous."""
-        import istota.worktree_reaper as mod
+        import istota.maintenance.worktree_reaper as mod
 
         repos_dir, bare, upstream = repos
         path = _worktree(bare, "project--topic", "origin/main", branch="topic")
@@ -1208,7 +1208,7 @@ class TestFailClosed:
         """A listing carrying no HEAD, or the all-zero sha of an unborn branch.
         Neither used to be compared against anything: an empty head returned
         "no unique commits", which is the reapable answer."""
-        import istota.worktree_reaper as mod
+        import istota.maintenance.worktree_reaper as mod
 
         assert mod._has_unique_commits(Path("/nonexistent"), "x", "") is None
         assert mod._has_unique_commits(Path("/nonexistent"), "x", "0" * 40) is None
@@ -1267,7 +1267,7 @@ class TestFailClosed:
         leave the remaining checks to decide, matching every other probe in
         this module: an unanswerable question holds the worktree rather than
         licensing a delete."""
-        import istota.worktree_reaper as mod
+        import istota.maintenance.worktree_reaper as mod
 
         _, bare, _ = repos
         assert mod._is_ancestor(Path("/nonexistent"), "x", "y") is False
@@ -1278,7 +1278,7 @@ class TestFailClosed:
         """The same fall-through through the real sweep: with the ancestor
         probe unable to answer, a worktree cut from a merge tip is held by the
         refusal that used to hold it unconditionally."""
-        import istota.worktree_reaper as mod
+        import istota.maintenance.worktree_reaper as mod
 
         repos_dir, bare, upstream = repos
         _git(upstream, "checkout", "-q", "-b", "feature")
@@ -1306,7 +1306,7 @@ class TestBranchRef:
         points at now, not the sha the containment checks approved — so a branch that
         advanced between the listing and the removal would lose the new commits
         to the delete. With the old value, git refuses and says so."""
-        import istota.worktree_reaper as mod
+        import istota.maintenance.worktree_reaper as mod
 
         repos_dir, bare, _ = repos
         path = _worktree(bare, "project--topic", "origin/main", branch="topic")
@@ -1335,14 +1335,14 @@ class TestAdminPointer:
     whose task has been committing all day reads as idle."""
 
     def test_an_absolute_pointer_resolves(self, repos):
-        import istota.worktree_reaper as mod
+        import istota.maintenance.worktree_reaper as mod
 
         _, bare, _ = repos
         path = _worktree(bare, "project--main", "origin/main")
         assert mod._admin_dir(path) is not None
 
     def test_a_relative_pointer_resolves_against_the_worktree(self, repos):
-        import istota.worktree_reaper as mod
+        import istota.maintenance.worktree_reaper as mod
 
         _, bare, _ = repos
         path = _worktree(bare, "project--main", "origin/main")
@@ -1379,7 +1379,7 @@ class TestRecheckBeforeRemoval:
     the removal to shrink it."""
 
     def test_a_file_appearing_after_classification_is_not_deleted(self, repos, monkeypatch):
-        import istota.worktree_reaper as mod
+        import istota.maintenance.worktree_reaper as mod
 
         repos_dir, bare, upstream = repos
         # Committed upstream so the checkout stays clean and only `--ignored`
@@ -1499,7 +1499,7 @@ class TestSchedulerIntegration:
         skip the same fixture *is* found, so a green assertion means the prune
         did it and not the depth limit or the git-dir test.
         """
-        from istota.git_remote_scrub import find_git_dirs
+        from istota.sandbox.git_remote_scrub import find_git_dirs
         from istota.scheduler import _package_cache_dirs
 
         repos_dir, _bare, _ = repos
@@ -1526,7 +1526,7 @@ class TestSchedulerIntegration:
         repos_dir, _bare, _ = repos
         (repos_dir / "alice" / ".package-caches").mkdir(parents=True)
 
-        with patch("istota.worktree_reaper.reap_and_report", return_value=[]) as reap:
+        with patch("istota.maintenance.worktree_reaper.reap_and_report", return_value=[]) as reap:
             check_worktree_reap(self._config(repos_dir))
 
         skip = reap.call_args.kwargs["skip"]

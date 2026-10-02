@@ -22,10 +22,10 @@ from pathlib import Path
 
 import pytest
 
-from istota import devbox_exec_protocol as p
+from istota.devbox import exec_protocol as p
 
 ROOT = Path(__file__).resolve().parents[1]
-CANONICAL = ROOT / "src/istota/devbox_exec_protocol.py"
+CANONICAL = ROOT / "src/istota/devbox/exec_protocol.py"
 VENDORED = ROOT / "docker/devbox/lib/istota_devbox_exec_protocol.py"
 SYNC_SCRIPT = ROOT / "scripts/sync-devbox-lib.sh"
 
@@ -435,7 +435,7 @@ class TestVendoredCopy:
     def test_the_copy_exists_and_is_byte_identical(self):
         assert VENDORED.exists(), f"{VENDORED} missing — run scripts/sync-devbox-lib.sh"
         assert CANONICAL.read_bytes() == VENDORED.read_bytes(), (
-            "src/istota/devbox_exec_protocol.py and "
+            "src/istota/devbox/exec_protocol.py and "
             "docker/devbox/lib/istota_devbox_exec_protocol.py have drifted — "
             "run scripts/sync-devbox-lib.sh"
         )
@@ -447,7 +447,7 @@ class TestVendoredCopy:
 
     def test_the_sync_script_lists_it(self):
         assert (
-            "src/istota/devbox_exec_protocol.py:docker/devbox/lib/istota_devbox_exec_protocol.py"
+            "src/istota/devbox/exec_protocol.py:docker/devbox/lib/istota_devbox_exec_protocol.py"
             in SYNC_SCRIPT.read_text()
         )
 

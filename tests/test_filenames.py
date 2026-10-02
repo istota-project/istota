@@ -2,7 +2,7 @@
 
 import pytest
 
-from istota.filenames import filename_parts, safe_filename
+from istota.lib.filenames import filename_parts, safe_filename
 
 
 class TestTheReportedName:
@@ -71,7 +71,7 @@ class TestReviewFindings:
         assert safe_filename(raw) == expected
 
     def test_the_source_holds_no_invisible_character(self):
-        import istota.filenames as module
+        import istota.lib.filenames as module
         from pathlib import Path
 
         assert Path(module.__file__).read_text(encoding="utf-8").isascii()

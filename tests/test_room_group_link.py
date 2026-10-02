@@ -15,9 +15,10 @@ import sqlite3
 
 import pytest
 
-from istota import commands, db, room_policy
+from istota import commands, db
+from istota.rooms import policy as room_policy
 from istota.config import Config, UserConfig
-from istota.room_scopes import task_group_ids
+from istota.rooms.scopes import task_group_ids
 
 
 @pytest.fixture

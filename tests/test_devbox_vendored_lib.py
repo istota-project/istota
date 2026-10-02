@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from istota import devbox_proxy_protocol
+from istota.devbox import proxy_protocol as devbox_proxy_protocol
 
 REPO = Path(__file__).resolve().parents[1]
 LIB_DIR = REPO / "docker" / "devbox" / "lib"

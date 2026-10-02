@@ -27,9 +27,10 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, notification_sources as sources
+from istota import db
+from istota.notifications import sources
 from istota.config import Config, EmailConfig as AppEmailConfig, UserConfig
-from istota.notification_resolvers import task_alert
+from istota.notifications.resolvers import task_alert
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email import inbound as inbound_module
 from istota.transport.email.inbound import _DmarcAlert, poll_emails
@@ -117,7 +118,7 @@ class TestFiftyForgedSendersProduceOneRow:
         alerts = _alerts(FORGED)
         assert len(alerts) == 50
 
-        with patch("istota.notifications.send_notification", return_value=True):
+        with patch("istota.notifications.delivery.send_notification", return_value=True):
             inbound_module._deliver_dmarc_alerts(config, alerts)
 
         rows = _rows(config)
@@ -130,7 +131,7 @@ class TestFiftyForgedSendersProduceOneRow:
         assert rows[0]["occurrences"] == 50
 
     def test_the_senders_are_in_params_and_bounded(self, config):
-        with patch("istota.notifications.send_notification", return_value=True):
+        with patch("istota.notifications.delivery.send_notification", return_value=True):
             inbound_module._deliver_dmarc_alerts(config, _alerts(FORGED))
 
         params = _params(config, _rows(config)[0]["id"])
@@ -147,7 +148,7 @@ class TestFiftyForgedSendersProduceOneRow:
         assert params["senders_dropped"] == 50 - task_alert.MAX_PARAM_ENTRIES
 
     def test_a_repeated_sender_does_not_grow_the_list(self, config):
-        with patch("istota.notifications.send_notification", return_value=True):
+        with patch("istota.notifications.delivery.send_notification", return_value=True):
             for _ in range(5):
                 inbound_module._reset_dmarc_alert_dedup()
                 inbound_module._deliver_dmarc_alerts(config, _alerts(FORGED[:1]))
@@ -164,7 +165,7 @@ class TestFiftyForgedSendersProduceOneRow:
         honest about being a tally of drop events: three bursts of the same
         fifty senders is ninety drops, not thirty.
         """
-        with patch("istota.notifications.send_notification", return_value=True):
+        with patch("istota.notifications.delivery.send_notification", return_value=True):
             for _ in range(3):
                 inbound_module._reset_dmarc_alert_dedup()
                 inbound_module._deliver_dmarc_alerts(config, _alerts(FORGED))
@@ -177,7 +178,7 @@ class TestFiftyForgedSendersProduceOneRow:
         assert params["senders"] == FORGED[: task_alert.MAX_PARAM_ENTRIES]
 
     def test_a_different_verdict_is_a_different_row(self, config):
-        with patch("istota.notifications.send_notification", return_value=True):
+        with patch("istota.notifications.delivery.send_notification", return_value=True):
             inbound_module._deliver_dmarc_alerts(config, _alerts(FORGED[:1]))
             inbound_module._deliver_dmarc_alerts(
                 config, _alerts(FORGED[1:2], verdict="none"),
@@ -198,13 +199,13 @@ class TestFiftyForgedSendersProduceOneRow:
         assert task_alert.dmarc_key("") == "dmarc:other"
 
     def test_the_sender_appears_in_the_delivered_text(self, config):
-        with patch("istota.notifications.send_notification", return_value=True) as send:
+        with patch("istota.notifications.delivery.send_notification", return_value=True) as send:
             inbound_module._deliver_dmarc_alerts(config, _alerts(FORGED[:1]))
         assert FORGED[0] in send.call_args.args[2]
 
     def test_delivery_still_fires_once_per_sender(self, config):
         """The in-process window is the delivery gate, not the row's branch."""
-        with patch("istota.notifications.send_notification", return_value=True) as send:
+        with patch("istota.notifications.delivery.send_notification", return_value=True) as send:
             inbound_module._deliver_dmarc_alerts(config, _alerts(FORGED[:5]))
 
         # Five distinct window keys, five pushes — unchanged from before the inbox
@@ -217,7 +218,7 @@ class TestFiftyForgedSendersProduceOneRow:
 class TestTheRowSurvivesAFailedDelivery:
     def test_no_destination_leaves_the_row_open_and_undelivered(self, config):
         """`send_notification` returning False is the case the inbox exists for."""
-        with patch("istota.notifications.send_notification", return_value=False) as send:
+        with patch("istota.notifications.delivery.send_notification", return_value=False) as send:
             inbound_module._deliver_dmarc_alerts(config, _alerts(FORGED[:1]))
 
         assert send.call_count == 1
@@ -227,12 +228,12 @@ class TestTheRowSurvivesAFailedDelivery:
 
     def test_a_failed_send_does_not_open_the_window(self, config):
         """The row is durable; the window still retries on the next occurrence."""
-        with patch("istota.notifications.send_notification", return_value=False):
+        with patch("istota.notifications.delivery.send_notification", return_value=False):
             inbound_module._deliver_dmarc_alerts(config, _alerts(FORGED[:1]))
         assert inbound_module._dmarc_alerted == {}
 
     def test_a_successful_delivery_stamps_the_row(self, config):
-        with patch("istota.notifications.send_notification", return_value=True):
+        with patch("istota.notifications.delivery.send_notification", return_value=True):
             inbound_module._deliver_dmarc_alerts(config, _alerts(FORGED[:1]))
         assert _rows(config)[0]["last_delivered_at"] is not None
 
@@ -268,7 +269,7 @@ def _poll_one(config, uid: str, *, delivered=True):
         patch("istota.transport.email.inbound.read_email",
               return_value=_email(uid)),
         patch("istota.transport.email.inbound.download_attachments", return_value=[]),
-        patch("istota.notifications.send_notification", return_value=delivered) as send,
+        patch("istota.notifications.delivery.send_notification", return_value=delivered) as send,
     ):
         poll_emails(config)
     return send

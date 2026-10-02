@@ -53,7 +53,7 @@ def _make_config(tmp_path):
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod.app.state.istota_config = config
     mod._oauth = MagicMock()
@@ -62,7 +62,7 @@ def _patch_app(config):
 
 
 async def _login(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
     )
@@ -80,7 +80,7 @@ async def chat_client(tmp_path):
 
 
 def _db_path():
-    import istota.web_app as mod
+    import istota.webui.app as mod
     return mod._config.db_path
 
 
@@ -352,7 +352,7 @@ class TestTalkInbound:
     to be filled too or the web transcript renders it as an ordinary message."""
 
     def _config(self):
-        import istota.web_app as mod
+        import istota.webui.app as mod
         return mod._config
 
     def _ingest_talk_reply(self, token, *, reply_to_talk_id, parent_talk_id=None):
@@ -477,7 +477,7 @@ async def _post_reply_as_user(client, cookies, room, parent_msg_id):
     """
     import json
 
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     captured: dict = {}
 
@@ -496,9 +496,9 @@ async def _post_reply_as_user(client, cookies, room, parent_msg_id):
     if parent_msg_id is not None:
         body["reply_to_msg_id"] = parent_msg_id
     with patch.object(mod, "_config", mod._config), \
-            patch("istota.web_tokens.feature_enabled", return_value=True), \
-            patch("istota.web_tokens.get_access_token", return_value="tok"), \
-            patch("istota.talk.TalkClient", _FakeTalkClient):
+            patch("istota.webui.tokens.feature_enabled", return_value=True), \
+            patch("istota.webui.tokens.get_access_token", return_value="tok"), \
+            patch("istota.nextcloud.talk.TalkClient", _FakeTalkClient):
         resp = await _send(client, cookies, room["id"], body)
     assert resp.status_code == 200
     with db.get_db(_db_path()) as conn:

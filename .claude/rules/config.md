@@ -19,7 +19,7 @@ Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config
 6. Secret env overrides, `ISTOTA_<SECTION>_<FIELD>` (same names as compose): `ISTOTA_NEXTCLOUD_APP_PASSWORD`, `ISTOTA_EMAIL_IMAP_PASSWORD`, `ISTOTA_EMAIL_SMTP_PASSWORD`, `ISTOTA_DEVELOPER_GITLAB_TOKEN`, `ISTOTA_DEVELOPER_GITHUB_TOKEN`, `ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET`, `ISTOTA_WEB_OAUTH2_CLIENT_SECRET`, `ISTOTA_WEB_SESSION_SECRET_KEY`, `ISTOTA_WEB_TOKEN_STORAGE` (value-validated), the three `ISTOTA_WHATSAPP_*` credentials (→ `whatsapp.cloud`). `ISTOTA_SECRET_KEY`, `ISTOTA_WEB_TOKEN_KEY` and runtime vars (`ISTOTA_DB_PATH`, `ISTOTA_USER_ID`, ...) are not config overrides.
 7. `_apply_user_profiles`: `user_profiles` overlays `config.users`. Scalars replace TOML when a row exists; lists (email_addresses, disabled_skills, trusted_email_senders) only when non-empty, so an auto-seeded blank row does not wipe templated lists. Best-effort.
 8. `_apply_user_resources`: rows → `ResourceConfig`, dedup on `(type, path)`, DB wins.
-9. `_migrate_obsolete_resources`: `secrets_store.import_from_user_configs` (absorbs karakeep `base_url`/`api_key` from `extra`, overland `ingest_token`, monarch creds), then `db.cleanup_obsolete_resources` deletes retired types (`feeds`, `money`, `monarch`, `moneyman`, `karakeep`, `overland`, `calendar`, `email_folder`, `notes_folder`). `todo_file`/`reminders_file` have no reader but are not auto-cleaned: deleting a user's rows is a data migration.
+9. `_migrate_obsolete_resources`: `credentials.store.import_from_user_configs` (absorbs karakeep `base_url`/`api_key` from `extra`, overland `ingest_token`, monarch creds), then `db.cleanup_obsolete_resources` deletes retired types (`feeds`, `money`, `monarch`, `moneyman`, `karakeep`, `overland`, `calendar`, `email_folder`, `notes_folder`). `todo_file`/`reminders_file` have no reader but are not auto-cleaned: deleting a user's rows is a data migration.
 10. `_apply_user_briefings`: dedup on `name`, DB wins; `enabled=0` drops the TOML name (web mute). TOML `blocks` are captured and re-attached to the DB entry, since rows never carry `blocks`.
 
 **A bad value never stops a process.** `load_config` runs in the scheduler, web app, webhook receiver and every proxied skill CLI. No raw value reaches bare `int()`/`float()` (TOML spells inf/nan). `coerce_int`/`coerce_float` turn a non-finite number, a bool in a numeric slot or a non-number into one WARNING and the default; a quoted number is read as the number.
@@ -36,7 +36,7 @@ Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config
 - `model`/`effort` at the root are deprecated (ISSUE-418): claude_code's defaults applied to every brain. Migrated with a warning onto `[brain.claude_code]` and `[brain.tmux]`, never `[brain.native]`. `advisor_model` uses the alias table (anthropic brains, no effort), dropped for a task with a model pin (`executor._resolve_advisor`).
 - `module_data_dir` must be local (WAL `-shm` SIGBUSes on FUSE); explicit values under `nextcloud_mount_path` raise. `module_db_root()` = it or `{db_path.parent}/modules`, split out because the sandbox masks the root and `_validate_workspace_dir` refuses overlap (three derivations is how it once went unmasked). `module_db_path(user, module)` is the one enumerator for `db_health`, `db_backup`, `db_relocate`.
 - `storage_is_nextcloud` = `bool(nextcloud.url)`, not `is_standalone` (which folds in web auth). Source of storage vocabulary; `storage_backend` and `storage_label` derive from it.
-- `workspace_root(user_id=None)`: de-dups `workspace/"Users"/uid`, scoped via `user_scope.scoped_user_dir`; no I/O.
+- `workspace_root(user_id=None)`: de-dups `workspace/"Users"/uid`, scoped via `sandbox.user_scope.scoped_user_dir`; no I/O.
 - `is_standalone`: blank `nextcloud.url` and `web.auth == ["none"]`. `local_user_id`: the sole user.
 - `available_capabilities()`: `browser`, `devbox` flags. A skill whose `requires_capability` is absent joins `skills._loader.effective_disabled_skills`.
 - `is_module_enabled(user, module)`: names from `modules.MODULE_NAMES` (`feeds`, `money`, `location`, `health`, `briefings`; unknown → False). Before the DB read: the `EXPERIMENTAL_MODULES` gate (empty) and the dependency gate (`MODULE_DEPENDENCIES`, `money → beancount`, `module_available` via `find_spec`), so a lean install hides a module everywhere. Then `user_profiles.disabled_modules` (cross-process without SIGHUP), else memory. Unknown user → True. `/settings/modules` and `_coerce_profile_value("disabled_modules", ...)` use the same gate.
@@ -69,7 +69,7 @@ The trusted allowlist is explicit only, never derived from correspondence (`sent
 
 ## ntfy
 
-No `[ntfy]` block: per-user secrets (`secret_schema.CONNECTED_SERVICE_SCHEMA`); no topic → no-op; priority 3. Headers go through `ntfy_headers.encode_header_value` (RFC 2047): httpx sends ASCII headers and an em dash in a title lost the whole push (ISSUE-213). Markdown is opt-in (`DeliveryOptions.markdown`, `--markdown`), since ntfy renders it only in its web app. One-way.
+No `[ntfy]` block: per-user secrets (`credentials.schema.CONNECTED_SERVICE_SCHEMA`); no topic → no-op; priority 3. Headers go through `notifications.ntfy_headers.encode_header_value` (RFC 2047): httpx sends ASCII headers and an em dash in a title lost the whole push (ISSUE-213). Markdown is opt-in (`DeliveryOptions.markdown`, `--markdown`), since ntfy renders it only in its web app. One-way.
 
 ## Devbox and the container transport
 
@@ -86,13 +86,13 @@ No `[ntfy]` block: per-user secrets (`secret_schema.CONNECTED_SERVICE_SCHEMA`); 
 
 ## Developer
 
-`repos_dir` is a root of per-user subtrees: `{repos_dir}/{user_id}/{namespace}/{project}.git`, worktrees as siblings, cache at `.package-caches`. `config.repos_root(config, user_id)` serves every task-scoped consumer (bwrap bind, native write root, `DEVELOPER_REPOS_DIR` via `config_per_user`, `git_remote_scrub`, devbox mount). Isolation is structural, which retired the ISSUE-319 masks. The namespace level avoids basename collisions; depth 3 fits `git_remote_scrub._MAX_DEPTH`. Global-root consumers by design: `worktree_reaper` (no user) and `_protected_cache_parents` (global is stricter). Helpers: `repos_root`, `container_backend`, `devbox_container_backend`, `exec_socket_dir`, `exec_socket_path`.
+`repos_dir` is a root of per-user subtrees: `{repos_dir}/{user_id}/{namespace}/{project}.git`, worktrees as siblings, cache at `.package-caches`. `config.repos_root(config, user_id)` serves every task-scoped consumer (bwrap bind, native write root, `DEVELOPER_REPOS_DIR` via `config_per_user`, `git_remote_scrub`, devbox mount). Isolation is structural, which retired the ISSUE-319 masks. The namespace level avoids basename collisions; depth 3 fits `sandbox.git_remote_scrub._MAX_DEPTH`. Global-root consumers by design: `worktree_reaper` (no user) and `_protected_cache_parents` (global is stricter). Helpers: `repos_root`, `container_backend`, `devbox_container_backend`, `exec_socket_dir`, `exec_socket_path`.
 
 - `DEVELOPER_REPOS_DIR` comes only from the developer skill's `setup_env` (`developer` and `code_review` manifests are `from: setup_env`), gated on `is_admin` like the bind. Residual: an override manifest at `config/skills/developer/skill.md` still saying `from: config` would hand out the shared root; the guard test reads bundled manifests only.
-- `repos_relocate.py` (Ansible, before restart) assigns every namespace to the single admin and refuses on none or several; marker `{repos_dir}/.istota-layout` = `2`; the old shared `.package-caches` is left for manual removal.
+- `maintenance/repos_relocate.py` (Ansible, before restart) assigns every namespace to the single admin and refuses on none or several; marker `{repos_dir}/.istota-layout` = `2`; the old shared `.package-caches` is left for manual removal.
 - `gitlab_reviewer` → `GITLAB_REVIEWER` for `glab mr create --reviewer` (by username). `gitlab_reviewer_id` is read by nothing (ISSUE-289: ids in the consumed field left every MR unassigned). Doctor `developer.gitlab_reviewer` WARNs on an all-digit username or an id with no username.
-- `worktree_reap_enabled`/`worktree_retention_hours` (24, 1h floor) drive `worktree_reaper.py` (ISSUE-288) from the scheduler (`scheduler.worktree_reap_interval`), never `setup_env`, which runs for every task including heartbeat `id=0`. Retention is what protects a running task.
-- Retired: `gitlab_api_allowlist`, `github_api_allowlist`, `api_timeout_seconds` (unified-forge-cli-wrapper spec). Endpoint lists cannot describe real `gh` calls; denial is `forge_cli.py`'s argv policy.
+- `worktree_reap_enabled`/`worktree_retention_hours` (24, 1h floor) drive `maintenance/worktree_reaper.py` (ISSUE-288) from the scheduler (`scheduler.worktree_reap_interval`), never `setup_env`, which runs for every task including heartbeat `id=0`. Retention is what protects a running task.
+- Retired: `gitlab_api_allowlist`, `github_api_allowlist`, `api_timeout_seconds` (unified-forge-cli-wrapper spec). Endpoint lists cannot describe real `gh` calls; denial is `sandbox/forge_cli.py`'s argv policy.
 - `forge_cli_permit` turns a baseline guard off. `_validate_forge_clis` (spawns nothing; config-load path) warns on a permit entry matching nothing, a missing `gh_bin_path`/`glab_bin_path`, and tokens with `skill_proxy_enabled = false` (the token then sits in the model's shell env via `direct_token`).
 - One instance per forge: each URL feeds the CONNECT allowlist (`executor._build_network_allowlist`), the per-host credential helper and `GITLAB_HOST`/`GH_HOST`. A second instance fails safe but opaquely; `extra_hosts` adds reachability, not credentials. `git` is unwrapped; force-push protection is forge-side.
 
@@ -100,7 +100,7 @@ No `[ntfy]` block: per-user secrets (`secret_schema.CONNECTED_SERVICE_SCHEMA`); 
 
 `skill_proxy_enabled` is required wherever `sandbox_enabled` is true (ISSUE-393 warning): `_split_credential_env` strips sensitive vars only in the proxy branch, and DB dirs are masked so `skill_client._run_direct` refuses on `ISTOTA_SANDBOXED`. Both off (the `setup_wizard` pair) is not warned: no boundary exists.
 
-`skill_proxy_timeouts` ships empty; the `code_review` ceiling is `skill_proxy.DEFAULT_SKILL_TIMEOUTS` (ISSUE-448). `skill_client_wait_seconds` (600) caps every skill budget at it minus 30s (ISSUE-450).
+`skill_proxy_timeouts` ships empty; the `code_review` ceiling is `sandbox.skill_proxy.DEFAULT_SKILL_TIMEOUTS` (ISSUE-448). `skill_client_wait_seconds` (600) caps every skill budget at it minus 30s (ISSUE-450).
 
 `sandbox_ro_paths` defaults to `[]` and is now parsed; it never was, so every deployment ran `["/srv/app"]`, exposing every DB to every task. DB masks are applied after it. `custom_system_prompt` no longer needs it: `build_bwrap_cmd` binds the single file (`custom_system_prompt_path`). `sandbox_admin_db_write` is removed; a stale key warns.
 
@@ -114,10 +114,10 @@ No `[ntfy]` block: per-user secrets (`secret_schema.CONNECTED_SERVICE_SCHEMA`); 
 - Open, ISSUE-320: without the `--disable-userns` precondition a concurrent same-user task could swap a symlink between check and `execve`; restoring it costs the EXDEV copy on old bwrap.
 - All refusals live in `resolve_sandbox_cache_dir`, so bind, env and `native_fs_roots` drop together. It never raises (task path). Rejections fall open: relative, non-writable, under a DB dir, `_validate_workspace_dir`'s blocklist, or at/above a path the sandbox already mounts (`_sandbox_bind_targets`). That last check is one-directional; over-reading it hid ISSUE-319. Checks run on the parent, so a `repos_dir` overlapping protected paths loses its cache; move `repos_dir`.
 - Planting a cache for another user (the ISSUE-319 residual) is closed by layout.
-- `git_remote_scrub.find_git_dirs` and `scheduler.check_worktree_reap` skip the caches, which also stops the reaper fetching a model-written `remote.origin.url` unsandboxed. Cost: a repo under a cache is not swept.
+- `sandbox.git_remote_scrub.find_git_dirs` and `scheduler.check_worktree_reap` skip the caches, which also stops the reaper fetching a model-written `remote.origin.url` unsandboxed. Cost: a repo under a cache is not swept.
 - `UV_CACHE_DIR`, `XDG_CACHE_HOME`, `npm_config_cache`, `HF_HOME` (pinned for the RO model bind) are set after `proxy_base_env` is snapshotted, not in `build_clean_env`: host-side CLIs must not resolve caches from model-writable dirs.
 
-Sweep (ISSUE-317): `sandbox_cache_sweep_enabled`, `sandbox_cache_max_gb` (10/user, 1 GiB floor), `[scheduler] sandbox_cache_sweep_interval`. `scheduler.sandbox_cache_sweep_root` copies the resolver's branch selection, not its refusals; user ids come from `config.users`, never from the tree. Full rules in maintenance.md (`sandbox_cache_sweeper.py`).
+Sweep (ISSUE-317): `sandbox_cache_sweep_enabled`, `sandbox_cache_max_gb` (10/user, 1 GiB floor), `[scheduler] sandbox_cache_sweep_interval`. `scheduler.sandbox_cache_sweep_root` copies the resolver's branch selection, not its refusals; user ids come from `config.users`, never from the tree. Full rules in maintenance.md (`maintenance/sandbox_cache_sweeper.py`).
 
 `CredentialBrokerConfig` (`[security.credential_broker]`): `enabled` (false), `enforce_reveal` (false), `scan_max_bytes` (1048576), `leaf_validity_hours` (24); bad integers warn and keep the default; enabled without a sandbox warns. `enforce_reveal` turns `credential_reveal action=would_refuse` audits into refusals for non-revealable entries, including manifest `env` lookups, and only applies with `enabled` (`reveal_enforced`). Turn it on after a week with no would-refuse events; it never self-activates.
 
@@ -125,12 +125,12 @@ Sweep (ISSUE-317): `sandbox_cache_sweep_enabled`, `sandbox_cache_max_gb` (10/use
 
 `WebConfig` (`[web]`): `auth` (`["nextcloud"]`; `nextcloud`|`email`|`none`, env `ISTOTA_WEB_AUTH`). `normalize_auth_methods` drops unknowns, makes `none` exclusive, empty keeps the default; readers use `has_method`. `trusted_proxy_hops = 0` skips the IP dimension for proxied requests.
 
-- `none` is local single-user mode, authorized only by `istota serve`'s in-process loopback marker after checking the bind. Direct uvicorn, Docker and Ansible refuse it; a SIGHUP trying it keeps the old config. `web_session_secret.resolve` is shared with doctor.
-- `token_storage = "encrypted"` keeps the user OAuth pair in `web_user_tokens` under the web-only `ISTOTA_WEB_TOKEN_KEY` (≥32 chars, own salt; `web_tokens.py`). Missing key: one ERROR, ephemeral. Other values: warning, ephemeral.
+- `none` is local single-user mode, authorized only by `istota serve`'s in-process loopback marker after checking the bind. Direct uvicorn, Docker and Ansible refuse it; a SIGHUP trying it keeps the old config. `webui.session_secret.resolve` is shared with doctor.
+- `token_storage = "encrypted"` keeps the user OAuth pair in `web_user_tokens` under the web-only `ISTOTA_WEB_TOKEN_KEY` (≥32 chars, own salt; `webui/tokens.py`). Missing key: one ERROR, ephemeral. Other values: warning, ephemeral.
 - `max_avatar_kb` (4096; 0 off) is not nginx's `client_max_body_size`. Checked on `Content-Length` and again on the running total (the header is a claim); `len(await file.read())` would buffer whatever nginx passed.
 - `avatar_import_from_nextcloud` (on, `[scheduler] avatar_import_interval`): imports only a **custom** avatar, told apart from Nextcloud's generated letter by one response header (absent → nothing imported). Records its result in `shared_kv` because doctor `web.avatar_import` opens no socket.
 
-`WebMapConfig` (`[web.map]`, ISSUE-334): `provider` (`openfreemap`|`carto`|`osm`|`custom`), `api_key`, custom `dark_style`/`light_style`/`attribution`. `map_basemap.py` serves both `GET /istota/api/map/basemap` and doctor `web.basemap`. Never returns an unusable spec: unknown provider, bad custom URL or a keyed provider with no key falls back to `openfreemap` with `fell_back` (keyless templates plus a `needs_key` flag was the original bug; the flag is now the reason). `api_key` is public (it is in tile URLs). A user's stored key (`MODULE_SERVICE_SCHEMA["location"]["carto"]`) selects CARTO for them (`map_basemap.select_provider`), returned only inside the URL. **`web.basemap` opens no socket**: CARTO's watermarked tile is byte-identical to a keyed one, the daemon is not the browser, and a CDN blip would page the operator, so a keyed CARTO is "configured", never verified (`tests/test_doctor_basemap.py::TestItOpensNoSocket`).
+`WebMapConfig` (`[web.map]`, ISSUE-334): `provider` (`openfreemap`|`carto`|`osm`|`custom`), `api_key`, custom `dark_style`/`light_style`/`attribution`. `webui/map_basemap.py` serves both `GET /istota/api/map/basemap` and doctor `web.basemap`. Never returns an unusable spec: unknown provider, bad custom URL or a keyed provider with no key falls back to `openfreemap` with `fell_back` (keyless templates plus a `needs_key` flag was the original bug; the flag is now the reason). `api_key` is public (it is in tile URLs). A user's stored key (`MODULE_SERVICE_SCHEMA["location"]["carto"]`) selects CARTO for them (`webui.map_basemap.select_provider`), returned only inside the URL. **`web.basemap` opens no socket**: CARTO's watermarked tile is byte-identical to a keyed one, the daemon is not the browser, and a CDN blip would page the operator, so a keyed CARTO is "configured", never verified (`tests/test_doctor_basemap.py::TestItOpensNoSocket`).
 
 `[web.chat] talk_read_sync_interval` (60; 0 off).
 
@@ -150,14 +150,14 @@ Sweep (ISSUE-317): `sandbox_cache_sweep_enabled`, `sandbox_cache_max_gb` (10/use
 - `room_selectable` (empty) bounds kinds a room (`!brain`, web) or CRON.md job may pin (ISSUE-419), since `resolve_brain_kind` applies it regardless of provenance; a separate `job_selectable` was rejected (rename is a follow-up). `cron_loader.fj_brain_or_none` drops non-admin job pins (CRON.md is model-writable). Empty by default because a kind decides the loop's process, tools and sandbox profile. `_validate_room_selectable` warns on unbuildable names. A pin clears `fallback`; `brain.reachable_brain_kinds` widens doctor. Ansible `istota_brain_room_selectable`; Docker `ISTOTA_BRAIN_ROOM_SELECTABLE` (CSV through `toml_escape`). Neither renders the key at its default, since both regenerate `config.toml` (Docker each boot since ISSUE-368). `TestTheRoomSelectableAllowlist` in `tests/test_render_config.py` and `tests/test_ansible_config_template.py`.
 - `[brain.tmux]`: own `model`/`effort` (ISSUE-418), trip/cooldown/timeouts, `cli_version_pin`, marker lists; `usage_limit_markers` are checked before `error_markers` → `stop_reason=usage_limit` → fallback.
 
-`[brain.claude_code]`: own `model`/`effort` (ISSUE-418) and the subscription usage poll, read whatever `kind` is. `subscription_usage.get_snapshot` serves doctor `runtime.subscription_usage`, `/admin` and `!usage` from `{db_path.parent}/subscription_usage.json`; the credential is never written or refreshed.
+`[brain.claude_code]`: own `model`/`effort` (ISSUE-418) and the subscription usage poll, read whatever `kind` is. `usage.subscription.get_snapshot` serves doctor `runtime.subscription_usage`, `/admin` and `!usage` from `{db_path.parent}/subscription_usage.json`; the credential is never written or refreshed.
 
 - `subscription_usage` (true): false → doctor SKIP, no card. Real or quoted boolean only, warns otherwise, since `bool("false")` is True and this gates an outbound request.
 - `subscription_usage_cache_ttl_seconds` (1800): freshness window and post-failure retry interval at once (a separate knob was rejected); failures are never cached as readings, a success clears the timer, stale readings are served meanwhile. 1800 because the endpoint rate-limits and its shortest window is five hours. A `Retry-After` overrides, capped by `MAX_RETRY_AFTER_SECONDS`.
 - `warn_percent` (80) / `high_percent` (95) are ours, not the server's `severity`; never a FAIL. `stale_after_seconds` (3600): older readings SKIP.
 - Only endpoint-produced failures are shared; "no credential" (`resolve_token` → `None`) describes the calling process and is rate-limited process-locally.
 - `_validate_claude_code_brain` clamps percents to `[0,100]`, lowers `warn > high`, floors TTL and timeout at 1; non-finite → default (NaN would go amber forever, `inf` breaks `allow_nan=False` JSON). `stale_after_seconds` unfloored. No I/O.
-- `subscription_usage.py` copies three defaults, pinned by `tests/test_config_claude_code_brain.py::TestOneSourceOfTruthForTheDefaults`. `deploy/ansible/files/validate_config.py` allowlists `claude_code`.
+- `usage/subscription.py` copies three defaults, pinned by `tests/test_config_claude_code_brain.py::TestOneSourceOfTruthForTheDefaults`. `deploy/ansible/files/validate_config.py` allowlists `claude_code`.
 
 `[brain.native]` (brain.md "NativeBrain"):
 - `model_overrides`: partial `ModelInfo` via `llm.catalog.set_model_overrides` (NB-4).
@@ -184,7 +184,7 @@ A bare `[sleep_cycle]` header keeps `enabled = True` (the old loader made it fal
 
 - **Resources**: only `folder` is declarable (operator-only, `istota resource ensure -t folder`); `shared_file` is organizer state. Calendars are CalDAV-discovered; todo/reminders/notes sources read their own `path`. Inert: `todo_file`, `reminders_file`. `ResourceConfig.base_url`/`api_key` live in `extra`.
 - **Modules**: on by default, opt-out via `disabled_modules`, one gate `is_module_enabled`.
-- **Connected services**: per-user credentials in `secrets` (Fernet over scrypt from `ISTOTA_SECRET_KEY`), schema in `secret_schema.py`. `garmin` is cross-module: auth in `garmin_routes.py`, and `health.garmin.acquire_client` is the only sanctioned client (re-persists rotated tokens under a per-user lock).
+- **Connected services**: per-user credentials in `secrets` (Fernet over scrypt from `ISTOTA_SECRET_KEY`), schema in `credentials/schema.py`. `garmin` is cross-module: auth in `webui/garmin_routes.py`, and `health.garmin.acquire_client` is the only sanctioned client (re-persists rotated tokens under a per-user lock).
 - Settings: `_CONNECTED_SERVICE_SCHEMA` (`GET /settings/services`) and `_MODULE_SERVICE_SCHEMA` (`GET /settings/module-services/{module}`); `_all_known_services()` validates secret writes. `ServiceCard`'s generic OAuth branch is gone, so a new OAuth service needs its own card. `POST /settings/secrets/overland/ingest_token/generate` is the only endpoint returning a secret, once, and 409s with a blank `[site] hostname` (a relative webhook URL would fail the phone's decoder).
 
 ## Money and briefings
@@ -198,14 +198,14 @@ A bare `[sleep_cycle]` header keeps `enabled = True` (the old loader made it fal
 ## Per-user profile fields
 
 - `email_reply_routing` (`origin+thread`|`origin`|`thread`) via `Config.email_reply_routing_for`.
-- `outbound_approval` (`''`|`off`|`untrusted`|`all`): `''` is unset, resolves to the floor. `outbound_policy.effective_policy` = `max(floor, user)`: users tighten, never loosen. An invalid row warns and counts as unset.
+- `outbound_approval` (`''`|`off`|`untrusted`|`all`): `''` is unset, resolves to the floor. `mail.outbound_policy.effective_policy` = `max(floor, user)`: users tighten, never loosen. An invalid row warns and counts as unset.
 - `external_turn_display` (`collapsed`): `hidden` still shows the header row, since a bot answer with no question above it is the ISSUE-136 defect.
 - `briefing_email_html` (true; unknown user → True): `multipart/alternative` via `render_briefing_html`.
 - `google_scopes` is a JSON column, deliberately not a `UserConfig` field: the user's choice within `[google_workspace] scopes`, written only by `PUT /api/google/scopes`, no CLI or TOML, because a grant is the user's consent.
 
 ## Module DBs (local disk, WAL)
 
-Framework DB: WAL set once in `init_db`, never per open (re-issuing takes a write lock that stalled the dispatch loop). `get_db` takes `busy_timeout_ms=` for read-only loop scans (`scheduler.main_loop_read_timeout_ms`, 2000). Module DBs moved from FUSE `DELETE` mode (ISSUE-157, ISSUE-156) to local WAL at `module_db_path`; only the `.db` moved. `python -m istota.db_relocate` migrates. Backups (`db_backup`, dated snapshots, collapse guard, mount-liveness guard, staleness alert), restore (`db_restore`) and the off-thread runs (ISSUE-144) are in maintenance.md and AGENTS.md.
+Framework DB: WAL set once in `init_db`, never per open (re-issuing takes a write lock that stalled the dispatch loop). `get_db` takes `busy_timeout_ms=` for read-only loop scans (`scheduler.main_loop_read_timeout_ms`, 2000). Module DBs moved from FUSE `DELETE` mode (ISSUE-157, ISSUE-156) to local WAL at `module_db_path`; only the `.db` moved. `python -m istota.maintenance.db_relocate` migrates. Backups (`db_backup`, dated snapshots, collapse guard, mount-liveness guard, staleness alert), restore (`db_restore`) and the off-thread runs (ISSUE-144) are in maintenance.md and AGENTS.md.
 
 ## Standalone install
 
@@ -213,6 +213,6 @@ Framework DB: WAL set once in `init_db`, never per open (re-issuing takes a writ
 
 - `istota serve` runs the scheduler on a worker thread (`install_signal_handlers=False`) and uvicorn on main; `_DaemonAlreadyRunning` on flock contention (`scheduler.DAEMON_LOCK_PATH`); sources `istota.env` non-clobbering and sets `ISTOTA_CONFIG_PATH`.
 - `istota update` is standalone-only (no contention with the Ansible cron). `install.json` records the channel; a record without one defaults to `main` so it is never reset backwards onto an older tag. Migrations use the freshly installed `istota init`, since nothing on startup runs them; failure rolls the checkout back.
-- `schema.sql` is `force-include`d into the wheel (`db._resolve_schema_path`); `web_app._pick_static_dir` falls back to packaged `web_static`; `web_app._root_redirect` sends `/` to `/istota/`.
+- `schema.sql` is `force-include`d into the wheel (`db._resolve_schema_path`); `webui.app._pick_static_dir` falls back to packaged `web_static`; `webui.app._root_redirect` sends `/` to `/istota/`.
 - "Sandbox disabled" logs INFO under `is_standalone`, WARNING otherwise.
 - Storage vocabulary follows `storage_backend`, not `is_standalone`; Nextcloud prompts are unchanged.

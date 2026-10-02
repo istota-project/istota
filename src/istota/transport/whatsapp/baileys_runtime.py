@@ -268,7 +268,7 @@ def _unlink_readers(config: "Config") -> list[str]:
     difference is that that one has a recipient to fall back on: a charged
     message names the user who received it, and a dead session names nobody.
     """
-    from ...notification_resolvers.task_alert import admin_readers  # noqa: PLC0415
+    from istota.notifications.resolvers.task_alert import admin_readers  # noqa: PLC0415
 
     return admin_readers(config)
 
@@ -286,7 +286,7 @@ def _alert_body(reason: str) -> str:
     the same rule this source already applies to every other caller-supplied
     key component, for the same reason.
     """
-    from ...notification_resolvers.task_alert import _slug  # noqa: PLC0415
+    from istota.notifications.resolvers.task_alert import _slug  # noqa: PLC0415
 
     if reason == "credential_unreadable":
         # The device is still linked on WhatsApp's side; it is the local copy
@@ -324,7 +324,7 @@ def _write_baileys_alerts(
     config: "Config", dedup_key: str, title: str, body: str, status: str,
 ) -> tuple[object, ...]:
     from ... import db  # noqa: PLC0415
-    from ...notification_resolvers import task_alert  # noqa: PLC0415
+    from istota.notifications.resolvers import task_alert  # noqa: PLC0415
 
     raised = []
     with db.get_db(config.db_path) as conn:
@@ -1369,8 +1369,8 @@ def _write_pairing_alerts(
     config: "Config", outcome: "_PairingClosure"
 ) -> tuple[object, ...]:
     from ... import db  # noqa: PLC0415
-    from ...notification_resolvers import task_alert  # noqa: PLC0415
-    from ...notification_resolvers.task_alert import _slug  # noqa: PLC0415
+    from istota.notifications.resolvers import task_alert  # noqa: PLC0415
+    from istota.notifications.resolvers.task_alert import _slug  # noqa: PLC0415
 
     title = _PAIRING_ALERT_TITLES.get(
         outcome.state, "The WhatsApp pairing request closed"

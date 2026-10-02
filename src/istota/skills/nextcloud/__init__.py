@@ -37,7 +37,7 @@ from istota.nextcloud import (
     users as users_mod,
     workspace_root,
 )
-from istota.nextcloud_client import (
+from istota.nextcloud.compat import (
     ocs_create_public_link,
     ocs_create_share,
     ocs_delete_share,
@@ -46,7 +46,7 @@ from istota.nextcloud_client import (
 )
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import EGRESS, WRITE, host_path
-from istota.untrusted import frame_untrusted
+from istota.lib.untrusted import frame_untrusted
 
 _SHARE_TYPE_MAP = shares_mod.SHARE_TYPES
 _DEFAULT_EXPIRE_DAYS = 14
@@ -107,7 +107,7 @@ def _scoped(config: Config, path: str, *, whole_tree: bool = False) -> str:
 
 
 def _refuse_withheld_path(path: str, user_id: str, *, whole_tree: bool) -> None:
-    from istota.skill_host_paths import withheld_from_env
+    from istota.sandbox.host_paths import withheld_from_env
 
     withheld = withheld_from_env()
     if "files" in withheld:
@@ -128,7 +128,7 @@ def _refuse_withheld_path(path: str, user_id: str, *, whole_tree: bool) -> None:
 def _withheld_memory_dirs(user_id: str) -> list[str]:
     """The caller's memory directories as Nextcloud paths, when the room
     withholds memory; empty otherwise."""
-    from istota.skill_host_paths import memory_dir_parts, withheld_from_env
+    from istota.sandbox.host_paths import memory_dir_parts, withheld_from_env
 
     if "memory" not in withheld_from_env() or not user_id:
         return []
@@ -557,7 +557,7 @@ def _talk_run(coro_factory):
     """
     import asyncio
 
-    from istota.talk import transient_client
+    from istota.nextcloud.talk import transient_client
 
     async def _run():
         config = _config_from_env()
@@ -1370,7 +1370,7 @@ def main(argv=None):
         parser.print_help()
         sys.exit(1)
     if group in ("files", "share"):
-        from istota.skill_host_paths import withheld_from_env
+        from istota.sandbox.host_paths import withheld_from_env
 
         if "files" in withheld_from_env():
             # The files control plane, trash and share listings included, is
@@ -1386,7 +1386,7 @@ def main(argv=None):
         # the endpoint a bare message does not, and `to_envelope` is defined on
         # it alone. `PathScopeError` and everything else name themselves, which
         # is why the two branches this replaced had identical bodies. A leaf
-        # `istota.ocs.OcsError` — what the `talk *` commands now raise on an
+        # `istota.nextcloud.ocs.OcsError` — what the `talk *` commands now raise on an
         # unreadable answer — is not an instance of it and takes the second
         # branch, where its own message already names the status and the body.
         if isinstance(exc, OcsError):

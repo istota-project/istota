@@ -35,7 +35,8 @@ from pathlib import Path
 
 import pytest
 
-from istota import db, secrets_store
+from istota import db
+from istota.credentials import store as secrets_store
 
 PASSPHRASE = "cli-fixture-passphrase-not-a-real-one"
 API_KEY_VALUE = "ak-cli-fixture-alpha"
@@ -62,7 +63,7 @@ class _Args:
 
 @pytest.fixture(autouse=True)
 def _clean_sync_state():
-    from istota import secrets_vault
+    from istota.credentials import vault as secrets_vault
 
     secrets_vault.reset_sync_state()
     yield
@@ -155,7 +156,7 @@ def _write_vault(path: Path, *, password=PASSPHRASE, ntfy=False, group_name="kar
 class TestGenerate:
     def test_generate_mints_stores_and_prints_the_value_once(self, env, capsys):
         from istota.cli import cmd_secret
-        from istota.secrets_vault import VAULT_PASSPHRASE_MIN_CHARS
+        from istota.credentials.vault import VAULT_PASSPHRASE_MIN_CHARS
 
         cfg, db_path, _mount = env
         cmd_secret(
@@ -402,7 +403,7 @@ class TestTheFloor:
     def test_a_supplied_value_at_the_floor_is_accepted(self, env):
         """The control: the floor refuses below it and nothing above it."""
         from istota.cli import cmd_secret
-        from istota.secrets_vault import VAULT_PASSPHRASE_MIN_CHARS
+        from istota.credentials.vault import VAULT_PASSPHRASE_MIN_CHARS
 
         cfg, db_path, _mount = env
         value = "q" * VAULT_PASSPHRASE_MIN_CHARS
@@ -446,7 +447,7 @@ class TestTheFloorAppliesToTheSuppliedPathOnly:
     """
 
     def test_generate_is_unaffected_by_the_floor(self, env, monkeypatch, capsys):
-        from istota import secrets_vault
+        from istota.credentials import vault as secrets_vault
         from istota.cli import cmd_secret
 
         cfg, db_path, _mount = env
@@ -557,7 +558,7 @@ class TestVaultSync:
         state is empty in a fresh process — which is precisely why the clearing
         has to live on `sync_user` rather than in the CLI branch.
         """
-        from istota import secrets_vault
+        from istota.credentials import vault as secrets_vault
         from istota.cli import cmd_secret
         from istota.config import load_config
 
@@ -592,7 +593,7 @@ class TestVaultSync:
         operator's terminal.
         """
         from istota.cli import _print_vault_sync
-        from istota.secrets_vault import (
+        from istota.credentials.vault import (
             SKIP_DUPLICATE_NAME,
             VaultApplyResult,
             VaultSyncResult,
@@ -729,7 +730,8 @@ class TestVaultStatus:
         the remedy, so printing the first alone reports a failure and withholds
         the actionable half of it.
         """
-        from istota import db, secrets_vault
+        from istota import db
+        from istota.credentials import vault as secrets_vault
         from istota.cli import cmd_secret
 
         cfg, db_path, mount = _with_vault(env)
@@ -767,7 +769,8 @@ class TestVaultStatus:
         A working vault must not print an error line, and `last sync` must carry
         the success stamp rather than the empty string a never-synced vault has.
         """
-        from istota import db, secrets_vault
+        from istota import db
+        from istota.credentials import vault as secrets_vault
         from istota.cli import cmd_secret
 
         cfg, db_path, mount = _with_vault(env)
@@ -857,8 +860,8 @@ def test_vault_new_refuses_a_name_a_local_credential_holds(env, monkeypatch, cap
     from pykeepass import create_database
 
     from istota.cli import main
-    from istota.credential_broker.bindings import parse_binding
-    from istota.secrets_vault import VAULT_ENTRY_SERVICE
+    from istota.credentials.broker.bindings import parse_binding
+    from istota.credentials.vault import VAULT_ENTRY_SERVICE
 
     cfg, db_path, mount = _with_vault(env)
     path = mount / "Users" / "alice" / "config" / "vault.kdbx"

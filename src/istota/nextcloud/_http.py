@@ -7,11 +7,11 @@ denial, a missing path, an expired app password and a network timeout are
 distinguishable at the call site instead of collapsing to ``None``.
 
 The ``None``-returning legacy variants used by best-effort daemon paths live in
-``istota.nextcloud_client`` (the back-compat shim), not here.
+``istota.nextcloud.compat`` (the back-compat shim), not here.
 
-``istota.ocs`` is the thin version of the envelope read below: a leaf that
+``istota.nextcloud.ocs`` is the thin version of the envelope read below: a leaf that
 unwraps ``ocs.data`` or names what came back instead, for callers outside this
-package (``talk.py``, ``web_app.py``, the Talk transport) that cannot import
+package (``nextcloud/talk.py``, ``webui/app.py``, the Talk transport) that cannot import
 the package and do not read ``meta.statuscode``. This module deliberately keeps
 its own reader — it also maps Nextcloud's 99x status range, carries the
 endpoint and special-cases the share rate limit — and its ``OcsError``
@@ -29,7 +29,7 @@ from urllib.parse import quote
 import httpx
 
 from ..config import Config
-from ..ocs import OcsError as BaseOcsError
+from istota.nextcloud.ocs import OcsError as BaseOcsError
 
 logger = logging.getLogger("istota.nextcloud.http")
 
@@ -77,7 +77,7 @@ class OcsError(BaseOcsError):
     ``message`` is the server's own text where it supplied one, otherwise a
     description synthesized from the status-code table.
 
-    Subclasses ``istota.ocs.OcsError`` so the leaf reader and this one are one
+    Subclasses ``istota.nextcloud.ocs.OcsError`` so the leaf reader and this one are one
     exception family rather than two unrelated classes wearing one name — the
     trap `web/src/lib/api.ts`'s duplicated ``AuthError`` fell into, where
     ``isinstance`` was false across the boundary and nothing said so.

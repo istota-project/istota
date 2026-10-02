@@ -24,11 +24,11 @@ import os
 import sys
 from pathlib import Path
 
-from istota.kv_namespaces import is_reserved_namespace
+from istota.sandbox.kv_namespaces import is_reserved_namespace
 from istota.skills._cli import fail as _fail, parse_and_resolve, run_skill_cli
 from istota.skills._group_access import group_access_denied, group_refusal
 from istota.skills._hostpath import READ, host_path
-from istota.untrusted import frame_untrusted
+from istota.lib.untrusted import frame_untrusted
 
 # `list` decodes and prints every value in a namespace. The natural command for
 # orienting in a namespace should not be the one that dumps a 153 KB array into

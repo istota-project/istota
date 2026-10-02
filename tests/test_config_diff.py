@@ -266,7 +266,7 @@ class TestParityWithTheAdminConfigView:
         That is the safe direction on a log line, and an allowlist on the boot
         path is a fail-open surface for the sake of legibility.
         """
-        from istota import admin_config_view as admin
+        from istota.webui import admin_config_view as admin
 
         leaked = [
             key
@@ -281,7 +281,7 @@ class TestParityWithTheAdminConfigView:
     def test_the_marker_list_covers_the_admin_view_s(self):
         """A marker whose effect no shipped field happens to exercise is
         invisible to the corpus test above; this is what catches it."""
-        from istota import admin_config_view as admin
+        from istota.webui import admin_config_view as admin
 
         missing = {p.lower() for p in admin.SECRET_NAME_PATTERNS} - set(
             config_diff._CREDENTIAL_MARKERS
@@ -293,7 +293,7 @@ class TestParityWithTheAdminConfigView:
         )
 
     def test_the_wholesale_list_covers_the_admin_view_s(self):
-        from istota import admin_config_view as admin
+        from istota.webui import admin_config_view as admin
 
         missing = set(admin._ALWAYS_SECRET_KEYS) - set(
             config_diff._ALWAYS_WITHHELD_PREFIXES
@@ -307,7 +307,7 @@ class TestParityWithTheAdminConfigView:
         """The normalization, asserted as the equivalence it is rather than
         against three literals — `is_secret_name` folds hyphens and this did
         not, which is the whole of why the three header shapes printed."""
-        from istota import admin_config_view as admin
+        from istota.webui import admin_config_view as admin
 
         for name in ("x-api-key", "api-key", "authorization", "x-auth-token"):
             assert admin.is_secret_name(name)

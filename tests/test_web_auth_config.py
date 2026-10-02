@@ -8,7 +8,7 @@ from istota.config import Config, WebConfig
 
 @pytest.fixture(autouse=True)
 def restore_web_state(monkeypatch):
-    from istota import web_app
+    from istota.webui import app as web_app
 
     monkeypatch.setattr(web_app, "_config", web_app._config)
     monkeypatch.setattr(web_app, "_oauth", web_app._oauth)
@@ -16,7 +16,7 @@ def restore_web_state(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_direct_uvicorn_lifespan_refuses_no_auth(monkeypatch):
-    from istota import web_app
+    from istota.webui import app as web_app
 
     cfg = Config(web=WebConfig(auth="none"))
     monkeypatch.setattr(web_app, "load_config", lambda: cfg)
@@ -32,7 +32,7 @@ async def test_direct_uvicorn_lifespan_refuses_no_auth(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
 async def test_validated_local_launcher_lifespan_accepts_no_auth(monkeypatch, host):
-    from istota import web_app
+    from istota.webui import app as web_app
 
     cfg = Config(web=WebConfig(auth="none"))
     monkeypatch.setattr(web_app, "load_config", lambda: cfg)
@@ -46,7 +46,7 @@ async def test_validated_local_launcher_lifespan_accepts_no_auth(monkeypatch, ho
 
 @pytest.mark.parametrize("host", [None, "0.0.0.0", "192.0.2.1"])
 def test_reload_refuses_no_auth_and_preserves_config(monkeypatch, host, caplog):
-    from istota import web_app
+    from istota.webui import app as web_app
 
     old = Config()
     old_oauth = object()
@@ -65,7 +65,7 @@ def test_reload_refuses_no_auth_and_preserves_config(monkeypatch, host, caplog):
 
 
 def test_email_requires_a_session_secret(monkeypatch):
-    from istota import web_app
+    from istota.webui import app as web_app
 
     monkeypatch.delenv("ISTOTA_WEB_SESSION_SECRET_KEY", raising=False)
     monkeypatch.delenv("ISTOTA_WEB_ALLOW_INSECURE_SESSION", raising=False)
@@ -75,7 +75,7 @@ def test_email_requires_a_session_secret(monkeypatch):
 
 
 def test_leaf_secret_resolution():
-    from istota.web_session_secret import resolve
+    from istota.webui.session_secret import resolve
 
     cfg = Config(web=WebConfig(auth="email", session_secret_key=" config-test-key "))
     assert resolve(cfg, {"ISTOTA_WEB_SESSION_SECRET_KEY": " env-test-key "}) == "env-test-key"

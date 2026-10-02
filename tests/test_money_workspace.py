@@ -353,7 +353,7 @@ class TestLoadUserSecrets:
         assert result["monarch"]["csrftoken"] == "csrf-from-env"
 
     def test_reads_from_secrets_store(self, monkeypatch, tmp_path):
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         from istota.money import load_user_secrets
 
         monkeypatch.delenv("MONEY_SECRETS_FILE", raising=False)
@@ -370,7 +370,7 @@ class TestLoadUserSecrets:
     def test_returns_only_cookie_pair(self, monkeypatch, tmp_path):
         """Other monarch.* secret rows that may exist on legacy installs are
         silently ignored — the loader only surfaces the cookie pair."""
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         from istota.money import load_user_secrets
 
         monkeypatch.delenv("MONEY_SECRETS_FILE", raising=False)

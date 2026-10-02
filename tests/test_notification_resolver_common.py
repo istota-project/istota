@@ -28,8 +28,8 @@ from pathlib import Path
 
 import pytest
 
-from istota import notification_store as store
-from istota.notification_resolvers import (
+from istota.notifications import store
+from istota.notifications.resolvers import (
     _common,
     confirmation,
     connected_service,
@@ -38,7 +38,7 @@ from istota.notification_resolvers import (
     outbound_draft,
     task_alert,
 )
-from istota.notification_sources import NotificationRow
+from istota.notifications.sources import NotificationRow
 
 SOURCE_MODULES = [
     confirmation,
@@ -315,7 +315,7 @@ class TestTheGuard:
     def _package(self) -> Path:
         return (
             Path(__file__).resolve().parents[1]
-            / "src" / "istota" / "notification_resolvers"
+            / "src" / "istota" / "notifications" / "resolvers"
         )
 
     def _called_names(self, path: Path) -> set[str]:
@@ -387,7 +387,7 @@ class TestTheGuard:
         every one of those paths — it is the single dependency the per-source
         import guard in ``notification_sources._register_all`` cannot isolate.
 
-        Absolute as well as relative: ``from istota.notification_store import
+        Absolute as well as relative: ``from istota.notifications.store import
         resolve_by_object`` at module scope would break the property just as
         surely as the relative spelling, and is the likelier way to lose it.
         """

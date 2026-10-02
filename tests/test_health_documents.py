@@ -754,7 +754,7 @@ class TestDeferredAttachOps:
             )
             conn.commit()
 
-        from istota import atomic_write
+        from istota.lib import atomic_write
 
         real_write = atomic_write.write_bytes_atomic
 

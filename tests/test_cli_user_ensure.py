@@ -374,7 +374,7 @@ class TestUserEnsureExternalTurnDisplay:
         the pane cannot render.
         """
         from istota import user_profiles as up
-        from istota.web_app import _PROFILE_EDITABLE_FIELDS
+        from istota.webui.app import _PROFILE_EDITABLE_FIELDS
 
         assert (
             _PROFILE_EDITABLE_FIELDS["external_turn_display"]["values"]

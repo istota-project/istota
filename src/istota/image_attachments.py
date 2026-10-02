@@ -61,9 +61,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .brain._types import ImageInput
-from .filenames import filename_parts
+from istota.lib.filenames import filename_parts
 from .skills.transcribe.out_of_process import ocr_image_out_of_process
-from .user_scope import is_within
+from istota.sandbox.user_scope import is_within
 
 logger = logging.getLogger("istota.image_attachments")
 

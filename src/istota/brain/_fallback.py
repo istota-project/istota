@@ -261,7 +261,7 @@ def usage_reset_deadline(config, kind: str, reason: str) -> float | None:
     if config is None or reason != "usage_limit" or kind not in SUBSCRIPTION_BRAIN_KINDS:
         return None
     try:
-        from ..subscription_usage import cached_reset_seconds
+        from istota.usage.subscription import cached_reset_seconds
 
         seconds = cached_reset_seconds(config, now_ts=time.time())
     except Exception:  # noqa: BLE001 — a missing hint costs the hint, nothing else

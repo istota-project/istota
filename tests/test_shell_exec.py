@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from istota import shell_exec
-from istota.shell_exec import (
+from istota.sandbox import shell_exec
+from istota.sandbox.shell_exec import (
     PIPEFAIL_SHELLOPTS,
     SHELLOPTS_VAR,
     SIGPIPE_NOTE,
@@ -79,7 +79,7 @@ class TestTheFallbackAnnouncesItself:
 
     def test_falling_back_warns(self, caplog):
         shell_exec._fallback_warned = False
-        with caplog.at_level(logging.WARNING, logger="istota.shell_exec"):
+        with caplog.at_level(logging.WARNING, logger="istota.sandbox.shell_exec"):
             shell_exec.shell_argv("echo hi", bash="")
         assert "pipefail" in caplog.text
         assert POSIX_SH in caplog.text
@@ -87,14 +87,14 @@ class TestTheFallbackAnnouncesItself:
     def test_it_warns_once_per_process_not_once_per_command(self, caplog):
         """This runs on every cron tick and every heartbeat check."""
         shell_exec._fallback_warned = False
-        with caplog.at_level(logging.WARNING, logger="istota.shell_exec"):
+        with caplog.at_level(logging.WARNING, logger="istota.sandbox.shell_exec"):
             for _ in range(5):
                 shell_exec.shell_argv("echo hi", bash="")
         assert len([r for r in caplog.records if "pipefail" in r.getMessage()]) == 1
 
     def test_the_working_path_is_silent(self, caplog):
         shell_exec._fallback_warned = False
-        with caplog.at_level(logging.WARNING, logger="istota.shell_exec"):
+        with caplog.at_level(logging.WARNING, logger="istota.sandbox.shell_exec"):
             shell_exec.shell_argv("echo hi", bash="bash")
         assert caplog.text == ""
 

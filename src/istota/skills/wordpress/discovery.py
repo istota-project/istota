@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from istota.skill_host_paths import write_resolved
+from istota.sandbox.host_paths import write_resolved
 
 from .client import WordPressError, fence, fence_keys, selector, selectors
 

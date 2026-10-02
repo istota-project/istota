@@ -4,7 +4,9 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, confirmations, message_relays as relays, whatsapp_requests as requests
+from istota import db, confirmations
+from istota.relay import relays
+from istota.relay import requests
 from istota.config import UserConfig
 from istota.transport.whatsapp._types import WhatsAppSendResult
 from .test_whatsapp_delivery import _config, _bind
@@ -225,7 +227,7 @@ def test_preview_delivered_only_to_its_private_push_origin(setup, surface, monke
     else:
         with db.get_db(config.db_path) as conn:
             db.add_room_binding(conn, token, 'talk', 'private-talk')
-        monkeypatch.setattr('istota.talk.TalkClient.get_participants', AsyncMock(return_value=[
+        monkeypatch.setattr('istota.nextcloud.talk.TalkClient.get_participants', AsyncMock(return_value=[
             {'actorType': 'users', 'actorId': 'alice'}, {'actorType': 'users', 'actorId': 'bot'}]))
     with db.get_db(config.db_path) as conn:
         conn.execute('UPDATE tasks SET source_type=?,conversation_token=? WHERE id=?', (surface, token, ident))
@@ -283,7 +285,7 @@ def test_binding_replacement_after_claim_cannot_retarget_question(setup, monkeyp
 @pytest.mark.asyncio
 async def test_web_admin_cannot_approve_another_users_relay(setup, monkeypatch):
     from fastapi import HTTPException
-    from istota import web_app
+    from istota.webui import app as web_app
     config, ident, _, sent = setup
     hold(setup)
     park(setup)

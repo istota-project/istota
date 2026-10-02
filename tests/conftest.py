@@ -237,7 +237,7 @@ def _no_subscription_usage_lookups(monkeypatch):
     reinstates one and forgets the other still cannot reach the endpoint.
     """
     try:
-        from istota import subscription_usage
+        from istota.usage import subscription as subscription_usage
     except Exception:
         # Broad on purpose: this runs before every test in the suite, so
         # anything it raises fails thousands of unrelated tests with a
@@ -341,12 +341,12 @@ def fake_talk(db_path):
 def fake_talk_web(fake_talk):
     """The same double, additionally behind `web_app`'s own constructions.
 
-    `web_app.py` builds `TalkClient(...)` directly in eight places, most with a
+    `webui/app.py` builds `TalkClient(...)` directly in eight places, most with a
     per-user OAuth bearer token — the promote path that *creates* a promoted
     room, the post-as-user mirror, the read push and pull, the rename
     propagation, the message delete's two legs and the liveness probe. There is
     no factory to patch, so the class itself is the seam: this replaces
-    `istota.talk.TalkClient`, which every one of those sites imports
+    `istota.nextcloud.talk.TalkClient`, which every one of those sites imports
     function-locally and therefore resolves at call time.
 
     Depends on `fake_talk` rather than repeating it, so a web test gets one
@@ -362,7 +362,7 @@ def fake_talk_web(fake_talk):
 
     from .support.talk_double import talk_client_factory
 
-    with patch("istota.talk.TalkClient", talk_client_factory(fake_talk)):
+    with patch("istota.nextcloud.talk.TalkClient", talk_client_factory(fake_talk)):
         yield fake_talk
 
 
@@ -457,7 +457,7 @@ def outbound_gate_off(monkeypatch, tmp_path):
     Also isolates the catch-all-pattern warning latch, a process-global set that
     would otherwise carry across tests in an xdist worker.
     """
-    from istota import outbound_policy
+    from istota.mail import outbound_policy
     from istota.config import Config, EmailConfig
 
     db_path = tmp_path / "gate-off.db"
@@ -957,7 +957,7 @@ def _pytest_is_the_skill_proxy_task_root(monkeypatch):
     adding to it.
     """
     try:
-        from istota import skill_proxy
+        from istota.sandbox import skill_proxy
     except ImportError:
         return
     monkeypatch.setattr(

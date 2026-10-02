@@ -39,11 +39,11 @@ if _has_web_deps:
     from httpx import ASGITransport, AsyncClient
 
     # Imported here rather than lazily inside `_patch_app`, because
-    # `istota.web_app` calls `load_config()` at module scope and that
+    # `istota.webui.app` calls `load_config()` at module scope and that
     # reaches `doctor.run_checks` via `_validate_forge_clis`. Deferred,
     # the import lands inside whichever test patched `run_checks` first
     # and its call is counted as the endpoint's.
-    import istota.web_app  # noqa: F401
+    import istota.webui.app  # noqa: F401
 
 from istota.doctor import DEPLOYMENT, FAIL, IMAGE, OK, SKIP, WARN, CheckResult
 
@@ -83,7 +83,7 @@ class TestAdminDoctor:
         return config
 
     async def _login(self, client, username):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(
             return_value={"user_id": username}
@@ -232,7 +232,7 @@ class TestAdminDoctor:
     async def test_a_second_deep_run_gets_409(self, tmp_path, monkeypatch):
         """The deep probe spawns a namespace. A second concurrent request is
         told so rather than queued behind one."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         started = threading.Event()
         release = threading.Event()
@@ -267,7 +267,7 @@ class TestAdminDoctor:
     async def test_a_shallow_run_is_not_blocked_by_a_deep_run(self, tmp_path, monkeypatch):
         """Only the namespace-spawning path is single-flight; the cheap read
         stays available while a deep run is going."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         assert mod._doctor_deep_slot.acquire(blocking=False)
         try:
@@ -283,7 +283,7 @@ class TestAdminDoctor:
         would return instead of re-raising into the test — the assertion is
         about the slot, and a propagated exception proves nothing about it.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         def _boom(cfg, **kw):
             if kw.get("deep"):
@@ -302,7 +302,7 @@ class TestAdminDoctor:
         mod._doctor_deep_slot.release()
 
     async def test_the_slot_is_released_after_a_normal_deep_run(self, tmp_path, monkeypatch):
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         resp = await self._get(tmp_path, monkeypatch, path="/istota/api/admin/doctor?deep=1")
         assert resp.status_code == 200
@@ -312,7 +312,7 @@ class TestAdminDoctor:
     async def test_a_deep_run_that_overruns_is_reported_not_hung(self, tmp_path, monkeypatch):
         """`check_sandbox_masks` bounds its own subprocess, but a check that
         hangs some other way must not hold the request open forever."""
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         monkeypatch.setattr(mod, "_doctor_deep_timeout", lambda: 0.1)
         finish = threading.Event()
@@ -352,7 +352,7 @@ class TestAdminDoctor:
         the next request starts a second concurrent namespace. The slot must
         stay taken until the thread itself finishes.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         monkeypatch.setattr(mod, "_doctor_deep_timeout", lambda: 0.1)
         finish = threading.Event()

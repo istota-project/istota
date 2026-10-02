@@ -8,7 +8,7 @@ user hasn't set one (the default "UTC", or empty).
 
 from __future__ import annotations
 
-from istota import nextcloud_api
+from istota.nextcloud import user_metadata as nextcloud_api
 from istota.config import Config, NextcloudConfig, UserConfig
 
 

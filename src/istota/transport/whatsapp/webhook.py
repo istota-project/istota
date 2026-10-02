@@ -40,9 +40,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
-from ... import commands, confirmations, db, room_veto
+from istota import commands, confirmations, db
+from istota.rooms import veto as room_veto
 from ...config import Config
-from ...http_headers import header_value
+from istota.lib.http_headers import header_value
 from ..ingest import record_phone_turn
 from . import (
     bsuid_fingerprint,
@@ -650,7 +651,7 @@ def _write_send_id_alert(conn, user_id: str, bsuid: str) -> object | None:
     reply will take the fallback route. Deduplicated on the destination, so a
     user who keeps writing bumps one row rather than firing a push per message.
     """
-    from ...notification_resolvers import task_alert
+    from istota.notifications.resolvers import task_alert
 
     fingerprint = bsuid_fingerprint(bsuid)
     return task_alert.write(
@@ -1032,7 +1033,7 @@ def _dispatch_inbound(
     if room_veto.is_vetoed(conn, token):
         return WhatsAppEventResult("vetoed", user_id=user_id)
 
-    from ...message_relays import match_whatsapp_reply
+    from istota.relay.relays import match_whatsapp_reply
 
     relay_result = match_whatsapp_reply(conn, config, actor_user_id=user_id, event=event)
     if relay_result is not None:
@@ -1362,7 +1363,7 @@ async def deliver_event_responses(
             # The command is already a turn in the room it came from; its reply
             # joins it there only when that is the private chat's room, after
             # the send and whatever the send returned.
-            from ...notifications import mirror_phone_command_reply
+            from istota.notifications.delivery import mirror_phone_command_reply
 
             await asyncio.to_thread(
                 mirror_phone_command_reply, config, "whatsapp", owner,

@@ -178,7 +178,7 @@ class TestTheProducerTheProductActuallyHas:
         assert part["image_url"]["url"].startswith("data:image/png;base64,")
 
     def test_a_no_vision_model_is_told_what_it_was_handed(self, tmp_path):
-        from istota.untrusted import IMAGE_NOTICE
+        from istota.lib.untrusted import IMAGE_NOTICE
 
         message = self._as_tool_result(self._read_a_png(tmp_path))
 

@@ -14,7 +14,7 @@ import sqlite3
 
 import pytest
 
-from istota import sqlite_util
+from istota.lib import sqlite_util
 from .support.sqlite_race import RacingConnection
 
 

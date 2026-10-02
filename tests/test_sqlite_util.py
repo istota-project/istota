@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from istota import sqlite_util
+from istota.lib import sqlite_util
 
 REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src" / "istota"
@@ -304,7 +304,7 @@ class TestConnectReadOnly:
         bytes, mtime changed.
 
         That is precisely the database `check_framework_db` exists to inspect
-        and whose remedy is `python -m istota.db_restore`, so altering it before
+        and whose remedy is `python -m istota.maintenance.db_restore`, so altering it before
         the operator has decided anything is the standing "no mutating probes"
         rule with the artifact in hand. `connect_read_only` therefore reads a
         database that has a hot journal read-only and takes the read-write path
@@ -569,7 +569,9 @@ _EXPECTED = {
 
 def _openers():
     from istota import db as framework_db
-    from istota import secrets_store, user_briefings, user_profiles, web_tokens
+    from istota import user_briefings, user_profiles
+    from istota.webui import tokens as web_tokens
+    from istota.credentials import store as secrets_store
     from istota.briefings import db as briefings_db
     from istota.feeds import db as feeds_db
     from istota.health import db as health_db
@@ -632,7 +634,7 @@ class TestTheBareCallers:
     take `sqlite_util.connect` and close it themselves. Measured the same way."""
 
     def test_room_relocate_migration_open(self, tmp_path, monkeypatch):
-        from istota import room_relocate
+        from istota.maintenance import room_relocate
 
         path = tmp_path / "rooms.db"
         sqlite3.connect(path).close()
@@ -711,7 +713,7 @@ class TestTheFrameworkGeocodeConnectionKeepsAShortBudget:
             assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
 
     def test_the_web_day_summary_call_site_asks_for_five(self, tmp_path, monkeypatch):
-        from istota import web_app
+        from istota.webui import app as web_app
         from istota.location import db as location_db
 
         seen: list[float] = []
@@ -859,11 +861,11 @@ class TestNoSecondCopy:
     CONVERTED = [
         "db.py",
         "doctor.py",
-        "web_app.py",
-        "secrets_store.py",
+        "webui/app.py",
+        "credentials/store.py",
         "user_briefings.py",
         "user_profiles.py",
-        "web_tokens.py",
+        "webui/tokens.py",
         "briefings/db.py",
         "feeds/db.py",
         "health/db.py",
@@ -935,10 +937,14 @@ class TestNoSecondCopy:
             for p in SRC.rglob("*.py")
             if any(n in p.read_text(encoding="utf-8") for n in needles)
         )
-        assert hits == ["sqlite_util.py"], (
+        assert hits == ["lib/sqlite_util.py"], (
             "a read-only URI open appeared outside sqlite_util; call "
             "sqlite_util.connect_read_only"
         )
+
+    def test_every_allowlisted_path_exists(self):
+        """A path that no longer exists would let the guard pass checking nothing."""
+        assert (SRC / "lib" / "sqlite_util.py").is_file()
 
     def test_the_mode_is_chosen_rather_than_fixed(self):
         """The guard above passes for a module that hardcodes either mode.
@@ -947,6 +953,6 @@ class TestNoSecondCopy:
         `connect_read_only` to a single mode puts back exactly one of the two
         defects ISSUE-458 is about, and every other drift guard stays green.
         """
-        body = (SRC / "sqlite_util.py").read_text(encoding="utf-8")
+        body = (SRC / "lib" / "sqlite_util.py").read_text(encoding="utf-8")
         assert "_has_hot_journal" in body
         assert '"ro" if' in body and '"rw"' in body

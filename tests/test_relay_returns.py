@@ -5,7 +5,9 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, message_relays as relays, whatsapp_requests as requests
+from istota import db
+from istota.relay import relays
+from istota.relay import requests
 from . import test_relay_questions
 from .test_relay_answers import question, event, receive
 
@@ -129,7 +131,7 @@ def origin_setup(setup, surface, monkeypatch):
         config.nextcloud.username = 'bot'
         with db.get_db(config.db_path) as conn:
             db.add_room_binding(conn, token, 'talk', 'private-talk')
-        monkeypatch.setattr('istota.talk.TalkClient.get_participants', AsyncMock(return_value=[
+        monkeypatch.setattr('istota.nextcloud.talk.TalkClient.get_participants', AsyncMock(return_value=[
             {'actorType': 'users', 'actorId': 'alice'}, {'actorType': 'users', 'actorId': 'bot'}]))
     with db.get_db(config.db_path) as conn:
         conn.execute('UPDATE tasks SET source_type=?,conversation_token=? WHERE id=?', (surface, token, ident))
@@ -189,7 +191,7 @@ def test_talk_restart_uses_readback_and_never_posts_again(setup, monkeypatch, se
     history = [{'id': 42, 'actorType': 'users', 'actorId': 'bot', 'referenceId': 'relay-return:' + relay}] if settled else []
     client = SimpleNamespace(send_message=post, fetch_chat_history=AsyncMock(return_value=history))
     monkeypatch.setattr('istota.transport.talk.get_talk_client', lambda config: client)
-    with patch('istota.message_relays._record_return', side_effect=RuntimeError('crash after send')):
+    with patch('istota.relay.relays._record_return', side_effect=RuntimeError('crash after send')):
         with pytest.raises(RuntimeError):
             asyncio.run(relays.deliver_returns(config))
     assert post.await_count == 1
@@ -213,7 +215,7 @@ def test_external_origin_changed_during_talk_privacy_check(setup, monkeypatch):
         with db.get_db(config.db_path) as conn:
             db.add_room_member(conn, token, 'bob')
         return [{'actorType': 'users', 'actorId': 'alice'}, {'actorType': 'users', 'actorId': 'bot'}]
-    monkeypatch.setattr('istota.talk.TalkClient.get_participants', participants)
+    monkeypatch.setattr('istota.nextcloud.talk.TalkClient.get_participants', participants)
     delivery = AsyncMock()
     monkeypatch.setattr('istota.transport.talk.TalkTransport.deliver', delivery)
     asyncio.run(relays.deliver_returns(config))
@@ -371,8 +373,8 @@ def test_revocation_after_answer_does_not_retract_its_return(setup):
 
 
 def test_resolver_never_uses_stored_private_notification_text(setup):
-    from istota.notification_resolvers.message_relay import RESOLVER, write
-    from istota.notification_store import _row_to_notification
+    from istota.notifications.resolvers.message_relay import RESOLVER, write
+    from istota.notifications.store import _row_to_notification
     config = setup[0]
     relay = answered(setup)
     with db.get_db(config.db_path) as conn:
@@ -417,7 +419,7 @@ def test_external_ledger_settlement_recovers_after_process_crash(setup, monkeypa
     monkeypatch.setattr('istota.transport.whatsapp.providers.whatsapp_cloud._send', wa_send)
     monkeypatch.setattr('istota.transport.whatsapp.baileys_bridge.active_bridge', lambda: SimpleNamespace(send=wa_send))
     monkeypatch.setattr('istota.transport.sms.providers.registry.make_provider_registry', lambda config: _providers(_adapter(sms_send)))
-    with patch('istota.message_relays._record_return', side_effect=RuntimeError('crash after send')):
+    with patch('istota.relay.relays._record_return', side_effect=RuntimeError('crash after send')):
         with pytest.raises(RuntimeError):
             asyncio.run(relays.deliver_returns(config))
     with db.get_db(config.db_path) as conn:
@@ -551,7 +553,7 @@ def test_body_free_expiry_notice_targets_frozen_origin_then_deduplicates(setup, 
     with db.get_db(config.db_path) as conn:
         conn.execute("UPDATE message_relays SET expires_at=datetime('now','-1 second')")
     send = Mock(return_value=True)
-    monkeypatch.setattr('istota.notifications.send_notification', send)
+    monkeypatch.setattr('istota.notifications.delivery.send_notification', send)
     asyncio.run(requests.drain_requests(config))
     asyncio.run(requests.drain_requests(config))
     assert send.call_count == 1

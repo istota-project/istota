@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from istota.devbox_proxy import DevboxProxyContext, handle_connection
+from istota.devbox.proxy import DevboxProxyContext, handle_connection
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -124,7 +124,7 @@ class FakeDaemon:
 @pytest.fixture()
 def daemon_factory(sock_path, monkeypatch):
     from unittest.mock import AsyncMock
-    monkeypatch.setattr("istota.devbox_proxy._peer_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr("istota.devbox.proxy._peer_allowed", AsyncMock(return_value=True))
     instances: list[FakeDaemon] = []
 
     def factory(ctx):
@@ -246,7 +246,7 @@ class TestWrapperAgainstRealDaemon:
     def _install_wrapper(self, tmp_path, name, real_stub, url):
         import json as _json
 
-        from istota.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
+        from istota.sandbox.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
 
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
@@ -470,7 +470,7 @@ class TestSeedForgePolicy:
         result, lib, etc = self._seed(tmp_path)
         assert result.returncode == 0, result.stderr
 
-        from istota.forge_cli import FORGE_GITHUB, FORGE_GITLAB, load_policy
+        from istota.sandbox.forge_cli import FORGE_GITHUB, FORGE_GITLAB, load_policy
 
         out = str(etc / "policy.json")
         for forge, binary in ((FORGE_GITHUB, "gh"), (FORGE_GITLAB, "glab")):
@@ -488,7 +488,7 @@ class TestSeedForgePolicy:
         result, lib, etc = self._seed(tmp_path)
         assert result.returncode == 0, result.stderr
 
-        from istota.forge_cli import FORGE_GITHUB, denied_reason, load_policy
+        from istota.sandbox.forge_cli import FORGE_GITHUB, denied_reason, load_policy
 
         policy = load_policy(str(etc / "policy.json"), FORGE_GITHUB)
         for args in (["repo", "delete", "o/r"], ["auth", "status"],

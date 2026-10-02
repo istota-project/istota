@@ -25,8 +25,8 @@ from pathlib import Path
 
 import pytest
 
-from istota import peer_process
-from istota.skill_proxy import SkillProxy
+from istota.sandbox import peer_process
+from istota.sandbox.skill_proxy import SkillProxy
 
 pytestmark = pytest.mark.skipif(
     not peer_process.supported(),
@@ -109,7 +109,7 @@ class TestASiblingProcessIsRefused:
         # Nothing registers during these, so each refusal would otherwise wait
         # out the full grace period.
         monkeypatch.setattr(
-            "istota.skill_proxy.PEER_REGISTRATION_GRACE_SECONDS", 0.1,
+            "istota.sandbox.skill_proxy.PEER_REGISTRATION_GRACE_SECONDS", 0.1,
         )
 
     @pytest.mark.parametrize("kind", sorted(REQUESTS))
@@ -129,7 +129,7 @@ class TestASiblingProcessIsRefused:
     def test_the_refusal_is_logged_with_the_peer(
         self, sock_path, client_script, task_root, caplog,
     ):
-        with caplog.at_level("WARNING", logger="istota.skill_proxy"):
+        with caplog.at_level("WARNING", logger="istota.sandbox.skill_proxy"):
             with _victim(sock_path, {task_root}):
                 _run_client(client_script, sock_path, REQUESTS["credential"])
         assert any(
@@ -155,7 +155,7 @@ class TestTheTasksOwnTreeIsServed:
         # child's pid registered for the rest of the task. Whatever process
         # holds that number next must not inherit it.
         monkeypatch.setattr(
-            "istota.skill_proxy.PEER_REGISTRATION_GRACE_SECONDS", 0.1,
+            "istota.sandbox.skill_proxy.PEER_REGISTRATION_GRACE_SECONDS", 0.1,
         )
         with _victim(sock_path, ()) as proxy:
             proc = subprocess.Popen(["sleep", "0.2"])
@@ -210,7 +210,7 @@ class TestTheProxysOwnSkillSubprocess:
             f'"{sock_path}" \'{json.dumps(REQUESTS["credential"])}\'\n'
         )
         fake_python.chmod(0o755)
-        monkeypatch.setattr("istota.skill_proxy.sys.executable", str(fake_python))
+        monkeypatch.setattr("istota.sandbox.skill_proxy.sys.executable", str(fake_python))
 
         with _victim(sock_path, ()) as proxy:
             outer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -322,7 +322,7 @@ class TestTheRootIsRegistered:
 
         from istota import db
         from istota.executor import execute_task
-        from istota.network_proxy import NetworkProxy
+        from istota.sandbox.network_proxy import NetworkProxy
 
         from .test_executor_streaming import (
             _EXECUTOR_PATCH_RETURNS,

@@ -9,7 +9,7 @@ by construction, so each assertion below goes through a call site and pins the
 **argv** it produces against what the pre-consolidation tests pinned.
 
 One thing there is not what it looks like, and the negative control is what
-said so: patching ``istota.rclone_client.subprocess.run`` does **not**
+said so: patching ``istota.lib.rclone_client.subprocess.run`` does **not**
 distinguish a shared runner from a reintroduced local one, because
 ``istota.storage.subprocess`` is the same module object and the patch reaches
 both. ``TestTheEntryPointsRouteThroughTheLeafsOwnRunner`` patches
@@ -24,7 +24,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from istota import rclone_client, storage
+from istota import storage
+from istota.lib import rclone_client
 from istota.skills import files as skill_files
 
 
@@ -39,7 +40,7 @@ def _completed(returncode=0, stdout="", stderr=""):
 class TestBothModulesReachTheOneRunner:
     """Patch only the leaf. A local copy would slip past the patch."""
 
-    @patch("istota.rclone_client.subprocess.run")
+    @patch("istota.lib.rclone_client.subprocess.run")
     def test_storage_mkdir_argv(self, run):
         run.return_value = _completed()
         assert storage._rclone_mkdir("nc", "/Users/alice/inbox") is True
@@ -49,7 +50,7 @@ class TestBothModulesReachTheOneRunner:
             text=True,
         )
 
-    @patch("istota.rclone_client.subprocess.run")
+    @patch("istota.lib.rclone_client.subprocess.run")
     def test_skill_mkdir_argv(self, run):
         run.return_value = _completed()
         assert skill_files.rclone_mkdir("nc", "/Users/alice/inbox") is True
@@ -59,7 +60,7 @@ class TestBothModulesReachTheOneRunner:
             text=True,
         )
 
-    @patch("istota.rclone_client.subprocess.run")
+    @patch("istota.lib.rclone_client.subprocess.run")
     def test_skill_path_exists_argv(self, run):
         run.return_value = _completed()
         assert skill_files.rclone_path_exists("nc", "/Users/alice/inbox") is True
@@ -69,7 +70,7 @@ class TestBothModulesReachTheOneRunner:
             text=True,
         )
 
-    @patch("istota.rclone_client.subprocess.run")
+    @patch("istota.lib.rclone_client.subprocess.run")
     def test_the_skills_raising_helpers_still_reach_it(self, run):
         """`rclone_list` and friends stayed in the skill — they were never
         duplicated — but they are built on the shared runner now."""
@@ -85,42 +86,42 @@ class TestBothModulesReachTheOneRunner:
 class TestTheEntryPointsRouteThroughTheLeafsOwnRunner:
     """Patching ``subprocess.run`` is not enough to prove this, and that is
     worth knowing before trusting the class above: ``istota.storage.subprocess``
-    and ``istota.rclone_client.subprocess`` are the *same module object*, so
-    ``patch("istota.rclone_client.subprocess.run")`` intercepts a reintroduced
+    and ``istota.lib.rclone_client.subprocess`` are the *same module object*, so
+    ``patch("istota.lib.rclone_client.subprocess.run")`` intercepts a reintroduced
     local copy just as happily. Patching ``rclone_client.rclone_run`` does not
     — a copy resolves its own name and never reaches this."""
 
-    @patch("istota.rclone_client.rclone_run")
+    @patch("istota.lib.rclone_client.rclone_run")
     def test_storage_mkdir(self, run):
         run.return_value = _completed()
         assert storage._rclone_mkdir("nc", "/x") is True
         run.assert_called_once_with(["rclone", "mkdir", "nc:/x"])
 
-    @patch("istota.rclone_client.rclone_run")
+    @patch("istota.lib.rclone_client.rclone_run")
     def test_storage_cat(self, run):
         run.return_value = _completed(stdout="body")
         assert storage._rclone_cat("nc", "/x") == "body"
         run.assert_called_once_with(["rclone", "cat", "nc:/x"])
 
-    @patch("istota.rclone_client.rclone_run")
+    @patch("istota.lib.rclone_client.rclone_run")
     def test_storage_rcat(self, run):
         run.return_value = _completed()
         assert storage._rclone_rcat("nc", "/x", "content") is True
         run.assert_called_once_with(["rclone", "rcat", "nc:/x"], input="content")
 
-    @patch("istota.rclone_client.rclone_run")
+    @patch("istota.lib.rclone_client.rclone_run")
     def test_storage_path_exists(self, run):
         run.return_value = _completed()
         assert storage._rclone_path_exists("nc", "/x") is True
         run.assert_called_once_with(["rclone", "lsjson", "nc:/x"])
 
-    @patch("istota.rclone_client.rclone_run")
+    @patch("istota.lib.rclone_client.rclone_run")
     def test_skill_mkdir(self, run):
         run.return_value = _completed()
         assert skill_files.rclone_mkdir("nc", "/x") is True
         run.assert_called_once_with(["rclone", "mkdir", "nc:/x"])
 
-    @patch("istota.rclone_client.rclone_run")
+    @patch("istota.lib.rclone_client.rclone_run")
     def test_skill_path_exists(self, run):
         run.return_value = _completed()
         assert skill_files.rclone_path_exists("nc", "/x") is True
@@ -130,26 +131,26 @@ class TestTheEntryPointsRouteThroughTheLeafsOwnRunner:
 class TestTheMissingBinaryStaysAFailureNotARaise:
     """The defect both copies documented, asserted once through each module."""
 
-    @patch("istota.rclone_client.subprocess.run", side_effect=FileNotFoundError("rclone"))
+    @patch("istota.lib.rclone_client.subprocess.run", side_effect=FileNotFoundError("rclone"))
     def test_storage_helpers(self, run):
         assert storage._rclone_cat("nc", "/x") is None
         assert storage._rclone_path_exists("nc", "/x") is False
         assert storage._rclone_mkdir("nc", "/x") is False
         assert storage._rclone_rcat("nc", "/x", "content") is False
 
-    @patch("istota.rclone_client.subprocess.run", side_effect=FileNotFoundError("rclone"))
+    @patch("istota.lib.rclone_client.subprocess.run", side_effect=FileNotFoundError("rclone"))
     def test_skill_helpers(self, run):
         assert skill_files.rclone_mkdir("nc", "/x") is False
         assert skill_files.rclone_path_exists("nc", "/x") is False
         assert skill_files.rclone_move("nc", "/a", "/b") is False
 
-    @patch("istota.rclone_client.subprocess.run", side_effect=FileNotFoundError("rclone"))
+    @patch("istota.lib.rclone_client.subprocess.run", side_effect=FileNotFoundError("rclone"))
     def test_the_skills_raising_helpers_raise_runtime_error_not_oserror(self, run):
         """Their callers handle ``RuntimeError`` and not ``FileNotFoundError``."""
         with pytest.raises(RuntimeError, match="not installed"):
             skill_files.rclone_read_text("nc", "/x")
 
-    @patch("istota.rclone_client.subprocess.run", side_effect=PermissionError("denied"))
+    @patch("istota.lib.rclone_client.subprocess.run", side_effect=PermissionError("denied"))
     def test_any_oserror_counts_not_only_a_missing_file(self, run):
         assert rclone_client.rclone_mkdir("nc", "/x") is False
 
@@ -168,7 +169,7 @@ class TestNoThirdCopy:
             if "subprocess.run(" in (root / name).read_text()
         ]
         assert offenders == [], (
-            "a module converted onto istota.rclone_client has grown its own "
+            "a module converted onto istota.lib.rclone_client has grown its own "
             f"subprocess runner back: {offenders}"
         )
 
@@ -176,14 +177,14 @@ class TestNoThirdCopy:
         """Without this the guard above would stay green if the leaf were
         deleted and every caller shelled out some other way."""
         root = pathlib.Path(__file__).resolve().parents[1] / "src" / "istota"
-        assert "subprocess.run(" in (root / "rclone_client.py").read_text()
+        assert "subprocess.run(" in (root / "lib" / "rclone_client.py").read_text()
 
     def test_the_leaf_imports_nothing_from_the_package(self):
         """``skills/files`` runs in a subprocess; a leaf is what lets it share
         this without pulling in ``istota.storage``."""
         source = (
             pathlib.Path(__file__).resolve().parents[1]
-            / "src" / "istota" / "rclone_client.py"
+            / "src" / "istota" / "lib" / "rclone_client.py"
         ).read_text()
         for line in source.splitlines():
             stripped = line.strip()

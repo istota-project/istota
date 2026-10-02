@@ -264,7 +264,7 @@ class TestRunDbBackup:
     def test_alerts_with_backup_results(self):
         cfg = self._config()
         results = [{"label": "money:alice", "status": "error", "error": "disk full"}]
-        with patch("istota.db_backup.backup_databases", return_value=results) as backup, \
+        with patch("istota.maintenance.db_backup.backup_databases", return_value=results) as backup, \
                 patch("istota.scheduler._alert_backup_problems") as alert:
             _run_db_backup(cfg)
         backup.assert_called_once_with(cfg)
@@ -272,7 +272,7 @@ class TestRunDbBackup:
 
     def test_alert_runs_even_for_clean_results(self):
         cfg = self._config()
-        with patch("istota.db_backup.backup_databases", return_value=[]), \
+        with patch("istota.maintenance.db_backup.backup_databases", return_value=[]), \
                 patch("istota.scheduler._alert_backup_problems") as alert:
             _run_db_backup(cfg)
         alert.assert_called_once_with(cfg, [])

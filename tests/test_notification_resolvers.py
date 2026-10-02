@@ -23,15 +23,15 @@ import pytest
 from istota import (
     confirmations,
     db,
-    notification_sources as sources,
-    notification_store as store,
-    outbound_drafts as drafts,
 )
+from istota.mail import drafts
+from istota.notifications import sources
+from istota.notifications import store
 from istota.config import Config, UserConfig
-from istota.notification_resolvers import confirmation as confirmation_source
-from istota.notification_resolvers import connected_service as service_source
-from istota.notification_resolvers import cron_job as cron_source
-from istota.notification_resolvers import outbound_draft as draft_source
+from istota.notifications.resolvers import confirmation as confirmation_source
+from istota.notifications.resolvers import connected_service as service_source
+from istota.notifications.resolvers import cron_job as cron_source
+from istota.notifications.resolvers import outbound_draft as draft_source
 
 
 @pytest.fixture(autouse=True)
@@ -957,7 +957,7 @@ class TestConnectedServiceResolver:
         self, config, conn, _secret_key,
     ):
         """The backstop: the blob came back behind the store's back."""
-        from istota import secrets_store
+        from istota.credentials import store as secrets_store
         from istota.health import garmin as gm
 
         _expired_garmin(conn)
@@ -991,7 +991,7 @@ class TestConnectedServiceResolver:
 # ---------------------------------------------------------------------------
 
 
-_GUARD_LOGGER = "istota.notification_resolvers.connected_service"
+_GUARD_LOGGER = "istota.notifications.resolvers.connected_service"
 
 
 def _guard_records(caplog):
@@ -1019,7 +1019,7 @@ class TestTheNeverRaisesGuardsSayWhatTheySwallowed:
             raise AssertionError("unreachable: the splat fails before the body")
 
         monkeypatch.setattr(
-            "istota.notification_store.raise_notification", _renamed,
+            "istota.notifications.store.raise_notification", _renamed,
         )
         with caplog.at_level(logging.DEBUG, logger=_GUARD_LOGGER):
             assert service_source.raise_for_service(

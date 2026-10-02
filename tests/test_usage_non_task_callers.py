@@ -17,7 +17,7 @@ from unittest.mock import patch
 import pytest
 
 from istota import db
-from istota.usage import SYSTEM_USER_ID, BrainUsage, ModelUsage
+from istota.usage.telemetry import SYSTEM_USER_ID, BrainUsage, ModelUsage
 
 
 def _usage():

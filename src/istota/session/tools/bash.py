@@ -5,7 +5,7 @@ partial output (``on_update``), honor the ``abort`` event (kill on cancel), and
 enforce a wall-clock timeout — none of which a blocking ``subprocess.run`` gives
 cleanly.
 
-It wraps nothing. This code runs in ``istota.tool_server``, which is itself the
+It wraps nothing. This code runs in ``istota.sandbox.tool_server``, which is itself the
 process bubblewrap wrapped once for the whole attempt, so the command inherits
 the namespace and the task cgroup by being forked from here rather than by
 each call rebuilding either. See ``session/tools/__init__.py`` for the shape
@@ -23,8 +23,8 @@ from pathlib import Path
 
 from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import TextContent, ToolParameter, ToolSchema
-from istota.process_group import kill_group_if_live
-from istota.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
+from istota.sandbox.process_group import kill_group_if_live
+from istota.sandbox.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
 
 from .env import ToolEnv
 
@@ -87,7 +87,7 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
 
         # No sandbox wrap and no cgroup placement, and both absences are the
         # point of this seam rather than an omission (ISSUE-389). The process
-        # running this code is `istota.tool_server`, already inside the one
+        # running this code is `istota.sandbox.tool_server`, already inside the one
         # bwrap namespace the attempt gets and already a member of the task
         # cgroup — and membership is inherited at fork, so every command below
         # is contained by being forked from here. Re-wrapping would nest

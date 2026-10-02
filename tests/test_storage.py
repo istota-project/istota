@@ -392,7 +392,7 @@ class TestRcloneOperations:
         mock.stderr = stderr
         return mock
 
-    @patch("istota.rclone_client.subprocess.run")
+    @patch("istota.lib.rclone_client.subprocess.run")
     def test_rclone_mkdir(self, mock_run):
         mock_run.return_value = self._mock_run(returncode=0)
         assert _rclone_mkdir("nc", "/Users/alice/inbox") is True
@@ -402,29 +402,29 @@ class TestRcloneOperations:
             text=True,
         )
 
-    @patch("istota.rclone_client.subprocess.run")
+    @patch("istota.lib.rclone_client.subprocess.run")
     def test_rclone_path_exists_true(self, mock_run):
         mock_run.return_value = self._mock_run(returncode=0)
         assert _rclone_path_exists("nc", "/Users/alice/inbox") is True
 
-    @patch("istota.rclone_client.subprocess.run")
+    @patch("istota.lib.rclone_client.subprocess.run")
     def test_rclone_path_exists_false(self, mock_run):
         mock_run.return_value = self._mock_run(returncode=1)
         assert _rclone_path_exists("nc", "/Users/alice/inbox") is False
 
-    @patch("istota.rclone_client.subprocess.run")
+    @patch("istota.lib.rclone_client.subprocess.run")
     def test_rclone_cat_success(self, mock_run):
         mock_run.return_value = self._mock_run(returncode=0, stdout="file content here")
         result = _rclone_cat("nc", "/Users/alice/context/memory.md")
         assert result == "file content here"
 
-    @patch("istota.rclone_client.subprocess.run")
+    @patch("istota.lib.rclone_client.subprocess.run")
     def test_rclone_cat_failure(self, mock_run):
         mock_run.return_value = self._mock_run(returncode=1)
         result = _rclone_cat("nc", "/Users/alice/context/memory.md")
         assert result is None
 
-    @patch("istota.rclone_client.subprocess.run", side_effect=FileNotFoundError("rclone"))
+    @patch("istota.lib.rclone_client.subprocess.run", side_effect=FileNotFoundError("rclone"))
     def test_a_missing_rclone_binary_is_a_failure_not_a_raise(self, mock_run):
         """These helpers all promise None/False on failure, and "rclone is not
         installed" is a failure. `subprocess.run` reports it by raising, so it
@@ -437,7 +437,7 @@ class TestRcloneOperations:
         assert _rclone_mkdir("nc", "/Users/alice/inbox") is False
         assert _rclone_rcat("nc", "/Users/alice/context/memory.md", "content") is False
 
-    @patch("istota.rclone_client.subprocess.run", side_effect=FileNotFoundError("rclone"))
+    @patch("istota.lib.rclone_client.subprocess.run", side_effect=FileNotFoundError("rclone"))
     def test_upload_to_inbox_reports_the_miss_too(self, mock_run, tmp_path):
         """The sixth caller, and the only one with a public signature."""
         local = tmp_path / "note.txt"
@@ -445,7 +445,7 @@ class TestRcloneOperations:
 
         assert upload_file_to_inbox("nc", "alice", local) is None
 
-    @patch("istota.rclone_client.subprocess.run")
+    @patch("istota.lib.rclone_client.subprocess.run")
     def test_rclone_rcat_success(self, mock_run):
         mock_run.return_value = self._mock_run(returncode=0)
         assert _rclone_rcat("nc", "/Users/alice/context/memory.md", "content") is True
@@ -456,12 +456,12 @@ class TestRcloneOperations:
             text=True,
         )
 
-    @patch("istota.rclone_client.subprocess.run")
+    @patch("istota.lib.rclone_client.subprocess.run")
     def test_rclone_rcat_failure(self, mock_run):
         mock_run.return_value = self._mock_run(returncode=1)
         assert _rclone_rcat("nc", "/path", "content") is False
 
-    @patch("istota.rclone_client.subprocess.run")
+    @patch("istota.lib.rclone_client.subprocess.run")
     def test_ensure_dirs_via_rclone(self, mock_run):
         """One mkdir per top-level subdir and one per bot subdirectory.
 
@@ -481,13 +481,13 @@ class TestRcloneOperations:
         for sub in BOT_SUBDIRS:
             assert f"nc:/Users/alice/istota/{sub}" in asked, sub
 
-    @patch("istota.rclone_client.subprocess.run")
+    @patch("istota.lib.rclone_client.subprocess.run")
     def test_read_memory_via_rclone(self, mock_run):
         mock_run.return_value = self._mock_run(returncode=0, stdout="memory data")
         result = read_user_memory("nc", "alice", "istota")
         assert result == "memory data"
 
-    @patch("istota.rclone_client.subprocess.run")
+    @patch("istota.lib.rclone_client.subprocess.run")
     def test_upload_file_via_rclone(self, mock_run, tmp_path):
         mock_run.return_value = self._mock_run(returncode=0)
 
@@ -747,8 +747,8 @@ class TestShareFolderWithUser:
         result = share_folder_with_user(config, "/Users/alice/notes", "alice")
         assert result is False
 
-    @patch("istota.nextcloud_client.httpx.get")
-    @patch("istota.nextcloud_client.httpx.post")
+    @patch("istota.nextcloud.compat.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.post")
     def test_creates_new_share(self, mock_post, mock_get, nc_config):
         # No existing shares
         mock_get_resp = MagicMock()
@@ -773,8 +773,8 @@ class TestShareFolderWithUser:
         assert call_kwargs.kwargs["data"]["shareType"] == 0
         assert call_kwargs.kwargs["data"]["permissions"] == 31
 
-    @patch("istota.nextcloud_client.httpx.get")
-    @patch("istota.nextcloud_client.httpx.post")
+    @patch("istota.nextcloud.compat.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.post")
     def test_idempotent_already_shared(self, mock_post, mock_get, nc_config):
         # Existing share found
         mock_get_resp = MagicMock()
@@ -790,8 +790,8 @@ class TestShareFolderWithUser:
         # POST should NOT be called since share already exists
         mock_post.assert_not_called()
 
-    @patch("istota.nextcloud_client.httpx.get")
-    @patch("istota.nextcloud_client.httpx.post")
+    @patch("istota.nextcloud.compat.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.post")
     def test_different_user_share_not_matching(self, mock_post, mock_get, nc_config):
         # Share exists but for different user
         mock_get_resp = MagicMock()
@@ -810,8 +810,8 @@ class TestShareFolderWithUser:
         assert result is True
         mock_post.assert_called_once()
 
-    @patch("istota.nextcloud_client.httpx.get")
-    @patch("istota.nextcloud_client.httpx.post")
+    @patch("istota.nextcloud.compat.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.post")
     def test_post_failure_returns_false(self, mock_post, mock_get, nc_config):
         mock_get_resp = MagicMock()
         mock_get_resp.json.return_value = {"ocs": {"data": []}}
@@ -823,8 +823,8 @@ class TestShareFolderWithUser:
         result = share_folder_with_user(nc_config, "/Users/alice/notes", "alice")
         assert result is False
 
-    @patch("istota.nextcloud_client.httpx.get")
-    @patch("istota.nextcloud_client.httpx.post")
+    @patch("istota.nextcloud.compat.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.post")
     def test_get_failure_still_tries_post(self, mock_post, mock_get, nc_config):
         # GET fails (can't check existing shares)
         mock_get.side_effect = Exception("Timeout")
@@ -839,8 +839,8 @@ class TestShareFolderWithUser:
         assert result is True
         mock_post.assert_called_once()
 
-    @patch("istota.nextcloud_client.httpx.get")
-    @patch("istota.nextcloud_client.httpx.post")
+    @patch("istota.nextcloud.compat.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.post")
     def test_ensure_dirs_calls_share(self, mock_post, mock_get, nc_config):
         """ensure_user_directories_v2 auto-shares istota/ folder."""
         mock_get_resp = MagicMock()

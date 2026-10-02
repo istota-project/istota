@@ -91,7 +91,7 @@ class TestStoreScheduledRoomTurn:
 @_needs_web_deps
 class TestWebReaderRendersScheduledPost:
     def test_scheduled_post_renders_assistant_only(self, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
 
         web_app._config = Config()
         web_app._config.db_path = db_path

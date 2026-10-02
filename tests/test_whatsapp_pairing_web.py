@@ -2,9 +2,9 @@
 
 Driven against `web_app`'s own admin dependencies (`_require_admin`,
 `_verify_origin`) in the pattern of `tests/test_web_admin_logs.py`. Not
-`web_router_stubs.py`: that is FastAPI-only plumbing for the five *module*
+`webui/router_stubs.py`: that is FastAPI-only plumbing for the five *module*
 routers, which are mounted separately and have their stubs replaced through
-`dependency_overrides`. These routes are declared in `web_app.py` itself, so
+`dependency_overrides`. These routes are declared in `webui/app.py` itself, so
 there is no stub to override.
 
 **The property the whole design rests on is that the pairing code appears in no
@@ -119,7 +119,7 @@ def _make_config(tmp_path, *, admins=(ADMIN,), **whatsapp) -> Config:
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     mod._config = config
     mod.app.state.istota_config = config
@@ -130,7 +130,7 @@ def _patch_app(config):
 
 
 async def _login(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username}
@@ -254,7 +254,7 @@ class _FakeRequest:
 
 async def _drain_stream(*, disconnect_after: int = 1) -> str:
     """Run the pairing stream to its disconnect-driven end, with the headers."""
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     resp = await mod.admin_whatsapp_pairing_stream(
         _FakeRequest(disconnect_after=disconnect_after), {"username": ADMIN},
@@ -276,7 +276,7 @@ def _stream_frame(buf: str) -> dict:
 @pytest.fixture(autouse=True)
 def _fast_stream_poll(monkeypatch):
     """One second per tick would make every stream test a second long."""
-    import istota.web_app as mod
+    import istota.webui.app as mod
 
     monkeypatch.setattr(mod, "_PAIRING_STREAM_POLL_SECONDS", 0.01)
 
@@ -711,9 +711,9 @@ class TestTheSandboxBoundRelayRefusal:
         `package_cache` mount enters the walk at all, and the guard is vacuous
         exactly where it is needed.
         """
-        from istota import sandbox_plan
+        from istota.sandbox import plan as sandbox_plan
         from istota.config import DeveloperConfig, SecurityConfig
-        from istota.sandbox_plan import SandboxProfile
+        from istota.sandbox.plan import SandboxProfile
 
         config = _make_config(tmp_path)
         config.security = SecurityConfig(
@@ -950,7 +950,7 @@ class TestTheStream:
         which sleep is called, and a driven stream that merely completes
         proves nothing about that.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         body = source_of(mod.admin_whatsapp_pairing_stream)
         assert "web_shutdown.sleep_unless_shutdown" in body
@@ -1294,7 +1294,7 @@ class TestTheCancelAgainstAClaimedRow:
         driven cancel that merely succeeds proves nothing about it. The
         behavioural half is the test above, which is what the refusal buys.
         """
-        import istota.web_app as mod
+        import istota.webui.app as mod
 
         body = source_of(mod._cancel_pairing_request)
 

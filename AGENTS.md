@@ -50,6 +50,9 @@ src/istota/
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
 ├── skills/               # 37 self-contained skills (skill.md + optional CLI)
 │   └── _group_access.py  # The one gate for `kv --group` and `memory --group`: current member and in the task's resolved group set → memory.md
+├── session/              # The native brain's application layer: compaction, results, transcripts
+│   ├── session_log.py       # Append-only JSONL transcript of one NativeBrain task attempt, and its sweep → maintenance.md
+│   └── session_log_read.py  # Reading a transcript back: one set of parsing rules, two consumers → maintenance.md
 ├── cli.py                # Local CLI (task, resource, briefing, secret, user, run, serve, setup, …)
 ├── serve.py              # Combined local launcher (`istota serve`): scheduler thread + uvicorn in one process
 ├── setup_wizard.py       # Interactive first-run installer (`istota setup`) → install.md
@@ -58,107 +61,124 @@ src/istota/
 ├── config_mapper.py      # Maps a parsed TOML document onto the `Config` dataclass tree → leaf-modules.md
 ├── context.py            # Hybrid conversation context selection
 ├── db.py                 # SQLite operations (framework tables)
-├── db_health.py          # `PRAGMA quick_check` + self-healing `REINDEX` backstop for local SQLite DBs
-├── db_relocate.py        # One-time migrator: per-user module DBs from the mount → local disk, DELETE→WAL
-├── db_backup.py          # Timed online-backup snapshot of local DBs to dated dirs on the mount; retention, row-count collapse guard, 0700/0600
-├── db_restore.py         # Restore a cold snapshot back to local disk (newest good, or `--date`); refuses an empty snapshot without `--force`
 ├── executor.py           # Per-task orchestration (memory/skills/sandbox)
 ├── executor_stream.py    # `TaskStreamAdapter`: the brain's `StreamEvent`s adapted to `TaskEvent`s → leaf-modules.md
-├── task_env.py           # `build_task_runtime`: one task's env, the credential split, the proxies, the bind list → sandbox.md
 ├── events.py             # Task event streaming: TaskEvent, EventWriter, EventSubscriber + task_events log
 ├── consumers/            # Event consumers: TalkEventSubscriber, LogChannelSubscriber, PushNotificationSubscriber
 ├── scheduler.py          # Task processor, briefings, all polling
-├── transport/            # Transport seam: IncomingMessage, registry, ingest, routing, talk/ email/ sms/ whatsapp/ ntfy/ istota_file/ repl/ web/
-│   ├── participants.py   # Who wrote a turn: principal / guest / agent, and the one multi-human predicate → transport.md
-│   ├── whatsapp/groups.py  # A Baileys group as a room: roster, registration, addressing, D14 leave → whatsapp.md
-│   └── email/threads.py  # A multi-party email thread as a room: minting, participants, reply-all → transport.md
-├── speech_gate.py        # Whether the bot answers a turn in a multi-human room; every turn is recorded first → transport.md
-├── room_scopes.py        # The withheld-scope set every reach seam reads, the ambient-memory rule, and a task's resolved group set → sandbox.md
-├── room_policy.py        # Per-room host, guest_reply, audience class and readers; who may change a shared room → transport.md
-├── room_veto.py          # `!<bot> off|on`, the one-time announcement, and the room-notices queue → transport.md
-├── side_rooms.py         # A member's private room beside a shared one: whispers, held posts, guest proposals, side answers → relay.md
-├── surfaces.py           # What role each surface plays in the room model, in one table → leaf-modules.md
-├── email_support.py      # Shared non-transport email plumbing (get_email_config, thread helpers, cleanup)
+├── scheduler_deferred.py # Deferred-op replay (subtasks, KG, KV, health_ops, …)
+├── commands.py           # surface-agnostic !command dispatch (CommandContext + registry push/stream)
+├── doctor.py             # Runtime self-check: every environmental fact istota depends on → doctor.md
+├── storage.py            # Bot-managed Nextcloud storage
 ├── tasks_file_poller.py  # TASKS.md monitoring
 ├── heartbeat.py          # Health-check system
-├── host_pressure.py      # Host memory instrumentation: PSI/meminfo/tmpfs, shmem attribution → maintenance.md
-├── webhook_receiver.py   # FastAPI: Overland GPS, etc.
-├── garmin_routes.py      # Module-agnostic Garmin auth router (/api/garmin/*), shared by Health + Location
-├── web_auth.py           # Native email identities, scrypt passwords, one-use links and session epochs
-├── web_app.py            # Authenticated web UI (Nextcloud OAuth2 + admin dashboard)
-├── web_shutdown.py       # Whether the web process is stopping, where the three SSE generators can see it → leaf-modules.md
-├── web_router_stubs.py   # The auth/CSRF stubs and the user-context factory every module router shares → leaf-modules.md
-├── usage.py              # Normalized per-attempt token/cost telemetry → leaf-modules.md
-├── usage_render.py       # The cost render rule for token-usage surfaces → leaf-modules.md
-├── subscription_usage.py # The Claude Code plan's rate-limit windows: one fetch, one disk cache → leaf-modules.md
-├── doctor.py             # Runtime self-check: every environmental fact istota depends on → doctor.md
-├── map_basemap.py        # Where the map's background tiles come from → leaf-modules.md
-├── admin_logs.py         # Read-only log sources for the admin UI: the rotating app log (+ rotation chain, paged reader, live tail) and `task_logs`
-├── admin_config_view.py  # Redacted, sectioned rendering of the loaded Config for the admin UI (credentials never leave the process)
-├── sqlite_util.py        # One SQLite open, each caller's pragma set as parameters; no journal_mode, deliberately → leaf-modules.md
-├── du.py                 # Du-style tree measurement and the first-level directory scan → leaf-modules.md
-├── rclone_client.py      # The rclone API `storage` and the files skill each had a copy of → leaf-modules.md
-├── secrets_store.py      # Encrypted credential store (Fernet via scrypt-derived key)
-├── secrets_vault.py      # A user's KDBX credential vault: read, mapped, and applied to the secrets table; never written
-├── secret_schema.py      # Shared service/key schema for `istota secret` CLI + web UI
-├── google_scopes.py      # The Google service ↔ OAuth scope table, bounded by the operator's configured ceiling
+├── cron_loader.py        # CRON.md → DB sync
 ├── modules.py            # MODULE_NAMES (feeds, money, location, health, briefings) + EXPERIMENTAL_MODULES (empty)
 ├── experimental.py       # Operator feature-flag gate (`@requires_feature`, env helpers)
 ├── user_profiles.py      # Per-user profile store
 ├── user_briefings.py     # Per-user briefings store
-├── notifications.py      # Talk / Email / ntfy dispatcher (delivery), distinct from the inbox below
-├── notification_store.py # The `notifications` table: the durable open set behind the bell → notifications.md
-├── notification_sources.py  # The resolver seam: rows, views, actions, the registry → notifications.md
-├── notification_resolvers/  # One module per source: id, dedup key, producer helpers, resolver → notifications.md
-├── claude_runtime_env.py # What a task env carries only because the outer process is the `claude` CLI → sandbox.md
-├── image_sniff.py        # Which bytes `/chat/files` will serve `inline` on the app's own origin → leaf-modules.md
-├── chat_files.py         # Which paths `/chat/files` will serve, and the stored-answer check that rewrites links it would refuse
-├── ntfy_headers.py       # RFC 2047 encoding for ntfy header values (stdlib-only leaf, shared by transport + skill)
-├── kv_namespaces.py      # Which `istota_kv` namespaces the model may not touch → sandbox.md
-├── git_hardening.py      # The `-c` overrides that stop a repository's own config running a program → sandbox.md
-├── git_remote_scrub.py   # Strips credentials out of the git configs under `developer.repos_dir` → sandbox.md
-├── repos_relocate.py     # One-shot migrator: `developer.repos_dir` → per-user subtrees → maintenance.md
-├── skill_proxy.py        # Unix-socket proxy for credential isolation
-├── tool_server.py        # The native brain's tool server, one process per task attempt, inside the sandbox → sandbox.md
-├── tool_server_protocol.py  # The wire format between the two, stdlib-only → sandbox.md
-├── worktree_reaper.py    # Removes a developer worktree once its work has landed → maintenance.md
-├── sandbox_cache_sweeper.py # Bounds the on-disk package caches the sandbox keeps per user → maintenance.md
-├── session/session_log.py       # Append-only JSONL transcript of one NativeBrain task attempt, and its sweep → maintenance.md
-├── session/session_log_read.py  # Reading a transcript back: one set of parsing rules, two consumers → maintenance.md
-├── user_scope.py         # Scoping a user id under a root, in one place → sandbox.md
-├── skill_host_paths.py   # Host-path allowlist for the skill CLIs that take one → sandbox.md
-├── task_cgroup.py        # A cgroup v2 group per task: memory.max, pids.max, cpu.max → sandbox.md
-├── shell_exec.py         # How a command string becomes a shell argv, with `pipefail` on → sandbox.md
-├── process_group.py      # `kill_process_group(pid, sig)`: signal a subprocess and its descendants → sandbox.md
-├── peer_process.py       # Who connected to a Unix socket, and whether they descend from a task's root → sandbox.md
-├── network_proxy.py      # CONNECT proxy for network isolation
-├── forge_cli.py          # The `gh` / `glab` wrapper: deny policy + server-side token injection → sandbox.md
-├── devbox_proxy.py       # Per-user host-side daemon: git credentials and the forge token injected server-side
-├── devbox_proxy_protocol.py # Wire protocol for devbox_proxy (single-line JSON, 16 MiB cap) → devbox.md
-├── devbox_exec_protocol.py  # The exec transport's wire format → devbox.md
-├── devbox_exec_client.py    # The other end, copied into each task's shim directory → devbox.md
-├── nextcloud_api.py      # NC user metadata
-├── provision_rooms.py    # Default Talk rooms (general/logs/alerts) for a user → leaf-modules.md
+├── shared_file_organizer.py
+├── logging_setup.py
+├── web_app.py, webhook_receiver.py, devbox_proxy.py  # Entry-point stubs for units rendered before the move; deleted after the next release
+├── tool_server.py, ocr_leaf.py  # Spawn-path stubs for a scheduler started before the move; deleted after the next release
+├── transport/            # Transport seam: IncomingMessage, registry, ingest, routing, talk/ email/ sms/ whatsapp/ ntfy/ istota_file/ repl/ web/
+│   ├── participants.py   # Who wrote a turn: principal / guest / agent, and the one multi-human predicate → transport.md
+│   ├── whatsapp/groups.py  # A Baileys group as a room: roster, registration, addressing, D14 leave → whatsapp.md
+│   └── email/threads.py  # A multi-party email thread as a room: minting, participants, reply-all → transport.md
+├── rooms/                # The multiplayer room model → transport.md
+│   ├── speech_gate.py    # Whether the bot answers a turn in a multi-human room; every turn is recorded first → transport.md
+│   ├── scopes.py         # The withheld-scope set every reach seam reads, the ambient-memory rule, and a task's resolved group set → sandbox.md
+│   ├── policy.py         # Per-room host, guest_reply, audience class and readers; who may change a shared room → transport.md
+│   ├── veto.py           # `!<bot> off|on`, the one-time announcement, and the room-notices queue → transport.md
+│   ├── side_rooms.py     # A member's private room beside a shared one: whispers, held posts, guest proposals, side answers → relay.md
+│   ├── surfaces.py       # What role each surface plays in the room model, in one table → leaf-modules.md
+│   └── provision.py      # Default Talk rooms (general/logs/alerts) for a user → leaf-modules.md
+├── relay/                # Relay questions between users: relays, destinations, requests (the `whatsapp_skill_requests` table) → relay.md
+├── sandbox/              # A task's runtime and its boundaries → sandbox.md
+│   ├── task_env.py       # `build_task_runtime`: one task's env, the credential split, the proxies, the bind list → sandbox.md
+│   ├── plan.py           # The sandbox mount plan, as data: what `build_bwrap_cmd` binds, masks and unshares
+│   ├── claude_runtime_env.py  # What a task env carries only because the outer process is the `claude` CLI → sandbox.md
+│   ├── tool_server.py    # The native brain's tool server, one process per task attempt, inside the sandbox → sandbox.md
+│   ├── tool_server_protocol.py  # The wire format between the two, stdlib-only → sandbox.md
+│   ├── skill_proxy.py    # Unix-socket proxy for credential isolation
+│   ├── network_proxy.py  # CONNECT proxy for network isolation
+│   ├── kv_namespaces.py  # Which `istota_kv` namespaces the model may not touch → sandbox.md
+│   ├── git_hardening.py  # The `-c` overrides that stop a repository's own config running a program → sandbox.md
+│   ├── git_remote_scrub.py  # Strips credentials out of the git configs under `developer.repos_dir` → sandbox.md
+│   ├── user_scope.py     # Scoping a user id under a root, in one place → sandbox.md
+│   ├── host_paths.py     # Host-path allowlist for the skill CLIs that take one → sandbox.md
+│   ├── cgroup.py         # A cgroup v2 group per task: memory.max, pids.max, cpu.max → sandbox.md
+│   ├── shell_exec.py     # How a command string becomes a shell argv, with `pipefail` on → sandbox.md
+│   ├── process_group.py  # `kill_process_group(pid, sig)`: signal a subprocess and its descendants → sandbox.md
+│   ├── peer_process.py   # Who connected to a Unix socket, and whether they descend from a task's root → sandbox.md
+│   ├── forge_cli.py      # The `gh` / `glab` wrapper: deny policy + server-side token injection → sandbox.md
+│   └── net_guard.py      # Whether an address is public: the SSRF rule shared by WebFetch and the wordpress skill → leaf-modules.md
+├── credentials/          # Secrets and the credential vault
+│   ├── store.py          # Encrypted credential store (Fernet via scrypt-derived key)
+│   ├── vault.py          # A user's KDBX credential vault: read, mapped, and applied to the secrets table; never written
+│   ├── schema.py         # Shared service/key schema for `istota secret` CLI + web UI
+│   ├── google_scopes.py  # The Google service ↔ OAuth scope table, bounded by the operator's configured ceiling
+│   └── broker/           # Credential grants, the broker CA and the intercepting proxy → sandbox.md
+├── devbox/               # The development container's daemon side → devbox.md
+│   ├── proxy.py          # Per-user host-side daemon: git credentials and the forge token injected server-side
+│   ├── proxy_protocol.py # Wire protocol for the devbox proxy (single-line JSON, 16 MiB cap) → devbox.md
+│   ├── exec_protocol.py  # The exec transport's wire format → devbox.md
+│   └── exec_client.py    # The other end, copied into each task's shim directory → devbox.md
+├── notifications/        # Delivery, the inbox behind the bell, and its sources → notifications.md
+│   ├── delivery.py       # Talk / Email / ntfy dispatcher, distinct from the inbox below
+│   ├── store.py          # The `notifications` table: the durable open set behind the bell → notifications.md
+│   ├── sources.py        # The resolver seam: rows, views, actions, the registry → notifications.md
+│   ├── resolvers/        # One module per source: id, dedup key, producer helpers, resolver → notifications.md
+│   └── ntfy_headers.py   # RFC 2047 encoding for ntfy header values (stdlib-only leaf, shared by transport + skill)
+├── usage/                # Token usage: telemetry, the cost render rule, the plan's windows → leaf-modules.md
+│   ├── telemetry.py      # Normalized per-attempt token/cost telemetry → leaf-modules.md
+│   ├── render.py         # The cost render rule for token-usage surfaces → leaf-modules.md
+│   └── subscription.py   # The Claude Code plan's rate-limit windows: one fetch, one disk cache → leaf-modules.md
+├── webui/                # The FastAPI web UI backend → web-ui.md
+│   ├── app.py            # Authenticated web UI (Nextcloud OAuth2 + admin dashboard)
+│   ├── auth.py           # Native email identities, scrypt passwords, one-use links and session epochs
+│   ├── webhook_receiver.py  # FastAPI: Overland GPS, etc.
+│   ├── garmin_routes.py  # Module-agnostic Garmin auth router (/api/garmin/*), shared by Health + Location
+│   ├── shutdown.py       # Whether the web process is stopping, where the three SSE generators can see it → leaf-modules.md
+│   ├── router_stubs.py   # The auth/CSRF stubs and the user-context factory every module router shares → leaf-modules.md
+│   ├── map_basemap.py    # Where the map's background tiles come from → leaf-modules.md
+│   ├── admin_logs.py     # Read-only log sources for the admin UI: the rotating app log (+ rotation chain, paged reader, live tail) and `task_logs`
+│   ├── admin_config_view.py  # Redacted, sectioned rendering of the loaded Config for the admin UI (credentials never leave the process)
+│   └── chat_files.py     # Which paths `/chat/files` will serve, and the stored-answer check that rewrites links it would refuse
+├── maintenance/          # Backups, migrators, sweepers, host instrumentation → maintenance.md
+│   ├── db_health.py      # `PRAGMA quick_check` + self-healing `REINDEX` backstop for local SQLite DBs → maintenance.md
+│   ├── db_relocate.py    # One-time migrator: per-user module DBs from the mount → local disk, DELETE→WAL
+│   ├── db_backup.py      # Timed online-backup snapshot of local DBs to dated dirs on the mount; retention, row-count collapse guard, 0700/0600 → maintenance.md
+│   ├── db_restore.py     # Restore a cold snapshot back to local disk (newest good, or `--date`); refuses an empty snapshot without `--force` → maintenance.md
+│   ├── repos_relocate.py # One-shot migrator: `developer.repos_dir` → per-user subtrees
+│   ├── room_relocate.py, room_mount_reconcile.py  # The room-identity migration and its mount sweep
+│   ├── worktree_reaper.py   # Removes a developer worktree once its work has landed → maintenance.md
+│   ├── sandbox_cache_sweeper.py  # Bounds the on-disk package caches the sandbox keeps per user → maintenance.md
+│   └── host_pressure.py  # Host memory instrumentation: PSI/meminfo/tmpfs, shmem attribution → maintenance.md
 ├── nextcloud/            # OCS + WebDAV client: _http (ocs_request/dav_request/OcsError/path scoping), capabilities, shares, users, dav, notifications
-├── nextcloud_client.py   # Back-compat shim: the None-returning variants four best-effort daemon paths depend on
-├── storage.py            # Bot-managed Nextcloud storage
+│   ├── talk.py, ocs.py   # The Talk client and the OCS envelope leaf
+│   ├── user_metadata.py  # NC user metadata
+│   └── compat.py         # The None-returning variants four best-effort daemon paths depend on
+├── mail/                 # Email plumbing that is not a transport: support (get_email_config, thread helpers, cleanup), ownership, outbound_policy, drafts
+├── browser/              # Admission to the single-threaded browser API, and browser profile identity
+├── lib/                  # Dependency-free leaves; nothing here imports from `istota` → leaf-modules.md
+│   ├── sqlite_util.py    # One SQLite open, each caller's pragma set as parameters; no journal_mode, deliberately → leaf-modules.md
+│   ├── du.py             # Du-style tree measurement and the first-level directory scan → leaf-modules.md
+│   ├── rclone_client.py  # The rclone API `storage` and the files skill each had a copy of → leaf-modules.md
+│   ├── image_sniff.py    # Which bytes `/chat/files` will serve `inline` on the app's own origin → leaf-modules.md
+│   ├── untrusted.py      # One fence around content somebody else wrote, markers redacted from the content → leaf-modules.md
+│   ├── toml_fence.py     # Where a TOML fence starts and ends, for the four markdown-config parsers → leaf-modules.md
+│   ├── llm_json.py       # The same, for a fence in *model* output; anchored closer, linear walk → leaf-modules.md
+│   ├── date_parse.py     # Loose date parsing for text a model or a person typed, validated → leaf-modules.md
+│   └── filenames.py      # The one rule for turning a name somebody else chose into a filename → leaf-modules.md
 ├── briefings/            # Block/source briefings module — DB, source resolvers, generation, reader/settings routes, migration
 ├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML, image_dedupe
 ├── health/               # Body stats, bloodwork, biomarker trends, encounters, immunizations, Garmin, OCR
-├── location/             # Per-user location.db module (pings, places, visits, state, migration)
-├── location_logic.py     # Place stats / cluster discovery (shared web ⇄ skill)
-├── scheduler_deferred.py # Deferred-op replay (subtasks, KG, KV, health_ops, …)
-├── shared_file_organizer.py
-├── commands.py           # surface-agnostic !command dispatch (CommandContext + registry push/stream)
-├── untrusted.py          # One fence around content somebody else wrote, markers redacted from the content → leaf-modules.md
-├── net_guard.py          # Whether an address is public: the SSRF rule shared by WebFetch and the wordpress skill → leaf-modules.md
-├── toml_fence.py         # Where a TOML fence starts and ends, for the four markdown-config parsers → leaf-modules.md
-├── llm_json.py           # The same, for a fence in *model* output; anchored closer, linear walk → leaf-modules.md
-├── date_parse.py         # Loose date parsing for text a model or a person typed, validated → leaf-modules.md
-├── filenames.py          # The one rule for turning a name somebody else chose into a filename → leaf-modules.md
-├── cron_loader.py        # CRON.md → DB sync
-└── logging_setup.py
+└── location/             # Per-user location.db module (pings, places, visits, state, migration)
+    └── logic.py          # Place stats / cluster discovery (shared web ⇄ skill)
 ```
+
+The root holds only what `tests/test_package_layout.py`'s `ROOT_ALLOWLIST` names. A new module goes in the package for its subsystem; adding one to the root is a deliberate one-line change to that list. Packages created for the layout keep an empty `__init__.py`, and `lib/` imports nothing from `istota`.
 
 Alongside `src/`: `config/` (config.toml, persona.md, emissaries.md, system-prompt.md, guidelines/ — read by the daemon, never bound into the sandbox; skill bodies live in `src/istota/skills/`), `deploy/ansible/`, `docker/` (full-stack compose), `web/` (SvelteKit, adapter-static, base `/istota`), `docs/` (the documentation markdown, referenced by path from Ansible, compose, the rules files and source docstrings — the files stay here), `docs-site/` (the Docusaurus site that renders it; `.md` is CommonMark, and a new page is listed in its `sidebars.ts`), `tests/`, `testbed/` (the deployment tiers' staging environment; its own `pyproject.toml`, never imported by `src/istota/` — see `.claude/rules/testbed.md`), `schema.sql`.
 
@@ -214,7 +234,7 @@ A room or a job may only pin a kind the operator listed in `[brain] room_selecta
 Full posture, with the reasoning and the shape-by-shape caveats, in `.claude/rules/sandbox.md`. The operative rules:
 
 - **Sandbox** (`bwrap`): per-user filesystem isolation. Linux + bubblewrap is the only supported deployment. The shipped Docker stack grants neither `seccomp:unconfined` nor `systempaths=unconfined`, so it runs every task unsandboxed.
-- **The native brain's tools are in the sandbox too**, one namespace per task attempt: `NativeBrain` spawns `istota.tool_server` through `build_bwrap_cmd(..., profile=NATIVE)` over an inherited socketpair, and the six core tools run in there. `executor.native_fs_roots` is still enforced and is the only confinement on the unsandboxed shapes.
+- **The native brain's tools are in the sandbox too**, one namespace per task attempt: `NativeBrain` spawns `istota.sandbox.tool_server` through `build_bwrap_cmd(..., profile=NATIVE)` over an inherited socketpair, and the six core tools run in there. `executor.native_fs_roots` is still enforced and is the only confinement on the unsandboxed shapes.
 - **Native web credentials**: password hashes and token digests live in the framework DB, bound into no sandbox. Email identities are separate from inbound email routing addresses.
 - **No databases in the sandbox**: `build_bwrap_cmd` ends by masking `db_path.parent` and `module_db_root()` with an empty read-only tmpfs, after every other mount. Nothing binds the framework DB for anyone, and `sandbox_ro_paths` defaults to `[]`. Reads and writes go through skill CLIs that run host-side and scope by `ISTOTA_USER_ID`; the masks are defence in depth behind that.
 - **Session logs are unbound** and a transcript holds the assembled prompt: `{db_path.parent}/logs/{user_id}/` is bound at no path and is in no `native_fs_roots` root. That is an absence rather than a guard, so keep `sandbox_ro_paths` narrow and add no `user_resources` row naming it. A task reads its own finished transcripts through `istota-skill tasks transcript`.
@@ -222,7 +242,7 @@ Full posture, with the reasoning and the shape-by-shape caveats, in `.claude/rul
 - **Config dir out of the sandbox**: emissaries, persona, guidelines and skill bodies become prompt text, so `config/` is never bound. The one exception is `config/system-prompt.md` under `custom_system_prompt`, bound as a single file under the `CLAUDE` profile only.
 - **Network proxy**: `--unshare-net` + CONNECT proxy on a Unix socket; allowlist of `host:port`. TLS interception only for hosts bound to a credential in the task snapshot, when the optional credential broker is enabled.
 - **Skill proxy**: strips secret env vars from the model; CLI calls go through a Unix socket that injects credentials server-side. Required wherever the sandbox is — `istota-skill` refuses to run in-sandbox rather than reaching for databases that are not there.
-- **Host paths in skill CLIs**: a skill CLI runs host-side with the daemon's filesystem view, so any verb taking a host path is scoped by `skill_host_paths.py` — never `NEXTCLOUD_MOUNT_PATH` whole. Symlinks rejected, callers use the returned resolved path.
+- **Host paths in skill CLIs**: a skill CLI runs host-side with the daemon's filesystem view, so any verb taking a host path is scoped by `sandbox/host_paths.py` — never `NEXTCLOUD_MOUNT_PATH` whole. Symlinks rejected, callers use the returned resolved path.
 - **Shared rooms withhold by reach, for guests and unasked tasks only**: a guest's turn, and a task nobody asked in a shared room, withhold every scope. Then `{mount}/Users/{user_id}` is not bound, the task gets its own `emissary-task-<id>` / `room-task-<id>` temp dir and no Talk bind. A member's own turn binds what their private room does. On a shape with no bwrap this is prompt and env only, and `doctor` warns.
 - **No Docker API in the sandbox**: no socket is bound at any path and no `DOCKER_HOST` is exported. Project builds go to the user's devbox over the exec transport (`.claude/rules/devbox.md`).
 - **Native WebFetch tool**: daemon-netns, credential-free, SSRF-hardened, and **available to every user**. What bounds it is `[brain.native.web_fetch]`'s own egress policy, which binds every caller alike; `admin_only = true` restores the identity gate it shipped with.

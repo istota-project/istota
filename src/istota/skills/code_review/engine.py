@@ -66,7 +66,7 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from istota.skill_host_paths import developer_repos_root, resolve_under_repos
+from istota.sandbox.host_paths import developer_repos_root, resolve_under_repos
 
 CONFORMANCE = "conformance"
 BUGHUNT = "bughunt"
@@ -185,11 +185,11 @@ class Finding:
 # The hardened git runner
 # --------------------------------------------------------------------------
 
-# The list lives in `istota.git_hardening` so `worktree_reaper` can have it
+# The list lives in `istota.sandbox.git_hardening` so `worktree_reaper` can have it
 # too: it runs `git status` inside the same model-writable checkouts, and it
 # cannot import from `istota.skills` (whose __init__ star-imports every skill).
 # Re-exported here because this module's call sites and tests use the name.
-from istota.git_hardening import (  # noqa: E402,F401 - GIT_HARDENING is re-exported
+from istota.sandbox.git_hardening import (  # noqa: E402,F401 - GIT_HARDENING is re-exported
     GIT_HARDENING,
     GIT_SUBPROCESS_ENV,
 )

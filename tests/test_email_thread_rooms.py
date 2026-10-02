@@ -12,11 +12,13 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, room_policy, speech_gate
+from istota import db
+from istota.rooms import policy as room_policy
+from istota.rooms import speech_gate
 from istota.config import Config, EmailConfig, UserConfig
 from istota.memory.sleep_cycle import gather_day_data
 from istota.skills.email import Email, EmailEnvelope
-from istota.surfaces import is_room_member_for
+from istota.rooms.surfaces import is_room_member_for
 from istota.transport import classify_ahead
 from istota.transport.email import threads
 from istota.transport.email.inbound import poll_emails
@@ -351,10 +353,10 @@ class TestNoMirrorIntoASharedRoom:
 class TestTheSideRoomsEmailView:
     @pytest.mark.asyncio
     async def test_a_private_mail_to_the_users_own_address(self, config, db_path):
-        from istota import side_rooms
+        from istota.rooms import side_rooms
 
         _start_thread(config)
-        with patch("istota.side_rooms._send_private_mail") as send:
+        with patch("istota.rooms.side_rooms._send_private_mail") as send:
             ok = await side_rooms.push_to_email_view(
                 config, user_id=HOST, parent_token=_room_token(config),
                 body="You are free after 7.", reference_id="r1",
@@ -368,11 +370,11 @@ class TestTheSideRoomsEmailView:
 
     @pytest.mark.asyncio
     async def test_nothing_for_a_parent_not_on_email(self, config, db_path):
-        from istota import side_rooms
+        from istota.rooms import side_rooms
 
         with db.get_db(db_path) as conn:
             db.register_room(conn, "web-x", HOST, origin="web")
-        with patch("istota.side_rooms._send_private_mail") as send:
+        with patch("istota.rooms.side_rooms._send_private_mail") as send:
             ok = await side_rooms.push_to_email_view(
                 config, user_id=HOST, parent_token="web-x", body="x",
                 reference_id="r1",
@@ -383,7 +385,7 @@ class TestTheSideRoomsEmailView:
     def test_a_shared_thread_routes_confirmations_to_the_email_view(
         self, config, db_path,
     ):
-        from istota import side_rooms
+        from istota.rooms import side_rooms
 
         task_ids = _start_thread(config)
         with db.get_db(db_path) as conn:
@@ -481,8 +483,9 @@ class TestHeldPostsAndWhispers:
         lands on the thread once approved, through the outbound gate."""
         import asyncio
 
-        from istota import confirmations, side_rooms
-        from istota import whatsapp_requests as requests
+        from istota import confirmations
+        from istota.rooms import side_rooms
+        from istota.relay import requests
 
         _start_thread(config)
         with db.get_db(db_path) as conn:
@@ -508,8 +511,8 @@ class TestHeldPostsAndWhispers:
     def test_a_whisper_reaches_the_members_own_address(self, config, db_path):
         import asyncio
 
-        from istota import side_rooms
-        from istota import whatsapp_requests as requests
+        from istota.rooms import side_rooms
+        from istota.relay import requests
 
         task_ids = _start_thread(config)
         with db.get_db(db_path) as conn:
@@ -517,7 +520,7 @@ class TestHeldPostsAndWhispers:
             side_rooms.enqueue_whisper(conn, config, actor_user_id=HOST,
                                        task_id=task_ids[0], request_key="w1",
                                        text="Only for you.")
-        with patch("istota.side_rooms._send_private_mail") as send:
+        with patch("istota.rooms.side_rooms._send_private_mail") as send:
             asyncio.run(requests.drain_requests(config))
 
         kwargs = send.call_args.kwargs

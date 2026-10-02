@@ -1,4 +1,4 @@
-"""Tests for ``istota.host_pressure``.
+"""Tests for ``istota.maintenance.host_pressure``.
 
 Every reader in that module takes its root as a parameter, so these tests build
 a fixture ``/proc`` tree under ``tmp_path`` and point the readers at it. Nothing
@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import host_pressure
+from istota.maintenance import host_pressure
 
 
 # ---------------------------------------------------------------------------
@@ -2041,7 +2041,7 @@ class TestSnapshotSandboxRows:
     def test_no_running_tasks_and_not_asked_are_different_lines(self, tmp_path):
         """The module's own rule, applied to the new section: an absent reading
         and a zero reading must not render alike. A caller with no database —
-        ``python -m istota.host_pressure --snapshot`` — has not established
+        ``python -m istota.maintenance.host_pressure --snapshot`` — has not established
         that no task is running."""
         proc = build_proc(tmp_path / "proc", mounts=MOUNTS)
 

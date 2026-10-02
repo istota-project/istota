@@ -32,7 +32,7 @@ import pytest
 
 from istota import db, executor
 from istota.config import Config
-from istota.sandbox_plan import SandboxProfile, build_mount_plan
+from istota.sandbox.plan import SandboxProfile, build_mount_plan
 from istota.session.tools.remote import server_command
 
 #: The interpreter this process really started under, read at import time. The
@@ -213,7 +213,7 @@ class TestTheBaseInterpreterBindRefusesRatherThanWidening:
 
 class TestTheRestOfTheArgvIsUnchanged:
     def test_it_still_runs_the_tool_server_module(self):
-        assert server_command()[1:] == ["-m", "istota.tool_server"]
+        assert server_command()[1:] == ["-m", "istota.sandbox.tool_server"]
 
 
 class TestTheInterpreterIsSomethingTheMountPlanActuallyBinds:

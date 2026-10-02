@@ -3,7 +3,7 @@
 Default ``mode="shared"``: a server-side ``date_gte`` INBOX fetch within
 ``lookback_hours`` (no fixed message cap — the prior 100-message truncation is
 gone), each message's owner resolved via
-:func:`istota.email_ownership.resolve_email_owner`, keeping only *unowned*
+:func:`istota.mail.ownership.resolve_email_owner`, keeping only *unowned*
 (shared-pool) mail. ``mode="senders"`` additionally narrows the shared pool to
 an fnmatch sender allowlist (for noisy shared mailboxes).
 
@@ -85,8 +85,8 @@ def resolve(config: dict, ctx: SourceContext) -> GatheredSource:
     try:
         from imap_tools import AND
 
-        from istota.email_ownership import resolve_email_owner
-        from istota.email_support import get_email_config
+        from istota.mail.ownership import resolve_email_owner
+        from istota.mail.support import get_email_config
         from istota.skills.email import fetch_emails_full, list_emails
     except Exception as e:  # noqa: BLE001
         logger.warning("email source: imports unavailable: %s", e)

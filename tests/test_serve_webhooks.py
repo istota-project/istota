@@ -39,12 +39,13 @@ class TestServeWebhookMount:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
-        from istota import serve, webhook_receiver as wr
+        from istota import serve
+        from istota.webui import webhook_receiver as wr
 
         monkeypatch.setattr(wr, "reload_config", lambda: None)
         parent = FastAPI()
         monkeypatch.setattr(
-            "istota.web_app._config", self._config(tmp_path), raising=False,
+            "istota.webui.app._config", self._config(tmp_path), raising=False,
         )
         serve._maybe_mount_webhooks(parent)
 
@@ -60,12 +61,13 @@ class TestServeWebhookMount:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
-        from istota import serve, webhook_receiver as wr
+        from istota import serve
+        from istota.webui import webhook_receiver as wr
 
         calls = []
         monkeypatch.setattr(wr, "reload_config", lambda: calls.append(1))
         monkeypatch.setattr(
-            "istota.web_app._config", self._config(tmp_path), raising=False,
+            "istota.webui.app._config", self._config(tmp_path), raising=False,
         )
         parent = FastAPI()
         serve._maybe_mount_webhooks(parent)
@@ -81,7 +83,7 @@ class TestServeWebhookMount:
         from istota import serve
 
         monkeypatch.setattr(
-            "istota.web_app._config", self._config(tmp_path, location=False),
+            "istota.webui.app._config", self._config(tmp_path, location=False),
             raising=False,
         )
         parent = FastAPI()
@@ -93,11 +95,12 @@ class TestServeWebhookMount:
     def test_double_attach_is_refused(self, tmp_path, monkeypatch):
         from fastapi import FastAPI
 
-        from istota import serve, webhook_receiver as wr
+        from istota import serve
+        from istota.webui import webhook_receiver as wr
 
         monkeypatch.setattr(wr, "reload_config", lambda: None)
         monkeypatch.setattr(
-            "istota.web_app._config", self._config(tmp_path), raising=False,
+            "istota.webui.app._config", self._config(tmp_path), raising=False,
         )
         parent = FastAPI()
         serve._maybe_mount_webhooks(parent)
@@ -111,12 +114,13 @@ class TestServeWebhookMount:
     def test_sms_only_attaches_both_fixed_provider_routes(self, tmp_path, monkeypatch):
         from fastapi import FastAPI
 
-        from istota import serve, webhook_receiver as wr
+        from istota import serve
+        from istota.webui import webhook_receiver as wr
         from istota.config import SmsConfig
 
         monkeypatch.setattr(wr, "reload_config", lambda: None)
         monkeypatch.setattr(
-            "istota.web_app._config",
+            "istota.webui.app._config",
             self._config(tmp_path, location=False, sms=SmsConfig(enabled=True)),
             raising=False,
         )
@@ -131,7 +135,8 @@ class TestServeWebhookMount:
     def test_callback_only_provider_attaches_sms_routes(self, tmp_path, monkeypatch):
         from fastapi import FastAPI
 
-        from istota import serve, webhook_receiver as wr
+        from istota import serve
+        from istota.webui import webhook_receiver as wr
         from istota.config import SmsConfig, TelnyxSmsConfig
 
         monkeypatch.setattr(wr, "reload_config", lambda: None)
@@ -143,7 +148,7 @@ class TestServeWebhookMount:
             )
         )
         monkeypatch.setattr(
-            "istota.web_app._config",
+            "istota.webui.app._config",
             self._config(tmp_path, location=False, sms=sms),
             raising=False,
         )
@@ -157,12 +162,13 @@ class TestServeWebhookMount:
     def test_location_and_sms_routes_each_attach_once(self, tmp_path, monkeypatch):
         from fastapi import FastAPI
 
-        from istota import serve, webhook_receiver as wr
+        from istota import serve
+        from istota.webui import webhook_receiver as wr
         from istota.config import SmsConfig
 
         monkeypatch.setattr(wr, "reload_config", lambda: None)
         monkeypatch.setattr(
-            "istota.web_app._config",
+            "istota.webui.app._config",
             self._config(tmp_path, sms=SmsConfig(enabled=True)),
             raising=False,
         )
@@ -188,12 +194,13 @@ class TestServeWebhookMount:
         """
         from fastapi import FastAPI
 
-        from istota import serve, webhook_receiver as wr
+        from istota import serve
+        from istota.webui import webhook_receiver as wr
         from .support.whatsapp_config import build_whatsapp_config
 
         monkeypatch.setattr(wr, "reload_config", lambda: None)
         monkeypatch.setattr(
-            "istota.web_app._config",
+            "istota.webui.app._config",
             self._config(
                 tmp_path, location=False, whatsapp=build_whatsapp_config(enabled=True),
             ),
@@ -222,7 +229,7 @@ class TestServeWebhookMount:
         from .support.whatsapp_config import build_whatsapp_config
 
         monkeypatch.setattr(
-            "istota.web_app._config",
+            "istota.webui.app._config",
             self._config(
                 tmp_path,
                 location=False,
@@ -250,14 +257,15 @@ class TestServeWebhookMount:
     ):
         from fastapi import FastAPI
 
-        from istota import serve, webhook_receiver as wr
+        from istota import serve
+        from istota.webui import webhook_receiver as wr
         from istota.config import SmsConfig
 
         from .support.whatsapp_config import build_whatsapp_config
 
         monkeypatch.setattr(wr, "reload_config", lambda: None)
         monkeypatch.setattr(
-            "istota.web_app._config",
+            "istota.webui.app._config",
             self._config(
                 tmp_path,
                 sms=SmsConfig(enabled=True),
@@ -291,7 +299,8 @@ class TestServeWebhookMount:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
-        from istota import serve, webhook_receiver as wr
+        from istota import serve
+        from istota.webui import webhook_receiver as wr
         from .support.whatsapp_config import build_whatsapp_config
 
         monkeypatch.setattr(wr, "reload_config", lambda: None)
@@ -300,7 +309,7 @@ class TestServeWebhookMount:
             location=False,
             whatsapp=build_whatsapp_config(enabled=True, verify_token="verify-placeholder"),
         )
-        monkeypatch.setattr("istota.web_app._config", config, raising=False)
+        monkeypatch.setattr("istota.webui.app._config", config, raising=False)
         monkeypatch.setattr(wr, "_config", config, raising=False)
         parent = FastAPI()
         serve._maybe_mount_webhooks(parent)
@@ -344,7 +353,7 @@ class TestServeWebhookMount:
         from .support.whatsapp_config import build_whatsapp_config
 
         monkeypatch.setattr(
-            "istota.web_app._config",
+            "istota.webui.app._config",
             self._config(
                 tmp_path,
                 location=False,
@@ -374,7 +383,7 @@ class TestServeWebhookMount:
         """
         from fastapi.testclient import TestClient
 
-        from istota import webhook_receiver as wr
+        from istota.webui import webhook_receiver as wr
         from .support.whatsapp_config import build_whatsapp_config
 
         config = self._config(

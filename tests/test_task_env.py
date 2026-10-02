@@ -11,7 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from istota import executor, network_proxy, skill_proxy, task_env
+from istota import executor
+from istota.sandbox import network_proxy
+from istota.sandbox import skill_proxy
+from istota.sandbox import task_env
 from istota.config import Config, DevboxConfig, NetworkConfig, SecurityConfig
 from istota.skills._types import EnvSpec, SkillMeta
 
@@ -875,8 +878,8 @@ class TestTheClientWaitExport:
 
 def test_runtime_freezes_empty_credential_snapshot(tmp_path, runtime_inputs):
     from istota import db
-    from istota.credential_broker import grants
-    from istota.credential_broker.bindings import put_binding, parse_binding
+    from istota.credentials.broker import grants
+    from istota.credentials.broker.bindings import put_binding, parse_binding
     config = _config(tmp_path)
     db.init_db(config.db_path)
     with db.get_db(config.db_path) as conn:
@@ -896,8 +899,8 @@ def test_runtime_freezes_empty_credential_snapshot(tmp_path, runtime_inputs):
 class TestBrokerTrustSplit:
     def test_trust_only_enters_sandbox_wrapper(self, tmp_path, runtime_inputs, monkeypatch):
         from istota.config import CredentialBrokerConfig
-        from istota.sandbox_plan import SandboxProfile
-        from istota.tool_server import merge_proxy_env
+        from istota.sandbox.plan import SandboxProfile
+        from istota.sandbox.tool_server import merge_proxy_env
         import shlex
 
         monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
@@ -941,7 +944,7 @@ class TestBrokerTrustSplit:
 def test_broker_strips_forge_tokens_without_requiring_skill_proxy(tmp_path, runtime_inputs, proxy_enabled, caplog):
     from istota.config import CredentialBrokerConfig
     from istota import db
-    from istota.credential_broker.bindings import get_binding
+    from istota.credentials.broker.bindings import get_binding
     config = _config(tmp_path, skill_proxy_enabled=proxy_enabled,
                      credential_broker=CredentialBrokerConfig(enabled=True))
     config.security.network.enabled = False
@@ -969,7 +972,7 @@ def test_a_task_without_the_forge_token_keeps_the_users_forge_binding(tmp_path, 
     no token in its env and must not delete the row other tasks read."""
     from istota.config import CredentialBrokerConfig
     from istota import db
-    from istota.credential_broker.bindings import get_binding
+    from istota.credentials.broker.bindings import get_binding
     config = _config(tmp_path, credential_broker=CredentialBrokerConfig(enabled=True))
     config.security.network.enabled = False
     config.developer.enabled = True

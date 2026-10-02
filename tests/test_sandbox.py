@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import credential_shim, db
+from istota import db
+from istota.sandbox import credential_shim
 from istota.config import Config, DevboxConfig, DeveloperConfig, NetworkConfig, SecurityConfig
 from istota.executor import (
     SandboxProfile,
@@ -2818,7 +2819,7 @@ class TestSessionLogContainment:
         config = self._standalone_shape(tmp_path)
         log_dir = self._log_dir(config)
 
-        with caplog.at_level(logging.ERROR, logger="istota.sandbox_plan"):
+        with caplog.at_level(logging.ERROR, logger="istota.sandbox.plan"):
             result = _run_bwrap(config, make_sandbox_task(), is_admin=False)
 
         assert not self._masked(result, log_dir)

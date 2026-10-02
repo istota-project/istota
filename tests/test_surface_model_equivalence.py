@@ -47,8 +47,8 @@ from typing import Callable
 
 import pytest
 
-from istota import surfaces
-from istota.surfaces import (
+from istota.rooms import surfaces
+from istota.rooms.surfaces import (
     is_room_member,
     is_room_view,
     origin_surface_for_source_type,
@@ -215,7 +215,7 @@ SITES = (
     ),
     Site(
         name="web_app._user_row_display foreign marker",
-        module="istota.web_app",
+        module="istota.webui.app",
         function="_user_row_display",
         # The only site that reads the predicate **negated**, to mark a row as
         # foreign to the room. Takes the raw `messages.origin_surface` column

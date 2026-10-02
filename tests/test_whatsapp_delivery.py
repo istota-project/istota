@@ -27,7 +27,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from istota import db, notifications, surfaces
+from istota import db
+from istota.notifications import delivery as notifications
+from istota.rooms import surfaces
 from istota.config import (
     Config,
     UserConfig,

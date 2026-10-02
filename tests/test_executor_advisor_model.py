@@ -203,7 +203,7 @@ class TestFallbackDropsAdvisor:
         patches = _patch_executor() + [
             patch("istota.executor.make_brain", side_effect=fake_make_brain),
             patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
-            patch("istota.notifications.send_notification"),
+            patch("istota.notifications.delivery.send_notification"),
         ]
         with contextmanager_chain(patches):
             task = _task(source_type="cli", model="")
@@ -236,7 +236,7 @@ class TestFallbackDropsAdvisor:
         patches = _patch_executor() + [
             patch("istota.executor.make_brain", side_effect=fake_make_brain),
             patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
-            patch("istota.notifications.send_notification"),
+            patch("istota.notifications.delivery.send_notification"),
         ]
         with contextmanager_chain(patches):
             task = _task(source_type="cli", model="")
@@ -277,7 +277,7 @@ class TestFallbackDropsAdvisor:
         patches = _patch_executor() + [
             patch("istota.executor.make_brain", side_effect=fake_make_brain),
             patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
-            patch("istota.notifications.send_notification"),
+            patch("istota.notifications.delivery.send_notification"),
         ]
         with contextmanager_chain(patches):
             task = _task(source_type="cli", model=task_model)

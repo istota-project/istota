@@ -28,8 +28,8 @@ from croniter import croniter
 # Top-level rather than imported where used: the admission gate consults it on
 # every dispatch tick (~0.5s), and it is a stdlib-only leaf with no import of
 # its own back into the package, so there is no cycle to avoid.
-from . import host_pressure as host_pressure_mod
-from . import task_cgroup
+from istota.maintenance import host_pressure as host_pressure_mod
+from istota.sandbox import cgroup as task_cgroup
 
 logger = logging.getLogger("istota.scheduler")
 # What a partial answer from an interrupted run is labelled with when it is
@@ -93,7 +93,9 @@ def _warn_once(key: str, message: str) -> None:
     _warned_keys.add(key)
     logger.warning("%s", message)
 
-from . import avatars, confirmations, db, speech_gate
+from istota import confirmations, db
+from istota.webui import avatars
+from istota.rooms import speech_gate
 from .brain import (
     make_brain,
     resolve_brain_kind,
@@ -101,15 +103,15 @@ from .brain import (
     split_effort,
 )
 from .build_info import build_description
-from .chat_files import check_chat_file_links
+from istota.webui.chat_files import check_chat_file_links
 from .consumers import (
     LogChannelSubscriber,
     PushNotificationSubscriber,
     TalkEventSubscriber,
 )
-from .db_health import CheckReport, check_and_repair
+from istota.maintenance.db_health import CheckReport, check_and_repair
 from .events import EventWriter, PROGRESS_MESSAGES
-from .shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, is_sigpipe_failure, shell_argv
+from istota.sandbox.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, is_sigpipe_failure, shell_argv
 from .skills.briefing import (
     get_briefings_for_user,
     parse_briefing_json,
@@ -130,20 +132,20 @@ from .executor import (
 from .async_runtime import reset_async_runtime, run_coro
 from .nextcloud import avatars as nc_avatars
 from .nextcloud._http import nc_configured
-from .nextcloud_api import hydrate_user_configs
+from istota.nextcloud.user_metadata import hydrate_user_configs
 from .modules import MODULE_NAMES
-from .notification_resolvers import confirmation as confirmation_source
-from .notification_resolvers import cron_job as cron_job_source
-from .notification_resolvers import task_alert as task_alert_source
-from .notification_store import (
+from istota.notifications.resolvers import confirmation as confirmation_source
+from istota.notifications.resolvers import cron_job as cron_job_source
+from istota.notifications.resolvers import task_alert as task_alert_source
+from istota.notifications.store import (
     RaiseResult,
     deliver_pending,
     mark_delivered,
     sweep_expired_alerts,
     sweep_retention,
 )
-from .notifications import effective_log_destinations, send_notification
-from .process_group import kill_group_if_live
+from istota.notifications.delivery import effective_log_destinations, send_notification
+from istota.sandbox.process_group import kill_group_if_live
 from .session.session_log import (
     SWEEP_STATE_KEY,
     SWEEP_STATE_NAMESPACE,
@@ -161,7 +163,7 @@ from .transport import (
     resolve_delivery_plan,
     transcript_room_for_task,
 )
-from .surfaces import (
+from istota.rooms.surfaces import (
     is_room_member,
     is_room_view,
     origin_surface_for_source_type,
@@ -2630,7 +2632,7 @@ def _email_task_from_the_user(config: Config, task: db.Task) -> bool:
         return False
     # Imported here, as every other `email_support` use in this module is: the
     # module pulls in the email skill, which is an optional extra.
-    from .email_support import sender_claims_to_be_user  # noqa: PLC0415
+    from istota.mail.support import sender_claims_to_be_user  # noqa: PLC0415
 
     try:
         with db.get_db(config.db_path) as conn:
@@ -2815,7 +2817,7 @@ def process_one_task(
         db.reset_attempt_tool_calls(conn, task_id)
         # A held draft was never published. A reclaimed/retried attempt must
         # not inherit it; approved requests are already queued and unaffected.
-        from .message_relays import close_task_questions
+        from istota.relay.relays import close_task_questions
         close_task_questions(conn, task_id, reason="attempt_restarted")
 
         # Get user resources
@@ -3174,8 +3176,8 @@ def process_one_task(
     if success:
         result = check_chat_file_links(config, task.user_id, result, task_id=task_id)
 
-    from . import side_rooms as side_rooms_mod
-    from .whatsapp_requests import held_question, present_question
+    from istota.rooms import side_rooms as side_rooms_mod
+    from istota.relay.requests import held_question, present_question
     with db.get_db(config.db_path) as conn:
         relay_question = held_question(conn, task_id)
     if relay_question and not dry_run:
@@ -3252,7 +3254,7 @@ def process_one_task(
     # answer is not recorded there and does not reach it. Progress it posted
     # while running is not taken back.
     if not dry_run:
-        from .room_veto import task_room_vetoed
+        from istota.rooms.veto import task_room_vetoed
         with db.get_db(config.db_path) as conn:
             vetoed = task_room_vetoed(conn, task)
             if vetoed:
@@ -3316,7 +3318,7 @@ def process_one_task(
 
     # Where a shared-room task's confirmation went instead of the room, when
     # it parked on one (multiplayer D4). Its Talk view is posted at the tail.
-    from . import side_rooms
+    from istota.rooms import side_rooms
     side_confirmation: "side_rooms.ConfirmationRoute | None" = None
 
     # A once-job whose table row was deleted inside the transaction below, and
@@ -4180,7 +4182,7 @@ def process_one_task(
         # so a failed post has nothing to record. Best-effort and gated on room
         # existence inside the helper — the delivery has already happened.
         if post_talk_mirror_body and response_msg_id:
-            from .notifications import mirror_talk_to_room
+            from istota.notifications.delivery import mirror_talk_to_room
             mirror_talk_to_room(
                 config, talk_token, post_talk_mirror_body,
                 talk_message_id=response_msg_id,
@@ -5621,7 +5623,7 @@ def check_worktree_reap(config: Config) -> list:
     Returns the outcomes so a caller can assert on them; the sweep logs its own
     removals and a count of what it kept.
     """
-    from .worktree_reaper import reap_and_report
+    from istota.maintenance.worktree_reaper import reap_and_report
 
     dev = config.developer
     # Re-checked here rather than left to the loop's gate. The gate exists to
@@ -5816,7 +5818,7 @@ def check_sandbox_cache_sweep(config: Config) -> list:
     the loop's gate exists to skip the thread spawn cheaply, and a delete path
     should be safe to call on its own.
     """
-    from .sandbox_cache_sweeper import sweep_and_report
+    from istota.maintenance.sandbox_cache_sweeper import sweep_and_report
 
     sec = config.security
     if not sec.sandbox_cache_sweep_enabled:
@@ -6137,12 +6139,12 @@ def _record_session_log_sweep(config: Config, result: SweepResult) -> None:
 def _operator_alert_user(config: Config) -> str | None:
     """Pick a user to receive operator-level scheduler alerts.
 
-    Thin delegate to :func:`istota.notifications.operator_alert_user` (the
+    Thin delegate to :func:`istota.notifications.delivery.operator_alert_user` (the
 canonical home) so scheduler-internal callers and tests keep their import
 path. Prefers the first admin user (sorted for determinism); falls back to
     the first configured user. ``None`` when no users are configured.
     """
-    from .notifications import operator_alert_user
+    from istota.notifications.delivery import operator_alert_user
 
     return operator_alert_user(config)
 
@@ -6171,7 +6173,7 @@ def _send_operator_alert(config: Config, user_id: str, message: str, *, timeout:
 def _db_backup_lookback_days() -> int:
     """The 'vanished' window, read from where it's defined rather than restated.
     Imported here so the alert text can't drift away from the actual window."""
-    from .db_backup import _VANISHED_LOOKBACK_DAYS
+    from istota.maintenance.db_backup import _VANISHED_LOOKBACK_DAYS
 
     return _VANISHED_LOOKBACK_DAYS
 
@@ -6241,7 +6243,7 @@ def _run_db_backup(config: Config) -> None:
     a background thread — the alert has to see the results of the run that
     produced them, and ``_alert_backup_problems`` is best-effort anyway.
     """
-    from .db_backup import backup_databases
+    from istota.maintenance.db_backup import backup_databases
 
     results = backup_databases(config)
     _alert_backup_problems(config, results)
@@ -6761,7 +6763,7 @@ def _emit_host_pressure_breadcrumb() -> None:
     """
     global _host_pressure_unavailable_warned
     try:
-        from . import host_pressure  # noqa: PLC0415  -- leaf module, imported where used
+        from istota.maintenance import host_pressure  # noqa: PLC0415  -- leaf module, imported where used
 
         sample = host_pressure.read_sample()
         if sample is None:
@@ -7175,7 +7177,7 @@ def _confirmation_notice_token(task_info: dict, conn=None) -> str | None:
     thread id or a stream-surface token is not a Talk channel. Returning None
     lets the routing ladder (alerts_channel → briefing → DM) resolve one.
     """
-    from .email_support import is_synthetic_email_thread_token
+    from istota.mail.support import is_synthetic_email_thread_token
 
     token = task_info.get("conversation_token")
     if not token:
@@ -7510,7 +7512,7 @@ def run_cleanup_checks(config: Config) -> None:
     # 5. Clean up old emails from IMAP (outside db context)
     if config.email.enabled and sched.email_retention_days > 0:
         try:
-            from .email_support import cleanup_old_emails
+            from istota.mail.support import cleanup_old_emails
             deleted_emails = cleanup_old_emails(config, sched.email_retention_days)
             if deleted_emails > 0:
                 logger.info(f"Deleted {deleted_emails} old email(s) from IMAP inbox")
@@ -7663,7 +7665,7 @@ def nag_stale_outbound_drafts(config: Config) -> int:
     permanently. A failed send leaves `nagged_at` NULL and the next sweep
     retries.
     """
-    from . import outbound_drafts as drafts
+    from istota.mail import drafts
 
     # Read and deliver in separate transactions, and deliver outside both: an
     # alert routed to the web surface opens a second connection to this
@@ -8655,7 +8657,7 @@ def vault_sync_enabled(config: Config) -> bool:
     branch exists for `backup-stale-alert`'s deliberate every-tick shape, so a
     negative value here would spawn a background sync roughly twice a second.
     """
-    from . import secrets_vault  # noqa: PLC0415 - keeps `config` load-time light
+    from istota.credentials import vault as secrets_vault  # noqa: PLC0415 - keeps `config` load-time light
 
     # The interval half is `secrets_vault.sync_is_scheduled`, not a second copy:
     # the notification resolver needs the same rule and cannot import this
@@ -8671,7 +8673,7 @@ def vault_sync_enabled(config: Config) -> bool:
 
 def _db_backup_last_time(config: Config) -> float:
     """The persisted backup clock, for the ``db-backup`` gate's seed."""
-    from . import db_backup as _db_backup
+    from istota.maintenance import db_backup as _db_backup
 
     return _db_backup.last_backup_time(config)
 
@@ -8808,7 +8810,7 @@ def build_interval_gates(
         # Reads the *persisted* clock, not the loop's — the loop clock advances
         # at spawn time, this one only on a durable OK run, which is what makes
         # "backups have silently stopped" detectable at all.
-        from . import db_backup as _db_backup
+        from istota.maintenance import db_backup as _db_backup
 
         persisted = _db_backup.last_backup_time(config)
         backup["alerted"] = _maybe_alert_backup_stale(
@@ -8816,12 +8818,12 @@ def build_interval_gates(
         )
 
     def _whatsapp_requests(now: float) -> None:
-        from .whatsapp_requests import drain_requests
+        from istota.relay.requests import drain_requests
 
         run_coro(drain_requests(config))
 
     def _room_notices(now: float) -> None:
-        from .room_veto import drain_room_notices
+        from istota.rooms.veto import drain_room_notices
 
         run_coro(drain_room_notices(config))
 
@@ -8856,7 +8858,7 @@ def build_interval_gates(
         )
 
     def _vault_sync(now: float) -> None:
-        from . import secrets_vault
+        from istota.credentials import vault as secrets_vault
 
         secrets_vault.sync_all(config)
 
@@ -9788,7 +9790,7 @@ def run_daemon(
     # secrets table so the web UI can read them. Skipped when ISTOTA_SECRET_KEY
     # is unset; later starts skip rows that already exist.
     try:
-        from . import secrets_store  # noqa: PLC0415
+        from istota.credentials import store as secrets_store  # noqa: PLC0415
 
         secrets_store.import_from_user_configs(config.db_path, config.users)
     except Exception as e:  # noqa: BLE001
@@ -9812,7 +9814,7 @@ def run_daemon(
     # raises, and a restart over an already-open row bumps, so this is one
     # delivery at the first failure rather than one per boot.
     try:
-        from . import secrets_vault  # noqa: PLC0415
+        from istota.credentials import vault as secrets_vault  # noqa: PLC0415
 
         if vault_sync_enabled(config):
             secrets_vault.sync_all(config)

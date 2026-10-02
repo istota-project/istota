@@ -128,10 +128,10 @@ def _run(
 
     with patch("istota.executor.make_brain", _capturing_brain(captured)), \
             patch("istota.executor._bwrap_available", return_value=True), \
-            patch("istota.skill_proxy.SkillProxy") as mock_proxy, \
+            patch("istota.sandbox.skill_proxy.SkillProxy") as mock_proxy, \
             patch.object(_loader, "effective_disabled_skills", _spy_disabled), \
             patch("istota.skills.health.setup_env", _health_hook), \
-            patch("istota.task_env._vault_credentials", lambda *a: {"bank": "s3cret"}):
+            patch("istota.sandbox.task_env._vault_credentials", lambda *a: {"bank": "s3cret"}):
         mock_proxy.return_value.__enter__ = lambda s: s
         mock_proxy.return_value.__exit__ = lambda s, *a: False
         with db.get_db(config.db_path) as conn:
@@ -280,7 +280,7 @@ class TestHostPathsFollowTheFilesScope:
     """A skill CLI's host-path roots drop the workspace with ``files``."""
 
     def _roots(self, tmp_path, monkeypatch, withheld: str | None):
-        from istota.skill_host_paths import (
+        from istota.sandbox.host_paths import (
             WITHHELD_SCOPES_VAR,
             env_host_roots,
             user_workspace_root,
@@ -312,7 +312,7 @@ class TestHostPathsFollowTheFilesScope:
         assert own == user_dir
 
     def test_the_marker_reaches_the_proxy_and_not_the_model(self, config):
-        from istota.skill_host_paths import WITHHELD_SCOPES_VAR
+        from istota.sandbox.host_paths import WITHHELD_SCOPES_VAR
 
         seen = _run(config, _room(config, shared=True), guest=True)
         assert "files" in seen["proxy_base_env"][WITHHELD_SCOPES_VAR].split(",")
@@ -350,7 +350,7 @@ class TestTheMountPlanPerScope:
     )
 
     def _plan(self, tmp_path, monkeypatch, withheld):
-        from istota.sandbox_plan import SandboxProfile, build_mount_plan
+        from istota.sandbox.plan import SandboxProfile, build_mount_plan
         from tests.test_sandbox_argv_golden import Case, _make_config, _make_world
 
         case = Case("shared_room", **self.CASE_KW)

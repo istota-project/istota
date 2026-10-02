@@ -21,7 +21,7 @@ def db_path(tmp_path):
 
 @pytest.fixture
 def web_config(db_path):
-    from istota import web_app
+    from istota.webui import app as web_app
     web_app._config = Config()
     web_app._config.db_path = db_path
     return web_app._config
@@ -29,7 +29,7 @@ def web_config(db_path):
 
 class TestRoomListSurfacesTalk:
     def test_talk_room_appears_with_origin_and_handle(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             db.register_room(conn, "cpz", "alice", origin="talk", name="#istota")
             db.add_room_binding(conn, "cpz", "talk", "cpz")
@@ -45,7 +45,7 @@ class TestRoomListSurfacesTalk:
             assert db.resolve_room_token(conn, "web", "cpz") == "cpz"
 
     def test_web_rooms_still_listed(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             db.create_web_chat_room(conn, "alice", "Ideas")
         rooms = web_app._chat_list_rooms("alice")
@@ -56,7 +56,7 @@ class TestRoomListSurfacesTalk:
 
 class TestDeleteGuard:
     def test_delete_talk_room_drops_membership_not_destroys(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             db.register_room(conn, "cpz", "alice", origin="talk", name="#istota")
             db.add_room_binding(conn, "cpz", "talk", "cpz")
@@ -77,7 +77,7 @@ class TestDeleteGuard:
         assert "cpz" not in {r["token"] for r in web_app._chat_list_rooms("alice")}
 
     def test_delete_web_room_hard_deletes(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Scratch")
         assert web_app._chat_delete_room("alice", room.id) == "ok"
@@ -114,7 +114,7 @@ class TestRoomListActivityOrder:
         )
 
     def test_payload_is_newest_activity_first(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             db.register_room(conn, "chatty", "alice", origin="web", name="Chatty")
             db.register_room(conn, "stale", "alice", origin="talk", name="Stale")
@@ -135,7 +135,7 @@ class TestRoomListActivityOrder:
         assert tokens == ["chatty", "stale"]
 
     def test_every_entry_carries_an_iso_last_activity(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             db.register_room(conn, "cpz", "alice", origin="talk", name="#istota")
             self._stamp(conn, "rooms", "token", "cpz", "2026-01-01 00:00:00")
@@ -166,7 +166,7 @@ class TestListingCarriesTheTalkRef:
     """
 
     def test_promoted_room_carries_its_talk_ref(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             db.create_web_chat_room(conn, "alice", "general")
             token = db.list_web_chat_rooms(conn, "alice")[0].token
@@ -176,7 +176,7 @@ class TestListingCarriesTheTalkRef:
         assert by_token[token]["talk_token"] == "tk4ab9cd"
 
     def test_talk_origin_room_carries_its_own_token(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             db.register_room(conn, "cpz", "alice", origin="talk", name="#istota")
             db.add_room_binding(conn, "cpz", "talk", "cpz")
@@ -184,7 +184,7 @@ class TestListingCarriesTheTalkRef:
         assert by_token["cpz"]["talk_token"] == "cpz"
 
     def test_unpromoted_web_room_carries_none(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             db.create_web_chat_room(conn, "alice", "Ideas")
             token = db.list_web_chat_rooms(conn, "alice")[0].token
@@ -194,7 +194,7 @@ class TestListingCarriesTheTalkRef:
     def test_one_users_binding_does_not_leak_into_anothers_listing(
         self, web_config, db_path,
     ):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             db.register_room(conn, "shared", "alice", origin="talk", name="#shared")
             db.add_room_binding(conn, "shared", "talk", "shared")
@@ -209,7 +209,7 @@ class TestListingCarriesTheTalkRef:
         # The PATCH response is merged into the client's room record, so a key
         # the listing carries and the PATCH omits reads as absent to any
         # consumer that replaces rather than spreads.
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "general")
             db.add_room_binding(conn, room.token, "talk", "tk4ab9cd")
@@ -232,7 +232,7 @@ class TestDefaultRoomAsksTheRegistry:
     """
 
     def test_a_talk_member_gets_no_second_general(self, web_config, db_path):
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             db.register_room(conn, "rm1a2b3c", "alice", origin="talk", name="general")
             db.add_room_binding(conn, "rm1a2b3c", "talk", "rm1a2b3c")
@@ -309,7 +309,7 @@ class TestDefaultRoomAsksTheRegistry:
         # The listing does not need a default invented for it — it mints handles
         # in its own loop — so a user whose only room is shared still sees that
         # room and nothing else.
-        from istota import web_app
+        from istota.webui import app as web_app
         with db.get_db(db_path) as conn:
             db.register_room(conn, "shared", "alice", origin="talk", name="general")
             db.add_room_member(conn, "shared", "bob")

@@ -17,7 +17,8 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, speech_gate
+from istota import db
+from istota.rooms import speech_gate
 from istota.commands import _format_history_markdown
 from istota.config import Config, UserConfig
 from istota.transport import ParticipantRef, classify_ahead
@@ -301,7 +302,7 @@ class TestRecordingAuthors:
     ):
         # Stage 11 answers a guest as the room's host; with `guest_reply = off`
         # the turn is still what Stage 7 made it, recorded and acting on nothing.
-        from istota import room_policy
+        from istota.rooms import policy as room_policy
 
         with db.get_db(db_path) as conn:
             _room(conn)

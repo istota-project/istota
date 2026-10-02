@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING
 
 from ... import db
 from ...storage import _get_mount_path, get_user_memory_path
-from ...timestamps import iso_now_seconds as _utc_now
+from istota.lib.timestamps import iso_now_seconds as _utc_now
 
 if TYPE_CHECKING:
     from ...config import Config

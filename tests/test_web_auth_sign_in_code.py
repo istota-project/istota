@@ -12,7 +12,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from istota import db, user_profiles, web_auth as auth
+from istota import db, user_profiles
+from istota.webui import auth
 
 pytest.importorskip("fastapi")
 from tests import test_web_auth_routes as routes

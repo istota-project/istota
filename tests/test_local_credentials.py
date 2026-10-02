@@ -13,10 +13,12 @@ from unittest import mock
 
 import pytest
 
-from istota import db, local_credentials, secrets_store
-from istota.credential_broker import bindings, grants
-from istota.local_credentials import LocalCredential, LocalCredentialError
-from istota.secrets_vault import VAULT_ENTRY_SERVICE, VAULT_MAX_VALUE_BYTES
+from istota import db
+from istota.credentials import local as local_credentials
+from istota.credentials import store as secrets_store
+from istota.credentials.broker import bindings, grants
+from istota.credentials.local import LocalCredential, LocalCredentialError
+from istota.credentials.vault import VAULT_ENTRY_SERVICE, VAULT_MAX_VALUE_BYTES
 
 VALUE = "lc-fixture-value-not-real"
 NEW_VALUE = "lc-fixture-value-rotated"

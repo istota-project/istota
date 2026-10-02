@@ -508,7 +508,7 @@ class TestGarminRouteMove:
         }
 
     def test_auth_routes_on_garmin_router(self):
-        from istota import garmin_routes
+        from istota.webui import garmin_routes
         paths = self._paths(garmin_routes.router)
         assert {"/status", "/connect", "/mfa", "/disconnect"} <= paths
 
@@ -527,7 +527,7 @@ class TestGarminRouteMove:
         on the health module) — a health-opted-out user still needs Garmin
         auth for the location importer. Inspect each route endpoint's own
         source (not the module docstring)."""
-        from istota import garmin_routes
+        from istota.webui import garmin_routes
         from tests.support.drift import source_of
 
         for route in garmin_routes.router.routes:
@@ -539,7 +539,7 @@ class TestGarminRouteMove:
             assert "HealthContext" not in src, route.path
 
     def test_garmin_in_connected_service_schema(self):
-        from istota.secret_schema import CONNECTED_SERVICE_SCHEMA
+        from istota.credentials.schema import CONNECTED_SERVICE_SCHEMA
         assert "garmin" in CONNECTED_SERVICE_SCHEMA
         entry = CONNECTED_SERVICE_SCHEMA["garmin"]
         assert entry.get("custom_ui") is True

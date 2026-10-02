@@ -643,7 +643,7 @@ class TestTheClaudeTokenIsNotInTheServersOwnEnvironment:
         out = self._ask(layout, task, user_temp, self._spawn_env(user_temp))
         assert "PARENT_ENV=ABSENT" in out
         # Without this the absence above is a fact about some other process.
-        assert "istota.tool_server" in out
+        assert "istota.sandbox.tool_server" in out
 
     def test_the_positive_control_finds_it_when_the_spawn_carries_it(
         self, layout, task, user_temp
@@ -658,4 +658,4 @@ class TestTheClaudeTokenIsNotInTheServersOwnEnvironment:
             self._spawn_env(user_temp, **{self._TOKEN: "sk-ant-oat-fake-for-tests"}),
         )
         assert "PARENT_ENV=PRESENT" in out
-        assert "istota.tool_server" in out
+        assert "istota.sandbox.tool_server" in out

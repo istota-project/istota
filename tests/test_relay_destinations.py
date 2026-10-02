@@ -3,8 +3,10 @@ import json
 
 import pytest
 
-from istota import db, message_relays as relays, relay_destinations as dest, user_profiles
-from istota import whatsapp_requests as requests
+from istota import db, user_profiles
+from istota.relay import relays
+from istota.relay import destinations as dest
+from istota.relay import requests
 from istota.config import UserConfig
 from . import test_relay_questions
 

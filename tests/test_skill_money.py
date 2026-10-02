@@ -510,7 +510,7 @@ class TestMoneyLoaderEnvFirst:
         monkeypatch.setenv("MONARCH_CSRFTOKEN", "env-csrf")
         called = []
         monkeypatch.setattr(
-            "istota.secrets_store.get_secret",
+            "istota.credentials.store.get_secret",
             lambda *a, **kw: called.append(a) or "from-store",
         )
 
@@ -539,7 +539,7 @@ class TestMoneyLoaderEnvFirst:
                 "csrftoken": "store-csrf",
             }.get(k)
 
-        monkeypatch.setattr("istota.secrets_store.get_secret", fake_get)
+        monkeypatch.setattr("istota.credentials.store.get_secret", fake_get)
         result = load_user_secrets("alice", cfg)
         assert result == {"monarch": {
             "session_id": "store-sid",
@@ -561,7 +561,7 @@ class TestMoneyLoaderEnvFirst:
         def fake_get(db, u, s, k):
             return {"csrftoken": "store-csrf"}.get(k)
 
-        monkeypatch.setattr("istota.secrets_store.get_secret", fake_get)
+        monkeypatch.setattr("istota.credentials.store.get_secret", fake_get)
         result = load_user_secrets("alice", cfg)
         assert result == {"monarch": {
             "session_id": "env-sid",

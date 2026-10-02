@@ -1,0 +1,75 @@
+"""Which KV namespaces the model may not touch.
+
+A reserved namespace holds framework state that happens to live in the KV
+store: today the USER.md curation audit trail and the fingerprints the
+bypass detector compares against (`memory/curation/audit.py`),
+`_provisioned_rooms` — the Talk token `rooms/provision.py` provisioned for each
+default room name, plus whether an invite to it is still outstanding, which is
+what lets a deploy recognise a room the user has since renamed instead of
+minting a second one (ISSUE-342) and tell a room they left from one whose
+invite never landed (ISSUE-408) — and
+`_avatar_import`, what the scheduler's Nextcloud profile-picture import tick
+wrote down for `doctor`'s socket-free `web.avatar_import` check to read, and
+`_session_log_sweep`, the same shape for the native-brain transcript sweep —
+what the scheduler's cleanup tick reclaimed, so `runtime.session_log_dir` can
+say whether the size ceiling rather than `retention_days` is the retention in
+force — and `_vault_sync`, what the credential-vault pass last settled for one
+user, which the web process reads to render the settings heading and to decide
+whether a vault notification is still live, neither of those being a question
+the syncing process's own in-memory state can answer from another unit — and
+`_room_backfill`, the scheduler's per-user marker that a minted SMS or
+WhatsApp room's pre-room history has been copied in, and
+`_vault_file`, the filename that user chose out of their vault folder, which is
+reserved for the same reason `_provisioned_rooms` is: it selects which file the
+daemon decrypts with a key it holds, and the folder it names is bound
+read-write into that user's own sandbox. Those
+rows are written by the daemon, by the host-side `memory` skill CLI and by the
+`provision-rooms` CLI, and read by neither the model nor the `kv` skill.
+
+Both KV tables, not only the per-user one: `skills/kv` applies this in `main`
+before it dispatches a verb, so `--shared` — which reads and writes the
+deployment-wide `shared_kv` — is covered by the same line. `_avatar_import` and
+`_session_log_sweep` are `shared_kv` namespaces and would otherwise be
+reachable; `_vault_sync` and `_vault_file` are per-user ones, because a vault
+belongs to one user and that table's key already carries a user id.
+
+The rule is a name prefix rather than a list, so an eighth reserved namespace
+costs nothing here or at either enforcement point. Both of those are needed
+and neither substitutes for the other:
+
+- `skills/kv` refuses the namespace before it does anything, which covers a
+  CLI call made host-side through the skill proxy.
+- `scheduler_deferred` refuses it again when it applies a deferred op, which
+  covers a **sandboxed** task: the sandbox has no database, so `kv set` there
+  writes a JSON op file that the scheduler replays afterwards. Guarding only
+  the CLI would leave that path open, and it is the path most tasks take.
+
+This is defence in depth rather than the boundary. The boundary is that the
+framework database is bound into no sandbox at any path; what this stops is a
+task reaching the same rows through the one tool that legitimately spans the
+whole store.
+
+stdlib-only leaf: it imports nothing, so the `kv` skill subprocess can use it
+without pulling in `istota.db`.
+"""
+
+from __future__ import annotations
+
+# Every reserved namespace starts with this. Chosen because the `kv` skill has
+# always documented namespaces as caller-chosen labels and nothing in the
+# store used a leading underscore, so reserving the prefix orphaned no rows.
+RESERVED_NAMESPACE_PREFIX = "_"
+
+
+def is_reserved_namespace(namespace: object) -> bool:
+    """True when `namespace` names framework state the model may not reach.
+
+    Takes `object` rather than `str` on purpose: both call sites pass a value
+    that came off an argparse namespace or out of model-written JSON, so a
+    non-string is a case to answer rather than to crash on. Anything that is
+    not a string is not a reserved namespace — the caller's own validation
+    rejects it moments later for being unusable.
+    """
+    return isinstance(namespace, str) and namespace.startswith(
+        RESERVED_NAMESPACE_PREFIX
+    )

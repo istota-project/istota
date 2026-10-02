@@ -1972,7 +1972,7 @@ class TestFillCredential:
         import tempfile
         from pathlib import Path as _Path
 
-        from istota.skill_proxy import SkillProxy
+        from istota.sandbox.skill_proxy import SkillProxy
 
         directory = tempfile.mkdtemp(prefix="bz_", dir="/tmp")
         sock = _Path(directory) / "s.sock"
@@ -2546,7 +2546,7 @@ class TestTheDeliveredCaptureFrame:
         )
         result = cmd_screenshot(args)
 
-        from istota.image_sniff import image_dimensions
+        from istota.lib.image_sniff import image_dimensions
 
         written = (workspace / "shot.png").read_bytes()
         assert result["capture"]["image"] == [1429, 804]
@@ -3514,7 +3514,7 @@ def test_creation_verbs_send_task_owner(monkeypatch, deferred_dir, verb, command
 
 @pytest.mark.parametrize("user,task", [(None, None), ("alice", None), (None, "42")])
 def test_browser_owner_without_both_identities_is_anonymous(monkeypatch, user, task):
-    from istota.browser_owner import with_browser_owner
+    from istota.browser.owner import with_browser_owner
     for name, value in [("ISTOTA_USER_ID", user), ("ISTOTA_TASK_ID", task)]:
         if value is None:
             monkeypatch.delenv(name, raising=False)
@@ -3650,7 +3650,7 @@ class TestProfileHandshake:
     def test_unrepresentable_identity_fails_locally(self, user):
         # NUL cannot live in os.environ; exercise the same helper with a
         # replaced environment mapping to pin its rejection too.
-        with patch("istota.browser_owner.os.environ", {} if user is None else {"ISTOTA_USER_ID": user}), patch("istota.skills.browse.httpx.post") as post:
+        with patch("istota.browser.owner.os.environ", {} if user is None else {"ISTOTA_USER_ID": user}), patch("istota.skills.browse.httpx.post") as post:
             with pytest.raises(ValueError, match="ISTOTA_USER_ID"):
                 _run_verb(["get", "https://example.com"])
         post.assert_not_called()

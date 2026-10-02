@@ -13,7 +13,7 @@ The executor composes prompt, env and sandbox and hands a `BrainRequest` to a `B
 **The prompt is three channels**: `prompt` (user half, the user turn), `composed_system_prompt_path` (Istota's standing instructions, system authority), `custom_system_prompt_path` (operator file, each backend's override semantics). The split stops a compacting brain from compacting away its instructions (ISSUE-375). Direct text-only callers supply only `prompt`.
 
 ## Layout
-`__init__.py`, `_types.py`, `_events.py` (root `stream_parser.py` is a shim), `_aliases.py`, `_roles.py`, `_fallback.py`, `_postures.py`, `claude_code.py` (`build_claude_cli_flags` shared with tmux), `native.py`, `tmux_claude.py`.
+`__init__.py`, `_types.py`, `_events.py`, `_aliases.py`, `_roles.py`, `_fallback.py`, `_postures.py`, `claude_code.py` (`build_claude_cli_flags` shared with tmux), `native.py`, `tmux_claude.py`.
 
 ## Brain protocol
 `model_namespace` (`anthropic` for claude_code and tmux_claude, `openai_compat` for native), `execute(req)`, `resolve_alias`, `resolve_model_name`, `list_aliases`, `validate_alias_override`, and properties `default_model` / `default_effort` (the brain's own configured default, unresolved; per brain since ISSUE-418). Consumers use `make_brain`, never a brain's tables.
@@ -25,7 +25,7 @@ Defaults live in `[brain.claude_code]`, `[brain.tmux]`, `[brain.native]` `model`
 - Retired top-level keys still load: `config._apply_legacy_brain_defaults` migrates them onto `[brain.claude_code]` and `[brain.tmux]` (same namespace and binary), with a warning, only into an unset block. **Never onto `[brain.native]`**. `render-config.sh` (`ISTOTA_BRAIN_CLAUDE_CODE_MODEL` / `ISTOTA_BRAIN_TMUX_MODEL`, falling back to `ISTOTA_MODEL`) and Ansible (`istota_brain_claude_code_model` / `istota_brain_tmux_model` from `istota_model`) migrate earlier.
 - `Brain.with_defaults(req)` is idempotent. Effort: request > block `effort` > effort of the alias the block's `model` names (else the explicit key is unreachable behind an effort-carrying alias).
 - `config._warn_native_lost_its_only_model` warns once when native is reachable with empty `model` and the retired key set; a warning because a failed load stops the daemon.
-- `model_namespace_for_kind(kind)` is a lookup, not a construction (ISSUE-417; constructing tmux probes the CLI). Used by `web_app._brain_catalogue`, `commands._model_namespace`, the executor's fallback crossing rule, `scheduler_deferred._inherited_model` (ISSUE-421). `None` means not established, never "same namespace". Buildability is still a construction, asked only for allowlisted kinds.
+- `model_namespace_for_kind(kind)` is a lookup, not a construction (ISSUE-417; constructing tmux probes the CLI). Used by `webui.app._brain_catalogue`, `commands._model_namespace`, the executor's fallback crossing rule, `scheduler_deferred._inherited_model` (ISSUE-421). `None` means not established, never "same namespace". Buildability is still a construction, asked only for allowlisted kinds.
 - `configured_default_model_effort(brain_config)`: same lookup for reporting callers (log line, admin dashboard), unresolved.
 
 ## Model identity (single source of truth)
@@ -73,7 +73,7 @@ Also `cwd`, `timeout_seconds`, `streaming`, `result_file`.
 ## BrainResult fields
 - `stop_reason`: `completed`/`cancelled`/`timeout`/`oom`/`terminated`/`transient_api_error`/`usage_limit`/`error`/`not_found`/`fallback` (native also `soft_timeout`). `usage_limit` = quota/billing, rerouted.
 - `execution_trace`: `{type: tool|text|cm_boundary}`; `tool` entries carry `raw` Bash (`_tool_invocation`) for playbooks (ISSUE-174).
-- `usage: BrainUsage | None` (`istota.usage`): retyped from `TaskUsage` because `input_tokens` there includes cache reads and `billed_input_tokens` does not; `from_task_usage` reconciles (`totals_source='derived'`). Set on every return; `None` on tmux (no result frame).
+- `usage: BrainUsage | None` (`istota.usage.telemetry`): retyped from `TaskUsage` because `input_tokens` there includes cache reads and `billed_input_tokens` does not; `from_task_usage` reconciles (`totals_source='derived'`). Set on every return; `None` on tmux (no result frame).
 - `effort_used`, `model_used`, `brain_kind`: stamped at each brain's `execute` seam (ISSUE-418), so correct on the fallback path. `brain_kind` in `KNOWN_BRAIN_KINDS`, empty for tmux.
 - `partial_text` (ISSUE-372), `work_committed` (vetoes in-brain retry).
 
@@ -140,7 +140,7 @@ The breaker and alert remain: the breaker-open block is not gated on a fallback 
 
 `rooms.model` is a canonical id, not an alias, so it cannot cross `anthropic` <-> `openai_compat`.
 1. **A cross-namespace brain change clears `rooms.model` and `rooms.effort` together** and says so (`commands._clear_pin_across_namespaces`, also used by the web PATCH). Same namespace keeps it; undeterminable clears.
-2. **Every writer and every model-offering surface resolves through the room's brain**: `commands.brain_for_room(config, conn, room_token, source_type)` or `web_app._brain_for_room_token`. Covers `!model` on Talk (`transport/talk/inbound.py`) and web (`chat_send_message`), `!room model`, `_room_model_allowed`, `/chat/commands` (`room_id`), and `!models`/`!help` via `commands._ctx_brain`. The composer autocomplete is unscoped; a stale pick is refused server-side.
+2. **Every writer and every model-offering surface resolves through the room's brain**: `commands.brain_for_room(config, conn, room_token, source_type)` or `webui.app._brain_for_room_token`. Covers `!model` on Talk (`transport/talk/inbound.py`) and web (`chat_send_message`), `!room model`, `_room_model_allowed`, `/chat/commands` (`room_id`), and `!models`/`!help` via `commands._ctx_brain`. The composer autocomplete is unscoped; a stale pick is refused server-side.
 
 `brain_for_room` returns a `BrainConfig` and never raises (`rooms.brain` is untyped TEXT; an exception would hit the Talk poll loop). It skips the per-user native key overlay.
 
@@ -161,7 +161,7 @@ The executor reruns the same attempt (no new row, no `attempt_count` bump) throu
 
 **Trigger set**: `{usage_limit, not_found, fallback}` + `transient_api_error` iff `fallback_on_transient` (default on, ISSUE-212). **Cooldown set**: `{usage_limit, not_found}` (tmux keeps being probed). **Never**: `oom`, `timeout`, `cancelled`, `error`. `_validate_brain_fallback` warns on an unknown kind and a self-fallback (the only kind the deployment runs), and logs one INFO per process for tmux with no fallback. One level only.
 
-**The cooldown is a deadline** (ISSUE-374): for `usage_limit` on a subscription primary it ends at the quota reset, capped by `fallback_cooldown_seconds` and floored at `MIN_COOLDOWN_SECONDS`. `open_primary_breaker` is the one decision point. `subscription_usage.cached_reset_seconds` reads the disk cache only. Not for `not_found` or native. A repeat failure never moves the deadline.
+**The cooldown is a deadline** (ISSUE-374): for `usage_limit` on a subscription primary it ends at the quota reset, capped by `fallback_cooldown_seconds` and floored at `MIN_COOLDOWN_SECONDS`. `open_primary_breaker` is the one decision point. `usage.subscription.cached_reset_seconds` reads the disk cache only. Not for `not_found` or native. A repeat failure never moves the deadline.
 
 ### Direct-caller availability (ISSUE-181)
 
@@ -183,11 +183,11 @@ Over `openai_compat` only.
 - **Cost**: provider-reported cost wins (OpenRouter only, `_parse_reported_cost`); `cost_usd` None -> catalog, `0.0` -> a real free turn.
 - **Model catalog (ISSUE-182)**: `llm.catalog.get_model_info` = `model_overrides` > fetched OpenRouter > `_DEFAULT` (200k, zero price); no bundled file. `_ensure_fetched_catalog` fetches only for `openrouter.ai`, disk-cached, never fatal, once per process per TTL.
 - **Overflow recovery**: <=2 force-compacts + `run_agent_loop_continue` under the shared deadline.
-- **Bash**: runs `bash -o pipefail -c` via `shell_exec.shell_argv` (ISSUE-307); 141 carries `SIGPIPE_NOTE`. CLI brains get pipefail via `SHELLOPTS=pipefail` from `build_clean_env` (ISSUE-321); not `BASH_ENV`, which names a file to source.
+- **Bash**: runs `bash -o pipefail -c` via `sandbox.shell_exec.shell_argv` (ISSUE-307); 141 carries `SIGPIPE_NOTE`. CLI brains get pipefail via `SHELLOPTS=pipefail` from `build_clean_env` (ISSUE-321); not `BASH_ENV`, which names a file to source.
 
 ### Claude runtime credential (ISSUE-390, ISSUE-409)
 
-`build_clean_env` puts `CLAUDE_CODE_OAUTH_TOKEN` in every task env and no manifest declares it. `claude_runtime_env.CLAUDE_RUNTIME_ENV_VARS` + `without_claude_runtime_env` strip it at **three seams**: `_hello_payload`, `_start_tool_server` (else readable via `/proc/<pid>/environ`), and `proxy_base_env`. `executor.skill_model_credentials` copies it back for `SKILL_MODEL_CALLERS` (`code_review` spawns `claude`); `_PROXY_LOOKUP_BLOCKED` keeps it out of lookups.
+`build_clean_env` puts `CLAUDE_CODE_OAUTH_TOKEN` in every task env and no manifest declares it. `sandbox.claude_runtime_env.CLAUDE_RUNTIME_ENV_VARS` + `without_claude_runtime_env` strip it at **three seams**: `_hello_payload`, `_start_tool_server` (else readable via `/proc/<pid>/environ`), and `proxy_base_env`. `executor.skill_model_credentials` copies it back for `SKILL_MODEL_CALLERS` (`code_review` spawns `claude`); `_PROXY_LOOKUP_BLOCKED` keeps it out of lookups.
 - Name list, not a `CLAUDE_*` prefix (would eat `passthrough_env_vars`); key-based guard in `tests/test_security.py`.
 - Copies, never mutates `req.env`. `{}` and `None` stay distinct (`None` = inherit the daemon env); callers pass `or None` on input.
 - Stripped at the seams, not at env build, where the kind is unknown and a `native -> claude_code` fallback would lose auth.
@@ -227,8 +227,8 @@ Native, gated on `turn_budget_nudge`, a `max_turns`, and tools.
 
 ### The tool server (native-only)
 
-One `python -m istota.tool_server` per attempt via `build_bwrap_cmd(..., profile=NATIVE)`, in the task cgroup, pid via `on_pid`; six proxy tools (`session/tools/remote.py`); `WebFetch` stays in the daemon. Replaced a Python path policy and a per-call Bash namespace carrying `.credentials.json` (ISSUE-389).
-- Transport: inherited socketpair (`pass_fds`), nothing nameable; `close_fds` keeps it from Bash. Protocol `tool_server_protocol.py`.
+One `python -m istota.sandbox.tool_server` per attempt via `build_bwrap_cmd(..., profile=NATIVE)`, in the task cgroup, pid via `on_pid`; six proxy tools (`session/tools/remote.py`); `WebFetch` stays in the daemon. Replaced a Python path policy and a per-call Bash namespace carrying `.credentials.json` (ISSUE-389).
+- Transport: inherited socketpair (`pass_fds`), nothing nameable; `close_fds` keeps it from Bash. Protocol `sandbox/tool_server_protocol.py`.
 - A dead server, `fatal` or bad frame fails the attempt naming the tool server, checked before `timed_out`/`aborted` (else "Cancelled by user").
 - No enable/disable flag (two paths forever). Without bwrap it runs unwrapped with `ToolEnv` as before. Text-only spawns nothing.
 
@@ -238,7 +238,7 @@ One `python -m istota.tool_server` per attempt via `build_bwrap_cmd(..., profile
 - Own `httpx.AsyncClient`, `trust_env=False`, no cookies, GET/text only.
 - `_ip_is_public` on every resolved IP of every hop, fail closed; connection pinned to the validated IP (Host + SNI); manual redirects; no https->http unless `allow_http`.
 - Caps on bytes, chars, redirects, time; honours abort.
-- Output framed `[UNTRUSTED WEB CONTENT …]` with a bounded `Fetched:` header (see `untrusted.py`, `.claude/rules/leaf-modules.md`). The executor folds `untrusted_input` into eager skills when native WebFetch is on and not withheld (`_native_web_fetch_enabled`).
+- Output framed `[UNTRUSTED WEB CONTENT …]` with a bounded `Fetched:` header (see `lib/untrusted.py`, `.claude/rules/leaf-modules.md`). The executor folds `untrusted_input` into eager skills when native WebFetch is on and not withheld (`_native_web_fetch_enabled`).
 - Residual: GET exfiltration (as `browse`). `require_url_provenance` corpus is `_extract_urls(req.prompt)` only, never tool output.
 
 ### Session logs (native-only, `session/session_log.py`)
@@ -288,4 +288,4 @@ Implement the protocol, add the kind to `make_brain()`, extend `BrainConfig`, up
 `EventWriter` (`events.py`) persists `TaskEvent`s to `task_events` (the table is the bus) and notifies in-process subscribers. Kinds: `task_started`, `tool_start`, `tool_end`, `tool_progress`, `progress_text`, `text_delta`, `context_management`, `brain_fallback`, `confirmation`, `result`, `error`, `cancelled`, `done`.
 - **`text_delta`**: stream surfaces only. **Narration gate**: nothing streams until `scheduler.stream_text_gate_chars` (280) is crossed without a tool call; at a tool boundary (`settle_at_tool_boundary`) a short lead-in is dropped and a crossed block flushed whole.
 - **`brain_fallback`** (ISSUE-278): emitted before the fallback runs; payload `primary`, `reason`, `fallback`, `model` (empty iff `dropped_pin`), `dropped_pin`, `text` (`executor.fallback_notice_text`). A stream boundary. Live-only; the durable record is `_append_model_note`.
-- Retries keep the log; a "retrying" `progress_text` is emitted and `seq` resumes from `db.get_max_task_event_seq`. `web_app._synthetic_terminal_events` synthesizes a terminal frame for a terminal task with no deliverable `done`. Rows deleted only in `cleanup_old_tasks` (`ON DELETE CASCADE` is decorative).
+- Retries keep the log; a "retrying" `progress_text` is emitted and `seq` resumes from `db.get_max_task_event_seq`. `webui.app._synthetic_terminal_events` synthesizes a terminal frame for a terminal task with no deliverable `done`. Rows deleted only in `cleanup_old_tasks` (`ON DELETE CASCADE` is decorative).

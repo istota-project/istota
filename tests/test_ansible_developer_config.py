@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 from istota.config import DeveloperConfig, ReviewConfig
-from istota.skill_proxy import resolve_skill_timeout
+from istota.sandbox.skill_proxy import resolve_skill_timeout
 from istota.skills.code_review import RESERVED_SECONDS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

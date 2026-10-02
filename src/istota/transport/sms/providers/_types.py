@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
-from ....http_headers import header_value  # noqa: F401  (re-exported; see below)
+from istota.lib.http_headers import header_value  # noqa: F401  (re-exported; see below)
 
 SmsProviderName = Literal["twilio", "telnyx"]
 SmsEncoding = Literal["gsm7", "ucs2"]
@@ -108,7 +108,7 @@ MAX_WEBHOOK_BODY = 64 * 1024
 
 # Re-exported, not defined: the WhatsApp webhook needs the same lookup and
 # importing it from an SMS provider package would be the wrong direction, so
-# the implementation moved to the stdlib-only `istota.http_headers` leaf. Both
+# the implementation moved to the stdlib-only `istota.lib.http_headers` leaf. Both
 # adapters' callers keep the name they already import from here.
 
 

@@ -212,13 +212,13 @@ class TestPostNtfyBlocking:
 
 
 class TestNtfySettings:
-    @patch("istota.secrets_store.get_service_secrets")
+    @patch("istota.credentials.store.get_service_secrets")
     def test_returns_none_when_topic_unset(self, mock_secrets):
         mock_secrets.return_value = {}
         config = Config(users={"alice": UserConfig()})
         assert ntfy_settings(config, "alice") is None
 
-    @patch("istota.secrets_store.get_service_secrets")
+    @patch("istota.credentials.store.get_service_secrets")
     def test_default_server_when_unset(self, mock_secrets):
         mock_secrets.side_effect = _ntfy_secrets(topic="t")
         config = Config(users={"alice": UserConfig()})
@@ -229,7 +229,7 @@ class TestNtfySettings:
 
 class TestSendNtfyAsync:
     @patch("istota.transport.ntfy.httpx")
-    @patch("istota.secrets_store.get_service_secrets")
+    @patch("istota.credentials.store.get_service_secrets")
     def test_sends_when_configured(self, mock_secrets, mock_httpx):
         mock_secrets.side_effect = _ntfy_secrets(topic="t")
         mock_httpx.post.return_value = MagicMock(raise_for_status=MagicMock())
@@ -238,7 +238,7 @@ class TestSendNtfyAsync:
         assert ok is True
         assert mock_httpx.post.call_args[0][0] == "https://ntfy.sh/t"
 
-    @patch("istota.secrets_store.get_service_secrets")
+    @patch("istota.credentials.store.get_service_secrets")
     def test_no_op_when_unconfigured(self, mock_secrets):
         mock_secrets.return_value = {}
         config = Config(users={"alice": UserConfig()})
@@ -253,13 +253,13 @@ class TestNtfyTransport:
         assert t.capabilities.surface_class == "push"
         assert t.capabilities.supports_edit is False
 
-    @patch("istota.secrets_store.get_service_secrets")
+    @patch("istota.credentials.store.get_service_secrets")
     def test_resolve_target_returns_topic(self, mock_secrets):
         mock_secrets.side_effect = _ntfy_secrets(topic="mytopic")
         config = Config(users={"alice": UserConfig()})
         assert NtfyTransport(config).resolve_target(_task()) == "mytopic"
 
-    @patch("istota.secrets_store.get_service_secrets")
+    @patch("istota.credentials.store.get_service_secrets")
     def test_resolve_target_none_when_unconfigured(self, mock_secrets):
         mock_secrets.return_value = {}
         config = Config(users={"alice": UserConfig()})
@@ -270,7 +270,7 @@ class TestNtfyTransport:
         assert asyncio.run(NtfyTransport(config).deliver("t", "m")) is None
 
     @patch("istota.transport.ntfy.httpx")
-    @patch("istota.secrets_store.get_service_secrets")
+    @patch("istota.credentials.store.get_service_secrets")
     def test_deliver_posts_with_options(self, mock_secrets, mock_httpx):
         mock_secrets.side_effect = _ntfy_secrets(topic="t")
         mock_httpx.post.return_value = MagicMock(raise_for_status=MagicMock())

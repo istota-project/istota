@@ -5,7 +5,8 @@ import sqlite3
 
 import pytest
 
-from istota import db, surfaces
+from istota import db
+from istota.rooms import surfaces
 from istota.config import Config
 from istota.transport import routing
 

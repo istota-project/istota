@@ -56,7 +56,7 @@ class TestArgv:
 
         argv = popen.call_args[0][0]
         assert argv[0] == sys.executable
-        assert argv[1:4] == ["-P", "-m", "istota.ocr_leaf"]
+        assert argv[1:4] == ["-P", "-m", "istota.lib.ocr_leaf"]
         assert argv[4] == "ocr"
 
     def test_the_path_goes_last_behind_a_double_dash(self):
@@ -282,7 +282,7 @@ class TestAReapedChildIsNeverSignalled:
     def test_a_child_that_has_already_been_reaped_is_not_signalled(self):
         signalled = []
         with patch(_POPEN) as popen, patch(
-            "istota.process_group._signal",
+            "istota.sandbox.process_group._signal",
             side_effect=lambda pid, sig: signalled.append(pid) or "gone",
         ):
             proc = _fake_proc(returncode=0)
@@ -298,7 +298,7 @@ class TestAReapedChildIsNeverSignalled:
         # above and lose the kill this module exists to make.
         signalled = []
         with patch(_POPEN) as popen, patch(
-            "istota.process_group._signal",
+            "istota.sandbox.process_group._signal",
             side_effect=lambda pid, sig: signalled.append(pid) or "group",
         ):
             popen.return_value = _fake_proc(returncode=None, timeout_first=True)
@@ -354,19 +354,21 @@ class TestTheChildImportSurface:
 
         assert "-m" in argv
         module = argv[argv.index("-m") + 1]
-        assert module == "istota.ocr_leaf"
+        assert module == "istota.lib.ocr_leaf"
         assert "istota.skills.transcribe" not in argv
 
     def test_importing_the_leaf_does_not_drag_in_the_skills_package(self):
         """A real subprocess: the claim is about an import graph, not a mock.
 
         `-P` matches the spawn, so the check is against the same `sys.path` the
-        child actually gets.
+        child actually gets. `istota.lib` is the leaf's own parent package,
+        whose `__init__` `tests/test_package_layout.py` holds empty.
         """
         probe = (
-            "import sys; import istota.ocr_leaf; "
+            "import sys; import istota.lib.ocr_leaf; "
             "print(','.join(sorted(m for m in sys.modules "
-            "if m.startswith('istota.') and m != 'istota.ocr_leaf')))"
+            "if m.startswith('istota.') "
+            "and m not in ('istota.lib', 'istota.lib.ocr_leaf'))))"
         )
         out = subprocess.run(
             [sys.executable, "-P", "-c", probe],
@@ -401,7 +403,7 @@ class TestTheChildImportSurface:
         """
         pytest.importorskip("pandas")
         probe = (
-            "import sys; import istota.ocr_leaf; print('pandas' in sys.modules)"
+            "import sys; import istota.lib.ocr_leaf; print('pandas' in sys.modules)"
         )
         out = subprocess.run(
             [sys.executable, "-P", "-c", probe],
@@ -424,7 +426,7 @@ class TestTheChildImportSurface:
         """
         from types import SimpleNamespace
 
-        from istota import ocr_leaf
+        from istota.lib import ocr_leaf
         from istota.skills import transcribe
 
         seen = {}

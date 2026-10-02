@@ -32,7 +32,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from istota.llm_json import candidate_json_blocks
+from istota.lib.llm_json import candidate_json_blocks
 from istota.health._brain_call import call_health_brain
 from istota.health import db as health_db
 from istota.health.models import HealthContext, Panel

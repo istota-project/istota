@@ -87,7 +87,7 @@ def _warn(key: str, raw: Any, expected: str) -> Any:
     restated; the import is deferred because this module is a leaf on the
     config-load hot path and a warning is the rare case.
     """
-    from .admin_config_view import is_secret_name
+    from istota.webui.admin_config_view import is_secret_name
 
     shown = "<redacted>" if is_secret_name(key.rsplit(".", 1)[-1]) else repr(raw)
     logger.warning(

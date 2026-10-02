@@ -1,4 +1,4 @@
-"""Tests for ``istota.subscription_usage``.
+"""Tests for ``istota.usage.subscription``.
 
 Nothing here touches the network, the real macOS Keychain, or the real
 ``~/.claude/.credentials.json``. Every entry point takes its environment, its
@@ -29,7 +29,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from istota import subscription_usage as su
+from istota.usage import subscription as su
 
 # The root conftest neutralizes both of these for the whole suite, so a doctor
 # sweep on a developer's macOS laptop cannot read the real keychain or reach the
@@ -1077,14 +1077,14 @@ def _good_snapshot() -> su.UsageSnapshot:
 def _staging_names(monkeypatch, root: Path) -> list[str]:
     """Record the staging file names written under ``root``, in order.
 
-    Both writers here go through :mod:`istota.atomic_write`, so the spy sits on
+    Both writers here go through :mod:`istota.lib.atomic_write`, so the spy sits on
     that module's ``mkstemp`` rather than on ``su.os.open`` — which is where
     the name used to be minted and no longer is. Scoped to ``root`` because
     ``tempfile`` is a shared module: anything else in the process staging a
     file during the window would otherwise be counted here and break an exact
     count for a reason that has nothing to do with the subject.
     """
-    from istota import atomic_write
+    from istota.lib import atomic_write
 
     names: list[str] = []
     real = atomic_write.tempfile.mkstemp

@@ -3,7 +3,7 @@
 Two places state what role a surface plays in the room model, deliberately.
 `TransportCapabilities` carries `room_view`, `inbound_room_role` and
 `user_turn_mirror` because somebody adding a surface is looking at the transport
-class, and `istota.surfaces` carries the same three because the readers that ask
+class, and `istota.rooms.surfaces` carries the same three because the readers that ask
 the question — `web_app._user_row_display` in the web process, the scheduler's
 two gates — have no `Config` and no instantiated transport to read them from,
 and must not get a different answer on a deployment where the surface is
@@ -12,13 +12,13 @@ switched off.
 Duplication with a test holding it in step is the trade the spec chose over an
 indirection at the declaration site, and it is the arrangement
 `sandbox_cache_sweeper` already uses against `executor`'s cache directory names
-and `usage_render.py` against `usageFormat.ts`. This file is the other half of
+and `usage/render.py` against `usageFormat.ts`. This file is the other half of
 that trade: without it the two copies drift and the leaf is a guess.
 """
 
 import pytest
 
-from istota import surfaces
+from istota.rooms import surfaces
 from istota.config import Config
 from istota.transport import make_registry
 from istota.transport._types import TransportCapabilities

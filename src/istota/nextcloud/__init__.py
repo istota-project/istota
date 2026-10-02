@@ -1,6 +1,6 @@
 """Nextcloud client package: OCS control plane, WebDAV, and sharing.
 
-Public surface is re-exported here; ``istota.nextcloud_client`` remains as a
+Public surface is re-exported here; ``istota.nextcloud.compat`` remains as a
 back-compat shim over the ``None``-returning legacy variants that best-effort
 daemon paths (startup hydration, the shared-file organizer, ``!search``) still
 depend on.

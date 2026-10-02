@@ -5,8 +5,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from istota import db, message_relays as relays, whatsapp_requests as requests
-from istota.notification_resolvers import relay_question
+from istota import db
+from istota.relay import relays
+from istota.relay import requests
+from istota.notifications.resolvers import relay_question
 from . import test_relay_questions
 from .support.talk_double import FakeTalkClient, talk_bot_client
 from .test_relay_questions import hold, park, approve
@@ -25,13 +27,13 @@ def room(setup, monkeypatch):
         token = db.create_web_chat_room(conn, 'bob', 'assistant').token
     talk = FakeTalkClient(config.db_path)
     participants = AsyncMock(return_value=BOT)
-    monkeypatch.setattr('istota.talk.TalkClient.get_participants', participants)
+    monkeypatch.setattr('istota.nextcloud.talk.TalkClient.get_participants', participants)
     pushes = []
 
     def send_notification(config, user_id, message, **kwargs):
         pushes.append((user_id, message, kwargs))
         return True
-    monkeypatch.setattr('istota.notifications.send_notification', send_notification)
+    monkeypatch.setattr('istota.notifications.delivery.send_notification', send_notification)
     with patch('istota.transport.talk.get_talk_client', talk_bot_client(talk)):
         yield dict(config=config, token=token, talk=talk, pushes=pushes, participants=participants)
 
@@ -255,5 +257,5 @@ class TestThePhoneDestinationNotice:
 
 
 def test_the_resolver_is_registered(setup):
-    from istota import notification_sources
+    from istota.notifications import sources as notification_sources
     assert notification_sources.get_resolver('relay_question') is relay_question.RESOLVER

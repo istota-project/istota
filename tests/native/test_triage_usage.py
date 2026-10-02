@@ -169,7 +169,7 @@ class TestNativeCompleterUsage:
 
 class TestTriageUsageSink:
     def test_it_writes_a_context_triage_row_with_no_task_id(self, tmp_path):
-        from istota.usage import BrainUsage
+        from istota.usage.telemetry import BrainUsage
 
         config = _cfg(tmp_path)
         db.init_db(config.db_path)
@@ -202,7 +202,7 @@ class TestTriageUsageSink:
 
     def test_it_never_raises(self, tmp_path):
         """Telemetry must not turn a working triage into a fail-open one."""
-        from istota.usage import BrainUsage
+        from istota.usage.telemetry import BrainUsage
 
         config = _cfg(tmp_path)
         config.db_path = tmp_path / "nonexistent" / "istota.db"

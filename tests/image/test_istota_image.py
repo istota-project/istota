@@ -504,7 +504,7 @@ class TestGroupCTheGeneratedConfig:
         """Where ISSUE-263 lived — and the raw value, not just the resolved one.
 
         `resolve_real_bin` rewrites the *code default* `/usr/local/bin/gh` to
-        the shipped path (`src/istota/forge_bin.py`), which is deliberate and is
+        the shipped path (`src/istota/sandbox/forge_bin.py`), which is deliberate and is
         what `30bb7c83` added for upgraded containers. It also means an
         assertion that only checks the resolver's output is blind to exactly one
         value: `/usr/local/bin/gh`, which is the value ISSUE-263 shipped.
@@ -518,7 +518,7 @@ class TestGroupCTheGeneratedConfig:
         script = (
             f"{RENDER_CONFIG} >/dev/null && python -c "
             f"'from pathlib import Path; from istota.config import load_config; "
-            f"from istota.forge_bin import resolve_real_bin; "
+            f"from istota.sandbox.forge_bin import resolve_real_bin; "
             f'c = load_config(Path("{env["CONFIG_FILE"]}")).developer; '
             f'print(c.gh_bin_path, resolve_real_bin(c.gh_bin_path, "gh")); '
             f'print(c.glab_bin_path, resolve_real_bin(c.glab_bin_path, "glab"))\''
@@ -543,7 +543,7 @@ class TestGroupCTheGeneratedConfig:
         # packaged layout that moved the build output would leave the literal
         # green and 404 the whole UI.
         script = (
-            "python -c 'from istota.static_dir import resolve_static_dir; "
+            "python -c 'from istota.webui.static_dir import resolve_static_dir; "
             "print(resolve_static_dir())'"
         )
         resolved = assert_ok(

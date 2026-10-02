@@ -23,7 +23,7 @@ Group={{ istota_group }}
 WorkingDirectory={{ istota_home }}
 Environment="ISTOTA_ADMINS_FILE=/etc/{{ istota_namespace }}/admins"
 EnvironmentFile=/etc/{{ istota_namespace }}/secrets.env
-ExecStart={{ istota_home }}/.venv/bin/python -m {{ istota_package }}.devbox_proxy --user %i --config {{ istota_repo_dir }}/config/config.toml
+ExecStart={{ istota_home }}/.venv/bin/python -m {{ istota_package }}.devbox.proxy --user %i --config {{ istota_repo_dir }}/config/config.toml
 Restart=on-failure
 RestartSec=5s
 # Limit blast radius. The proxy needs to read tokens, write to its socket

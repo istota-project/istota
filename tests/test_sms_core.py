@@ -9,8 +9,10 @@ from dataclasses import replace
 
 import pytest
 
-from istota import db, notifications, surfaces
-from istota.notification_resolvers import confirmation as confirmation_source
+from istota import db
+from istota.notifications import delivery as notifications
+from istota.rooms import surfaces
+from istota.notifications.resolvers import confirmation as confirmation_source
 from istota.config import Config, SmsConfig, UserConfig
 from istota.transport import make_registry
 from istota.transport.routing import (
@@ -1115,7 +1117,7 @@ class TestTheDeliveryPathStaysOffTheRuntimeLoop:
         Asserting "it still returns a record" would pass either way, so this
         records the *thread* of every connection open instead.
         """
-        from istota import sqlite_util
+        from istota.lib import sqlite_util
 
         config = _config(tmp_path)
         providers = _providers(_adapter(lambda _req: SmsSendResult("opaque-1", "sent", 1)))
@@ -2017,7 +2019,7 @@ class TestSmsRoomMint:
             assert conn.execute('SELECT new_token FROM room_token_migration WHERE old_token=?', (old,)).fetchone()[0] == original
 
     def test_new_text_cancels_legacy_and_current_questions_and_notifications(self, tmp_path):
-        from istota import notification_store
+        from istota.notifications import store as notification_store
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
             first = handle_provider_event(conn, config, _inbound())
@@ -2063,7 +2065,7 @@ class TestSmsRoomMint:
             assert conn.execute('SELECT count(*) FROM messages').fetchone()[0] == 1
 
     def test_canonical_sms_command_can_manage_relays(self, tmp_path):
-        from istota import message_relays
+        from istota.relay import relays as message_relays
         config = _config(tmp_path)
         sent = []
         providers = _providers(_adapter(
@@ -2082,8 +2084,8 @@ class TestSmsRoomMint:
 
     @pytest.mark.parametrize('change', ['shared', 'guest', 'archived', 'deleted', 'foreign'])
     def test_canonical_sms_relay_origin_requires_own_live_private_room(self, tmp_path, change):
-        from istota import message_relays
-        from istota.whatsapp_requests import RequestError
+        from istota.relay import relays as message_relays
+        from istota.relay.requests import RequestError
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
             result = handle_provider_event(conn, config, _inbound())
@@ -2104,8 +2106,8 @@ class TestSmsRoomMint:
                 message_relays.private_origin(conn, config, actor_user_id='alice', surface='sms', conversation_token=token)
 
     def test_relay_origin_survives_mint_but_not_delete_and_recreate(self, tmp_path):
-        from istota import message_relays
-        from istota.whatsapp_requests import RequestError
+        from istota.relay import relays as message_relays
+        from istota.relay.requests import RequestError
         config = _config(tmp_path)
         ref = sms_conversation_token('alice')
         with db.get_db(config.db_path) as conn:

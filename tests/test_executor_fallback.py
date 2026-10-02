@@ -127,7 +127,7 @@ def _run(
     patches = _patch_executor() + [
         patch("istota.executor.make_brain", side_effect=fake_make_brain),
         patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
-        patch("istota.notifications.send_notification", side_effect=fake_send),
+        patch("istota.notifications.delivery.send_notification", side_effect=fake_send),
     ]
     with contextmanager_chain(patches):
         for _ in range(n_runs):
@@ -406,7 +406,7 @@ class TestCooldownEndsAtTheQuotaReset:
         import time
         from datetime import datetime, timezone
 
-        import istota.subscription_usage as su
+        import istota.usage.subscription as su
 
         resets_at = datetime.fromtimestamp(
             time.time() + seconds, tz=timezone.utc
@@ -649,7 +649,7 @@ class TestFallbackIsVisibleOnStreamSurfaces:
             patch("istota.executor.make_brain",
                   side_effect=lambda bc: primary if getattr(bc, "kind", "") == "claude_code" else fb),
             patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
-            patch("istota.notifications.send_notification", side_effect=lambda *a, **k: None),
+            patch("istota.notifications.delivery.send_notification", side_effect=lambda *a, **k: None),
         ]
         with contextmanager_chain(patches):
             task = _make_task(source_type="cli")
@@ -737,7 +737,7 @@ class TestFallbackIsVisibleOnStreamSurfaces:
         patches = _patch_executor() + [
             patch("istota.executor.make_brain", side_effect=_make),
             patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
-            patch("istota.notifications.send_notification", side_effect=lambda *a, **k: None),
+            patch("istota.notifications.delivery.send_notification", side_effect=lambda *a, **k: None),
         ]
         with contextmanager_chain(patches):
             task = _make_task(source_type="cli")
@@ -869,7 +869,7 @@ class TestFallbackIsVisibleOnStreamSurfaces:
                   side_effect=lambda bc: primary if getattr(bc, "kind", "") == "claude_code" else fb),
             patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
             patch("istota.transport.registry.task_is_stream_surface", return_value=True),
-            patch("istota.notifications.send_notification", side_effect=lambda *a, **k: None),
+            patch("istota.notifications.delivery.send_notification", side_effect=lambda *a, **k: None),
         ]
         with contextmanager_chain(patches):
             task = _make_task(source_type="web")
@@ -1158,7 +1158,7 @@ class TestOneNoticePerTurn:
             ),
             patch("istota.executor._native_with_user_key",
                   side_effect=lambda nc, *a, **k: nc),
-            patch("istota.notifications.send_notification",
+            patch("istota.notifications.delivery.send_notification",
                   side_effect=lambda *a, **k: None),
         ]
         seen = {}
@@ -1296,7 +1296,7 @@ class TestTheCrossingRuleAtTheRealSeam:
                 "istota.executor._native_with_user_key",
                 side_effect=lambda nc, *a, **k: nc,
             ),
-            patch("istota.notifications.send_notification"),
+            patch("istota.notifications.delivery.send_notification"),
         ]
         with contextmanager_chain(patches):
             task = _make_task(source_type="cli", model="claude-opus-5")

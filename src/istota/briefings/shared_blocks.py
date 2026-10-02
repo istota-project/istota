@@ -59,7 +59,7 @@ def _alert_brain_unavailable(config, label: str, reason: str) -> None:
     briefing's shared section is N hours behind, not fresh (ISSUE-181).
     """
     try:
-        from istota.notifications import send_operator_alert
+        from istota.notifications.delivery import send_operator_alert
 
         send_operator_alert(
             config,
@@ -290,7 +290,7 @@ def _run_section_brain(config, prompt: str, label: str) -> tuple[bool, str]:
     # `briefings.generate`, and a top-level import from any of these callers
     # risks closing a cycle back through it.
     from istota.executor import persist_brain_usage
-    from istota.usage import SYSTEM_USER_ID
+    from istota.usage.telemetry import SYSTEM_USER_ID
 
     # One call per shared block per briefing. Shared blocks are operator-level
     # content with no single owner, so the row carries the system identity.

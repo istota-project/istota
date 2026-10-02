@@ -25,9 +25,9 @@ import pytest
 from istota import (
     confirmations,
     db,
-    notification_sources as sources,
-    notification_store as store,
 )
+from istota.notifications import sources
+from istota.notifications import store
 from istota.config import Config, EmailConfig, UserConfig
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email.inbound import poll_emails
@@ -88,7 +88,7 @@ def _poll_hostile_mail(config):
         patch("istota.transport.email.inbound.read_email", return_value=email),
         patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         patch(
-            "istota.notifications.send_confirmation_prompt", return_value=(True, None),
+            "istota.notifications.delivery.send_confirmation_prompt", return_value=(True, None),
         ),
     ):
         return poll_emails(config)

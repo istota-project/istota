@@ -58,7 +58,7 @@ def _make_config(tmp_path):
 
 
 def _patch_app(config):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._config = config
     mod.app.state.istota_config = config
     mod._oauth = MagicMock()
@@ -67,7 +67,7 @@ def _patch_app(config):
 
 
 async def _login(client, username):
-    import istota.web_app as mod
+    import istota.webui.app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(
         return_value={"user_id": username},
     )
@@ -490,7 +490,8 @@ class TestChannelMemoryStorage:
         """A fixed `CHANNEL.md.tmp` is shared with the memory skill CLI, whose
         lock anchor is per-user — so two members of a shared room stage into one
         file and publish a mixture. The names must not collide."""
-        from istota import atomic_write, storage
+        from istota import storage
+        from istota.lib import atomic_write
         config = _make_config(tmp_path)
         seen: list[str] = []
         real_mkstemp = atomic_write.tempfile.mkstemp
@@ -532,7 +533,7 @@ class TestChannelMemoryStorage:
         # path rather than through `storage.os`, which reaches the same module
         # object only incidentally and would go quiet if `atomic_write` ever
         # imported `replace` by name.
-        monkeypatch.setattr("istota.atomic_write.os.replace", _boom)
+        monkeypatch.setattr("istota.lib.atomic_write.os.replace", _boom)
         assert storage.write_channel_memory(config, "web-alice-abc", "x") is False
         # Every entry, not `*.tmp`: the staging name carries no suffix now, so
         # a glob for one would pass whether or not anything was left behind.

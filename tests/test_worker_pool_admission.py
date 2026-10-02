@@ -25,7 +25,8 @@ import logging
 import time
 from unittest.mock import patch
 
-from istota import db, host_pressure
+from istota import db
+from istota.maintenance import host_pressure
 from istota.config import Config, SchedulerConfig
 from istota.scheduler import WorkerPool
 

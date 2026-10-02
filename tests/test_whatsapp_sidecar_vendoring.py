@@ -51,7 +51,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from istota import image_sniff
+from istota.lib import image_sniff
 from istota.transport.whatsapp import baileys_protocol as proto
 from istota.transport.whatsapp import identity, media
 

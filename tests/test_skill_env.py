@@ -564,7 +564,7 @@ class TestExecutorHardcodedCredentialBlockGone:
     guard lapses the same way, silently.
     """
 
-    _ENV_SOURCES = ("executor.py", "task_env.py")
+    _ENV_SOURCES = ("executor.py", "sandbox/task_env.py")
 
     def test_hardcoded_credential_assignments_removed(self):
         src_dir = Path(__file__).parent.parent / "src" / "istota"

@@ -48,8 +48,8 @@ import os
 import sys
 from pathlib import Path
 
-from istota import skill_proxy
-from istota.skill_host_paths import developer_repos_root, resolve_under_repos
+from istota.sandbox import skill_proxy
+from istota.sandbox.host_paths import developer_repos_root, resolve_under_repos
 from istota.skills._cli import emit, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import REPO, host_path
 

@@ -67,9 +67,9 @@ import subprocess
 import time
 from pathlib import Path
 
-from istota import devbox_exec_client as _client
-from istota import devbox_exec_protocol as proto
-from istota.skill_host_paths import write_resolved
+from istota.devbox import exec_client as _client
+from istota.devbox import exec_protocol as proto
+from istota.sandbox.host_paths import write_resolved
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import READ, REMOTE, WRITE, host_path
 
@@ -108,7 +108,7 @@ ACK_TIMEOUT_SECONDS = _client.ACK_TIMEOUT_SECONDS
 # one command away.
 MAX_BUFFERED_OUTPUT_BYTES = 64 * 1024 * 1024
 
-# Both re-exported from `istota.devbox_exec_protocol`, which is the vendored
+# Both re-exported from `istota.devbox.exec_protocol`, which is the vendored
 # module the server also reads them from. A second copy of the sentence is a
 # second thing to keep in step, and this one is user-facing text.
 #

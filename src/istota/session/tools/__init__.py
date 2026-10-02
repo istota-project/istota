@@ -4,7 +4,7 @@ The six core tools (Read, Write, Edit, Grep, Glob, Bash) the native agent loop
 dispatches against, built as ``AgentTool`` instances. They mirror Claude Code's
 tool schemas closely enough that prompts written for one work on the other.
 
-Sandbox model: these six run in ``istota.tool_server``, one process per task
+Sandbox model: these six run in ``istota.sandbox.tool_server``, one process per task
 attempt, wrapped once by ``build_bwrap_cmd(..., profile=NATIVE)`` and placed in
 the task cgroup before it can fork. ``NativeBrain`` holds proxies onto it
 (``session/tools/remote.py``); the agent loop, the provider client and

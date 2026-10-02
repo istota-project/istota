@@ -274,7 +274,7 @@
 # Forge CLIs (developer skill)
 # ============================================================
 # The developer skill drives the real `gh` and `glab` through the wrapper in
-# src/istota/forge_cli.py. The sandbox binds / read-only, so a binary here is
+# src/istota/sandbox/forge_cli.py. The sandbox binds / read-only, so a binary here is
 # visible inside it with no extra mount.
 #
 # From the vendors' own releases, pinned and sha256-verified, rather than from
@@ -2423,7 +2423,7 @@
 
     - name: Run database snapshot relocation migrator
       command: >-
-        {{ istota_home }}/.venv/bin/python -m {{ istota_package }}.db_backup_relocate
+        {{ istota_home }}/.venv/bin/python -m {{ istota_package }}.maintenance.db_backup_relocate
       args:
         chdir: "{{ istota_repo_dir }}"
       become: true
@@ -2460,7 +2460,7 @@
 # id — so the migrator reads the admins file, assigns everything to the single
 # admin where there is exactly one, and refuses where there are none or several.
 # Guessing wrong hands one admin's clones to another, which is the exact failure
-# the per-user split exists to prevent. Same pattern as `istota.db_relocate`.
+# the per-user split exists to prevent. Same pattern as `istota.maintenance.db_relocate`.
 #
 # Run unconditionally: it writes `{repos_dir}/.istota-layout` on success and is
 # a reported no-op from then on, so there is nothing to gate it on. A blank
@@ -2470,7 +2470,7 @@
 # Update-only is "pull the code, update the dependencies, render the config,
 # restart" — precisely the run that puts the per-user binds on a host whose
 # clones are still at the old depth. Gating it there would land the split and
-# skip the migration on the one path most likely to carry it. `istota.db_relocate`
+# skip the migration on the one path most likely to carry it. `istota.maintenance.db_relocate`
 # and the location migrator are ungated the same way, and the two directory
 # tasks above were brought into line with all three.
 #
@@ -2530,7 +2530,7 @@
 # module's.
 - name: Migrate the developer repos tree into per-user subtrees
   command: >-
-    {{ istota_home }}/.venv/bin/python -m {{ istota_package }}.repos_relocate
+    {{ istota_home }}/.venv/bin/python -m {{ istota_package }}.maintenance.repos_relocate
   args:
     chdir: "{{ istota_repo_dir }}"
   become: true
@@ -2736,7 +2736,7 @@
 # which serialised readers vs. the writer and let a per-minute reader stall the
 # dispatch loop. On local disk WAL is safe and restores concurrency.
 #
-# The migrator (istota.db_relocate) is idempotent: it skips when the local
+# The migrator (istota.maintenance.db_relocate) is idempotent: it skips when the local
 # destination exists and archives each moved on-mount DB to <name>.migrated-<ts>
 # (so the archived file no longer matches the *.db find below). This whole block
 # is therefore skipped on re-runs once every module DB has been relocated.
@@ -2767,7 +2767,7 @@
 
     - name: Run module DB relocation migrator
       command: >-
-        {{ istota_home }}/.venv/bin/python -m {{ istota_package }}.db_relocate
+        {{ istota_home }}/.venv/bin/python -m {{ istota_package }}.maintenance.db_relocate
       args:
         chdir: "{{ istota_repo_dir }}"
       environment:

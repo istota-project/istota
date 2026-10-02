@@ -17,7 +17,7 @@ import pytest
 from istota.skills._credref import SecretValue
 from istota.skills.wordpress import client as client_module
 from istota.skills.wordpress.client import WordPressClient, WordPressError
-from istota.untrusted import frame_untrusted
+from istota.lib.untrusted import frame_untrusted
 
 PASSWORD = "SENTINEL-app-password-4b1d"
 PUBLIC_IP = "93.184.216.34"

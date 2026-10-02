@@ -22,13 +22,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib.resources import files
 
-from istota import sqlite_util
+from istota.lib import sqlite_util
 from istota.money.core.importers.positions_base import (
     OPTION_DESCRIPTION_RE,
     ParsedSnapshot,
     is_cash_row,
 )
-from istota.timestamps import iso_now as _iso_now
+from istota.lib.timestamps import iso_now as _iso_now
 
 _SEED_SENTINEL = "portfolio_classifications_seeded_at"
 
