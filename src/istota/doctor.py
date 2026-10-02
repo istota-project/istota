@@ -3743,7 +3743,7 @@ def check_credential_broker(config: "Config", probe: bool) -> list[CheckResult]:
     from cryptography.hazmat.primitives import serialization
     from .credential_broker import ca
     from .credential_broker.bindings import credential_groups, credential_name, get_entry_binding
-    from .credential_broker.grants import get_grant
+    from .credential_broker.grants import AUTO_GRANT_DECLINED, auto_grant_marker, get_grant
     from . import peer_process
 
     prefix = "security.credential_broker"
@@ -3806,7 +3806,10 @@ def check_credential_broker(config: "Config", probe: bool) -> list[CheckResult]:
                     binding = get_entry_binding(conn, user_id, owner, groups)
                     if not binding or not binding["hosts"]:
                         unbound += 1
-                    elif get_grant(conn, user_id, owner) is None:
+                    elif (get_grant(conn, user_id, owner) is None
+                          and auto_grant_marker(conn, user_id, owner) != AUTO_GRANT_DECLINED):
+                        # A declined entry is ungranted on purpose: tagged
+                        # `istota:nogrant`, or created by a task.
                         ungranted += 1
                 if unbound or ungranted:
                     gaps.append(f"{user_id}: {unbound} unbound, {ungranted} bound without grants")
