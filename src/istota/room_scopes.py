@@ -6,7 +6,9 @@ know others read is the decision that the answer may be read there, so there is
 no per-room grant to make first. A guest's turn (emissary mode, multiplayer D2)
 runs as the room's host at room-safe reach: the guest has no data of their own
 and the host asked nothing, so every scope is withheld. So does a task nobody
-asked in the room, such as a cron job whose conversation is a shared room. A scope is a skill
+asked in the room, such as a subtask whose conversation is a shared room. A
+member's own cron job or briefing aimed at a room they are in counts as that
+member asking (ISSUE-594). A scope is a skill
 whose manifest says ``shared_room: private`` (the default), or one of the two
 synthetic scopes that are not skills:
 
@@ -63,7 +65,8 @@ def withheld_for_task(
 
     Every scope on a guest's turn. Every scope, too, on a task in a room more
     than one human reads that no member asked there: one with no origin
-    surface (a cron job, a briefing, a subtask, a CLI task), or one whose
+    surface (a subtask, a CLI task, a heartbeat) unless it is the user's own
+    cron job or briefing and the user is a current member, or one whose
     stored turn was written by somebody who is not the task's user (an outside
     correspondent's email continuing the room's thread). Such a task's answer
     lands in the room with no member asking, so the consent a member's turn
@@ -91,7 +94,9 @@ def withheld_for_task(
             or task.audience == "mixed"
         ):
             return frozenset()
-        if not member_surface or _written_by_someone_else(conn, task):
+        if not member_surface and not _members_own_schedule(conn, task, token):
+            return all_scopes(skill_index)
+        if _written_by_someone_else(conn, task):
             return all_scopes(skill_index)
     except Exception as exc:
         logger.warning(
@@ -100,6 +105,50 @@ def withheld_for_task(
         )
         return all_scopes(skill_index)
     return frozenset()
+
+
+def _members_own_schedule(
+    conn: sqlite3.Connection, task: "db.Task", room_token: str,
+) -> bool:
+    """Whether this task is the task's user's own CRON.md job or briefing,
+    aimed at a room they are a current member of (ISSUE-594).
+
+    The job lives in the user's workspace and names this room as where its
+    answer is read, which is the member asking in advance. Under bwrap a
+    guest's turn and a restricted task cannot write that file. Without it
+    (Docker, macOS, standalone) a guest's tools can, but such a job could
+    already be aimed at the host's private room at full reach, so this adds
+    nothing a guest could not reach before. A ``scheduled`` task must point at
+    a job row owned by its user; a briefing is only ever created by the
+    scheduler from the user's own config.
+
+    Current membership is a ``room_members`` row and, where the user has any
+    principal participant row, a present one: Talk records a departure only
+    as ``left_at`` and never removes the member row.
+    """
+    if task.source_type == "scheduled":
+        if task.scheduled_job_id is None:
+            return False
+        row = conn.execute(
+            "SELECT user_id FROM scheduled_jobs WHERE id = ?",
+            (task.scheduled_job_id,),
+        ).fetchone()
+        if row is None or row[0] != task.user_id:
+            return False
+    elif task.source_type == "briefing":
+        if not task.briefing_name:
+            return False
+    else:
+        return False
+    if not db.is_room_member(conn, room_token, task.user_id):
+        return False
+    present = conn.execute(
+        "SELECT COUNT(*), COUNT(*) FILTER (WHERE left_at IS NULL) "
+        "FROM room_participants WHERE room_token = ? AND user_id = ? "
+        "AND kind = 'principal'",
+        (room_token, task.user_id),
+    ).fetchone()
+    return present[0] == 0 or present[1] > 0
 
 
 def _written_by_someone_else(conn: sqlite3.Connection, task: "db.Task") -> bool:

@@ -109,7 +109,7 @@ A member's turn in a room more than one person reads runs with that member's ful
 
 Other participants' messages in a shared room's history reach the model inside an untrusted-content fence, since a co-member's message could otherwise try to steer a turn that runs at full reach. Confirmations still gate side effects.
 
-**On a deployment with no bubblewrap sandbox none of the filesystem half applies.** On the shipped Docker stack, macOS and the standalone install, what a guest's turn loses is removed from the prompt, the skill list, the proxy's allowlist and the environment, but the task's own tools can still read the host's files on disk. `istota doctor` reports a warning (`security.room_scope_confinement`) on that shape. If guests should not be able to reach a host's files, run the Ansible deployment.
+**On a deployment with no bubblewrap sandbox none of the filesystem half applies.** On the shipped Docker stack, macOS and the standalone install, what a guest's turn loses is removed from the prompt, the skill list, the proxy's allowlist and the environment, but the task's own tools can still read and write the host's files on disk, including `CRON.md`, whose jobs run as the host. `istota doctor` reports a warning (`security.room_scope_confinement`) on that shape. If guests should not be able to reach a host's files, run the Ansible deployment.
 
 ## Credential proxy
 

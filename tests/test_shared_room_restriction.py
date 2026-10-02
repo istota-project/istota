@@ -104,10 +104,12 @@ def _room(config, *, shared: bool) -> str:
 
 def _run(
     config, room_token: str, *, guest: bool = False, attachments: list[str] | None = None,
+    scheduled_by: str | None = None,
 ) -> dict:
     """Run one web task in the room; return what each seam saw.
 
     ``guest`` runs it as a guest's turn (multiplayer Stage 11, emissary mode).
+    ``scheduled_by`` runs it as a CRON.md job owned by that user instead.
     """
     captured: list = []
     disabled_seen: list[set[str]] = []
@@ -133,10 +135,18 @@ def _run(
         mock_proxy.return_value.__enter__ = lambda s: s
         mock_proxy.return_value.__exit__ = lambda s, *a: False
         with db.get_db(config.db_path) as conn:
+            job_id = None
+            if scheduled_by is not None:
+                job_id = conn.execute(
+                    "INSERT INTO scheduled_jobs (user_id, name, cron_expression, "
+                    "prompt, conversation_token) VALUES (?, 'digest', '0 9 * * *', "
+                    "'p', ?)", (scheduled_by, room_token),
+                ).lastrowid
             task_id = db.create_task(
                 conn, prompt="what's on my calendar tomorrow?", user_id="alice",
-                source_type="web", conversation_token=room_token,
-                attachments=attachments,
+                source_type="web" if job_id is None else "scheduled",
+                conversation_token=room_token,
+                attachments=attachments, scheduled_job_id=job_id,
             )
             if guest:
                 conn.execute("UPDATE tasks SET guest_participant_id = 1 WHERE id = ?",
@@ -214,6 +224,26 @@ class TestAGuestsTurnReachesNothing:
         assert _user_dir(config) not in _binds(seen["argv"])
         assert seen["vault"] == {}
         assert seen["vault_writes"] == 0
+
+
+class TestAMembersOwnCronJobInASharedRoom:
+    """ISSUE-594: the member's own scheduled job posting into a shared room
+    reaches what their turn there reaches."""
+
+    def test_every_seam_reaches_the_members_data(self, config):
+        seen = _run(config, _room(config, shared=True), scheduled_by="alice")
+        assert "calendar" not in seen["disabled"]
+        assert "calendar" in seen["allowed_skills"]
+        assert seen["proxy_base_env"].get("HEALTH_DB_PATH") == HEALTH_DB
+        assert _user_dir(config) in _binds(seen["argv"])
+        assert seen["vault"] == {"bank": "s3cret"}
+
+    def test_control_a_job_owned_by_someone_else_reaches_nothing(self, config):
+        seen = _run(config, _room(config, shared=True), scheduled_by="bob")
+        assert "calendar" in seen["disabled"]
+        assert "calendar" not in seen["allowed_skills"]
+        assert _user_dir(config) not in _binds(seen["argv"])
+        assert seen["vault"] == {}
 
 
 class TestAmbientMemoryStaysOut:

@@ -65,13 +65,22 @@ class TestWhatATaskIsWithheld:
         }
 
 
+def _job(conn, user_id: str, token: str) -> int:
+    cur = conn.execute(
+        "INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, "
+        "conversation_token) VALUES (?, 'digest', '0 9 * * *', 'p', ?)",
+        (user_id, token),
+    )
+    return cur.lastrowid
+
+
 class TestATaskNobodyAskedInTheRoom:
-    """A cron job, a briefing or a subtask whose conversation is a shared room
-    lands its answer there with no member asking, so it runs at room-safe reach."""
+    """A subtask or a CLI task whose conversation is a shared room lands its
+    answer there with no member asking, so it runs at room-safe reach."""
 
     INDEX = _index(calendar="private")
 
-    @pytest.mark.parametrize("source_type", ["scheduled", "briefing", "subtask"])
+    @pytest.mark.parametrize("source_type", ["subtask", "cli", "heartbeat"])
     def test_a_shared_room_withholds_every_scope(self, conn, make_task, source_type):
         task = make_task(user_id="alice", conversation_token=_shared_room(conn),
                          source_type=source_type)
@@ -92,10 +101,86 @@ class TestATaskNobodyAskedInTheRoom:
 
     def test_an_unreadable_audience_withholds_everything(self, make_task):
         broken = sqlite3.connect(":memory:")
-        task = make_task(user_id="alice", conversation_token="t", source_type="scheduled")
+        task = make_task(user_id="alice", conversation_token="t", source_type="scheduled",
+                         scheduled_job_id=1)
         assert room_scopes.withheld_for_task(broken, task, skill_index=self.INDEX) == {
             "calendar", "files", "memory",
         }
+
+
+class TestAMembersOwnScheduleInASharedRoom:
+    """ISSUE-594: a member's own CRON.md job or briefing that targets a shared
+    room they are in was asked by that member, in advance and for that room,
+    so it runs at their reach like their own turn."""
+
+    INDEX = _index(calendar="private")
+    ALL = {"calendar", "files", "memory"}
+
+    def test_the_members_own_cron_job_withholds_nothing(self, conn, make_task):
+        token = _shared_room(conn)
+        task = make_task(user_id="alice", conversation_token=token,
+                         source_type="scheduled", scheduled_job_id=_job(conn, "alice", token))
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == frozenset()
+
+    def test_a_co_members_job_is_the_owner_too(self, conn, make_task):
+        token = _shared_room(conn)
+        task = make_task(user_id="bob", conversation_token=token,
+                         source_type="scheduled", scheduled_job_id=_job(conn, "bob", token))
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == frozenset()
+
+    def test_the_members_own_briefing_withholds_nothing(self, conn, make_task):
+        task = make_task(user_id="alice", conversation_token=_shared_room(conn),
+                         source_type="briefing", briefing_name="morning")
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == frozenset()
+
+    def test_a_scheduled_task_with_no_job_withholds_every_scope(self, conn, make_task):
+        task = make_task(user_id="alice", conversation_token=_shared_room(conn),
+                         source_type="scheduled")
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == self.ALL
+
+    def test_a_job_naming_another_user_withholds_every_scope(self, conn, make_task):
+        token = _shared_room(conn)
+        task = make_task(user_id="alice", conversation_token=token,
+                         source_type="scheduled", scheduled_job_id=_job(conn, "bob", token))
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == self.ALL
+
+    def test_a_briefing_with_no_name_withholds_every_scope(self, conn, make_task):
+        task = make_task(user_id="alice", conversation_token=_shared_room(conn),
+                         source_type="briefing")
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == self.ALL
+
+    def test_an_owner_who_left_a_talk_room_withholds_every_scope(self, conn, make_task):
+        token = _shared_room(conn)
+        db.upsert_room_participant(conn, room_token=token, surface="talk",
+                                   surface_ref="alice", kind="principal", user_id="alice")
+        conn.execute("UPDATE room_participants SET left_at = datetime('now') "
+                     "WHERE room_token = ? AND user_id = 'alice'", (token,))
+        task = make_task(user_id="alice", conversation_token=token,
+                         source_type="scheduled", scheduled_job_id=_job(conn, "alice", token))
+        assert db.is_room_member(conn, token, "alice")
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == self.ALL
+
+    def test_control_an_owner_present_on_talk_withholds_nothing(self, conn, make_task):
+        token = _shared_room(conn)
+        db.upsert_room_participant(conn, room_token=token, surface="talk",
+                                   surface_ref="alice", kind="principal", user_id="alice")
+        task = make_task(user_id="alice", conversation_token=token,
+                         source_type="scheduled", scheduled_job_id=_job(conn, "alice", token))
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == frozenset()
+
+    def test_an_owner_who_is_not_a_member_withholds_every_scope(self, conn, make_task):
+        room = db.create_web_chat_room(conn, "carol", "Family")
+        db.add_room_member(conn, room.token, "bob")
+        task = make_task(user_id="alice", conversation_token=room.token,
+                         source_type="scheduled",
+                         scheduled_job_id=_job(conn, "alice", room.token))
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == self.ALL
+
+    def test_a_task_flagged_group_chat_withholds_every_scope(self, conn, make_task):
+        token = _shared_room(conn)
+        task = make_task(user_id="alice", conversation_token=token, is_group_chat=True,
+                         source_type="scheduled", scheduled_job_id=_job(conn, "alice", token))
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == self.ALL
 
 
 class TestATurnWrittenBySomeoneElse:
