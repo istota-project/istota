@@ -1924,7 +1924,7 @@ def _migrate_workspace_files(user_base: Path) -> None:
 # Config files that live in bot_name/config/
 _CONFIG_FILES = (
     "USER.md", "TASKS.md", "BRIEFINGS.md", "HEARTBEAT.md",
-    "CRON.md", "WORDPRESS.md",
+    "CRON.md",
 )
 
 

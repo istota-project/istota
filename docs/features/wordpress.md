@@ -20,11 +20,9 @@ TLS uses the system trust store. For a site with a locally signed certificate, p
 
 ## What each user sets
 
-Two things: a vault entry with the credential, and a record in `config/WORDPRESS.md` that names it.
+One vault entry per install, in the user's credential vault (see [Credentials](../configuration/credentials.md)), under the `istota` group. Nothing else: there is no site file.
 
-### The vault entry
-
-The application password is kept in the user's credential vault (see [Credentials](../configuration/credentials.md)), one entry per install, under the `istota` group:
+The entry's name is `wordpress_` followed by the site's name, which is what `--site` takes: an entry `wordpress_blog` is `--site blog`. A user with one such entry never needs `--site`; with several, every call names one. Site names are lowercase letters, digits and underscores, starting with a letter.
 
 | Vault field | Holds |
 |---|---|
@@ -32,23 +30,11 @@ The application password is kept in the user's credential vault (see [Credential
 | Username | the WordPress login |
 | Password | an application password, made in wp-admin under Users, Profile, Application Passwords |
 
-The URL field also binds the entry to its host. The skill sends the password only to a host the entry is bound to, so a record the model edits cannot send it anywhere else. On a subdomain multisite network, list each subsite host in the entry's `istota_hosts` attribute.
+The URL field also binds the entry to its host. The skill sends the password only to a host the entry is bound to, so a site name or `--blog` the model chooses cannot send it anywhere else. On a subdomain multisite network, list each subsite host in the entry's `istota_hosts` attribute.
 
 Each call reads the entry once from the task's vault budget (`[security] vault_fetch_limit_per_task`). The vault's own rules apply: it is withheld on a guest's turn and on a task nobody asked in a shared room, and with the credential broker on, a scheduled job needs its grant's scheduled use switched on.
 
-### WORDPRESS.md
-
-In the user's `config/` folder, beside `CRON.md`, inside a TOML fence:
-
-```toml
-[[sites]]
-name = "blog"                   # the --site value
-credential = "wordpress_blog"   # vault entry name; default "wordpress_<name>"
-multisite = false               # true enables --blog
-default = true                  # at most one site
-```
-
-The record holds no URL and no login; those come from the vault entry. `istota-skill wordpress sites` lists the records and any problems in the file, with line numbers, without reading the vault or making a request.
+`istota-skill wordpress sites` lists the `wordpress_*` entries by site name, without reading a password or making a request.
 
 ## Asking before anything public
 
@@ -75,9 +61,9 @@ Drafts, pending posts and media uploads are not gated.
 
 ## Multisite
 
-A network is one record with `multisite = true` and one credential; a super admin's application password works on every site. `--blog SLUG` (subdirectory network) or `--blog HOST` (subdomain network) addresses one site. The skill checks that the site exists before acting on it, so a typo answers `unknown_blog` rather than acting on the main site.
+A network is one vault entry and one credential; a super admin's application password works on every site. `--blog SLUG` (subdirectory network) or `--blog HOST` (subdomain network) addresses one site. The skill checks that the site exists before acting on it, so a typo answers `unknown_blog` rather than acting on the main site.
 
-`plugins activate --network` asks core REST to network-activate a plugin. If the site refuses, the answer is `unsupported_on_multisite` and the plugin is not activated per site instead; network-activate it in the network admin.
+`plugins activate --network` asks core REST to network-activate a plugin. If the site refuses, including because it is not a network, the answer is `unsupported_on_multisite` and the plugin is not activated per site instead; network-activate it in the network admin.
 
 ## The istota-connector plugin
 

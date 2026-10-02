@@ -31,22 +31,20 @@ Usage:
 
 The last three need the istota-connector plugin on the site (`connector.py`).
 
-Every verb but `sites` takes ``--site`` and, on a multisite record, ``--blog``.
+Every verb but `sites` takes ``--site`` and, on a multisite network, ``--blog``.
 
-**How a call finds its credential.** ``--site`` names a record in the user's
-``config/WORDPRESS.md`` (`sites.py`), and the record names a vault entry. That
-one entry is resolved whole, after the argv has parsed and every host path has
-resolved and before the verb's handler runs (`_site_verb`), through
-`_credref.resolve_entry`: one fetch from the task's budget, over the private
-credential fd, yielding the application password, the WordPress login and the
-site URL. The URL decides where requests go and the entry's ``bound_hosts``
-decide where they may go, so a record the model edited cannot move the password
-(`client.py`). The site is chosen before the fetch, so a typo in ``--site``
-spends nothing.
+**How a call finds its credential.** A site is the vault entry
+``wordpress_<name>`` (`sites.py`); ``--site NAME`` names it, and with no
+``--site`` the user's only such entry is used, found through the proxy's
+uncharged ``vault_list``. That one entry is resolved whole, after the argv has
+parsed and every host path has resolved and before the verb's handler runs
+(`_site_verb`), through `_credref.resolve_entry`: one fetch from the task's
+budget, over the private credential fd, yielding the application password, the
+WordPress login and the site URL. The URL decides where requests go and the
+entry's ``bound_hosts`` decide where they may go (`client.py`).
 
 The user id is ``ISTOTA_USER_ID`` and the config is the daemon's own
-(``ISTOTA_CONFIG_PATH``), read host-side for ``[wordpress] private_hosts`` and
-the user's workspace.
+(``ISTOTA_CONFIG_PATH``), read host-side for ``[wordpress] private_hosts``.
 """
 
 from __future__ import annotations
@@ -65,16 +63,16 @@ from . import admin, connector, content, discovery, generic, media
 from .cache import Cache
 from .client import WordPressClient, WordPressError, fence, resolve_host
 from .sites import (
-    SITES_FILE,
     SiteError,
     SiteRecord,
     blog_base,
     check_blog,
     check_bound,
     normalize_site_url,
-    parse_sites,
     same_site,
     select_site,
+    site_for,
+    site_names,
 )
 
 log = logging.getLogger(__name__)
@@ -100,7 +98,7 @@ class SiteContext:
 
 
 def _site_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--site", help="site name from WORDPRESS.md (default: the default site)")
+    parser.add_argument("--site", help="site name: the vault entry wordpress_<name> (default: the only one)")
     parser.add_argument("--blog", help="multisite network site: a slug, or a host on a subdomain network")
 
 
@@ -292,14 +290,14 @@ def build_parser() -> argparse.ArgumentParser:
                        "admin.plugin_id and resolved by WordPress",
                   help="dir/file, as `plugins list` names it")
         p.add_argument("--network", action="store_true",
-                       help="network-wide, on a multisite record (needs a super admin)")
+                       help="network-wide, on a multisite network (needs a super admin)")
         _confirmed(p)
     p = plugins.add_parser("install", help="install from WordPress.org (needs --confirmed)")
     _site_args(p)
     p.add_argument("--slug", required=True, help="the WordPress.org plugin slug")
     p.add_argument("--activate", action="store_true", help="activate it once installed")
     p.add_argument("--network", action="store_true",
-                   help="with --activate: network-wide, on a multisite record")
+                   help="with --activate: network-wide, on a multisite network")
     _confirmed(p)
 
     p = sub.add_parser("rest", help="call a REST route the other verbs do not cover")
@@ -373,17 +371,15 @@ def _resolver():
     return resolve_host
 
 
-def _read_records(config, user_id: str) -> tuple[list[SiteRecord], list[str]]:
-    from istota.storage import read_user_config_file
+def _list_entries() -> list[str]:
+    """The task's vault entry names, through the proxy. Tests replace this."""
+    from istota.credential_shim import ProxyError, list_entries
 
-    text = read_user_config_file(config, user_id, SITES_FILE)
-    if text is None:
-        raise SiteError(
-            f"config/{SITES_FILE} could not be read: there is no workspace on this "
-            f"deployment, or the file is not a regular file.",
-            "unknown_site",
-        )
-    return parse_sites(text)
+    try:
+        return list_entries()
+    except ProxyError as exc:
+        raise SiteError(f"Could not list the vault's entries: {exc}",
+                        "vault_credential_refused") from None
 
 
 def _user_id() -> str:
@@ -400,18 +396,14 @@ def _entry_text(entry, field: str) -> str:
 
 
 def _open_site(args) -> SiteContext:
-    """The record, the entry and a client, in the order that spends least first."""
+    """The site, the entry and a client, in the order that spends least first."""
     user_id = _user_id()
     config = getattr(args, "config", None) or _load_config()
-    records, errors = _read_records(config, user_id)
-    try:
-        record = select_site(records, args.site)
-    except SiteError as exc:
-        if errors:
-            raise SiteError(f"{exc} Problems in {SITES_FILE}: {'; '.join(errors)}",
-                            exc.reason) from None
-        raise
-    blog = check_blog(args.blog, record.multisite)
+    if args.site:
+        record = site_for(args.site)
+    else:
+        record = select_site(_list_entries(), None)
+    blog = check_blog(args.blog)
 
     entry, refusal = resolve_entry(record.credential, f"wordpress --site {record.name}")
     if refusal is not None:
@@ -488,13 +480,11 @@ def _check_blog_exists(ctx: SiteContext, *, refresh: bool) -> None:
 
 
 def cmd_sites(args) -> dict:
-    """The records in WORDPRESS.md. No network and no vault fetch."""
-    records, errors = _read_records(_load_config(), _user_id())
+    """The sites the vault holds: its ``wordpress_*`` entries. No network, no fetch."""
+    names = site_names(_list_entries())
     return {
         "status": "ok",
-        "file": f"config/{SITES_FILE}",
-        "sites": [r.as_dict() for r in records],
-        "errors": errors,
+        "sites": [site_for(name).as_dict() for name in names],
     }
 
 

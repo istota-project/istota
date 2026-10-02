@@ -3,8 +3,8 @@
 The vault is replaced at `_credref.fetch_entry` — the transport under
 `resolve_entry` — so the resolution, its budget accounting and the handler are
 all exercised. HTTP is an `httpx.MockTransport` that records every request, and
-the resolver is a stub. The user's `WORDPRESS.md` lives in a real mount laid
-out like a deployment's.
+the resolver is a stub. The proxy's entry listing is `wp._list_entries`, which
+the fixture answers from `env.entries`.
 """
 
 from __future__ import annotations
@@ -29,21 +29,8 @@ PASSWORD = "SENTINEL-wp-app-password-77c1"
 PUBLIC_IP = "93.184.216.34"
 HOST = "wp.example.test"
 CLOSE = "[END UNTRUSTED WORDPRESS CONTENT]"
-
-SITES = """\
-# WordPress sites
-
-```toml
-[[sites]]
-name = "blog"
-default = true
-
-[[sites]]
-name = "net"
-credential = "wordpress_network"
-multisite = true
-```
-"""
+#: Saved before any fixture replaces it.
+REAL_LIST_ENTRIES = wp._list_entries
 
 TYPES = {
     "post": {"slug": "post", "name": "Posts", "rest_base": "posts",
@@ -101,7 +88,6 @@ def env(tmp_path, monkeypatch):
     mount = tmp_path / "mount"
     config_dir = mount / "Users" / "alice" / "istota" / "config"
     config_dir.mkdir(parents=True)
-    (config_dir / "WORDPRESS.md").write_text(SITES)
     db_path = tmp_path / "istota.db"
     db.init_db(db_path)
     config = Config(workspace_path=mount, db_path=db_path,
@@ -125,7 +111,7 @@ def env(tmp_path, monkeypatch):
     vault = {
         "wordpress_blog": ({"password": PASSWORD, "username": "editor",
                             "url": f"https://{HOST}"}, [HOST]),
-        "wordpress_network": ({"password": PASSWORD, "username": "admin",
+        "wordpress_net": ({"password": PASSWORD, "username": "admin",
                                "url": f"https://{HOST}"}, [HOST, f"sub.{HOST}"]),
     }
     fetches: list[str] = []
@@ -143,6 +129,18 @@ def env(tmp_path, monkeypatch):
         pass
 
     e = Env()
+    # What `vault_list` lists. One site by default, so a call with no --site
+    # picks it; `--site net` still resolves by name, since a named site is not
+    # looked up in the listing.
+    e.entries = ["wordpress_blog", "github_pat"]
+    listings: list[int] = []
+
+    def list_entries():
+        listings.append(1)
+        return list(e.entries)
+
+    monkeypatch.setattr(wp, "_list_entries", list_entries)
+    e.listings = listings
     e.mount, e.config_dir, e.config, e.site, e.vault, e.fetches, e.resolved = (
         mount, config_dir, config, site, vault, fetches, resolved)
     return e
@@ -159,65 +157,54 @@ def run(argv, capsys):
 
 
 # ---------------------------------------------------------------------------
-# sites: the file, with no network and no vault
+# sites: the vault's wordpress_* entries, with no network and no fetch
 # ---------------------------------------------------------------------------
 
 
 class TestSites:
-    def test_it_lists_the_records_and_reads_no_vault(self, env, capsys):
+    def test_it_lists_the_wordpress_entries_and_reads_no_value(self, env, capsys):
+        env.entries = ["wordpress_net", "wordpress_blog", "github_pat", "wordpress_Bad"]
         code, out = run(["sites"], capsys)
         assert code == 0
-        assert [s["name"] for s in out["sites"]] == ["blog", "net"]
-        assert out["sites"][0]["credential"] == "wordpress_blog"
-        assert out["sites"][1]["credential"] == "wordpress_network"
-        assert out["errors"] == []
+        assert out["sites"] == [{"name": "blog", "credential": "wordpress_blog"},
+                                {"name": "net", "credential": "wordpress_net"}]
         assert env.fetches == [] and env.site.requests == []
 
-    def test_a_bad_record_is_reported_with_its_line(self, env, capsys):
-        (env.config_dir / "WORDPRESS.md").write_text(
-            "intro\n\n```toml\n[[sites]]\nname = \"ok\"\n\n[[sites]]\nname = \"old\"\n"
-            "url = \"https://x.example.test\"\n```\n"
-        )
+    def test_no_entries_is_no_sites(self, env, capsys):
+        env.entries = ["github_pat"]
         code, out = run(["sites"], capsys)
-        assert code == 0
-        assert [s["name"] for s in out["sites"]] == ["ok"]
-        [error] = out["errors"]
-        assert "line 7" in error and "url" in error and "vault entry" in error
+        assert code == 0 and out["sites"] == []
 
-    def test_a_toml_error_names_the_file_line(self, env, capsys):
-        (env.config_dir / "WORDPRESS.md").write_text("a\nb\n```toml\n[[sites]]\nname = \n```\n")
-        _, out = run(["sites"], capsys)
-        assert out["sites"] == []
-        assert "line 5" in out["errors"][0]
+    def test_a_listing_the_proxy_cannot_give_is_refused_not_empty(self, env, capsys, monkeypatch):
+        import istota.credential_shim as shim
 
-    def test_a_missing_file_is_no_sites(self, env, capsys):
-        (env.config_dir / "WORDPRESS.md").unlink()
+        # The real wrapper and shim, under a proxy that omits `entries`.
+        monkeypatch.setattr(wp, "_list_entries", REAL_LIST_ENTRIES)
+        monkeypatch.setattr(shim, "_request", lambda payload, **kw: {"names": []})
         code, out = run(["sites"], capsys)
-        assert code == 0 and out["sites"] == [] and out["errors"] == []
+        assert code == 1 and out["reason"] == "vault_credential_refused"
+        assert "did not list vault entries" in out["error"]
 
 
-class TestParseSites:
-    def test_the_default_credential_is_derived_from_the_name(self):
-        records, errors = sites.parse_sites("```toml\n[[sites]]\nname = \"istota\"\n```\n")
-        assert errors == []
-        assert records[0].credential == "wordpress_istota"
+class TestSelectSite:
+    def test_a_named_site_maps_to_its_entry_without_a_listing(self):
+        assert sites.select_site(None, "pulsar") == sites.SiteRecord("pulsar", "wordpress_pulsar")
 
-    def test_two_defaults_leave_no_default(self):
-        text = ("```toml\n[[sites]]\nname = \"a\"\ndefault = true\n"
-                "[[sites]]\nname = \"b\"\ndefault = true\n```\n")
-        records, errors = sites.parse_sites(text)
-        assert not any(r.default for r in records)
-        assert errors and "more than one" in errors[0]
+    def test_the_only_site_is_used(self):
+        record = sites.select_site(["github_pat", "wordpress_blog"], None)
+        assert record.credential == "wordpress_blog"
+
+    @pytest.mark.parametrize("entries", [[], ["github_pat"], ["wordpress_a", "wordpress_b"]])
+    def test_none_or_several_needs_site(self, entries):
         with pytest.raises(sites.SiteError) as err:
-            sites.select_site(records, None)
+            sites.select_site(entries, None)
         assert err.value.reason == "unknown_site"
 
-    @pytest.mark.parametrize("bad", ['name = "Bad Name"', 'name = "dup"\n[[sites]]\nname = "dup"',
-                                     'name = "a"\ncredential = "no spaces allowed"',
-                                     'name = "a"\nmultisite = "yes"'])
-    def test_malformed_records_are_errors(self, bad):
-        _, errors = sites.parse_sites(f"```toml\n[[sites]]\n{bad}\n```\n")
-        assert errors
+    @pytest.mark.parametrize("bad", ["Bad", "a b", "../x", "1a", "a" * 60])
+    def test_a_malformed_name_is_refused(self, bad):
+        with pytest.raises(sites.SiteError) as err:
+            sites.site_for(bad)
+        assert err.value.reason == "unknown_site"
 
 
 # ---------------------------------------------------------------------------
@@ -226,14 +213,26 @@ class TestParseSites:
 
 
 class TestTheCredential:
-    def test_an_unknown_site_spends_no_vault_fetch(self, env, capsys):
-        code, out = run(["describe", "--site", "nope"], capsys)
+    def test_a_malformed_site_spends_no_vault_fetch(self, env, capsys):
+        code, out = run(["describe", "--site", "No Such"], capsys)
         assert code == 1 and out["reason"] == "unknown_site"
-        assert env.fetches == []
+        assert env.fetches == [] and env.listings == []
 
-    def test_a_blog_on_a_single_site_record_spends_no_vault_fetch(self, env, capsys):
-        code, out = run(["list", "--type", "post", "--blog", "x"], capsys)
-        assert code == 1 and out["reason"] == "unknown_blog"
+    def test_a_site_with_no_entry_is_refused_by_the_fetch(self, env, capsys):
+        code, out = run(["describe", "--site", "nope"], capsys)
+        assert code == 1 and out["reason"] == "vault_credential_refused"
+        assert env.fetches == ["wordpress_nope"] and env.site.requests == []
+
+    def test_a_named_site_does_not_list_the_vault(self, env, capsys):
+        env.site.routes[("GET", "/wp-json/wp/v2/posts")] = []
+        code, _ = run(["list", "--site", "blog", "--type", "post"], capsys)
+        assert code == 0 and env.listings == []
+
+    def test_several_sites_and_no_site_spends_no_fetch(self, env, capsys):
+        env.entries = ["wordpress_blog", "wordpress_net"]
+        code, out = run(["list", "--type", "post"], capsys)
+        assert code == 1 and out["reason"] == "unknown_site"
+        assert "blog, net" in out["error"]
         assert env.fetches == []
 
     def test_one_fetch_per_invocation(self, env, capsys):

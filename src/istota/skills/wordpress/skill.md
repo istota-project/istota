@@ -13,29 +13,19 @@ Run `istota-skill wordpress --help` (or `<verb> --help`) for the live argument l
 
 ## Sites and credentials
 
-Each install is a `[[sites]]` table in the user's `config/WORDPRESS.md`, inside a ```toml fence:
-
-```toml
-[[sites]]
-name = "blog"                   # the --site value
-credential = "wordpress_blog"   # vault entry name; default "wordpress_<name>"
-multisite = false               # true enables --blog
-default = true                  # at most one site
-```
-
-The record holds no URL and no login. Those come from the vault entry it names, under the user's `istota` group:
+Each install is one vault entry, named `wordpress_<name>`, under the user's `istota` group. `--site NAME` picks the entry `wordpress_NAME`; with no `--site`, the user's only `wordpress_*` entry is used, and with several `--site` is required. There is no site file. The entry holds:
 
 - URL field: the site's HTTPS address (`https://blog.example.com`, or with a path if WordPress lives in a subdirectory).
 - Username field: the WordPress login.
 - Password field: an application password, made in wp-admin under Users, Profile, Application Passwords.
 
-Requests go only to a host the vault entry is bound to. A record or `--blog` pointing anywhere else is refused with `credential_host_mismatch` and nothing is sent. Each call reads the entry once from the task's vault budget, so prefer `describe` (one call for all discovery) over many small calls.
+Requests go only to a host the vault entry is bound to. A `--blog` pointing anywhere else is refused with `credential_host_mismatch` and nothing is sent. Each call reads the entry once from the task's vault budget, so prefer `describe` (one call for all discovery) over many small calls.
 
-`istota-skill wordpress sites` lists the records and any problems in the file, with line numbers. It reads no vault entry and makes no request.
+`istota-skill wordpress sites` lists the `wordpress_*` entries by site name. It reads no password and makes no request. If the user has no such entry, tell them to add one with the three fields above.
 
 ## Multisite
 
-A network is one record with `multisite = true` and one credential (a super admin's application password works on every site). Address one site with `--blog SLUG` on a subdirectory network or `--blog HOST` on a subdomain network; a subdomain host must also be bound to the vault entry (its `istota_hosts` attribute). A `--blog` the network does not have answers `unknown_blog`.
+A network is one entry and one credential (a super admin's application password works on every site). Address one site with `--blog SLUG` on a subdirectory network or `--blog HOST` on a subdomain network; a subdomain host must also be bound to the vault entry (its `istota_hosts` attribute). A `--blog` the network does not have answers `unknown_blog`.
 
 ## Start with describe
 
@@ -132,7 +122,7 @@ istota-skill wordpress plugins install --slug hello-dolly [--activate [--network
 - `users create` sets no password anybody knows, and WordPress sends no email. Tell the user the new account signs in after using "Lost your password?" on the login page. `--role` replaces the user's roles.
 - `settings update` takes JSON values, so a string is quoted. `readback.dropped` names a setting the site does not expose over REST, which WordPress ignores without an error.
 - `--plugin` is the `plugin` value `plugins list` shows (`dir/file`). A plugin already in the asked state answers `"changed": false` and nothing is sent. A network-active plugin can only be deactivated with `--network`, since that acts on every site of the network.
-- `--network` needs a multisite record and a super admin. If the site refuses network activation through REST, the answer is `unsupported_on_multisite`; the user does it in the network admin.
+- `--network` needs a multisite network and a super admin. If the site refuses network activation through REST, the answer is `unsupported_on_multisite`; the user does it in the network admin.
 - `plugins install` fetches from the WordPress.org directory. A plugin already installed answers `"installed": false`, so running it again after `outcome_unknown` is safe.
 - Deleting users and plugins, and application passwords, are not offered. Do them in wp-admin.
 
@@ -183,7 +173,7 @@ Every string the site wrote (titles, content, ACF text, term names, user names, 
 
 ## Errors
 
-Errors carry a `reason`: `unknown_site`, `vault_credential_refused`, `credential_unbound`, `credential_incomplete`, `credential_host_mismatch`, `host_refused` (a private address the operator has not allowed, or a redirect, which is never followed), `unknown_blog`, `unknown_type`, `unknown_taxonomy`, `unknown_term`, `auth_failed`, `permission_denied`, `unknown_route`, `not_found`, `validation_error` (with the refused `fields`), `acf_not_in_rest` (with the `fields`), `confirmation_required`, `time_budget` (the call stopped before an upload or the post write that might not finish within the skill time limit; `uploaded` lists what was stored), `request_refused`, `server_error`, `connection_failed`, `outcome_unknown`, `unsupported_on_multisite` (the site refused to network-activate a plugin through REST; do it in the network admin), `connector_missing` (the istota-connector plugin, or the Abilities API it needs, is not on the site), `connector_mismatch` (an ability with the connector's name that is not marked the way the plugin marks it), `not_multisite`, `host_path_refused`. Tell the user what the reason means; `auth_failed` lists its three ordinary causes.
+Errors carry a `reason`: `unknown_site`, `vault_credential_refused`, `credential_unbound`, `credential_incomplete`, `credential_host_mismatch`, `host_refused` (a private address the operator has not allowed, or a redirect, which is never followed), `unknown_blog`, `unknown_type`, `unknown_taxonomy`, `unknown_term`, `auth_failed`, `permission_denied`, `unknown_route`, `not_found`, `validation_error` (with the refused `fields`), `acf_not_in_rest` (with the `fields`), `confirmation_required`, `time_budget` (the call stopped before an upload or the post write that might not finish within the skill time limit; `uploaded` lists what was stored), `request_refused`, `server_error`, `connection_failed`, `outcome_unknown`, `unsupported_on_multisite` (the site refused to network-activate a plugin through REST: it is not a network, or the user does it in the network admin), `connector_missing` (the istota-connector plugin, or the Abilities API it needs, is not on the site), `connector_mismatch` (an ability with the connector's name that is not marked the way the plugin marks it), `not_multisite`, `host_path_refused`. Tell the user what the reason means; `auth_failed` lists its three ordinary causes.
 
 ## Out of scope
 

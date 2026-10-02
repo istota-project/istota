@@ -66,14 +66,6 @@ pytestmark = [
 ]
 
 USER_ID = "smoke"
-SITES = """\
-```toml
-[[sites]]
-name = "test"
-multisite = {multisite}
-default = true
-```
-"""
 
 
 def tiny_png() -> bytes:
@@ -95,8 +87,6 @@ def live(tmp_path, monkeypatch):
     workspace = mount / "Users" / USER_ID
     config_dir = workspace / "istota" / "config"
     config_dir.mkdir(parents=True)
-    (config_dir / "WORDPRESS.md").write_text(
-        SITES.replace("{multisite}", "true" if BLOG else "false"))
     db_path = tmp_path / "istota.db"
     db.init_db(db_path)
     config = Config(workspace_path=mount, db_path=db_path,
@@ -111,6 +101,7 @@ def live(tmp_path, monkeypatch):
         return {"password": APP_PASSWORD, "username": USER, "url": URL}, [host]
 
     monkeypatch.setattr(_credref, "fetch_entry", fetch_entry)
+    monkeypatch.setattr(wp, "_list_entries", lambda: ["wordpress_test"])
     return workspace
 
 

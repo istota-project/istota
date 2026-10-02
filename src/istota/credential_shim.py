@@ -269,6 +269,19 @@ def fetch_entry(
     return fields, hosts
 
 
+def list_entries() -> list[str]:
+    """The vault entry names this task can read, with no values. Not charged.
+
+    Raises ``ProxyError`` when the proxy cannot say, rather than answering an
+    empty list that would read as "no entries".
+    """
+    reply = _request({"type": "vault_list"})
+    entries = reply.get("entries")
+    if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
+        raise ProxyError("the credential proxy did not list vault entries")
+    return entries
+
+
 def _cmd_list() -> int:
     reply = _request({"type": "vault_list"})
     names = reply.get("names")

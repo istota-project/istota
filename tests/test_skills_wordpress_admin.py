@@ -246,13 +246,6 @@ class TestPluginStatus:
         assert code == 0, out
         assert sent == [{"status": "inactive"}]
 
-    def test_network_on_a_single_site_record_sends_nothing(self, env, capsys):
-        self._plugin(env)
-        code, out = run(["plugins", "activate", "--plugin", "akismet/akismet", "--network",
-                         "--confirmed"], capsys)
-        assert out["reason"] == "validation_error"
-        assert writes(env.site) == []
-
     def test_network_activate_sends_network_active(self, env, capsys):
         sent = self._plugin(env)
         code, out = run(["plugins", "activate", "--plugin", "akismet/akismet", "--network",
@@ -345,6 +338,17 @@ class TestPluginInstall:
         _, out = run(["plugins", "install", "--slug", "hello-dolly", "--confirmed"], capsys)
         assert out["reason"] == "outcome_unknown"
         assert out["lookup"] == "plugins list --site blog"
+        assert len(writes(env.site)) == 1
+
+    def test_network_install_on_a_single_site_is_unsupported(self, env, capsys):
+        env.site.routes[("GET", PLUGINS)] = []
+        env.site.routes[("POST", PLUGINS)] = httpx.Response(
+            400, json={"code": "rest_invalid_param", "message": "Invalid parameter(s): status",
+                       "data": {"params": {"status": "no"}}})
+        code, out = run(["plugins", "install", "--slug", "hello-dolly", "--activate",
+                         "--network", "--confirmed"], capsys)
+        assert code == 1 and out["reason"] == "unsupported_on_multisite"
+        assert "not a multisite network" in out["error"]
         assert len(writes(env.site)) == 1
 
     @pytest.mark.parametrize("argv", [
