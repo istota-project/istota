@@ -696,5 +696,75 @@
     "ref_range_high_f": 6.0,
     "aliases": ["Urate"],
     "description": "End product of purine metabolism. Elevated values are associated with gout, kidney stones, and metabolic syndrome; modulated by diet (purines, fructose) and kidney clearance."
+  },
+  {
+    "name": "Urine_Specific_Gravity",
+    "display_name": "Urine Specific Gravity",
+    "category": "Urinalysis",
+    "default_unit": "",
+    "ref_range_low": 1.005,
+    "ref_range_high": 1.03,
+    "aliases": ["Specific Gravity", "SG, Urine", "Urine SG"],
+    "description": "How concentrated the urine is compared with water. Low values follow heavy fluid intake or reflect reduced concentrating ability; high values usually mean dehydration, or glucose or protein in the urine."
+  },
+  {
+    "name": "Urine_pH",
+    "display_name": "Urine pH",
+    "category": "Urinalysis",
+    "default_unit": "",
+    "ref_range_low": 4.5,
+    "ref_range_high": 8.0,
+    "aliases": ["pH, Urine", "Urine pH Level"],
+    "description": "Acidity of the urine. It moves with diet and time of day; a persistently high or low value can point to a urinary infection, kidney stone risk, or an acid-base disorder."
+  },
+  {
+    "name": "Urine_Albumin",
+    "display_name": "Urine Albumin (microalbumin)",
+    "category": "Urinalysis",
+    "default_unit": "mg/L",
+    "ref_range_low": null,
+    "ref_range_high": 30,
+    "aliases": ["Microalbumin", "Microalbumin, Urine", "Albumin, Urine", "Urine Microalbumin"],
+    "description": "Small amounts of albumin leaking into the urine, an early sign of kidney stress from diabetes or high blood pressure. Read it with urine creatinine (the albumin/creatinine ratio), since a single value moves with how dilute the sample is."
+  },
+  {
+    "name": "Urine_ACR",
+    "display_name": "Albumin/Creatinine Ratio (urine)",
+    "category": "Urinalysis",
+    "default_unit": "mg/g",
+    "ref_range_low": null,
+    "ref_range_high": 30,
+    "aliases": ["Albumin/Creatinine Ratio", "Microalbumin/Creatinine Ratio", "UACR", "ACR", "Albumin Creatinine Ratio, Urine"],
+    "description": "Urine albumin corrected for how concentrated the sample is. 30-300 mg/g is moderately increased albuminuria and above 300 is severely increased; two of three samples over a few months are needed to call it persistent."
+  },
+  {
+    "name": "Urine_Creatinine",
+    "display_name": "Urine Creatinine",
+    "category": "Urinalysis",
+    "default_unit": "mg/dL",
+    "ref_range_low": 20,
+    "ref_range_high": 320,
+    "aliases": ["Creatinine, Urine", "Urine Creat", "Creatinine, Random Urine"],
+    "description": "Creatinine measured in a urine sample, used mainly to correct other urine results for dilution. On its own a random value varies widely and says little."
+  },
+  {
+    "name": "Urine_Protein",
+    "display_name": "Urine Protein",
+    "category": "Urinalysis",
+    "default_unit": "mg/dL",
+    "ref_range_low": null,
+    "ref_range_high": 15,
+    "aliases": ["Protein, Urine", "Urine Total Protein", "Protein, Random Urine"],
+    "description": "Total protein in a urine sample, measured as a number rather than a dipstick grade. Persistently raised values can reflect kidney disease; exercise, fever and dehydration raise it briefly."
+  },
+  {
+    "name": "Fecal_Calprotectin",
+    "display_name": "Fecal Calprotectin",
+    "category": "Stool",
+    "default_unit": "µg/g",
+    "ref_range_low": null,
+    "ref_range_high": 50,
+    "aliases": ["Calprotectin", "Calprotectin, Fecal", "Calprotectin, Stool"],
+    "description": "A protein released by white cells in the gut lining, measured in stool. Raised values point to intestinal inflammation, as in inflammatory bowel disease, and help tell it apart from irritable bowel syndrome."
   }
 ]
