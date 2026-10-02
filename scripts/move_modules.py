@@ -26,7 +26,9 @@ Stage 12 is the docs pass:
     usage          Stage 8   usage/ (likewise)
     webui          Stage 9   webui/
     misc           Stage 10  maintenance/, nextcloud/, mail/, browser/
-    adjacent       Stage 11  into location/ and briefings/, each gated
+    adjacent       Stage 11  location_logic into location/; geo, user_briefings
+                             and shared_blocks_store failed the import gate
+                             and stay at the root
 
 **Which stages a run touches.** `--only` names them, and a stage is moved only
 when it is named. With no flags the run takes every stage that has *already
@@ -196,9 +198,6 @@ MOVES: list[tuple[str, str, str]] = [
     ("misc", "istota.browser_admission", "istota.browser.admission"),
     ("misc", "istota.browser_owner", "istota.browser.owner"),
     ("adjacent", "istota.location_logic", "istota.location.logic"),
-    ("adjacent", "istota.geo", "istota.location.geo"),
-    ("adjacent", "istota.user_briefings", "istota.briefings.user_store"),
-    ("adjacent", "istota.shared_blocks_store", "istota.briefings.shared_blocks_store"),
 ]
 
 #: Old paths that are packages rather than modules; their whole tree moves.

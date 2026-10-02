@@ -358,7 +358,7 @@ class TestLearnFromADiscoveredCluster:
 
 class TestTheHelperItself:
     def test_a_ping_just_outside_the_radius_is_left_alone(self, tmp_path):
-        from istota.location_logic import assign_pings_to_place
+        from istota.location.logic import assign_pings_to_place
 
         loc_db = _seed(tmp_path, "helper")
         with location_db.connect(loc_db) as conn:
@@ -377,7 +377,7 @@ class TestTheHelperItself:
         The bounding box is centred on the new place, so a neighbour's
         assigned pings sit inside it whenever the two circles overlap.
         """
-        from istota.location_logic import assign_pings_to_place
+        from istota.location.logic import assign_pings_to_place
 
         loc_db = _seed(tmp_path, "steal")
         with location_db.connect(loc_db) as conn:

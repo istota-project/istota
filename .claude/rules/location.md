@@ -1,7 +1,7 @@
 ---
 paths:
   - "src/istota/location/**"
-  - "src/istota/location_logic.py"
+  - "src/istota/location/logic.py"
   - "src/istota/webui/webhook_receiver.py"
   - "src/istota/webui/garmin_routes.py"
 ---

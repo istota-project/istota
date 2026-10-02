@@ -426,7 +426,7 @@ class TestHistoryParity:
 
     def test_an_unknown_sort_direction_raises(self, tmp_path):
         """A typo must not answer with the other end of the day."""
-        from istota.location_logic import location_history
+        from istota.location.logic import location_history
 
         loc_db, _ = _seed(tmp_path, "skill")
         with pytest.raises(ValueError):
@@ -458,7 +458,7 @@ class TestSharedHelpers:
     """
 
     def test_a_date_object_names_the_same_day_as_its_iso_string(self, tmp_path):
-        from istota.location_logic import location_day_summary
+        from istota.location.logic import location_day_summary
 
         loc_db, _ = _seed(tmp_path, "skill")
         as_string = location_day_summary(str(loc_db), day=DAY, tz=TZ)
@@ -467,7 +467,7 @@ class TestSharedHelpers:
         assert as_date == as_string
 
     def test_a_tzinfo_object_reports_its_own_key(self, tmp_path):
-        from istota.location_logic import location_day_summary
+        from istota.location.logic import location_day_summary
 
         loc_db, _ = _seed(tmp_path, "skill")
         summary = location_day_summary(
@@ -483,7 +483,7 @@ class TestSharedHelpers:
         `timezone` field keeps saying what was asked for. Only `None` — nobody
         asked at all — reports the default as the answer.
         """
-        from istota.location_logic import resolve_timezone
+        from istota.location.logic import resolve_timezone
 
         zone, name = resolve_timezone("")
         assert name == ""

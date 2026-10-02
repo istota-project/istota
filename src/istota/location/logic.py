@@ -18,8 +18,8 @@ from zoneinfo import ZoneInfo
 
 from types import SimpleNamespace
 
-from .geo import MAX_STOP_EXTENSION_SECONDS, _parse_ts, haversine, resolve_place
-from .location import db as location_db
+from istota.geo import MAX_STOP_EXTENSION_SECONDS, _parse_ts, haversine, resolve_place
+from istota.location import db as location_db
 
 # The radius the day summary clusters a stop at, and so how far from a stop
 # a point can sit and still be read as being there.
@@ -640,7 +640,7 @@ def location_day_summary(
     through the loaded config. ``None`` means no reverse geocoding is
     available and an unnamed stop is reported as ``unknown``.
     """
-    from .geo import (
+    from istota.geo import (
         ACTIVITY_SOURCES,
         activity_segments,
         dedupe_near_duplicate_pings,
@@ -920,7 +920,7 @@ def _stops_around_activities(
     points) through the whole run, and those would otherwise hold the stop
     open across it.
     """
-    from .geo import cluster_pings, filter_transit_clusters
+    from istota.geo import cluster_pings, filter_transit_clusters
 
     spans = [(_parse_ts(s["first_ts"]), _parse_ts(s["last_ts"])) for s in segments]
     stretches: list[list[dict]] = [[] for _ in range(len(segments) + 1)]
@@ -984,7 +984,7 @@ def _reopen_after_activity(
     place or nothing after it says the user stayed, and the stretch with the
     pings the stop consumed removed.
     """
-    from .geo import _estimated_departure_timestamp
+    from istota.geo import _estimated_departure_timestamp
 
     place = _place_at(segment["last"]["lat"], segment["last"]["lon"], saved_places)
     if place is None or place.get("id") is None:

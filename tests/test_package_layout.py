@@ -73,7 +73,6 @@ ROOT_ALLOWLIST = frozenset({
     "geo",
     "heartbeat",
     "image_attachments",
-    "location_logic",
     "logging_setup",
     "module_loader",
     "modules",

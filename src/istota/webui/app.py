@@ -73,7 +73,7 @@ from istota.config import load_config
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
 from istota.nextcloud.ocs import OcsError, ocs_data
 from istota.usage.telemetry import SYSTEM_USER_ID
-from istota.location_logic import (
+from istota.location.logic import (
     _location_discover_places,
     _location_dismiss_cluster,
     _location_list_dismissed,
@@ -14038,7 +14038,7 @@ def _location_query_places(db_path: str) -> dict:
 
 def _location_create_place(db_path: str, data: dict) -> dict:
     from istota.location import db as location_db
-    from istota.location_logic import assign_pings_to_place
+    from istota.location.logic import assign_pings_to_place
 
     with location_db.connect(db_path) as conn:
         notes = (data.get("notes") or "").strip() or None
@@ -14071,7 +14071,7 @@ def _location_create_place(db_path: str, data: dict) -> dict:
 
 def _location_update_place(db_path: str, place_id: int, data: dict) -> dict | None:
     from istota.location import db as location_db
-    from istota.location_logic import assign_pings_to_place
+    from istota.location.logic import assign_pings_to_place
 
     with location_db.connect(db_path) as conn:
         place = location_db.get_place_by_id(conn, place_id)
