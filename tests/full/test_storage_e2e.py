@@ -452,3 +452,43 @@ print('MOVE', 'verified')
         assert nextcloud.read_file(f"{BOT_MOUNT_POINT}/Channels/{new}/CHANNEL.md").decode() == "durable notes"
         assert nextcloud.read_file(f"{BOT_MOUNT_POINT}/Channels/{new}/memories/2026-01-01.md").decode() == "dated notes"
         assert f"{BOT_MOUNT_POINT}/Channels/{old}" not in nextcloud.files(f"{BOT_MOUNT_POINT}/Channels")
+
+    def test_mint_day_dated_memory_merges_over_dav(self, stack):
+        """ISSUE-588: the alias and the minted room both wrote today's memory."""
+        old = _unique("legacy-room")
+        day = "memories/2026-10-01.md"
+        setup = "\n" + f"""
+from istota import db, room_relocate
+c.db_path = pathlib.Path('/tmp/{old}.db')
+c.users = {{'testuser': c.users['testuser']}}
+db.init_db(c.db_path)
+with db.get_db(c.db_path) as conn:
+    db.register_room(conn, {old!r}, 'testuser', origin='talk')
+assert room_relocate.migrate_database(c.db_path) == 0
+with db.get_db(c.db_path) as conn:
+    new = conn.execute('SELECT new_token FROM room_token_migration').fetchone()[0]
+for token, text in (({old!r}, 'before the mint\\n'), (new, 'after the mint\\n')):
+    path = c.workspace_path / 'Channels' / token / {day!r}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+print('NEW', new)
+"""
+        new = _tagged(_run(stack, setup), "NEW").strip()
+        sweep = "\n" + f"""
+from unittest.mock import patch
+from istota import room_relocate
+c.db_path = pathlib.Path('/tmp/{old}.db')
+c.users = {{'testuser': c.users['testuser']}}
+with patch('istota.room_mount_reconcile.os.rename', side_effect=AssertionError('FUSE rename')):
+    assert room_relocate.reconcile_mount(c) == 0
+    assert room_relocate.reconcile_mount(c) == 0
+print('SWEEP', 'done')
+"""
+        assert _tagged(_run(stack, sweep), "SWEEP").strip() == "done"
+        nextcloud = stack.service("nextcloud")
+        merged = nextcloud.read_file(f"{BOT_MOUNT_POINT}/Channels/{new}/{day}").decode()
+        assert merged == "before the mint\n\nafter the mint\n"
+        # The merge leaves the emptied collection, so list inside it.
+        assert f"{BOT_MOUNT_POINT}/Channels/{old}/{day}" not in nextcloud.files(
+            f"{BOT_MOUNT_POINT}/Channels/{old}/memories"
+        )
