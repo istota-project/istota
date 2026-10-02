@@ -284,9 +284,22 @@
   const toolCount = $derived(message.segments.filter((s) => s.kind === 'tool').length);
   // Index of the last activity group, so only the trailing chip pulses while
   // the message is still streaming.
+  // A chip above an answered question is finished work, so the search stops at
+  // the last gate (ISSUE-592).
   const lastActivityIdx = $derived.by(() => {
-    for (let i = groups.length - 1; i >= 0; i--) if (groups[i].kind === 'activity') return i;
+    for (let i = groups.length - 1; i >= 0; i--) {
+      if (groups[i].kind === 'activity') return i;
+      if (groups[i].kind === 'gate') return -1;
+    }
     return -1;
+  });
+  // What the current run has produced: everything after the last question. A
+  // confirmed re-run starts with nothing of its own, so the work-phase cue
+  // shows until it does.
+  const currentRunGroups = $derived.by(() => {
+    let i = groups.length - 1;
+    while (i >= 0 && groups[i].kind !== 'gate') i--;
+    return groups.slice(i + 1);
   });
 
   // Subtle per-message metadata, revealed on hover (bottom-right).
@@ -988,6 +1001,20 @@
             <div class="markdown banner warn run-notice" role="status">
               {@html renderMarkdown(g.text, mentions)}
             </div>
+          {:else if g.kind === 'gate'}
+            <!-- The question the turn parked on (ISSUE-592). It stays where it
+					     was asked, with how it was answered under it, so the work
+					     streamed after an approval reads as a continuation. -->
+            <div class="gate">
+              <div class="body markdown">
+                {@html renderMarkdown(g.text, mentions)}
+              </div>
+              {#if g.outcome}
+                <div class="gate-outcome caption">
+                  {g.outcome === 'approved' ? 'Approved' : 'Declined'}
+                </div>
+              {/if}
+            </div>
           {:else}
             <div class="body markdown">
               {@html renderMarkdown(g.text, mentions)}
@@ -995,7 +1022,7 @@
           {/if}
         {/each}
 
-        {#if message.streaming && groups.every((g) => g.kind === 'notice')}
+        {#if message.streaming && currentRunGroups.every((g) => g.kind === 'notice')}
           <!-- Work-phase cue: the ack verb + pulsing dot, shown while the
 					     model reasons / before the first tool or answer text.
 					     A `notice` group does NOT count as content here (ISSUE-278):
@@ -1488,6 +1515,9 @@
 	   re-declare them); only the transcript-specific parts are here — the body
 	   width it shares with prose, the leading rule, and a smaller type size so
 	   the aside doesn't compete with the answer for prominence. */
+  .gate-outcome {
+    margin-top: var(--space-1);
+  }
   .run-notice {
     max-width: var(--chat-body-max);
     margin: var(--space-2) 0;

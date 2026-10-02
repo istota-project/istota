@@ -494,8 +494,90 @@ class TestApprovalEventLog:
 
             kinds = [e["kind"] for e in db.get_task_events(conn, task_id)]
             prompt = db.get_task(conn, task_id).confirmation_prompt
-        assert kinds == ["task_started", "tool_start", "tool_end"]
+        # The question stays in the log, relabelled so a replay renders it
+        # answered rather than re-arming the card (ISSUE-592).
+        assert kinds == ["task_started", "tool_start", "tool_end", "confirmed"]
         assert prompt == "May I?"
+
+
+class TestTraceWithGate:
+    """`trace_with_gate` keeps the work before each question (ISSUE-592)."""
+
+    def _t(self, *entries):
+        import json
+        return json.dumps(list(entries))
+
+    def test_a_park_ends_the_trace_on_its_question(self):
+        import json
+        from istota import confirmations
+        trace = self._t({"type": "tool", "text": "Listed"}, {"type": "text", "text": "May I?"})
+        got = confirmations.trace_with_gate(None, trace, prompt="May I?")
+        assert json.loads(got) == [
+            {"type": "tool", "text": "Listed"}, {"type": "gate", "text": "May I?"},
+        ]
+
+    def test_a_park_ending_on_a_tool_appends_the_question(self):
+        import json
+        from istota import confirmations
+        got = confirmations.trace_with_gate(
+            None, self._t({"type": "tool", "text": "Listed"}), prompt="May I?",
+        )
+        assert json.loads(got)[-1] == {"type": "gate", "text": "May I?"}
+
+    def test_the_rerun_follows_the_parked_work(self):
+        import json
+        from istota import confirmations
+        parked = self._t({"type": "tool", "text": "Listed"}, {"type": "gate", "text": "May I?"})
+        rerun = self._t({"type": "text", "text": "Done."})
+        assert json.loads(confirmations.trace_with_gate(parked, rerun)) == [
+            {"type": "tool", "text": "Listed"},
+            {"type": "gate", "text": "May I?", "outcome": "approved"},
+            {"type": "text", "text": "Done."},
+        ]
+
+    def test_a_rerun_stopped_before_recording_anything_still_reads_approved(self):
+        import json
+        from istota import confirmations
+        parked = self._t({"type": "gate", "text": "May I?"})
+        assert json.loads(confirmations.trace_with_gate(parked, None)) == [
+            {"type": "gate", "text": "May I?", "outcome": "approved"},
+        ]
+
+    def test_a_retried_rerun_does_not_repeat_itself(self):
+        """The stored trace past the last gate is a failed attempt of this run."""
+        import json
+        from istota import confirmations
+        failed = self._t(
+            {"type": "gate", "text": "May I?"}, {"type": "tool", "text": "Attempt 1"},
+        )
+        retry = self._t({"type": "tool", "text": "Attempt 2"})
+        assert json.loads(confirmations.trace_with_gate(failed, retry)) == [
+            {"type": "gate", "text": "May I?", "outcome": "approved"},
+            {"type": "tool", "text": "Attempt 2"},
+        ]
+
+    def test_a_second_park_keeps_the_first_once(self):
+        """A confirmed re-run that asks again: the first pass and its question
+        appear once, then the second pass and its question."""
+        import json
+        from istota import confirmations
+        parked = confirmations.trace_with_gate(
+            None, self._t({"type": "tool", "text": "a"}, {"type": "text", "text": "Q1"}),
+            prompt="Q1",
+        )
+        second = self._t({"type": "tool", "text": "b"}, {"type": "text", "text": "Q2"})
+        assert json.loads(confirmations.trace_with_gate(parked, second, prompt="Q2")) == [
+            {"type": "tool", "text": "a"},
+            {"type": "gate", "text": "Q1", "outcome": "approved"},
+            {"type": "tool", "text": "b"}, {"type": "gate", "text": "Q2"},
+        ]
+
+    def test_an_ungated_task_is_untouched(self):
+        from istota import confirmations
+        prior = self._t({"type": "tool", "text": "Earlier"})
+        trace = self._t({"type": "text", "text": "Answer"})
+        assert confirmations.trace_with_gate(prior, trace) == trace
+        assert confirmations.trace_with_gate(None, None) is None
 
 
 # ---------------------------------------------------------------------------

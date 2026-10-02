@@ -2888,6 +2888,7 @@ def process_one_task(
     # Ping liveness for the whole execution so stuck-task reclaim can tell a
     # slow-but-alive worker from a dead one (ISSUE-112). Covers the skill,
     # command, and brain paths; stops on exit even if execution raises.
+    attempt_trace: str | None = None
     with _task_heartbeat(config, task_id):
         if task.skill:
             success, result = _execute_skill_task(task, config)
@@ -2980,6 +2981,14 @@ def process_one_task(
             # Execute the task (outside the db context to avoid long locks)
             success, result, actions_taken, execution_trace = execute_task(
                 task, config, user_resources, dry_run=dry_run, event_writer=event_writer,
+            )
+            # A confirmed re-run keeps the parked attempt's work ahead of its
+            # own, so the turn reads the same reloaded as it did live (ISSUE-592).
+            # The park takes the attempt's own trace: merging the merged one
+            # again would put the earlier work in twice.
+            attempt_trace = execution_trace
+            execution_trace = confirmations.trace_with_gate(
+                task.execution_trace, attempt_trace,
             )
 
     # Duplicate-execution guard (ISSUE-112 follow-up). A slow-but-alive worker
@@ -3327,7 +3336,12 @@ def process_one_task(
         if success:
             if is_confirmation_request:
                 # Set task to pending confirmation instead of completing
-                db.set_task_confirmation(conn, task_id, result)
+                db.set_task_confirmation(
+                    conn, task_id, result, actions_taken=actions_taken,
+                    execution_trace=confirmations.trace_with_gate(
+                        task.execution_trace, attempt_trace, prompt=result,
+                    ),
+                )
                 db.log_task(conn, task_id, "info", "Task awaiting user confirmation")
                 # Talk confirmations post the prompt to the room; web/stream
                 # confirmations surface it via the `confirmation` task event
@@ -3998,12 +4012,16 @@ def process_one_task(
                    if stored_assistant_msg_id is not None else {}),
             })
             event_writer.finish()
-            # Prune the ephemeral text_delta rows now the canonical result/
-            # confirmation/error has landed (web chat streaming). The deltas were
-            # a cosmetic live preview; steady state retains zero. Web is the only
-            # stream surface that flows through process_one_task (repl runs
-            # inline), so plan_web is the gate — push tasks never wrote any.
-            if plan_web:
+            # Prune the ephemeral text_delta rows now the canonical result/error
+            # has landed (web chat streaming). The deltas were a cosmetic live
+            # preview; steady state retains zero. Web is the only stream surface
+            # that flows through process_one_task (repl runs inline), so plan_web
+            # is the gate — push tasks never wrote any. A park keeps them: the
+            # confirmed re-run replays from seq 0, and the deltas are the only
+            # record of the text above the question (ISSUE-592). The re-run's
+            # own terminal prune takes them; a question that is declined or
+            # expires leaves them to task retention.
+            if plan_web and not is_confirmation_request:
                 with db.get_db(config.db_path) as _prune_conn:
                     db.delete_task_events_by_kind(_prune_conn, task_id, "text_delta")
                     db.delete_task_events_by_kind(_prune_conn, task_id, "thinking")

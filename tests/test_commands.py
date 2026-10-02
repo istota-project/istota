@@ -2717,6 +2717,21 @@ class TestCmdMore:
         assert "Fixed it." in result
 
     @pytest.mark.asyncio
+    async def test_shows_the_question_a_confirmed_task_asked(self, make_config, db_path):
+        config = make_config()
+        trace = json.dumps([
+            {"type": "tool", "text": "List files"},
+            {"type": "gate", "text": "May I delete them?", "outcome": "approved"},
+            {"type": "tool", "text": "Delete files"},
+        ])
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Clean up", user_id="alice")
+            db.update_task_status(conn, task_id, "completed", result="Done", execution_trace=trace)
+        with db.get_db(db_path) as conn:
+            result = await cmd_more(_ctx(config, conn, "alice", "room1", str(task_id)))
+        assert "May I delete them? (approved)" in result
+
+    @pytest.mark.asyncio
     async def test_accepts_hash_prefix(self, make_config, db_path):
         config = make_config()
         trace = json.dumps([{"type": "tool", "text": "Read file"}])

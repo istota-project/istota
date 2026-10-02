@@ -168,6 +168,43 @@ class TestTraceSegments:
             {"kind": "tool", "text": ""},
         ]
 
+    def test_a_confirmed_turn_keeps_its_question_above_the_answer(self):
+        """ISSUE-592: the gate renders, answered, between the two passes, and the
+        canonical answer replaces the re-run's text rather than the question."""
+        import json
+        trace = json.dumps([
+            {"type": "text", "text": "Looked."},
+            {"type": "tool", "text": "listed"},
+            {"type": "gate", "text": "May I delete it?"},
+            {"type": "tool", "text": "deleted"},
+            {"type": "text", "text": "draft"},
+        ])
+        assert self._fn()(trace, None, "Done.") == [
+            {"kind": "text", "text": "Looked."},
+            {"kind": "tool", "text": "listed"},
+            {"kind": "gate", "text": "May I delete it?", "outcome": "approved"},
+            {"kind": "tool", "text": "deleted"},
+            {"kind": "text", "text": "Done."},
+        ]
+
+    def test_the_last_gate_is_open_while_parked_and_declined_when_cancelled(self):
+        import json
+        trace = json.dumps([
+            {"type": "tool", "text": "listed"},
+            {"type": "gate", "text": "May I?"},
+        ])
+        parked = self._fn()(trace, None, "", status="pending_confirmation")
+        assert parked[-1] == {"kind": "gate", "text": "May I?"}
+        declined = self._fn()(trace, None, "", status="cancelled")
+        assert declined[-1] == {"kind": "gate", "text": "May I?", "outcome": "declined"}
+
+    def test_an_approved_run_stopped_early_stays_approved(self):
+        """The re-run's stamp outranks the cancelled status around it."""
+        import json
+        trace = json.dumps([{"type": "gate", "text": "May I?", "outcome": "approved"}])
+        segs = self._fn()(trace, None, "", status="cancelled")
+        assert segs == [{"kind": "gate", "text": "May I?", "outcome": "approved"}]
+
 
 # ---------------------------------------------------------------------------
 # DB layer: rooms + rate-limit counter
@@ -1897,19 +1934,19 @@ class TestChatTaskActions:
         with db.get_db(mod._config.db_path) as c:
             assert db.get_task(c, tid).status == "pending"
             kinds = [e["kind"] for e in db.get_task_events(c, tid)]
-        assert kinds == ["task_started", "tool_start", "tool_end"]
+        assert kinds == ["task_started", "tool_start", "tool_end", "confirmed"]
 
     async def test_confirm_drops_the_frames_that_would_end_a_replay(
         self, chat_client,
     ):
-        """The parked attempt's `confirmation` and `done` must not survive.
+        """The parked attempt's `done` must not survive, nor a live question.
 
-        A client streams a confirmed task from seq 0 — the confirm path passes
-        no `since_seq`, and neither does a reload that picks the task back up —
-        so a surviving `done` closes the stream in `chat_task_stream` before any
-        of the re-run reaches the client, and a surviving `confirmation` puts
-        the answered card back with nothing to clear it. The question itself
-        stays on `tasks.confirmation_prompt`, so nothing is lost by dropping it.
+        A client streams a confirmed task from seq 0 after a reload — the
+        confirm path then passes no `since_seq`, and neither does a reload that
+        picks the task back up — so a surviving `done` closes the stream in
+        `chat_task_stream` before any of the re-run reaches the client, and a
+        surviving `confirmation` puts the answered card back with nothing to
+        clear it. The question replays as `confirmed` instead (ISSUE-592).
         """
         cookies = await _login(chat_client, "alice")
         tid = await self._seed_task("alice", status="pending_confirmation")
@@ -1924,7 +1961,7 @@ class TestChatTaskActions:
         # own loader rather than a hand-built query.
         replayed = mod._load_task_events(tid, 0)
         assert [e["kind"] for e in replayed] == [
-            "task_started", "tool_start", "tool_end",
+            "task_started", "tool_start", "tool_end", "confirmed",
         ]
 
     async def test_confirmed_rerun_appends_above_kept_events(self, chat_client):
@@ -1947,13 +1984,14 @@ class TestChatTaskActions:
         )
         assert resp.status_code == 200
         # What the confirmed re-run does: a fresh writer over the same task.
-        # `_resume_seq` reads MAX(seq), so the pruned `confirmation`/`done` at 4
-        # and 5 free those numbers and the re-run takes 4 — which is only safe
-        # because they really are gone from the unique index.
+        # `_resume_seq` reads MAX(seq). `confirmed` keeps 4 and the pruned
+        # `done` frees 5, so the re-run takes 5 — only safe because `done` is
+        # really gone from the unique index. A client that saw the question at
+        # 4 resumes past it without missing the re-run's first event.
         writer = EventWriter(tid, mod._config.db_path)
-        assert writer.emit("task_started").seq == 4
+        assert writer.emit("task_started").seq == 5
         with db.get_db(mod._config.db_path) as c:
-            assert [e["seq"] for e in db.get_task_events(c, tid)] == [1, 2, 3, 4]
+            assert [e["seq"] for e in db.get_task_events(c, tid)] == [1, 2, 3, 4, 5]
 
     async def test_cancel_pending_confirmation_cancels(self, chat_client):
         cookies = await _login(chat_client, "alice")

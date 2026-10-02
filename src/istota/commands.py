@@ -2796,6 +2796,10 @@ async def cmd_more(ctx: CommandContext):
             text = entry["text"].strip()
             if text:
                 lines.append(f"> {text}")
+        elif entry.get("type") == "gate":
+            # The question a parked attempt asked (ISSUE-592).
+            answered = " (approved)" if entry.get("outcome") == "approved" else ""
+            lines.append(f"❓ {(entry.get('text') or '').strip()}{answered}")
 
     # Add result summary
     if task.result:
