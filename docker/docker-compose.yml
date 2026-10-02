@@ -420,6 +420,9 @@ services:
       # the browser does run on the host's loopback.)
       ISTOTA_BROWSER_API_URL: ${ISTOTA_BROWSER_API_URL:-http://istota-browser:9223}
       ISTOTA_BROWSER_VNC_URL: ${ISTOTA_BROWSER_VNC_URL:-}
+      # WordPress skill (optional; empty leaves the loader's defaults)
+      ISTOTA_WORDPRESS_PRIVATE_HOSTS: ${ISTOTA_WORDPRESS_PRIVATE_HOSTS:-}
+      ISTOTA_WORDPRESS_MAX_UPLOAD_MB: ${ISTOTA_WORDPRESS_MAX_UPLOAD_MB:-}
       # Location tracking (optional). LOCATION_INGEST_TOKEN auto-generates
       # if blank; the entrypoint persists the chosen token to the API
       # provisioning flag so it survives restarts.

@@ -673,6 +673,10 @@ autoclass_lookup = {{ (istota_money_autoclass_lookup | default(true)) | lower }}
 {{ _shared_blocks_toml }}
 {% endif %}
 
+[wordpress]
+private_hosts = {{ istota_wordpress_private_hosts | to_json }}
+max_upload_mb = {{ istota_wordpress_max_upload_mb | int }}
+
 {% if istota_browser_enabled %}
 
 [browser]

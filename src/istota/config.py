@@ -246,6 +246,15 @@ class WordPressConfig:
     max_upload_mb: int = 25
 
 
+# What a `[wordpress] private_hosts` entry may look like: a host name (with an
+# optional trailing dot) or an IP literal. The skill matches entries by exact
+# name, so a URL, a port or a wildcard matches nothing. The Ansible role asserts
+# with this same string; tests/test_config_wordpress.py holds the two equal.
+WORDPRESS_PRIVATE_HOST_PATTERN = (
+    r"^([A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.?|[0-9A-Fa-f.]*:[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*)$"
+)
+
+
 @dataclass
 class DevboxConfig:
     """Per-user devbox container — persistent Linux workbench.
@@ -4541,6 +4550,7 @@ def load_config(config_path: Path | None = None) -> Config:
 
     _validate_brain_fallback(config)
     _validate_room_selectable(config)
+    _validate_wordpress_private_hosts(config)
     _validate_claude_code_brain(config)
     _validate_configured_model_references(config)
     _validate_advisor_model(config)
@@ -5366,6 +5376,26 @@ def _validate_brain_fallback(config: "Config") -> None:
             "failure or usage limit fails the task rather than rerouting. Set "
             'fallback = "claude_code" to keep the behaviour it had before '
             "ISSUE-362.",
+        )
+
+
+def _validate_wordpress_private_hosts(config: "Config") -> None:
+    """Warn about a ``[wordpress] private_hosts`` entry that can match no host.
+
+    Left on the field rather than dropped: it already grants nothing, and the
+    admin config view should show what the operator wrote.
+    """
+    malformed = [
+        entry for entry in (config.wordpress.private_hosts or [])
+        if not re.match(WORDPRESS_PRIVATE_HOST_PATTERN, str(entry).strip())
+    ]
+    if malformed:
+        logging.getLogger("istota.config").warning(
+            "[wordpress] private_hosts entry %s is not a bare host name or IP "
+            "address; entries are matched by exact name, so it lifts the "
+            "private-address refusal for no site (write the host alone, with "
+            "no scheme, port, path or wildcard)",
+            ", ".join(repr(entry) for entry in malformed),
         )
 
 

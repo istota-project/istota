@@ -2379,3 +2379,21 @@ class TestTheTomlEscapeFilterItself:
         `str()` is already what Jinja does to an interpolated non-string, so
         no rendered value changes."""
         assert self._escape(raw) == expected
+
+
+class TestTheWordPressSection:
+    """ISSUE-591: the role had no way to set ``[wordpress] private_hosts``, so a
+    site whose API host resolves to an internal address could not be reached
+    from a role-built host, and a hand edit was overwritten by the next run."""
+
+    def test_the_default_render_carries_the_loader_defaults(self, parsed):
+        assert parsed["wordpress"] == {"private_hosts": [], "max_upload_mb": 25}
+
+    def test_the_values_reach_the_loader(self):
+        text = render(
+            istota_wordpress_private_hosts=["wp.internal.example.com", "wp.example.org"],
+            istota_wordpress_max_upload_mb=40,
+        )
+        config = load_config_from(text)
+        assert config.wordpress.private_hosts == ["wp.internal.example.com", "wp.example.org"]
+        assert config.wordpress.max_upload_mb == 40
