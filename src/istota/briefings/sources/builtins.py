@@ -79,8 +79,21 @@ def _workspace_file(ctx: SourceContext, override: str | None) -> str | None:
 
 
 def _read_workspace_text(ctx: SourceContext, path: str) -> str | None:
-    """Read a workspace file, returning None on any error / missing file."""
+    """Read a workspace file, returning None on any error / missing file.
+
+    The daemon reads this path on the user's behalf, so on a local workspace
+    it goes through ``storage.read_owner_text`` (ISSUE-596): no symlink at any
+    component, a regular file only, capped. ``_resolve_user_path`` has already
+    put it under ``Users/<user_id>/``. The rclone fallback reads a remote and
+    has no local filesystem to escape into.
+    """
     try:
+        if ctx.app_config.has_workspace:
+            from istota.storage import read_owner_text
+            text, _reason, _definitive = read_owner_text(
+                ctx.app_config, ctx.user_id, path,
+            )
+            return text
         from istota.skills.files import read_text
         return read_text(ctx.app_config, path)
     except Exception:  # noqa: BLE001

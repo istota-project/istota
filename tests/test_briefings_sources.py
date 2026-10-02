@@ -794,6 +794,42 @@ class TestResolveUserPath:
         )
 
 
+class TestBuiltinPathScope:
+    """The daemon reads a source's path, so no symlink and no FIFO (ISSUE-596)."""
+
+    SECRET = "- [ ] SECRET-NOT-ALICES"
+
+    def test_a_symlinked_file_is_not_followed(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        bob = tmp_path / "mount/Users/bob/notes.md"
+        bob.parent.mkdir(parents=True)
+        bob.write_text(self.SECRET)
+        _write_user_file(ctx, "placeholder", "")
+        (tmp_path / "mount/Users/alice/n.md").symlink_to("../bob/notes.md")
+        for kind in ("todos", "notes", "reminders"):
+            gs = resolve_source(kind, {"path": "n.md"}, ctx)
+            assert "SECRET" not in (gs.text or "") + repr(gs.items), kind
+
+    def test_a_symlinked_directory_is_not_followed(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "TODO.md").write_text(self.SECRET)
+        _write_user_file(ctx, "placeholder", "")
+        (tmp_path / "mount/Users/alice/dir").symlink_to(elsewhere)
+        gs = resolve_source("todos", {"path": "dir/TODO.md"}, ctx)
+        assert gs.ok is False
+        assert "SECRET" not in repr(gs.items)
+
+    def test_a_fifo_does_not_block(self, tmp_path):
+        import os
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "placeholder", "")
+        os.mkfifo(tmp_path / "mount/Users/alice/TODO.md")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert gs.ok is False
+
+
 class TestBuiltinTodos:
     def test_no_path_returns_not_configured(self, tmp_path):
         gs = resolve_source("todos", {}, _ctx(tmp_path))

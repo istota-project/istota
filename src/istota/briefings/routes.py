@@ -712,7 +712,17 @@ def check_path(
     cfg = _app_config(request)
     exists = False
     try:
-        if cfg is not None:
+        if cfg is not None and cfg.has_workspace:
+            # The resolver's own read (ISSUE-596), so this says yes exactly
+            # when the briefing will read the file, and a symlink planted in
+            # the user's tree cannot answer whether its target exists.
+            from istota.storage import read_owner_text
+
+            text, _reason, _definitive = read_owner_text(
+                cfg, user["username"], resolved,
+            )
+            exists = text is not None
+        elif cfg is not None:
             exists = path_exists(cfg, resolved)
     except Exception:  # noqa: BLE001
         exists = False

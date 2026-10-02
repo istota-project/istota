@@ -41,7 +41,7 @@ CRON.md is the source of truth. `cron_loader.py` reads it and syncs job definiti
 Deleting a job from the file deletes it. That includes the last one: a file whose TOML block is empty means you have no jobs, and the sync removes the rows to match. Two shapes are not that, and neither deletes anything:
 
 - A file with no TOML block, or one holding only comments, has had no job list written into it. That is what a freshly seeded CRON.md looks like, so if the table holds jobs they are written into the file instead — which is how a workspace whose CRON.md went missing fills back in. Emptying the block by hand but leaving a comment in it lands here too; delete the comment as well if you meant the jobs to go.
-- A file that lists jobs the loader cannot use — a typo in a required key, a `prompt_file` it cannot read — is left alone with a warning in the log, and so are the existing rows. Fix the file and the next tick picks it up.
+- A file that lists jobs the loader cannot use — a typo in a required key, a `prompt_file` that is missing or unreadable — is left alone with a warning in the log, and so are the existing rows. Fix the file and the next tick picks it up. A `prompt_file` the path rule refuses (outside your own folder, `..`, a symlink, not a regular file) is not held this way: that job's row is removed, because the rule will refuse it on every tick.
 
 Rewriting CRON.md replaces the first TOML block and nothing else. Notes you keep above or below the fence, a second fenced block, the header you rewrote — all of it survives `!cron disable`, the removal of a `once` job and the rest. What does not survive is anything inside the block that is not a job the loader accepted: comments there, and a job entry it skipped, are both re-rendered away. The one case that still rewrites the whole file is the seeded-template restore above, which has no job list to splice into.
 
@@ -51,7 +51,7 @@ There is no `type` field. The loader infers the kind from which of `prompt`, `pr
 
 **Prompt jobs** (default): Run through the brain like any other task. The prompt is sent to the executor with full skill and context support.
 
-**Prompt file jobs**: Like prompt jobs, but the prompt is loaded from an external file. Paths are relative to the workspace root. `prompt_file` cannot be combined with `prompt` or `command`.
+**Prompt file jobs**: Like prompt jobs, but the prompt is loaded from an external file. The path is written from the workspace root and must name a file in the job owner's own folder, `/Users/<owner>/...`. The scheduler reads it outside any sandbox, so another user's folder, a room's `Channels/` folder, a `..` component and a symlink at any level are all refused, and the job is dropped from the schedule until the path is fixed. `prompt_file` cannot be combined with `prompt` or `command`.
 
 A multiline `prompt` becomes one of these the first time anything rewrites the file — `!cron enable` / `!cron disable`, the removal of a `once` job, or a schedule migration (ISSUE-330). The text is written to `{bot_dir}/scripts/prompts/<job-name>.txt` and the job is left pointing at it. This is not tidiness: the rewriter used to re-serialize a multiline prompt as a TOML block, where a single stray backslash made *every* job in the file fail to load. A `prompt_file` you set yourself is never touched, and an existing file is only reused when its contents already match.
 
@@ -66,7 +66,7 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `name` | yes | Job identifier |
 | `cron` | yes | Cron expression (evaluated in user's timezone) |
 | `prompt` | for prompt jobs | The prompt to send to Claude |
-| `prompt_file` | for prompt_file jobs | Path to prompt file (relative to workspace root) |
+| `prompt_file` | for prompt_file jobs | Path to prompt file, `/Users/<owner>/...` |
 | `command` | for command jobs | Shell command to execute |
 | `room` | no | The room the job runs in, as its canonical token. A room made in web chat has a `web-…` token, not a Talk one — see "Delivering into a room" below |
 | `target` | no | `talk`, `email`, `ntfy`, `both`, `all`, or a `surface:channel` / comma-list descriptor. See "Delivering into a room" below |

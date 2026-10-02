@@ -276,6 +276,15 @@ class TestPathPicker:
         ).json()
         assert body["ok"] is False
 
+    def test_check_does_not_follow_a_symlink(self, path_client, tmp_path):
+        """ISSUE-596: no existence oracle through a link, and no false yes."""
+        (tmp_path / "outside.md").write_text("x")
+        (tmp_path / "mount/Users/alice/link.md").symlink_to(tmp_path / "outside.md")
+        body = path_client.get(
+            "/istota/api/briefings/path-check", params={"path": "link.md"},
+        ).json()
+        assert body["ok"] is False
+
     def test_suggest_lists_text_files(self, path_client):
         body = path_client.get("/istota/api/briefings/path-suggest").json()
         paths = body["paths"]

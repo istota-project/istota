@@ -7871,6 +7871,20 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                         "read; leaving the %d existing scheduled job(s) alone "
                         "until the file is fixed", user_id, len(user_db_jobs),
                     )
+                    # Except a job whose prompt_file the path rule refused:
+                    # that refusal does not clear on its own, and a row
+                    # written before ISSUE-596 can hold another user's text.
+                    for stale in user_db_jobs:
+                        if stale.name in doc.refused_names:
+                            conn.execute(
+                                "DELETE FROM scheduled_jobs WHERE id = ?",
+                                (stale.id,),
+                            )
+                            logger.info(
+                                "Removed scheduled job '%s' for %s: its "
+                                "prompt_file is refused", stale.name, user_id,
+                            )
+                    conn.commit()
                 else:
                     sync_cron_jobs_to_db(
                         conn, user_id, doc.jobs,

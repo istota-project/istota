@@ -664,6 +664,33 @@ def resolve_under_repos(path: str | Path) -> tuple[Path | None, str | None]:
     return resolved, None
 
 
+def owner_path_parts(path: str, user_id: str) -> list[str] | None:
+    """The components of a mount-relative path below ``Users/{user_id}``, or None.
+
+    For a path written into a user's own config file (CRON.md ``prompt_file``,
+    HEARTBEAT.md ``file-watch``) that the daemon then opens host-side, with no
+    task env to derive roots from (ISSUE-596). The form is the one those files
+    have always used, ``/Users/<owner>/...`` with the leading slash optional,
+    and the rule is lexical: the second component must be the owner's exact
+    id, and no component may be empty, ``.``, ``..`` or carry a NUL. A ``..``
+    that would land back inside the tree is refused too, since accepting it
+    means resolving it. What this returns is meant for a walk that refuses a
+    symlink at every component (``skills._loader.open_overlay_dir``), which is
+    the half a lexical rule cannot cover.
+
+    At least one component must remain, so ``/Users/<owner>`` alone is None.
+    """
+    if not isinstance(path, str) or not isinstance(user_id, str) or not user_id:
+        return None
+    parts = path.lstrip("/").split("/")
+    if len(parts) < 3 or parts[0] != "Users" or parts[1] != user_id:
+        return None
+    rest = parts[2:]
+    if any(not p or p in (".", "..") or "\0" in p for p in rest):
+        return None
+    return rest
+
+
 def path_under_roots(resolved: Path, roots: Sequence[Path]) -> bool:
     """Is `resolved` at or under one of `roots`?
 

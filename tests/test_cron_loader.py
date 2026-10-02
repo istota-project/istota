@@ -3752,3 +3752,204 @@ class TestTheRenderedTomlRoundTrips:
         assert len(reloaded) == 1, "the rewrite truncated the fence"
         assert reloaded[0].prompt == prompt
         assert reloaded[0].enabled is False
+
+
+
+# ---------------------------------------------------------------------------
+# TestPromptFileScope (ISSUE-596)
+# ---------------------------------------------------------------------------
+
+
+_SECRET = "SECRET-NOT-ALICES"
+
+
+def _one_job_cron(prompt_file):
+    return (
+        "```toml\n[[jobs]]\n"
+        'name = "j"\ncron = "0 9 * * *"\n'
+        f'prompt_file = "{prompt_file}"\n'
+        "```\n"
+    )
+
+
+class TestPromptFileScope:
+    """``prompt_file`` is read by the unsandboxed scheduler, so it is scoped.
+
+    Only a regular file inside the job owner's own ``{mount}/Users/{user_id}``
+    tree, reached without a symlink at any component, may become a prompt.
+    """
+
+    def _load(self, config, mount_path, prompt_file):
+        _write_cron_md(mount_path, "alice", _one_job_cron(prompt_file))
+        return load_cron_document(config, "alice")
+
+    def _assert_refused(self, doc):
+        assert doc is not None
+        assert doc.jobs == []
+
+    def test_another_users_file_is_refused(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        bob = mount_path / "Users/bob/istota/config/USER.md"
+        bob.parent.mkdir(parents=True)
+        bob.write_text(_SECRET)
+        self._assert_refused(
+            self._load(config, mount_path, "/Users/bob/istota/config/USER.md"))
+
+    def test_dotdot_out_of_the_mount_is_refused(
+        self, tmp_path, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        (tmp_path / "config.toml").write_text(_SECRET)
+        self._assert_refused(
+            self._load(config, mount_path, "/Users/alice/../../config.toml"))
+        self._assert_refused(self._load(config, mount_path, "../config.toml"))
+
+    def test_dotdot_into_another_user_is_refused(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        bob = mount_path / "Users/bob/notes.txt"
+        bob.parent.mkdir(parents=True)
+        bob.write_text(_SECRET)
+        self._assert_refused(
+            self._load(config, mount_path, "/Users/alice/../bob/notes.txt"))
+
+    def test_a_symlinked_leaf_is_refused(
+        self, tmp_path, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        outside = tmp_path / "secret.txt"
+        outside.write_text(_SECRET)
+        link = mount_path / "Users/alice/prompts/p.txt"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(outside)
+        self._assert_refused(
+            self._load(config, mount_path, "/Users/alice/prompts/p.txt"))
+
+    def test_a_symlinked_directory_is_refused(
+        self, tmp_path, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "p.txt").write_text(_SECRET)
+        (mount_path / "Users/alice").mkdir(parents=True)
+        (mount_path / "Users/alice/prompts").symlink_to(elsewhere)
+        self._assert_refused(
+            self._load(config, mount_path, "/Users/alice/prompts/p.txt"))
+
+    def test_a_channel_file_is_refused(self, mount_path, make_config_with_mount):
+        """A shared room's directory is written by everyone in it."""
+        config = make_config_with_mount()
+        chan = mount_path / "Channels/room1/CHANNEL.md"
+        chan.parent.mkdir(parents=True)
+        chan.write_text(_SECRET)
+        self._assert_refused(
+            self._load(config, mount_path, "/Channels/room1/CHANNEL.md"))
+
+    def test_a_fifo_is_refused_without_blocking(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        fifo = mount_path / "Users/alice/p.fifo"
+        fifo.parent.mkdir(parents=True)
+        os.mkfifo(fifo)
+        self._assert_refused(self._load(config, mount_path, "/Users/alice/p.fifo"))
+
+    def test_own_file_without_a_leading_slash_still_loads(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        own = mount_path / "Users/alice/istota/scripts/prompts/p.txt"
+        own.parent.mkdir(parents=True)
+        own.write_text("mine")
+        doc = self._load(config, mount_path, "Users/alice/istota/scripts/prompts/p.txt")
+        assert [j.prompt for j in doc.jobs] == ["mine"]
+
+    def test_a_scope_refusal_is_definitive_not_a_fault(
+        self, mount_path, make_config_with_mount
+    ):
+        """A refused path is not a mount fault, so it must not hold the sync."""
+        config = make_config_with_mount()
+        doc = self._load(config, mount_path, "/Users/bob/x.txt")
+        assert doc.states_no_jobs
+
+    def test_a_missing_file_still_holds_the_sync(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        doc = self._load(config, mount_path, "/Users/alice/nope.txt")
+        assert not doc.states_no_jobs
+
+    def test_a_stale_row_holding_a_stolen_prompt_is_removed(
+        self, db_path, mount_path, make_config_with_mount
+    ):
+        """Driven through the real sync: the row a pre-fix read wrote goes."""
+        from istota.config import UserConfig
+        from istota.scheduler import _sync_cron_files
+
+        config = make_config_with_mount(db_path=db_path)
+        config.users = {"alice": UserConfig()}
+        bob = mount_path / "Users/bob/istota/config/USER.md"
+        bob.parent.mkdir(parents=True)
+        bob.write_text(_SECRET)
+        _write_cron_md(
+            mount_path, "alice", _one_job_cron("/Users/bob/istota/config/USER.md"))
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice",
+                [CronJob(name="j", cron="0 9 * * *", prompt=_SECRET,
+                         prompt_file="/Users/bob/istota/config/USER.md")],
+            )
+            _sync_cron_files(conn, config)
+            rows = db.get_user_scheduled_jobs(conn, "alice")
+        assert [r.name for r in rows if not r.name.startswith("_module.")] == []
+
+    def test_a_refused_row_goes_even_when_a_faulting_job_holds_the_sync(
+        self, db_path, mount_path, make_config_with_mount
+    ):
+        """One refused job beside one missing file: the hold keeps only the latter."""
+        from istota.config import UserConfig
+        from istota.scheduler import _sync_cron_files
+
+        config = make_config_with_mount(db_path=db_path)
+        config.users = {"alice": UserConfig()}
+        _write_cron_md(mount_path, "alice", (
+            "```toml\n"
+            '[[jobs]]\nname = "a"\ncron = "0 9 * * *"\n'
+            'prompt_file = "/Users/bob/x.txt"\n'
+            '[[jobs]]\nname = "b"\ncron = "0 9 * * *"\n'
+            'prompt_file = "/Users/alice/missing.txt"\n'
+            "```\n"
+        ))
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", [
+                CronJob(name="a", cron="0 9 * * *", prompt=_SECRET),
+                CronJob(name="b", cron="0 9 * * *", prompt="mine"),
+            ])
+            _sync_cron_files(conn, config)
+            names = sorted(
+                r.name for r in db.get_user_scheduled_jobs(conn, "alice")
+                if not r.name.startswith("_module.")
+            )
+        assert names == ["b"]
+
+    def test_externalizing_through_a_symlinked_scripts_dir_writes_nothing(
+        self, tmp_path, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", '''\
+```toml
+[[jobs]]
+name = "multi"
+cron = "0 9 * * *"
+prompt = """line one
+line two"""
+```
+''')
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (mount_path / "Users/alice/istota/scripts").symlink_to(elsewhere)
+
+        assert update_job_enabled_in_cron_md(config, "alice", "multi", False) is False
+        assert list(elsewhere.rglob("*")) == []
