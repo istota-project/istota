@@ -316,6 +316,16 @@ CASES: dict[tuple[str, str, str], Case] = {
         main="istota.skills.wordpress",
         patch=("istota.skills.wordpress.COMMANDS", "abilities run"),
     ),
+    ("wordpress", "fields.get", "output"): Case(
+        argv=lambda p: ["fields", "get", "--id", "1", "--path", "blocks", "--output", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "fields get"),
+    ),
+    ("wordpress", "fields.edit", "ops_file"): Case(
+        argv=lambda p: ["fields", "edit", "--id", "1", "--token", "t", "--ops-file", p],
+        main="istota.skills.wordpress",
+        patch=("istota.skills.wordpress.COMMANDS", "fields edit"),
+    ),
     ("wordpress", "options.update", "acf_file"): Case(
         argv=lambda p: ["options", "update", "--page", "acf-options", "--acf-file", p],
         main="istota.skills.wordpress",

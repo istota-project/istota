@@ -22,8 +22,11 @@ from istota.skill_host_paths import write_resolved
 from .client import WordPressError, fence, fence_keys, selector, selectors
 
 ABILITIES_NAMESPACE = "wp-abilities/v1"
-#: The abilities the istota-connector plugin registers (spec §3.3).
+#: The abilities the istota-connector plugin registers (spec §3.3). These
+#: three are what `connector: true` means, so a 0.1 plugin still reads as there.
 CONNECTOR_ABILITIES = ("istota/options-get", "istota/options-update", "istota/network-sites")
+#: The field editing pair, since connector 0.2.0 (`fields.py`).
+FIELD_ABILITIES = ("istota/fields-get", "istota/fields-edit")
 
 _SCHEMA_PROSE_KEYS = frozenset({"title", "description"})
 ACF_NOTE = (
@@ -175,6 +178,10 @@ def _describe_site(ctx) -> dict:
         "connector": (
             None if abilities is None
             else all(name in abilities for name in CONNECTOR_ABILITIES)
+        ),
+        "connector_abilities": (
+            None if abilities is None
+            else selectors([name for name in abilities if name.startswith("istota/")])
         ),
         "account": {
             "id": me.get("id"),

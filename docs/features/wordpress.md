@@ -60,15 +60,16 @@ Gated:
 - creating terms;
 - creating or updating users, changing site settings, and activating, deactivating or installing plugins;
 - any `rest` call that is not a `GET`, and running an ability the site does not mark read-only;
-- writing an ACF options page.
+- writing an ACF options page;
+- a `fields edit` on any post that is not a draft or pending (a live post, or a media item), on an options page, on a post another user has open in the editor, and any `fields edit` that loses rows, a draft included, since no revision keeps a copy of them: a removed row, or a set after which a repeater or flexible content list holds fewer rows (the `would` line names the list and the count, `blocks/0/items: 4 rows → 1`).
 
-Drafts, pending posts and media uploads are not gated.
+Drafts, pending posts and media uploads are not gated, and neither is a `fields edit` on a draft that loses no rows.
 
 ## How writes behave
 
 - A create, an upload, a user create, a plugin install, a `rest` call and an ability run are sent once. If the connection drops or the site fails partway, the answer is `outcome_unknown`, with a lookup command where there is one. Nothing is resent blind.
 - Every post write is read back, and the answer names any field WordPress dropped or changed, such as unregistered meta, markup filtered for an account without `unfiltered_html`, or a slug that gained `-2`. Settings writes report a setting the site ignored the same way.
-- ACF fields are written whole, in the shape `get` returns. Anywhere in an ACF value, `{"$upload": PATH}` uploads a file from the user's own workspace and puts its attachment id there. All uploads happen before the post is written.
+- `update --acf-*` and `options update` write ACF fields whole, in the shape `get` returns. `fields edit` changes one row, one sub-field or one list position instead (next section). Anywhere in an ACF value, `{"$upload": PATH}` uploads a file from the user's own workspace and puts its attachment id there. All uploads happen before the post is written.
 - `users create` sets no password anybody knows, and WordPress sends no email. The new user signs in after using "Lost your password?" on the login page.
 - Every string the site wrote comes back inside untrusted-content markers.
 
@@ -80,15 +81,25 @@ A network is one vault entry and one credential; a super admin's application pas
 
 ## The istota-connector plugin
 
-Core REST has no route for an ACF options page and none for listing a multisite network's sites. A small companion plugin fills both gaps. It is optional: everything else works without it, and the three verbs that need it answer `connector_missing` with a pointer here.
+Core REST has no route for an ACF options page and none for listing a multisite network's sites, and its ACF write path refuses its own read output in common cases (a field required only under a condition, an empty image read back as `false`). A small companion plugin fills these gaps. It is optional: everything else works without it, and the verbs that need it answer `connector_missing` with a pointer here. A site with a plugin older than 0.2.0 answers `connector_outdated` for the two field verbs; build and upload the zip again.
 
 | Verb | Ability | Needs |
 |---|---|---|
 | `options get --page SLUG` | `istota/options-get` | `manage_options`, and the options page's own capability |
 | `options update --page SLUG --acf-file F --confirmed` | `istota/options-update` | the same |
 | `network sites` | `istota/network-sites` | `manage_sites` on the main site (a super admin) |
+| `fields get (--id N \| --page SLUG) [--path P]` | `istota/fields-get` | `edit_post` on the post, or the options page rule above |
+| `fields edit (--id N \| --page SLUG) --token T [ops]` | `istota/fields-edit` | the same |
 
 The plugin registers these as abilities with the WordPress Abilities API, so it needs WordPress 6.9 or later. It adds no REST routes of its own, has no settings and stores nothing. Only fields in a field group with "Show in REST API" switched on can be read or written, the same rule ACF applies to posts. `options update` replaces each named field's value whole and leaves the others alone. Write image and file fields as attachment ids.
+
+### Editing inside a field
+
+`fields get` lists a post's or options page's fields with a token each; with `--path` (`blocks/0/items`) it returns the value there and the field definition: names, types, choices, which sub-fields are required, and for a flexible content field its layouts. Values come back in one shape the edit accepts unchanged: field names as keys, every defined sub-field present, attachment and post ids rather than objects, `null` for nothing stored.
+
+`fields edit` applies `--set`, `--insert`, `--remove` and `--move` operations, in the order given, to one top-level field, and sends only what changes. Fields and rows it does not name are not sent and cannot be damaged. It needs the token from `fields get`: when someone has saved the field since, the edit is refused with `stale_value` and nothing is written, so an index from an old read never lands on the wrong row. A successful edit gives a new token. Only the values the edit writes are validated, so a field elsewhere on the page that is required only under a condition does not block it. A required sub-field left empty is reported in `missing_required`; the editor asks for it on the next manual save. Flexible content rows keep their disabled flag and custom label through every operation. A custom label is text an editor typed, so it comes back inside the markers like any other.
+
+Text copied from a `fields get` answer, untrusted-content markers included, is written without the markers. A value that still holds a marker, or the text a marker was replaced with, is refused rather than written. `update --acf-*` and `options update` apply the same rule.
 
 The source is `integrations/wordpress/istota-connector/` in the istota repository. To install it:
 
@@ -102,7 +113,7 @@ The source is `integrations/wordpress/istota-connector/` in the istota repositor
 
 2. In wp-admin, go to Plugins, Add New, Upload Plugin, and upload the zip. On a single site, activate it. On a multisite network, upload it in the network admin and network-activate it, so every site has the options abilities.
 
-3. Check it with `istota-skill wordpress describe --refresh`, which should report `connector: true`.
+3. Check it with `istota-skill wordpress describe --refresh`, which should report `connector: true`, and list `istota/fields-get` and `istota/fields-edit` under `connector_abilities` from version 0.2.0.
 
 To update the plugin, build a new zip and upload it again; WordPress offers to replace the installed copy.
 

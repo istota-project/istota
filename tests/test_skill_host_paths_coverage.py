@@ -112,6 +112,12 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
     # reach may still be scoped by a guard. `UNSCOPED` did not survive its
     # last entry, which is the difference between a record and an invitation.
 
+    ("wordpress", "fields.edit", "ops"): Entry(
+        SCOPED, guard="istota.skills.wordpress.fields.parse_ops", helper="egress_path",
+        note="one dest for every op flag, so their order survives; only --set-file and "
+             "--insert-file name a host file, inside the value, resolved by parse_ops",
+    ),
+
     # -- Remote: the path names somewhere else -------------------------------
     ("nextcloud", "share.list", "path"): Entry(REMOTE, note="Nextcloud path"),
     ("nextcloud", "share.create", "path"): Entry(REMOTE, note="Nextcloud path"),
@@ -152,6 +158,10 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
     ),
     ("nextcloud", "activity.list", "type"): Entry(
         NOT_A_PATH, note="an activity filter name; the help names 'files'",
+    ),
+
+    ("wordpress", "fields.get", "path"): Entry(
+        NOT_A_PATH, note="a path inside an ACF value, such as blocks/0/items",
     ),
 
     ("health", "import-immunizations", "paste"): Entry(

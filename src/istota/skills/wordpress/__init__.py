@@ -28,8 +28,13 @@ Usage:
     python -m istota.skills.wordpress options get --page SLUG
     python -m istota.skills.wordpress options update --page SLUG [--acf-file F] [--acf-set K=JSON] --confirmed
     python -m istota.skills.wordpress network sites
+    python -m istota.skills.wordpress fields get (--id N | --page SLUG) [--path PATH] [--output OUT]
+    python -m istota.skills.wordpress fields edit (--id N | --page SLUG) --token T \
+        [--set PATH=JSON] [--set-file PATH=FILE] [--insert PATH=JSON] [--insert-file PATH=FILE] \
+        [--remove PATH] [--move FROM=TO] [--ops-file F] [--confirmed]
 
-The last three need the istota-connector plugin on the site (`connector.py`).
+``options``, ``network`` and ``fields`` need the istota-connector plugin on the
+site (`connector.py`, `fields.py`).
 
 Every verb but `sites` takes ``--site`` and, on a multisite network, ``--blog``.
 
@@ -59,7 +64,7 @@ from istota.skills._cli import error_envelope, fail, parse_and_resolve, run_skil
 from istota.skills._credref import resolve_entry
 from istota.skills._hostpath import EGRESS, REMOTE, WRITE, host_path
 
-from . import admin, connector, content, discovery, generic, media
+from . import admin, connector, content, discovery, fields, generic, media
 from .cache import Cache
 from .client import WordPressClient, WordPressError, fence, resolve_host
 from .sites import (
@@ -342,7 +347,31 @@ def build_parser() -> argparse.ArgumentParser:
     p = network.add_parser("sites", help="list the network's sites (needs a super admin)")
     _site_args(p)
 
+    p = sub.add_parser("fields", help="ACF values edited by path (needs the istota-connector plugin)")
+    fields_sub = p.add_subparsers(dest="fields_command", required=True)
+    p = fields_sub.add_parser("get", help="list a post's or options page's fields, or read one path")
+    _site_args(p)
+    _field_target(p)
+    p.add_argument("--path", help="a field path such as blocks/0/items; without it, the "
+                                  "fields and their tokens are listed")
+    host_path(p, "--output", mode=WRITE,
+              help="with --path: write the value and its definition as JSON here")
+    p = fields_sub.add_parser("edit", help="set, insert, remove or move inside one field")
+    _site_args(p)
+    _field_target(p)
+    p.add_argument("--token", required=True, help="the field's token from `fields get`")
+    fields.add_op_arguments(p)
+    host_path(p, "--ops-file", mode=EGRESS,
+              help="a JSON array of op objects from your own workspace, applied before the flags")
+    _confirmed(p)
+
     return parser
+
+
+def _field_target(parser: argparse.ArgumentParser) -> None:
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--id", type=int, help="a post id, of any type")
+    target.add_argument("--page", help="an ACF options page slug, e.g. acf-options")
 
 
 # --------------------------------------------------------------------------- #
@@ -525,7 +554,8 @@ def _site_verb(handler, precheck=None):
 #: A write refused for one of these may have been refused on stale discovery
 #: (a field group just switched to REST, a route just registered), so the
 #: site's cache is dropped and the next call rediscovers (spec §9.3).
-_STALE_REASONS = frozenset({"acf_not_in_rest", "unknown_route", "validation_error"})
+_STALE_REASONS = frozenset({"acf_not_in_rest", "unknown_route", "validation_error",
+                            "stale_value", "unknown_path"})
 
 
 def _write_verb(handler, precheck=None):
@@ -574,6 +604,8 @@ COMMANDS = {
     "options update": _write_verb(connector.cmd_options_update,
                                   connector.check_options_update),
     "network sites": _site_verb(connector.cmd_network_sites),
+    "fields get": _site_verb(fields.cmd_fields_get, fields.check_fields_get),
+    "fields edit": _write_verb(fields.cmd_fields_edit, fields.check_fields_edit),
 }
 
 

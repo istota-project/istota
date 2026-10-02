@@ -29,10 +29,13 @@ ABILITIES = "/wp-json/wp-abilities/v1/abilities"
 OPTIONS_GET = "istota/options-get"
 OPTIONS_UPDATE = "istota/options-update"
 NETWORK_SITES = "istota/network-sites"
+FIELDS_GET = "istota/fields-get"
+FIELDS_EDIT = "istota/fields-edit"
 
 REPO = Path(__file__).resolve().parent.parent
 PLUGIN_DIR = REPO / "integrations" / "wordpress" / "istota-connector"
 PLUGIN = PLUGIN_DIR / "istota-connector.php"
+README = PLUGIN_DIR / "readme.txt"
 
 FIELDS = {
     "frontend_url": "https://front.example.test",
@@ -383,20 +386,28 @@ def _registrations(text: str) -> dict[str, str]:
 
 class TestThePlugin:
     def test_it_registers_exactly_the_abilities_the_skill_names(self):
-        from istota.skills.wordpress.discovery import CONNECTOR_ABILITIES
+        # The 0.1 set is what `describe` calls `connector: true`; the field
+        # editing pair arrived in 0.2.0.
+        from istota.skills.wordpress.discovery import CONNECTOR_ABILITIES, FIELD_ABILITIES
 
-        assert set(_registrations(PLUGIN.read_text())) == set(CONNECTOR_ABILITIES)
+        assert set(_registrations(PLUGIN.read_text())) == (
+            set(CONNECTOR_ABILITIES) | set(FIELD_ABILITIES))
+        assert set(FIELD_ABILITIES) == {FIELDS_GET, FIELDS_EDIT}
 
-    @pytest.mark.parametrize("name,readonly,destructive", [
-        (OPTIONS_GET, "true", "false"),
-        (OPTIONS_UPDATE, "false", "false"),
-        (NETWORK_SITES, "true", "false"),
+    @pytest.mark.parametrize("name,readonly,destructive,idempotent", [
+        (OPTIONS_GET, "true", "false", "true"),
+        (OPTIONS_UPDATE, "false", "false", "true"),
+        (NETWORK_SITES, "true", "false", "true"),
+        (FIELDS_GET, "true", "false", "true"),
+        # Not idempotent: a successful edit moves the token, so a resend is refused.
+        (FIELDS_EDIT, "false", "false", "false"),
     ])
     def test_each_ability_carries_the_annotations_the_gate_reads(
-            self, name, readonly, destructive):
+            self, name, readonly, destructive, idempotent):
         body = _registrations(PLUGIN.read_text())[name]
         assert re.search(rf"'readonly'\s*=>\s*{readonly}\b", body)
         assert re.search(rf"'destructive'\s*=>\s*{destructive}\b", body)
+        assert re.search(rf"'idempotent'\s*=>\s*{idempotent}\b", body)
         assert re.search(r"'show_in_rest'\s*=>\s*true\b", body)
         assert "'permission_callback'" in body
         assert "'input_schema'" in body and "'output_schema'" in body
@@ -428,9 +439,127 @@ class TestThePlugin:
             if "Author" in line or "URI" in line:
                 assert "@" not in line
 
-    def test_the_plugin_is_one_php_file_and_a_readme(self):
+    @pytest.mark.parametrize("name", [FIELDS_GET, FIELDS_EDIT])
+    def test_the_field_abilities_share_one_permission_callback(self, name):
+        body = _registrations(PLUGIN.read_text())[name]
+        assert "'permission_callback' => 'istota_connector_can_edit_fields'" in body
+        assert "'additionalProperties' => false" in body
+
+    def test_field_permission_is_edit_post_or_the_options_page_rule(self):
+        text = PLUGIN.read_text()
+        start = text.index("function istota_connector_can_edit_fields(")
+        body = text[start:text.index("\n}\n", start)]
+        assert "current_user_can( 'edit_post', $post_id )" in body
+        assert "istota_connector_can_edit_options( $input )" in body
+        # The callback re-checks, so a permission callback that lets a missing
+        # post through cannot become a write.
+        target = text[text.index("function istota_connector_fields_target("):]
+        assert "current_user_can( 'edit_post', $post_id )" in target.split("\n}\n", 1)[0]
+
+    def test_the_edit_input_schema_bounds_the_ops(self):
+        text = PLUGIN.read_text()
+        body = _registrations(text)[FIELDS_EDIT]
+        assert re.search(r"'required'\s*=>\s*array\( 'token', 'ops' \)", body)
+        assert "'minItems' => 1" in body
+        assert "'maxItems' => ISTOTA_FIELDS_MAX_OPS" in body
+        assert "'enum' => array( 'set', 'insert', 'remove', 'move' )" in body
+        assert re.search(r"'required'\s*=>\s*array\( 'op', 'path' \)", body)
+        assert body.count("'additionalProperties' => false") == 2
+        cap = re.search(r"const ISTOTA_FIELDS_MAX_OPS\s*=\s*(\d+);",
+                        (PLUGIN_DIR / "includes" / "fields.php").read_text())
+        assert cap and int(cap.group(1)) == 50
+
+    def test_an_op_value_keeps_string_first_in_its_type_list(self):
+        # The run route sanitizes input to the first type a value passes:
+        # anything ahead of string turns "1" into true and "42" into 42.
+        text = PLUGIN.read_text()
+        start = text.index("function istota_connector_any_schema(")
+        types = re.search(r"'type' => array\(([^)]*)\)", text[start:])
+        names = re.findall(r"'(\w+)'", types.group(1))
+        assert names[0] == "string"
+        assert names.index("integer") < names.index("boolean")
+        assert set(names) == {"string", "integer", "number", "boolean", "null", "array", "object"}
+
+    def test_field_values_are_read_with_every_flexible_row(self):
+        # Decision 13: SCF drops disabled flexible rows on any read outside
+        # wp-admin, and an edit written back from such a read deletes them. The
+        # field abilities read only through istota_connector_read(), which
+        # installs the filter that keeps them.
+        text = PLUGIN.read_text()
+        fields_part = text[text.index("// istota/fields-get and istota/fields-edit."):]
+        reads = [m.start() for m in re.finditer(r"\bacf_get_value\(", fields_part)]
+        allowed = [fields_part.index("function istota_connector_flexible_rows("),
+                   fields_part.index("function istota_connector_read(")]
+        for at in reads:
+            owner = fields_part.rfind("\nfunction ", 0, at) + 1
+            assert owner in allowed, fields_part[owner:owner + 80]
+        assert "add_filter( 'acf/pre_load_value', 'istota_connector_flexible_rows', 10, 3 );" in text
+        assert "remove_filter( 'acf/pre_load_value', 'istota_connector_flexible_rows', 10 );" in text
+
+    def test_the_edit_writes_slashed_through_the_field_it_read(self):
+        # update_metadata() unslashes; an unslashed write strips every backslash
+        # in the field, rows the edit never named included. update_field() by key
+        # cannot find a seamless clone's composite key.
+        text = PLUGIN.read_text()
+        edit = text[text.index("function istota_connector_fields_edit("):]
+        edit = edit[:edit.index("\n}\n")]
+        assert "acf_update_value( wp_slash( $stored ), $target['storage'], $write_field );" in edit
+        code = "\n".join(line for line in edit.splitlines() if not line.strip().startswith("//"))
+        assert "update_field(" not in code
+
+    def test_the_storage_pass_runs_between_the_write_and_the_hooks(self):
+        # Decision 18: the pass takes away the rows the write made and the edit
+        # did not name, before acf/save_post lets the site's hooks read them.
+        text = PLUGIN.read_text()
+        edit = text[text.index("function istota_connector_fields_edit("):]
+        edit = edit[:edit.index("\n}\n")]
+        write = edit.index("acf_update_value( wp_slash( $stored )")
+        unstore = edit.index("istota_connector_unstore( $target['storage'], $result['storage'], "
+                             "$read['census'], $wrote )")
+        assert write < unstore < edit.index("istota_connector_after_write( $target );")
+        assert "add_filter( 'acf/pre_update_value', $note, 5, 4 );" in edit
+        # The census is taken by the read the token is checked against.
+        assert "$read = istota_connector_read( $target['storage'], $field, true );" in edit
+
+    def test_the_storage_pass_deletes_single_rows_only(self):
+        # acf_delete_value() runs a repeater's or flexible field's delete_value,
+        # which deletes every row of it, not only its own meta row.
+        text = PLUGIN.read_text()
+        unstore = text[text.index("function istota_connector_unstore("):]
+        unstore = unstore[:unstore.index("\n}\n")]
+        assert "acf_delete_metadata(" in unstore
+        assert "acf_delete_value(" not in unstore and "delete_post_meta(" not in unstore
+        # A source the read did not load means the naming disagrees: delete nothing.
+        assert "'skipped'  => 'naming'" in unstore
+        # So do two nodes under one name, where a delete for one takes the other.
+        assert "$taken || ( null !== $node['source']" in unstore
+        # The census and the written names count this target's calls only.
+        assert "(string) $post_id === (string) $storage" in text
+        assert "(string) $post_id === (string) $target['storage']" in text
+
+    def test_acf_required_is_left_to_the_value_model(self):
+        # Decision 15: ACF's own required rule would refuse a required leaf an
+        # edit leaves empty without emptying it.
+        text = PLUGIN.read_text()
+        check = text[text.index("function istota_connector_check_written("):]
+        check = check[:check.index("\n}\n")]
+        assert "$rules['required'] = 0;" in check
+        assert "acf_validate_value( istota_fields_denormalize( $field, $leaf['value'] ), $rules," in check
+
+    def test_the_main_file_loads_the_value_model(self):
+        assert "require_once __DIR__ . '/includes/fields.php';" in PLUGIN.read_text()
+
+    def test_the_version_is_0_2_0_in_the_header_and_the_readme(self):
+        header = PLUGIN.read_text().split("*/", 1)[0]
+        assert re.search(r"^ \* Version: 0\.2\.0$", header, re.M)
+        assert re.search(r"^Stable tag: 0\.2\.0$", README.read_text(), re.M)
+        for name in (FIELDS_GET, FIELDS_EDIT):
+            assert name in README.read_text()
+
+    def test_the_plugin_is_its_main_file_includes_and_a_readme(self):
         assert sorted(p.name for p in PLUGIN_DIR.iterdir()) == [
-            "istota-connector.php", "readme.txt"]
+            "includes", "istota-connector.php", "readme.txt"]
+        assert sorted(p.name for p in (PLUGIN_DIR / "includes").iterdir()) == ["fields.php"]
 
     @pytest.mark.skipif(shutil.which("php") is None, reason="php is not installed")
     def test_it_is_valid_php(self):

@@ -17,6 +17,10 @@ re-resolved), then opened by `media.open_upload`, all in the precheck before
 the vault fetch. Every upload of a call happens before the post write; a
 failure stops the write and lists what was uploaded.
 
+**Fences come off.** A string copied whole out of a fenced read (``get
+--output``, ``options get``) is unwrapped to its body before it is sent, and one
+still carrying a marker or its redaction is refused (`unwrap_markers`).
+
 **Where a field must be.** A type whose collection schema has no ``acf``
 property has no field group with "Show in REST API" on, and a name not in that
 schema's ``properties`` is a field WordPress would drop. Both refuse with
@@ -28,8 +32,10 @@ from __future__ import annotations
 
 import json
 import re
+from istota.untrusted import MARKER_REDACTION, has_marker, unframe_untrusted
+
 from . import media
-from .client import WordPressError
+from .client import LABEL, WordPressError
 from .common import read_text_file
 from .discovery import ACF_NOTE, acf_schema
 
@@ -110,6 +116,50 @@ def substitute_markers(value, uploads: Uploads, where: str = "acf"):
     return value
 
 
+class SiteText(str):
+    """A string `unwrap_markers` took out of a fence: the site's words, which a
+    `would` line fences again."""
+
+
+def unwrap_markers(value, where: str = "acf"):
+    """`value` with every string that is exactly one fence replaced by its body.
+
+    Reads fence every string the site wrote, and a model copies values out of
+    them into writes. A string that is one whole fence is unwrapped; one that
+    still holds a marker, or the text a marker was redacted to, is refused,
+    since sending it would write that text to the site.
+    """
+    if isinstance(value, str):
+        body = unframe_untrusted(value, LABEL)
+        text = value if body is None else SiteText(body)
+        if has_marker(text, LABEL) or MARKER_REDACTION in text:
+            raise WordPressError(
+                f"The value at {where} still carries an [UNTRUSTED WORDPRESS CONTENT] "
+                f"marker or the text {MARKER_REDACTION!r}, and writing it would put that "
+                f"on the site. Copy a fenced value whole, or give only the text between "
+                f"the two markers.",
+                "validation_error",
+            )
+        return text
+    if isinstance(value, dict):
+        if UPLOAD_KEY in value:
+            # A marker is yours to write. One copied out of a read is a value the
+            # site stored, and unwrapping it would upload a workspace file the
+            # site named.
+            for key, item in value.items():
+                if isinstance(item, str) and (unframe_untrusted(item, LABEL) is not None
+                                              or has_marker(item, LABEL)):
+                    raise WordPressError(
+                        f"The {UPLOAD_KEY} marker at {where} came from a read of the site "
+                        f"({key} is fenced). Only write {UPLOAD_KEY} markers yourself.",
+                        "validation_error",
+                    )
+        return {k: unwrap_markers(v, f"{where}.{k}") for k, v in value.items()}
+    if isinstance(value, list):
+        return [unwrap_markers(v, f"{where}[{i}]") for i, v in enumerate(value)]
+    return value
+
+
 def fill(value, ids: dict[int, int]):
     """`value` with each `Slot` replaced by its uploaded attachment id."""
     if isinstance(value, Slot):
@@ -167,6 +217,7 @@ def check(args, cap: int) -> None:
     featured = getattr(args, "featured_image", None)
     if featured:
         args.featured_slot = uploads.add(featured, "--featured-image", {})
+    values = unwrap_markers(values)
     args.acf_values = substitute_markers(values, uploads) if values else None
 
 
