@@ -10,9 +10,12 @@
     listEncounters,
     saveHealthBiomarkers,
     updateHealthPanel,
+    SPECIMENS,
+    specimenLabel,
     type Biomarker,
     type Encounter,
     type HealthPanel,
+    type Specimen,
   } from '$lib/api';
   import {
     Badge,
@@ -44,6 +47,12 @@
   let editDrawnAt = $state('');
   let editLabName = $state('');
   let editPanelType = $state('');
+  // '' is "not stated", stored as NULL.
+  let editSpecimen: Specimen | '' = $state('');
+  const specimenOptions = [
+    { value: '', label: 'Not stated' },
+    ...SPECIMENS.map((s) => ({ value: s, label: specimenLabel(s) })),
+  ];
   // `''` means "no link"; numeric string is an encounter id. <select> binds
   // to strings, so we round-trip through string for clean change detection.
   let editEncounterId = $state('');
@@ -57,6 +66,7 @@
     editDrawnAt = (panel.drawn_at || '').slice(0, 10);
     editLabName = panel.lab_name || '';
     editPanelType = panel.panel_type || '';
+    editSpecimen = panel.specimen ?? '';
     editEncounterId = panel.encounter_id == null ? '' : String(panel.encounter_id);
     editing = true;
     loadEncounters();
@@ -128,6 +138,9 @@
       if (editPanelType !== (panel.panel_type || '')) {
         headerPatch.panel_type = editPanelType;
       }
+      if (editSpecimen !== (panel.specimen ?? '')) {
+        headerPatch.specimen = editSpecimen || null;
+      }
       const newEncounterId = editEncounterId === '' ? null : Number(editEncounterId);
       if (newEncounterId !== (panel.encounter_id ?? null)) {
         headerPatch.encounter_id = newEncounterId;
@@ -169,7 +182,7 @@
   async function deletePanel() {
     try {
       await deleteHealthPanel(id);
-      goto(`${base}/health/bloodwork`);
+      goto(`${base}/health/labs`);
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to delete';
       confirmDelete = false;
@@ -208,10 +221,10 @@
   {:else if panel}
     <div class="header">
       <div class="header-meta">
-        <a href="{base}/health/bloodwork" class="back">← Bloodwork</a>
+        <a href="{base}/health/labs" class="back">← Labs</a>
         {#if editing}
           <div class="header-edit">
-            <Field label="Date drawn">
+            <Field label="Collected">
               <input type="date" bind:value={editDrawnAt} />
             </Field>
             <Field label="Lab">
@@ -220,6 +233,16 @@
             <Field label="Panel type">
               <input type="text" bind:value={editPanelType} placeholder="CBC, CMP, Lipid, …" />
             </Field>
+            <label class="full-row">
+              <span>Specimen</span>
+              <Select
+                value={editSpecimen}
+                options={specimenOptions}
+                onValueChange={(v) => (editSpecimen = v as Specimen | '')}
+                ariaLabel="Specimen"
+                fullWidth
+              />
+            </label>
             <label class="full-row">
               <span>Linked encounter</span>
               <Select
@@ -236,6 +259,7 @@
             {formatDate(panel.drawn_at)}
             <span class="lab">· {panel.lab_name || 'Unknown lab'}</span>
             {#if panel.panel_type}<span class="type">· {panel.panel_type}</span>{/if}
+            {#if panel.specimen}<span class="type">· {specimenLabel(panel.specimen)}</span>{/if}
           </h1>
           {#if panel.encounter_id != null}
             <div class="encounter-link">
@@ -289,7 +313,7 @@
                   {:else}
                     <a
                       class="marker-link"
-                      href="{base}/health/bloodwork/marker?name={encodeURIComponent(b.name)}"
+                      href="{base}/health/labs/marker?name={encodeURIComponent(b.name)}"
                     >
                       {b.display_name || b.name}
                     </a>
@@ -441,7 +465,7 @@
     text-decoration: underline;
   }
   /* Buttons sit under the header (not pinned to the right) at the compact
-	   size used by the main bloodwork header on mobile. */
+	   size used by the main labs header on mobile. */
   .actions {
     display: flex;
     gap: var(--space-1);

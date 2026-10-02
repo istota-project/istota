@@ -386,7 +386,7 @@
 
   .extracting {
     /* `flex-direction` with no `display: flex` is inert, so the spinner sat
-       above its label on this page and beside it on bloodwork/upload, which
+       above its label on this page and beside it on labs/upload, which
        had the declaration. */
     display: flex;
     flex-direction: row;

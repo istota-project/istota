@@ -2,21 +2,35 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import {
-    getBloodworkMatrix,
+    getLabsMatrix,
     healthCsvExportUrl,
     importHealthCsv,
     listHealthPanels,
-    type BloodworkMatrix,
+    SPECIMENS,
+    specimenLabel,
+    type LabsMatrix,
+    type Specimen,
     type CsvImportSummary,
     type HealthPanel,
   } from '$lib/api';
-  import { Badge, Button } from '$lib/components/ui';
+  import { Badge, Button, Select } from '$lib/components/ui';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
   let loading = $state(true);
   let error = $state('');
-  let matrix: BloodworkMatrix | null = $state(null);
+  let matrix: LabsMatrix | null = $state(null);
   let drafts: HealthPanel[] = $state([]);
+  // '' is every specimen; panels with none recorded only show under it.
+  let specimen: Specimen | '' = $state('');
+  const specimenOptions = [
+    { value: '', label: 'All specimens' },
+    ...SPECIMENS.map((s) => ({ value: s, label: specimenLabel(s) })),
+  ];
+
+  async function onSpecimenChange(v: string) {
+    specimen = v as Specimen | '';
+    await load();
+  }
 
   let csvInput: HTMLInputElement | undefined = $state(undefined);
   let csvImporting = $state(false);
@@ -49,13 +63,13 @@
     error = '';
     try {
       const [m, panelResp] = await Promise.all([
-        getBloodworkMatrix(),
+        getLabsMatrix(specimen || null),
         listHealthPanels({ limit: 200 }),
       ]);
       matrix = m;
       drafts = panelResp.panels.filter((p) => p.draft);
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to load bloodwork';
+      error = e instanceof Error ? e.message : 'Failed to load labs';
     } finally {
       loading = false;
     }
@@ -96,6 +110,8 @@
       Inflammation: 'INFLAMMATION',
       Hormones: 'HORMONES',
       Diabetes: 'DIABETES',
+      Urinalysis: 'URINALYSIS',
+      Stool: 'STOOL',
       Other: 'OTHER',
     };
     return labels[c] || c.toUpperCase();
@@ -131,8 +147,16 @@
        loading message, rather than centering it in the space left under
        this header. -->
   <div class="header">
-    <h1>Bloodwork</h1>
+    <h1>Labs</h1>
     <div class="actions">
+      <Select
+        value={specimen}
+        options={specimenOptions}
+        onValueChange={onSpecimenChange}
+        ariaLabel="Filter by specimen"
+        size="md"
+        minChars={13}
+      />
       <Button onclick={triggerCsvPick} loading={csvImporting} loadingLabel="Importing…"
         >Import CSV</Button
       >
@@ -143,8 +167,8 @@
         style="display: none"
         onchange={onCsvPicked}
       />
-      <Button href={healthCsvExportUrl()} download="bloodwork.csv">Export CSV</Button>
-      <Button variant="primary" href="{base}/health/bloodwork/upload">Upload lab results</Button>
+      <Button href={healthCsvExportUrl()} download="labs.csv">Export CSV</Button>
+      <Button variant="primary" href="{base}/health/labs/upload">Upload lab results</Button>
     </div>
   </div>
 {/if}
@@ -187,10 +211,12 @@
   <div class="center-msg">Loading…</div>
 {:else if error}
   <div class="center-msg error">{error}</div>
+{:else if specimen && matrix && matrix.panels.length === 0}
+  <div class="empty">No confirmed {specimen} panels on file.</div>
 {:else if matrix && matrix.panels.length === 0 && drafts.length === 0}
   <div class="empty">
-    No bloodwork on file yet.
-    <a href="{base}/health/bloodwork/upload">Upload your first lab report.</a>
+    No lab results on file yet.
+    <a href="{base}/health/labs/upload">Upload your first lab report.</a>
   </div>
 {:else if matrix}
   {#if drafts.length > 0}
@@ -199,7 +225,7 @@
       <ul>
         {#each drafts as p (p.id)}
           <li>
-            <a href="{base}/health/bloodwork/panel?id={p.id}">
+            <a href="{base}/health/labs/panel?id={p.id}">
               <Badge variant="warn">Draft</Badge>
               <span>{formatDate(p.drawn_at)}</span>
               <span class="muted">{p.lab_name || '—'}</span>
@@ -218,7 +244,7 @@
         Review the draft above to add it to your history,
       {/if}
       or
-      <a href="{base}/health/bloodwork/upload">upload another lab report</a>.
+      <a href="{base}/health/labs/upload">upload another lab report</a>.
     </div>
   {:else}
     <section class="spreadsheet">
@@ -234,9 +260,11 @@
               {#each matrix.panels as p (p.id)}
                 <th class="date-cell">
                   <a
-                    href="{base}/health/bloodwork/panel?id={p.id}"
+                    href="{base}/health/labs/panel?id={p.id}"
                     class="date-link"
-                    title={p.lab_name ?? undefined}
+                    title={[p.lab_name, p.specimen && specimenLabel(p.specimen)]
+                      .filter(Boolean)
+                      .join(' · ') || undefined}
                   >
                     <span class="date">{formatDate(p.drawn_at)}</span>
                   </a>
@@ -254,7 +282,7 @@
                 <tr data-category={cat.name}>
                   <th class="sticky-left marker-col">
                     <a
-                      href="{base}/health/bloodwork/marker?name={encodeMarker(mk.name)}"
+                      href="{base}/health/labs/marker?name={encodeMarker(mk.name)}"
                       class="marker-link"
                       title={mk.display_name}
                     >

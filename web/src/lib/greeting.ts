@@ -94,7 +94,7 @@ const TIPS: { text: string; when?: (ctx: TipContext) => boolean }[] = [
     when: (c) => !!c.features?.feeds,
   },
   {
-    text: 'Upload a bloodwork PDF under Health and I will pull the numbers out of it.',
+    text: 'Upload a lab report PDF under Health and I will pull the numbers out of it.',
     when: (c) => !!c.features?.health,
   },
   {

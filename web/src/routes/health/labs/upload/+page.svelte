@@ -7,7 +7,10 @@
     updateHealthPanel,
     uploadHealthPanel,
     healthPanelSourceUrl,
+    SPECIMENS,
+    specimenLabel,
     type Biomarker,
+    type Specimen,
   } from '$lib/api';
   import { Button, Field, FileDropZone, Select } from '$lib/components/ui';
 
@@ -37,6 +40,12 @@
   let drawnAt = $state(today);
   let labName = $state('');
   let panelType = $state('');
+  // '' is "not stated", which the server stores as NULL.
+  let specimen: Specimen | '' = $state('');
+  const specimenOptions = [
+    { value: '', label: 'Not stated' },
+    ...SPECIMENS.map((s) => ({ value: s, label: specimenLabel(s) })),
+  ];
 
   let error = $state('');
   let info = $state('');
@@ -93,6 +102,7 @@
       if (resp.drawn_at) drawnAt = resp.drawn_at;
       if (resp.lab_name) labName = resp.lab_name;
       if (resp.panel_type) panelType = resp.panel_type;
+      if (resp.specimen) specimen = resp.specimen;
       info = `Extracted ${extracted.length} biomarkers. Review and confirm.`;
     } catch (e) {
       error = e instanceof Error ? e.message : 'Extraction failed';
@@ -133,6 +143,7 @@
         drawn_at: drawnAt,
         lab_name: labName,
         panel_type: panelType,
+        specimen: specimen || null,
       });
       await saveHealthBiomarkers(
         panelId,
@@ -147,7 +158,7 @@
         })),
         true,
       );
-      goto(`${base}/health/bloodwork/panel?id=${panelId}`);
+      goto(`${base}/health/labs/panel?id=${panelId}`);
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to save';
     } finally {
@@ -157,7 +168,7 @@
 </script>
 
 <div class="page">
-  <a class="back" href="{base}/health/bloodwork">← Bloodwork</a>
+  <a class="back" href="{base}/health/labs">← Labs</a>
   <h1>Upload lab results</h1>
 
   {#if panelId == null}
@@ -165,7 +176,8 @@
       <FileDropZone bind:file>
         <p>Drop or paste a PDF or image of the lab report here, or use the file picker.</p>
         <p class="caption">
-          Date drawn, lab, and panel type are extracted automatically; you'll review them next.
+          Collection date, lab, specimen and panel type are extracted automatically; you'll review
+          them next.
         </p>
       </FileDropZone>
 
@@ -187,7 +199,7 @@
       <div class="banner warn">
         A panel from {collision.lab_name || '—'} on {collision.drawn_at} already exists. This upload is
         saved separately;
-        <a href="{base}/health/bloodwork/panel?id={collision.existing_id}">view the existing one</a>
+        <a href="{base}/health/labs/panel?id={collision.existing_id}">view the existing one</a>
         to decide which to keep.
       </div>
     {/if}
@@ -196,7 +208,7 @@
       <div class="review-table">
         {#if !extracting}
           <div class="metadata">
-            <Field label="Date drawn">
+            <Field label="Collected">
               <input type="date" bind:value={drawnAt} required />
             </Field>
             <Field label="Lab">
@@ -204,6 +216,15 @@
             </Field>
             <Field label="Panel type">
               <input type="text" bind:value={panelType} placeholder="CBC, CMP, Lipid, …" />
+            </Field>
+            <Field label="Specimen">
+              <Select
+                value={specimen}
+                options={specimenOptions}
+                onValueChange={(v) => (specimen = v as Specimen | '')}
+                ariaLabel="Specimen"
+                fullWidth
+              />
             </Field>
           </div>
         {/if}
@@ -331,7 +352,7 @@
   }
   .metadata {
     display: grid;
-    grid-template-columns: auto 1fr 1fr;
+    grid-template-columns: auto 1fr 1fr auto;
     gap: var(--space-2) var(--space-3);
     margin-bottom: var(--space-3);
     padding-bottom: var(--space-3);

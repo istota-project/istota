@@ -1,4 +1,8 @@
 {
+  "src/lib/components/FeedReader.svelte": {
+    "redefined-primitive": 3,
+    "off-scale-space": 5
+  },
   "src/lib/components/briefings/SourceConfigFields.svelte": {
     "off-scale-space": 5,
     "redefined-primitive": 2
@@ -19,10 +23,6 @@
   },
   "src/lib/components/chat/SearchResults.svelte": {
     "off-scale-space": 2
-  },
-  "src/lib/components/FeedReader.svelte": {
-    "redefined-primitive": 3,
-    "off-scale-space": 5
   },
   "src/lib/components/health/DocumentCard.svelte": {
     "off-scale-space": 1
@@ -123,21 +123,6 @@
     "off-scale-space": 5,
     "raw-color": 1
   },
-  "src/routes/health/bloodwork/+page.svelte": {
-    "raw-color": 3,
-    "off-scale-space": 2
-  },
-  "src/routes/health/bloodwork/marker/+page.svelte": {
-    "off-scale-space": 8,
-    "raw-color": 8
-  },
-  "src/routes/health/bloodwork/panel/+page.svelte": {
-    "off-scale-space": 1,
-    "raw-color": 1
-  },
-  "src/routes/health/bloodwork/upload/+page.svelte": {
-    "off-scale-space": 1
-  },
   "src/routes/health/history/+page.svelte": {
     "off-scale-space": 8,
     "redefined-primitive": 2,
@@ -164,6 +149,21 @@
   },
   "src/routes/health/immunizations/vaccine/+page.svelte": {
     "off-scale-space": 3
+  },
+  "src/routes/health/labs/+page.svelte": {
+    "raw-color": 3,
+    "off-scale-space": 2
+  },
+  "src/routes/health/labs/marker/+page.svelte": {
+    "off-scale-space": 8,
+    "raw-color": 8
+  },
+  "src/routes/health/labs/panel/+page.svelte": {
+    "off-scale-space": 1,
+    "raw-color": 1
+  },
+  "src/routes/health/labs/upload/+page.svelte": {
+    "off-scale-space": 1
   },
   "src/routes/health/stats/+page.svelte": {
     "off-scale-space": 1

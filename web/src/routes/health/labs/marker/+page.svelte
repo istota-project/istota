@@ -276,7 +276,7 @@
   <!-- Held back while loading so the pane shows nothing but the centered
        loading message, rather than centering it in the space left under
        this header. -->
-  <a class="back" href="{base}/health/bloodwork">← Bloodwork</a>
+  <a class="back" href="{base}/health/labs">← Labs</a>
 {/if}
 
 {#if loading}
@@ -301,7 +301,7 @@
     <div class="related">
       <span class="related-label">Related:</span>
       {#each related as r (r.name)}
-        <a href="{base}/health/bloodwork/marker?name={encodeMarker(r.name)}">{r.display_name}</a>
+        <a href="{base}/health/labs/marker?name={encodeMarker(r.name)}">{r.display_name}</a>
       {/each}
     </div>
   {/if}
