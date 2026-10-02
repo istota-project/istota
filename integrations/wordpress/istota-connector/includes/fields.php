@@ -231,7 +231,9 @@ function istota_fields_definition( array $def ) {
 		$out['multiple'] = 'refs' === $kind;
 	}
 	foreach ( array( 'min', 'max' ) as $limit ) {
-		if ( isset( $def[ $limit ] ) && '' !== $def[ $limit ] ) {
+		// A row or item count of 0 is ACF's "no limit"; only a number's 0 is a bound.
+		$unbounded = 'number' !== $kind && isset( $def[ $limit ] ) && is_numeric( $def[ $limit ] ) && 0.0 === (float) $def[ $limit ];
+		if ( isset( $def[ $limit ] ) && '' !== $def[ $limit ] && ! $unbounded ) {
 			$out[ $limit ] = is_numeric( $def[ $limit ] ) ? $def[ $limit ] + 0 : $def[ $limit ];
 		}
 	}
@@ -796,6 +798,50 @@ function istota_fields_shape_into( array $def, $value, $path, array &$errors ) {
 			return;
 	}
 	// raw: a third-party type's value is the site's to judge.
+}
+
+/**
+ * The leaves of a written value, for the checks that need WordPress: every
+ * node that is not a group, row or list of rows, as array( path, field,
+ * value ). Only what $value holds is visited; a row's reserved keys and a key
+ * its definition lacks are skipped, since the shape check reports those.
+ */
+function istota_fields_leaves( array $def, $value, $path ) {
+	$out = array();
+	istota_fields_leaves_into( $def, $value, (string) $path, $out );
+	return $out;
+}
+
+function istota_fields_leaves_into( array $def, $value, $path, array &$out ) {
+	$kind = istota_fields_kind( $def );
+	if ( 'object' === $kind || 'row' === $kind ) {
+		if ( ! is_array( $value ) ) {
+			return;
+		}
+		$subs = istota_fields_sub_fields( $def );
+		foreach ( $value as $key => $item ) {
+			if ( is_string( $key ) && isset( $subs[ $key ] ) ) {
+				istota_fields_leaves_into( $subs[ $key ], $item, $path . '/' . $key, $out );
+			}
+		}
+		return;
+	}
+	if ( 'rows' === $kind ) {
+		if ( istota_fields_is_list( $value ) ) {
+			foreach ( $value as $i => $row ) {
+				istota_fields_leaves_into( istota_fields_row_def( $def, $i, $row ), $row, $path . '/' . $i, $out );
+			}
+		}
+		return;
+	}
+	if ( 'seamless' === $kind ) {
+		return;
+	}
+	$out[] = array(
+		'path'  => $path,
+		'field' => $def,
+		'value' => $value,
+	);
 }
 
 function istota_fields_ref_ok( array $def, $value ) {

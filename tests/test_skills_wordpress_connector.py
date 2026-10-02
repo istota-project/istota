@@ -29,10 +29,13 @@ ABILITIES = "/wp-json/wp-abilities/v1/abilities"
 OPTIONS_GET = "istota/options-get"
 OPTIONS_UPDATE = "istota/options-update"
 NETWORK_SITES = "istota/network-sites"
+FIELDS_GET = "istota/fields-get"
+FIELDS_EDIT = "istota/fields-edit"
 
 REPO = Path(__file__).resolve().parent.parent
 PLUGIN_DIR = REPO / "integrations" / "wordpress" / "istota-connector"
 PLUGIN = PLUGIN_DIR / "istota-connector.php"
+README = PLUGIN_DIR / "readme.txt"
 
 FIELDS = {
     "frontend_url": "https://front.example.test",
@@ -383,20 +386,27 @@ def _registrations(text: str) -> dict[str, str]:
 
 class TestThePlugin:
     def test_it_registers_exactly_the_abilities_the_skill_names(self):
+        # The 0.1 set is what `describe` calls `connector: true`; the field
+        # editing pair arrived in 0.2.0.
         from istota.skills.wordpress.discovery import CONNECTOR_ABILITIES
 
-        assert set(_registrations(PLUGIN.read_text())) == set(CONNECTOR_ABILITIES)
+        assert set(_registrations(PLUGIN.read_text())) == (
+            set(CONNECTOR_ABILITIES) | {FIELDS_GET, FIELDS_EDIT})
 
-    @pytest.mark.parametrize("name,readonly,destructive", [
-        (OPTIONS_GET, "true", "false"),
-        (OPTIONS_UPDATE, "false", "false"),
-        (NETWORK_SITES, "true", "false"),
+    @pytest.mark.parametrize("name,readonly,destructive,idempotent", [
+        (OPTIONS_GET, "true", "false", "true"),
+        (OPTIONS_UPDATE, "false", "false", "true"),
+        (NETWORK_SITES, "true", "false", "true"),
+        (FIELDS_GET, "true", "false", "true"),
+        # Not idempotent: a successful edit moves the token, so a resend is refused.
+        (FIELDS_EDIT, "false", "false", "false"),
     ])
     def test_each_ability_carries_the_annotations_the_gate_reads(
-            self, name, readonly, destructive):
+            self, name, readonly, destructive, idempotent):
         body = _registrations(PLUGIN.read_text())[name]
         assert re.search(rf"'readonly'\s*=>\s*{readonly}\b", body)
         assert re.search(rf"'destructive'\s*=>\s*{destructive}\b", body)
+        assert re.search(rf"'idempotent'\s*=>\s*{idempotent}\b", body)
         assert re.search(r"'show_in_rest'\s*=>\s*true\b", body)
         assert "'permission_callback'" in body
         assert "'input_schema'" in body and "'output_schema'" in body
@@ -427,6 +437,57 @@ class TestThePlugin:
         for line in header.splitlines():
             if "Author" in line or "URI" in line:
                 assert "@" not in line
+
+    @pytest.mark.parametrize("name", [FIELDS_GET, FIELDS_EDIT])
+    def test_the_field_abilities_share_one_permission_callback(self, name):
+        body = _registrations(PLUGIN.read_text())[name]
+        assert "'permission_callback' => 'istota_connector_can_edit_fields'" in body
+        assert "'additionalProperties' => false" in body
+
+    def test_field_permission_is_edit_post_or_the_options_page_rule(self):
+        text = PLUGIN.read_text()
+        start = text.index("function istota_connector_can_edit_fields(")
+        body = text[start:text.index("\n}\n", start)]
+        assert "current_user_can( 'edit_post', $post_id )" in body
+        assert "istota_connector_can_edit_options( $input )" in body
+        # The callback re-checks, so a permission callback that lets a missing
+        # post through cannot become a write.
+        target = text[text.index("function istota_connector_fields_target("):]
+        assert "current_user_can( 'edit_post', $post_id )" in target.split("\n}\n", 1)[0]
+
+    def test_the_edit_input_schema_bounds_the_ops(self):
+        text = PLUGIN.read_text()
+        body = _registrations(text)[FIELDS_EDIT]
+        assert re.search(r"'required'\s*=>\s*array\( 'token', 'ops' \)", body)
+        assert "'minItems' => 1" in body
+        assert "'maxItems' => ISTOTA_FIELDS_MAX_OPS" in body
+        assert "'enum' => array( 'set', 'insert', 'remove', 'move' )" in body
+        assert re.search(r"'required'\s*=>\s*array\( 'op', 'path' \)", body)
+        assert body.count("'additionalProperties' => false") == 2
+        cap = re.search(r"const ISTOTA_FIELDS_MAX_OPS\s*=\s*(\d+);",
+                        (PLUGIN_DIR / "includes" / "fields.php").read_text())
+        assert cap and int(cap.group(1)) == 50
+
+    def test_an_op_value_keeps_string_first_in_its_type_list(self):
+        # The run route sanitizes input to the first type a value passes:
+        # anything ahead of string turns "1" into true and "42" into 42.
+        text = PLUGIN.read_text()
+        start = text.index("function istota_connector_any_schema(")
+        types = re.search(r"'type' => array\(([^)]*)\)", text[start:])
+        names = re.findall(r"'(\w+)'", types.group(1))
+        assert names[0] == "string"
+        assert names.index("integer") < names.index("boolean")
+        assert set(names) == {"string", "integer", "number", "boolean", "null", "array", "object"}
+
+    def test_the_main_file_loads_the_value_model(self):
+        assert "require_once __DIR__ . '/includes/fields.php';" in PLUGIN.read_text()
+
+    def test_the_version_is_0_2_0_in_the_header_and_the_readme(self):
+        header = PLUGIN.read_text().split("*/", 1)[0]
+        assert re.search(r"^ \* Version: 0\.2\.0$", header, re.M)
+        assert re.search(r"^Stable tag: 0\.2\.0$", README.read_text(), re.M)
+        for name in (FIELDS_GET, FIELDS_EDIT):
+            assert name in README.read_text()
 
     def test_the_plugin_is_its_main_file_includes_and_a_readme(self):
         assert sorted(p.name for p in PLUGIN_DIR.iterdir()) == [

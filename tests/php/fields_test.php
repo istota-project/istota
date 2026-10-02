@@ -663,6 +663,10 @@ test(
 		same( 'flexible_content', $definition['type'], 'type' );
 		same( 5, $definition['max'], 'max' );
 		ok( ! isset( $definition['min'] ), 'an empty min is left out' );
+		$unlimited = istota_fields_definition( f( 'repeater', 'r', array( 'min' => 0, 'max' => '0', 'sub_fields' => array() ) ) );
+		ok( ! isset( $unlimited['min'] ) && ! isset( $unlimited['max'] ), 'a row count of 0 is no limit and left out' );
+		$number = istota_fields_definition( f( 'number', 'n', array( 'min' => 0, 'max' => 10 ) ) );
+		same( 0, $number['min'], 'a number min of 0 is a bound and kept' );
 		same( array( 'list', 'text', 'hero' ), array_column( $definition['layouts'], 'name' ), 'layouts by name' );
 		same( array( 'title', 'items', 'options' ), array_column( $definition['layouts'][0]['sub_fields'], 'name' ), 'layout-only fields are not in a definition' );
 		same( 2, $definition['layouts'][1]['max'], 'a layout max' );
@@ -1206,6 +1210,39 @@ test(
 			}
 		);
 		ok( $e && 'unsupported_field' === $e->reason, 'a value JSON cannot encode is refused, not hashed as null' );
+	}
+);
+
+test(
+	'leaves are what a written value holds, never its containers',
+	function () {
+		$row    = array(
+			'acf_fc_layout'          => 'list',
+			'acf_fc_layout_disabled' => true,
+			'title'                  => 'T',
+			'items'                  => array( array( 'label' => 'a', 'done' => true ) ),
+			'options'                => array( 'spacing' => 'lg' ),
+			'stray'                  => 1,
+		);
+		$leaves = istota_fields_leaves( istota_fields_row_def( blocks_field(), 2, $row ), $row, 'blocks/2' );
+		$paths  = array();
+		foreach ( $leaves as $leaf ) {
+			$paths[ $leaf['path'] ] = $leaf['field']['type'];
+		}
+		same(
+			array(
+				'blocks/2/title'             => 'text',
+				'blocks/2/items/0/label'     => 'text',
+				'blocks/2/items/0/done'      => 'true_false',
+				'blocks/2/options/spacing'   => 'select',
+			),
+			$paths,
+			'every present leaf, with its definition; reserved keys and unknown keys skipped'
+		);
+		same( 'a', $leaves[1]['value'], 'a leaf carries its written value' );
+		same( array(), istota_fields_leaves( items_field(), 'not a list', 'items' ), 'a malformed list has no leaves' );
+		$leaf = istota_fields_leaves( f( 'image', 'image' ), null, 'blocks/1/image' );
+		same( array( array( 'path' => 'blocks/1/image', 'field' => f( 'image', 'image' ), 'value' => null ) ), $leaf, 'a leaf field written whole is its own leaf' );
 	}
 );
 
