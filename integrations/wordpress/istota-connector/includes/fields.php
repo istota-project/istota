@@ -658,7 +658,31 @@ function istota_fields_check_shape( array $field, $value, $path ) {
 	return $errors;
 }
 
-function istota_fields_shape_into( array $def, $value, $path, array &$errors ) {
+/**
+ * The shape check for a value an op writes over $before, the node it replaces
+ * (null for an inserted row). A required leaf written empty is an error only
+ * where $before held something there; one that was empty and stays empty is
+ * returned in `kept`, for missing_required (Decision 15). ACF's required rule
+ * depends on conditional logic this module does not evaluate.
+ */
+function istota_fields_check_written( array $field, $value, $path, $before ) {
+	$errors     = array();
+	$ctx        = new stdClass();
+	$ctx->kept  = array();
+	istota_fields_shape_into( $field, $value, (string) $path, $errors, $before, $ctx );
+	return array(
+		'errors' => $errors,
+		'kept'   => $ctx->kept,
+	);
+}
+
+/** Whether a required field would count $value as not filled in. */
+function istota_fields_required_empty( array $def, $value ) {
+	return null === $value || '' === $value
+		|| ( array() === $value && ! in_array( istota_fields_kind( $def ), array( 'object', 'row', 'map', 'raw' ), true ) );
+}
+
+function istota_fields_shape_into( array $def, $value, $path, array &$errors, $before = null, $ctx = null ) {
 	$kind = istota_fields_kind( $def );
 	$name = isset( $def['name'] ) ? (string) $def['name'] : '';
 	$fail = function ( $message, $at = null ) use ( &$errors, $path ) {
@@ -673,9 +697,13 @@ function istota_fields_shape_into( array $def, $value, $path, array &$errors ) {
 		return;
 	}
 	$containers = array( 'object', 'row', 'rows' );
-	if ( ! empty( $def['required'] ) && ( null === $value || '' === $value || ( array() === $value && ! in_array( $kind, array( 'object', 'row', 'map', 'raw' ), true ) ) ) ) {
-		$fail( sprintf( '%s is required.', $name ) );
-		return;
+	if ( ! empty( $def['required'] ) && istota_fields_required_empty( $def, $value ) ) {
+		if ( null === $ctx || ! istota_fields_required_empty( $def, $before ) ) {
+			$fail( sprintf( '%s is required.', $name ) );
+			return;
+		}
+		// Empty before and after: written, not emptied. Its shape is still checked.
+		$ctx->kept[] = $path;
 	}
 	if ( null === $value && ! in_array( $kind, array_merge( $containers, array( 'ids', 'refs', 'strings' ) ), true ) ) {
 		return;
@@ -783,7 +811,8 @@ function istota_fields_shape_into( array $def, $value, $path, array &$errors ) {
 					$fail( sprintf( '%s is not a field here.', $key ), $path . '/' . $key );
 					continue;
 				}
-				istota_fields_shape_into( $subs[ $key ], $item, $path . '/' . $key, $errors );
+				$was = ( is_array( $before ) && array_key_exists( $key, $before ) ) ? $before[ $key ] : null;
+				istota_fields_shape_into( $subs[ $key ], $item, $path . '/' . $key, $errors, $was, $ctx );
 			}
 			return;
 
@@ -793,7 +822,8 @@ function istota_fields_shape_into( array $def, $value, $path, array &$errors ) {
 				return;
 			}
 			foreach ( $value as $i => $row ) {
-				istota_fields_shape_into( istota_fields_row_def( $def, $i, $row ), $row, $path . '/' . $i, $errors );
+				$was = ( is_array( $before ) && array_key_exists( $i, $before ) ) ? $before[ $i ] : null;
+				istota_fields_shape_into( istota_fields_row_def( $def, $i, $row ), $row, $path . '/' . $i, $errors, $was, $ctx );
 			}
 			return;
 	}
@@ -982,8 +1012,9 @@ function istota_fields_op_error( $reason, $message, $label, $params = array() ) 
  * - errors: every shape and row count error, each array( op, path, message );
  *   op is null for a count error. Non-empty means the edit is refused.
  * - previous: per op, the node a set replaced or a remove removed, else null.
- * - missing_required: required sub-fields inserted rows left out, as paths
- *   in the new value.
+ * - missing_required: required fields an op left empty without emptying
+ *   them (left out of an inserted row, or empty before and after a set), as
+ *   paths in the new value.
  * - paths: per op, where the node it set, inserted or moved is in the new
  *   value, which a later op inserting, removing or moving a row above it
  *   shifts; null for a remove and for a node a later op removed.
@@ -1057,17 +1088,27 @@ function istota_fields_apply( array $field, $value, array $ops ) {
 			}
 			$def      = $target['field'];
 			$previous = istota_fields_untag( $def, $target['value'] );
-			istota_fields_collect( $result['errors'], istota_fields_check_shape( $def, $new, $where ), $label );
+			$checked  = istota_fields_check_written( $def, $new, $where, $target['value'] );
+			istota_fields_collect( $result['errors'], $checked['errors'], $label );
 			// A set clears what its value leaves out, so a required sub-field left out is
-			// a required field set to null, which is refused. An insert only reports it.
+			// a required field set to null: refused where it held something, else
+			// reported, like one written empty over empty (Decision 15).
 			$cleared = array();
 			istota_fields_missing_into( $def, $new, $where, $cleared );
 			foreach ( $cleared as $at ) {
-				$result['errors'][] = array(
-					'op'      => $label,
-					'path'    => $at,
-					'message' => 'Required; a set clears what it leaves out.',
-				);
+				$old = istota_fields_resolve( $field, $work, istota_fields_parse_path( $at ) );
+				if ( $old['found'] && ! istota_fields_required_empty( $old['field'], $old['value'] ) ) {
+					$result['errors'][] = array(
+						'op'      => $label,
+						'path'    => $at,
+						'message' => 'Required; a set clears what it leaves out.',
+					);
+				} else {
+					$checked['kept'][] = $at;
+				}
+			}
+			foreach ( $checked['kept'] as $at ) {
+				$missing[] = array( $i, substr( $at, strlen( $where ) ) );
 			}
 			$filled = istota_fields_fill( $def, $new );
 			if ( ! empty( $def['flexible'] ) && is_array( $filled ) && is_array( $new ) && is_array( $target['value'] ) ) {
@@ -1115,8 +1156,10 @@ function istota_fields_apply( array $field, $value, array $ops ) {
 				}
 				$where   = $parent_where . '/' . $index;
 				$row_def = istota_fields_row_def( $list_def, $index, $new );
-				istota_fields_collect( $result['errors'], istota_fields_check_shape( $row_def, $new, $where ), $label );
-				$left_out = array();
+				// A new row replaces nothing, so a required leaf written empty is reported.
+				$checked = istota_fields_check_written( $row_def, $new, $where, null );
+				istota_fields_collect( $result['errors'], $checked['errors'], $label );
+				$left_out = $checked['kept'];
 				istota_fields_missing_into( $row_def, $new, $where, $left_out );
 				foreach ( $left_out as $at ) {
 					$missing[] = array( $i, substr( $at, strlen( $where ) ) );

@@ -506,6 +506,15 @@ class TestThePlugin:
         code = "\n".join(line for line in edit.splitlines() if not line.strip().startswith("//"))
         assert "update_field(" not in code
 
+    def test_acf_required_is_left_to_the_value_model(self):
+        # Decision 15: ACF's own required rule would refuse a required leaf an
+        # edit leaves empty without emptying it.
+        text = PLUGIN.read_text()
+        check = text[text.index("function istota_connector_check_written("):]
+        check = check[:check.index("\n}\n")]
+        assert "$rules['required'] = 0;" in check
+        assert "acf_validate_value( istota_fields_denormalize( $field, $leaf['value'] ), $rules," in check
+
     def test_the_main_file_loads_the_value_model(self):
         assert "require_once __DIR__ . '/includes/fields.php';" in PLUGIN.read_text()
 

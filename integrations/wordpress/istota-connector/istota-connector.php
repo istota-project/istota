@@ -587,7 +587,11 @@ function istota_connector_check_written( array $written, array $skip_ops ) {
 		}
 		foreach ( istota_fields_leaves( $entry['field'], $entry['value'], $entry['path'] ) as $leaf ) {
 			$field = $leaf['field'];
-			$valid = acf_validate_value( istota_fields_denormalize( $field, $leaf['value'] ), $field, $leaf['path'] );
+			// Required is the value model's call (Decision 15): ACF's would refuse a
+			// required leaf that was empty and stays empty, as an unconditional rule.
+			$rules             = $field;
+			$rules['required'] = 0;
+			$valid             = acf_validate_value( istota_fields_denormalize( $field, $leaf['value'] ), $rules, $leaf['path'] );
 			if ( ! $valid ) {
 				$message = sprintf( '%s is not valid.', $leaf['path'] );
 				foreach ( (array) acf_get_validation_errors() as $error ) {

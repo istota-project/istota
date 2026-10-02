@@ -1306,6 +1306,58 @@ test(
 	}
 );
 
+test(
+	'a required leaf is refused only where the edit empties it (Decision 15)',
+	function () {
+		$raw                  = raw_blocks();
+		$raw[1]['field_body'] = '';
+		$value                = istota_fields_normalize( blocks_field(), $raw );
+		same( null, $value[1]['body'], 'fixture: the required body is empty' );
+
+		// Copy, change one sub-field, write the whole row back.
+		$row          = $value[1];
+		$row['image'] = 7;
+		$result       = apply_ok( blocks_field(), $value, array( array( 'op' => 'set', 'path' => 'blocks/1', 'value' => $row ) ) );
+		same( array(), $result['errors'], 'a whole-row set keeping an empty required leaf empty is not refused' );
+		same( array( 'blocks/1/body' ), $result['missing_required'], 'it is reported in missing_required' );
+		same( 7, $result['value'][1]['image'], 'the changed sub-field applies' );
+
+		$direct = apply_ok( blocks_field(), $value, array( array( 'op' => 'set', 'path' => 'blocks/1/body', 'value' => '' ) ) );
+		same( array(), $direct['errors'], 'setting an empty required leaf to empty is not refused' );
+		same( array( 'blocks/1/body' ), $direct['missing_required'], 'and is reported' );
+
+		unset( $row['body'] );
+		$left = apply_ok( blocks_field(), $value, array( array( 'op' => 'set', 'path' => 'blocks/1', 'value' => $row ) ) );
+		same( array(), $left['errors'], 'leaving out a required leaf that was empty is not refused' );
+		same( array( 'blocks/1/body' ), $left['missing_required'], 'and is reported' );
+
+		// Emptying a required leaf that held something is still refused, every way.
+		$full = blocks_value();
+		foreach ( array(
+			array( 'op' => 'set', 'path' => 'blocks/1/body', 'value' => null ),
+			array( 'op' => 'set', 'path' => 'blocks/1/body', 'value' => '' ),
+			array( 'op' => 'set', 'path' => 'blocks/1', 'value' => array( 'acf_fc_layout' => 'text', 'body' => null ) ),
+			array( 'op' => 'set', 'path' => 'blocks/1', 'value' => array( 'acf_fc_layout' => 'text' ) ),
+			array( 'op' => 'set', 'path' => 'blocks/0/items/0/label', 'value' => null ),
+		) as $op ) {
+			$refused = istota_fields_apply( blocks_field(), $full, array( $op ) );
+			ok( count( $refused['errors'] ) > 0, 'emptying a filled required leaf is refused: ' . json_encode( $op ) );
+			same( array(), $refused['missing_required'], 'and not reported as kept: ' . $op['path'] );
+		}
+
+		// Shape is still checked on an unchanged empty required leaf.
+		$bad = istota_fields_apply( blocks_field(), $value, array( array( 'op' => 'set', 'path' => 'blocks/1', 'value' => array( 'acf_fc_layout' => 'text', 'body' => null, 'image' => 'x' ) ) ) );
+		ok( 1 === count( $bad['errors'] ) && 'blocks/1/image' === $bad['errors'][0]['path'], 'shape errors elsewhere in the row still refuse' );
+
+		// An insert replaces nothing: a required leaf written empty is reported.
+		$ins = apply_ok( blocks_field(), $full, array( array( 'op' => 'insert', 'path' => 'blocks/0', 'value' => array( 'acf_fc_layout' => 'text', 'body' => null ) ) ) );
+		same( array( 'blocks/0/body' ), $ins['missing_required'], 'an inserted row\'s empty required leaf is reported' );
+
+		// The strict check, without a before value, is unchanged.
+		ok( count( istota_fields_check_shape( f( 'text', 'x', array( 'required' => 1 ) ), null, 'x' ) ) === 1, 'check_shape still refuses a required null' );
+	}
+);
+
 $total = $GLOBALS['passes'] + $GLOBALS['failures'];
 if ( $GLOBALS['failures'] ) {
 	fwrite( STDERR, $GLOBALS['failures'] . " of $total checks failed\n" );
