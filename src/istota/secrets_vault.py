@@ -74,6 +74,8 @@ from . import file_lock, secrets_store
 logger = logging.getLogger(__name__)
 
 VAULT_WRITE_GROUP = "generated"
+#: The KeePass tag that keeps an entry out of the sync's first-sight grant.
+VAULT_NO_GRANT_TAG = "istota:nogrant"
 _VAULT_LOCK_WAIT_SECONDS = 2.0
 
 #: The size above which the file is refused unread. A vault is a few kilobytes
@@ -432,6 +434,7 @@ class VaultRead:
     skipped: tuple[tuple[str, str], ...] = ()
     generated_count: int = 0
     bindings: dict[str, dict] = field(default_factory=dict)
+    no_auto_grant: frozenset[str] = frozenset()
 
     def __repr__(self) -> str:
         """Everything but the values.
@@ -857,6 +860,7 @@ class VaultApplyResult:
     deleted_keys: list[str] = field(default_factory=list)
     skipped: list[tuple[str, str]] = field(default_factory=list)
     name_conflicts: int = 0
+    auto_granted: int = 0
 
 
 def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResult:
@@ -959,6 +963,7 @@ def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResul
     sources = _stored_entry_sources(db_path, user_id)
     stored = {name for name, source in sources.items() if source == "vault"}
     taken = {name for name, source in sources.items() if source == "local"}
+    _baseline_auto_grants(db_path, user_id, sources)
 
     written: set[str] = set()
     conflicting_entries: set[str] = set()
@@ -1013,10 +1018,19 @@ def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResul
     # still revoke its old policy. Ambiguous names are unbound by the parser.
     from . import db
     from .credential_broker.bindings import put_binding
+    from .credential_broker.grants import auto_grant_vault_entries
+    owners = {read.bindings.get(name, {}).get("credential", name) for name in written}
     with db.get_db(db_path) as conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
         for name in sorted(read.held & stored):
             if name in read.bindings:
                 put_binding(conn, user_id, name, read.bindings[name])
+        result.auto_granted = auto_grant_vault_entries(
+            conn, user_id, owners, declined=read.no_auto_grant, scoped=read.scoped,
+        )
+    if result.auto_granted:
+        logger.info("vault: %s: granted %d new credential(s)", _label(user_id), result.auto_granted)
 
     if read.truncated:
         result.swept = False
@@ -1091,6 +1105,20 @@ def _stored_entry_names(db_path: Path, user_id: str) -> set[str]:
         for row in services.get(VAULT_ENTRY_SERVICE, [])
         if row.get("key")
     }
+
+
+def _baseline_auto_grants(db_path: Path, user_id: str, names) -> None:
+    """Record the entries stored before auto-grant existed, before any write.
+
+    Its own transaction ahead of the upserts, so a pass that fails part-way
+    leaves the entries it created unmarked, and the next pass still grants them.
+    """
+    from . import db
+    from .credential_broker.bindings import credential_name
+    from .credential_broker.grants import baseline_auto_grants
+    with db.get_db(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        baseline_auto_grants(conn, user_id, {credential_name(conn, user_id, name) for name in names})
 
 
 def _stored_entry_sources(db_path: Path, user_id: str) -> dict[str, str]:
@@ -1247,6 +1275,8 @@ class _Walk:
     #: collision rather than an overwrite.
     candidates: dict[str, list[str]] = field(default_factory=dict)
     bindings: dict[str, dict] = field(default_factory=dict)
+    #: Entry names the sync must not grant on its own (ISSUE-590).
+    no_auto_grant: set[str] = field(default_factory=set)
     skipped: list[tuple[str, str]] = field(default_factory=list)
     entries_visited: int = 0
     fields_examined: int = 0
@@ -1494,6 +1524,7 @@ def _map_groups(kp, digest: str) -> VaultRead:
         bindings={name: (walk.bindings[name] if len(walk.candidates[name]) == 1
                          else {"hosts": [], "headers": [], "revealable": False, "source": "vault"})
                   for name in services.keys() | held},
+        no_auto_grant=frozenset(walk.no_auto_grant),
     )
 
 
@@ -1555,6 +1586,11 @@ def _take_entry(walk: _Walk, entry, group_path: tuple[str, ...]) -> None:
     from .credential_broker.bindings import parse_binding
     attributes = entry.custom_properties
     binding = parse_binding(entry.url, attributes, entry.tags)
+    # A task's `vault_create` writes under `generated/`, and its later tasks
+    # are meant to need a grant the user gave, so the sync never gives one.
+    if (VAULT_NO_GRANT_TAG in (entry.tags or [])
+            or (group_path and str(group_path[0]).strip().casefold() == VAULT_WRITE_GROUP)):
+        walk.no_auto_grant.add(slug_name(path))
     fields: list[tuple[tuple[str, ...], object]] = [
         (path, entry.password),
         ((*path, _USERNAME_SEGMENT), entry.username),

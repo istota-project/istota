@@ -12,6 +12,13 @@ from .bindings import get_binding, forge_bindings, credential_name, get_entry_bi
 
 NAMESPACE = "_credential_grants"
 
+AUTO_GRANT_PREFIX = "auto:"
+AUTO_GRANT_DONE = "granted"
+AUTO_GRANT_PENDING = "pending"
+AUTO_GRANT_DECLINED = "declined"
+AUTO_GRANT_PREEXISTING = "preexisting"
+AUTO_GRANT_BASELINE = "auto_baseline"
+
 
 def get_grant(conn, user_id, name):
     name = credential_name(conn, user_id, name)
@@ -79,9 +86,68 @@ def grant_what_exists(conn, user_id):
         return 0
     count = 0
     for row in conn.execute("SELECT name, hosts FROM credential_bindings WHERE user_id=?", (user_id,)):
+        if auto_grant_marker(conn, user_id, credential_name(conn, user_id, row["name"])) == AUTO_GRANT_DECLINED:
+            continue
         if json.loads(row["hosts"]) and get_grant(conn, user_id, row["name"]) is None:
             put_grant(conn, user_id, row["name"], allow_scheduled=True)
             count += 1
+    return count
+
+
+def auto_grant_marker(conn, user_id, owner):
+    row = db.kv_get(conn, user_id, NAMESPACE, AUTO_GRANT_PREFIX + owner)
+    return row["value"] if row else None
+
+
+def baseline_auto_grants(conn, user_id, stored_owners):
+    """Mark the entries stored before auto-grant existed, once per user.
+
+    Without it, the first pass after an upgrade would grant every entry the
+    user had left ungranted. Caller owns the transaction.
+    """
+    inserted = conn.execute("INSERT OR IGNORE INTO istota_kv (user_id, namespace, key, value) "
+                            "VALUES (?, ?, ?, '1')", (user_id, NAMESPACE, AUTO_GRANT_BASELINE))
+    if not inserted.rowcount:
+        return
+    for owner in stored_owners:
+        conn.execute("INSERT OR IGNORE INTO istota_kv (user_id, namespace, key, value) "
+                     "VALUES (?, ?, ?, ?)",
+                     (user_id, NAMESPACE, AUTO_GRANT_PREFIX + owner, AUTO_GRANT_PREEXISTING))
+
+
+def auto_grant_vault_entries(conn, user_id, owners, *, declined, scoped):
+    """Grant vault entries the sync sees for the first time (ISSUE-590).
+
+    ``owners`` are the entry names the file produced this pass, ``declined``
+    the ones tagged ``istota:nogrant`` or created by a task under
+    ``generated/``. The marker is the whole record of "first time" and is
+    never cleared, like the ``revision:`` tombstone: deleting an entry and
+    restoring it, which a task can do to the file, must not turn a grant the
+    user narrowed or revoked back into a wide one. ``granted`` and
+    ``preexisting`` are final; ``pending`` (no host yet, or an unscoped read)
+    and ``declined`` are decided again on every pass. Nothing is granted from
+    an unscoped read, where the whole file stands in for the ``istota`` group.
+    Caller owns the transaction. Returns how many grants were created.
+    """
+    count = 0
+    for owner in sorted(owners):
+        marker = auto_grant_marker(conn, user_id, owner)
+        if marker in (AUTO_GRANT_DONE, AUTO_GRANT_PREEXISTING):
+            continue
+        key = AUTO_GRANT_PREFIX + owner
+        if owner in declined:
+            if marker != AUTO_GRANT_DECLINED:
+                db.kv_set(conn, user_id, NAMESPACE, key, AUTO_GRANT_DECLINED)
+            continue
+        if get_grant(conn, user_id, owner) is None:
+            binding = get_entry_binding(conn, user_id, owner)
+            if not scoped or not binding or not binding["hosts"] or binding["source"] != "vault":
+                if marker != AUTO_GRANT_PENDING:
+                    db.kv_set(conn, user_id, NAMESPACE, key, AUTO_GRANT_PENDING)
+                continue
+            put_grant(conn, user_id, owner, allow_scheduled=True)
+            count += 1
+        db.kv_set(conn, user_id, NAMESPACE, key, AUTO_GRANT_DONE)
     return count
 
 
