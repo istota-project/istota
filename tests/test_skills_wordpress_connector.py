@@ -428,9 +428,10 @@ class TestThePlugin:
             if "Author" in line or "URI" in line:
                 assert "@" not in line
 
-    def test_the_plugin_is_one_php_file_and_a_readme(self):
+    def test_the_plugin_is_its_main_file_includes_and_a_readme(self):
         assert sorted(p.name for p in PLUGIN_DIR.iterdir()) == [
-            "istota-connector.php", "readme.txt"]
+            "includes", "istota-connector.php", "readme.txt"]
+        assert sorted(p.name for p in (PLUGIN_DIR / "includes").iterdir()) == ["fields.php"]
 
     @pytest.mark.skipif(shutil.which("php") is None, reason="php is not installed")
     def test_it_is_valid_php(self):
