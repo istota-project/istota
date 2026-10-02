@@ -987,6 +987,28 @@ function istota_fields_untag( array $def, $value ) {
 	return istota_fields_tag( $def, $value, $none );
 }
 
+/** Tag the rows that carry no identity yet: the ones a set's value adds. */
+function istota_fields_tag_untagged( array $def, $value, &$counter ) {
+	$kind = istota_fields_kind( $def );
+	if ( 'rows' === $kind && is_array( $value ) ) {
+		foreach ( $value as $i => $row ) {
+			$value[ $i ] = istota_fields_tag_untagged( istota_fields_row_def( $def, $i, $row ), $row, $counter );
+		}
+		return $value;
+	}
+	if ( ( 'object' === $kind || 'row' === $kind ) && is_array( $value ) ) {
+		if ( 'row' === $kind && ! isset( $value[ ISTOTA_FIELDS_ROW_TAG ] ) ) {
+			$value[ ISTOTA_FIELDS_ROW_TAG ] = $counter++;
+		}
+		foreach ( istota_fields_sub_fields( $def ) as $name => $sub ) {
+			if ( array_key_exists( $name, $value ) ) {
+				$value[ $name ] = istota_fields_tag_untagged( $sub, $value[ $name ], $counter );
+			}
+		}
+	}
+	return $value;
+}
+
 /** Set the node at $segments (past the field name) to $node. */
 function istota_fields_put( &$value, array $segments, $node ) {
 	$ref = &$value;
@@ -1020,6 +1042,8 @@ function istota_fields_op_error( $reason, $message, $label, $params = array() ) 
  *   shifts; null for a remove and for a node a later op removed.
  * - written: per set and insert, array( op, path, field, value ), for the
  *   WordPress-side checks (ACF's own validation, references) to walk.
+ * - storage: istota_fields_storage_plan() of the edit, for the pass after the
+ *   write that takes away the storage rows it made and did not name.
  */
 function istota_fields_apply( array $field, $value, array $ops ) {
 	$name = (string) $field['name'];
@@ -1074,6 +1098,7 @@ function istota_fields_apply( array $field, $value, array $ops ) {
 	);
 	$anchors = array();
 	$missing = array();
+	$named   = array();
 
 	foreach ( $parsed as $i => $entry ) {
 		list( $verb, $path, $from, $new ) = $entry;
@@ -1119,9 +1144,12 @@ function istota_fields_apply( array $field, $value, array $ops ) {
 					}
 				}
 			}
-			istota_fields_put( $work, $path, istota_fields_inherit_tags( $def, $target['value'], $filled ) );
+			$placed = istota_fields_inherit_tags( $def, $target['value'], $filled );
+			istota_fields_put( $work, $path, istota_fields_tag_untagged( $def, $placed, $counter ) );
 			$result['written'][] = array( 'op' => $i, 'path' => $where, 'field' => $def, 'value' => $new );
 			$anchors[ $i ]       = $path;
+			// A set names everything at and under its path.
+			istota_fields_name_nodes( $field, $work, $where, true, array(), $named );
 		} else {
 			// insert, remove and move act on a row of a repeater or flexible content list.
 			$parent_path = array_slice( $path, 0, -1 );
@@ -1168,6 +1196,9 @@ function istota_fields_apply( array $field, $value, array $ops ) {
 				array_splice( $list, $index, 0, array( istota_fields_tag( $row_def, istota_fields_fill( $row_def, $new ), $counter ) ) );
 				$result['written'][] = array( 'op' => $i, 'path' => $where, 'field' => $row_def, 'value' => $new );
 				$anchors[ $i ]       = array_merge( $parent_path, array( $index ) );
+				// An insert names what its value gives, not what it leaves out.
+				$given = array();
+				istota_fields_given_paths( $row_def, $new, $where, $given );
 			} elseif ( 'remove' === $verb ) {
 				if ( $index >= $count ) {
 					throw $past( $where, $count );
@@ -1190,6 +1221,8 @@ function istota_fields_apply( array $field, $value, array $ops ) {
 				$anchors[ $i ] = $path;
 			}
 			istota_fields_put( $work, $parent_path, $list );
+			// The list a row op acts in, and what holds it, are written whatever else is.
+			istota_fields_name_nodes( $field, $work, $parent_where, false, 'insert' === $verb ? $given : array(), $named );
 		}
 		if ( isset( $anchors[ $i ] ) ) {
 			$anchors[ $i ] = array( $anchors[ $i ], istota_fields_row_chain( $field, $work, $anchors[ $i ] ) );
@@ -1208,7 +1241,8 @@ function istota_fields_apply( array $field, $value, array $ops ) {
 	}
 
 	istota_fields_collect( $result['errors'], istota_fields_counts( $field, $before, $work ), null );
-	$result['value'] = istota_fields_untag( $field, $work );
+	$result['storage'] = istota_fields_storage_plan( $field, $before, $work, $named );
+	$result['value']   = istota_fields_untag( $field, $work );
 	return $result;
 }
 
@@ -1303,6 +1337,140 @@ function istota_fields_collect( array &$errors, array $found, $label ) {
 			'message' => $error['message'],
 		);
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Storage the edit does not name (Decision 18).
+//
+// update_field() of the whole denormalized value writes a meta row for every
+// defined sub-field, a null leaf as "", since a row shifted to a new index
+// must not inherit its previous occupant's meta. That stores values where
+// nothing was stored, which a REST read shows (an empty select reads "" and
+// not false, a range reads its stored "1" and not its default 1). So the
+// write is followed by a pass that takes those rows away again, and this is
+// its plan: every node the write stored, where it was stored before the
+// edit, and whether an op named it.
+
+/**
+ * Every node of a top-level field's value that ACF stores a meta row for: each
+ * field at every depth, but not a repeater or flexible content row, which has
+ * none of its own. Keyed by an identity that survives row shifts: the tag of
+ * the innermost row holding the node and the field names from there, or "top"
+ * and the names from the top-level field. Each: path, name (the meta name as
+ * ACF's handlers build it), flexible, and clean (no row disabled or renamed,
+ * so ACF's layout meta would hold nothing).
+ *
+ * The names follow SCF's update_row ("{list}_{i}_{name}"), the group handler
+ * ("{group}_{_name}"), and the clone handler, which stores a cloned field
+ * under the clone's own prefix and the name it was given, prefix_name and all.
+ */
+function istota_fields_storage_nodes( array $field, $value ) {
+	$out  = array();
+	$name = (string) $field['name'];
+	istota_fields_storage_into( $field, $value, 'top|' . $name, $name, '', $name, $out );
+	return $out;
+}
+
+function istota_fields_storage_into( array $def, $value, $id, $path, $prefix, $own, array &$out ) {
+	$kind  = istota_fields_kind( $def );
+	$name  = $prefix . $own;
+	$entry = array(
+		'path'     => $path,
+		'name'     => $name,
+		'flexible' => 'flexible_content' === istota_fields_type( $def ),
+		'clean'    => true,
+	);
+	if ( 'object' === $kind ) {
+		$clone = 'clone' === istota_fields_type( $def );
+		foreach ( istota_fields_sub_fields( $def ) as $sub_name => $sub ) {
+			if ( $clone ) {
+				$child_prefix = $prefix;
+				$child_own    = (string) $sub['name'];
+			} else {
+				$child_prefix = $name . '_';
+				$child_own    = ( isset( $sub['_name'] ) && '' !== (string) $sub['_name'] ) ? (string) $sub['_name'] : (string) $sub['name'];
+			}
+			$child = ( is_array( $value ) && array_key_exists( $sub_name, $value ) ) ? $value[ $sub_name ] : null;
+			istota_fields_storage_into( $sub, $child, $id . '/' . $sub_name, $path . '/' . $sub_name, $child_prefix, $child_own, $out );
+		}
+	} elseif ( 'rows' === $kind && istota_fields_is_list( $value ) ) {
+		foreach ( $value as $i => $row ) {
+			if ( $entry['flexible'] && is_array( $row ) && ( ! empty( $row[ ISTOTA_FIELDS_DISABLED ] ) || ! empty( $row[ ISTOTA_FIELDS_LABEL ] ) ) ) {
+				$entry['clean'] = false;
+			}
+			// Every row is tagged while ops apply; the fallback keeps a stray one
+			// from sharing an identity with another.
+			$base = ( is_array( $row ) && isset( $row[ ISTOTA_FIELDS_ROW_TAG ] ) ) ? '#' . $row[ ISTOTA_FIELDS_ROW_TAG ] : $id . '@' . $i;
+			foreach ( istota_fields_sub_fields( istota_fields_row_def( $def, $i, $row ) ) as $sub_name => $sub ) {
+				$child = ( is_array( $row ) && array_key_exists( $sub_name, $row ) ) ? $row[ $sub_name ] : null;
+				istota_fields_storage_into( $sub, $child, $base . '|' . $sub_name, $path . '/' . $i . '/' . $sub_name, $name . '_' . $i . '_', (string) $sub['name'], $out );
+			}
+		}
+	}
+	$out[ $id ] = $entry;
+}
+
+/**
+ * Mark as named, in $named, the storage nodes of $value at $where and above it
+ * (what holds it), with $subtree everything below it too, and those at the
+ * exact paths in $exact.
+ */
+function istota_fields_name_nodes( array $field, $value, $where, $subtree, array $exact, array &$named ) {
+	foreach ( istota_fields_storage_nodes( $field, $value ) as $id => $node ) {
+		$path = $node['path'];
+		if ( $path === $where || 0 === strpos( $where, $path . '/' ) || isset( $exact[ $path ] )
+			|| ( $subtree && 0 === strpos( $path, $where . '/' ) ) ) {
+			$named[ $id ] = true;
+		}
+	}
+}
+
+/** The paths of the fields an inserted $value gives, at every depth, as keys of $out. */
+function istota_fields_given_paths( array $def, $value, $path, array &$out ) {
+	$kind = istota_fields_kind( $def );
+	if ( ( 'object' === $kind || 'row' === $kind ) && is_array( $value ) ) {
+		foreach ( istota_fields_sub_fields( $def ) as $name => $sub ) {
+			if ( array_key_exists( $name, $value ) ) {
+				$out[ $path . '/' . $name ] = true;
+				istota_fields_given_paths( $sub, $value[ $name ], $path . '/' . $name, $out );
+			}
+		}
+	} elseif ( 'rows' === $kind && istota_fields_is_list( $value ) ) {
+		foreach ( $value as $i => $row ) {
+			istota_fields_given_paths( istota_fields_row_def( $def, $i, $row ), $row, $path . '/' . $i, $out );
+		}
+	}
+}
+
+/**
+ * The plan for the pass after the write: one entry per storage node of the
+ * new value, with its meta name now (`name`), its meta name before the edit
+ * (`source`, null for a node of an inserted row), whether an op named it
+ * (`named`: set it, gave it in an inserted row, or holds what an op changed),
+ * and for a flexible field whether its layout meta would be empty (`clean`).
+ *
+ * The pass keeps a named node's rows. An unnamed one is put back the way it
+ * was: a meta row, or its `_` field key reference, that did not exist at
+ * `source` (or anywhere, with no source) is deleted at `name`. One that did
+ * exist was written at `name` by update_field() with the same value, which a
+ * shifted row needs. A flexible field's layout meta is deleted where it is
+ * clean and none existed at `source`, named or not, since an absent layout
+ * meta reads as an empty one.
+ */
+function istota_fields_storage_plan( array $field, $before, $after, array $named ) {
+	$was  = istota_fields_storage_nodes( $field, $before );
+	$plan = array();
+	foreach ( istota_fields_storage_nodes( $field, $after ) as $id => $node ) {
+		$plan[] = array(
+			'path'     => $node['path'],
+			'name'     => $node['name'],
+			'source'   => isset( $was[ $id ] ) ? $was[ $id ]['name'] : null,
+			'named'    => isset( $named[ $id ] ),
+			'flexible' => $node['flexible'],
+			'clean'    => $node['clean'],
+		);
+	}
+	return $plan;
 }
 
 // ---------------------------------------------------------------------------

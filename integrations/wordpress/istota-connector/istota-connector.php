@@ -388,15 +388,48 @@ function istota_connector_flexible_rows( $pre, $post_id, $field ) {
  * disabled rows reach any other reader.
  */
 function istota_connector_raw_value( $storage, array $field ) {
+	$read = istota_connector_read( $storage, $field, false );
+	return $read['raw'];
+}
+
+/**
+ * The raw value, and with $census which storage rows the read found: for every
+ * meta name ACF loaded, whether its value row, its `_` field key reference
+ * and, for a flexible field, its layout meta exist. The names are ACF's own,
+ * caught as its handlers build them, so the pass after a write can check its
+ * own naming against them (istota_connector_unstore()).
+ */
+function istota_connector_read( $storage, array $field, $census ) {
+	$found  = array();
+	$record = function ( $pre, $post_id, $sub ) use ( &$found ) {
+		if ( is_array( $sub ) && isset( $sub['name'] ) && '' !== (string) $sub['name'] ) {
+			$name           = (string) $sub['name'];
+			$flexible       = isset( $sub['type'] ) && 'flexible_content' === $sub['type'];
+			$found[ $name ] = array(
+				'value'  => null !== acf_get_metadata( $post_id, $name ),
+				'ref'    => null !== acf_get_metadata( $post_id, $name, true ),
+				'layout' => $flexible && null !== acf_get_metadata( $post_id, '_' . $name . '_layout_meta' ),
+			);
+		}
+		return $pre;
+	};
 	acf_get_store( 'values' )->reset();
+	if ( $census ) {
+		// Ahead of istota_connector_flexible_rows, which answers for a flexible field.
+		add_filter( 'acf/pre_load_value', $record, 5, 3 );
+	}
 	add_filter( 'acf/pre_load_value', 'istota_connector_flexible_rows', 10, 3 );
 	try {
 		$raw = acf_get_value( $storage, $field );
 	} finally {
 		remove_filter( 'acf/pre_load_value', 'istota_connector_flexible_rows', 10 );
+		remove_filter( 'acf/pre_load_value', $record, 5 );
 		acf_get_store( 'values' )->reset();
 	}
-	return $raw;
+	return array(
+		'raw'    => $raw,
+		'census' => $census ? $found : null,
+	);
 }
 
 /** A top-level field's normalized value, or a WP_Error. */
@@ -422,6 +455,7 @@ function istota_connector_fields_context( array $target ) {
 		'post_id'      => (string) $target['storage'],
 		'post_status'  => null,
 		'post_type'    => null,
+		'title'        => null,
 		'modified_gmt' => null,
 		'locked_by'    => null,
 	);
@@ -430,6 +464,7 @@ function istota_connector_fields_context( array $target ) {
 		$post                = get_post( $target['post']->ID );
 		$out['post_status']  = $post->post_status;
 		$out['post_type']    = $post->post_type;
+		$out['title']        = $post->post_title;
 		$out['modified_gmt'] = $post->post_modified_gmt;
 		if ( ! function_exists( 'wp_check_post_lock' ) ) {
 			require_once ABSPATH . 'wp-admin/includes/post.php';
@@ -662,6 +697,56 @@ function istota_connector_after_write( array $target ) {
 	}
 }
 
+/**
+ * Decision 18: after update_field(), put back the storage rows the edit did
+ * not name the way they were, down to "no row at all". $plan is the value
+ * model's (istota_fields_storage_plan()), $census what the read before the
+ * edit found, $wrote the meta names ACF's handlers wrote.
+ *
+ * Every name the plan reads a node's previous rows from must be one the read
+ * loaded. If one is not, this file and ACF disagree about how a field is
+ * stored, and nothing is deleted: the edit stands with the rows the write
+ * made, as it did before this pass existed. A name ACF did not write is left
+ * alone, since nothing was made there. Deletes go through ACF's meta layer
+ * and not acf_delete_value(), whose repeater and flexible handlers would
+ * delete the rows of a field as well as its own row.
+ */
+function istota_connector_unstore( $storage, array $plan, array $census, array $wrote ) {
+	foreach ( $plan as $node ) {
+		if ( null !== $node['source'] && ! isset( $census[ $node['source'] ] ) ) {
+			return array(
+				'unstored' => 0,
+				'skipped'  => 'naming',
+			);
+		}
+	}
+	$none     = array(
+		'value'  => false,
+		'ref'    => false,
+		'layout' => false,
+	);
+	$unstored = 0;
+	foreach ( $plan as $node ) {
+		if ( ! isset( $wrote[ $node['name'] ] ) ) {
+			continue;
+		}
+		$was = null === $node['source'] ? $none : $census[ $node['source'] ];
+		if ( ! $node['named'] ) {
+			if ( ! $was['value'] && acf_delete_metadata( $storage, $node['name'] ) ) {
+				++$unstored;
+			}
+			if ( ! $was['ref'] ) {
+				acf_delete_metadata( $storage, $node['name'], true );
+			}
+		}
+		if ( $node['flexible'] && $node['clean'] && ! $was['layout'] ) {
+			acf_delete_metadata( $storage, '_' . $node['name'] . '_layout_meta' );
+		}
+	}
+	acf_get_store( 'values' )->reset();
+	return array( 'unstored' => $unstored );
+}
+
 function istota_connector_fields_edit( $input ) {
 	$target = istota_connector_fields_target( $input );
 	if ( is_wp_error( $target ) ) {
@@ -698,10 +783,12 @@ function istota_connector_fields_edit( $input ) {
 	}
 	$field = $target['fields'][ $name ];
 
-	// 2. The value now, and the token the edit was made against.
-	$value = istota_connector_normalized( $target['storage'], $field );
-	if ( is_wp_error( $value ) ) {
-		return $value;
+	// 2. The value now, what storage rows it has, and the token the edit was made against.
+	$read = istota_connector_read( $target['storage'], $field, true );
+	try {
+		$value = istota_fields_normalize( $field, $read['raw'] );
+	} catch ( Istota_Fields_Error $e ) {
+		return istota_connector_fields_error( $e );
 	}
 	$token = istota_connector_token_of( $value );
 	if ( is_wp_error( $token ) ) {
@@ -772,7 +859,21 @@ function istota_connector_fields_edit( $input ) {
 	// acf/save_post has fired in this process, and a whole value is not a page.
 	$write_field               = $field;
 	$write_field['pagination'] = 0;
-	acf_update_value( wp_slash( $stored ), $target['storage'], $write_field );
+	$wrote                     = array();
+	$note                      = function ( $check, $unused, $post_id, $sub ) use ( &$wrote ) {
+		if ( is_array( $sub ) && isset( $sub['name'] ) ) {
+			$wrote[ (string) $sub['name'] ] = true;
+		}
+		return $check;
+	};
+	add_filter( 'acf/pre_update_value', $note, 5, 4 );
+	try {
+		acf_update_value( wp_slash( $stored ), $target['storage'], $write_field );
+	} finally {
+		remove_filter( 'acf/pre_update_value', $note, 5 );
+	}
+	// Before the hooks, so a site's acf/save_post sees the storage as it stays.
+	$storage = istota_connector_unstore( $target['storage'], $result['storage'], $read['census'], $wrote );
 	istota_connector_after_write( $target );
 
 	$after = istota_connector_normalized( $target['storage'], $field );
@@ -808,6 +909,7 @@ function istota_connector_fields_edit( $input ) {
 	$out['changed']          = $changed;
 	$out['previous']         = $previous;
 	$out['missing_required'] = $result['missing_required'];
+	$out['storage']          = $storage;
 	return $out;
 }
 
@@ -839,6 +941,7 @@ function istota_connector_fields_output_schema() {
 			'post_id'      => array( 'type' => 'string' ),
 			'post_status'  => array( 'type' => array( 'string', 'null' ) ),
 			'post_type'    => array( 'type' => array( 'string', 'null' ) ),
+			'title'        => array( 'type' => array( 'string', 'null' ) ),
 			'modified_gmt' => array( 'type' => array( 'string', 'null' ) ),
 			'locked_by'    => array( 'type' => array( 'string', 'null' ) ),
 			'token'        => array( 'type' => 'string' ),

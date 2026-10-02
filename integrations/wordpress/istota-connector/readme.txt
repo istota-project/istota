@@ -25,7 +25,7 @@ Build the zip with scripts/build-wordpress-connector.sh in the Istota repository
 == Changelog ==
 
 = 0.2.0 =
-* Add istota/fields-get and istota/fields-edit: path-level editing of ACF values on posts and options pages.
+* Add istota/fields-get and istota/fields-edit: path-level editing of ACF values on posts and options pages. An edit leaves every stored value it does not name as it was, including a sub-field with nothing stored.
 
 = 0.1.0 =
 * First release: istota/options-get, istota/options-update, istota/network-sites.

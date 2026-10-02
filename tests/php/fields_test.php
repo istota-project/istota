@@ -1358,6 +1358,196 @@ test(
 	}
 );
 
+// ---------------------------------------------------------------------------
+// The storage plan (Decision 18).
+
+/** The plan of an edit, by path in the new value. */
+function plan_of( $field, $value, $ops ) {
+	$result = apply_ok( $field, $value, $ops );
+	$out    = array();
+	foreach ( $result['storage'] as $node ) {
+		ok( ! isset( $out[ $node['path'] ] ), 'one plan entry per path: ' . $node['path'] );
+		$out[ $node['path'] ] = $node;
+	}
+	return $out;
+}
+
+/** [name, source, named] of one plan entry, to compare at a glance. */
+function where_from( $plan, $path ) {
+	if ( ! isset( $plan[ $path ] ) ) {
+		return 'absent';
+	}
+	return array( $plan[ $path ]['name'], $plan[ $path ]['source'], $plan[ $path ]['named'] );
+}
+
+test(
+	'an insert names what it gives and the list; shifted rows keep their source',
+	function () {
+		$plan = plan_of( people_field(), people( array( 'A', 'B' ) ), array( array( 'op' => 'insert', 'path' => 'people/0', 'value' => array( 'name' => 'Z' ) ) ) );
+		same( array( 'people', 'people', true ), where_from( $plan, 'people' ), 'the list is named' );
+		same( array( 'people_0_name', null, true ), where_from( $plan, 'people/0/name' ), 'a given field of the new row is named' );
+		same( array( 'people_0_age', null, false ), where_from( $plan, 'people/0/age' ), 'a left-out field of the new row has no source and is not named' );
+		same( array( 'people_1_name', 'people_0_name', false ), where_from( $plan, 'people/1/name' ), 'a shifted row is stored at its new index, from its old one' );
+		same( array( 'people_2_age', 'people_1_age', false ), where_from( $plan, 'people/2/age' ), 'and every field of it' );
+		same( 7, count( $plan ), 'one entry per stored node: the list and two fields for each of three rows' );
+	}
+);
+
+test(
+	'a set names its node, below it and above it, and nothing beside it',
+	function () {
+		$plan = plan_of( blocks_field(), blocks_value(), array( array( 'op' => 'set', 'path' => 'blocks/0/items/1/label', 'value' => 'B' ) ) );
+		same( array( 'blocks_0_items_1_label', 'blocks_0_items_1_label', true ), where_from( $plan, 'blocks/0/items/1/label' ), 'the leaf' );
+		same( true, $plan['blocks/0/items']['named'], 'the list holding it' );
+		same( true, $plan['blocks']['named'], 'the top-level field' );
+		same( array( 'blocks_0_items_1_done', 'blocks_0_items_1_done', false ), where_from( $plan, 'blocks/0/items/1/done' ), 'a sibling leaf is not named' );
+		same( false, $plan['blocks/0/items/0/label']['named'], 'nor a sibling row' );
+		same( false, $plan['blocks/0/title']['named'], 'nor the row\'s other fields' );
+		same( 'absent', where_from( $plan, 'blocks/0' ), 'a row has no storage node of its own' );
+
+		// A group's sub-fields are stored under the group's name.
+		same( array( 'blocks_2_options_spacing', 'blocks_2_options_spacing', false ), where_from( $plan, 'blocks/2/options/spacing' ), 'group naming' );
+
+		$whole = plan_of( blocks_field(), blocks_value(), array( array( 'op' => 'set', 'path' => 'blocks/2/options', 'value' => array( 'background' => '#000', 'spacing' => 'lg' ) ) ) );
+		same( true, $whole['blocks/2/options/background']['named'] && $whole['blocks/2/options']['named'], 'a set of a group names all of it' );
+		same( false, $whole['blocks/0/options/background']['named'], 'and not the same group in another row' );
+	}
+);
+
+test(
+	'row ops: sources follow rows through moves and removes',
+	function () {
+		$value = blocks_value();
+		$plan  = plan_of( blocks_field(), $value, array( array( 'op' => 'move', 'from' => 'blocks/0', 'path' => 'blocks/2' ) ) );
+		same( array( 'blocks_2_title', 'blocks_0_title', false ), where_from( $plan, 'blocks/2/title' ), 'the moved row is stored at its new index, from its old one' );
+		same( array( 'blocks_0_body', 'blocks_1_body', false ), where_from( $plan, 'blocks/0/body' ), 'the rows it passed shift back' );
+		same( array( 'blocks_2_items_2_label', 'blocks_0_items_2_label', false ), where_from( $plan, 'blocks/2/items/2/label' ), 'nested rows go with it' );
+		same( true, $plan['blocks']['named'], 'the list a move acts in is named' );
+
+		$plan = plan_of( blocks_field(), $value, array( array( 'op' => 'remove', 'path' => 'blocks/0' ) ) );
+		same( array( 'blocks_1_title', 'blocks_2_title', false ), where_from( $plan, 'blocks/1/title' ), 'a remove shifts the rows after it' );
+		same( 'absent', where_from( $plan, 'blocks/2/title' ), 'and the last index is gone' );
+
+		$plan = plan_of( blocks_field(), $value, array( array( 'op' => 'remove', 'path' => 'blocks/0/items/1' ) ) );
+		same( true, $plan['blocks/0/items']['named'] && $plan['blocks']['named'], 'a remove names its list and what holds it' );
+		same( false, $plan['blocks/2/items']['named'], 'and not another row\'s list' );
+	}
+);
+
+test(
+	'an inserted row with a nested list names only what it gives, at any depth',
+	function () {
+		$row  = array(
+			'acf_fc_layout' => 'list',
+			'items'         => array( array( 'label' => 'n' ) ),
+		);
+		$plan = plan_of( blocks_field(), blocks_value(), array( array( 'op' => 'insert', 'path' => 'blocks/1', 'value' => $row ) ) );
+		same( array( 'blocks_1_items', null, true ), where_from( $plan, 'blocks/1/items' ), 'a given list is named' );
+		same( array( 'blocks_1_items_0_label', null, true ), where_from( $plan, 'blocks/1/items/0/label' ), 'a given field of its row is named' );
+		same( array( 'blocks_1_items_0_done', null, false ), where_from( $plan, 'blocks/1/items/0/done' ), 'a field its row leaves out is not' );
+		same( array( 'blocks_1_title', null, false ), where_from( $plan, 'blocks/1/title' ), 'nor one the inserted row leaves out' );
+		same( array( 'blocks_1_options_background', null, false ), where_from( $plan, 'blocks/1/options/background' ), 'nor a left-out group\'s fields' );
+		same( array( 'blocks_2_body', 'blocks_1_body', false ), where_from( $plan, 'blocks/2/body' ), 'the row it pushed down keeps its source' );
+
+		// Ops later in the edit shift the inserted row; what it gave stays named.
+		$plan = plan_of(
+			blocks_field(),
+			blocks_value(),
+			array(
+				array( 'op' => 'insert', 'path' => 'blocks/1', 'value' => $row ),
+				array( 'op' => 'insert', 'path' => 'blocks/0', 'value' => array( 'acf_fc_layout' => 'text' ) ),
+			)
+		);
+		same( array( 'blocks_2_items_0_label', null, true ), where_from( $plan, 'blocks/2/items/0/label' ), 'a given field stays named after a later shift' );
+		same( array( 'blocks_2_items_0_done', null, false ), where_from( $plan, 'blocks/2/items/0/done' ), 'and a left-out one unnamed' );
+	}
+);
+
+test(
+	'rows a set adds stay named when a later op shifts them',
+	function () {
+		$items = array( array( 'label' => 'a' ), array( 'label' => 'b' ), array( 'label' => 'c' ), array( 'label' => 'd' ) );
+		$plan  = plan_of(
+			blocks_field(),
+			blocks_value(),
+			array(
+				array( 'op' => 'set', 'path' => 'blocks/2/items', 'value' => $items ),
+				array( 'op' => 'insert', 'path' => 'blocks/0', 'value' => array( 'acf_fc_layout' => 'text' ) ),
+			)
+		);
+		same( array( 'blocks_3_items_3_label', null, true ), where_from( $plan, 'blocks/3/items/3/label' ), 'a row a set added is named where it ends up' );
+		same( array( 'blocks_3_items_0_label', 'blocks_2_items_0_label', true ), where_from( $plan, 'blocks/3/items/0/label' ), 'a row a set replaced keeps its source' );
+		same( false, $plan['blocks/3/title']['named'], 'the rest of that row is not named' );
+	}
+);
+
+test(
+	'clone fields are stored under the clone\'s own prefix',
+	function () {
+		$typography = array(
+			'key'        => 'field_typo',
+			'name'       => 'typography',
+			'_name'      => 'typography',
+			'label'      => 'Typography',
+			'type'       => 'clone',
+			'display'    => 'group',
+			'required'   => 0,
+			'sub_fields' => array( f( 'range', 'body_font_size' ) ),
+		);
+		$prefixed                           = $typography;
+		$prefixed['name']                   = 'heading';
+		$prefixed['_name']                  = 'heading';
+		$prefixed['key']                    = 'field_head';
+		$prefixed['sub_fields'][0]['name']  = 'heading_size';
+		$prefixed['sub_fields'][0]['key']   = 'field_head_size';
+		$rows                               = f( 'repeater', 'rows', array( 'sub_fields' => array( f( 'text', 'x' ), $typography, $prefixed ) ) );
+		$value                              = array(
+			array(
+				'x'          => 'a',
+				'typography' => array( 'body_font_size' => 1 ),
+				'heading'    => array( 'heading_size' => 2 ),
+			),
+		);
+		$plan = plan_of( $rows, $value, array( array( 'op' => 'set', 'path' => 'rows/0/x', 'value' => 'b' ) ) );
+		same( array( 'rows_0_typography', 'rows_0_typography', false ), where_from( $plan, 'rows/0/typography' ), 'the clone has a row of its own' );
+		same( array( 'rows_0_body_font_size', 'rows_0_body_font_size', false ), where_from( $plan, 'rows/0/typography/body_font_size' ), 'a cloned field is stored without the clone\'s name' );
+		same( 'rows_0_heading_size', $plan['rows/0/heading/heading_size']['name'], 'prefix_name is in the name it was given' );
+
+		$top  = plan_of( $typography, array( 'body_font_size' => 1 ), array( array( 'op' => 'set', 'path' => 'typography/body_font_size', 'value' => 2 ) ) );
+		same( 'body_font_size', $top['typography/body_font_size']['name'], 'a top-level clone\'s fields carry no prefix' );
+	}
+);
+
+test(
+	'a flexible field is clean only with no row disabled or renamed',
+	function () {
+		$value = blocks_value();
+		$plan  = plan_of( blocks_field(), $value, array( array( 'op' => 'set', 'path' => 'blocks/0/title', 'value' => 'x' ) ) );
+		same( true, $plan['blocks']['flexible'] && $plan['blocks']['clean'], 'no flags: clean' );
+		same( false, $plan['blocks/0/items']['flexible'], 'a repeater is not flexible' );
+
+		$value[1]['acf_fc_layout_disabled'] = true;
+		$plan                               = plan_of( blocks_field(), $value, array( array( 'op' => 'set', 'path' => 'blocks/0/title', 'value' => 'x' ) ) );
+		same( false, $plan['blocks']['clean'], 'a disabled row: not clean' );
+
+		$value[1]['acf_fc_layout_disabled']     = false;
+		$value[1]['acf_fc_layout_custom_label'] = 'Mine';
+		$plan                                   = plan_of( blocks_field(), $value, array( array( 'op' => 'set', 'path' => 'blocks/0/title', 'value' => 'x' ) ) );
+		same( false, $plan['blocks']['clean'], 'a renamed row: not clean' );
+	}
+);
+
+test(
+	'a whole-field set names everything',
+	function () {
+		$plan = plan_of( people_field(), people( array( 'A' ) ), array( array( 'op' => 'set', 'path' => 'people', 'value' => people( array( 'B', 'C' ) ) ) ) );
+		foreach ( $plan as $path => $node ) {
+			same( true, $node['named'], 'named: ' . $path );
+		}
+		same( null, $plan['people/1/name']['source'], 'a row the set added has no source' );
+	}
+);
+
 $total = $GLOBALS['passes'] + $GLOBALS['failures'];
 if ( $GLOBALS['failures'] ) {
 	fwrite( STDERR, $GLOBALS['failures'] . " of $total checks failed\n" );

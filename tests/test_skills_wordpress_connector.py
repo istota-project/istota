@@ -483,13 +483,13 @@ class TestThePlugin:
     def test_field_values_are_read_with_every_flexible_row(self):
         # Decision 13: SCF drops disabled flexible rows on any read outside
         # wp-admin, and an edit written back from such a read deletes them. The
-        # field abilities read only through istota_connector_raw_value(), which
+        # field abilities read only through istota_connector_read(), which
         # installs the filter that keeps them.
         text = PLUGIN.read_text()
         fields_part = text[text.index("// istota/fields-get and istota/fields-edit."):]
         reads = [m.start() for m in re.finditer(r"\bacf_get_value\(", fields_part)]
         allowed = [fields_part.index("function istota_connector_flexible_rows("),
-                   fields_part.index("function istota_connector_raw_value(")]
+                   fields_part.index("function istota_connector_read(")]
         for at in reads:
             owner = fields_part.rfind("\nfunction ", 0, at) + 1
             assert owner in allowed, fields_part[owner:owner + 80]
@@ -506,6 +506,31 @@ class TestThePlugin:
         assert "acf_update_value( wp_slash( $stored ), $target['storage'], $write_field );" in edit
         code = "\n".join(line for line in edit.splitlines() if not line.strip().startswith("//"))
         assert "update_field(" not in code
+
+    def test_the_storage_pass_runs_between_the_write_and_the_hooks(self):
+        # Decision 18: the pass takes away the rows the write made and the edit
+        # did not name, before acf/save_post lets the site's hooks read them.
+        text = PLUGIN.read_text()
+        edit = text[text.index("function istota_connector_fields_edit("):]
+        edit = edit[:edit.index("\n}\n")]
+        write = edit.index("acf_update_value( wp_slash( $stored )")
+        unstore = edit.index("istota_connector_unstore( $target['storage'], $result['storage'], "
+                             "$read['census'], $wrote )")
+        assert write < unstore < edit.index("istota_connector_after_write( $target );")
+        assert "add_filter( 'acf/pre_update_value', $note, 5, 4 );" in edit
+        # The census is taken by the read the token is checked against.
+        assert "$read = istota_connector_read( $target['storage'], $field, true );" in edit
+
+    def test_the_storage_pass_deletes_single_rows_only(self):
+        # acf_delete_value() runs a repeater's or flexible field's delete_value,
+        # which deletes every row of it, not only its own meta row.
+        text = PLUGIN.read_text()
+        unstore = text[text.index("function istota_connector_unstore("):]
+        unstore = unstore[:unstore.index("\n}\n")]
+        assert "acf_delete_metadata(" in unstore
+        assert "acf_delete_value(" not in unstore and "delete_post_meta(" not in unstore
+        # A source the read did not load means the naming disagrees: delete nothing.
+        assert "'skipped'  => 'naming'" in unstore
 
     def test_acf_required_is_left_to_the_value_model(self):
         # Decision 15: ACF's own required rule would refuse a required leaf an
