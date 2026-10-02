@@ -531,6 +531,11 @@ class TestThePlugin:
         assert "acf_delete_value(" not in unstore and "delete_post_meta(" not in unstore
         # A source the read did not load means the naming disagrees: delete nothing.
         assert "'skipped'  => 'naming'" in unstore
+        # So do two nodes under one name, where a delete for one takes the other.
+        assert "$taken || ( null !== $node['source']" in unstore
+        # The census and the written names count this target's calls only.
+        assert "(string) $post_id === (string) $storage" in text
+        assert "(string) $post_id === (string) $target['storage']" in text
 
     def test_acf_required_is_left_to_the_value_model(self):
         # Decision 15: ACF's own required rule would refuse a required leaf an

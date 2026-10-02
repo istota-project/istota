@@ -1515,6 +1515,38 @@ test(
 
 		$top  = plan_of( $typography, array( 'body_font_size' => 1 ), array( array( 'op' => 'set', 'path' => 'typography/body_font_size', 'value' => 2 ) ) );
 		same( 'body_font_size', $top['typography/body_font_size']['name'], 'a top-level clone\'s fields carry no prefix' );
+
+		// A clone inside a prefix_name clone: SCF names the inner one outer_inner and
+		// cuts its own _name off to get its fields' prefix, so they are not the row's.
+		$inner = array(
+			'key'        => 'field_inner',
+			'name'       => 'outer_inner',
+			'_name'      => 'inner',
+			'label'      => 'Inner',
+			'type'       => 'clone',
+			'display'    => 'group',
+			'required'   => 0,
+			'sub_fields' => array( f( 'text', 'title' ) ),
+		);
+		$outer = array(
+			'key'        => 'field_outer',
+			'name'       => 'outer',
+			'_name'      => 'outer',
+			'label'      => 'Outer',
+			'type'       => 'clone',
+			'display'    => 'group',
+			'required'   => 0,
+			'sub_fields' => array( $inner ),
+		);
+		$list  = f( 'repeater', 'rows', array( 'sub_fields' => array( f( 'text', 'title' ), $outer ) ) );
+		$plan  = plan_of( $list, array( array( 'title' => 'a', 'outer' => array( 'outer_inner' => array( 'title' => 'b' ) ) ) ), array( array( 'op' => 'insert', 'path' => 'rows/0', 'value' => array( 'title' => 'Hello' ) ) ) );
+		same( 'rows_0_title', $plan['rows/0/title']['name'], 'the row\'s own field' );
+		same( 'rows_0_outer_title', $plan['rows/0/outer/outer_inner/title']['name'], 'the nested clone\'s field, under the outer prefix' );
+		$names = array();
+		foreach ( $plan as $node ) {
+			$names[] = $node['name'];
+		}
+		same( count( $names ), count( array_unique( $names ) ), 'no two nodes share a name' );
 	}
 );
 

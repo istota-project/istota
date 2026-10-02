@@ -401,8 +401,9 @@ function istota_connector_raw_value( $storage, array $field ) {
  */
 function istota_connector_read( $storage, array $field, $census ) {
 	$found  = array();
-	$record = function ( $pre, $post_id, $sub ) use ( &$found ) {
-		if ( is_array( $sub ) && isset( $sub['name'] ) && '' !== (string) $sub['name'] ) {
+	// Only this target's reads: a site filter may load a same-named field elsewhere.
+	$record = function ( $pre, $post_id, $sub ) use ( &$found, $storage ) {
+		if ( (string) $post_id === (string) $storage && is_array( $sub ) && isset( $sub['name'] ) && '' !== (string) $sub['name'] ) {
 			$name           = (string) $sub['name'];
 			$flexible       = isset( $sub['type'] ) && 'flexible_content' === $sub['type'];
 			$found[ $name ] = array(
@@ -712,8 +713,12 @@ function istota_connector_after_write( array $target ) {
  * delete the rows of a field as well as its own row.
  */
 function istota_connector_unstore( $storage, array $plan, array $census, array $wrote ) {
+	$names = array();
 	foreach ( $plan as $node ) {
-		if ( null !== $node['source'] && ! isset( $census[ $node['source'] ] ) ) {
+		// Two nodes under one name: a delete for one would take the other's value.
+		$taken                   = isset( $names[ $node['name'] ] );
+		$names[ $node['name'] ] = true;
+		if ( $taken || ( null !== $node['source'] && ! isset( $census[ $node['source'] ] ) ) ) {
 			return array(
 				'unstored' => 0,
 				'skipped'  => 'naming',
@@ -860,8 +865,8 @@ function istota_connector_fields_edit( $input ) {
 	$write_field               = $field;
 	$write_field['pagination'] = 0;
 	$wrote                     = array();
-	$note                      = function ( $check, $unused, $post_id, $sub ) use ( &$wrote ) {
-		if ( is_array( $sub ) && isset( $sub['name'] ) ) {
+	$note                      = function ( $check, $unused, $post_id, $sub ) use ( &$wrote, $target ) {
+		if ( (string) $post_id === (string) $target['storage'] && is_array( $sub ) && isset( $sub['name'] ) ) {
 			$wrote[ (string) $sub['name'] ] = true;
 		}
 		return $check;
@@ -908,7 +913,16 @@ function istota_connector_fields_edit( $input ) {
 	$out['previous_token']   = $token;
 	$out['changed']          = $changed;
 	$out['previous']         = $previous;
-	$out['missing_required'] = $result['missing_required'];
+	// A left-out field with a default now has no row and reads its default, which
+	// the editor shows filled in, so it is not reported as empty.
+	$missing = array();
+	foreach ( $result['missing_required'] as $at ) {
+		$node = istota_fields_resolve( $field, $after, istota_fields_parse_path( $at ) );
+		if ( ! $node['found'] || istota_fields_required_empty( $node['field'], $node['value'] ) ) {
+			$missing[] = $at;
+		}
+	}
+	$out['missing_required'] = $missing;
 	$out['storage']          = $storage;
 	return $out;
 }

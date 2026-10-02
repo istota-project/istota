@@ -1382,9 +1382,15 @@ function istota_fields_storage_into( array $def, $value, $id, $path, $prefix, $o
 	);
 	if ( 'object' === $kind ) {
 		$clone = 'clone' === istota_fields_type( $def );
+		if ( $clone ) {
+			// SCF's prepare_field_for_db: the name less the clone's own _name, or no
+			// prefix at all when the two are equal or the name does not end in it.
+			$base         = ( isset( $def['_name'] ) && '' !== (string) $def['_name'] ) ? (string) $def['_name'] : $own;
+			$clone_prefix = ( $name !== $base && substr( $name, -strlen( $base ) ) === $base ) ? substr( $name, 0, -strlen( $base ) ) : '';
+		}
 		foreach ( istota_fields_sub_fields( $def ) as $sub_name => $sub ) {
 			if ( $clone ) {
-				$child_prefix = $prefix;
+				$child_prefix = $clone_prefix;
 				$child_own    = (string) $sub['name'];
 			} else {
 				$child_prefix = $name . '_';
