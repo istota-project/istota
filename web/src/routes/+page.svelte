@@ -120,7 +120,7 @@
       {#if user.features.health}
         <a href="{base}/health" class="feature-card">
           <div class="feature-title"><HeartPulse aria-hidden="true" />Health</div>
-          <div class="feature-desc">Body stats, bloodwork, and biomarker trends</div>
+          <div class="feature-desc">Body stats, lab results, and biomarker trends</div>
         </a>
       {/if}
     </div>

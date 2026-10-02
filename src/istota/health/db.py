@@ -47,6 +47,18 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 4
 
+# What a lab panel was run on. NULL means the report did not say; existing
+# rows are never backfilled, since a wrong label is worse than none.
+SPECIMENS = ("blood", "urine", "stool", "saliva", "other")
+
+
+def normalize_specimen(value: Any) -> str | None:
+    """Return ``value`` as a member of :data:`SPECIMENS`, or None."""
+    if not isinstance(value, str):
+        return None
+    v = value.strip().lower()
+    return v if v in SPECIMENS else None
+
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -86,6 +98,7 @@ CREATE TABLE IF NOT EXISTS panels (
     draft INTEGER NOT NULL DEFAULT 0,
     notes TEXT,
     content_hash TEXT,
+    specimen TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_panels_drawn ON panels(drawn_at);
@@ -294,6 +307,7 @@ def init_db(db_path: Path) -> None:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA_SQL)
         _migrate_add_content_hash(conn)
+        _migrate_add_panel_specimen(conn)
         _migrate_add_panel_encounter_fk(conn)
         _migrate_add_history_dedup_keys(conn)
         _migrate_diagnosis_encounters(conn)
@@ -322,6 +336,11 @@ def _migrate_add_content_hash(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_panels_content_hash "
         "ON panels(content_hash)",
     )
+
+
+def _migrate_add_panel_specimen(conn: sqlite3.Connection) -> None:
+    """Add ``panels.specimen`` on older DBs. Idempotent; old rows stay NULL."""
+    sqlite_util.add_columns(conn, "panels", {"specimen": "TEXT"})
 
 
 def _migrate_add_history_dedup_keys(conn: sqlite3.Connection) -> None:
@@ -538,6 +557,10 @@ def _row_to_panel(row: sqlite3.Row) -> Panel:
         encounter_id = row["encounter_id"]
     except (IndexError, KeyError):
         encounter_id = None
+    try:
+        specimen = row["specimen"]
+    except (IndexError, KeyError):
+        specimen = None
     return Panel(
         id=row["id"],
         drawn_at=row["drawn_at"],
@@ -551,6 +574,7 @@ def _row_to_panel(row: sqlite3.Row) -> Panel:
         created_at=row["created_at"],
         content_hash=content_hash,
         encounter_id=encounter_id,
+        specimen=specimen,
     )
 
 
@@ -650,18 +674,20 @@ def insert_panel(
     draft: bool = False,
     notes: str | None = None,
     encounter_id: int | None = None,
+    specimen: str | None = None,
 ) -> int:
     cur = conn.execute(
         """
         INSERT INTO panels(
             drawn_at, lab_name, panel_type, source_file, source_mime,
-            ocr_text, draft, notes, encounter_id
+            ocr_text, draft, notes, encounter_id, specimen
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             drawn_at, lab_name, panel_type, source_file, source_mime,
             ocr_text, 1 if draft else 0, notes, encounter_id,
+            normalize_specimen(specimen),
         ),
     )
     return int(cur.lastrowid)
@@ -680,11 +706,15 @@ def list_panels(
     since: str | None = None,
     until: str | None = None,
     include_drafts: bool = True,
+    specimen: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> list[Panel]:
     clauses: list[str] = []
     params: list[Any] = []
+    if specimen is not None:
+        clauses.append("specimen = ?")
+        params.append(specimen)
     if since:
         clauses.append("drawn_at >= ?")
         params.append(since)
@@ -751,6 +781,7 @@ def update_panel(
     notes: str | None = None,
     draft: bool | None = None,
     encounter_id: Any = _UNSET,
+    specimen: Any = _UNSET,
 ) -> int:
     fields: list[str] = []
     params: list[Any] = []
@@ -772,6 +803,9 @@ def update_panel(
     if encounter_id is not _UNSET:
         fields.append("encounter_id = ?")
         params.append(encounter_id)
+    if specimen is not _UNSET:
+        fields.append("specimen = ?")
+        params.append(normalize_specimen(specimen))
     if not fields:
         return 0
     params.append(panel_id)
@@ -1011,9 +1045,16 @@ def upsert_biomarker_ref(conn: sqlite3.Connection, ref: dict) -> None:
     )
 
 
+OTHER_CATEGORY = "Other"
+
+
 def list_biomarker_refs(conn: sqlite3.Connection) -> list[BiomarkerRef]:
+    # "Other" sorts last: the matrix and the CSV export both take their
+    # category order from this list, and unknown markers join that bucket.
     rows = conn.execute(
-        "SELECT * FROM biomarker_refs ORDER BY category, display_name COLLATE NOCASE",
+        "SELECT * FROM biomarker_refs "
+        "ORDER BY category = ?, category, display_name COLLATE NOCASE",
+        (OTHER_CATEGORY,),
     ).fetchall()
     return [_row_to_ref(r) for r in rows]
 

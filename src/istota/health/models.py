@@ -97,6 +97,7 @@ class Panel:
     created_at: str = ""
     content_hash: str | None = None
     encounter_id: int | None = None
+    specimen: str | None = None
 
 
 @dataclass

@@ -1834,6 +1834,15 @@ export interface HealthPanel {
   notes: string | null;
   has_source: boolean;
   encounter_id: number | null;
+  specimen: Specimen | null;
+}
+
+/** What a lab panel was run on; `health.db.SPECIMENS` on the server. */
+export const SPECIMENS = ['blood', 'urine', 'stool', 'saliva', 'other'] as const;
+export type Specimen = (typeof SPECIMENS)[number];
+
+export function specimenLabel(s: Specimen): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 export interface Biomarker {
@@ -2039,6 +2048,7 @@ export async function createHealthPanel(body: {
   panel_type?: string;
   notes?: string;
   encounter_id?: number | null;
+  specimen?: Specimen | null;
 }): Promise<{
   status: string;
   id: number;
@@ -2060,6 +2070,7 @@ export async function updateHealthPanel(
     notes: string;
     draft: boolean;
     encounter_id: number | null;
+    specimen: Specimen | null;
   }>,
 ): Promise<{ status: string }> {
   return healthFetch(`/panels/${id}`, {
@@ -2090,6 +2101,7 @@ export async function uploadHealthPanel(
   drawn_at: string,
   lab_name?: string,
   panel_type?: string,
+  specimen?: Specimen | null,
 ): Promise<{
   status: string;
   id: number;
@@ -2100,6 +2112,7 @@ export async function uploadHealthPanel(
   form.append('drawn_at', drawn_at);
   if (lab_name) form.append('lab_name', lab_name);
   if (panel_type) form.append('panel_type', panel_type);
+  if (specimen) form.append('specimen', specimen);
   return healthFetch('/panels/upload', { method: 'POST', body: form });
 }
 
@@ -2108,6 +2121,7 @@ export async function extractHealthPanel(panelId: number): Promise<{
   drawn_at: string | null;
   lab_name: string | null;
   panel_type: string | null;
+  specimen: Specimen | null;
   warnings: string[];
   raw_text: string;
 }> {
@@ -2155,7 +2169,7 @@ export async function healthBiomarkerRefs(): Promise<{ refs: BiomarkerRef[] }> {
   return healthFetch('/biomarkers/refs');
 }
 
-export interface BloodworkMatrixMarker {
+export interface LabsMatrixMarker {
   name: string;
   display_name: string;
   unit: string;
@@ -2164,26 +2178,28 @@ export interface BloodworkMatrixMarker {
   category: string;
 }
 
-export interface BloodworkMatrixCategory {
+export interface LabsMatrixCategory {
   name: string;
-  markers: BloodworkMatrixMarker[];
+  markers: LabsMatrixMarker[];
 }
 
-export interface BloodworkMatrixPanel {
+export interface LabsMatrixPanel {
   id: number;
   drawn_at: string;
   lab_name: string | null;
   panel_type: string | null;
+  specimen: Specimen | null;
 }
 
-export interface BloodworkMatrix {
-  categories: BloodworkMatrixCategory[];
-  panels: BloodworkMatrixPanel[];
+export interface LabsMatrix {
+  categories: LabsMatrixCategory[];
+  panels: LabsMatrixPanel[];
   values: Record<string, Record<string, { value: number; unit: string; flag: string | null }>>;
 }
 
-export async function getBloodworkMatrix(): Promise<BloodworkMatrix> {
-  return healthFetch('/bloodwork/matrix');
+export async function getLabsMatrix(specimen?: Specimen | null): Promise<LabsMatrix> {
+  const q = specimen ? `?specimen=${encodeURIComponent(specimen)}` : '';
+  return healthFetch(`/labs/matrix${q}`);
 }
 
 export interface BiomarkerExplainer {

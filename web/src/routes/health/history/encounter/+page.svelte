@@ -392,7 +392,7 @@
       <ul class="card-grid">
         {#each panels as p (p.id)}
           <li>
-            <a href="{base}/health/bloodwork/panel?id={p.id}">
+            <a href="{base}/health/labs/panel?id={p.id}">
               <h3 class="name">{formatDate(p.drawn_at)}</h3>
               <div class="tags">
                 <span class="count-tag">

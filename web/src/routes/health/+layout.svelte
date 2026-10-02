@@ -29,7 +29,7 @@
       label: 'Immunizations',
       active: isActive('/health/immunizations'),
     },
-    { href: `${base}/health/bloodwork`, label: 'Bloodwork', active: isActive('/health/bloodwork') },
+    { href: `${base}/health/labs`, label: 'Labs', active: isActive('/health/labs') },
     {
       href: `${base}/health/documents`,
       label: 'Documents',
@@ -129,7 +129,7 @@
   /* The .msg boxes this replaced each carried their own margin-bottom —
      0.75rem on six pages, 0.5rem on one. Restored once for the module rather
      than as twelve page rules re-forking the primitive; the majority value
-     wins, so the bloodwork toolbar's notice gains 0.25rem. */
+     wins, so the labs toolbar's notice gains 0.25rem. */
   .health-frame :global(.banner) {
     margin-bottom: var(--space-3);
   }

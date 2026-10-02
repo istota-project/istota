@@ -109,7 +109,7 @@
   --status-partial-bg: hsla(280, 45%, 65%, 0.22);
   --status-partial-fg: #d0aeec;
   /* A step above danger, for a value that is not merely out of range but
-	   clinically critical (the bloodwork flag-C cell). Unlike the four above it
+	   clinically critical (the labs flag-C cell). Unlike the four above it
 	   is a *solid saturated fill* rather than a tint, so `-fg` is the text laid
 	   on `-bg` — white in both themes, like --accent-amber-fill-fg. */
   --status-critical-bg: #6b0000;

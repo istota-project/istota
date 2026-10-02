@@ -12,7 +12,7 @@ afterEach(() => {
 
 const items = [
   { href: '/istota/health/stats', label: 'Stats' },
-  { href: '/istota/health/bloodwork', label: 'Bloodwork', active: true },
+  { href: '/istota/health/labs', label: 'Labs', active: true },
 ];
 
 describe('HeaderNav', () => {
@@ -38,7 +38,7 @@ describe('HeaderNav', () => {
 
   it('shows the active item as the dropdown selection', () => {
     render(HeaderNav, { items, ariaLabel: 'Health section' });
-    expect(screen.getByRole('button', { name: 'Health section' })).toHaveTextContent('Bloodwork');
+    expect(screen.getByRole('button', { name: 'Health section' })).toHaveTextContent('Labs');
   });
 
   it('falls back to the first item when none is active', () => {

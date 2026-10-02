@@ -582,7 +582,7 @@ def collect_answers(args, *, input_fn, which_fn, out, getpass_fn, prior_caldav=N
 #: ``Answers.disabled_modules``.
 _OPT_OUT_MODULES: tuple[tuple[str, str, str], ...] = (
     ("money_enabled", "money", "Enable the money module (double-entry accounting)?"),
-    ("health_enabled", "health", "Enable the health module (body stats, bloodwork, documents)?"),
+    ("health_enabled", "health", "Enable the health module (body stats, lab results, documents)?"),
     ("feeds_enabled", "feeds", "Enable the feeds module (RSS/Atom/Tumblr reader)?"),
     ("briefings_enabled", "briefings", "Enable the briefings module (scheduled digests)?"),
 )

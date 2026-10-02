@@ -1,7 +1,7 @@
-"""A bloodwork panel left in `draft` after an OCR extraction nobody confirmed.
+"""A lab panel left in `draft` after an OCR extraction nobody confirmed.
 
 The third silent gap, and the one the store's scoping rule was written for. A
-panel uploaded to `/health/bloodwork/upload` is inserted with `draft=1` and stays
+panel uploaded to `/health/labs/upload` is inserted with `draft=1` and stays
 there until the extracted values are reviewed and posted back with
 `confirm: true`. A draft panel is excluded from the health dashboard *and* from
 the biomarker trends, so a user who closes the tab mid-review has lab results in
@@ -24,7 +24,7 @@ that came from the request.
 There is no one-click confirm: `POST /health/panels/{id}/biomarkers` needs the
 whole reviewed biomarker list in its body, and `PUT /health/panels/{id}` is a
 PUT, which the action vocabulary does not carry. So the action is a link to the
-bloodwork page, where the review UI lives.
+labs page, where the review UI lives.
 """
 
 from __future__ import annotations
@@ -51,10 +51,10 @@ OBJECT_TYPE = "health_panel"
 # holding data out of the trends.
 SEVERITY = "info"
 
-# The bloodwork list, from which every draft panel is one click away. The panel
-# page itself is `/health/bloodwork/panel?id=N`, which the URL allowlist refuses
+# The labs list, from which every draft panel is one click away. The panel
+# page itself is `/health/labs/panel?id=N`, which the URL allowlist refuses
 # (no query strings, deliberately), so the list is where the link goes.
-REVIEW_HREF = "/health/bloodwork"
+REVIEW_HREF = "/health/labs"
 
 # How much of a lab name survives into the title. `lab_name` arrives as a form
 # field on the upload with no length check anywhere on that path, and the title
@@ -97,7 +97,7 @@ def body_for(drawn_at: str | None, lab_name: str | None) -> str:
     if lab:
         bits.append(f"from {lab}")
     if when:
-        bits.append(f"drawn {when}")
+        bits.append(f"collected {when}")
     which = " ".join(bits)
     lead = f"An uploaded lab report{' ' + which if which else ''} was read but"
     return (

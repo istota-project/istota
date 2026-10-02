@@ -1,19 +1,19 @@
 ---
 name: health
-triggers: [health, weight, bloodwork, labs, lab results, biomarker, biomarkers, panel, blood pressure, heart rate, body fat, cholesterol, glucose, bmi, vitals, body temp, body temperature, resting hr, spo2, sleep, sleep score, stress, body battery, steps, hrv, vo2, vo2 max, garmin, encounter, doctor, doctor visit, procedure, screening, hospitalization, diagnosis, diagnosed, condition, medical history, icd10, chronic, immunization, immunizations, vaccine, vaccines, vaccinated, vaccination, shot, booster, flu shot, tdap, mmr, shingles, hpv, covid shot, travel vaccine, mychart vaccines]
-description: Health tracking — body stats, bloodwork panels, biomarker trends, lab analysis, and Garmin daily summaries.
+triggers: [health, weight, bloodwork, labs, lab results, lab work, urinalysis, urine test, stool test, biomarker, biomarkers, panel, blood pressure, heart rate, body fat, cholesterol, glucose, bmi, vitals, body temp, body temperature, resting hr, spo2, sleep, sleep score, stress, body battery, steps, hrv, vo2, vo2 max, garmin, encounter, doctor, doctor visit, procedure, screening, hospitalization, diagnosis, diagnosed, condition, medical history, icd10, chronic, immunization, immunizations, vaccine, vaccines, vaccinated, vaccination, shot, booster, flu shot, tdap, mmr, shingles, hpv, covid shot, travel vaccine, mychart vaccines]
+description: Health tracking — body stats, lab panels (blood, urine and other specimens), biomarker trends, lab analysis, and Garmin daily summaries.
 cli: true
 env: [{"var":"HEALTH_DB_PATH","from":"setup_env","proxy_only":true}]
 ---
 
 # Health Skill
 
-Body-stats time series, bloodwork panels, biomarker trends, and lab result tracking. Records live in a per-user SQLite database the CLI opens for you; uploaded documents stay under `{workspace}/{BOT_DIR}/health/`. The database itself is on local disk outside your sandbox — go through this CLI, there is nothing to read directly. All values stored metric (kg, cm, °C, mmHg, bpm); the display layer converts to the user's preferred units.
+Body-stats time series, lab panels, biomarker trends, and lab result tracking. A lab panel is any lab report with numeric results: bloodwork, a urinalysis, a stool or saliva test. Records live in a per-user SQLite database the CLI opens for you; uploaded documents stay under `{workspace}/{BOT_DIR}/health/`. The database itself is on local disk outside your sandbox — go through this CLI, there is nothing to read directly. All values stored metric (kg, cm, °C, mmHg, bpm); the display layer converts to the user's preferred units.
 
 ## When to use
 
 - The user logs a measurement ("I weigh 82.5 kg", "BP 128/82", "resting HR 60").
-- The user uploads or mentions lab/bloodwork results.
+- The user uploads or mentions lab results (bloodwork, urinalysis, or any other lab test).
 - The user asks how a biomarker is trending, what's flagged, or for a health summary.
 - Recording or retrieving any vital sign, weight, or biomarker over time.
 
@@ -34,12 +34,20 @@ istota-skill health log body_fat_pct 18.5 --date 2026-05-08
 istota-skill health stats --metric weight --since 2026-01-01 --limit 30
 istota-skill health latest                                # latest value per metric
 
-# Bloodwork
+# Labs
 istota-skill health panels --since 2026-01-01 --limit 10
+istota-skill health panels --specimen urine               # blood | urine | stool | saliva | other
 istota-skill health panel 12                              # show panel + biomarkers
 istota-skill health add-panel --drawn-at 2026-05-08 --lab Kaiser --type CBC
 istota-skill health add-biomarker 12 Hemoglobin 14.8 g/dL --ref-low 13.5 --ref-high 17.5
 istota-skill health add-biomarker 12 WBC 12.5 10^3/uL --flag H
+
+# Set --specimen when the report says what the sample was; omit it otherwise.
+# A marker measured in urine takes its Urine_ name (Urine_Creatinine, not
+# Creatinine), so it never joins the blood marker's trend. Skip dipstick
+# results with no number ("negative", "trace", "1+"): a value must be numeric.
+istota-skill health add-panel --drawn-at 2026-05-08 --lab Quest --type Urinalysis --specimen urine --ref ua
+istota-skill health add-biomarker @ua Urine_pH 6.0 ""                # unitless markers take an explicit empty unit
 
 # Adding a panel and its biomarkers in ONE sandboxed task: the panel id
 # doesn't exist yet (the write is deferred), so give the panel a --ref name
@@ -58,9 +66,9 @@ istota-skill health upload /path/to/lab.pdf --drawn-at 2026-05-08 --lab Kaiser
 # refused; copy it into `{workspace}` first and name the copy.
 
 # Bulk CSV (Date,Lab,Marker (unit) layout)
-istota-skill health import-csv /path/to/bloodwork.csv             # skip duplicate (date, lab) panels
-istota-skill health import-csv /path/to/bloodwork.csv --on-collision replace
-istota-skill health export-csv --output "$NEXTCLOUD_MOUNT_PATH/Users/$ISTOTA_USER_ID/{BOT_DIR}/bloodwork.csv"   # all confirmed panels; the path must be inside your own workspace
+istota-skill health import-csv /path/to/labs.csv                  # skip duplicate (date, lab) panels
+istota-skill health import-csv /path/to/labs.csv --on-collision replace
+istota-skill health export-csv --output "$NEXTCLOUD_MOUNT_PATH/Users/$ISTOTA_USER_ID/{BOT_DIR}/labs.csv"   # all confirmed panels; the path must be inside your own workspace
 
 # Dashboard snapshot
 istota-skill health summary
@@ -185,7 +193,7 @@ Use canonical names where possible (`Hemoglobin`, `LDL`, `HDL`, `Cholesterol_Tot
 | "Resting HR 60" | `log resting_hr 60` |
 | "What's my latest weight?" | `latest` and format the weight entry |
 | "How's my cholesterol?" | `trend Cholesterol_Total` |
-| "Show me my bloodwork history" | `panels` |
+| "Show me my lab history" | `panels` (add `--specimen urine` for urine tests) |
 | "Any biomarkers out of range?" | `summary` — surface entries from `alerts` |
 | "Here are my lab results" (+ image) | OCR via `transcribe`/`whisper`, then `add-panel` + `add-biomarker` per row |
 | "I saw the GI doctor today, colonoscopy was clean" | `add-encounter --date 2026-05-15 --type procedure --specialty gastroenterology --reason "Colonoscopy" --notes "Clean, no findings"` |

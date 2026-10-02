@@ -4768,7 +4768,7 @@ def main():
     )
     setup_parser.add_argument(
         "--no-health", action="store_true",
-        help="Disable the health module (body stats, bloodwork; on by default)",
+        help="Disable the health module (body stats, lab results; on by default)",
     )
     setup_parser.add_argument(
         "--no-feeds", action="store_true",
