@@ -31,7 +31,8 @@ _needs_web_deps = pytest.mark.skipif(
 if _has_web_deps:
     from httpx import ASGITransport, AsyncClient
 
-from istota import db, outbound_drafts
+from istota import db
+from istota.mail import drafts as outbound_drafts
 from istota.config import Config, EmailConfig, SiteConfig, UserConfig, WebConfig
 
 ORIGIN = {"origin": "https://example.com"}
@@ -284,7 +285,7 @@ class TestOwnership:
         draft_id = _hold(db_path, user_id="mallory")
         cookies = await _login(client, "alice")
 
-        with patch("istota.outbound_drafts.release") as release:
+        with patch("istota.mail.drafts.release") as release:
             resp = await client.post(
                 f"/istota/api/chat/drafts/{draft_id}/approve",
                 cookies=cookies, headers=ORIGIN,
@@ -602,7 +603,7 @@ class TestApprove:
         draft_id = _hold(db_path)
         cookies = await _login(client)
 
-        with patch("istota.outbound_drafts.release") as release:
+        with patch("istota.mail.drafts.release") as release:
             release.side_effect = outbound_drafts.DraftSentButUnrecorded(
                 "<gone@example.com>", RuntimeError("disk full"),
             )
@@ -627,7 +628,7 @@ class TestApprove:
         draft_id = _hold(db_path)
         cookies = await _login(client)
 
-        with patch("istota.outbound_drafts.release") as release:
+        with patch("istota.mail.drafts.release") as release:
             release.side_effect = outbound_drafts.DraftError(
                 "email sending is not configured on this instance",
             )

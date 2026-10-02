@@ -6,10 +6,10 @@ from contextlib import asynccontextmanager
 
 import httpx
 
-from .config import Config
+from istota.config import Config
 from .ocs import OcsError, ocs_data
 
-logger = logging.getLogger("istota.talk")
+logger = logging.getLogger("istota.nextcloud.talk")
 
 # Backward-compat exports: a few tests / callers still import these. The
 # resolver no longer drives off them — it walks messageParameters and
@@ -20,7 +20,7 @@ MENTION_PLACEHOLDER_PATTERN = re.compile(r'\{(mention-(?:user|call|federated-use
 
 
 # Nextcloud answering a Talk read with something that is not an OCS envelope.
-# An alias, not a subclass: `istota.ocs.ocs_data` raises the shared type, and
+# An alias, not a subclass: `istota.nextcloud.ocs.ocs_data` raises the shared type, and
 # every `except TalkResponseError` / `pytest.raises(TalkResponseError)` in the
 # tree has to keep catching what this file's reads actually raise.
 TalkResponseError = OcsError

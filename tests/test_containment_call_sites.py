@@ -28,8 +28,9 @@ from pathlib import Path
 
 import pytest
 
-from istota import repos_relocate, sandbox_cache_sweeper as sweeper
-from istota import worktree_reaper
+from istota.maintenance import repos_relocate
+from istota.maintenance import sandbox_cache_sweeper as sweeper
+from istota.maintenance import worktree_reaper
 from istota.sandbox import git_remote_scrub
 from istota.sandbox import host_paths as skill_host_paths
 from istota.executor import _daemon_dirs, get_task_control_dir

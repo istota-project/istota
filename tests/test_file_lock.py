@@ -200,7 +200,7 @@ class TestCallerTypesSurvive:
 #: `exclusive_lock`, because none of them retries: each takes the lock once and
 #: acts on the answer immediately.
 _SINGLE_SHOT = {
-    "db_restore.py",
+    "maintenance/db_restore.py",
     "updater.py",
     "scheduler.py",
 }

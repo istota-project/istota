@@ -331,7 +331,7 @@ def _send_email(
         return False
 
     try:
-        from istota.email_support import get_email_config
+        from istota.mail.support import get_email_config
         from istota.skills.email import send_email
         email_config = get_email_config(config)
         send_email(

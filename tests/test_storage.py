@@ -747,8 +747,8 @@ class TestShareFolderWithUser:
         result = share_folder_with_user(config, "/Users/alice/notes", "alice")
         assert result is False
 
-    @patch("istota.nextcloud_client.httpx.get")
-    @patch("istota.nextcloud_client.httpx.post")
+    @patch("istota.nextcloud.compat.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.post")
     def test_creates_new_share(self, mock_post, mock_get, nc_config):
         # No existing shares
         mock_get_resp = MagicMock()
@@ -773,8 +773,8 @@ class TestShareFolderWithUser:
         assert call_kwargs.kwargs["data"]["shareType"] == 0
         assert call_kwargs.kwargs["data"]["permissions"] == 31
 
-    @patch("istota.nextcloud_client.httpx.get")
-    @patch("istota.nextcloud_client.httpx.post")
+    @patch("istota.nextcloud.compat.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.post")
     def test_idempotent_already_shared(self, mock_post, mock_get, nc_config):
         # Existing share found
         mock_get_resp = MagicMock()
@@ -790,8 +790,8 @@ class TestShareFolderWithUser:
         # POST should NOT be called since share already exists
         mock_post.assert_not_called()
 
-    @patch("istota.nextcloud_client.httpx.get")
-    @patch("istota.nextcloud_client.httpx.post")
+    @patch("istota.nextcloud.compat.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.post")
     def test_different_user_share_not_matching(self, mock_post, mock_get, nc_config):
         # Share exists but for different user
         mock_get_resp = MagicMock()
@@ -810,8 +810,8 @@ class TestShareFolderWithUser:
         assert result is True
         mock_post.assert_called_once()
 
-    @patch("istota.nextcloud_client.httpx.get")
-    @patch("istota.nextcloud_client.httpx.post")
+    @patch("istota.nextcloud.compat.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.post")
     def test_post_failure_returns_false(self, mock_post, mock_get, nc_config):
         mock_get_resp = MagicMock()
         mock_get_resp.json.return_value = {"ocs": {"data": []}}
@@ -823,8 +823,8 @@ class TestShareFolderWithUser:
         result = share_folder_with_user(nc_config, "/Users/alice/notes", "alice")
         assert result is False
 
-    @patch("istota.nextcloud_client.httpx.get")
-    @patch("istota.nextcloud_client.httpx.post")
+    @patch("istota.nextcloud.compat.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.post")
     def test_get_failure_still_tries_post(self, mock_post, mock_get, nc_config):
         # GET fails (can't check existing shares)
         mock_get.side_effect = Exception("Timeout")
@@ -839,8 +839,8 @@ class TestShareFolderWithUser:
         assert result is True
         mock_post.assert_called_once()
 
-    @patch("istota.nextcloud_client.httpx.get")
-    @patch("istota.nextcloud_client.httpx.post")
+    @patch("istota.nextcloud.compat.httpx.get")
+    @patch("istota.nextcloud.compat.httpx.post")
     def test_ensure_dirs_calls_share(self, mock_post, mock_get, nc_config):
         """ensure_user_directories_v2 auto-shares istota/ folder."""
         mock_get_resp = MagicMock()

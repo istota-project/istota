@@ -123,7 +123,7 @@ from istota.sandbox.git_hardening import run_git
 from istota.sandbox.git_remote_scrub import find_git_dirs
 from istota.sandbox.user_scope import is_within
 
-logger = logging.getLogger("istota.worktree_reaper")
+logger = logging.getLogger("istota.maintenance.worktree_reaper")
 
 _GIT_TIMEOUT = 60
 

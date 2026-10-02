@@ -280,7 +280,7 @@ def is_git_dir(path: Path) -> bool:
     repository made by hand.
 
     Checked as strictly as a structural test can be, because finding a git
-    directory *prunes the walk*, here and in :mod:`istota.repos_relocate` which
+    directory *prunes the walk*, here and in :mod:`istota.maintenance.repos_relocate` which
     shares this predicate. ``repos_dir`` is bound read-write into the sandbox,
     so a directory of empty files with the right names is something the model
     can create, and anything the walk accepts hides every repository beneath it

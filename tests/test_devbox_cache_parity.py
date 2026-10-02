@@ -32,7 +32,7 @@ import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from istota.executor import SANDBOX_CACHE_NPM, SANDBOX_CACHE_UV
-from istota.sandbox_cache_sweeper import CACHE_NPM, CACHE_UV, CACHE_ROOT_NAME
+from istota.maintenance.sandbox_cache_sweeper import CACHE_NPM, CACHE_UV, CACHE_ROOT_NAME
 
 REPO = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO / "deploy" / "ansible" / "templates"

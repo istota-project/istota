@@ -98,8 +98,8 @@ def _mock_talk_client(monkeypatch, conversations=None, mark=None):
         constructed.append({"bearer_token": bearer_token, "timeout": timeout})
         return instance
 
-    import istota.talk
-    monkeypatch.setattr(istota.talk, "TalkClient", factory)
+    import istota.nextcloud.talk
+    monkeypatch.setattr(istota.nextcloud.talk, "TalkClient", factory)
     return constructed, instance
 
 

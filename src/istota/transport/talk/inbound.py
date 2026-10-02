@@ -17,7 +17,7 @@ from istota.rooms import veto as room_veto
 from istota.rooms import speech_gate
 from ...async_runtime import get_talk_client
 from ...config import Config
-from ...talk import TalkClient, clean_message_content
+from istota.nextcloud.talk import TalkClient, clean_message_content
 from .._types import WEBMIRROR_REF_PREFIX, IncomingMessage, ParticipantRef
 from ..ingest import classify_ahead, ingest_message
 from ..participants import classify as classify_participant

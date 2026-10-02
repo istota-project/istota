@@ -131,7 +131,7 @@ def origin_setup(setup, surface, monkeypatch):
         config.nextcloud.username = 'bot'
         with db.get_db(config.db_path) as conn:
             db.add_room_binding(conn, token, 'talk', 'private-talk')
-        monkeypatch.setattr('istota.talk.TalkClient.get_participants', AsyncMock(return_value=[
+        monkeypatch.setattr('istota.nextcloud.talk.TalkClient.get_participants', AsyncMock(return_value=[
             {'actorType': 'users', 'actorId': 'alice'}, {'actorType': 'users', 'actorId': 'bot'}]))
     with db.get_db(config.db_path) as conn:
         conn.execute('UPDATE tasks SET source_type=?,conversation_token=? WHERE id=?', (surface, token, ident))
@@ -215,7 +215,7 @@ def test_external_origin_changed_during_talk_privacy_check(setup, monkeypatch):
         with db.get_db(config.db_path) as conn:
             db.add_room_member(conn, token, 'bob')
         return [{'actorType': 'users', 'actorId': 'alice'}, {'actorType': 'users', 'actorId': 'bot'}]
-    monkeypatch.setattr('istota.talk.TalkClient.get_participants', participants)
+    monkeypatch.setattr('istota.nextcloud.talk.TalkClient.get_participants', participants)
     delivery = AsyncMock()
     monkeypatch.setattr('istota.transport.talk.TalkTransport.deliver', delivery)
     asyncio.run(relays.deliver_returns(config))

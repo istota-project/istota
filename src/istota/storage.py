@@ -2887,5 +2887,5 @@ def share_folder_with_user(config: "Config", folder_path: str, user_id: str) -> 
 
     Delegates to nextcloud_client.ocs_share_folder.
     """
-    from .nextcloud_client import ocs_share_folder
+    from istota.nextcloud.compat import ocs_share_folder
     return ocs_share_folder(config, folder_path, user_id)

@@ -11,7 +11,7 @@ unbounded disk leak on the fuller resource.
 
 :func:`sweep_and_report` runs from the **scheduler**, on
 ``scheduler.sandbox_cache_sweep_interval``, for the same reason
-:mod:`istota.worktree_reaper` does: ``dispatch_setup_env_hooks`` calls every
+:mod:`istota.maintenance.worktree_reaper` does: ``dispatch_setup_env_hooks`` calls every
 skill's ``setup_env`` whatever the task selected, so a sweep there would fire
 before every Talk reply, every cron job and every heartbeat tick. A delete path
 belongs on a stated cadence.
@@ -175,7 +175,7 @@ from typing import NamedTuple
 from istota.lib import du
 from istota.sandbox.user_scope import is_scopable_user_id, scoped_user_dir
 
-logger = logging.getLogger("istota.sandbox_cache_sweeper")
+logger = logging.getLogger("istota.maintenance.sandbox_cache_sweeper")
 
 # Mirrors executor.SANDBOX_CACHE_UV / SANDBOX_CACHE_NPM — see the module
 # docstring for why these are a copy and what holds them equal.

@@ -197,7 +197,7 @@ Snapshots framework + module DBs to `db_backup_dir/<date>/` (default `{workspace
 - `0700`/`0600`; cold copies in DELETE journal mode (WAL on FUSE SIGBUSes).
 - `_destination_is_durable`: a destination resolving under `nextcloud_mount_path` is written only if `os.path.ismount`; keyed on the resolved path, not the config branch (ISSUE-480); `user_scope.is_within`; mount resolved once (`ismount` is False on a symlink). Outside the mount is trusted.
 - Clock persisted at `{db_path.parent}/.db_backup_last_run`, advances only when ≥1 DB succeeded. `_alert_backup_problems` and `_maybe_alert_backup_stale` (> 2x interval, after a prior success) use `_send_operator_alert` (thread with join timeout, ISSUE-143 class).
-- `python -m istota.db_backup` forces a run; `python -m istota.db_restore --all` (or `--date`) clears sidecars, refuses empty snapshots without `--force`, refuses while `_daemon_running`.
+- `python -m istota.maintenance.db_backup` forces a run; `python -m istota.maintenance.db_restore --all` (or `--date`) clears sidecars, refuses empty snapshots without `--force`, refuses while `_daemon_running`.
 
 ### Host pressure
 - Breadcrumb on `istota.scheduler.pressure`, unconditional (slow leaks cross no threshold). `shmem_unaccounted_kb` = `Shmem` − Σ tmpfs used (deduped by `st_dev`). Field order is a data format (`test_host_pressure.py`). Gated on `/proc/meminfo`, not PSI (Debian disables PSI by default). Unmeasured = `?`, never 0. Carries `memory_events_high` / `memory_events_oom_kill`.

@@ -498,7 +498,7 @@ async def _post_reply_as_user(client, cookies, room, parent_msg_id):
     with patch.object(mod, "_config", mod._config), \
             patch("istota.webui.tokens.feature_enabled", return_value=True), \
             patch("istota.webui.tokens.get_access_token", return_value="tok"), \
-            patch("istota.talk.TalkClient", _FakeTalkClient):
+            patch("istota.nextcloud.talk.TalkClient", _FakeTalkClient):
         resp = await _send(client, cookies, room["id"], body)
     assert resp.status_code == 200
     with db.get_db(_db_path()) as conn:

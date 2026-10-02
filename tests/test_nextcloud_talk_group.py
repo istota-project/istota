@@ -8,7 +8,7 @@ import pytest
 from istota.config import Config, NextcloudConfig
 from istota.nextcloud import OcsError
 from istota.skills.nextcloud import build_parser, main
-from istota.talk import TalkResponseError
+from istota.nextcloud.talk import TalkResponseError
 
 CAPS_WITH_TALK = {"capabilities": {"spreed": {"features": ["chat-v2"]}}}
 CAPS_WITHOUT_TALK = {"capabilities": {"files_sharing": {}}}
@@ -42,7 +42,7 @@ def talk_client():
         async def __aexit__(self_inner, *exc):
             return False
 
-    with patch("istota.talk.transient_client", return_value=_Ctx()), patch(
+    with patch("istota.nextcloud.talk.transient_client", return_value=_Ctx()), patch(
         "istota.nextcloud.capabilities.fetch_capabilities", return_value=CAPS_WITH_TALK
     ):
         yield client
@@ -175,7 +175,7 @@ class TestWritePaths:
         no `ocs` key did not come from Talk's chat endpoint — Talk always wraps
         — but from something interposed, which most likely never passed the
         post on. Answering "ok, message_id null" there is the silent success
-        `istota.ocs` exists to end, so the command fails and the caller can
+        `istota.nextcloud.ocs` exists to end, so the command fails and the caller can
         read the room back. Pre-change this exited 0.
         """
         talk_client.send_message.side_effect = TalkResponseError(
@@ -271,7 +271,7 @@ class TestTalkClientMethods:
 
     @pytest.fixture
     def client(self):
-        from istota.talk import TalkClient
+        from istota.nextcloud.talk import TalkClient
 
         config = Config(
             nextcloud=NextcloudConfig(
@@ -394,7 +394,7 @@ class TestTalkClientMethods:
 class TestTransientClient:
     @pytest.mark.asyncio
     async def test_closes_on_exit(self):
-        from istota.talk import transient_client
+        from istota.nextcloud.talk import transient_client
 
         config = Config(
             nextcloud=NextcloudConfig(url="https://cloud.example.com", username="istota")

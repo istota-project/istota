@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from istota import db
 from istota.rooms import veto as room_veto
-from ...email_support import get_email_config
+from istota.mail.support import get_email_config
 from istota.lib.llm_json import find_fenced_block
 from istota.notifications.resolvers import outbound_draft as draft_source
 from istota.notifications.store import RaiseResult, deliver_pending
@@ -233,7 +233,7 @@ def _hold_if_unapproved(
     reports a genuine delivery failure. Refusing rather than sending is the
     point — a gate that fails open on a busy database is not a gate.
     """
-    from ...outbound_policy import effective_policy, recipients_require_hold
+    from istota.mail.outbound_policy import effective_policy, recipients_require_hold
 
     # Resolved before any connection is opened, so `off` costs no database —
     # matching the skill-side gate, where the same ordering keeps an unreachable
@@ -258,7 +258,7 @@ def _hold_if_unapproved(
             "trusted and every message will be held", task.user_id,
         )
 
-    from ... import outbound_drafts as drafts
+    from istota.mail import drafts
     from ...transport import routing
 
     try:

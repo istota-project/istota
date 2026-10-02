@@ -44,7 +44,7 @@ from datetime import date as _date
 from datetime import timedelta
 from pathlib import Path
 
-from .modules import MODULE_NAMES
+from istota.modules import MODULE_NAMES
 from istota.sandbox.user_scope import is_within
 
 logger = logging.getLogger(__name__)
@@ -258,7 +258,7 @@ def _was_recently_covered(root: Path, date_str: str, rel: str) -> bool:
     except ValueError:  # a caller-supplied `today` that isn't a date
         return False
     # Today's dir counts: on a same-day rerun (a shortened interval, or a manual
-    # `python -m istota.db_backup` after a scheduled run) the copy that proves
+    # `python -m istota.maintenance.db_backup` after a scheduled run) the copy that proves
     # coverage is the one this morning's run wrote. Nothing writes it *this*
     # run — the source is missing, which is why we're here.
     if (root / date_str / rel).exists():
@@ -469,7 +469,7 @@ def main() -> int:
 
     from istota.config import load_config
 
-    argparse.ArgumentParser(prog="istota.db_backup").parse_args()
+    argparse.ArgumentParser(prog="istota.maintenance.db_backup").parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     config = load_config()
 

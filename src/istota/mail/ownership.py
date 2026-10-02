@@ -26,10 +26,10 @@ import logging
 import re
 from email.utils import getaddresses, parseaddr
 
-from . import db
-from .config import Config
+from istota import db
+from istota.config import Config
 
-logger = logging.getLogger("istota.email_ownership")
+logger = logging.getLogger("istota.mail.ownership")
 
 _SIGNUP_PRIVATE_OWNER = "\x00signup-private"
 

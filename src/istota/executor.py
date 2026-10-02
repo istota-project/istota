@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from .brain import BrainResult
 
 from . import db
-from . import email_support
+from istota.mail import support as email_support
 from istota.credentials import vault as secrets_vault
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox import task_env

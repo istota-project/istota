@@ -17,9 +17,9 @@ from pathlib import Path
 import tomli
 import tomli_w
 
-from . import cron_loader, db, storage
-from .nextcloud import dav
-from .nextcloud._http import OcsError, dav_files_url, dav_request
+from istota import cron_loader, db, storage
+from istota.nextcloud import dav
+from istota.nextcloud._http import OcsError, dav_files_url, dav_request
 from .room_relocate import (
     EXIT_OK, EXIT_PARTIAL, EXIT_REFUSED, _descriptor, _preflight, _problem, _refusal, load_vector_extension,
 )
@@ -99,7 +99,7 @@ def _merged_dated(source_text: str, target_text: str) -> str | None:
     prior run that stopped before removing the source; a target that merely
     begins with the same words is not, and is merged.
     """
-    from .memory.sleep_cycle import join_dated_memory  # noqa: PLC0415
+    from istota.memory.sleep_cycle import join_dated_memory  # noqa: PLC0415
 
     head = source_text.rstrip("\n")
     if not head.strip() or target_text == source_text or target_text.startswith(head + "\n\n"):
@@ -273,7 +273,7 @@ def _cron_plan(config, user: str, content: str, mapping: dict[str, str]):
 
 
 def _briefing_plan(content: str, mapping: dict[str, str]):
-    from .user_briefings import parse_briefings_md, _row_from_entry
+    from istota.user_briefings import parse_briefings_md, _row_from_entry
     span, raw = _block(content)
     if span is None:
         return None

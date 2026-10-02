@@ -258,7 +258,7 @@ class TestTheClockSeeds:
     def test_the_backup_clock_is_seeded_from_the_persisted_stamp(self, monkeypatch):
         """Not 0. Without this the clock reset every boot and a host deploying
         more than once a day never backed up."""
-        from istota import db_backup
+        from istota.maintenance import db_backup
 
         monkeypatch.setattr(db_backup, "last_backup_time", lambda config: 1234.5)
         config = Config()
@@ -1031,7 +1031,7 @@ class TestTheBodiesCloseOverTheDaemonsState:
     def test_the_backup_stale_flag_round_trips_on_the_persisted_stamp(
         self, tmp_path, monkeypatch
     ):
-        from istota import db_backup
+        from istota.maintenance import db_backup
 
         seen: dict = {}
         monkeypatch.setattr(db_backup, "last_backup_time", lambda config: 4242.0)

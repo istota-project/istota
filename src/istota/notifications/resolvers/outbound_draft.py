@@ -158,7 +158,7 @@ class OutboundDraftResolver:
     def resolve(
         self, config: "Config", conn: "sqlite3.Connection", row: "NotificationRow",
     ) -> "NotificationView | None":
-        from istota import outbound_drafts as drafts
+        from istota.mail import drafts
         from istota.notifications.sources import NotificationAction, NotificationView
 
         # The statuses come from the store that writes them, never re-spelled

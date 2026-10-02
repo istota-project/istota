@@ -3,7 +3,8 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, room_relocate, storage
+from istota import db, storage
+from istota.maintenance import room_relocate
 from istota.config import Config, UserConfig
 
 
@@ -156,17 +157,17 @@ def test_dav_move_ambiguity_verifies_both_paths(migrated):
     config.nextcloud.url = "https://cloud.example.com"
     config.nextcloud.username = "bot"
     put(config, f"Channels/{old}/CHANNEL.md", "stale mount")
-    from istota.room_mount_reconcile import _move_dav
+    from istota.maintenance.room_mount_reconcile import _move_dav
     err = OcsError("timeout", None, None, "MOVE")
     absent = OcsError("missing", 404, None, "PROPFIND")
-    with patch("istota.room_mount_reconcile.dav_request", side_effect=err) as request, patch(
-        "istota.room_mount_reconcile.dav.stat", side_effect=[absent, {"is_dir": True}]
+    with patch("istota.maintenance.room_mount_reconcile.dav_request", side_effect=err) as request, patch(
+        "istota.maintenance.room_mount_reconcile.dav.stat", side_effect=[absent, {"is_dir": True}]
     ) as check:
         _move_dav(config, f"/Channels/{old}", f"/Channels/{new}")
     assert check.call_count == 2
     assert request.call_args.kwargs["headers"]["Overwrite"] == "F"
-    with patch("istota.room_mount_reconcile.dav_request", side_effect=err), patch(
-        "istota.room_mount_reconcile.dav.stat", return_value={"is_dir": True}
+    with patch("istota.maintenance.room_mount_reconcile.dav_request", side_effect=err), patch(
+        "istota.maintenance.room_mount_reconcile.dav.stat", return_value={"is_dir": True}
     ):
         with pytest.raises(OcsError):
             _move_dav(config, f"/Channels/{old}", f"/Channels/{new}")
@@ -184,7 +185,7 @@ def test_cli_reconcile_uses_config_and_db_override(migrated):
 def test_read_only_rename_is_partial_and_resumes(migrated):
     config, old, new = migrated
     original = put(config, f"Channels/{old}/CHANNEL.md", "notes")
-    with patch("istota.room_mount_reconcile.os.rename", side_effect=OSError("read only")):
+    with patch("istota.maintenance.room_mount_reconcile.os.rename", side_effect=OSError("read only")):
         assert room_relocate.reconcile_mount(config) == 2
     assert original.read_text() == "notes"
     assert room_relocate.reconcile_mount(config) == 0
@@ -246,7 +247,7 @@ def test_backup_failure_prevents_rewrite(migrated):
     from istota.cron_loader import CronJob, generate_cron_md
     text = generate_cron_md([CronJob(name="job", cron="0 8 * * *", prompt="hi", room=old)])
     path = userfile(config, "alice", "CRON.md", text)
-    with patch("istota.room_mount_reconcile.storage.create_file_if_absent", return_value=False):
+    with patch("istota.maintenance.room_mount_reconcile.storage.create_file_if_absent", return_value=False):
         assert room_relocate.reconcile_mount(config) == 2
     assert path.read_text() == text
 
@@ -360,7 +361,7 @@ def test_dated_memory_merge_that_cannot_write_keeps_both(migrated):
     config, old, new = migrated
     alias = put(config, f"Channels/{old}/{DAY}", "before\n")
     target = put(config, f"Channels/{new}/{DAY}", "after\n")
-    with patch("istota.room_mount_reconcile.storage.write_regular_file", return_value=False):
+    with patch("istota.maintenance.room_mount_reconcile.storage.write_regular_file", return_value=False):
         assert room_relocate.reconcile_mount(config) == 2
     assert alias.read_text() == "before\n"
     assert target.read_text() == "after\n"
@@ -456,10 +457,10 @@ def dav_server(migrated):
     config.nextcloud.url = "https://cloud.example.com"
     config.nextcloud.username = "bot"
     server = FakeDav()
-    with patch("istota.room_mount_reconcile.dav.stat", side_effect=server.stat), patch(
-        "istota.room_mount_reconcile.dav.list_dir", side_effect=server.list_dir
-    ), patch("istota.room_mount_reconcile.dav_request", side_effect=server.request), patch(
-        "istota.room_mount_reconcile.dav_files_url", side_effect=lambda config, path: path
+    with patch("istota.maintenance.room_mount_reconcile.dav.stat", side_effect=server.stat), patch(
+        "istota.maintenance.room_mount_reconcile.dav.list_dir", side_effect=server.list_dir
+    ), patch("istota.maintenance.room_mount_reconcile.dav_request", side_effect=server.request), patch(
+        "istota.maintenance.room_mount_reconcile.dav_files_url", side_effect=lambda config, path: path
     ):
         yield config, old, new, server
 
@@ -500,7 +501,7 @@ def test_dav_merge_refuses_a_target_that_changed_under_it(dav_server):
             server.files[url] = b"a late write\n"
         return real(config, method, url, **kw)
 
-    with patch("istota.room_mount_reconcile.dav_request", side_effect=late_write):
+    with patch("istota.maintenance.room_mount_reconcile.dav_request", side_effect=late_write):
         assert room_relocate.reconcile_mount(config) == 2
     assert server.files[f"/Channels/{new}/{DAY}"] == b"a late write\n"
     assert server.files[f"/Channels/{old}/{DAY}"] == b"before\n"

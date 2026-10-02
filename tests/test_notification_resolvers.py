@@ -23,8 +23,8 @@ import pytest
 from istota import (
     confirmations,
     db,
-    outbound_drafts as drafts,
 )
+from istota.mail import drafts
 from istota.notifications import sources
 from istota.notifications import store
 from istota.config import Config, UserConfig

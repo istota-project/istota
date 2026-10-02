@@ -467,7 +467,7 @@ def get_talk_client(config):
     with _TALK_CLIENT_LOCK:
         if _TALK_CLIENT is not None and not _TALK_CLIENT.is_closed:
             return _TALK_CLIENT
-        from .talk import TalkClient
+        from istota.nextcloud.talk import TalkClient
 
         client = TalkClient(config)
         get_async_runtime().add_cleanup_hook(client.aclose)

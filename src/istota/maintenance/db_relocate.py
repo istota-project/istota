@@ -22,8 +22,8 @@ the real data on the mount.
 
 Idempotent: a destination that already exists is left untouched.
 
-    python -m istota.db_relocate            # migrate all users x modules
-    python -m istota.db_relocate --dry-run  # report what would move
+    python -m istota.maintenance.db_relocate            # migrate all users x modules
+    python -m istota.maintenance.db_relocate --dry-run  # report what would move
 """
 
 from __future__ import annotations
@@ -237,7 +237,7 @@ def main() -> int:
 
     from istota.config import load_config
 
-    parser = argparse.ArgumentParser(prog="istota.db_relocate")
+    parser = argparse.ArgumentParser(prog="istota.maintenance.db_relocate")
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Report what would move without copying anything.",

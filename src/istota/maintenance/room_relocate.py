@@ -176,7 +176,7 @@ def load_vector_extension(conn: sqlite3.Connection) -> None:
     """
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='memory_chunks_vec'").fetchone():
         return
-    from .memory.search import enable_vec_extension
+    from istota.memory.search import enable_vec_extension
     # The loader opens the installed package's extension, never a DB-
     # supplied path. Restrict extension loading again immediately.
     conn.enable_load_extension(True)
@@ -508,14 +508,14 @@ def main(argv: list[str] | None = None) -> int:
             pass
     try:
         if args.reconcile_mount:
-            from .config import load_config
+            from istota.config import load_config
             config = load_config()
             if args.db_path is not None:
                 config.db_path = args.db_path
             return reconcile_mount(config, dry_run=args.dry_run, list_only=args.list_only)
         path = args.db_path
         if path is None:
-            from .config import load_config
+            from istota.config import load_config
             path = load_config().db_path
         return migrate_database(path, dry_run=args.dry_run, list_only=args.list_only)
     except Exception as exc:

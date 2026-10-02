@@ -31,8 +31,8 @@ from pathlib import Path
 
 import pytest
 
-from istota import repos_relocate
-from istota.repos_relocate import (
+from istota.maintenance import repos_relocate
+from istota.maintenance.repos_relocate import (
     EXIT_OK,
     EXIT_PARTIAL,
     EXIT_REFUSED,

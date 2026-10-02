@@ -10,7 +10,7 @@ failure mode seen in practice).
 
 Usage::
 
-    from istota.db_health import check_and_repair
+    from istota.maintenance.db_health import check_and_repair
 
     report = check_and_repair(db_path, label="feeds:alice")
     # report.ok is True after a clean check or a successful repair;

@@ -109,7 +109,7 @@ def _talk_bound(setup, monkeypatch):
 
 def _participants(monkeypatch, **mock):
     from unittest.mock import AsyncMock
-    monkeypatch.setattr('istota.talk.TalkClient.get_participants', AsyncMock(**mock))
+    monkeypatch.setattr('istota.nextcloud.talk.TalkClient.get_participants', AsyncMock(**mock))
 
 
 def test_list_from_a_talk_bound_room_checks_the_live_audience(setup, monkeypatch):

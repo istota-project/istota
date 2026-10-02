@@ -223,7 +223,7 @@ def _post(token, *, role="assistant", body="hello", task_id=None, title=None,
 
 def _hold_draft(room_token, *, user_id="alice", subject="Re: Invite"):
     """An outbound email the approval gate held, rendered in ``room_token``."""
-    from istota import outbound_drafts
+    from istota.mail import drafts as outbound_drafts
 
     with db.get_db(_db_path()) as conn:
         return outbound_drafts.hold(
@@ -662,7 +662,7 @@ class TestRoomStreamSSE:
     async def test_a_resolved_draft_pushes_the_shrunken_set(self, tmp_path):
         """Sent and discarded are the transitions an id-ordered cursor cannot
         carry, and the reason this is a snapshot diff rather than a tail."""
-        from istota import outbound_drafts
+        from istota.mail import drafts as outbound_drafts
 
         room = await self._setup(tmp_path, room_stream_room_check_seconds=0.001)
         draft_id = _hold_draft(room["token"])

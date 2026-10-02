@@ -222,7 +222,7 @@ class TestSendConfirmationPrompt:
 
 class TestSendEmail:
     @patch("istota.skills.email.send_email")
-    @patch("istota.email_support.get_email_config")
+    @patch("istota.mail.support.get_email_config")
     def test_sends_email(self, mock_get_config, mock_send):
         config = Config(
             email=EmailConfig(enabled=True, bot_email="bot@test.com"),

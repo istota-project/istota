@@ -3186,7 +3186,7 @@ def backfill_room_messages_from_talk_cache(
     # store — the cache holds the *raw* body, so without this the recovered
     # transcript leaks literal placeholder tokens to the web UI (ISSUE-132). The
     # live inbound path already resolves; only this cache-recovery path didn't.
-    from .talk import clean_message_content
+    from istota.nextcloud.talk import clean_message_content
 
     def _resolved(row) -> str:
         params = row["message_parameters"]
@@ -8325,7 +8325,7 @@ def _backfill_notifications(conn: sqlite3.Connection) -> None:
     `istota init` retries the whole pass.
     """
     from . import confirmations  # noqa: PLC0415 — `confirmations` imports db
-    from . import outbound_drafts as drafts  # noqa: PLC0415
+    from istota.mail import drafts  # noqa: PLC0415
     from istota.notifications.resolvers import confirmation as confirmation_source  # noqa: PLC0415
     from istota.notifications.resolvers import outbound_draft as draft_source  # noqa: PLC0415
 

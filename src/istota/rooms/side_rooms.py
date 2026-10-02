@@ -302,7 +302,7 @@ async def push_to_whatsapp_view(
 
 
 def _send_private_mail(config, *, to: str, subject: str, body: str) -> None:
-    from istota.email_support import get_email_config
+    from istota.mail.support import get_email_config
     from istota.skills.email import send_email
 
     send_email(to=to, subject=subject, body=body, config=get_email_config(config),

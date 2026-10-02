@@ -23,7 +23,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from istota import async_runtime, db, talk
+from istota import async_runtime, db
+from istota.nextcloud import talk
 from istota.config import NextcloudConfig, TalkConfig
 from istota.scheduler import edit_talk_message
 from istota.transport import talk as talk_pkg

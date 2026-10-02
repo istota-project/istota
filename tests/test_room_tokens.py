@@ -94,7 +94,7 @@ def _schema_columns(conn):
 
 
 def _assert_inventory(conn):
-    from istota.room_relocate import PRESERVE_COLUMNS, REWRITE_COLUMNS
+    from istota.maintenance.room_relocate import PRESERVE_COLUMNS, REWRITE_COLUMNS
 
     rewrite, preserve = set(REWRITE_COLUMNS), set(PRESERVE_COLUMNS)
     columns, candidates = _schema_columns(conn)
@@ -134,7 +134,7 @@ def test_inventory_guard_refuses_an_unclassified_holder(ddl):
 
 
 def test_mixed_and_structured_holders_require_specific_handlers():
-    from istota.room_relocate import REWRITE_COLUMNS
+    from istota.maintenance.room_relocate import REWRITE_COLUMNS
 
     assert REWRITE_COLUMNS["sent_emails", "conversation_token"] == "email_thread"
     assert REWRITE_COLUMNS["processed_emails", "thread_id"] == "email_thread"

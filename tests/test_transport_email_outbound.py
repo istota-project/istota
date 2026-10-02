@@ -1014,7 +1014,7 @@ class TestDeliveryLegApprovalGate:
             patch("istota.transport.email.outbound.reply_to_email") as mock_reply,
             patch("istota.transport.email.outbound.send_email") as mock_send,
             patch(
-                "istota.outbound_policy.recipients_require_hold",
+                "istota.mail.outbound_policy.recipients_require_hold",
                 side_effect=RuntimeError("database is locked"),
             ),
         ):
@@ -1049,7 +1049,7 @@ class TestDeliveryLegApprovalGate:
             patch("istota.transport.email.outbound.reply_to_email"),
             patch("istota.transport.email.outbound.send_email"),
             patch(
-                "istota.outbound_policy.recipients_require_hold",
+                "istota.mail.outbound_policy.recipients_require_hold",
                 side_effect=RuntimeError("database is locked"),
             ),
         ):

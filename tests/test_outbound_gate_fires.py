@@ -18,7 +18,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from istota import db, outbound_drafts as drafts
+from istota import db
+from istota.mail import drafts
 from istota.config import Config, EmailConfig, UserConfig
 from istota.skills.email import Email, cmd_reply, cmd_send, main
 from tests.support.skill_cli import run_skill_main

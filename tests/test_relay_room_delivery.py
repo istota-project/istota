@@ -27,7 +27,7 @@ def room(setup, monkeypatch):
         token = db.create_web_chat_room(conn, 'bob', 'assistant').token
     talk = FakeTalkClient(config.db_path)
     participants = AsyncMock(return_value=BOT)
-    monkeypatch.setattr('istota.talk.TalkClient.get_participants', participants)
+    monkeypatch.setattr('istota.nextcloud.talk.TalkClient.get_participants', participants)
     pushes = []
 
     def send_notification(config, user_id, message, **kwargs):

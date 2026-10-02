@@ -35,8 +35,8 @@ from pathlib import Path
 
 import pytest
 
-import istota.sandbox_cache_sweeper as sweeper
-from istota.sandbox_cache_sweeper import (
+import istota.maintenance.sandbox_cache_sweeper as sweeper
+from istota.maintenance.sandbox_cache_sweeper import (
     ACTION_BUSY,
     ACTION_FUTURE_MTIME,
     ACTION_NO_TOOLS,
@@ -349,7 +349,7 @@ class TestLiveness:
         ahead = time.time() + 86400
         os.utime(user_dir / CACHE_UV / "archive-v0" / "wheel", (ahead, ahead))
 
-        with caplog.at_level("WARNING", logger="istota.sandbox_cache_sweeper"):
+        with caplog.at_level("WARNING", logger="istota.maintenance.sandbox_cache_sweeper"):
             sweep_and_report(root, max_bytes=MIN_MAX_BYTES)
 
         assert "alice" in caplog.text
@@ -765,7 +765,7 @@ class TestReporting:
         _cache(root, "bob", uv=4 * MB)
         _age(root, 86400)
 
-        with caplog.at_level("INFO", logger="istota.sandbox_cache_sweeper"):
+        with caplog.at_level("INFO", logger="istota.maintenance.sandbox_cache_sweeper"):
             outcomes = sweep_and_report(root, max_bytes=MIN_MAX_BYTES)
 
         assert {o.action for o in outcomes} == {ACTION_RECLAIMED}
@@ -773,7 +773,7 @@ class TestReporting:
 
     def test_it_never_raises(self, tmp_path, toolbox, monkeypatch):
         monkeypatch.setattr(
-            "istota.sandbox_cache_sweeper.sweep_caches",
+            "istota.maintenance.sandbox_cache_sweeper.sweep_caches",
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
         )
         assert sweep_and_report(tmp_path, max_bytes=MIN_MAX_BYTES) == []
@@ -1512,7 +1512,7 @@ class TestOrphanCaches:
         orphan = _derived_cache(repos, "newcomer", uv=4 * MB)
         _age(repos, 86400)
 
-        with caplog.at_level("WARNING", logger="istota.sandbox_cache_sweeper"):
+        with caplog.at_level("WARNING", logger="istota.maintenance.sandbox_cache_sweeper"):
             sweep_and_report(repos, max_bytes=CEILING, user_ids=["alice"])
 
         assert str(orphan) in caplog.text
@@ -1524,7 +1524,7 @@ class TestOrphanCaches:
         deletes: an entry under `repos_dir` is model-creatable, so a 'clean up
         the orphans' pass would aim a reclaim verb at a directory a task made.
         """
-        from istota.sandbox_cache_sweeper import report_orphan_caches
+        from istota.maintenance.sandbox_cache_sweeper import report_orphan_caches
 
         repos = tmp_path / "repos"
         _derived_cache(repos, "alice", uv=1)
@@ -1536,7 +1536,7 @@ class TestOrphanCaches:
     def test_a_symlinked_entry_is_not_reported_as_an_orphan(self, tmp_path):
         """It would name a path outside the tree in an operator-facing warning,
         chosen by whoever planted the link."""
-        from istota.sandbox_cache_sweeper import report_orphan_caches
+        from istota.maintenance.sandbox_cache_sweeper import report_orphan_caches
 
         repos = tmp_path / "repos"
         repos.mkdir()
@@ -1547,7 +1547,7 @@ class TestOrphanCaches:
         assert report_orphan_caches(repos, ["alice"]) == []
 
     def test_an_unreadable_root_reports_nothing(self, tmp_path):
-        from istota.sandbox_cache_sweeper import report_orphan_caches
+        from istota.maintenance.sandbox_cache_sweeper import report_orphan_caches
 
         assert report_orphan_caches(tmp_path / "nope", ["alice"]) == []
 
@@ -1560,7 +1560,7 @@ class TestOrphanCaches:
         repos = tmp_path / "repos"
         repos.mkdir()
 
-        with caplog.at_level("INFO", logger="istota.sandbox_cache_sweeper"):
+        with caplog.at_level("INFO", logger="istota.maintenance.sandbox_cache_sweeper"):
             assert sweep_and_report(repos, max_bytes=CEILING, user_ids=[]) == []
 
         assert "no package cache found" in caplog.text
@@ -1577,7 +1577,7 @@ class TestOutcomeVisibility:
         victim = _derived_cache(repos, "bob", uv=1)
         (repos / "alice" / CACHE_ROOT_NAME).symlink_to(victim)
 
-        with caplog.at_level("WARNING", logger="istota.sandbox_cache_sweeper"):
+        with caplog.at_level("WARNING", logger="istota.maintenance.sandbox_cache_sweeper"):
             sweep_and_report(repos, max_bytes=CEILING, user_ids=["alice"])
 
         assert "alice" in caplog.text

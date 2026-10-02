@@ -4,7 +4,8 @@ import sqlite3
 
 import pytest
 
-from istota import db, room_relocate
+from istota import db
+from istota.maintenance import room_relocate
 from istota.relay.destinations import destination_fingerprint
 
 
@@ -330,7 +331,7 @@ def test_cli_dry_run_and_run(database):
     with db.get_db(database) as conn:
         legacy(conn)
     before = snapshot(database)
-    command = [sys.executable, "-m", "istota.room_relocate", "--db-path", str(database)]
+    command = [sys.executable, "-m", "istota.maintenance.room_relocate", "--db-path", str(database)]
     dry = subprocess.run([*command, "--dry-run"], text=True, capture_output=True)
     assert dry.returncode == 0, dry.stderr
     assert "pending: old-talk" in dry.stdout

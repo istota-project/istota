@@ -1495,7 +1495,7 @@ def snapshot(
 
 
 # ---------------------------------------------------------------------------
-# `python -m istota.host_pressure`
+# `python -m istota.maintenance.host_pressure`
 # ---------------------------------------------------------------------------
 
 
@@ -1508,7 +1508,7 @@ def main(argv: list[str] | None = None) -> int:
     import argparse  # noqa: PLC0415  -- CLI-only, not paid for on the daemon path
 
     parser = argparse.ArgumentParser(
-        prog="python -m istota.host_pressure",
+        prog="python -m istota.maintenance.host_pressure",
         description="Print one host-pressure breadcrumb line, or a full snapshot.",
     )
     parser.add_argument("--snapshot", action="store_true", help="print the full snapshot instead")

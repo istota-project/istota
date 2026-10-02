@@ -227,7 +227,7 @@ def test_preview_delivered_only_to_its_private_push_origin(setup, surface, monke
     else:
         with db.get_db(config.db_path) as conn:
             db.add_room_binding(conn, token, 'talk', 'private-talk')
-        monkeypatch.setattr('istota.talk.TalkClient.get_participants', AsyncMock(return_value=[
+        monkeypatch.setattr('istota.nextcloud.talk.TalkClient.get_participants', AsyncMock(return_value=[
             {'actorType': 'users', 'actorId': 'alice'}, {'actorType': 'users', 'actorId': 'bot'}]))
     with db.get_db(config.db_path) as conn:
         conn.execute('UPDATE tasks SET source_type=?,conversation_token=? WHERE id=?', (surface, token, ident))

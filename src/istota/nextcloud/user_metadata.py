@@ -2,10 +2,10 @@
 
 import logging
 
-from .config import Config
-from .nextcloud_client import ocs_get
+from istota.config import Config
+from istota.nextcloud.compat import ocs_get
 
-logger = logging.getLogger("istota.nextcloud_api")
+logger = logging.getLogger("istota.nextcloud.user_metadata")
 
 
 def fetch_user_info(config: Config, user_id: str) -> dict | None:

@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from istota import host_pressure
+from istota.maintenance import host_pressure
 from istota.executor import _bwrap_available
 
 pytestmark = pytest.mark.linux

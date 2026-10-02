@@ -39,7 +39,7 @@ def web_config(db_path):
 class TestTalkClientRoomMethods:
     @pytest.mark.asyncio
     async def test_create_conversation_posts_v4_room(self):
-        from istota.talk import TalkClient
+        from istota.nextcloud.talk import TalkClient
         cfg = Config()
         cfg.nextcloud = NextcloudConfig(url="https://nc.example", username="bot", app_password="pw")
         client = TalkClient(cfg)
@@ -57,7 +57,7 @@ class TestTalkClientRoomMethods:
 
     @pytest.mark.asyncio
     async def test_add_participant_posts_participants(self):
-        from istota.talk import TalkClient
+        from istota.nextcloud.talk import TalkClient
         cfg = Config()
         cfg.nextcloud = NextcloudConfig(url="https://nc.example", username="bot", app_password="pw")
         client = TalkClient(cfg)
@@ -73,7 +73,7 @@ class TestTalkClientRoomMethods:
 
     @pytest.mark.asyncio
     async def test_rename_conversation_puts_room(self):
-        from istota.talk import TalkClient
+        from istota.nextcloud.talk import TalkClient
         cfg = Config()
         cfg.nextcloud = NextcloudConfig(url="https://nc.example", username="bot", app_password="pw")
         client = TalkClient(cfg)
@@ -115,7 +115,7 @@ class TestPromote:
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
         fake = _fake_talk_client()
-        with patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             status, result = await web_app._chat_promote_to_talk("alice", room.id)
         assert status == "ok"
         assert result is not None
@@ -137,7 +137,7 @@ class TestPromote:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
         fake = _fake_talk_client()
         fake.add_participant = AsyncMock(side_effect=RuntimeError("NC down"))
-        with patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             status, result = await web_app._chat_promote_to_talk("alice", room.id)
         assert status == "ok"
         assert result is not None
@@ -147,7 +147,7 @@ class TestPromote:
         # A second promote attempt sees the binding, finds the conversation
         # still there, and creates no new Talk room.
         fake2 = _fake_talk_client()
-        with patch("istota.talk.TalkClient", return_value=fake2):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake2):
             again_status, _ = await web_app._chat_promote_to_talk("alice", room.id)
         assert again_status == "live"
         fake2.create_conversation.assert_not_awaited()
@@ -159,7 +159,7 @@ class TestPromote:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
             db.add_room_binding(conn, room.token, "talk", "existing")
         fake = _fake_talk_client()
-        with patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             status, _ = await web_app._chat_promote_to_talk("alice", room.id)
         assert status == "live"
         fake.create_conversation.assert_not_awaited()
@@ -171,7 +171,7 @@ class TestPromote:
             db.register_room(conn, "cpz", "alice", origin="talk", name="#x")
             handle = db.ensure_web_chat_handle(conn, "alice", "cpz", "#x")
         fake = _fake_talk_client()
-        with patch("istota.talk.TalkClient", return_value=fake):
+        with patch("istota.nextcloud.talk.TalkClient", return_value=fake):
             status, _ = await web_app._chat_promote_to_talk("alice", handle.id)
         assert status == "not_found"
 

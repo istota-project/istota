@@ -165,4 +165,4 @@ The client lives in `src/istota/nextcloud/`:
 | `dav.py` | PROPFIND, SEARCH, versions, trash, upload/download, favorites, quota |
 | `notifications.py` | Notifications and activity reads |
 
-`src/istota/nextcloud_client.py` remains as a back-compat shim holding the `None`-returning variants four best-effort daemon paths depend on: startup user hydration, the `ocs_share_folder` pre-check, the shared-file organizer's owner lookup, and `!search`. A Nextcloud hiccup must not fail daemon startup, so those keep the historical contract; only the CLI takes the raising path.
+`src/istota/nextcloud/compat.py` remains as a back-compat shim holding the `None`-returning variants four best-effort daemon paths depend on: startup user hydration, the `ocs_share_folder` pre-check, the shared-file organizer's owner lookup, and `!search`. A Nextcloud hiccup must not fail daemon startup, so those keep the historical contract; only the CLI takes the raising path.

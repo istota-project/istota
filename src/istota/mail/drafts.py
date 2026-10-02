@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 from istota.sandbox.host_paths import path_under_roots
 
 if TYPE_CHECKING:
-    from .config import Config
+    from istota.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -562,9 +562,9 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
     **Never marks sent optimistically.** A draft wrongly marked sent is a
     message the user believes went out and did not.
     """
-    from . import db
-    from .email_support import get_email_config
-    from .skills.email import send_email
+    from istota import db
+    from istota.mail.support import get_email_config
+    from istota.skills.email import send_email
 
     email_config = get_email_config(config)
     if not config.email.enabled or not email_config.smtp_host:

@@ -31,7 +31,7 @@ import pytest
 
 from istota import confirmations, db
 from istota.config import UserConfig
-from istota.email_support import compute_thread_id, normalize_subject
+from istota.mail.support import compute_thread_id, normalize_subject
 from istota.skills.email import (
     EmailConfig,
     _get_mailbox,

@@ -33,7 +33,7 @@ from istota.async_runtime import (
     run_coro,
 )
 from istota.config import Config, NextcloudConfig
-from istota.talk import TalkClient
+from istota.nextcloud.talk import TalkClient
 
 
 def _config() -> Config:
@@ -177,7 +177,7 @@ class TestStage6PersistentRequests:
 
     def test_send_message_reuses_one_httpx_client(self):
         client = get_talk_client(_config())
-        with patch("istota.talk.httpx.AsyncClient") as MockHttp:
+        with patch("istota.nextcloud.talk.httpx.AsyncClient") as MockHttp:
             inst = MockHttp.return_value
             inst.post = AsyncMock(return_value=self._resp({"ocs": {"data": {"id": 1}}}))
             inst.aclose = AsyncMock()
@@ -195,7 +195,7 @@ class TestStage6PersistentRequests:
 
     def test_method_after_aclose_raises(self):
         client = get_talk_client(_config())
-        with patch("istota.talk.httpx.AsyncClient") as MockHttp:
+        with patch("istota.nextcloud.talk.httpx.AsyncClient") as MockHttp:
             MockHttp.return_value.aclose = AsyncMock()
 
             async def go():
@@ -208,7 +208,7 @@ class TestStage6PersistentRequests:
 
     def test_poll_messages_overrides_timeout_per_request(self):
         client = get_talk_client(_config())
-        with patch("istota.talk.httpx.AsyncClient") as MockHttp:
+        with patch("istota.nextcloud.talk.httpx.AsyncClient") as MockHttp:
             inst = MockHttp.return_value
             inst.get = AsyncMock(return_value=self._resp({"ocs": {"data": []}}))
             inst.aclose = AsyncMock()
@@ -249,7 +249,7 @@ class TestShimDeliveryEndToEnd:
         task.talk_message_id = None
         task.user_id = "alice"
 
-        with patch("istota.talk.httpx.AsyncClient") as MockHttp:
+        with patch("istota.nextcloud.talk.httpx.AsyncClient") as MockHttp:
             inst = MockHttp.return_value
             inst.post = AsyncMock(
                 return_value=self._resp({"ocs": {"data": {"id": 99}}})

@@ -7,8 +7,8 @@ directory across on the same mount, then writes a marker in the destination.
 
 Run it with the scheduler stopped::
 
-    python -m istota.db_backup_relocate
-    python -m istota.db_backup_relocate --dry-run
+    python -m istota.maintenance.db_backup_relocate
+    python -m istota.maintenance.db_backup_relocate --dry-run
 """
 
 from __future__ import annotations
@@ -318,9 +318,9 @@ def _print_report(report: RelocationReport) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from .config import load_config
+    from istota.config import load_config
 
-    parser = argparse.ArgumentParser(prog="istota.db_backup_relocate")
+    parser = argparse.ArgumentParser(prog="istota.maintenance.db_backup_relocate")
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Report the dated directories that would move without writing.",

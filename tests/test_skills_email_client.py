@@ -17,7 +17,7 @@ from istota import db
 from istota.config import Config
 from istota.config import EmailConfig as AppEmailConfig
 from istota.config import UserConfig
-from istota.email_ownership import (
+from istota.mail.ownership import (
     extract_user_from_recipient,
     owner_in_scope,
     parse_message_ids,

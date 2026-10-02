@@ -10,13 +10,13 @@ task binds only its own subtree, so the reach is closed structurally rather
 than by a mask.
 
 This module moves an existing deployment across, mirroring
-:mod:`istota.db_relocate`: a one-shot migrator invoked by the Ansible role, so
+:mod:`istota.maintenance.db_relocate`: a one-shot migrator invoked by the Ansible role, so
 the judgement lives in Python where it can be tested rather than in untested
 YAML run once, during a real migration, on the only copy of the data.
 
-    python -m istota.repos_relocate             # migrate
-    python -m istota.repos_relocate --dry-run   # print the plan, touch nothing
-    python -m istota.repos_relocate --list      # report the tree as it stands
+    python -m istota.maintenance.repos_relocate             # migrate
+    python -m istota.maintenance.repos_relocate --dry-run   # print the plan, touch nothing
+    python -m istota.maintenance.repos_relocate --list      # report the tree as it stands
 
 **Ownership is the whole problem.** Nothing on disk says which user owns a
 clone — a forge namespace is not a user id, and the two can legitimately share
@@ -127,8 +127,8 @@ otherwise hide every real clone beneath it from repair. That predicate is not a
 proof of provenance, and its own docstring says both where it stops and the one
 dimension in which it is looser than the one deleted here.
 
-Error posture follows :mod:`istota.worktree_reaper` and
-:mod:`istota.sandbox_cache_sweeper`, the other two delete-adjacent paths:
+Error posture follows :mod:`istota.maintenance.worktree_reaper` and
+:mod:`istota.maintenance.sandbox_cache_sweeper`, the other two delete-adjacent paths:
 nothing raises out of :func:`main`, what could not be done is reported rather
 than passed over in silence, and a refusal is distinguishable from a success by
 the exit code as well as by the text. ``--dry-run`` touches nothing.
@@ -1052,7 +1052,7 @@ def _live_task_refusal(config) -> RelocateRefusal | None:
     against a database that is not there, and refusing would fail the very
     first deploy.
     """
-    from . import db
+    from istota import db
 
     db_path = Path(config.db_path) if config.db_path else None
     if db_path is None or not db_path.exists():
@@ -1168,7 +1168,7 @@ def _print_listing(repos_dir: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="istota.repos_relocate",
+        prog="istota.maintenance.repos_relocate",
         description=(
             "Move developer.repos_dir into per-user subtrees "
             "({repos_dir}/{user_id}/{namespace}/{project}.git)."
@@ -1199,7 +1199,7 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     try:
-        from .config import load_admin_users, load_config
+        from istota.config import load_admin_users, load_config
 
         config = load_config()
     except Exception as exc:  # noqa: BLE001 - never raises out of main

@@ -26,8 +26,8 @@ import sys
 import time
 from pathlib import Path
 
-from istota.browser_owner import browser_headers, with_browser_owner
-from istota.browser_admission import BrowserQueueTimeout, browser_request
+from istota.browser.owner import browser_headers, with_browser_owner
+from istota.browser.admission import BrowserQueueTimeout, browser_request
 
 import httpx
 

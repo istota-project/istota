@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from . import db
 from .config import Config
-from .nextcloud_client import webdav_get_owner
+from istota.nextcloud.compat import webdav_get_owner
 from .skills.files import list_files, path_exists, move_file
 from .storage import get_user_shared_path, ensure_user_directories_v2
 

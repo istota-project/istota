@@ -48,7 +48,7 @@ def env(tmp_path, monkeypatch):
         db.add_web_room_member(conn, shared, "bob")
     talk = FakeTalkClient(config.db_path)
     participants = AsyncMock(return_value=PARTICIPANTS_ALICE)
-    monkeypatch.setattr("istota.talk.TalkClient.get_participants", participants)
+    monkeypatch.setattr("istota.nextcloud.talk.TalkClient.get_participants", participants)
     with patch("istota.transport.talk.get_talk_client", talk_bot_client(talk)):
         yield dict(config=config, shared=shared, talk=talk, participants=participants)
 
@@ -484,7 +484,7 @@ class TestSharedRoomConfirmations:
         config.scheduler = SchedulerConfig()
         config.workspace_path = tmp_path / "mount"
         config.workspace_path.mkdir()
-        monkeypatch.setattr("istota.talk.TalkClient.get_participants",
+        monkeypatch.setattr("istota.nextcloud.talk.TalkClient.get_participants",
                             AsyncMock(return_value=PARTICIPANTS_ALICE))
         fake_talk.db_path = config.db_path
         with db.get_db(config.db_path) as conn:

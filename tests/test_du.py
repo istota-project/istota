@@ -182,7 +182,7 @@ class TestTheConvertedCallersStillAnswerWhatTheyAnsweredBefore:
     def test_measure_cache_counts_a_hardlinked_wheel_once(self, tmp_path):
         """The property uv's cache needs. Discriminating on any filesystem:
         without dedupe the answer is twice this."""
-        from istota.sandbox_cache_sweeper import measure_cache
+        from istota.maintenance.sandbox_cache_sweeper import measure_cache
 
         real = tmp_path / "wheel"
         real.write_bytes(b"w" * 65536)
@@ -195,7 +195,7 @@ class TestTheConvertedCallersStillAnswerWhatTheyAnsweredBefore:
         Linux host the sweep runs on — see
         `TestTreeBytes::test_include_dirs_adds_exactly_the_directory_inodes_and_nothing_else`.
         The identity is what is asserted, not a number."""
-        from istota.sandbox_cache_sweeper import measure_cache
+        from istota.maintenance.sandbox_cache_sweeper import measure_cache
 
         (tmp_path / "f").write_bytes(b"w" * 8192)
         (tmp_path / "d").mkdir()
@@ -207,7 +207,7 @@ class TestTheConvertedCallersStillAnswerWhatTheyAnsweredBefore:
         """`_largest_child` is `tree_bytes`'s only caller in the tree, and it
         has to answer what `measure_cache` answers or the `still-over` note
         names the wrong directory."""
-        from istota.sandbox_cache_sweeper import _largest_child, measure_cache
+        from istota.maintenance.sandbox_cache_sweeper import _largest_child, measure_cache
 
         (tmp_path / "linky").mkdir()
         real = tmp_path / "linky" / "wheel"
@@ -222,7 +222,7 @@ class TestTheConvertedCallersStillAnswerWhatTheyAnsweredBefore:
         )
 
     def test_measure_cache_reports_the_newest_mtime_in_the_tree(self, tmp_path):
-        from istota.sandbox_cache_sweeper import measure_cache
+        from istota.maintenance.sandbox_cache_sweeper import measure_cache
 
         (tmp_path / "old").write_text("x")
         os.utime(tmp_path / "old", (1_000_000, 1_000_000))
@@ -232,14 +232,14 @@ class TestTheConvertedCallersStillAnswerWhatTheyAnsweredBefore:
         assert measure_cache(tmp_path).newest_mtime == 2_000_000
 
     def test_measure_cache_on_a_non_directory_is_zero(self, tmp_path):
-        from istota.sandbox_cache_sweeper import measure_cache
+        from istota.maintenance.sandbox_cache_sweeper import measure_cache
 
         f = tmp_path / "f"
         f.write_text("x")
         assert measure_cache(f) == (0, 0.0)
 
     def test_largest_child_names_the_biggest_immediate_subdirectory(self, tmp_path):
-        from istota.sandbox_cache_sweeper import _largest_child
+        from istota.maintenance.sandbox_cache_sweeper import _largest_child
 
         (tmp_path / "small").mkdir()
         (tmp_path / "small" / "f").write_bytes(b"a" * 1024)
@@ -248,7 +248,7 @@ class TestTheConvertedCallersStillAnswerWhatTheyAnsweredBefore:
         assert _largest_child(tmp_path)[0] == "big"
 
     def test_largest_child_ignores_a_symlinked_child(self, tmp_path):
-        from istota.sandbox_cache_sweeper import _largest_child
+        from istota.maintenance.sandbox_cache_sweeper import _largest_child
 
         outside = tmp_path.parent / "elsewhere"
         outside.mkdir(exist_ok=True)
@@ -261,7 +261,7 @@ class TestTheConvertedCallersStillAnswerWhatTheyAnsweredBefore:
         assert _largest_child(root)[0] == "small"
 
     def test_report_orphan_caches_still_filters_on_the_known_users(self, tmp_path, caplog):
-        from istota.sandbox_cache_sweeper import CACHE_ROOT_NAME, report_orphan_caches
+        from istota.maintenance.sandbox_cache_sweeper import CACHE_ROOT_NAME, report_orphan_caches
 
         for name in ("alice", "mallory"):
             (tmp_path / name / CACHE_ROOT_NAME).mkdir(parents=True)
@@ -406,7 +406,7 @@ class TestNoSecondCopy:
         """Three of the four carried their own `_BLOCK = 512` with an identical
         four-line comment above it. One constant, in `du`."""
         converted = [
-            "sandbox_cache_sweeper.py",
+            "maintenance/sandbox_cache_sweeper.py",
             "session/session_log.py",
             "session/session_log_read.py",
             "doctor.py",

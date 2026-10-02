@@ -590,7 +590,7 @@ def check_framework_db(config: "Config", probe: bool) -> CheckResult:
     """
     import sqlite3
 
-    from .db_health import quick_check
+    from istota.maintenance.db_health import quick_check
 
     db_path = Path(config.db_path)
     if not db_path.exists():
@@ -617,7 +617,7 @@ def check_framework_db(config: "Config", probe: bool) -> CheckResult:
             "runtime.framework_db",
             FAIL,
             f"{db_path} could not be opened: {exc}",
-            remedy="Restore the database from a snapshot (`python -m istota.db_restore`).",
+            remedy="Restore the database from a snapshot (`python -m istota.maintenance.db_restore`).",
         )
     try:
         issues = quick_check(conn)
@@ -637,7 +637,7 @@ def check_framework_db(config: "Config", probe: bool) -> CheckResult:
             "runtime.framework_db",
             FAIL,
             f"{db_path} failed quick_check: {exc}",
-            remedy="Restore the database from a snapshot (`python -m istota.db_restore`).",
+            remedy="Restore the database from a snapshot (`python -m istota.maintenance.db_restore`).",
         )
     finally:
         conn.close()
@@ -648,7 +648,7 @@ def check_framework_db(config: "Config", probe: bool) -> CheckResult:
             f"{db_path}: quick_check reported {len(issues)} issue(s)",
             remedy=(
                 "The scheduler's db-health sweep attempts a REINDEX; if it does not "
-                "clear, restore from a snapshot (`python -m istota.db_restore`)."
+                "clear, restore from a snapshot (`python -m istota.maintenance.db_restore`)."
             ),
         )
     if not tables:
@@ -2112,7 +2112,7 @@ def check_task_failure_rate(config: "Config", probe: bool) -> CheckResult:
             name,
             FAIL,
             f"{db_path} could not be opened: {exc}",
-            remedy="Restore the database from a snapshot (`python -m istota.db_restore`).",
+            remedy="Restore the database from a snapshot (`python -m istota.maintenance.db_restore`).",
         )
     try:
         row = conn.execute(_RECENT_TASK_OUTCOMES_SQL).fetchone()
@@ -2134,7 +2134,7 @@ def check_task_failure_rate(config: "Config", probe: bool) -> CheckResult:
             name,
             FAIL,
             f"{db_path} could not be read: {exc}",
-            remedy="Restore the database from a snapshot (`python -m istota.db_restore`).",
+            remedy="Restore the database from a snapshot (`python -m istota.maintenance.db_restore`).",
         )
     finally:
         conn.close()
@@ -7366,7 +7366,7 @@ def _signaling_settings(config: "Config", timeout: float):
     from .transport.talk import signaling as sig
 
     async def _fetch():
-        from .talk import TalkClient
+        from istota.nextcloud.talk import TalkClient
 
         client = TalkClient(config, timeout=timeout)
         try:

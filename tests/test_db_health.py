@@ -1,4 +1,4 @@
-"""Tests for ``istota.db_health``.
+"""Tests for ``istota.maintenance.db_health``.
 
 The integration path (REINDEX repairs index corruption) is exercised in
 production (the deathcults-tumblr incident) — synthesizing genuine SQLite
@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from unittest.mock import patch
 
-from istota import db_health
+from istota.maintenance import db_health
 
 
 class TestQuickCheck:

@@ -17,7 +17,7 @@ from .config import load_config
 from .logging_setup import setup_logging
 from .executor import execute_task
 from .scheduler import process_one_task, check_briefings, _task_heartbeat
-from .email_support import get_email_config
+from istota.mail.support import get_email_config
 from .transport.email import poll_emails
 from .skills.email import list_emails, send_email
 from .storage import (
@@ -73,7 +73,7 @@ def cmd_init(args):
     db.init_db(config.db_path)
     print(f"Database initialized at {config.db_path}")
     if getattr(args, "relocate_rooms", False):
-        from .room_relocate import migrate_database, reconcile_mount, record_outcome
+        from istota.maintenance.room_relocate import migrate_database, reconcile_mount, record_outcome
         problems: list[str] = []
         result = migrate_database(config.db_path, problems=problems)
         if result == 0:
@@ -1857,7 +1857,7 @@ def cmd_user_ensure(args):
         updates["email_reply_routing"] = args.email_reply_routing
     outbound_approval = getattr(args, "outbound_approval", None)
     if outbound_approval is not None:
-        from .outbound_policy import VALID_POLICIES
+        from istota.mail.outbound_policy import VALID_POLICIES
 
         # "" is a real value: unset, meaning "follow the operator's
         # [email] outbound_approval_floor". It is not the same as "off", which

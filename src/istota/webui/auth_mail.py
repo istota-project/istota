@@ -57,7 +57,7 @@ def send_auth_email(config: Config, to: str, subject: str, plain: str, html: str
         logger.warning("Auth email is not configured")
         return False
     try:
-        from istota.email_support import get_email_config
+        from istota.mail.support import get_email_config
         from istota.skills.email import send_email
 
         send_email(to=to, subject=subject, body=plain, html_body=html,

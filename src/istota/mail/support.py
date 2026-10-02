@@ -8,7 +8,7 @@ and the scheduler's delivery-routing / cleanup paths).
 
 The low-level IMAP/SMTP client (``list_emails`` / ``read_email`` / ``send_email``
 / ``reply_to_email`` / ``EmailConfig``) stays in ``istota.skills.email`` — that
-is email's equivalent of ``istota.talk.TalkClient``.
+is email's equivalent of ``istota.nextcloud.talk.TalkClient``.
 """
 
 import hashlib
@@ -16,14 +16,14 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 
-from .config import Config
-from .skills.email import (
+from istota.config import Config
+from istota.skills.email import (
     _MAX_DELETES_PER_SWEEP,
     EmailConfig,
     delete_emails_before,
 )
 
-logger = logging.getLogger("istota.email_support")
+logger = logging.getLogger("istota.mail.support")
 
 
 # The wrapper `transport/email/inbound.py` builds around an inbound email before

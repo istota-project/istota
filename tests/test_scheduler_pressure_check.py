@@ -20,7 +20,8 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db, host_pressure, scheduler
+from istota import db, scheduler
+from istota.maintenance import host_pressure
 from istota.config import Config, SchedulerConfig
 from istota.scheduler import WorkerPool, _check_host_pressure
 

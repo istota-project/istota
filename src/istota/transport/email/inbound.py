@@ -23,7 +23,7 @@ from imap_tools import AND, U
 from istota import confirmations, db
 from istota.rooms import veto as room_veto
 from ...config import CONFIRM_SENDER_MATCH_POLICIES, Config
-from ...email_ownership import (
+from istota.mail.ownership import (
     bot_addressed_in_to,
     exact_recipient_users,
     extract_user_from_recipient,
@@ -31,7 +31,7 @@ from ...email_ownership import (
     signup_recipient_tails,
     thread_reply_from_correspondent,
 )
-from ...email_support import (
+from istota.mail.support import (
     compute_thread_id,
     get_email_config,
     is_synthetic_email_thread_token,
@@ -41,7 +41,7 @@ from ...email_support import (
 from istota.notifications.resolvers import confirmation as confirmation_source
 from istota.notifications.resolvers import task_alert as task_alert_source
 from istota.notifications.store import RaiseResult, deliver_pending, mark_delivered
-from ...outbound_policy import effective_policy
+from istota.mail.outbound_policy import effective_policy
 from ...skills.email import (
     attachment_leaf_name, download_attachments, list_emails, read_email,
 )

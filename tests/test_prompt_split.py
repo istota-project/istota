@@ -457,7 +457,7 @@ class TestNoScalarCanForgeASystemHeader:
         assert len(self._header(hostile)) == len(self._header(clean))
 
     def test_a_hostile_per_user_email_cannot_add_a_header_line(self, tmp_path, monkeypatch):
-        from istota import email_support
+        from istota.mail import support as email_support
 
         clean = build_prompt(_task(), [], _config(tmp_path))
         monkeypatch.setattr(

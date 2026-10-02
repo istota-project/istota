@@ -1,6 +1,6 @@
 """Tests for the EmailTransport inbound body (``transport/email/inbound.py``:
 ``poll_emails`` + routing precedence + confirmation gate) and the shared email
-helpers it depends on (``istota.email_support``: subject normalization, thread
+helpers it depends on (``istota.mail.support``: subject normalization, thread
 id, config adapter, IMAP cleanup)."""
 
 import json
@@ -11,8 +11,8 @@ import pytest
 
 from istota import db
 from istota.config import Config, EmailConfig as AppEmailConfig, UserConfig
-from istota.email_ownership import thread_reply_from_correspondent
-from istota.email_support import (
+from istota.mail.ownership import thread_reply_from_correspondent
+from istota.mail.support import (
     cleanup_old_emails,
     compute_thread_id,
     get_email_config,
@@ -375,7 +375,7 @@ class TestCleanupOldEmails:
 
     def test_deletes_expired_emails(self, mail_config):
         with patch(
-            "istota.email_support.delete_emails_before", return_value=1,
+            "istota.mail.support.delete_emails_before", return_value=1,
         ) as mock_delete:
             result = cleanup_old_emails(mail_config(), days=7)
 
@@ -384,7 +384,7 @@ class TestCleanupOldEmails:
 
     def test_handles_imap_error(self, mail_config):
         with patch(
-            "istota.email_support.delete_emails_before",
+            "istota.mail.support.delete_emails_before",
             side_effect=Exception("IMAP error"),
         ):
             assert cleanup_old_emails(mail_config(), days=7) == 0
@@ -1067,14 +1067,14 @@ class TestBotAddressedInTo:
         ((), (), False),
     ])
     def test_to_versus_cc(self, to, cc, expected):
-        from istota.email_ownership import bot_addressed_in_to
+        from istota.mail.ownership import bot_addressed_in_to
 
         config = Config()
         config.email = _email_config()
         assert bot_addressed_in_to(config, _email(to=to, cc=cc)) is expected
 
     def test_no_bot_address_configured(self):
-        from istota.email_ownership import bot_addressed_in_to
+        from istota.mail.ownership import bot_addressed_in_to
 
         assert bot_addressed_in_to(Config(), _email()) is False
 

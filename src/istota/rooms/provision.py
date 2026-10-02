@@ -494,7 +494,7 @@ def provision_user_rooms(
     runtime loop — this runs from the CLI during a deploy, not inside the
     scheduler.
     """
-    from istota.talk import TalkClient
+    from istota.nextcloud.talk import TalkClient
 
     bot_user_id = config.nextcloud.username
 

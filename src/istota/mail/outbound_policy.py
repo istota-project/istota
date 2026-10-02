@@ -1,7 +1,7 @@
 """Outbound email approval policy: does this message's recipient set require a
 hold?
 
-Kept separate from :mod:`istota.outbound_drafts` so the email skill can import
+Kept separate from :mod:`istota.mail.drafts` so the email skill can import
 the decision without pulling in the drafts store — the skill asks the question
 on every send, and only writes a row on the rare hold.
 
@@ -45,7 +45,7 @@ from email.utils import getaddresses
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .config import Config
+    from istota.config import Config
 
 logger = logging.getLogger(__name__)
 

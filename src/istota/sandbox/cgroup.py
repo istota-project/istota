@@ -145,7 +145,7 @@ def resolve_root(
     controllers for its children.
 
     Truncating rather than taking the path verbatim is deliberate, for the same
-    reason :func:`istota.host_pressure.read_memory_events` walks up — the leaf
+    reason :func:`istota.maintenance.host_pressure.read_memory_events` walks up — the leaf
     carries no controller files. The two are not the same walk, though: that one
     starts at the leaf and climbs until it finds ``memory.events``, using the
     unit component only as a floor, while this goes straight to the unit.

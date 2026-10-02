@@ -37,7 +37,7 @@ from istota.nextcloud import (
     users as users_mod,
     workspace_root,
 )
-from istota.nextcloud_client import (
+from istota.nextcloud.compat import (
     ocs_create_public_link,
     ocs_create_share,
     ocs_delete_share,
@@ -557,7 +557,7 @@ def _talk_run(coro_factory):
     """
     import asyncio
 
-    from istota.talk import transient_client
+    from istota.nextcloud.talk import transient_client
 
     async def _run():
         config = _config_from_env()
@@ -1386,7 +1386,7 @@ def main(argv=None):
         # the endpoint a bare message does not, and `to_envelope` is defined on
         # it alone. `PathScopeError` and everything else name themselves, which
         # is why the two branches this replaced had identical bodies. A leaf
-        # `istota.ocs.OcsError` — what the `talk *` commands now raise on an
+        # `istota.nextcloud.ocs.OcsError` — what the `talk *` commands now raise on an
         # unreadable answer — is not an instance of it and takes the second
         # branch, where its own message already names the status and the body.
         if isinstance(exc, OcsError):

@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING
 
 from istota import db
 from istota.rooms import policy as room_policy
-from ...email_ownership import is_bot_address, parse_message_ids
+from istota.mail.ownership import is_bot_address, parse_message_ids
 from .. import participants
 from .._types import ParticipantRef
 

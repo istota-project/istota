@@ -27,7 +27,7 @@ import pytest
 
 from istota import db
 from istota.config import Config, UserConfig
-from istota.email_support import parse_email_prompt
+from istota.mail.support import parse_email_prompt
 
 try:
     import authlib  # noqa: F401

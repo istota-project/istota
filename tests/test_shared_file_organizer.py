@@ -67,7 +67,7 @@ def make_config(tmp_path, db_path):
 
 
 class TestGetFileOwner:
-    @patch("istota.nextcloud_client.httpx.request")
+    @patch("istota.nextcloud.compat.httpx.request")
     def test_parses_owner_from_xml(self, mock_request, make_config):
         config = make_config()
         mock_response = MagicMock()
@@ -83,7 +83,7 @@ class TestGetFileOwner:
         assert call_args[0][0] == "PROPFIND"
         assert "shared_doc.txt" in call_args[0][1]
 
-    @patch("istota.nextcloud_client.httpx.request")
+    @patch("istota.nextcloud.compat.httpx.request")
     def test_no_owner_in_xml(self, mock_request, make_config):
         config = make_config()
         mock_response = MagicMock()
@@ -94,7 +94,7 @@ class TestGetFileOwner:
         owner = get_file_owner(config, "some_file.txt")
         assert owner is None
 
-    @patch("istota.nextcloud_client.httpx.request")
+    @patch("istota.nextcloud.compat.httpx.request")
     def test_request_error_returns_none(self, mock_request, make_config):
         config = make_config()
         mock_request.side_effect = Exception("Connection refused")

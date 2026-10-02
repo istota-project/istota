@@ -23,7 +23,7 @@ import pytest
 
 from istota import db
 from istota.config import Config, EmailConfig as AppEmailConfig, SchedulerConfig
-from istota.email_support import cleanup_old_emails
+from istota.mail.support import cleanup_old_emails
 from istota.skills.email import EmailConfig, delete_emails_before
 
 
@@ -92,13 +92,13 @@ class TestCleanupOldEmails:
 
     def test_disabled_returns_zero(self):
         config = Config(email=AppEmailConfig(enabled=False))
-        with patch("istota.email_support.delete_emails_before") as mock_delete:
+        with patch("istota.mail.support.delete_emails_before") as mock_delete:
             assert cleanup_old_emails(config, days=7) == 0
         mock_delete.assert_not_called()
 
     def test_zero_days_returns_zero(self):
         config = self._config()
-        with patch("istota.email_support.delete_emails_before") as mock_delete:
+        with patch("istota.mail.support.delete_emails_before") as mock_delete:
             assert cleanup_old_emails(config, days=0) == 0
         mock_delete.assert_not_called()
 
@@ -114,9 +114,9 @@ class TestCleanupOldEmails:
                 return frozen if tz else frozen.replace(tzinfo=None)
 
         with (
-            patch("istota.email_support.datetime", _FrozenDatetime),
+            patch("istota.mail.support.datetime", _FrozenDatetime),
             patch(
-                "istota.email_support.delete_emails_before", return_value=3,
+                "istota.mail.support.delete_emails_before", return_value=3,
             ) as mock_delete,
         ):
             assert cleanup_old_emails(config, days=7) == 3
@@ -140,9 +140,9 @@ class TestCleanupOldEmails:
                 return frozen if tz else local
 
         with (
-            patch("istota.email_support.datetime", _FrozenDatetime),
+            patch("istota.mail.support.datetime", _FrozenDatetime),
             patch(
-                "istota.email_support.delete_emails_before", return_value=0,
+                "istota.mail.support.delete_emails_before", return_value=0,
             ) as mock_delete,
         ):
             cleanup_old_emails(config, days=7)
@@ -168,7 +168,7 @@ class TestCleanupOldEmails:
     def test_handles_imap_error(self):
         config = self._config()
         with patch(
-            "istota.email_support.delete_emails_before",
+            "istota.mail.support.delete_emails_before",
             side_effect=Exception("IMAP error"),
         ):
             assert cleanup_old_emails(config, days=7) == 0

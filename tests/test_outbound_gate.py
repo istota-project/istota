@@ -15,7 +15,7 @@ from istota.config import (
     EmailConfig,
     UserConfig,
 )
-from istota.outbound_policy import (
+from istota.mail.outbound_policy import (
     HOLD_ALL_MODE,
     HOLD_UNTRUSTED,
     effective_policy,
@@ -262,7 +262,7 @@ class TestRecipientExpansion:
         too, so a catch-all turns the gate off while the floor still reads
         'untrusted' everywhere. Not a refusal — the entry predates the meaning
         — but it must not be silent."""
-        import istota.outbound_policy as mod
+        import istota.mail.outbound_policy as mod
 
         mod._warned_catch_all.clear()
         config = _config(tmp_path, floor="untrusted")
@@ -289,7 +289,7 @@ class TestRecipientExpansion:
         ],
     )
     def test_catch_all_detection(self, pattern, catch_all):
-        from istota.outbound_policy import _pattern_matches_everything
+        from istota.mail.outbound_policy import _pattern_matches_everything
 
         assert _pattern_matches_everything(pattern) is catch_all
 

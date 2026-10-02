@@ -1,7 +1,7 @@
 ---
 paths:
   - "src/istota/transport/**"
-  - "src/istota/email_support.py"
+  - "src/istota/mail/support.py"
   - "src/istota/notifications/delivery.py"
   - "src/istota/rooms/surfaces.py"
 ---
@@ -14,7 +14,7 @@ A uniform seam over messaging surfaces. Inbound, a `Transport` normalizes messag
 
 ## Layout
 
-`_types.py`, `registry.py`, `routing.py`, `ingest.py`, `participants.py`; subpackages `talk/`, `email/` (`inbound.py`, `outbound.py`, `threads.py`), `sms/` (`.claude/rules/sms.md`), `whatsapp/` (Cloud and Baileys, `.claude/rules/whatsapp.md`), `ntfy/` (`send_ntfy_async`, the single ntfy POST), `istota_file/`, `repl/`, `web/`. Low-level clients stay outside (`istota.talk.TalkClient`, `istota.skills.email`); shared non-transport email helpers are `istota.email_support`.
+`_types.py`, `registry.py`, `routing.py`, `ingest.py`, `participants.py`; subpackages `talk/`, `email/` (`inbound.py`, `outbound.py`, `threads.py`), `sms/` (`.claude/rules/sms.md`), `whatsapp/` (Cloud and Baileys, `.claude/rules/whatsapp.md`), `ntfy/` (`send_ntfy_async`, the single ntfy POST), `istota_file/`, `repl/`, `web/`. Low-level clients stay outside (`istota.nextcloud.talk.TalkClient`, `istota.skills.email`); shared non-transport email helpers are `istota.mail.support`.
 
 ## Core types (`_types.py`)
 

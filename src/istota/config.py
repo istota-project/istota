@@ -211,7 +211,7 @@ class EmailConfig:
     # so this is the operator's minimum rather than a default. `untrusted` on a
     # fresh install: the gate exists because prose rules against committing on
     # the principal's behalf lose to context pressure, and an install that ships
-    # with it off has no gate at all. See istota.outbound_policy.
+    # with it off has no gate at all. See istota.mail.outbound_policy.
     outbound_approval_floor: str = "untrusted"
 
     @property
@@ -1055,7 +1055,7 @@ class DeveloperConfig:
     devbox_proxy_enabled: bool = True
     devbox_proxy_socket_dir: str = "/var/run/istota"
     devbox_proxy_audit_log: str = ""   # empty = journal only; set to a path for file fan-out
-    # Worktree reaping (ISSUE-288, src/istota/worktree_reaper.py). Nothing used
+    # Worktree reaping (ISSUE-288, src/istota/maintenance/worktree_reaper.py). Nothing used
     # to remove a task's worktree, so `repos_dir` accumulated gigabyte
     # checkouts with no owner. The sweep runs from the *scheduler*, on
     # `scheduler.worktree_reap_interval` — not from the developer skill's
@@ -1567,7 +1567,7 @@ class SecurityConfig:
     # would cover it. `executor.resolve_sandbox_cache_dir` owns every one of
     # those rules and never raises.
     sandbox_cache_dir: str = ""
-    # Bounding what the key above creates (ISSUE-317, src/istota/sandbox_cache_sweeper.py).
+    # Bounding what the key above creates (ISSUE-317, src/istota/maintenance/sandbox_cache_sweeper.py).
     # Moving the caches onto disk is what makes them *persist*, and nothing
     # pruned them: the sweep runs from the scheduler on
     # `scheduler.sandbox_cache_sweep_interval` and gives each per-user cache the
@@ -3461,7 +3461,7 @@ def _validate_outbound_approval_floor(raw: object) -> str:
     who deliberately wrote ``off``. A typo in a security floor should stop the
     process, not pick a policy on the operator's behalf.
     """
-    from .outbound_policy import VALID_POLICIES
+    from istota.mail.outbound_policy import VALID_POLICIES
 
     value = raw if isinstance(raw, str) else ""
     value = value.strip()

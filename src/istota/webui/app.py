@@ -71,7 +71,7 @@ from istota.brain import make_brain
 from .chat_files import ChatFileError, resolve_chat_file
 from istota.config import load_config
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
-from istota.ocs import OcsError, ocs_data
+from istota.nextcloud.ocs import OcsError, ocs_data
 from istota.usage.telemetry import SYSTEM_USER_ID
 from istota.location_logic import (
     _location_discover_places,
@@ -1993,7 +1993,7 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
     # email me"; null/false when the surface isn't deployed.
     contact = {"email": None, "talk": False}
     if _config:
-        from istota.email_support import per_user_address  # noqa: PLC0415
+        from istota.mail.support import per_user_address  # noqa: PLC0415
         contact["email"] = per_user_address(_config, username)
         contact["talk"] = bool(_config.talk.enabled and _config.nextcloud.url)
     return {
@@ -4023,7 +4023,8 @@ def _drafts_snapshot(username: str) -> list[dict]:
     first draft always rides whole whatever its size, since a budget that could
     stub everything would make the frame useless exactly when it matters.
     """
-    from istota import db, outbound_drafts  # noqa: PLC0415
+    from istota import db  # noqa: PLC0415
+    from istota.mail import drafts as outbound_drafts  # noqa: PLC0415
 
     with db.get_db(
         _config.db_path, busy_timeout_ms=_ROOM_STREAM_BUSY_TIMEOUT_MS,
@@ -6566,7 +6567,7 @@ async def _talk_conversation_seen_by_user(
     which is a fact about this deployment rather than about the conversation.
     """
     from istota.webui import tokens as web_tokens
-    from istota.talk import TalkClient
+    from istota.nextcloud.talk import TalkClient
 
     if not _config or not web_tokens.feature_enabled(_config):
         return "unknown"
@@ -6629,7 +6630,7 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
     - `failed` — Nextcloud created no conversation.
     """
     from istota import db
-    from istota.talk import TalkClient
+    from istota.nextcloud.talk import TalkClient
 
     with db.get_db(_config.db_path) as conn:
         handle = db.get_web_chat_room(conn, room_id)
@@ -7322,7 +7323,7 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
     reader's `external_turn_display` setting; nothing about the stored row
     changes.
     """
-    from istota.email_support import parse_email_prompt  # noqa: PLC0415
+    from istota.mail.support import parse_email_prompt  # noqa: PLC0415
     from istota.rooms.surfaces import is_room_member  # noqa: PLC0415
 
     body = row["body"]
@@ -8070,7 +8071,7 @@ async def _mark_read_as_user(username: str, talk_ref: str, access: str) -> bool:
     failing request.
     """
     from istota.webui import tokens as web_tokens
-    from istota.talk import TalkClient
+    from istota.nextcloud.talk import TalkClient
 
     for attempt in (0, 1):
         client = TalkClient(_config, bearer_token=access, timeout=5)
@@ -8172,7 +8173,7 @@ async def _pull_talk_read_state(username: str) -> None:
         )
         if not access:
             return
-        from istota.talk import TalkClient
+        from istota.nextcloud.talk import TalkClient
 
         client = TalkClient(_config, bearer_token=access, timeout=5)
         try:
@@ -8235,7 +8236,7 @@ async def _post_as_user(
     rather than being withheld: the message still belongs in the room.
     """
     from istota.webui import tokens as web_tokens
-    from istota.talk import TalkClient
+    from istota.nextcloud.talk import TalkClient
     from istota.transport import WEBMIRROR_REF_PREFIX
 
     reference_id = f"{WEBMIRROR_REF_PREFIX}{message_id}"
@@ -8463,7 +8464,7 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
     `effective_policy` off the snapshot too.
     """
     from istota import user_profiles  # noqa: PLC0415
-    from istota.outbound_policy import VALID_POLICIES, effective_policy  # noqa: PLC0415
+    from istota.mail.outbound_policy import VALID_POLICIES, effective_policy  # noqa: PLC0415
 
     chat = _config.web.chat
     username = user["username"]
@@ -8868,7 +8869,7 @@ async def chat_update_room(
             _room_talk_binding, user["username"], room_id,
         )
         if talk_token:
-            from istota.talk import TalkClient
+            from istota.nextcloud.talk import TalkClient
             client = TalkClient(_config)
             try:
                 await client.rename_conversation(talk_token, updated["name"])
@@ -9315,7 +9316,7 @@ async def _delete_from_talk(
     web process rather than the scheduler's delivery path, so a short-lived
     client here is the same answer the promote and rename paths already give.
     """
-    from istota.talk import TalkClient
+    from istota.nextcloud.talk import TalkClient
 
     try:
         msg_id = int(talk_message_id)
@@ -9981,7 +9982,8 @@ def _chat_pending_drafts(username: str) -> list[dict]:
     sends the client to, so capping it would leave the body unreachable from
     either path.
     """
-    from istota import db, outbound_drafts  # noqa: PLC0415
+    from istota import db  # noqa: PLC0415
+    from istota.mail import drafts as outbound_drafts  # noqa: PLC0415
 
     with db.get_db(_config.db_path) as conn:
         listing = outbound_drafts.open_for_user(conn, username)
@@ -10007,7 +10009,8 @@ def _chat_draft_owner_status(draft_id: int, username: str) -> str | None:
     discarded. Refusing to send such a row is still right, and still happens:
     `release` does its own strict read.
     """
-    from istota import db, outbound_drafts  # noqa: PLC0415
+    from istota import db  # noqa: PLC0415
+    from istota.mail import drafts as outbound_drafts  # noqa: PLC0415
 
     with db.get_db(_config.db_path) as conn:
         found = outbound_drafts.identity(conn, draft_id)
@@ -10036,7 +10039,7 @@ async def chat_approve_draft(
     row already `sent` and returns the same Message-ID rather than sending
     twice.
     """
-    from istota import outbound_drafts  # noqa: PLC0415
+    from istota.mail import drafts as outbound_drafts  # noqa: PLC0415
 
     username = user["username"]
     owned = await asyncio.to_thread(_chat_draft_owner_status, draft_id, username)
@@ -10127,7 +10130,8 @@ async def chat_edit_draft(
     send, and against the one promise this feature makes, that approving sends
     exactly what was read.
     """
-    from istota import db, outbound_drafts  # noqa: PLC0415
+    from istota import db  # noqa: PLC0415
+    from istota.mail import drafts as outbound_drafts  # noqa: PLC0415
 
     username = user["username"]
     try:
@@ -10190,7 +10194,8 @@ async def chat_discard_draft(
     Idempotent on an already-discarded row, so a duplicate tap reports the same
     thing rather than an error.
     """
-    from istota import db, outbound_drafts  # noqa: PLC0415
+    from istota import db  # noqa: PLC0415
+    from istota.mail import drafts as outbound_drafts  # noqa: PLC0415
 
     username = user["username"]
     owned = await asyncio.to_thread(_chat_draft_owner_status, draft_id, username)

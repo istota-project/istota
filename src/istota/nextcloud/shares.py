@@ -1,6 +1,6 @@
 """OCS sharing: CRUD, the safe-link helper, and direct-download URL synthesis.
 
-The raising counterparts of the legacy wrappers in ``istota.nextcloud_client``,
+The raising counterparts of the legacy wrappers in ``istota.nextcloud.compat``,
 plus the ergonomics a "give me a download link" request needs: an expiry by
 default, an optional password, a URL that actually downloads, and a revocation
 loop.

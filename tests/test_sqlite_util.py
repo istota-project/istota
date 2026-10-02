@@ -304,7 +304,7 @@ class TestConnectReadOnly:
         bytes, mtime changed.
 
         That is precisely the database `check_framework_db` exists to inspect
-        and whose remedy is `python -m istota.db_restore`, so altering it before
+        and whose remedy is `python -m istota.maintenance.db_restore`, so altering it before
         the operator has decided anything is the standing "no mutating probes"
         rule with the artifact in hand. `connect_read_only` therefore reads a
         database that has a hot journal read-only and takes the read-write path
@@ -634,7 +634,7 @@ class TestTheBareCallers:
     take `sqlite_util.connect` and close it themselves. Measured the same way."""
 
     def test_room_relocate_migration_open(self, tmp_path, monkeypatch):
-        from istota import room_relocate
+        from istota.maintenance import room_relocate
 
         path = tmp_path / "rooms.db"
         sqlite3.connect(path).close()

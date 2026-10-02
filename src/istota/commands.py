@@ -3647,7 +3647,7 @@ async def cmd_drafts(ctx: CommandContext):
     """
     import asyncio
 
-    from . import outbound_drafts as drafts
+    from istota.mail import drafts
 
     conn, user_id = ctx.conn, ctx.user_id
     words = ctx.args.split()

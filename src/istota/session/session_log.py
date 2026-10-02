@@ -74,14 +74,14 @@ the file from somewhere this module does not control. ``result_text`` is the one
 deliberate exemption.
 
 :func:`sweep_session_logs` lives here rather than in the scheduler, on the
-:mod:`istota.worktree_reaper` precedent: the delete rule and the write rule
+:mod:`istota.maintenance.worktree_reaper` precedent: the delete rule and the write rule
 belong in one file. It enforces **two independent rules**, and neither implies
 the other. Age bounds how long a transcript is retrievable, which is a privacy
 question. Bytes bound how much disk a burst of long agentic tasks can take from
 the filesystem the framework database is writing to, which is an availability
 one — on the reference deployment ``data/`` holds ``istota.db``, every module DB
 and these logs, so a logging artifact that can fill it takes SQLite writes down
-with it. :mod:`istota.sandbox_cache_sweeper` wrote the reasoning down first: a
+with it. :mod:`istota.maintenance.sandbox_cache_sweeper` wrote the reasoning down first: a
 rule phrased in days either keeps everything or throws away something minutes
 old, because the growth arrives in bursts rather than at a rate.
 

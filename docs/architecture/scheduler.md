@@ -87,7 +87,7 @@ The line goes to its own logger (`istota.scheduler.pressure`), so a multi-day se
 
 It costs six small file reads plus a `statvfs` and a `stat` per tmpfs mount, so it stays on the loop thread rather than paying for a thread every interval. `host_pressure_enabled = false` turns it off; so does an interval of 0. On a platform with no PSI interface (macOS, a kernel without `CONFIG_PSI`) it says so once and then no-ops.
 
-`host_pressure.py` is a stdlib-only leaf. Every reader takes its `/proc` root as a parameter and none of them raise. `python -m istota.host_pressure --snapshot` produces the threshold snapshot that attributes shmem to mounts, containers and `memfd` fd holders.
+`maintenance/host_pressure.py` is a stdlib-only leaf. Every reader takes its `/proc` root as a parameter and none of them raise. `python -m istota.maintenance.host_pressure --snapshot` produces the threshold snapshot that attributes shmem to mounts, containers and `memfd` fd holders.
 
 ### Admission gate
 

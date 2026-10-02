@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from istota import db
-from istota.ocs import OcsError
+from istota.nextcloud.ocs import OcsError
 from istota.config import Config, NextcloudConfig, SiteConfig, UserConfig, WebConfig
 
 try:
@@ -265,7 +265,7 @@ class TestDeletionTailOnEvents:
 
 @contextlib.contextmanager
 def _fake_talk_class(client):
-    """Stand `client` in at `istota.talk.TalkClient`, the seam this path uses.
+    """Stand `client` in at `istota.nextcloud.talk.TalkClient`, the seam this path uses.
 
     `_delete_from_talk` builds both of its clients itself as of ISSUE-407 —
     patching `async_runtime.get_talk_client`, which is what these tests used to
@@ -274,7 +274,7 @@ def _fake_talk_class(client):
     the fourth is what caught it.
     """
     client.aclose = AsyncMock()
-    with patch("istota.talk.TalkClient", return_value=client):
+    with patch("istota.nextcloud.talk.TalkClient", return_value=client):
         yield client
 
 

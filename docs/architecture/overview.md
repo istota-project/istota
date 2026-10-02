@@ -148,7 +148,7 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 
 | Module | Purpose |
 |---|---|
-| `talk.py` | Async HTTP client for Nextcloud Talk API (send, poll, download attachments) |
+| `nextcloud/talk.py` | Async HTTP client for Nextcloud Talk API (send, poll, download attachments) |
 | `async_runtime.py` | One persistent asyncio loop + one pooled httpx client for all Talk I/O (`run_coro`, `get_talk_client` singleton); started/stopped by `run_daemon` |
 | `notifications/delivery.py` | **Delivery.** Unified dispatcher for Talk, email and ntfy; per-user purpose-keyed routing table. Distinct from the two below, which are the inbox |
 | `notifications/store.py` | **The inbox.** The `notifications` table — the durable open set of what is waiting on a user, behind the app-bar bell. The write and the send are two separate calls, so a push that reached nobody leaves the row intact |
@@ -173,8 +173,8 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 |---|---|
 | `heartbeat.py` | Evaluates health checks from HEARTBEAT.md |
 | `shared_file_organizer.py` | Scans for files shared with the bot, auto-organizes by owner |
-| `nextcloud_client.py` | Shared Nextcloud HTTP plumbing (OCS + WebDAV) |
-| `nextcloud_api.py` | Enriches user configs from Nextcloud OCS API at startup |
+| `nextcloud/compat.py` | Shared Nextcloud HTTP plumbing (OCS + WebDAV) |
+| `nextcloud/user_metadata.py` | Enriches user configs from Nextcloud OCS API at startup |
 | `webui/app.py` | Authenticated web interface (FastAPI + Nextcloud OAuth2) |
 | `webui/webhook_receiver.py` | FastAPI webhook receiver (Overland GPS) |
 | `devbox/proxy.py` | Per-user host-side credential proxy for the devbox container |

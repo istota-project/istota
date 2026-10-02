@@ -20,7 +20,7 @@ from datetime import date
 from unittest.mock import MagicMock, patch
 
 from istota.config import Config, EmailConfig as AppEmailConfig
-from istota.email_support import cleanup_old_emails
+from istota.mail.support import cleanup_old_emails
 from istota.skills.email import (
     _MAX_DELETES_PER_SWEEP,
     EmailConfig,
@@ -504,7 +504,7 @@ class TestCleanupWiring:
         ))
 
         with patch(
-            "istota.email_support.delete_emails_before", return_value=7,
+            "istota.mail.support.delete_emails_before", return_value=7,
         ) as mock_delete:
             assert cleanup_old_emails(config, days=7) == 7
 

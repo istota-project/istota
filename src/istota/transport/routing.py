@@ -223,7 +223,7 @@ def _room_descriptor(conn, surface: str, task: "db.Task") -> str | None:
     """
     if conn is None or surface == "repl":
         return None
-    from ..email_support import is_synthetic_email_thread_token
+    from istota.mail.support import is_synthetic_email_thread_token
 
     candidates = [task.conversation_token, task.talk_delivery_token]
     try:
@@ -324,7 +324,7 @@ def origin_descriptor(task: "db.Task", conn=None) -> str | None:
     too. A genuine email-only thread carries a synthetic thread token → no origin.
     ``repl`` is never a pushable origin (the terminal is gone by reply time).
     """
-    from ..email_support import is_synthetic_email_thread_token
+    from istota.mail.support import is_synthetic_email_thread_token
     from .registry import _surface_for_source_type
     from ..db import is_canonical_room_token
 
@@ -792,7 +792,7 @@ def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
     trading it for a different failure mode.
     """
     from ..db import is_canonical_room_token
-    from ..email_support import is_synthetic_email_thread_token
+    from istota.mail.support import is_synthetic_email_thread_token
 
     if task.talk_delivery_token:
         return task.talk_delivery_token

@@ -129,7 +129,7 @@ Read: `list`, `read`, `search`, `thread`, `attachments --dest`, `from-senders`, 
 - **`output` is not exempt** (ISSUE-246): `_hold_if_unapproved` runs in `transport/email/outbound.deliver_email_result` before all three send sites; a hold returns `True`, an unrunnable check `False` and sends nothing; `_announce_hold` alerts. A plain `yes` or a thread match writes no trust row (ISSUE-234), so replies are held unless the recipient is authorized. Replies snapshot threading headers so `release` sends from the row.
 - **`--attach` is `EGRESS`** (ISSUE-447): root `{mount}/Users/{uid}` only, resolved at parse by `skills/_hostpath.resolve_parsed`, replacing the split `_scoped_attachments` / `_holdable_attachments`. Talk, channel and deferred files must be copied into the workspace first.
 - `effective_policy` resolves before opening the DB. `!drafts` answers drafts; `nag_stale_outbound_drafts` alerts at 24h, stamping `nagged_at` after delivery; `release` raises `DraftSentButUnrecorded` when bookkeeping fails after SMTP.
-- **Read scoping**: `istota.email_ownership` is shared with the inbound poll; `shared`/`all` fail closed without the DB; `--scope mine` pushes all arms server-side, the thread arm from `_MINE_THREAD_MAX_IDS` sends (ISSUE-252), and the client filter stays authoritative.
+- **Read scoping**: `istota.mail.ownership` is shared with the inbound poll; `shared`/`all` fail closed without the DB; `--scope mine` pushes all arms server-side, the thread arm from `_MINE_THREAD_MAX_IDS` sends (ISSUE-252), and the client filter stays authoritative.
 - `delete_emails_before` is library-only retention (scheduler.md). `html_body` (`_set_body`) is used only by briefing email.
 
 ### `browse/` - headless browser

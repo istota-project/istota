@@ -1605,7 +1605,7 @@ def _scope_filter(app_config, user_id, scope, conn, items):
     Mail owned by another user is dropped in every scope. ``items`` may be
     EmailEnvelope or Email — both duck-type for ownership resolution.
     """
-    from ...email_ownership import owner_in_scope, resolve_email_owner
+    from istota.mail.ownership import owner_in_scope, resolve_email_owner
     kept = []
     for item in items:
         owner = resolve_email_owner(app_config, conn, item)
@@ -1786,7 +1786,7 @@ def _read_scoped(app_config, user_id, scope, email_config, email_id):
         # DB); mine only ever under-includes without it, so it's safe to proceed.
         if conn is None and _requires_verified_ownership(scope):
             return None, _ownership_unavailable_error()
-        from ...email_ownership import owner_in_scope, resolve_email_owner
+        from istota.mail.ownership import owner_in_scope, resolve_email_owner
         owner = resolve_email_owner(app_config, conn, email)
         if not owner_in_scope(owner, scope, user_id):
             # Never reveal that another user's mail exists.
@@ -1888,7 +1888,7 @@ def _thread_members(root: Email, candidates: list[Email]) -> list[Email]:
     ``match_thread`` — a walk that disagrees with the router about what an id is
     would show the user a different thread than the one that routed their mail.
     """
-    from ...email_ownership import parse_message_ids
+    from istota.mail.ownership import parse_message_ids
 
     thread_ids: set[str] = set()
     if root.message_id:
@@ -1934,7 +1934,7 @@ def cmd_thread(args):
     with _scope_conn(app_config) as conn:
         if conn is None:
             return _ownership_unavailable_error()
-        from ...email_ownership import owner_in_scope, resolve_email_owner
+        from istota.mail.ownership import owner_in_scope, resolve_email_owner
         members = [
             m for m in members
             if owner_in_scope(resolve_email_owner(app_config, conn, m), args.scope, user_id)
@@ -2304,7 +2304,7 @@ def _unparseable(entry: object) -> bool:
     that the recipient is untrusted, and saying so sends the model off to
     suggest trusting a string no trust entry could ever match.
     """
-    from ...outbound_policy import _expand
+    from istota.mail.outbound_policy import _expand
 
     return _expand(entry) is None
 
@@ -2320,7 +2320,7 @@ def _held_message(reason: str, held: list[str]) -> str:
     that reads the envelope as a transient failure will reach for a different
     spelling of the same message.
     """
-    from ...outbound_policy import HOLD_ALL_MODE
+    from istota.mail.outbound_policy import HOLD_ALL_MODE
 
     unreadable = [e for e in held if _unparseable(e)]
     if unreadable:
@@ -2416,9 +2416,10 @@ def _outbound_gate(
     and direct do not answer *identically*, and the one root they differ by is
     named at the hold below.
     """
-    from ... import db, outbound_drafts as drafts
+    from istota import db
+    from istota.mail import drafts
     from istota.notifications.resolvers import outbound_draft as draft_source
-    from ...outbound_policy import effective_policy, recipients_require_hold
+    from istota.mail.outbound_policy import effective_policy, recipients_require_hold
 
     user_id = os.environ.get("ISTOTA_USER_ID", "").strip()
     if not user_id:

@@ -8,12 +8,12 @@ import pytest
 
 
 def test_processes_share_admission_and_release_on_exit(tmp_path, monkeypatch):
-    from istota.browser_admission import browser_admission, BrowserQueueTimeout
+    from istota.browser.admission import browser_admission, BrowserQueueTimeout
 
     db_path = tmp_path / "istota.db"
     monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
     child = subprocess.Popen(
-        [sys.executable, "-c", "from istota.browser_admission import browser_admission; "
+        [sys.executable, "-c", "from istota.browser.admission import browser_admission; "
          "import time; "
          "\nwith browser_admission():\n print('locked', flush=True)\n time.sleep(30)"],
         stdout=subprocess.PIPE, text=True, env=os.environ.copy(),
@@ -32,7 +32,7 @@ def test_processes_share_admission_and_release_on_exit(tmp_path, monkeypatch):
 
 
 def test_request_waits_before_http_and_releases_on_exception(tmp_path, monkeypatch):
-    from istota.browser_admission import browser_admission, browser_request, BrowserQueueTimeout
+    from istota.browser.admission import browser_admission, browser_request, BrowserQueueTimeout
     import httpx
 
     monkeypatch.setenv("ISTOTA_DB_PATH", str(tmp_path / "istota.db"))
@@ -57,7 +57,7 @@ def test_request_waits_before_http_and_releases_on_exception(tmp_path, monkeypat
 
 
 def test_browse_cli_process_waits_for_daemon_lock(tmp_path, monkeypatch):
-    from istota.browser_admission import browser_admission
+    from istota.browser.admission import browser_admission
 
     db_path = tmp_path / "istota.db"
     monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
@@ -93,7 +93,7 @@ main(["get", "https://example.com"])
 
 def test_finviz_queue_timeout_is_not_retried(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
-    from istota.browser_admission import BrowserQueueTimeout
+    from istota.browser.admission import BrowserQueueTimeout
     from istota.skills.markets import finviz
 
     calls = []
@@ -111,7 +111,7 @@ def test_finviz_queue_timeout_is_not_retried(tmp_path, monkeypatch, caplog):
 @pytest.mark.parametrize("headers", [None, {}, {"X-Istota-User": ""}])
 def test_a_request_naming_no_user_is_refused_before_it_is_sent(tmp_path, monkeypatch, headers):
     """The API refuses it 400 and every caller read that as an empty page."""
-    from istota.browser_admission import (
+    from istota.browser.admission import (
         BrowserIdentityMissing, browser_admission, browser_request,
     )
     import httpx
@@ -138,7 +138,7 @@ def _no_config_anywhere(tmp_path, monkeypatch):
 
 def test_no_database_path_is_refused_and_creates_nothing(tmp_path, monkeypatch):
     """A cwd-relative lock coordinates with nobody and left ``data/`` behind (#572)."""
-    from istota.browser_admission import BrowserAdmissionUnconfigured, browser_admission
+    from istota.browser.admission import BrowserAdmissionUnconfigured, browser_admission
 
     _no_config_anywhere(tmp_path, monkeypatch)
     monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
@@ -149,7 +149,7 @@ def test_no_database_path_is_refused_and_creates_nothing(tmp_path, monkeypatch):
 
 
 def test_an_empty_database_path_is_refused(tmp_path, monkeypatch):
-    from istota.browser_admission import BrowserAdmissionUnconfigured, browser_admission
+    from istota.browser.admission import BrowserAdmissionUnconfigured, browser_admission
 
     _no_config_anywhere(tmp_path, monkeypatch)
     monkeypatch.setenv("ISTOTA_DB_PATH", "  ")
@@ -181,7 +181,7 @@ def test_the_loaded_config_names_the_lock_when_the_proxy_withholds_the_path(
 ):
     """Proxy off: the executor keeps ISTOTA_DB_PATH from the model's env, and
     the CLI takes the same lock as the daemon through the config file."""
-    from istota.browser_admission import browser_admission
+    from istota.browser.admission import browser_admission
 
     _no_config_anywhere(tmp_path, monkeypatch)
     monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
@@ -197,7 +197,7 @@ def test_the_loaded_config_names_the_lock_when_the_proxy_withholds_the_path(
 
 def test_a_relative_db_path_in_the_config_is_refused(tmp_path, monkeypatch):
     """Relative to the daemon's cwd, which this process cannot know."""
-    from istota.browser_admission import BrowserAdmissionUnconfigured, browser_admission
+    from istota.browser.admission import BrowserAdmissionUnconfigured, browser_admission
 
     _no_config_anywhere(tmp_path, monkeypatch)
     monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)

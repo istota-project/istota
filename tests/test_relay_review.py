@@ -135,7 +135,7 @@ def test_talk_bot_actor_can_differ_from_login_without_allowing_a_third_user(setu
     config.talk.bot_username = 'bot'
     origin = {'talk_ref': 'private-talk'}
     asyncio.run(relays.verify_private_audience(config, actor_user_id='alice', origin=origin))
-    monkeypatch.setattr('istota.talk.TalkClient.get_participants', AsyncMock(return_value=[
+    monkeypatch.setattr('istota.nextcloud.talk.TalkClient.get_participants', AsyncMock(return_value=[
         {'actorType': 'users', 'actorId': name} for name in ('alice', 'bot', 'carol')]))
     with pytest.raises(RequestError, match='unsupported_origin'):
         asyncio.run(relays.verify_private_audience(config, actor_user_id='alice', origin=origin))

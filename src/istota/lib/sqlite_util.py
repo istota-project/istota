@@ -152,7 +152,7 @@ def connect_read_only(path: Path | str) -> sqlite3.Connection:
     against a database left by a ``SIGKILL``ed writer, the main file went from
     4096 to 28672 bytes with its mtime moved. That database is exactly what
     :func:`~istota.doctor.check_framework_db` exists to inspect, and its remedy
-    is ``python -m istota.db_restore``, so recovering and rewriting it before
+    is ``python -m istota.maintenance.db_restore``, so recovering and rewriting it before
     the operator has decided anything is a diagnostic altering the evidence.
     Hence :func:`_has_hot_journal`, and hence the read-only branch — which
     strands nothing, because a database with a hot journal already has its

@@ -9,12 +9,12 @@ drill can't quietly wipe data with a bad backup.
 
 Restore the whole set after a disaster::
 
-    python -m istota.db_restore --all        # newest good snapshot of every DB
+    python -m istota.maintenance.db_restore --all        # newest good snapshot of every DB
 
 Or a single DB / point in time::
 
-    python -m istota.db_restore --user alice --module location --date 2026-07-11
-    python -m istota.db_restore --framework
+    python -m istota.maintenance.db_restore --user alice --module location --date 2026-07-11
+    python -m istota.maintenance.db_restore --framework
 
 Run with the services stopped (the live files are being overwritten).
 """
@@ -183,7 +183,7 @@ def main() -> int:
 
     from istota.config import load_config
 
-    parser = argparse.ArgumentParser(prog="istota.db_restore")
+    parser = argparse.ArgumentParser(prog="istota.maintenance.db_restore")
     parser.add_argument("--list", action="store_true", help="List available snapshot dates and exit.")
     parser.add_argument("--all", action="store_true", help="Restore framework + every user's module DBs.")
     parser.add_argument("--framework", action="store_true", help="Restore the framework DB.")

@@ -395,7 +395,7 @@ def _scheduler_config(tmp_path):
 def _run_guest_task(tmp_path, monkeypatch, fake_talk, guest_reply):
     from istota.scheduler import process_one_task
     config = _scheduler_config(tmp_path)
-    monkeypatch.setattr("istota.talk.TalkClient.get_participants",
+    monkeypatch.setattr("istota.nextcloud.talk.TalkClient.get_participants",
                         AsyncMock(return_value=GROUP_PARTICIPANTS))
     fake_talk.db_path = config.db_path
     with db.get_db(config.db_path) as conn:

@@ -1,11 +1,11 @@
-"""Tests for istota.talk module."""
+"""Tests for istota.nextcloud.talk module."""
 
 import json
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from istota.talk import (
+from istota.nextcloud.talk import (
     TalkClient,
     TalkResponseError,
     clean_message_content,
@@ -47,7 +47,7 @@ class TestTalkClient:
         mock_response.json.return_value = {"ocs": {"data": {"id": 42}}}
         mock_http.post = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.send_message("room1", "Hello!")
 
         mock_http.post.assert_called_once()
@@ -64,7 +64,7 @@ class TestTalkClient:
         mock_response.json.return_value = {"ocs": {"data": {"id": 43}}}
         mock_http.post = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             await client.send_message("room1", "Reply!", reply_to=10)
 
         call_kwargs = mock_http.post.call_args
@@ -77,7 +77,7 @@ class TestTalkClient:
         mock_response.json.return_value = {"ocs": {"data": {}}}
         mock_http.put = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             await client.edit_message("room1", 42, "Updated text")
 
         mock_http.put.assert_called_once()
@@ -97,7 +97,7 @@ class TestTalkClient:
         )
         mock_http.put = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             with pytest.raises(httpx.HTTPStatusError):
                 await client.edit_message("room1", 99, "fail")
 
@@ -109,7 +109,7 @@ class TestTalkClient:
         mock_response.json.return_value = {"ocs": {"data": rooms}}
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.list_conversations()
 
         assert result == rooms
@@ -126,7 +126,7 @@ class TestTalkClient:
         mock_response.json.return_value = {"ocs": {"data": messages}}
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.poll_messages("room1", last_known_message_id=10, timeout=5)
 
         assert result == messages
@@ -144,7 +144,7 @@ class TestTalkClient:
         mock_response.status_code = 304
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.poll_messages("room1", last_known_message_id=10)
 
         assert result == []
@@ -165,7 +165,7 @@ class TestTalkClient:
         mock_response.json.side_effect = json.JSONDecodeError("Expecting value", "", 0)
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             with pytest.raises(TalkResponseError) as excinfo:
                 await client.poll_messages("room1", last_known_message_id=10)
 
@@ -186,7 +186,7 @@ class TestTalkClient:
         mock_response.json.side_effect = json.JSONDecodeError("Expecting value", "", 0)
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             with pytest.raises(TalkResponseError) as excinfo:
                 await client.poll_messages("room1", last_known_message_id=10)
 
@@ -201,7 +201,7 @@ class TestTalkClient:
         mock_response.json.return_value = {"error": "nope"}
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             with pytest.raises(TalkResponseError) as excinfo:
                 await client.poll_messages("room1", last_known_message_id=10)
 
@@ -218,7 +218,7 @@ class TestTalkClient:
         mock_response.json.side_effect = json.JSONDecodeError("Expecting value", "", 0)
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             with pytest.raises(TalkResponseError) as excinfo:
                 await client.poll_messages("room1", last_known_message_id=10)
 
@@ -235,7 +235,7 @@ class TestTalkClient:
         mock_response.json.return_value = {"ocs": {"data": messages}}
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.poll_messages("room1")
 
         # Should be reversed to oldest-first
@@ -251,7 +251,7 @@ class TestTalkClient:
         mock_response.json.return_value = {"ocs": {"data": [{"id": 99, "message": "latest"}]}}
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.get_latest_message_id("room1")
 
         assert result == 99
@@ -265,7 +265,7 @@ class TestTalkClient:
         mock_response.json.return_value = {"ocs": {"data": []}}
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.get_latest_message_id("room1")
 
         assert result is None
@@ -283,7 +283,7 @@ class TestGetParticipants:
         mock_response.json.return_value = {"ocs": {"data": participants}}
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.get_participants("room1")
 
         assert result == participants
@@ -391,7 +391,7 @@ class TestSendMessageReferenceId:
         mock_response.json.return_value = {"ocs": {"data": {"id": 50}}}
         mock_http.post = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             await client.send_message("room1", "Hello!", reference_id="istota:task:42:result")
 
         call_kwargs = mock_http.post.call_args
@@ -407,7 +407,7 @@ class TestSendMessageReferenceId:
         mock_response.json.return_value = {"ocs": {"data": {"id": 51}}}
         mock_http.post = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             await client.send_message("room1", "Hello!")
 
         call_kwargs = mock_http.post.call_args
@@ -420,7 +420,7 @@ class TestSendMessageReferenceId:
         mock_response.json.return_value = {"ocs": {"data": {"id": 52}}}
         mock_http.post = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             await client.send_message(
                 "room1", "Reply!", reply_to=10, reference_id="istota:task:5:ack",
             )
@@ -447,7 +447,7 @@ class TestFetchChatHistory:
         mock_response.json.return_value = {"ocs": {"data": messages}}
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.fetch_chat_history("room1", limit=50)
 
         assert [m["id"] for m in result] == [1, 2, 3]
@@ -462,7 +462,7 @@ class TestFetchChatHistory:
         mock_response.json.return_value = {"ocs": {"data": []}}
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.fetch_chat_history("room1")
 
         assert result == []
@@ -474,7 +474,7 @@ class TestFetchChatHistory:
         mock_response.json.return_value = {"ocs": {"data": []}}
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             await client.fetch_chat_history("room1")
 
         call_kwargs = mock_http.get.call_args
@@ -490,7 +490,7 @@ class TestGetConversationInfo:
         mock_response.json.return_value = {"ocs": {"data": room_data}}
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.get_conversation_info("room1")
 
         assert result == room_data
@@ -510,7 +510,7 @@ class TestFetchFullHistory:
         mock_response.json.return_value = {"ocs": {"data": messages}}
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.fetch_full_history("room1", batch_size=200)
 
         assert [m["id"] for m in result] == [1, 2, 3]
@@ -532,7 +532,7 @@ class TestFetchFullHistory:
 
         mock_http.get = AsyncMock(side_effect=[resp1, resp2])
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.fetch_full_history("room1", batch_size=2)
 
         assert [m["id"] for m in result] == [1, 3, 4]
@@ -545,7 +545,7 @@ class TestFetchFullHistory:
         mock_response.json.return_value = {"ocs": {"data": []}}
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.fetch_full_history("room1")
 
         assert result == []
@@ -560,7 +560,7 @@ class TestFetchFullHistory:
 
         mock_http.get = AsyncMock(side_effect=[resp1, resp2])
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.fetch_full_history("room1", batch_size=2)
 
         assert [m["id"] for m in result] == [1, 2]
@@ -575,7 +575,7 @@ class TestFetchMessagesSince:
         mock_response.json.return_value = {"ocs": {"data": messages}}
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.fetch_messages_since("room1", since_id=10)
 
         assert [m["id"] for m in result] == [11, 12]
@@ -591,7 +591,7 @@ class TestFetchMessagesSince:
         mock_response = MagicMock(status_code=304)
         mock_http.get = AsyncMock(return_value=mock_response)
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.fetch_messages_since("room1", since_id=10)
 
         assert result == []
@@ -607,7 +607,7 @@ class TestFetchMessagesSince:
         resp2.json.return_value = {"ocs": {"data": batch2}}
         mock_http.get = AsyncMock(side_effect=[resp1, resp2])
 
-        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+        with patch("istota.nextcloud.talk.httpx.AsyncClient", return_value=mock_http):
             result = await client.fetch_messages_since("room1", since_id=10, batch_size=2)
 
         assert [m["id"] for m in result] == [11, 12, 13]

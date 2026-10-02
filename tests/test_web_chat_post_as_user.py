@@ -71,7 +71,7 @@ async def _login(client, username="alice"):
 
 
 def _mock_talk_client(monkeypatch, posted_id=777, send_error=None):
-    """Patch istota.talk.TalkClient with a recording factory."""
+    """Patch istota.nextcloud.talk.TalkClient with a recording factory."""
     constructed = []
     instance = MagicMock()
     if send_error is not None:
@@ -84,8 +84,8 @@ def _mock_talk_client(monkeypatch, posted_id=777, send_error=None):
         constructed.append({"bearer_token": bearer_token, "timeout": timeout})
         return instance
 
-    import istota.talk
-    monkeypatch.setattr(istota.talk, "TalkClient", factory)
+    import istota.nextcloud.talk
+    monkeypatch.setattr(istota.nextcloud.talk, "TalkClient", factory)
     return constructed, instance
 
 

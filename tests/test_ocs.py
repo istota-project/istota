@@ -1,6 +1,6 @@
 """One OCS unwrap, and every Nextcloud read outside `nextcloud/` goes through it.
 
-`istota.ocs` is the mechanism. This file covers three things:
+`istota.nextcloud.ocs` is the mechanism. This file covers three things:
 
 - the helper itself, over the three answers a Nextcloud read can give — a body
   that is not JSON, JSON that is not an OCS envelope, and a real envelope;
@@ -24,8 +24,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from istota.config import Config, NextcloudConfig
-from istota.ocs import OcsError, is_ocs_envelope, ocs_body_data, ocs_data
-from istota.talk import TalkClient, TalkResponseError
+from istota.nextcloud.ocs import OcsError, is_ocs_envelope, ocs_body_data, ocs_data
+from istota.nextcloud.talk import TalkClient, TalkResponseError
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "istota"
 
@@ -443,7 +443,7 @@ class TestBestEffortCallersKeepTheirOldAnswer:
         from istota.webui import app as web_app
 
         # A class, not a lambda or a MagicMock: `_post_as_user` resolves
-        # `TalkClient` through `istota.talk`, and `transport/talk/inbound`
+        # `TalkClient` through `istota.nextcloud.talk`, and `transport/talk/inbound`
         # spells `TalkClient | None` in a signature it evaluates at import.
         # Substituting a non-type there makes an unrelated module fail to
         # import for whichever test happens to load it next.
@@ -457,7 +457,7 @@ class TestBestEffortCallersKeepTheirOldAnswer:
         monkeypatch.setattr(web_app, "_config", Config(nextcloud=NextcloudConfig(
             url=NC_URL, username="bot", app_password="secret",
         )))
-        monkeypatch.setattr("istota.talk.TalkClient", FakeTalkClient)
+        monkeypatch.setattr("istota.nextcloud.talk.TalkClient", FakeTalkClient)
 
         with caplog.at_level("WARNING"):
             posted = asyncio.run(web_app._post_as_user(
@@ -490,7 +490,7 @@ class TestBestEffortCallersKeepTheirOldAnswer:
                 )
                 self.aclose = AsyncMock()
 
-        monkeypatch.setattr("istota.talk.TalkClient", FakeTalkClient)
+        monkeypatch.setattr("istota.nextcloud.talk.TalkClient", FakeTalkClient)
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
 
@@ -676,7 +676,7 @@ class TestSkillTalkSend:
         no `ocs` key did not come from Talk's chat endpoint — Talk always wraps
         — but from something interposed, which most likely never passed the
         post on. Answering "ok, message_id null" there is the silent success
-        `istota.ocs` exists to end, so `cmd_talk_send` lets it out and
+        `istota.nextcloud.ocs` exists to end, so `cmd_talk_send` lets it out and
         `run_skill_cli` turns it into the error envelope. Pre-change this
         answered `{"status": "ok", ..., "message_id": None}`.
         """
@@ -692,7 +692,7 @@ class TestSkillTalkSend:
 
 
 class TestNoSecondUnwrap:
-    """`istota.ocs` is the only place outside `nextcloud/` that names the key.
+    """`istota.nextcloud.ocs` and `nextcloud/_http.py` are the only places that name the key.
 
     A grep-shaped guard rather than a behaviour test, because the failure this
     stage prevents is a *new* copy: a sixteenth site reading
@@ -703,7 +703,7 @@ class TestNoSecondUnwrap:
     #: Files allowed to name the envelope key, and why.
     EXEMPT = {
         # The mechanism itself.
-        "ocs.py",
+        "nextcloud/ocs.py",
         # The package's own richer reader: it also checks `meta.statuscode`,
         # maps the 99x range and carries the endpoint. Deliberately not
         # migrated; its `OcsError` subclasses the leaf's.
@@ -744,7 +744,7 @@ class TestNoSecondUnwrap:
         offenders = self._offenders()
         assert offenders == {}, (
             "these reach into the OCS envelope instead of calling "
-            f"istota.ocs.ocs_data / ocs_body_data: {offenders}"
+            f"istota.nextcloud.ocs.ocs_data / ocs_body_data: {offenders}"
         )
 
     def test_the_exemptions_are_still_real(self):

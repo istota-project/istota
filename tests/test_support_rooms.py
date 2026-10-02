@@ -263,7 +263,7 @@ class TestPinnedAgainstTheProducers:
         previous_config = web_app._config
         web_app._config = config
         try:
-            with patch("istota.talk.TalkClient", return_value=fake):
+            with patch("istota.nextcloud.talk.TalkClient", return_value=fake):
                 status, _ = await web_app._chat_promote_to_talk("alice", handle.id)
         finally:
             web_app._config = previous_config

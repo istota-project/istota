@@ -5,7 +5,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 from istota.config import Config, NextcloudConfig
-from istota.talk import TalkClient
+from istota.nextcloud.talk import TalkClient
 
 
 def _config() -> Config:

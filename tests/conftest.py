@@ -346,7 +346,7 @@ def fake_talk_web(fake_talk):
     room, the post-as-user mirror, the read push and pull, the rename
     propagation, the message delete's two legs and the liveness probe. There is
     no factory to patch, so the class itself is the seam: this replaces
-    `istota.talk.TalkClient`, which every one of those sites imports
+    `istota.nextcloud.talk.TalkClient`, which every one of those sites imports
     function-locally and therefore resolves at call time.
 
     Depends on `fake_talk` rather than repeating it, so a web test gets one
@@ -362,7 +362,7 @@ def fake_talk_web(fake_talk):
 
     from .support.talk_double import talk_client_factory
 
-    with patch("istota.talk.TalkClient", talk_client_factory(fake_talk)):
+    with patch("istota.nextcloud.talk.TalkClient", talk_client_factory(fake_talk)):
         yield fake_talk
 
 
@@ -457,7 +457,7 @@ def outbound_gate_off(monkeypatch, tmp_path):
     Also isolates the catch-all-pattern warning latch, a process-global set that
     would otherwise carry across tests in an xdist worker.
     """
-    from istota import outbound_policy
+    from istota.mail import outbound_policy
     from istota.config import Config, EmailConfig
 
     db_path = tmp_path / "gate-off.db"

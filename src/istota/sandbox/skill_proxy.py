@@ -834,7 +834,8 @@ class SkillProxy:
 
     def _serve_vault_create(self, conn: socket.socket, request: dict) -> None:
         """Create one entry from a host-only passphrase and return names only."""
-        from istota import db, email_support, storage
+        from istota import db, storage
+        from istota.mail import support as email_support
         from istota.credentials import vault as secrets_vault
         from istota.notifications.resolvers import task_alert
         from istota.notifications.store import deliver_pending

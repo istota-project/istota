@@ -15,7 +15,7 @@ best-effort — a Nextcloud hiccup must not fail daemon startup or wedge a
 
 They keep the historical ``None`` / ``False`` contract through this module. The
 wrappers below call this module's own ``ocs_*`` names on purpose, so a caller
-(or a test) patching ``istota.nextcloud_client.ocs_get`` still intercepts them.
+(or a test) patching ``istota.nextcloud.compat.ocs_get`` still intercepts them.
 """
 
 import logging
@@ -23,13 +23,13 @@ import xml.etree.ElementTree as ET
 from typing import Any
 
 # Not called directly any more — the request bodies live in istota.nextcloud._http
-# — but kept as the patch anchor for `istota.nextcloud_client.httpx.*`, which
+# — but kept as the patch anchor for `istota.nextcloud.compat.httpx.*`, which
 # several callers and tests still target.
 import httpx  # noqa: F401
 
-from .config import Config
-from .nextcloud import _http
-from .nextcloud._http import (
+from istota.config import Config
+from istota.nextcloud import _http
+from istota.nextcloud._http import (
     OcsError,
     dav_files_url,
     dav_request,
@@ -39,9 +39,9 @@ from .nextcloud._http import (
     ocs_headers as _ocs_headers,
     to_remote_path as _to_remote_path,
 )
-from .nextcloud.shares import relabel as _relabel_share
+from istota.nextcloud.shares import relabel as _relabel_share
 
-logger = logging.getLogger("istota.nextcloud_client")
+logger = logging.getLogger("istota.nextcloud.compat")
 
 _SHARES_PATH = "/apps/files_sharing/api/v1/shares"
 

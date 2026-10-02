@@ -25,7 +25,7 @@ import psutil
 import pytest
 
 from istota.config import Config, NextcloudConfig
-from istota.talk import TalkClient
+from istota.nextcloud.talk import TalkClient
 
 
 def _start_long_poll_server(

@@ -298,7 +298,7 @@ async def verify_private_audience(config, *, actor_user_id: str, origin: dict) -
     """Fresh external audience check, called outside the claim transaction."""
     if not origin.get("talk_ref"):
         return
-    from istota.talk import TalkClient
+    from istota.nextcloud.talk import TalkClient
 
     client = TalkClient(config)
     try:

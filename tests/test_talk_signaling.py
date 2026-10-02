@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from istota.config import Config, NextcloudConfig
-from istota.talk import TalkClient
+from istota.nextcloud.talk import TalkClient
 from istota.transport.talk import signaling
 
 
@@ -676,7 +676,7 @@ class TestTalkClientSignalingMethods:
         assert kwargs["headers"]["OCS-APIRequest"] == "true"
 
     def test_get_signaling_settings_reports_a_non_ocs_answer(self):
-        from istota.talk import TalkResponseError
+        from istota.nextcloud.talk import TalkResponseError
 
         client, http = _wired_talk_client(json_body={"not": "ocs"})
 
@@ -707,7 +707,7 @@ class TestTalkClientSignalingMethods:
         # Building a room-join frame without one fails opaquely as
         # `no_such_room`, so the refusal belongs at the source where the
         # message can name the real cause.
-        from istota.talk import TalkResponseError
+        from istota.nextcloud.talk import TalkResponseError
 
         client, http = _wired_talk_client(json_body={"ocs": {"data": data}})
 
@@ -987,7 +987,7 @@ class TestJoinRoomSessionRefusesAWhitespaceSessionId:
         # It would otherwise be caught a layer later by build_room_join, whose
         # message names the room rather than the answer Nextcloud actually
         # gave — and this method is the only place the real cause can be named.
-        from istota.talk import TalkResponseError
+        from istota.nextcloud.talk import TalkResponseError
 
         client, _ = _wired_talk_client(
             json_body={"ocs": {"data": {"sessionId": "   "}}},

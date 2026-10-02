@@ -1548,7 +1548,7 @@ class TestTheFourCallersRootSets:
     def test_outbound_drafts_confines_to_the_users_own_workspace(self, tmp_path):
         """A draft is released hours later and unsandboxed, so the root set is
         the narrow one: the owner's workspace and nothing else."""
-        from istota import outbound_drafts
+        from istota.mail import drafts as outbound_drafts
         from istota.config import Config
 
         mount = tmp_path / "mount"
@@ -1574,7 +1574,7 @@ class TestTheFourCallersRootSets:
 
     def test_outbound_drafts_still_refuses_a_symlink_outright(self, tmp_path):
         """Its own rule, kept: only containment was delegated."""
-        from istota import outbound_drafts
+        from istota.mail import drafts as outbound_drafts
         from istota.config import Config
 
         mount = tmp_path / "mount"

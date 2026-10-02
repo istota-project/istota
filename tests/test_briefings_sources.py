@@ -210,7 +210,7 @@ class TestEmail:
 
         # The resolver imports these lazily from their source modules, so patch
         # at the source (the from-import at call time binds the patched name).
-        monkeypatch.setattr("istota.email_support.get_email_config", lambda c: cfg.email)
+        monkeypatch.setattr("istota.mail.support.get_email_config", lambda c: cfg.email)
         monkeypatch.setattr(
             "istota.skills.email.list_emails",
             lambda **kw: [shared, owned],
@@ -220,7 +220,7 @@ class TestEmail:
             lambda **kw: [_Full("1", "Semafor body")],
         )
         monkeypatch.setattr(
-            "istota.email_ownership.resolve_email_owner",
+            "istota.mail.ownership.resolve_email_owner",
             lambda config, conn, e: None if e.sender == "news@semafor.com" else "alice",
         )
 
@@ -243,14 +243,14 @@ class TestEmail:
         e1 = _Env("1", "news@semafor.com")
         e2 = _Env("2", "digest@axios.com")
 
-        monkeypatch.setattr("istota.email_support.get_email_config", lambda c: cfg.email)
+        monkeypatch.setattr("istota.mail.support.get_email_config", lambda c: cfg.email)
         monkeypatch.setattr("istota.skills.email.list_emails", lambda **kw: [e1, e2])
         monkeypatch.setattr(
             "istota.skills.email.fetch_emails_full",
             lambda **kw: [_Full("1", "b1"), _Full("2", "b2")],
         )
         monkeypatch.setattr(
-            "istota.email_ownership.resolve_email_owner",
+            "istota.mail.ownership.resolve_email_owner",
             lambda config, conn, e: None,
         )
         gs = _call_email(
@@ -284,14 +284,14 @@ class TestEmail:
             captured["criteria"] = kw.get("criteria")
             return many
 
-        monkeypatch.setattr("istota.email_support.get_email_config", lambda c: cfg.email)
+        monkeypatch.setattr("istota.mail.support.get_email_config", lambda c: cfg.email)
         monkeypatch.setattr("istota.skills.email.list_emails", fake_list)
         monkeypatch.setattr(
             "istota.skills.email.fetch_emails_full",
             lambda **kw: [_Full(str(i), f"body{i}") for i in range(150)],
         )
         monkeypatch.setattr(
-            "istota.email_ownership.resolve_email_owner",
+            "istota.mail.ownership.resolve_email_owner",
             lambda config, conn, e: None,
         )
         gs = _call_email(email_mod, {"mode": "shared"}, ctx)
@@ -320,7 +320,7 @@ class TestEmail:
         stale = _Env("2", "stale@x.com")
         stale.date = datetime(2026, 7, 19, 10, 0, tzinfo=timezone.utc)  # >12h, day surplus
 
-        monkeypatch.setattr("istota.email_support.get_email_config", lambda c: cfg.email)
+        monkeypatch.setattr("istota.mail.support.get_email_config", lambda c: cfg.email)
         monkeypatch.setattr(
             "istota.skills.email.list_emails", lambda **kw: [recent, stale]
         )
@@ -329,7 +329,7 @@ class TestEmail:
             lambda **kw: [_Full("1", "fresh body")],
         )
         monkeypatch.setattr(
-            "istota.email_ownership.resolve_email_owner",
+            "istota.mail.ownership.resolve_email_owner",
             lambda config, conn, e: None,
         )
 
@@ -1540,7 +1540,7 @@ class TestCleanBody:
             f'<div><a href="https://x.com/{i}">item {i}</a></div>' for i in range(4)
         ) + "</body></html>"
 
-        monkeypatch.setattr("istota.email_support.get_email_config", lambda c: cfg.email)
+        monkeypatch.setattr("istota.mail.support.get_email_config", lambda c: cfg.email)
         monkeypatch.setattr(
             "istota.skills.email.list_emails", lambda **kw: [_Env("1", "n@semafor.com")],
         )
@@ -1548,7 +1548,7 @@ class TestCleanBody:
             "istota.skills.email.fetch_emails_full", lambda **kw: [_Full("1", html)],
         )
         monkeypatch.setattr(
-            "istota.email_ownership.resolve_email_owner", lambda config, conn, e: None,
+            "istota.mail.ownership.resolve_email_owner", lambda config, conn, e: None,
         )
 
         gs = _call_email(email_mod, {"mode": "shared"}, ctx)

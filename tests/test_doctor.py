@@ -1013,7 +1013,7 @@ class TestFrameworkDb:
 
     def test_does_not_repair(self, make_config, tmp_path, monkeypatch):
         """Doctor is a diagnostic. `check_db_health` owns the REINDEX."""
-        from istota import db_health
+        from istota.maintenance import db_health
 
         db_path = _sqlite_with_table(tmp_path / "istota.db")
 
