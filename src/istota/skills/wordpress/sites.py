@@ -2,46 +2,46 @@
 
 Three things, each a boundary the rest of the skill leans on:
 
-- **The site record.** `config/WORDPRESS.md` holds one ``[[sites]]`` table per
-  install in a TOML fence: ``name`` (the ``--site`` value), ``credential`` (the
-  vault entry; ``wordpress_<name>`` by default), ``multisite`` and
-  ``default``. Nothing secret, and since ISSUE-583 nothing about *where* either:
-  the site's URL and login come from the vault entry itself, read whole in one
-  fetch. The file is user-written and model-editable, which is acceptable only
-  because of the next point.
+- **The site.** A site is a vault entry named ``wordpress_<name>``, and
+  ``--site NAME`` names it. There is no site file: the entry holds the URL, the
+  login and the application password, and is read whole in one fetch. With no
+  ``--site``, the user's only ``wordpress_*`` entry is used; the list comes
+  from the proxy's ``vault_list``, which returns names and no values and is not
+  charged to the fetch budget.
 - **The bound-host check.** A request's authority must be one of the vault
   entry's ``bound_hosts``, computed by the credential broker's own
   `credential_host` so the two cannot disagree about what an authority is. An
   entry with no binding sends nothing at all.
-- **``--blog``.** A multisite network is one record and one credential; a slug
-  addresses a subdirectory site under the record's URL and a host addresses a
-  subdomain one, which then has to be bound as well.
+- **``--blog``.** A multisite network is one entry; a slug addresses a
+  subdirectory site under the entry's URL and a host addresses a subdomain one,
+  which then has to be bound as well. Whether the install is a network is not
+  recorded anywhere: a ``--blog`` the site does not have is refused by the
+  index check before anything acts on it.
 """
 
 from __future__ import annotations
 
 import re
-import tomllib
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from istota.credential_broker.bindings import credential_host
-from istota.secrets_vault import VAULT_NAME_RE
-from istota.toml_fence import find_toml_block
 
-SITES_FILE = "WORDPRESS.md"
+#: A site's vault entry is this prefix plus the site name.
+ENTRY_PREFIX = "wordpress_"
 
-#: A site name is the ``--site`` value and becomes part of the default
-#: credential name, so it is held to the vault's name rule with room for the
-#: ``wordpress_`` prefix.
+#: A site name is the ``--site`` value and the tail of its entry name, so it is
+#: held to the vault's name rule with room for the prefix.
 NAME_RE = re.compile(r"\A[a-z][a-z0-9_]{0,53}\Z")
 
 #: A subdirectory blog slug, as WordPress allows them in a network path.
 BLOG_SLUG_RE = re.compile(r"\A[a-z0-9][a-z0-9-]{0,62}\Z")
 
-_KNOWN_KEYS = frozenset({"name", "credential", "multisite", "default"})
-_SITES_HEADER_RE = re.compile(r"^[ \t]*\[\[[ \t]*sites[ \t]*\]\]", re.MULTILINE)
-_TOML_LINE_RE = re.compile(r"at line (\d+)")
+_ENTRY_HINT = (
+    "Add a vault entry named wordpress_<name> in the istota group, with the "
+    "site's address in its URL field, the WordPress login as its username and "
+    "an application password as its password."
+)
 
 
 class SiteError(Exception):
@@ -56,129 +56,50 @@ class SiteError(Exception):
 class SiteRecord:
     name: str
     credential: str
-    multisite: bool = False
-    default: bool = False
 
     def as_dict(self) -> dict:
-        return {
-            "name": self.name,
-            "credential": self.credential,
-            "multisite": self.multisite,
-            "default": self.default,
-        }
+        return {"name": self.name, "credential": self.credential}
 
 
-def _block_line_offset(text: str, start: int) -> int:
-    """How many lines precede the TOML body, so a body line becomes a file line."""
-    return text.count("\n", 0, start)
+def site_names(entries) -> list[str]:
+    """The site names the vault holds: every ``wordpress_<name>`` entry, sorted."""
+    names = set()
+    for entry in entries or ():
+        if isinstance(entry, str) and entry.startswith(ENTRY_PREFIX):
+            name = entry[len(ENTRY_PREFIX):]
+            if NAME_RE.fullmatch(name):
+                names.add(name)
+    return sorted(names)
 
 
-def parse_sites(text: str) -> tuple[list[SiteRecord], list[str]]:
-    """The records in a WORDPRESS.md, and every problem found, with file lines.
-
-    A record with a problem is left out and named rather than guessed at, and
-    the rest still load, so one typo does not take every site down with it.
-    An empty or missing file is no records and no errors.
-    """
-    if not text or not text.strip():
-        return [], []
-    span = find_toml_block(text)
-    if span is None:
-        return [], [f"{SITES_FILE} has no closed ```toml block"]
-    start, end = span
-    body = text[start:end]
-    offset = _block_line_offset(text, start)
-    try:
-        data = tomllib.loads(body)
-    except tomllib.TOMLDecodeError as exc:
-        message = str(exc)
-        match = _TOML_LINE_RE.search(message)
-        if match:
-            line = int(match.group(1)) + offset
-            message = _TOML_LINE_RE.sub(f"at line {line}", message, count=1)
-        return [], [f"{SITES_FILE}: {message}"]
-
-    unknown_top = sorted(set(data) - {"sites"})
-    errors = [f"{SITES_FILE}: unknown top-level key {key!r}" for key in unknown_top]
-    tables = data.get("sites", [])
-    if not isinstance(tables, list):
-        return [], errors + [f"{SITES_FILE}: `sites` must be [[sites]] tables"]
-
-    header_lines = [
-        body.count("\n", 0, m.start()) + 1 + offset
-        for m in _SITES_HEADER_RE.finditer(body)
-    ]
-    records: list[SiteRecord] = []
-    seen: set[str] = set()
-    for index, table in enumerate(tables):
-        line = header_lines[index] if index < len(header_lines) else None
-        where = f"{SITES_FILE} line {line}" if line else f"{SITES_FILE} site #{index + 1}"
-        record, problem = _record(table, seen)
-        if problem:
-            errors.append(f"{where}: {problem}")
-            continue
-        seen.add(record.name)
-        records.append(record)
-
-    defaults = [r.name for r in records if r.default]
-    if len(defaults) > 1:
-        errors.append(
-            f"{SITES_FILE}: more than one site has default = true ({', '.join(defaults)}); "
-            f"none is used as the default"
-        )
-        records = [
-            SiteRecord(r.name, r.credential, r.multisite, False) for r in records
-        ]
-    return records, errors
-
-
-def _record(table: object, seen: set[str]) -> tuple[SiteRecord | None, str | None]:
-    if not isinstance(table, dict):
-        return None, "not a table"
-    unknown = sorted(set(table) - _KNOWN_KEYS)
-    if unknown:
-        hint = ""
-        if {"url", "username"} & set(unknown):
-            hint = " (the site's URL and login come from its vault entry)"
-        return None, f"unknown key(s) {', '.join(unknown)}{hint}"
-    name = table.get("name")
-    if not isinstance(name, str) or not NAME_RE.fullmatch(name):
-        return None, "name must be lowercase letters, digits and underscores, starting with a letter"
-    if name in seen:
-        return None, f"duplicate site name {name!r}"
-    credential = table.get("credential", f"wordpress_{name}")
-    if not isinstance(credential, str) or not VAULT_NAME_RE.fullmatch(credential):
-        return None, f"credential {credential!r} is not a vault entry name"
-    multisite = table.get("multisite", False)
-    default = table.get("default", False)
-    if not isinstance(multisite, bool) or not isinstance(default, bool):
-        return None, "multisite and default must be true or false"
-    return SiteRecord(name, credential, multisite, default), None
-
-
-def select_site(records: list[SiteRecord], name: str | None) -> SiteRecord:
-    """The record ``--site`` names, or the default, or the only one."""
-    if not records:
+def site_for(name: str) -> SiteRecord:
+    """The site ``--site NAME`` names. Checks the shape only; no vault read."""
+    name = (name or "").strip()
+    if not NAME_RE.fullmatch(name):
         raise SiteError(
-            f"No WordPress sites are configured. Add a [[sites]] table to "
-            f"config/{SITES_FILE}.",
+            f"--site {name!r} is not a site name: lowercase letters, digits and "
+            f"underscores, starting with a letter.",
             "unknown_site",
         )
+    return SiteRecord(name, ENTRY_PREFIX + name)
+
+
+def select_site(entries, name: str | None) -> SiteRecord:
+    """The site ``--site`` names, or the only one the vault holds.
+
+    `entries` is the vault's entry names; it is consulted only when ``--site``
+    is absent. A named site with no entry behind it is refused by the entry
+    fetch itself.
+    """
     if name:
-        for record in records:
-            if record.name == name:
-                return record
-        known = ", ".join(r.name for r in records)
-        raise SiteError(f"No site named {name!r} in {SITES_FILE} (known: {known}).",
-                        "unknown_site")
-    defaults = [r for r in records if r.default]
-    if defaults:
-        return defaults[0]
-    if len(records) == 1:
-        return records[0]
+        return site_for(name)
+    names = site_names(entries)
+    if len(names) == 1:
+        return site_for(names[0])
+    if not names:
+        raise SiteError(f"No WordPress site is set up. {_ENTRY_HINT}", "unknown_site")
     raise SiteError(
-        f"Several sites are configured and none is the default; pass --site "
-        f"({', '.join(r.name for r in records)}).",
+        f"Several WordPress sites are set up; pass --site ({', '.join(names)}).",
         "unknown_site",
     )
 
@@ -239,7 +160,7 @@ def check_bound(url: str, bound_hosts) -> str:
     return authority
 
 
-def check_blog(blog: str | None, multisite: bool) -> str | None:
+def check_blog(blog: str | None) -> str | None:
     """``--blog`` normalised and checked for shape, before any vault fetch is spent.
 
     A value with a dot is a subdomain network's host, anything else a
@@ -249,11 +170,6 @@ def check_blog(blog: str | None, multisite: bool) -> str | None:
     if blog is None:
         return None
     blog = blog.strip().lower()
-    if not multisite:
-        raise SiteError(
-            "--blog applies only to a site with multisite = true in its record.",
-            "unknown_blog",
-        )
     if "." in blog:
         if blog.startswith(".") or any(c in blog for c in "/:@?#\\ "):
             raise SiteError(f"--blog {blog!r} is not a host name.", "unknown_blog")

@@ -326,15 +326,8 @@ def check_plugin_status(args) -> None:
     args.plugin = plugin_id(args.plugin)
 
 
-def _require_multisite(args, ctx) -> None:
-    if args.network and not ctx.record.multisite:
-        raise WordPressError(f"--network needs a multisite record; {ctx.record.name} is not one.",
-                             "validation_error")
-
-
 def _plugin_status(args, new_status: str) -> dict:
     ctx = args.wp
-    _require_multisite(args, ctx)
     path = f"wp/v2/plugins/{args.plugin}"
     current, _ = ctx.client.get(path, params={"context": "edit"}, base=ctx.base)
     if not isinstance(current, dict):
@@ -372,7 +365,8 @@ def _plugin_status(args, new_status: str) -> dict:
         if new_status == "network-active" and exc.reason in _NETWORK_REFUSALS:
             raise WordPressError(
                 f"The site refused to network-activate {args.plugin} through core REST: "
-                f"{exc} Network-activate it in the network admin instead.",
+                f"{exc} Either the site is not a multisite network, or core REST cannot "
+                f"network-activate there; on a network, use the network admin instead.",
                 "unsupported_on_multisite", **exc.extra,
             ) from None
         raise
@@ -407,7 +401,6 @@ def cmd_plugins_install(args) -> dict:
     the lookup.
     """
     ctx = args.wp
-    _require_multisite(args, ctx)
     slug = args.slug.strip()
     installed, _ = ctx.client.get("wp/v2/plugins", params={"context": "edit"}, base=ctx.base)
     for plugin in installed or []:

@@ -180,6 +180,36 @@ def test_proxy_resolves_live_value_and_hosts_together(tmp_path, monkeypatch):
             assert "no longer available" in error
 
 
+def test_vault_list_names_whole_entries_in_the_snapshot(tmp_path, monkeypatch):
+    import tempfile
+    from pathlib import Path
+    from istota.config import Config
+    from istota.credential_shim import list_entries
+    from istota.skill_proxy import SkillProxy
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
+    database = tmp_path / "data.db"
+    db.init_db(database)
+    fields = {"wordpress_blog": None, "wordpress_blog_username": "wordpress_blog",
+              "wordpress_nopw_url": "wordpress_nopw", "hidden": None}
+    for key, entry in fields.items():
+        secrets_store.upsert_secret(database, "alice", "vault_entries", key, "fixture")
+        if entry:
+            with db.get_db(database) as conn:
+                db.kv_set(conn, "alice", "_credential_fields", key, entry)
+    snapshot = {key: "fixture" for key in fields if key != "hidden"}
+    with tempfile.TemporaryDirectory(prefix="entries_", dir="/tmp") as directory:
+        socket = Path(directory) / "s"
+        monkeypatch.setenv("ISTOTA_SKILL_PROXY_SOCK", str(socket))
+        with SkillProxy(socket, {}, {}, config=Config(db_path=database), user_id="alice",
+                        vault_credentials=snapshot):
+            # Grouped by the parser's record, not by suffix; an entry with no
+            # password is still an entry; one outside the snapshot is not listed.
+            assert list_entries() == ["wordpress_blog", "wordpress_nopw"]
+        with SkillProxy(socket, {}, {}, config=Config(db_path=database), user_id="alice",
+                        vault_credentials={}):
+            assert list_entries() == []
+
+
 def test_forge_sync_replaces_and_removes_bindings(tmp_path):
     from istota.config import DeveloperConfig
     from istota.credential_broker.bindings import get_binding, sync_forge_bindings

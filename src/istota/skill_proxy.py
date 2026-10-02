@@ -589,7 +589,17 @@ class SkillProxy:
                             if env_name in self.credential_env:
                                 metadata[name] = binding
                         granted = {name for name in metadata if get_grant(database, self.user_id, name)}
+                        # Entry names, for a caller that addresses whole entries
+                        # (`wordpress --site`). Membership is the vault parser's,
+                        # never a name suffix, and an entry is listed only when a
+                        # member is in this task's snapshot.
+                        from .credential_broker.bindings import credential_groups
+                        entries = sorted(
+                            entry for entry, members in credential_groups(database, self.user_id).items()
+                            if any(member in self.vault_credentials for member in members)
+                        )
                     reply["names"] = sorted(metadata)
+                    reply["entries"] = entries
                     reply["credentials"] = [
                         {"name": name, "bound_hosts": (binding or {}).get("hosts", []),
                          "revealable": (binding or {}).get("revealable", False),

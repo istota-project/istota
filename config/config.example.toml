@@ -1680,7 +1680,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # ============================================================================
 # WordPress skill (docs/features/wordpress.md)
 # ============================================================================
-# Sites live in each user's config/WORDPRESS.md; credentials in their vault.
+# Each site is a vault entry named wordpress_<name> in the user's vault.
 # [wordpress]
 # private_hosts = []              # exact host names allowed to resolve to a
 #                                 #   private or loopback address, e.g. a local

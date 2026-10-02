@@ -246,13 +246,6 @@ class TestPluginStatus:
         assert code == 0, out
         assert sent == [{"status": "inactive"}]
 
-    def test_network_on_a_single_site_record_sends_nothing(self, env, capsys):
-        self._plugin(env)
-        code, out = run(["plugins", "activate", "--plugin", "akismet/akismet", "--network",
-                         "--confirmed"], capsys)
-        assert out["reason"] == "validation_error"
-        assert writes(env.site) == []
-
     def test_network_activate_sends_network_active(self, env, capsys):
         sent = self._plugin(env)
         code, out = run(["plugins", "activate", "--plugin", "akismet/akismet", "--network",
