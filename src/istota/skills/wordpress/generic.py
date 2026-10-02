@@ -26,7 +26,7 @@ import json
 import re
 
 from .client import WordPressError, fence, fence_tree, selector
-from .common import gate, quoted, read_json_file, total_header
+from .common import gate, lookup_hint, quoted, read_json_file, total_header
 from .discovery import ABILITIES_NAMESPACE
 
 _ROUTE_SEGMENT_RE = re.compile(r"\A[A-Za-z0-9._~!$&'()*+,;=:@-]+\Z")
@@ -163,7 +163,7 @@ def cmd_rest(args) -> dict:
     }
 
 
-def _annotations(ability: dict) -> dict:
+def annotations(ability: dict) -> dict:
     meta = ability.get("meta") if isinstance(ability.get("meta"), dict) else {}
     found = ability.get("annotations") or meta.get("annotations") or {}
     return found if isinstance(found, dict) else {}
@@ -190,7 +190,7 @@ def cmd_abilities_list(args) -> dict:
     for ability in items or []:
         if not isinstance(ability, dict):
             continue
-        notes = _annotations(ability)
+        notes = annotations(ability)
         rows.append({
             "name": selector(ability.get("name")),
             "category": selector(ability.get("category")),
@@ -236,41 +236,68 @@ def php_query(prefix: str, value) -> list[tuple[str, str]]:
     return [(prefix, str(value))]
 
 
-def cmd_abilities_run(args) -> dict:
-    ctx = args.wp
+def fetch_ability(ctx, name: str) -> dict:
+    """The ability as the site registers it, read before anything runs it."""
     try:
-        ability, _ = ctx.client.get(f"{ABILITIES_NAMESPACE}/abilities/{args.name}",
-                                    base=ctx.base)
+        ability, _ = ctx.client.get(f"{ABILITIES_NAMESPACE}/abilities/{name}", base=ctx.base)
     except WordPressError as exc:
         raise _no_abilities(exc) from None
     if not isinstance(ability, dict):
         raise WordPressError("The site answered with something that is not an ability.",
                              "bad_response")
-    notes = _annotations(ability)
+    return ability
+
+
+def run_ability(args, ctx, name: str, ability: dict, value, *,
+                described: str | None = None, always_gate: bool = False,
+                hint: str | None = None):
+    """Run `ability` with `value` as its input: ``(result, readonly, destructive)``.
+
+    The ability's own annotations decide the gate and the method. `described`
+    replaces the default `would` line, and `always_gate` gates whatever the
+    site claims, for a caller that knows its ability writes.
+    Never retried (spec §9.1), readonly included: the annotation is the
+    site's own claim.
+    """
+    notes = annotations(ability)
     readonly = notes.get("readonly") is True
     destructive = notes.get("destructive") is True
     # An ability that calls itself both is gated: the annotation is the
     # site's own claim, and the cautious half wins.
-    if not readonly or destructive:
-        kind = "destructive ability" if destructive else "ability"
-        given = f" with the input {shown_json(args.input)}" if args.input is not None else ""
-        gate(args, ctx, [f"run the {kind} {args.name} "
-                         f"({fence(ability.get('label')) or 'no label'}){given}"])
-    route = f"{ABILITIES_NAMESPACE}/abilities/{args.name}/run"
+    if always_gate or not readonly or destructive:
+        if described is None:
+            kind = "destructive ability" if destructive else "ability"
+            given = f" with the input {shown_json(value)}" if value is not None else ""
+            described = (f"run the {kind} {name} "
+                         f"({fence(ability.get('label')) or 'no label'}){given}")
+        gate(args, ctx, [described])
+    route = f"{ABILITIES_NAMESPACE}/abilities/{name}/run"
     params = json_body = None
+    # The method follows the annotations even under `always_gate`: core's run
+    # controller refuses any other.
     if readonly:
         method = "GET"
-        params = php_query("input", args.input) or None
+        params = php_query("input", value) or None
     elif destructive and notes.get("idempotent") is True:
         method = "DELETE"
-        params = php_query("input", args.input) or None
+        params = php_query("input", value) or None
     else:
         method = "POST"
-        json_body = {"input": args.input} if args.input is not None else {}
-    # Never retried (spec §9.1), readonly included: the annotation is the
-    # site's own claim.
-    result, _ = ctx.client.request(method, route, params=params, json=json_body,
-                                   base=ctx.base, idempotent=False)
+        json_body = {"input": value} if value is not None else {}
+    try:
+        result, _ = ctx.client.request(method, route, params=params, json=json_body,
+                                       base=ctx.base, idempotent=False)
+    except WordPressError as exc:
+        if hint is not None:
+            lookup_hint(exc, hint)
+        raise
+    return result, readonly, destructive
+
+
+def cmd_abilities_run(args) -> dict:
+    ctx = args.wp
+    ability = fetch_ability(ctx, args.name)
+    result, readonly, destructive = run_ability(args, ctx, args.name, ability, args.input)
     return {
         "status": "ok",
         **ctx.envelope(),

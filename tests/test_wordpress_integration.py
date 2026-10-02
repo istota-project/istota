@@ -15,6 +15,9 @@ Optional:
                                  and ISTOTA_WP_TEST_BLOG's network (§14.3)
     ISTOTA_WP_TEST_ACF_TYPE      a post type with ACF fields in REST, and
     ISTOTA_WP_TEST_ACF_FIELD     a text field on it, for the ACF round trip
+    ISTOTA_WP_TEST_OPTIONS_PAGE  an ACF options page slug, and
+    ISTOTA_WP_TEST_OPTIONS_FIELD a text field on it, for the options round trip;
+                                 needs the istota-connector plugin
 
 Point these at a local development copy of a site, never at production: the
 test writes. Make a local-only application password in wp-admin and revoke it
@@ -251,3 +254,46 @@ def test_network_plugin_deactivate_and_reactivate(live, capsys):
     print("network activation:", out.get("reason", "ok"))
     assert code == 0, (f"{PLUGIN} is now deactivated network-wide; network-activate it "
                        f"again in the network admin. The skill answered: {out}")
+
+
+OPTIONS_PAGE = os.environ.get("ISTOTA_WP_TEST_OPTIONS_PAGE", "").strip()
+OPTIONS_FIELD = os.environ.get("ISTOTA_WP_TEST_OPTIONS_FIELD", "").strip()
+
+
+def unfenced(text: str) -> str:
+    """The site's own text out of its fence, to write an original value back."""
+    lines = text.split("\n")
+    assert lines[0].startswith("[UNTRUSTED") and lines[-1].startswith("[END UNTRUSTED"), text
+    return "\n".join(lines[1:-1])
+
+
+@pytest.mark.skipif(not (OPTIONS_PAGE and OPTIONS_FIELD),
+                    reason="ISTOTA_WP_TEST_OPTIONS_PAGE and ISTOTA_WP_TEST_OPTIONS_FIELD not set")
+def test_an_options_page_round_trip(live, capsys):
+    """§16.3 scenario 10: needs the istota-connector plugin on the site.
+
+    Writes a scratch value into a text field of the options page and puts
+    the original back, so the field must hold a string to begin with.
+    """
+    fields = ok(capsys, "options", "get", "--page", OPTIONS_PAGE)["fields"]
+    assert OPTIONS_FIELD in fields, sorted(fields)
+    original = fields[OPTIONS_FIELD]
+    assert isinstance(original, str), original
+    original = unfenced(original) if original else original
+    scratch = f"istota smoke {uuid.uuid4().hex[:8]}"
+    try:
+        out = ok(capsys, "options", "update", "--page", OPTIONS_PAGE,
+                 "--acf-set", f"{OPTIONS_FIELD}={json.dumps(scratch)}", "--confirmed")
+        assert out["readback"]["changed"] == [] and out["readback"]["dropped"] == [], out
+        again = ok(capsys, "options", "get", "--page", OPTIONS_PAGE)["fields"][OPTIONS_FIELD]
+        assert scratch in again
+    finally:
+        cli(capsys, "options", "update", "--page", OPTIONS_PAGE,
+            "--acf-set", f"{OPTIONS_FIELD}={json.dumps(original)}", "--confirmed")
+
+
+@pytest.mark.skipif(not BLOG, reason="ISTOTA_WP_TEST_BLOG not set (not a network)")
+def test_network_sites(live, capsys):
+    """Needs the istota-connector plugin network-activated, and a super admin."""
+    out = ok(capsys, "network", "sites")
+    assert out["count"] >= 2 and any(site["id"] == 1 for site in out["sites"]), out

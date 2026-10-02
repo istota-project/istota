@@ -1,6 +1,6 @@
 # WordPress
 
-The `wordpress` skill reads, writes and administers WordPress sites over the core REST API. It works against an ordinary install and an ordinary account: nothing has to be installed on the site. It covers posts, pages and custom post types (discovered at runtime, including types outside `wp/v2`), ACF or Secure Custom Fields values, terms, media, users, site settings, plugins, any other REST route, and the Abilities API on WordPress 6.9 and later. One user can have several installs, and several sites of one multisite network.
+The `wordpress` skill reads, writes and administers WordPress sites over the core REST API. It works against an ordinary install and an ordinary account: nothing has to be installed on the site. It covers posts, pages and custom post types (discovered at runtime, including types outside `wp/v2`), ACF or Secure Custom Fields values, terms, media, users, site settings, plugins, any other REST route, and the Abilities API on WordPress 6.9 and later. An optional companion plugin adds ACF options pages and a multisite network's site list. One user can have several installs, and several sites of one multisite network.
 
 The skill is a menu skill with a CLI (`istota-skill wordpress`). The model reads its instructions when a request needs it.
 
@@ -60,7 +60,8 @@ Gated:
 - deleting a post for good (moving it to the trash is not gated);
 - creating terms;
 - creating or updating users, changing site settings, and activating, deactivating or installing plugins;
-- any `rest` call that is not a `GET`, and running an ability the site does not mark read-only.
+- any `rest` call that is not a `GET`, and running an ability the site does not mark read-only;
+- writing an ACF options page.
 
 Drafts, pending posts and media uploads are not gated.
 
@@ -77,6 +78,34 @@ Drafts, pending posts and media uploads are not gated.
 A network is one record with `multisite = true` and one credential; a super admin's application password works on every site. `--blog SLUG` (subdirectory network) or `--blog HOST` (subdomain network) addresses one site. The skill checks that the site exists before acting on it, so a typo answers `unknown_blog` rather than acting on the main site.
 
 `plugins activate --network` asks core REST to network-activate a plugin. If the site refuses, the answer is `unsupported_on_multisite` and the plugin is not activated per site instead; network-activate it in the network admin.
+
+## The istota-connector plugin
+
+Core REST has no route for an ACF options page and none for listing a multisite network's sites. A small companion plugin fills both gaps. It is optional: everything else works without it, and the three verbs that need it answer `connector_missing` with a pointer here.
+
+| Verb | Ability | Needs |
+|---|---|---|
+| `options get --page SLUG` | `istota/options-get` | `manage_options`, and the options page's own capability |
+| `options update --page SLUG --acf-file F --confirmed` | `istota/options-update` | the same |
+| `network sites` | `istota/network-sites` | `manage_sites` on the main site (a super admin) |
+
+The plugin registers these as abilities with the WordPress Abilities API, so it needs WordPress 6.9 or later. It adds no REST routes of its own, has no settings and stores nothing. Only fields in a field group with "Show in REST API" switched on can be read or written, the same rule ACF applies to posts. `options update` replaces each named field's value whole and leaves the others alone. Write image and file fields as attachment ids.
+
+The source is `integrations/wordpress/istota-connector/` in the istota repository. To install it:
+
+1. Build the zip from a checkout:
+
+   ```bash
+   scripts/build-wordpress-connector.sh
+   ```
+
+   This writes `dist/istota-connector-<version>.zip` from the committed files at `HEAD`. Pass another git ref as the first argument to build that one instead. Uncommitted edits are not included.
+
+2. In wp-admin, go to Plugins, Add New, Upload Plugin, and upload the zip. On a single site, activate it. On a multisite network, upload it in the network admin and network-activate it, so every site has the options abilities.
+
+3. Check it with `istota-skill wordpress describe --refresh`, which should report `connector: true`.
+
+To update the plugin, build a new zip and upload it again; WordPress offers to replace the installed copy.
 
 ## Not offered
 

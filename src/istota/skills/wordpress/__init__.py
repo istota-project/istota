@@ -25,6 +25,11 @@ Usage:
     python -m istota.skills.wordpress rest METHOD ROUTE [--query K=V ...] [--body-file F] [--confirmed]
     python -m istota.skills.wordpress abilities list [--category C]
     python -m istota.skills.wordpress abilities run NAME [--input-file F] [--confirmed]
+    python -m istota.skills.wordpress options get --page SLUG
+    python -m istota.skills.wordpress options update --page SLUG [--acf-file F] [--acf-set K=JSON] --confirmed
+    python -m istota.skills.wordpress network sites
+
+The last three need the istota-connector plugin on the site (`connector.py`).
 
 Every verb but `sites` takes ``--site`` and, on a multisite record, ``--blog``.
 
@@ -56,7 +61,7 @@ from istota.skills._cli import error_envelope, fail, parse_and_resolve, run_skil
 from istota.skills._credref import resolve_entry
 from istota.skills._hostpath import EGRESS, REMOTE, WRITE, host_path
 
-from . import admin, content, discovery, generic, media
+from . import admin, connector, content, discovery, generic, media
 from .cache import Cache
 from .client import WordPressClient, WordPressError, fence, resolve_host
 from .sites import (
@@ -319,6 +324,26 @@ def build_parser() -> argparse.ArgumentParser:
               help="the ability's input as JSON, from your own workspace")
     _confirmed(p)
 
+    p = sub.add_parser("options", help="ACF options pages (needs the istota-connector plugin)")
+    options = p.add_subparsers(dest="options_command", required=True)
+    p = options.add_parser("get", help="read an options page's REST-visible fields")
+    _site_args(p)
+    p.add_argument("--page", required=True, help="the options page slug, e.g. acf-options")
+    p = options.add_parser("update", help="write options page fields whole (needs --confirmed)")
+    _site_args(p)
+    p.add_argument("--page", required=True, help="the options page slug, e.g. acf-options")
+    host_path(p, "--acf-file", mode=EGRESS,
+              help="a JSON object of fields to write whole, from your own workspace; "
+                   '{"$upload": PATH} anywhere in a value uploads PATH and puts its id there')
+    p.add_argument("--acf-set", action="append",
+                   help="FIELD=JSON, one field written whole; repeatable")
+    _confirmed(p)
+
+    p = sub.add_parser("network", help="a multisite network (needs the istota-connector plugin)")
+    network = p.add_subparsers(dest="network_command", required=True)
+    p = network.add_parser("sites", help="list the network's sites (needs a super admin)")
+    _site_args(p)
+
     return parser
 
 
@@ -555,6 +580,10 @@ COMMANDS = {
     "rest": _site_verb(generic.cmd_rest, generic.prepare_rest),
     "abilities list": _site_verb(generic.cmd_abilities_list),
     "abilities run": _site_verb(generic.cmd_abilities_run, generic.check_ability),
+    "options get": _site_verb(connector.cmd_options_get, connector.check_page),
+    "options update": _write_verb(connector.cmd_options_update,
+                                  connector.check_options_update),
+    "network sites": _site_verb(connector.cmd_network_sites),
 }
 
 
