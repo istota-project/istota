@@ -116,6 +116,11 @@ def substitute_markers(value, uploads: Uploads, where: str = "acf"):
     return value
 
 
+class SiteText(str):
+    """A string `unwrap_markers` took out of a fence: the site's words, which a
+    `would` line fences again."""
+
+
 def unwrap_markers(value, where: str = "acf"):
     """`value` with every string that is exactly one fence replaced by its body.
 
@@ -126,7 +131,7 @@ def unwrap_markers(value, where: str = "acf"):
     """
     if isinstance(value, str):
         body = unframe_untrusted(value, LABEL)
-        text = value if body is None else body
+        text = value if body is None else SiteText(body)
         if has_marker(text, LABEL) or MARKER_REDACTION in text:
             raise WordPressError(
                 f"The value at {where} still carries an [UNTRUSTED WORDPRESS CONTENT] "
@@ -137,6 +142,18 @@ def unwrap_markers(value, where: str = "acf"):
             )
         return text
     if isinstance(value, dict):
+        if UPLOAD_KEY in value:
+            # A marker is yours to write. One copied out of a read is a value the
+            # site stored, and unwrapping it would upload a workspace file the
+            # site named.
+            for key, item in value.items():
+                if isinstance(item, str) and (unframe_untrusted(item, LABEL) is not None
+                                              or has_marker(item, LABEL)):
+                    raise WordPressError(
+                        f"The {UPLOAD_KEY} marker at {where} came from a read of the site "
+                        f"({key} is fenced). Only write {UPLOAD_KEY} markers yourself.",
+                        "validation_error",
+                    )
         return {k: unwrap_markers(v, f"{where}.{k}") for k, v in value.items()}
     if isinstance(value, list):
         return [unwrap_markers(v, f"{where}[{i}]") for i, v in enumerate(value)]

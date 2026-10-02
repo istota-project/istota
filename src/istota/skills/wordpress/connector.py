@@ -63,8 +63,13 @@ def connector_ability(ctx, name: str) -> dict:
     try:
         ability = fetch_ability(ctx, name)
     except WordPressError as exc:
-        if exc.reason in ("unknown_route", "not_found") and cached_says is True:
+        outdated = (exc.reason == "not_found" and name in FIELD_ABILITIES
+                    and _has_ability(ctx, OPTIONS_GET))
+        # A 0.1 plugin still is the connector `describe` reported.
+        if exc.reason in ("unknown_route", "not_found") and cached_says is True and not outdated:
             ctx.cache.drop()
+        if outdated:
+            raise WordPressError(OUTDATED, "connector_outdated", install=INSTALL) from None
         if exc.reason == "unknown_route":
             raise WordPressError(
                 "This site has no Abilities API (WordPress 6.9 or later), which the "
@@ -72,8 +77,6 @@ def connector_ability(ctx, name: str) -> dict:
                 "connector_missing", install=INSTALL,
             ) from None
         if exc.reason == "not_found":
-            if name in FIELD_ABILITIES and _has_ability(ctx, OPTIONS_GET):
-                raise WordPressError(OUTDATED, "connector_outdated", install=INSTALL) from None
             raise WordPressError(
                 f"The istota-connector plugin is not active on this site (it has no "
                 f"ability {name}).",
@@ -157,9 +160,12 @@ def check_options_update(args) -> None:
 
 
 def _shown(value, uploads: acf.Uploads):
-    """A value for the `would` line, an upload named by its path."""
+    """A value for the `would` line, an upload named by its path and text
+    copied out of a read fenced again."""
     if isinstance(value, Slot):
         return f"(upload of {uploads.sources[value.index].path})"
+    if isinstance(value, acf.SiteText):
+        return fence(value)
     if isinstance(value, dict):
         return {k: _shown(v, uploads) for k, v in value.items()}
     if isinstance(value, list):

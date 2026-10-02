@@ -20,8 +20,9 @@ removes change counted. Below a row that an earlier op shifted, or a node an
 earlier set replaced, the read no longer says what is there, so the check
 stops and the ability is the one that answers.
 
-**The gate.** A live post, any options page, a post another user has open in
-the editor, and every row removal ask first (no revision is made, so a removed
+**The gate.** A post that is not a draft or pending (live, or an attachment,
+whose status is ``inherit``), any options page, a post another user has open
+in the editor, and every row removal ask first (no revision is made, so a removed
 row is gone from WordPress). A draft edit that only sets, inserts or moves
 does not. The gate runs here, ahead of the uploads, and the ability is run with
 ``gated=False``.
@@ -68,6 +69,8 @@ _AT_RE = re.compile(r"\A(ops\[[0-9]{1,2}\] )?[A-Za-z0-9_/-]{1,1100}\Z")
 #: How much of a value a `would` line shows.
 _SHOWN_CHARS = 300
 _UNKNOWN = object()
+#: Where an edit that removes no row runs without --confirmed, as `update` does.
+_UNGATED_STATUSES = frozenset({"draft", "pending", "auto-draft"})
 
 
 def _invalid(message: str, **extra) -> WordPressError:
@@ -247,8 +250,13 @@ def check_fields_edit(args) -> None:
                     f"{label} addresses {segments[0]}, and an edit changes one top-level "
                     f"field ({top}). Run one edit per field."
                 )
-        if op["op"] != "set" and len(paths[0]) < 2:
-            raise _invalid(f"{label}: {op['op']} takes the path of a row, such as {top}/0.")
+        if op["op"] != "set":
+            last = paths[0][-1] if len(paths[0]) > 1 else None
+            if not (isinstance(last, int) or (last == "-" and op["op"] == "insert")):
+                raise _invalid(f"{label}: {op['op']} takes the path of a row, ending in "
+                               f"its index, such as {top}/0.")
+            if op["op"] == "move" and not isinstance(paths[1][-1], int):
+                raise _invalid(f"{label}: move takes a from path ending in a row index.")
     uploads = acf.Uploads(media.upload_cap(args.config), args.closers)
     for i, op in enumerate(ops):
         if "value" in op:
@@ -351,13 +359,16 @@ def fence_definition(definition):
         if key == "label":
             out[key] = fence(item)
         elif key == "choices" and isinstance(item, dict):
-            out[key] = {k: fence(v) if isinstance(v, str) else v for k, v in item.items()}
+            out[key] = fence_tree(item)
         elif key in ("sub_fields", "layouts"):
             out[key] = fence_definition(item)
         elif key in ("name", "type", "layout", "return_format"):
             out[key] = selector(item)
-        else:
+        elif key in ("required", "multiple", "raw") or (
+                key in ("min", "max") and isinstance(item, (int, float))):
             out[key] = item
+        else:
+            out[key] = fence_tree(item)
     return out
 
 
@@ -581,7 +592,9 @@ def _subject(args, context: dict) -> str:
 def _actions(args, context: dict, seen: list[dict]) -> list[str]:
     """The `would` lines, or none for a draft edit that removes nothing."""
     status = context.get("post_status")
-    live = args.page is None and status in LIVE_STATUSES
+    # An attachment is `inherit` and public, and a status this list does not
+    # know is asked about rather than assumed private.
+    live = args.page is None and status not in _UNGATED_STATUSES
     locked = context.get("locked_by")
     removes = [(op, s) for op, s in zip(args.field_ops, seen) if op["op"] == "remove"]
     if not (live or args.page is not None or locked or removes):
@@ -590,7 +603,8 @@ def _actions(args, context: dict, seen: list[dict]) -> list[str]:
     changes = "; ".join(_describe_op(op, s, args.uploads) for op, s in zip(args.field_ops, seen))
     head = f"change {subject}"
     if live:
-        head += f", which is live ({status})"
+        head += (f", which is live ({status})" if status in LIVE_STATUSES
+                 else f", which is not a draft ({status})")
     actions = [f"{head}: {changes}"]
     if locked:
         actions.append(
@@ -604,8 +618,27 @@ def _actions(args, context: dict, seen: list[dict]) -> list[str]:
     return actions
 
 
-def _later_remove(ops: list[dict], i: int) -> bool:
-    return any(op["op"] == "remove" for op in ops[i + 1:])
+def _final_path(changed: list, i: int) -> list | None:
+    entry = changed[i] if i < len(changed) and isinstance(changed[i], dict) else {}
+    path = entry.get("path")
+    return path.split("/") if isinstance(path, str) else None
+
+
+def _overwritten(sent_ops: list[dict], changed: list, i: int) -> bool:
+    """Whether a later op wrote at, inside or over op i's node, or removed a row:
+    then the node after the edit is not op i's value to compare."""
+    mine = _final_path(changed, i)
+    if mine is None:
+        return True
+    for j in range(i + 1, len(sent_ops)):
+        if sent_ops[j]["op"] == "remove":
+            return True
+        theirs = _final_path(changed, j)
+        if sent_ops[j]["op"] in ("set", "insert") and theirs:
+            shorter = min(len(mine), len(theirs))
+            if mine[:shorter] == theirs[:shorter]:
+                return True
+    return False
 
 
 def _readback(sent_ops: list[dict], changed: list) -> dict:
@@ -615,7 +648,7 @@ def _readback(sent_ops: list[dict], changed: list) -> dict:
             continue
         entry = changed[i] if isinstance(changed[i], dict) else {}
         got = entry.get("value")
-        if got is None and op["value"] is not None and _later_remove(sent_ops, i):
+        if _overwritten(sent_ops, changed, i):
             continue
         if not acf.same(op["value"], got):
             differ.append(_path_text(entry.get("path")) or op["path"])

@@ -61,7 +61,7 @@ Gated:
 - creating or updating users, changing site settings, and activating, deactivating or installing plugins;
 - any `rest` call that is not a `GET`, and running an ability the site does not mark read-only;
 - writing an ACF options page;
-- a `fields edit` on a live post, on an options page, on a post another user has open in the editor, and any `fields edit` that removes a row, a draft included, since no revision keeps a copy of the removed row.
+- a `fields edit` on any post that is not a draft or pending (a live post, or a media item), on an options page, on a post another user has open in the editor, and any `fields edit` that removes a row, a draft included, since no revision keeps a copy of the removed row.
 
 Drafts, pending posts and media uploads are not gated, and neither is a `fields edit` on a draft that only sets, inserts or moves.
 
