@@ -107,7 +107,20 @@ def _panel_to_dict(p, *, biomarker_count: int = 0, flagged_count: int = 0) -> di
         "notes": p.notes,
         "has_source": bool(p.source_file),
         "encounter_id": p.encounter_id,
+        "specimen": p.specimen,
     }
+
+
+def _specimen_from(raw) -> tuple[str | None, str | None]:
+    """``(specimen, error)`` for a client-supplied value; empty means unset."""
+    if raw is None or raw == "":
+        return None, None
+    specimen = health_db.normalize_specimen(raw)
+    if specimen is None:
+        return None, (
+            "specimen must be one of " + ", ".join(health_db.SPECIMENS)
+        )
+    return specimen, None
 
 
 def _encounter_to_dict(e) -> dict:
@@ -499,9 +512,14 @@ async def api_list_panels(
     since: str = Query(default=""),
     until: str = Query(default=""),
     include_drafts: int = Query(default=1, ge=0, le=1),
+    specimen: str = Query(default=""),
     limit: int = Query(default=50, le=500, ge=1),
     offset: int = Query(default=0, ge=0),
 ):
+    specimen_filter, err = _specimen_from(specimen)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
     def _query():
         with health_db.connect(ctx.db_path) as conn:
             panels = health_db.list_panels(
@@ -509,6 +527,7 @@ async def api_list_panels(
                 since=since or None,
                 until=until or None,
                 include_drafts=bool(include_drafts),
+                specimen=specimen_filter,
                 limit=limit,
                 offset=offset,
             )
@@ -537,6 +556,9 @@ async def api_create_panel(
     lab_name = body.get("lab_name") or None
     panel_type = body.get("panel_type") or None
     notes = body.get("notes")
+    specimen, err = _specimen_from(body.get("specimen"))
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
     encounter_id = body.get("encounter_id")
     if encounter_id is not None:
         try:
@@ -562,6 +584,7 @@ async def api_create_panel(
                 panel_type=panel_type,
                 notes=notes,
                 encounter_id=encounter_id,
+                specimen=specimen,
             )
             conn.commit()
         return pid, collision
@@ -626,6 +649,10 @@ async def api_update_panel(
         return JSONResponse(
             {"error": "draft must be a boolean"}, status_code=400,
         )
+    has_specimen = "specimen" in body
+    specimen, err = _specimen_from(body.get("specimen"))
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
     has_encounter_id = "encounter_id" in body
     encounter_id = body.get("encounter_id")
     if has_encounter_id and encounter_id is not None:
@@ -654,6 +681,8 @@ async def api_update_panel(
             }
             if has_encounter_id:
                 kwargs["encounter_id"] = encounter_id
+            if has_specimen:
+                kwargs["specimen"] = specimen
             n = health_db.update_panel(conn, panel_id, **kwargs)
             conn.commit()
         return n
@@ -830,6 +859,7 @@ async def api_panel_upload(
     drawn_at: str = Form(""),
     lab_name: str = Form(""),
     panel_type: str = Form(""),
+    specimen: str = Form(""),
     _csrf: None = Depends(verify_origin),
     ctx: HealthContext = Depends(get_user_context),
 ):
@@ -845,6 +875,9 @@ async def api_panel_upload(
     """
     if not drawn_at:
         drawn_at = datetime.now(timezone.utc).date().isoformat()
+    specimen_value, err = _specimen_from(specimen)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
 
     raw = await file.read()
     if not raw:
@@ -865,6 +898,7 @@ async def api_panel_upload(
                 panel_type=panel_type or None,
                 source_mime=mime,
                 draft=True,
+                specimen=specimen_value,
             )
             conn.commit()
         panel_dir = ctx.uploads_dir / str(pid)
@@ -1067,9 +1101,11 @@ async def api_biomarker_summary(
     return {"summary": summary}
 
 
-@router.get("/bloodwork/matrix")
-async def api_bloodwork_matrix(
+@router.get("/labs/matrix")
+@router.get("/bloodwork/matrix")  # pre-rename path, kept for a cached client
+async def api_labs_matrix(
     ctx: HealthContext = Depends(get_user_context),
+    specimen: str = Query(default=""),
 ):
     """Spreadsheet view of every biomarker × every confirmed panel.
 
@@ -1078,13 +1114,18 @@ async def api_bloodwork_matrix(
 
     ``panels`` is sorted by ``drawn_at`` ascending (oldest first), matching
     the "lab journal" layout people use offline. ``categories`` preserves
-    a stable ordering from the bundled refs; markers not in the refs fall
-    into an ``Other`` bucket.
+    a stable ordering from the bundled refs, with ``Other`` last; markers
+    not in the refs fall into that bucket. ``specimen`` narrows the panels.
     """
+    specimen_filter, err = _specimen_from(specimen)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
     def _query():
         with health_db.connect(ctx.db_path) as conn:
             panels = health_db.list_panels(
                 conn, include_drafts=False, limit=500,
+                specimen=specimen_filter,
             )
             panels_sorted = sorted(panels, key=lambda p: p.drawn_at)
 
@@ -1124,7 +1165,7 @@ async def api_bloodwork_matrix(
 
     for name, meta in marker_meta.items():
         ref = ref_by_name.get(name)
-        cat = ref.category if ref else "Other"
+        cat = ref.category if ref else health_db.OTHER_CATEGORY
         if cat not in cat_markers:
             cat_order.append(cat)
             cat_markers[cat] = []
@@ -1164,6 +1205,7 @@ async def api_bloodwork_matrix(
                 "drawn_at": p.drawn_at,
                 "lab_name": p.lab_name,
                 "panel_type": p.panel_type,
+                "specimen": p.specimen,
             }
             for p in panels_sorted
         ],
@@ -1262,7 +1304,7 @@ async def api_csv_import(
     _csrf: None = Depends(verify_origin),
     ctx: HealthContext = Depends(get_user_context),
 ):
-    """Import a bloodwork CSV.
+    """Import a labs CSV.
 
     Accepts the same shape exported by ``GET /csv/export`` (category
     banner row + ``Marker (unit)`` headers + reference-range row +
@@ -1321,7 +1363,7 @@ async def api_csv_export(ctx: HealthContext = Depends(get_user_context)):
         text,
         media_type="text/csv",
         headers={
-            "Content-Disposition": 'attachment; filename="bloodwork.csv"',
+            "Content-Disposition": 'attachment; filename="labs.csv"',
         },
     )
 

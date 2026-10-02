@@ -14,6 +14,56 @@ def _ctx(tmp_path):
     return synthesize_health_context("alice", tmp_path / "workspace")
 
 
+class TestPanelSpecimen:
+    """#599. Existing rows stay NULL: a guessed "blood" is worse than none."""
+
+    def test_migrates_a_db_without_the_column(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ctx.ensure_dirs()
+        conn = sqlite3.connect(ctx.db_path)
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE panels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    drawn_at TEXT NOT NULL,
+                    lab_name TEXT,
+                    panel_type TEXT,
+                    source_file TEXT,
+                    source_mime TEXT,
+                    ocr_text TEXT,
+                    draft INTEGER NOT NULL DEFAULT 0,
+                    notes TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                INSERT INTO panels (drawn_at) VALUES ('2026-05-01');
+                """,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        health_db.init_db(ctx.db_path)
+        health_db.init_db(ctx.db_path)
+        with health_db.connect(ctx.db_path) as conn:
+            (panel,) = health_db.list_panels(conn)
+        assert panel.specimen is None
+
+    def test_written_values_are_normalised(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            a = health_db.insert_panel(conn, drawn_at="2026-05-01", specimen=" URINE ")
+            b = health_db.insert_panel(conn, drawn_at="2026-05-02", specimen="plasma")
+            health_db.update_panel(conn, b, specimen="Saliva")
+            health_db.update_panel(conn, a, lab_name="Quest")
+            conn.commit()
+            assert health_db.get_panel(conn, a).specimen == "urine"
+            assert health_db.get_panel(conn, b).specimen == "saliva"
+            assert [p.id for p in health_db.list_panels(conn, specimen="urine")] == [a]
+            health_db.update_panel(conn, a, specimen=None)
+            assert health_db.get_panel(conn, a).specimen is None
+
+
 class TestInitDb:
     def test_creates_tables(self, tmp_path):
         ctx = _ctx(tmp_path)
@@ -280,6 +330,32 @@ class TestBiomarkerRefs:
         assert hgb.ref_range_low_m is not None
         assert hgb.ref_range_low_f is not None
         assert hgb.ref_range_low_m != hgb.ref_range_low_f
+
+    def test_no_alias_names_two_refs(self, tmp_path):
+        """#600. Urine markers share words with blood ones ("Creatinine",
+        "Protein"). An alias claimed twice would send a recanonicalised urine
+        row onto the blood trend, or the reverse, depending on seed order."""
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            refs = health_db.list_biomarker_refs(conn)
+        owner: dict[str, str] = {}
+        for r in refs:
+            for word in [r.name, *r.aliases]:
+                key = word.strip().lower()
+                assert owner.setdefault(key, r.name) == r.name, (word, owner[key], r.name)
+
+    def test_non_blood_markers_are_seeded(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            by_alias = health_db.find_biomarker_ref_by_alias(conn, "Creatinine, Urine")
+            blood = health_db.find_biomarker_ref_by_alias(conn, "Creat")
+            calpro = health_db.get_biomarker_ref(conn, "Fecal_Calprotectin")
+        assert by_alias is not None and by_alias.name == "Urine_Creatinine"
+        assert by_alias.category == "Urinalysis"
+        assert blood is not None and blood.name == "Creatinine"
+        assert calpro is not None and calpro.category == "Stool"
 
 
 class TestRecanonicalize:

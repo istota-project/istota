@@ -1215,6 +1215,7 @@ def _process_deferred_health_ops(
                         lab_name=entry.get("lab_name"),
                         panel_type=entry.get("panel_type"),
                         notes=entry.get("notes"),
+                        specimen=entry.get("specimen"),
                         encounter_id=(
                             int(enc_id) if enc_id is not None else None
                         ),

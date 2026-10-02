@@ -399,7 +399,7 @@ class TestCsvImportExport:
         assert again.json()["panels_skipped_identical"] == 2
 
 
-class TestBloodworkMatrix:
+class TestLabsMatrix:
     def _seed(self, client, drawn_at: str, lab: str, items: list[tuple[str, float, str]]):
         pid = client.post("/istota/api/health/panels", json={
             "drawn_at": drawn_at, "lab_name": lab,
@@ -417,7 +417,7 @@ class TestBloodworkMatrix:
         return pid
 
     def test_empty(self, client):
-        resp = client.get("/istota/api/health/bloodwork/matrix").json()
+        resp = client.get("/istota/api/health/labs/matrix").json()
         assert resp["panels"] == []
         assert resp["categories"] == []
         assert resp["values"] == {}
@@ -432,7 +432,7 @@ class TestBloodworkMatrix:
             ("Hemoglobin", 15.0, "g/dL"),
             ("LDL", 112, "mg/dL"),
         ])
-        m = client.get("/istota/api/health/bloodwork/matrix").json()
+        m = client.get("/istota/api/health/labs/matrix").json()
         # Panels sorted ascending.
         assert [p["id"] for p in m["panels"]] == [p1, p2]
         # CBC category contains Hemoglobin and WBC; Lipid contains LDL.
@@ -463,7 +463,7 @@ class TestBloodworkMatrix:
                 {"name": "Hemoglobin", "value": 15.0, "unit": "g/dL"},
             ]},
         )
-        m = client.get("/istota/api/health/bloodwork/matrix").json()
+        m = client.get("/istota/api/health/labs/matrix").json()
         assert [p["id"] for p in m["panels"]] == [p1]
         assert str(p2) not in m["values"]
 
@@ -471,10 +471,97 @@ class TestBloodworkMatrix:
         self._seed(client, "2026-05-08", "Custom Lab", [
             ("MyUnusualMarker", 42, "x/y"),
         ])
-        m = client.get("/istota/api/health/bloodwork/matrix").json()
+        m = client.get("/istota/api/health/labs/matrix").json()
         other = next((c for c in m["categories"] if c["name"] == "Other"), None)
         assert other is not None
         assert other["markers"][0]["name"] == "MyUnusualMarker"
+
+    def test_other_is_the_last_category(self, client):
+        """#598. Refs are stored by category, and "Other" sorted between
+        "Lipid" and "Thyroid". PSA is a seeded ref in "Other", TSH sorts after
+        it alphabetically, and the unknown marker joins the same bucket."""
+        self._seed(client, "2026-05-08", "Quest", [
+            ("PSA", 1.1, "ng/mL"),
+            ("TSH", 2.0, "mIU/L"),
+            ("Hemoglobin", 14.8, "g/dL"),
+            ("MyUnusualMarker", 42, "x/y"),
+        ])
+        m = client.get("/istota/api/health/labs/matrix").json()
+        names = [c["name"] for c in m["categories"]]
+        assert names[-1] == "Other"
+        assert "Thyroid" in names
+        other = {mk["name"] for mk in m["categories"][-1]["markers"]}
+        assert other == {"PSA", "MyUnusualMarker"}
+
+    def test_old_path_still_answers(self, client):
+        self._seed(client, "2026-05-08", "Quest", [("Hemoglobin", 14.8, "g/dL")])
+        old = client.get("/istota/api/health/bloodwork/matrix").json()
+        new = client.get("/istota/api/health/labs/matrix").json()
+        assert old == new and len(new["panels"]) == 1
+
+    def test_specimen_filter(self, client):
+        blood = self._seed(client, "2026-01-15", "Quest", [("Hemoglobin", 14.8, "g/dL")])
+        urine = self._seed(client, "2026-02-01", "Quest", [("Urine_pH", 6.0, "")])
+        unset = self._seed(client, "2026-03-01", "Quest", [("WBC", 7.0, "10^3/uL")])
+        client.put(f"/istota/api/health/panels/{blood}", json={"specimen": "blood"})
+        client.put(f"/istota/api/health/panels/{urine}", json={"specimen": "urine"})
+
+        m = client.get("/istota/api/health/labs/matrix?specimen=urine").json()
+        assert [p["id"] for p in m["panels"]] == [urine]
+        assert m["panels"][0]["specimen"] == "urine"
+        assert [c["name"] for c in m["categories"]] == ["Urinalysis"]
+
+        everything = client.get("/istota/api/health/labs/matrix").json()
+        assert [p["id"] for p in everything["panels"]] == [blood, urine, unset]
+
+        bad = client.get("/istota/api/health/labs/matrix?specimen=plasma")
+        assert bad.status_code == 400
+
+
+class TestPanelSpecimen:
+    """#599: what a panel was run on, on every route that writes or reads one."""
+
+    def test_create_read_update_and_clear(self, client):
+        pid = client.post("/istota/api/health/panels", json={
+            "drawn_at": "2026-05-08", "specimen": "Urine",
+        }).json()["id"]
+        panel = client.get(f"/istota/api/health/panels/{pid}").json()["panel"]
+        assert panel["specimen"] == "urine"
+
+        client.put(f"/istota/api/health/panels/{pid}", json={"specimen": "stool"})
+        listed = client.get("/istota/api/health/panels?specimen=stool").json()
+        assert [p["id"] for p in listed["panels"]] == [pid]
+
+        # A PUT without the key leaves it alone; null clears it.
+        client.put(f"/istota/api/health/panels/{pid}", json={"lab_name": "Quest"})
+        panel = client.get(f"/istota/api/health/panels/{pid}").json()["panel"]
+        assert panel["specimen"] == "stool"
+        client.put(f"/istota/api/health/panels/{pid}", json={"specimen": None})
+        panel = client.get(f"/istota/api/health/panels/{pid}").json()["panel"]
+        assert panel["specimen"] is None
+
+    def test_a_value_off_the_list_is_refused(self, client):
+        resp = client.post("/istota/api/health/panels", json={
+            "drawn_at": "2026-05-08", "specimen": "plasma",
+        })
+        assert resp.status_code == 400
+        assert "specimen" in resp.json()["error"]
+
+        pid = client.post("/istota/api/health/panels", json={
+            "drawn_at": "2026-05-08",
+        }).json()["id"]
+        resp = client.put(f"/istota/api/health/panels/{pid}", json={"specimen": 3})
+        assert resp.status_code == 400
+
+    def test_upload_takes_a_specimen(self, client):
+        resp = client.post(
+            "/istota/api/health/panels/upload",
+            files={"file": ("ua.pdf", b"%PDF-1.4 x", "application/pdf")},
+            data={"drawn_at": "2026-05-08", "specimen": "urine"},
+        )
+        pid = resp.json()["id"]
+        panel = client.get(f"/istota/api/health/panels/{pid}").json()["panel"]
+        assert panel["specimen"] == "urine"
 
 
 class TestEncountersRoutes:

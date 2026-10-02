@@ -247,6 +247,41 @@ class TestExportCsv:
         assert summary.panels_created == 0
         assert summary.panels_skipped_identical == 2
 
+    def test_other_is_the_last_category(self, ctx):
+        """#598. PSA is a seeded ref in "Other"; Thyroid sorts after it."""
+        with health_db.connect(ctx.db_path) as conn:
+            pid = health_db.insert_panel(conn, drawn_at="2026-05-08", lab_name="Q")
+            for name, value, unit in (
+                ("PSA", 1.1, "ng/mL"), ("TSH", 2.0, "mIU/L"),
+                ("MyUnusualMarker", 42, "x/y"),
+            ):
+                health_db.insert_biomarker(
+                    conn, panel_id=pid, name=name, value=value, unit=unit,
+                )
+            conn.commit()
+            exported = csv_io.export_csv(conn)
+        banner = [c for c in exported.splitlines()[0].split(",") if c]
+        assert banner[-1] == "OTHER"
+        assert "THYROID" in banner
+        header = exported.splitlines()[1].split(",")
+        assert header[-2:] == ["PSA (ng/mL)", "MyUnusualMarker (x/y)"]
+
+    def test_deferred_panel_specimen(self, ctx, tmp_path):
+        """#599. The op file is written in the sandbox, so its specimen is
+        untrusted text: a word off the list is stored as NULL, not as given."""
+        user_temp = tmp_path / "user_temp"
+        user_temp.mkdir()
+        count = self._replay(ctx, user_temp, 1003, [
+            {"op": "insert_panel", "drawn_at": "2026-05-08", "specimen": "urine"},
+            {"op": "insert_panel", "drawn_at": "2026-05-09", "specimen": "x' OR 1"},
+        ])
+        assert count == 2
+        with health_db.connect(ctx.db_path) as conn:
+            panels = health_db.list_panels(conn, include_drafts=True)
+        assert sorted((p.drawn_at, p.specimen) for p in panels) == [
+            ("2026-05-08", "urine"), ("2026-05-09", None),
+        ]
+
     def test_empty_db_emits_header_only(self, ctx):
         with health_db.connect(ctx.db_path) as conn:
             out = csv_io.export_csv(conn)

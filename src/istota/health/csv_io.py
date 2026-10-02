@@ -1,4 +1,4 @@
-"""CSV import/export for bloodwork panels.
+"""CSV import/export for lab panels.
 
 The file format is the one most people already keep offline as a
 spreadsheet: rows are dates, columns are biomarkers. Three header rows
@@ -70,7 +70,7 @@ class ImportSummary:
       silently noop'd (idempotent re-import).
     * ``panels_needs_review`` — same ``(date, lab)`` as an existing
       confirmed panel but the biomarker content differs; saved as a draft
-      for the user to merge or discard from the Bloodwork page.
+      for the user to merge or discard from the Labs page.
     """
     panels_created: int = 0
     panels_skipped_identical: int = 0
@@ -199,7 +199,7 @@ def import_csv(
     conn: sqlite3.Connection,
     csv_text: str,
 ) -> ImportSummary:
-    """Parse and persist a CSV of bloodwork results.
+    """Parse and persist a CSV of lab results.
 
     Deduplication is content-based, not user-driven:
 
@@ -210,7 +210,7 @@ def import_csv(
     * If a confirmed panel exists for the same ``(drawn_at, lab_name)``
       but its biomarker content differs, the new row is saved as a
       ``draft`` panel so the user can compare and merge from the
-      Bloodwork page rather than having one version silently win.
+      Labs page rather than having one version silently win.
     * Otherwise the row is written as a new confirmed panel.
 
     Caller owns the commit so the import can be rolled back as a whole
@@ -391,7 +391,7 @@ def export_csv(conn: sqlite3.Connection) -> str:
     # Unknown markers (no ref) land in "Other".
     for name in observed:
         if name not in ref_by_name:
-            cats.setdefault("Other", []).append(name)
+            cats.setdefault(health_db.OTHER_CATEGORY, []).append(name)
 
     cat_order = [c for c in _category_order(refs) if c in cats]
     for c in cats:

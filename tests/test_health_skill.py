@@ -116,6 +116,31 @@ class TestPanelsCli:
         assert ops[1]["panel_ref"] == "cbc"
         assert "panel_id" not in ops[1]
 
+    def test_specimen_on_add_panel_and_panels(self, ready, tmp_path):
+        db_path, env = ready
+        urine = _run([
+            "add-panel", "--drawn-at", "2026-05-08", "--specimen", "urine",
+        ], env)["id"]
+        _run(["add-panel", "--drawn-at", "2026-05-09"], env)
+        out = _run(["panels", "--specimen", "urine"], env)
+        assert [p["id"] for p in out["panels"]] == [urine]
+        assert out["panels"][0]["specimen"] == "urine"
+        assert _run(["panel", str(urine)], env)["panel"]["specimen"] == "urine"
+
+        refused = subprocess.run(
+            [sys.executable, "-m", "istota.skills.health",
+             "add-panel", "--drawn-at", "2026-05-08", "--specimen", "plasma"],
+            capture_output=True, text=True, env=env,
+        )
+        assert refused.returncode != 0
+
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        denv = {**env, "ISTOTA_DEFERRED_DIR": str(deferred), "ISTOTA_TASK_ID": "56"}
+        _run(["add-panel", "--drawn-at", "2026-05-08", "--specimen", "stool"], denv)
+        ops = json.loads((deferred / "task_56_health_ops.json").read_text())
+        assert ops[0]["specimen"] == "stool"
+
     def test_panel_ref_direct_mode_errors(self, ready):
         """A @ref is meaningless outside a deferred batch — direct mode rejects
         it with an error envelope instead of crashing or misfiling."""
