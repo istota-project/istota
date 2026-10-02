@@ -14,7 +14,8 @@ there: ``rest_no_route`` means the site has no Abilities API (WordPress 6.9 or
 later), and a missing ability means the plugin is not active on this site.
 That read is what `abilities run` makes anyway, so nothing extra is probed,
 and a plugin installed a moment ago is seen at once rather than after the
-discovery cache expires.
+discovery cache expires. A missing field ability on a site that has
+``istota/options-get`` is the 0.1 plugin, answered ``connector_outdated``.
 
 **options update** reads the page first, refuses a field the page does not
 expose with ``acf_not_in_rest`` before the gate, names each field's current and
