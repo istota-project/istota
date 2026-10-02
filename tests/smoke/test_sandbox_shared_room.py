@@ -3,7 +3,7 @@
 A turn runs with its sender's reach (ISSUE-576). A member's turn in a room more
 than one human reads binds what their private room does. What is withheld is
 withheld from a guest's turn and from a task nobody asked in the room (here a
-`cli` task, the same rule as a cron job): no `Users/{uid}` bind, a per-task
+`cli` task, the same rule as a subtask): no `Users/{uid}` bind, a per-task
 temp dir instead of the per-user one (`room-task-<id>`, or `emissary-task-<id>`
 for a guest), and no flat Talk directory. Independently, a `Groups/<id>` bind
 for the groups the task resolves (multiplayer Stages 9, 13, 23).
@@ -230,7 +230,7 @@ class TestAMembersTurnInASharedRoom:
 
 
 class TestATaskNobodyAskedInTheRoom:
-    """A `cli` task, like a cron job, lands its answer in the room with no
+    """A `cli` task, like a subtask, lands its answer in the room with no
     member asking in it, so it runs at room-safe reach."""
 
     @pytest.mark.script(SCRIPT)
