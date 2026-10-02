@@ -64,6 +64,7 @@ from . import db as _db
 from . import user_profiles
 from . import web_auth, web_auth_mail, web_shutdown
 from .build_info import RUNNING_VERSION, build_description
+from .filenames import filename_parts
 from .brain import make_brain
 from .chat_files import ChatFileError, resolve_chat_file
 from .config import load_config
@@ -10477,7 +10478,6 @@ def _chat_attachment_dir(username: str, day: str) -> Path:
     return _chat_upload_roots(username)[0] / day
 
 
-_ATTACHMENT_STEM_RE = re.compile(r"[^A-Za-z0-9._-]+")
 # A chip label is display-only, so it's bounded rather than sanitized (the
 # renderer escapes it); this just keeps a client from persisting an essay.
 _MAX_ATTACHMENT_NAME_CHARS = 200
@@ -10497,18 +10497,17 @@ _REPLY_EXCERPT_CHARS = 200
 def _attachment_stem(filename: str, limit: int = 48) -> str:
     """Filesystem-safe leading part of a stored attachment's name.
 
-    ``Path.stem`` drops any directory component, and the substitution keeps
-    only characters that can't traverse or confuse a path, so a hostile
-    ``filename`` (it comes from the client) can only shorten to ``""``.
+    The `istota.filenames` rule in ASCII mode: no directory component, nothing
+    that can traverse or confuse a path, so a hostile ``filename`` (it comes
+    from the client) can only shorten to ``""``.
     """
-    stem = _ATTACHMENT_STEM_RE.sub("-", Path(filename).stem).strip("-._")
-    return stem[:limit]
+    return filename_parts(filename, ascii_only=True, max_stem=limit)[0]
 
 
 def _save_chat_attachment(username: str, filename: str, data: bytes) -> str:
     import uuid
     from datetime import date
-    ext = Path(filename).suffix.lower()
+    ext = filename_parts(filename)[1].lower()
     day = date.today().isoformat()
     dest_dir = _chat_attachment_dir(username, day)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -10533,7 +10532,9 @@ async def chat_upload_attachment(
     should reference."""
     chat = _config.web.chat
     name = file.filename or "upload"
-    ext = Path(name).suffix.lower().lstrip(".")
+    # Checked on the extension the stored file will carry, so the allowlist and
+    # the name on disk cannot disagree (`x.html ` is stored and checked as html).
+    ext = filename_parts(name)[1].lower().lstrip(".")
     if chat.attachment_extensions and ext not in chat.attachment_extensions:
         return JSONResponse(
             {"error": f"file type .{ext} not allowed"}, status_code=400,

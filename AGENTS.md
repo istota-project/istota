@@ -155,6 +155,7 @@ src/istota/
 ├── toml_fence.py         # Where a TOML fence starts and ends, for the four markdown-config parsers → leaf-modules.md
 ├── llm_json.py           # The same, for a fence in *model* output; anchored closer, linear walk → leaf-modules.md
 ├── date_parse.py         # Loose date parsing for text a model or a person typed, validated → leaf-modules.md
+├── filenames.py          # The one rule for turning a name somebody else chose into a filename → leaf-modules.md
 ├── cron_loader.py        # CRON.md → DB sync
 └── logging_setup.py
 ```

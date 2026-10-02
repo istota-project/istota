@@ -29,7 +29,7 @@ scan could get zero workers indefinitely.
 """
 
 import re
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -135,7 +135,7 @@ class FakeMailbox:
         )
 
 
-def _run_poll(config, mailbox, download=None, notifications=None):
+def _run_poll(config, mailbox, download=None, notifications=None, upload=None):
     """Drive one poll against `mailbox`, with the network legs stubbed.
 
     `notifications` collects `(kind, user_id, message)` for every alert and
@@ -158,7 +158,8 @@ def _run_poll(config, mailbox, download=None, notifications=None):
         patch("istota.transport.email.inbound.download_attachments",
               download or (lambda *a, **k: [])),
         patch("istota.transport.email.inbound.ensure_user_directories_v2"),
-        patch("istota.transport.email.inbound.upload_file_to_inbox_v2"),
+        patch("istota.transport.email.inbound.upload_file_to_inbox_v2",
+              upload or MagicMock()),
         patch("istota.notifications.send_confirmation_prompt", _fake_prompt),
         patch("istota.notifications.send_notification", _fake_notify),
     ):
@@ -595,6 +596,32 @@ class TestSkippedAttachmentsAreDeclared:
             ).fetchone()["prompt"]
         assert "invoice.pdf" in prompt
         assert "not retrieved" in prompt
+
+    def test_a_sanitised_name_is_not_reported_as_missing(self, make_config):
+        """ISSUE-593: the attachment lands under its sanitised name, so the
+        skipped-attachment diff must not read the rename as a loss."""
+        config = make_config()
+        declared = "Booking-Ref\r Receipt.pdf"
+        mailbox = FakeMailbox([1, 2], attachments=[declared])
+        _prime_cursor(config, mailbox)
+
+        def _download(email_id, target_dir, **kwargs):
+            target_dir.mkdir(parents=True, exist_ok=True)
+            path = target_dir / "Booking-Ref Receipt.pdf"
+            path.write_bytes(b"%PDF")
+            return [path]
+
+        _run_poll(
+            config, mailbox, download=_download,
+            upload=lambda config, user_id, path, name: f"/Users/{user_id}/inbox/{name}",
+        )
+
+        with db.get_db(config.db_path) as conn:
+            prompt = conn.execute(
+                "SELECT prompt FROM tasks ORDER BY id DESC LIMIT 1"
+            ).fetchone()["prompt"]
+        assert "Booking-Ref Receipt.pdf" in prompt
+        assert "not retrieved" not in prompt
 
     def test_no_declared_attachments_means_no_download_call(self, make_config):
         """The second IMAP login per message is pure cost when the message

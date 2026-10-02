@@ -322,6 +322,18 @@ class TestPanelUpload:
         assert src.status_code == 200
         assert src.content.startswith(b"%PDF")
 
+    def test_a_hostile_suffix_does_not_name_the_stored_file(self, client, ctx):
+        """ISSUE-593: the stored name was `original<client suffix>`, so a
+        control character in the client's filename reached the disk."""
+        resp = client.post(
+            "/istota/api/health/panels/upload",
+            files={"file": ("report.pd\rf", b"%PDF-1.4 fake pdf", "application/pdf")},
+            data={"drawn_at": "2026-05-08"},
+        )
+        assert resp.status_code == 200, resp.text
+        pid = resp.json()["id"]
+        assert [p.name for p in (ctx.uploads_dir / str(pid)).iterdir()] == ["original.pdf"]
+
     def test_empty_upload_rejected(self, client):
         resp = client.post(
             "/istota/api/health/panels/upload",
