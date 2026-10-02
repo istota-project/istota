@@ -2,9 +2,9 @@
 
 Driven against `web_app`'s own admin dependencies (`_require_admin`,
 `_verify_origin`) in the pattern of `tests/test_web_admin_logs.py`. Not
-`web_router_stubs.py`: that is FastAPI-only plumbing for the five *module*
+`webui/router_stubs.py`: that is FastAPI-only plumbing for the five *module*
 routers, which are mounted separately and have their stubs replaced through
-`dependency_overrides`. These routes are declared in `web_app.py` itself, so
+`dependency_overrides`. These routes are declared in `webui/app.py` itself, so
 there is no stub to override.
 
 **The property the whole design rests on is that the pairing code appears in no

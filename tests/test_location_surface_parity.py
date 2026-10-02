@@ -1,7 +1,7 @@
 """The two location surfaces answer the same question the same way.
 
 The location query pipeline used to exist twice: once in
-``skills/location/__init__.py`` for the model and once in ``web_app.py``
+``skills/location/__init__.py`` for the model and once in ``webui/app.py``
 for the browser. The two copies drifted — the web copy snapped a stop to
 its saved place's centre and the skill copy did not, the skill copy
 carried the ``road``/``neighborhood``/``suburb`` enrichment and

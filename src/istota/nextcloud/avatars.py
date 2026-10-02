@@ -12,7 +12,7 @@ job is reading it correctly and refusing to guess when it is not there.
 `/ocs/v2.php` into the URL and `dav_request` raises `OcsError` with WebDAV
 wording — so this builds its own request against `nc_base_url` with `nc_auth`,
 which is what the two existing ad-hoc `index.php` callers already do
-(`web_app.py`, `web_tokens.py`). It raises `OcsError` like everything else in
+(`webui/app.py`, `webui/tokens.py`). It raises `OcsError` like everything else in
 the package, so the import job can log a transport failure apart from a no-op.
 """
 

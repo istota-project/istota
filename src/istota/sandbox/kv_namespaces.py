@@ -3,7 +3,7 @@
 A reserved namespace holds framework state that happens to live in the KV
 store: today the USER.md curation audit trail and the fingerprints the
 bypass detector compares against (`memory/curation/audit.py`),
-`_provisioned_rooms` — the Talk token `provision_rooms.py` provisioned for each
+`_provisioned_rooms` — the Talk token `rooms/provision.py` provisioned for each
 default room name, plus whether an invite to it is still outstanding, which is
 what lets a deploy recognise a room the user has since renamed instead of
 minting a second one (ISSUE-342) and tell a room they left from one whose

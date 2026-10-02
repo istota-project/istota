@@ -19,7 +19,7 @@ Docker, is not: `docker/istota/entrypoint.sh` writes the config-ready flag the
 web container waits on well before it runs `istota init`, so the web process
 can serve requests against an unmigrated database for as long as the rest of
 that script takes. Left as it is, deliberately — it is a pre-existing property
-of that shape (`web_app.py` documents the same class of window for
+of that shape (`webui/app.py` documents the same class of window for
 `task_usage`) and closing it is a deployment change with its own argument, not
 a consequence of any one column. It is named here rather than left out so the
 absence of an assertion reads as a decision instead of an oversight.

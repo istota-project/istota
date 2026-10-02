@@ -582,7 +582,7 @@ services:
       # istota service on first boot).
       ISTOTA_SECRET_KEY: ${ISTOTA_SECRET_KEY:-}
       # Web session cookie signing key. Operator-supplied value wins; when
-      # unset, web_app.py reads web.session_secret_key from config.toml, which
+      # unset, webui/app.py reads web.session_secret_key from config.toml, which
       # the istota service generates on first boot and persists on the
       # istota_data volume (survives rebuilds without -v). There is no insecure
       # default — the web service refuses to start with neither (ISSUE-124).

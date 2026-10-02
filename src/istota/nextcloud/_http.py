@@ -11,7 +11,7 @@ The ``None``-returning legacy variants used by best-effort daemon paths live in
 
 ``istota.nextcloud.ocs`` is the thin version of the envelope read below: a leaf that
 unwraps ``ocs.data`` or names what came back instead, for callers outside this
-package (``talk.py``, ``web_app.py``, the Talk transport) that cannot import
+package (``nextcloud/talk.py``, ``webui/app.py``, the Talk transport) that cannot import
 the package and do not read ``meta.statuscode``. This module deliberately keeps
 its own reader — it also maps Nextcloud's 99x status range, carries the
 endpoint and special-cases the share rate limit — and its ``OcsError``

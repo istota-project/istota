@@ -301,7 +301,7 @@ class TestFirstInstallProvisioning:
 
         `roomType=2`, not 3: #logs carries the daemon's execution log and
         #alerts carries confirmations and security alerts, and a public room is
-        joinable by anyone holding its token. `provision_rooms.py` is the
+        joinable by anyone holding its token. `rooms/provision.py` is the
         Ansible path's implementation of the same rule, and it is asserted
         against `MagicMock`.
         """

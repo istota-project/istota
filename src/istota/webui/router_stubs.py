@@ -5,12 +5,12 @@
 ``require_auth`` and ``verify_origin`` with byte-identical bodies — ten
 functions, one behaviour. They exist so a router can be included in a bare
 ``FastAPI()`` and driven by a test with no session middleware and no host app;
-``web_app.py`` replaces both through ``app.dependency_overrides`` at mount
+``webui/app.py`` replaces both through ``app.dependency_overrides`` at mount
 time, and that mechanism is untouched by this module.
 
 **Sharing the function object is the part to understand before changing
 anything here.** ``dependency_overrides`` is a dict keyed by the callable, so
-five separate declarations meant five separate keys and ``web_app.py`` set all
+five separate declarations meant five separate keys and ``webui/app.py`` set all
 five — to the same two values, ``_require_api_auth`` and ``_verify_origin``.
 With one object the five assignments collapse to two entries with those same
 values, which is why nothing observable moves. What it does mean is that a
@@ -22,7 +22,7 @@ example, and it stays where it is).
 
 ``verify_origin`` returning ``None`` is not "CSRF is off" — it is the seam the
 host fills. A router mounted without the override is a router with no CSRF
-check, which is correct for a test client and is why ``web_app.py`` sets the
+check, which is correct for a test client and is why ``webui/app.py`` sets the
 override on the same line it includes the router.
 
 ``make_get_user_context`` covers the three routers (health, briefings, feeds)

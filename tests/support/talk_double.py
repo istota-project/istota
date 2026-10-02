@@ -37,7 +37,7 @@ room half way through a scenario and the next call must see the new binding.
 same reason: a test repoints or extends them mid-scenario.
 
 **The web process is reached by a second patch, not by this module's first one.**
-`web_app.py` constructs `TalkClient(...)` directly in eight places — including
+`webui/app.py` constructs `TalkClient(...)` directly in eight places — including
 `_chat_promote_to_talk`, which *creates* the promoted shape, and `_post_as_user`,
 which posts a web turn to the room's Talk ref — and each takes a per-user OAuth
 bearer token, so there is no factory to patch. `talk_client_factory` stands in at

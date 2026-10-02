@@ -3,7 +3,7 @@
 Uses ``fastapi.testclient.TestClient`` against a minimal app that mounts
 ``istota.feeds.routes.router`` and overrides the auth + context
 dependencies to inject a tmp-path-backed FeedsContext. This mirrors how
-``web_app.py`` mounts the router under the native backend.
+``webui/app.py`` mounts the router under the native backend.
 """
 
 from __future__ import annotations

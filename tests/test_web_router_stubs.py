@@ -4,7 +4,7 @@ Five module routers declared ``require_auth`` and ``verify_origin`` with
 byte-identical bodies. Folding them changes one thing that is not visible in a
 diff: ``dependency_overrides`` is keyed by the callable, so five declarations
 were five keys and one declaration is one. That collapse is safe only because
-``web_app.py`` sets every one of them to the same two values — which is
+``webui/app.py`` sets every one of them to the same two values — which is
 asserted here rather than assumed, since the day one router needs a different
 gate is the day this stops being true.
 
@@ -276,7 +276,7 @@ class TestNoSixthCopy:
 
     def test_no_other_module_defines_either_stub_by_name(self):
         """The body-shape guard above catches a copy under a new name; this
-        catches the likelier one, which keeps the name — ``web_app.py`` imports
+        catches the likelier one, which keeps the name — ``webui/app.py`` imports
         both by name to key `dependency_overrides` on them, so a router copying
         a stub back copies the name with it. ``verify_origin`` has no
         distinctive body at all (``return None``), so the shape guard cannot

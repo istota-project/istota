@@ -1,6 +1,6 @@
 """Which paths `/chat/files` will serve, asked from both sides of the endpoint.
 
-The endpoint lives in `web_app.py`, but the question it answers is also asked
+The endpoint lives in `webui/app.py`, but the question it answers is also asked
 when a task's answer is stored: a reply embedding a `/chat/files` URL the
 endpoint would refuse renders as a broken image with nothing to say why
 (ISSUE-559). Both callers go through `resolve_chat_file`, so the rule the

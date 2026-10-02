@@ -131,7 +131,7 @@ Below `min_available_memory_mb` of `MemAvailable` or above `host_pressure_psi_th
 - Swap deliberately unbounded (zram absorbs first); revisit if a contained task drives swap I/O.
 - Sibling of the daemon's cgroup (v2 forbids processes plus child controllers); `DelegateSubgroup=supervisor`; `resolve_root` takes the last `.service`/`.scope` component (the first may be `user@N.service`).
 - The kernel is the probe: a `memory.max` write proves delegation. Failed `memory.max` removes the dir; failed `pids.max`/`cpu.max` keeps it.
-- Placement in the child before exec (ISSUE-285): `BrainRequest.task_cgroup` → `task_cgroup.placement(...)` as `preexec_fn`, because membership is inherited at `fork` and `bwrap` forks during setup. The parent opens `cgroup.procs`, the child writes `0` (safe in a threaded daemon). Each spawn then calls `verify_placement(pid, path)`; a miss warns once and is not retried (`tests/test_task_cgroup_placement.py`).
+- Placement in the child before exec (ISSUE-285): `BrainRequest.task_cgroup` → `sandbox.cgroup.placement(...)` as `preexec_fn`, because membership is inherited at `fork` and `bwrap` forks during setup. The parent opens `cgroup.procs`, the child writes `0` (safe in a threaded daemon). Each spawn then calls `verify_placement(pid, path)`; a miss warns once and is not retried (`tests/test_task_cgroup_placement.py`).
 - `place()` only for TmuxClaudeBrain via `on_pid`.
 - Fails open, never silent: `create` returns `None` without delegation, logged once per cause. `STARTUP Per-task cgroups:` is a real probe under `task-probe`, since resolving the root succeeds on any systemd host.
 - `task_cgroup_enabled = false` disables; `task_cpu_max_percent = 0` writes no `cpu.max`.
@@ -195,7 +195,7 @@ Snapshots framework + module DBs to `db_backup_dir/<date>/` (default `{workspace
 - Dated dirs (ISSUE-159); `_prune_old_snapshots` never prunes the newest good copy of any DB.
 - `_apply_collapse_guard` marks `*.suspect` when a DB that held data comes back empty (exact zero).
 - `0700`/`0600`; cold copies in DELETE journal mode (WAL on FUSE SIGBUSes).
-- `_destination_is_durable`: a destination resolving under `nextcloud_mount_path` is written only if `os.path.ismount`; keyed on the resolved path, not the config branch (ISSUE-480); `user_scope.is_within`; mount resolved once (`ismount` is False on a symlink). Outside the mount is trusted.
+- `_destination_is_durable`: a destination resolving under `nextcloud_mount_path` is written only if `os.path.ismount`; keyed on the resolved path, not the config branch (ISSUE-480); `sandbox.user_scope.is_within`; mount resolved once (`ismount` is False on a symlink). Outside the mount is trusted.
 - Clock persisted at `{db_path.parent}/.db_backup_last_run`, advances only when ≥1 DB succeeded. `_alert_backup_problems` and `_maybe_alert_backup_stale` (> 2x interval, after a prior success) use `_send_operator_alert` (thread with join timeout, ISSUE-143 class).
 - `python -m istota.maintenance.db_backup` forces a run; `python -m istota.maintenance.db_restore --all` (or `--date`) clears sidecars, refuses empty snapshots without `--force`, refuses while `_daemon_running`.
 
@@ -206,7 +206,7 @@ Snapshots framework + module DBs to `db_backup_dir/<date>/` (default `{workspace
 - Never raises into the loop; the gate gets its sample before attribution runs.
 
 ### IMAP retention
-`email_support.cleanup_old_emails` → one `skills.email.delete_emails_before` sweep (IMAP `BEFORE`, batched, one connection; ISSUE-230). Internal date; everything past the cutoff; count logged first.
+`mail.support.cleanup_old_emails` → one `skills.email.delete_emails_before` sweep (IMAP `BEFORE`, batched, one connection; ISSUE-230). Internal date; everything past the cutoff; count logged first.
 - `UID EXPUNGE` with UIDPLUS (read post-auth by `_server_capabilities`), else folder-wide `EXPUNGE` with one warning per host. A refused `UID EXPUNGE` rolls back `\Deleted`. `delete_email` shares the path.
 - `_MAX_DELETES_PER_SWEEP` (2000) because it runs on the dispatch loop.
 
@@ -216,14 +216,14 @@ ISSUE-231, on `processed_at`. Rows referenced by `messages` are never deleted (`
 ## Other Scheduler Functions
 
 - `get_worker_id()`: `{hostname}-{pid}[-{user_id}]`.
-- **Event streaming.** Brain-path tasks get an `EventWriter` (Talk, log-channel, push subscribers); terminal events and `writer.finish()` only on a non-retry terminal state. A retry emits `progress_text` and keeps the log; `seq` resumes via `db.get_max_task_event_seq`. `web_app._synthetic_terminal_events` backstops a missing `done`.
+- **Event streaming.** Brain-path tasks get an `EventWriter` (Talk, log-channel, push subscribers); terminal events and `writer.finish()` only on a non-retry terminal state. A retry emits `progress_text` and keeps the log; `seq` resumes via `db.get_max_task_event_seq`. `webui.app._synthetic_terminal_events` backstops a missing `done`.
 - `post_result_to_talk()` (`target_token` override); `_talk_target_for_delivery()` is a shim over `transport.routing.talk_channel_for_task`, ladder in `.claude/rules/transport.md`.
 - `_execute_command_task()`: cwd `config.temp_dir`; env = `build_stripped_env()` + `ISTOTA_*` + `build_skill_env(list(skill_index), …)` with `discover_calendars_for_task`, then `dispatch_setup_env_hooks` (overwrite ambient env, ISSUE-097). `ISTOTA_EXPERIMENTAL_FEATURES` and `ISTOTA_DEFERRED_DIR` (ISSUE-233) injected; deferred writes land only on exit 0.
   - Success is exit 0 unless stdout is a JSON dict with `"status": "error"` (facades and `@requires_feature`); money's inner envelope unwrapped (`_unwrap_inner_error`).
-  - Runs via `shell_exec.shell_argv`, not `shell=True` (dash has no `pipefail`, ISSUE-307 twin); `_run_capture` has no `shell` parameter. Without bash, `/bin/sh -c` with one log. Interpreter swap: `echo`/`$0` differ; `$BASH_ENV` stripped by `build_stripped_env` (`_SHELL_STARTUP_ENV_VARS`; `ENV` kept).
+  - Runs via `sandbox.shell_exec.shell_argv`, not `shell=True` (dash has no `pipefail`, ISSUE-307 twin); `_run_capture` has no `shell` parameter. Without bash, `/bin/sh -c` with one log. Interpreter swap: `echo`/`$0` differ; `$BASH_ENV` stripped by `build_stripped_env` (`_SHELL_STARTUP_ENV_VARS`; `ENV` kept).
   - Upgrade effects: hidden failures now fail and can auto-disable; a 141 gets `SIGPIPE_NOTE` and is non-retryable via `is_sigpipe_failure` gated on `task.command` (the ladder would repeat side effects).
 - `_execute_skill_task()`: `python -m istota.skills.<skill>`, same env over the full index, same envelope check. `health garmin-sync` short-circuits to `_run_garmin_sync_inprocess` (ISSUE-098; needs `ISTOTA_SECRET_KEY`), which returns `{"status", "inserted", "skipped", "days_processed", "auth_error", "error"?}`.
-- `_run_capture()`: `Popen(start_new_session=True)`; on timeout SIGKILLs the group via `process_group.kill_group_if_live` (reaped guard, F5), then re-raises; `subprocess.run(timeout=)` hung on grandchildren holding the pipe.
+- `_run_capture()`: `Popen(start_new_session=True)`; on timeout SIGKILLs the group via `sandbox.process_group.kill_group_if_live` (reaped guard, F5), then re-raises; `subprocess.run(timeout=)` hung on grandchildren holding the pipe.
 - `check_briefings()`: enqueues a background `briefing` task with `briefing_name`; no network on the dispatch thread (ISSUE-143); the prompt is built by `executor.build_deferred_briefing_prompt`. Same for `check_briefing_triggers`.
 - `check_scheduled_jobs()`: skips a fire while `db.count_inflight_tasks_for_scheduled_job > 0` without advancing `last_run_at`. `_resolve_job_model_effort` resolves `job.model` against the brain `resolve_brain_kind` picks for the job via `resolve_alias`, keeping effort (ISSUE-419). Never raises.
 
@@ -255,7 +255,7 @@ The `whatsapp_requests` gate drains durable requests on the runtime that owns Ba
 
 ### Task Operations
 `create_task(conn, prompt, user_id, source_type="cli", …) -> int`, `claim_task(conn, worker_id, max_retry_age_minutes=60, user_id=None)`, `update_task_status(conn, task_id, status, result=None, …)`, `set_task_pending_retry`, `release_task_for_restart` (attempt_count untouched), confirmation and cancel helpers, `list_tasks`, `get_users_with_pending_*tasks`.
-- `create_task` raises `ValueError` for a `user_id` that cannot name its own directory (`user_scope.is_scopable_user_id`, ISSUE-402); covers local entry points (`istota task -u`, `istota repl -u`, `execute_task_interactive`).
+- `create_task` raises `ValueError` for a `user_id` that cannot name its own directory (`sandbox.user_scope.is_scopable_user_id`, ISSUE-402); covers local entry points (`istota task -u`, `istota repl -u`, `execute_task_interactive`).
 - `update_task_status` writes `result` as `COALESCE(?, result)` on `failed`/`cancelled` (ISSUE-372), so re-marking a completed row failed after an email-delivery error keeps the answer (ISSUE-255).
 
 ### `claim_task()` Locking Mechanism
@@ -263,7 +263,7 @@ The `whatsapp_requests` gate drains durable requests on the runtime that owns Ba
 
 Steps 3-5 and `fail_stuck_locked_running_tasks()` share `_STUCK_RUNNING_PREDICATE` (ISSUE-112): stuck means `last_heartbeat` silent past `worker_stuck_minutes`, else `started_at` past `task_timeout_minutes` + grace. Workers ping via `_task_heartbeat`, so a slow live worker is never reclaimed.
 
-**`worker_pid` invariant.** Cleared on every exit from `running` (`update_task_status`, `set_task_pending_retry`, `release_task_for_restart`, `recover_orphaned_tasks`), because `!stop` and `web_app._chat_cancel_task` signal whatever the row holds (ISSUE-191). Both use `process_group.kill_process_group(pid, SIGTERM)` (ISSUE-257), falling back to the single process when the pid leads no group. The streaming child and tmux panes lead groups; the non-streaming child (pid since ISSUE-550) does not, so its tree is orphaned. Clearing bounds the wider stale-pid hazard; `_chat_cancel_task` also gates on `status IN ('running','locked')`.
+**`worker_pid` invariant.** Cleared on every exit from `running` (`update_task_status`, `set_task_pending_retry`, `release_task_for_restart`, `recover_orphaned_tasks`), because `!stop` and `webui.app._chat_cancel_task` signal whatever the row holds (ISSUE-191). Both use `sandbox.process_group.kill_process_group(pid, SIGTERM)` (ISSUE-257), falling back to the single process when the pid leads no group. The streaming child and tmux panes lead groups; the non-streaming child (pid since ISSUE-550) does not, so its tree is orphaned. Clearing bounds the wider stale-pid hazard; `_chat_cancel_task` also gates on `status IN ('running','locked')`.
 
 ### Startup orphan recovery (`recover_orphaned_tasks_on_startup`)
 Under the flock every `running`/`locked` row at boot is an orphan; recovered before workers spawn. `db.recover_orphaned_tasks`: `cancel_requested` → `cancelled`; retries exhausted, too old, or `INLINE_ONLY_SOURCE_TYPES` → `failed`; else `pending` with `attempt_count` bumped and liveness cleared. Cancelled/failed get a terminal frame from a subscriber-less `EventWriter`; released orphans emit nothing. `pending_confirmation` untouched.

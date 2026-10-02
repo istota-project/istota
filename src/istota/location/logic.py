@@ -1,7 +1,7 @@
 """Location query helpers shared between the web API and the location skill.
 
 These functions are pure SQL + lightweight math — no FastAPI/HTTP/auth
-dependencies — so they can be called from both `web_app.py` and skill
+dependencies — so they can be called from both `webui/app.py` and skill
 subprocesses.
 
 Per-user split: every helper takes a path to the per-user
@@ -392,7 +392,7 @@ def assign_pings_to_place(
 #
 # ``day_summary``, ``current``, ``history`` and ``places`` used to exist
 # twice — once in ``skills/location/__init__.py`` for the model and once
-# in ``web_app.py`` for the browser — and the two copies had drifted: only
+# in ``webui/app.py`` for the browser — and the two copies had drifted: only
 # the web copy snapped a stop to its saved place's centre, only the skill
 # copy carried the address parts and ``duration_minutes``, and an empty
 # day came back under two different key sets. Nothing chose any of that.

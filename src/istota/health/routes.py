@@ -56,7 +56,7 @@ from istota.notifications.resolvers import health_panel as notification_health_p
 from istota.lib.timestamps import iso_now as _now
 from istota.webui.router_stubs import (  # noqa: F401
     make_get_user_context,
-    require_auth,  # re-exported: `web_app.py` keys `dependency_overrides` on it
+    require_auth,  # re-exported: `webui/app.py` keys `dependency_overrides` on it
     verify_origin,
 )
 

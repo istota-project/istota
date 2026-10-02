@@ -1,7 +1,7 @@
 """The notification inbox: the durable set of what is currently waiting on a user.
 
 Not to be confused with :mod:`istota.notifications.delivery`, which is *delivery* and is
-untouched by this module. The naming follows `secrets_store.py`: this is the
+untouched by this module. The naming follows `credentials/store.py`: this is the
 store, that is the dispatcher. Raising a notification writes a row here and,
 separately, fans out through the delivery layer — so a user with no alerts
 channel loses nothing (the bell is always there) and a user who lives in Talk

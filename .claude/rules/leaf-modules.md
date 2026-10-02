@@ -16,7 +16,7 @@ It does not own judgement: anything that validates, migrates a legacy key, reads
 
 `TaskStreamAdapter`: the brain's `StreamEvent` stream adapted to `TaskEvent`s, one instance per task. It holds separate coalescing buffers for answer text and reasoning (they render to different places on a stream surface), the narration gate, and the delta-vs-whole-turn dedupe. `on_event` goes on `BrainRequest.on_progress`; `execute_task` calls `flush_thinking` / `settle_at_tool_boundary` / `finish` at the reroute boundary and the end of the run. Stateful and single-threaded: events arrive serialized, so nothing locks. `task_is_stream_surface` is imported inside `__init__` for a test reason, not a cycle: two suites patch the name through `istota.transport.registry`, and a module-scope binding would make both patches inert while the tests still passed.
 
-## surfaces.py
+## rooms/surfaces.py
 
 What role each surface plays in the room model, in one table, replacing hardcoded surface-name lists scattered across five files. Three different questions shared those literals, and the table answers two:
 
@@ -27,13 +27,13 @@ The third question, whether a surface may deposit a `role='user'` row in a room,
 
 **The durable-place test** makes email's `None` principled: is there a durable, addressable place a person opens to read the whole conversation, that we can write into? A Talk room yes; an email thread no. Bidirectional sync is not a field: it is the conjunction of the first two, and a flag would allow states no surface can implement.
 
-**Static on purpose.** `routing._room_view` reads the same fact through a config-built registry and collapses "not a room view" with "surface not resolvable": safe for a delivery planner branching only on `canonical`, unsafe here, where with `talk.enabled = false` `web_app._user_row_display` would render every historic Talk turn as external and the confirmation gate would put the prompt on the mirror Talk leg. Each docstring names the other.
+**Static on purpose.** `routing._room_view` reads the same fact through a config-built registry and collapses "not a room view" with "surface not resolvable": safe for a delivery planner branching only on `canonical`, unsafe here, where with `talk.enabled = false` `webui.app._user_row_display` would render every historic Talk turn as external and the confirmation gate would put the prompt on the mirror Talk leg. Each docstring names the other.
 
 `origin_surface_for_source_type` is likewise not `registry._surface_for_source_type`, which answers "where do I deliver this" and maps every non-surface source type to `talk`. Used for "where did this originate", the negated confirmation gate would park cron, briefing and heartbeat tasks with the question delivered nowhere until `expire_stale_confirmations`. `tests/test_room_target_no_origin.py` pins the two apart.
 
-Each transport still declares its fields on `TransportCapabilities`, where somebody adding a surface looks; a test holds the two in step, and another requires a record for every surface `make_registry` can produce. Every reader takes `object` (values off database rows) and answers "not a room surface" for anything unrecognised, which is safe at every site except `web_app._user_row_display`, where it renders a genuine Talk turn as external. Full reference in `.claude/rules/transport.md`. stdlib-only leaf, imports nothing: `transport` imports `db` at module level, so a table both read has to sit below them.
+Each transport still declares its fields on `TransportCapabilities`, where somebody adding a surface looks; a test holds the two in step, and another requires a record for every surface `make_registry` can produce. Every reader takes `object` (values off database rows) and answers "not a room surface" for anything unrecognised, which is safe at every site except `webui.app._user_row_display`, where it renders a genuine Talk turn as external. Full reference in `.claude/rules/transport.md`. stdlib-only leaf, imports nothing: `transport` imports `db` at module level, so a table both read has to sit below them.
 
-## web_shutdown.py
+## webui/shutdown.py
 
 Whether the web process is stopping, in one place the three SSE generators can see (`/chat/stream`, the task stream, the admin log tail). They poll until the client goes away, so shutdown ran out uvicorn's graceful window and then cancelled them, logging `CancelledError` as `ERROR: Exception in ASGI application`. uvicorn gives a generator nothing to observe (`request.is_disconnected()` stays False; the lifespan shutdown event fires after the connection wait), so the signal is made here. `install_signal_hook` wraps the SIGINT/SIGTERM handler uvicorn installed, and `sleep_unless_shutdown` wakes every sleeping stream at once so each returns and completes normally.
 
@@ -46,7 +46,7 @@ Whether the web process is stopping, in one place the three SSE generators can s
 
 stdlib-only leaf, imports nothing from the package.
 
-## web_router_stubs.py
+## webui/router_stubs.py
 
 The auth and CSRF stubs every module router declares so it stays mountable on its own, plus the user-context factory three of them share. `briefings/routes.py`, `feeds/routes.py`, `webui/garmin_routes.py`, `health/routes.py` and `money/routes.py` each declared byte-identical `require_auth` and `verify_origin`. They exist so a router can be included in a bare `FastAPI()` and tested with no session middleware; `webui/app.py` replaces both through `app.dependency_overrides` at mount time. `verify_origin` returning `None` is the seam the host fills, not "CSRF is off", which is why `webui/app.py` sets that override on the same line it includes the router.
 
@@ -54,15 +54,15 @@ The auth and CSRF stubs every module router declares so it stays mountable on it
 
 `make_get_user_context` covers the three routers whose `get_user_context` differed only in the module's resolver, its `UserNotFoundError`, the `app.state` cache attribute, and whether `ensure_initialised` takes the config. Each call returns a **distinct** function object, unlike the stubs, because route suites override one module's context per app and must not reach the others; only `tests/test_web_router_stubs.py` would catch a cached closure. `money/routes.py` (a `get_user_config`) and `webui/garmin_routes.py` (no per-user resolver) take only the two stubs. FastAPI only, no config and no DB, so a router imports this before anything of its module's.
 
-## usage.py
+## usage/telemetry.py
 
 Normalized per-attempt token/cost telemetry (`BrainUsage`, `ModelUsage`, `from_cli_result`, `from_task_usage`). The one place each brain's reporting shape is converted to one vocabulary, so the schema and read surfaces never learn which brain produced a row. Pure: no DB, no config, no brain imports, and neither adapter raises, since they sit on the brain's return path.
 
-## usage_render.py
+## usage/render.py
 
 The cost render rule for token-usage surfaces, in one Python place: `COST_PLACEHOLDER`, `render_cost`, `fmt_money`, `fmt_int`, `fmt_context`. A currency figure appears only where `cost_basis = 'api'`, and nothing is summed across bases: a subscription's list-price equivalent and a catalog estimate both read as spend at a glance. It is here rather than in `cli.py` because there are two Python importers: `cli.py` has a heavy import graph, and `commands.py` (`!usage`) is on the Talk polling path. `web/src/lib/usageFormat.ts` states the same rule in TypeScript; `tests/test_cli_render_cost.py` and `usageFormat.parity.test.ts` hold the two languages together, and a third Python copy would make that harder. stdlib-only leaf.
 
-## subscription_usage.py
+## usage/subscription.py
 
 The Claude Code plan's rate-limit windows, from `GET https://api.anthropic.com/api/oauth/usage`. One fetch, one parser and one deployment-wide disk cache (`{db_path.parent}/subscription_usage.json`) shared by three surfaces: the `runtime.subscription_usage` doctor check, the `/admin` card and `!usage`. On a subscription deployment the cost column is blank (a plan-equivalent list price is not spend), so these percentages are the real budget.
 
@@ -73,16 +73,16 @@ The Claude Code plan's rate-limit windows, from `GET https://api.anthropic.com/a
 
 stdlib-only leaf, paths are parameters.
 
-## image_sniff.py
+## lib/image_sniff.py
 
 Which bytes are images, asked of the bytes and never of a name. Two predicates, each for its own caller:
 
-- `sniff_raster`: what `/chat/files` will serve `inline` on the app's own origin. PNG, JPEG, GIF and WebP by signature, never by extension, because the name is caller-supplied on a file the model wrote and an SVG named `.png` is the case that decides it. Everything else stays `attachment`, the default and the security position, since the workspace holds user- and model-authored HTML and SVG. A hit is served with the sniffed type sent explicitly plus `nosniff`, so a file that is both valid PNG and valid HTML stays an image. HEIF is left out though `avatars.ACCEPTED_FORMATS` admits it: browser support is not universal, and an inline type that does not draw is worse than an attachment.
+- `sniff_raster`: what `/chat/files` will serve `inline` on the app's own origin. PNG, JPEG, GIF and WebP by signature, never by extension, because the name is caller-supplied on a file the model wrote and an SVG named `.png` is the case that decides it. Everything else stays `attachment`, the default and the security position, since the workspace holds user- and model-authored HTML and SVG. A hit is served with the sniffed type sent explicitly plus `nosniff`, so a file that is both valid PNG and valid HTML stays an image. HEIF is left out though `webui.avatars.ACCEPTED_FORMATS` admits it: browser support is not universal, and an inline type that does not draw is worse than an attachment.
 - `sniff_decodable`: what the image pipeline can decode, which adds HEIF for inbound WhatsApp media. Widening `sniff_raster` instead would have changed `/chat/files` silently. See `.claude/rules/whatsapp.md`.
 
 **No Pillow.** A magic-number test must not decode; Pillow's peak memory is why `webui/app.py` serializes avatar decodes on one worker, and a download route must not join that queue. A leaf so the skill side shares the predicate (`browse screenshot` uses it) instead of a second table. stdlib-only leaf, imports nothing, never raises.
 
-## map_basemap.py
+## webui/map_basemap.py
 
 Where the map's background tiles come from, decided in one place (ISSUE-334). `LocationMap.svelte` hardcoded `basemaps.cartocdn.com`, which now watermarks unauthenticated tiles. A provider name plus a few `[web.map]` strings resolve to the concrete URLs the browser fetches; adding a provider is a row in `PROVIDERS`.
 
@@ -93,7 +93,7 @@ Where the map's background tiles come from, decided in one place (ISSUE-334). `L
 
 stdlib-only leaf.
 
-## provision_rooms.py
+## rooms/provision.py
 
 Default Talk rooms (general/logs/alerts) for a user: reuse by remembered token first, participant-scoped name lookup only on a first provision, group (not public) rooms, and seeding `log_channel`/`alerts_channel` only where empty. Behind `istota nextcloud provision-rooms`, called by the Ansible role on every deploy; the bare-metal counterpart to the Docker entrypoint, which persists `GENERAL_TOKEN` in its provisioning flag file and never had the bug below.
 
@@ -105,17 +105,17 @@ Default Talk rooms (general/logs/alerts) for a user: reuse by remembered token f
 - A run that observed nothing (`_is_orphan` treats an empty participant list as a failed read) carries the previous outcome forward, or one transient Talk error would erase a recorded failure for good. So `record_invite_failed` ("is an invite outstanding", persisted) differs from `invite_failed` ("did this run try and fail", read by the CLI warning and the Ansible `failed_when`).
 - `--adopt` records no failure, since it never contacts Talk.
 
-## rclone_client.py
+## lib/rclone_client.py
 
 The rclone API `storage.py` and `skills/files/__init__.py` each had a copy of: `rclone_run` plus the `mkdir` / `path_exists` / `cat` / `rcat` wrappers. `subprocess.run` raises on a missing binary, so a `FileNotFoundError` escaped every helper documented to return `None` or `False`, reachable wherever the no-mount fallback runs without rclone installed; the fix had to land on both sides, so the pair was merged. `setdefault` rather than fixed keywords, so a caller passing `text=False` gets its own value rather than "multiple values for keyword argument".
 
 - **A leaf rather than an import of `storage`** because `skills/files` runs in a skill subprocess and `storage` pulls in the package. `storage.py` keeps the private names as aliases so its callers and tests are unchanged.
 - **Only shared code lives here.** `rclone_list`, `rclone_move`, `rclone_download`, `rclone_upload` and `_rclone_run_or_raise` stay in the skill, which is their only caller.
-- **The pin is a source scan, not a mock.** `istota.storage.subprocess` and `istota.lib.rclone_client.subprocess` are the same module object, so patching `rclone_client.subprocess.run` cannot tell a reintroduced local copy apart. `tests/test_rclone_client.py` patches `rclone_client.rclone_run`, which a local copy never calls, and asserts neither converted module contains `subprocess.run(`.
+- **The pin is a source scan, not a mock.** `istota.storage.subprocess` and `istota.lib.rclone_client.subprocess` are the same module object, so patching `lib.rclone_client.subprocess.run` cannot tell a reintroduced local copy apart. `tests/test_rclone_client.py` patches `lib.rclone_client.rclone_run`, which a local copy never calls, and asserts neither converted module contains `subprocess.run(`.
 
 stdlib-only leaf: `subprocess` and `logging`.
 
-## sqlite_util.py
+## lib/sqlite_util.py
 
 One SQLite open, with each caller's pragma set as parameters, replacing many helpers that each issued a subset of the same four pragmas. Three entry points for three caller shapes: `open_db` (a context manager), `connect` (bare, for `money/cli._get_db_conn` and `money/routes._portfolio_conn`, which hand a live connection on, and `room_relocate`'s migration, which passes `create=False` so a wrong path raises rather than becoming an empty database), and `connect_read_only` (`doctor`, `storage.channel_memory_tokens`, `room_mount_reconcile` and `room_relocate`'s `--dry-run` / `--list`).
 
@@ -137,22 +137,22 @@ Residuals: against a 0444 file `mode=rw` falls back to read-only and leaves side
 
 stdlib-only leaf: `sqlite3`, `pathlib`, `contextlib`, `os`, `urllib.parse`.
 
-## du.py
+## lib/du.py
 
 Du-style tree measurement and the first-level directory scan beneath it, shared by callers that each had a copy. `iter_tree` is the walk (`os.walk(followlinks=False)` + `os.lstat`), `entry_bytes` the arithmetic, `tree_bytes` the sum, `first_level_dirs` the sorted, symlink-skipping, non-directory-skipping scan.
 
 - **Blocks rather than apparent size** (`st_blocks * 512`), because a volume fills by blocks. `dedupe_inodes` counts each `(st_dev, st_ino)` once, because uv's cache hardlinks a wheel into every venv and counting per link reports an overage no reclaim can clear.
 - **`include_dirs` defaults off and is the one axis callers disagree on.** `sandbox_cache_sweeper` passes `True` (uv's `archive-v0` is a directory per wheel, real occupancy); `session_log`'s sweep passes `False` (a per-user directory is overhead no eviction can reclaim, and counting it would leave a many-user deployment permanently over its ceiling). A directory reports `st_blocks == 0` on APFS, so a byte assertion about `include_dirs` is vacuous on macOS; tests carry the property in the entry set instead.
 - **Nothing raises**; an unreadable root is nought bytes and no directories. `ValueError` (a null byte) is caught beside `OSError` everywhere, including a guard on the `os.walk` iteration itself, since CPython wraps only `OSError` around the root `scandir`. `on_error` follows `os.walk`'s convention and skips the `ValueError` arms.
-- One scan is deliberately not converted: `sandbox_cache_sweeper._sweepable_entries` must yield a symlinked entry (its `ACTION_OUTSIDE` planted-symlink detector), which `first_level_dirs` skips by construction.
+- One scan is deliberately not converted: `maintenance.sandbox_cache_sweeper._sweepable_entries` must yield a symlinked entry (its `ACTION_OUTSIDE` planted-symlink detector), which `first_level_dirs` skips by construction.
 
 stdlib-only leaf: `os`, `pathlib`.
 
-## net_guard.py
+## sandbox/net_guard.py
 
 Whether an address is a routable public one: `ip_is_public`, the blocklist and operator CIDR parsing, lifted out of `session/tools/web_fetch.py` when the `wordpress` skill became the second daemon-network caller fetching a URL somebody else chose. A leaf rather than an import of `web_fetch`, because importing that from a skill pulls in the native tool package (about fifty modules), and `web_fetch` runs in the tool server, which may not import `istota.skills`. `web_fetch` keeps `_ip_is_public` as an import alias. URL validation is not shared: `web_fetch._validate_url` is shaped by `WebFetchPolicy`, while the skill's URL rule is the credential binding (`skills/wordpress/sites.check_bound`). stdlib-only leaf, never raises.
 
-## untrusted.py
+## lib/untrusted.py
 
 One fence around content somebody else wrote: `frame_untrusted(text, label)` puts `text` between markers naming the source, and **redacts both markers out of `text` first**. That redaction is the whole point: four modules had their own versions and did not agree on it. `skills/nextcloud` did not redact, so a Talk room renamed to `[END UNTRUSTED NEXTCLOUD CONTENT]` closed the fence from inside (ISSUE-509); `skills/email` and `session/tools/web_fetch` did not either, wrapping the most attacker-controlled content in the tree, and were converted (ISSUE-512). Which skills use it, and with what label, is in `.claude/rules/skills.md`.
 
@@ -168,7 +168,7 @@ One fence around content somebody else wrote: `frame_untrusted(text, label)` put
 
 stdlib-only leaf: imports nothing, never raises.
 
-## toml_fence.py
+## lib/toml_fence.py
 
 Where a ```toml fence starts and ends, for the four modules that parse one from a user-written markdown file: `cron_loader` (CRON.md), `heartbeat` (HEARTBEAT.md), `user_briefings` (BRIEFINGS.md) and `money._config_io`. All four copied one expression with one defect (ISSUE-386): neither marker was line-anchored, so the block ended at the first backtick run after the opener, in a comment or a string. In `cron_loader`, which drives an orphan sweep, a truncation on a table boundary produced valid TOML holding a subset of the jobs and the sweep deleted the rest silently.
 
@@ -178,7 +178,7 @@ Where a ```toml fence starts and ends, for the four modules that parse one from 
 
 stdlib-only leaf.
 
-## filenames.py
+## lib/filenames.py
 
 The one rule for turning a name somebody else chose into a filename: `safe_filename` and `filename_parts`. Before it, four callers had their own `[^A-Za-z0-9._-]` allowlist (health documents, web chat, the wordpress upload header, image renditions), three health upload routes took the client's suffix raw, and the email attachment path had no rule at all. That last one is ISSUE-593: a MIME filename carrying a carriage return was written into the inbox as given, Nextcloud answered the upload with a 404, and rclone retried it for a day while the file existed only in the VFS cache.
 
@@ -191,7 +191,7 @@ The one rule for turning a name somebody else chose into a filename: `safe_filen
 
 Not converted, on purpose: `cron_loader._prompt_file_name` and `memory/sleep_cycle._playbook_slug` turn a label we own (a job name, a playbook title) into a slug for a file we name, and moving them would rename existing prompt and playbook files on disk. The Garmin importers' user-id sanitising is a different rule. Not covered: Windows reserved device names (`CON`, `NUL`). Display names rendered into a prompt are a different rule (`image_attachments._display_name`), since they are text rather than a path. stdlib-only leaf, never raises.
 
-## date_parse.py
+## lib/date_parse.py
 
 Loose date parsing for text a model or a person typed (`parse_loose_date`), for the three health modules that each had a copy: `health/parser.py` (an EHR paste), `health/encounter_ocr.py` and `health/immunization_ocr.py` (a model's JSON). Two validated the ISO branch with `date.fromisoformat` and one did not, so `2026-02-31` was returned verbatim by `parser.py`. The strict copy wins, per the rule that where copies disagree on a safety property the strict one survives.
 
@@ -203,7 +203,7 @@ This costs nothing new: every caller already handles the same answer from the al
 
 stdlib-only leaf, never raises.
 
-## llm_json.py
+## lib/llm_json.py
 
 Where a markdown code fence starts and ends in **model** output: `lib/toml_fence.py`'s question about a string the model wrote. The expressions it replaced had two different defects, each in its own file:
 

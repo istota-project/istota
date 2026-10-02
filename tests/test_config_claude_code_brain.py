@@ -5,7 +5,7 @@ spec, Stage 2). Every field is defaulted, so an absent block is the shipping
 behaviour; the loader corrects a configuration that would make the feature
 misbehave rather than refusing to load.
 
-The last class here is the anti-drift pin. ``subscription_usage.py`` is a
+The last class here is the anti-drift pin. ``usage/subscription.py`` is a
 stdlib-only leaf and reads these settings defensively via ``getattr``, so it
 carries its own copy of the defaults it uses. That copy and this dataclass are
 the same numbers, and this is what keeps them so.
@@ -392,7 +392,7 @@ class TestValidation:
 
 
 class TestOneSourceOfTruthForTheDefaults:
-    """``subscription_usage.py`` keeps its own copy. It must be the same copy.
+    """``usage/subscription.py`` keeps its own copy. It must be the same copy.
 
     The module is a stdlib-only leaf reached from the doctor/config-load side,
     so it must not import ``istota.config`` to learn these numbers, and it must

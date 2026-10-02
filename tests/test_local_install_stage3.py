@@ -618,7 +618,7 @@ class TestSecretPreservationPrecedence:
         assert not any(exported in line or in_file in line for line in out)
 
     def test_the_web_token_key_is_carried_forward(self, tmp_path):
-        """A second Fernet key with identical loss semantics: `web_tokens.py`
+        """A second Fernet key with identical loss semantics: `webui/tokens.py`
         derives its own from it for the `web_user_tokens` rows. The wizard has
         never written it, so the wholesale rewrite would delete it."""
         token_key = "g" * 64

@@ -757,7 +757,7 @@ class TestTheTitleIsNotRepeated:
         """The leg where the title now survives *only* as a separate argument.
 
         `WebTransport.deliver` puts it in `messages.title`, which two renderers
-        re-compose (`web_app.py`'s room history and its notification view). While
+        re-compose (`webui/app.py`'s room history and its notification view). While
         the body carried the label too, dropping the argument was cosmetic; now
         it would lose the label outright.
         """

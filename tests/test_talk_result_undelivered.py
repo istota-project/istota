@@ -330,7 +330,7 @@ class TestAMirrorLegIsNotAlerted:
         self, mock_run, config, fake_talk, promoted,
     ):
         _timeout(fake_talk, promoted.talk_ref)
-        # `output_target="room"` is what the web composer queues (`web_app.py`),
+        # `output_target="room"` is what the web composer queues (`webui/app.py`),
         # and it is what produces the mirror leg at all: the room fan-out is a
         # meta-destination, not a source-type default.
         task_id = _queue(

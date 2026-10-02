@@ -6388,7 +6388,7 @@ def _chat_memory_room(username: str, room_id: int):
     **Membership is checked, not inferred from the handle.** Owner scoping alone
     looks like a membership check and is not one: `_chat_delete_room` on a
     Talk-origin room deliberately keeps the handle row and merely archives it
-    (`web_app.py`, the ISSUE-134 hide), and `db.get_web_chat_room` applies no
+    (`webui/app.py`, the ISSUE-134 hide), and `db.get_web_chat_room` applies no
     archived filter — so a user who left a shared room would keep write access
     to the one file every remaining member's tasks are given as standing
     instructions. `db.delete_message` is the neighbouring room-wide write and

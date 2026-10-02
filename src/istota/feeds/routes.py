@@ -38,7 +38,7 @@ from istota.feeds.retention import resolve_max_entries_per_feed
 from istota.feeds.sanitize import image_identity
 from istota.webui.router_stubs import (  # noqa: F401
     make_get_user_context,
-    require_auth,  # re-exported: `web_app.py` keys `dependency_overrides` on it
+    require_auth,  # re-exported: `webui/app.py` keys `dependency_overrides` on it
     verify_origin,
 )
 

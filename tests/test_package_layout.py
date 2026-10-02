@@ -4,9 +4,8 @@ The root grew one file per concern because nothing stopped it. These guards
 are what make adding to it a visible decision (spec: src-package-layout):
 
 - **The root allowlist.** Every module directly under `src/istota/` is listed
-  here, and every listed name exists. Each stage of the reorganisation shrinks
-  the list in the same commit as its move; a new root module is a one-line
-  addition somebody has to write and a reviewer can see.
+  here, and every listed name exists. A new root module is a one-line addition
+  somebody has to write and a reviewer can see.
 - **New packages hold nothing in `__init__.py`** but a docstring. Several moved
   modules sit at the root today only because of import cost (the tool server
   must not import `istota.skills`), and an `__init__` with imports would add to
@@ -47,8 +46,8 @@ def _mover():
 
 mm = _mover()
 
-#: Every module allowed directly under src/istota/. Shrinks stage by stage; the
-#: modules that stay are the spine and the process entry points.
+#: Every module allowed directly under src/istota/: the spine and the process
+#: entry points. Adding one here is a decision a reviewer should see.
 ROOT_ALLOWLIST = frozenset({
     "__init__",
     "async_runtime",
@@ -64,13 +63,15 @@ ROOT_ALLOWLIST = frozenset({
     "context",
     "cron_loader",
     "db",
-    "devbox_proxy",
+    "devbox_proxy",  # entry-point stub for units rendered before the devbox/ move
     "doctor",
     "events",
     "executor",
     "executor_stream",
     "experimental",
-    "geo",
+    # location/ and briefings/ load their _loader and _migrate on import, so
+    # these three stay: each move grew sys.modules for a real importer.
+    "geo",  # the location skill CLI's reverse-geocode path
     "heartbeat",
     "image_attachments",
     "logging_setup",
@@ -80,17 +81,17 @@ ROOT_ALLOWLIST = frozenset({
     "scheduler_deferred",
     "serve",
     "setup_wizard",
-    "shared_blocks_store",
+    "shared_blocks_store",  # the scheduler (stays at the root, see "geo")
     "shared_file_organizer",
     "skill_client",
     "status_writer",
     "storage",
     "tasks_file_poller",
     "updater",
-    "user_briefings",
+    "user_briefings",  # config.load_config, so every process (see "geo")
     "user_profiles",
-    "web_app",
-    "webhook_receiver",
+    "web_app",  # entry-point stub for units rendered before the webui/ move
+    "webhook_receiver",  # entry-point stub, as web_app
 })
 
 #: Packages that existed before the reorganisation; the `__init__` rule is not theirs.

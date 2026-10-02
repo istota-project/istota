@@ -12,7 +12,7 @@ the seam they meet at is a real Talk server. `tests/test_talk_integration.py`
 does run against one — a hand-configured external Nextcloud, with a hardcoded
 room token, reading the developer's own `config/config.toml`. That is
 developer-local rather than absent, which is the same thing for a tier's
-purposes. `provision_rooms.py`, the Ansible path's implementation of the room
+purposes. `rooms/provision.py`, the Ansible path's implementation of the room
 provisioning this file's last test drives, is asserted against `MagicMock`.
 
 **Read `tests/full/test_provisioning.py` first if everything here fails.** Every
@@ -62,7 +62,7 @@ def _room_name() -> str:
     """A name no other test and no boot-provisioned room can collide with.
 
     `find_room_by_name` in `entrypoint.sh` and `find_room_for_user` in
-    `provision_rooms.py` both match on the display name, so a scenario naming
+    `rooms/provision.py` both match on the display name, so a scenario naming
     its room `general` would be handing the recovery paths a decoy.
     """
     return f"testbed-{uuid.uuid4().hex[:8]}"
@@ -356,7 +356,7 @@ class TestATalkRoundTrip:
 
 @FULL
 class TestProvisionRoomsAgainstARealServer:
-    """`provision_rooms.py` — the Ansible path — run against Talk, not a mock.
+    """`rooms/provision.py` — the Ansible path — run against Talk, not a mock.
 
     No room is created here and none should be: the point is that a second
     provisioning run over rooms `entrypoint.sh` already made reuses them. That

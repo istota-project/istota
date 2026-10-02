@@ -59,7 +59,7 @@ An image becomes a task attachment handled by `image_attachments.prepare_image_a
 
 Bounds: per-file cap is the fetcher's (sidecar aborts; Cloud checks `MediaURL.file_size` then the stream); staging ceiling and orphan sweep are the daemon's, swept on every touch.
 
-**Image type comes from bytes.** `image_sniff.sniff_decodable` (what the pipeline decodes) vs `sniff_raster` (what `/chat/files` serves inline; HEIC stays an attachment). HEIF is a **major-brand allowlist**, never bare `ftyp`. The inbox copy is named from its own sniff, since a wrong suffix is skipped silently downstream.
+**Image type comes from bytes.** `lib.image_sniff.sniff_decodable` (what the pipeline decodes) vs `sniff_raster` (what `/chat/files` serves inline; HEIC stays an attachment). HEIF is a **major-brand allowlist**, never bare `ftyp`. The inbox copy is named from its own sniff, since a wrong suffix is skipped silently downstream.
 
 ### The staging directory
 
@@ -139,7 +139,7 @@ Admin requests from Admin, Connections; the scheduler's poll hands it to the bri
 - **Poll every tick, inline**: `IntervalGate` with `fixed_interval=0`, not `background` or `one_shot`; claims to `servicing` in one `BEGIN IMMEDIATE`, then `async_runtime.spawn_task`; a refused spawn reverts the claim.
 - **Two expiry arms**: deadline (any non-terminal row past `pairing_expires_at` → `expired`) and orphan (window states only, only in the bridge process). A single "no window behind it" rule would kill a fresh `requested` row. Re-pairing an emptied directory re-opens rather than re-archives.
 - **Adoption (ISSUE-504)**: after a scheduler restart mid-window, `adopt_pairing_window` rebuilds the window from the row, **writing nothing**: monotonic deadline from the row, `opened_at` now, **`qr_seq` seeded when the row says `awaiting_scan`** (else a post-scan `ready` would fail the row and prompt a re-pair that archives the new credential). Refuses: window open, stopping, deadline passed, session `ready`. Sets `_session_unpaired`. Arm order in `_expire_stale_pairing`: missing id, deadline, no-bridge/not-window, live window, `last_pairing_outcome`, adopt, close (only for an unparseable deadline or refused spawn, naming `restore-session`).
-- **Web**: five admin routes plus the index; SSE at 1 Hz via `web_shutdown.sleep_unless_shutdown`; `qr.svg` server-rendered, `no-store`, `seq` a cache-buster echoed in `X-Pairing-Qr-Seq`. `pairing_enabled = false` 404s the routes only; the index and the poll stay. The card offers one-click re-pair when latched or unreadable from this process (the unforced start refuses as `session_live`).
+- **Web**: five admin routes plus the index; SSE at 1 Hz via `webui.shutdown.sleep_unless_shutdown`; `qr.svg` server-rendered, `no-store`, `seq` a cache-buster echoed in `X-Pairing-Qr-Seq`. `pairing_enabled = false` 404s the routes only; the index and the poll stay. The card offers one-click re-pair when latched or unreadable from this process (the unforced start refuses as `session_live`).
 - **Doctor**: `baileys_bridge` reports an open window before `connected`/`ready`; `pairing_relay` `lstat`s the relay file; `baileys_session` walks archives too (`session_archives`, sharing `ARCHIVE_STAMP_FORMAT`). Survey only.
 
 ## Config, credentials and deployment
@@ -211,9 +211,9 @@ A group the bot is in becomes a room on Baileys (multiplayer Stage 18, D6); gene
 - **Identity is read-only**: `identity.group_member_user` never latches, enrolls or alerts. An unmapped LID is a guest, relabelled when mapped.
 - **Addressing**: sidecar's `mentions_bot`; a quote of a stanza id in `sent_whatsapp.meta_message_id`; the bot's name as first word.
 - **Sends**: only the group's own turn sends to the group JID (re-resolved, non-metered, no window); other tasks' legs are dropped, never redirected. No per-user opt-out. Approved `room post`s and guest proposals go in. Archived groups get nothing.
-- **The 1:1 is the side room's view**: `side_rooms.push_to_whatsapp_view`, headed `re: <room>`; confirmations carry `!confirm <id> yes|no`; keyed per prompt hash.
-- **D14**: host leaves → `room_policy.lose_host`, archive, `leave_group` after commit (retried on next roster); a bot-removal archive reverses on re-add.
-- **Veto**: `!<bot name> off` precedes member commands and the guest path. Removing the bot switches the room off (`room_veto.switch_off_by_removal`) until a member's `on`. Vetoed messages claim their id only (`group_vetoed`).
+- **The 1:1 is the side room's view**: `rooms.side_rooms.push_to_whatsapp_view`, headed `re: <room>`; confirmations carry `!confirm <id> yes|no`; keyed per prompt hash.
+- **D14**: host leaves → `rooms.policy.lose_host`, archive, `leave_group` after commit (retried on next roster); a bot-removal archive reverses on re-add.
+- **Veto**: `!<bot name> off` precedes member commands and the guest path. Removing the bot switches the room off (`rooms.veto.switch_off_by_removal`) until a member's `on`. Vetoed messages claim their id only (`group_vetoed`).
 - **Wire**: `group_roster` up, `leave_group` down, inbound `sender_jid`, `sender_lid`, `mentions_bot`; version unchanged, sender-less frames refused, group media refused.
 - **Classifier mode**: `groups.classify_group_event` decides before `BEGIN IMMEDIATE`, passed as `classified=` to `record_inbound`.
 - **Owed before merge**: a real group with a guest number, and three unverified fields (`participant` / `participantAlt` / `participantPn`; `groupMetadata` ids under LID; which event fires on add, with which author).

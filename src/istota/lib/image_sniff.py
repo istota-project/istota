@@ -64,11 +64,11 @@ written for a case nobody has observed. A file outside the list sniffs as
 `None`, which costs its sender a visible refusal rather than a wrong answer.
 
 **No decode.** A magic-number test must not open the file with an image
-library: `web_app.py` already runs its avatar decode on a serialized
+library: `webui/app.py` already runs its avatar decode on a serialized
 single-worker executor because Pillow's peak memory is not bounded by the byte
 cap it enforces, and a download route must not join that queue.
 
-A leaf rather than a function inside `web_app.py`, so the skill side can hold
+A leaf rather than a function inside `webui/app.py`, so the skill side can hold
 the same predicate about what counts as an inline-servable image without a
 second copy of the table. stdlib-only, imports nothing, never raises — the
 caller is a download route, where a traceback is a 500 on a file the user owns.

@@ -341,7 +341,7 @@ def fake_talk(db_path):
 def fake_talk_web(fake_talk):
     """The same double, additionally behind `web_app`'s own constructions.
 
-    `web_app.py` builds `TalkClient(...)` directly in eight places, most with a
+    `webui/app.py` builds `TalkClient(...)` directly in eight places, most with a
     per-user OAuth bearer token — the promote path that *creates* a promoted
     room, the post-as-user mirror, the read push and pull, the rename
     propagation, the message delete's two legs and the liveness probe. There is

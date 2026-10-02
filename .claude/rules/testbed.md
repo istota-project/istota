@@ -140,7 +140,7 @@ Given up, to revisit: nothing asserts that a *booted* local-backend daemon behav
 uv run env ISTOTA_UPDATE_GOLDEN=1 pytest tests/test_prompt_golden.py -n0
 ```
 
-`env` goes *inside* the `uv run`, not in front as a shell assignment. `uv` is in `DEFAULT_SHIM_COMMANDS`, so with a devbox it is a shim that hands argv to the exec server, and `devbox_exec_protocol` carries no `env` field (deliberately, and pinned), so nothing set in the calling shell arrives; the run then compares instead of rewriting. In argv the assignment survives, and without a devbox the two forms are identical. `tests/support/env_isolation.py` keeps the variable in its keep-list for the same reason.
+`env` goes *inside* the `uv run`, not in front as a shell assignment. `uv` is in `DEFAULT_SHIM_COMMANDS`, so with a devbox it is a shim that hands argv to the exec server, and `devbox.exec_protocol` carries no `env` field (deliberately, and pinned), so nothing set in the calling shell arrives; the run then compares instead of rewriting. In argv the assignment survives, and without a devbox the two forms are identical. `tests/support/env_isolation.py` keeps the variable in its keep-list for the same reason.
 
 `-n0` matters: the orphan check has no ordering with the writers under xdist, so a regeneration adding a case reports missing goldens from the run meant to create it. The variable is parsed by an `updating()` helper taking the same affirmative and negative sets as `PRECOMMIT_SCANS_REQUIRED` and raising on anything else, so `ISTOTA_UPDATE_GOLDEN=0` left exported cannot turn every golden into a rubber stamp.
 

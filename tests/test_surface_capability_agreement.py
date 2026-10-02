@@ -12,7 +12,7 @@ switched off.
 Duplication with a test holding it in step is the trade the spec chose over an
 indirection at the declaration site, and it is the arrangement
 `sandbox_cache_sweeper` already uses against `executor`'s cache directory names
-and `usage_render.py` against `usageFormat.ts`. This file is the other half of
+and `usage/render.py` against `usageFormat.ts`. This file is the other half of
 that trade: without it the two copies drift and the leaf is a guess.
 """
 

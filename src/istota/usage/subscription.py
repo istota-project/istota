@@ -286,7 +286,7 @@ class UsageSnapshot:
 
 
 # ---------------------------------------------------------------------------
-# Coercion helpers — same discipline as usage.py's _int / _float
+# Coercion helpers — same discipline as usage/telemetry.py's _int / _float
 # ---------------------------------------------------------------------------
 
 

@@ -391,7 +391,7 @@ class TestTheAcceptListIsStatedOnce:
     def test_the_typescript_copy_equals_the_python_one(self):
         """Two languages, one list, and nothing else holding them equal.
 
-        Same treatment `usage_render.py` and `usageFormat.ts` get: the client
+        Same treatment `usage/render.py` and `usageFormat.ts` get: the client
         offers what the server accepts, so a format added on one side and not
         the other leaves the picker narrower than the endpoint (a format the
         user cannot choose) or wider (one they find out about after uploading).
@@ -731,7 +731,7 @@ class TestMeCarriesTheHashes:
 
 # --- the admin bot-icon writes ----------------------------------------------
 #
-# Stage 5. The first mutating admin routes in `web_app.py`, though not in the
+# Stage 5. The first mutating admin routes in `webui/app.py`, though not in the
 # app: they copy `briefings/routes.py`'s `require_admin` + `verify_origin`
 # pair. What is asserted here is that the gate is real on both verbs, that the
 # body takes the same two size checks the user's own upload does rather than a

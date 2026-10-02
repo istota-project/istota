@@ -6,7 +6,7 @@ and is what lets the spec's "a local Unix socket the daemon owns, 0600" be
 literally true — the daemon creates the inode and sets its mode, so the
 sidecar's own umask cannot widen it.
 
-`devbox_exec_protocol.py`'s shape, one property short of it. That one frames
+`devbox/exec_protocol.py`'s shape, one property short of it. That one frames
 binary in both directions because it carries file bodies and a command's
 stdout; every message here is a small JSON object, so a line is enough and a
 line is what a Node `readline` on the other side already produces. What is

@@ -6,7 +6,7 @@ comment describes as "safe to retry — existing rooms get reused, not
 duplicated" — and until Stage 3 of the deployment-testbed spec they had no
 witness at any layer: the image tier asserts only that `entrypoint.sh` parses,
 the upgrade tier runs an older copy of it against a stub that returns one canned
-room so `find_room_by_name` never matches, and `provision_rooms.py` (the Ansible
+room so `find_room_by_name` never matches, and `rooms/provision.py` (the Ansible
 path's implementation of the same rule) is a different file asserted against
 `MagicMock`.
 

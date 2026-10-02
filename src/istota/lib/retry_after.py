@@ -4,9 +4,9 @@ RFC 9110 gives the header two spellings and a server is free to use either, so
 both are read: ``delta-seconds`` (``Retry-After: 2327``) and an HTTP-date
 (``Retry-After: Sat, 22 Aug 2026 23:42:17 GMT``).
 
-Extracted from ``subscription_usage.py``, which paid for the hardening and
+Extracted from ``usage/subscription.py``, which paid for the hardening and
 still re-exports it, when the feeds poller became a second caller (ISSUE-347).
-Same reasoning as ``usage_render.py`` and ``git_hardening.py``: a second copy of
+Same reasoning as ``usage/render.py`` and ``sandbox/git_hardening.py``: a second copy of
 a parser whose whole job is to be right about malformed input is what makes the
 next one a third, and the copies drift on exactly the inputs nobody thought of.
 ``brain/claude_code.py`` keeps its own ``parse_retry_after`` and is deliberately

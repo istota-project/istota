@@ -1,6 +1,6 @@
 """`web_app`'s own Talk calls, through the strict double.
 
-Until now the double reached the daemon and not the web process. `web_app.py`
+Until now the double reached the daemon and not the web process. `webui/app.py`
 constructs `TalkClient(...)` directly in eight places — most with a per-user
 OAuth bearer token, so there is no `get_talk_client` to patch — and two of them
 are the paths most exposed to ISSUE-400: `_chat_promote_to_talk`, which *creates*

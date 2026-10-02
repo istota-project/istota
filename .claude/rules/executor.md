@@ -32,7 +32,7 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. The 
 10. `build_prompt()` returns a `ComposedPrompt` (`.system`, `.user`).
 11. Dry run returns both halves via `render_composed_prompt()` (`===== SYSTEM =====` / `===== USER =====`); no file, no request.
 12. Writes `prompt.txt` (user) and `system_prompt.txt` (system), `O_NOFOLLOW`, 0600.
-13. `task_env.build_task_runtime()` returns a `TaskRuntime`. Credentials split by `_split_credential_env()` twice, proxy-only first. Proxies come back constructed, not entered: the `ExitStack` around step 15 enters them, since they must live across primary, reroute and fallback. Orderings are in its docstring.
+13. `sandbox.task_env.build_task_runtime()` returns a `TaskRuntime`. Credentials split by `_split_credential_env()` twice, proxy-only first. Proxies come back constructed, not entered: the `ExitStack` around step 15 enters them, since they must live across primary, reroute and fallback. Orderings are in its docstring.
 14. `BrainRequest`: user half as `prompt`, `composed_system_prompt_path`, tools, env, model/effort, two sandbox-wrap closures, callbacks, `images`.
 15. `run_with_failover` over `make_brain(resolve_brain_kind(task.source_type, config.brain, override=task.brain))`.
 16. `_compose_full_result`. 16b. Image notes (see below).
@@ -46,7 +46,7 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. The 
 
 `_SKILLS_CHANGELOG_SOURCE_TYPES` (`talk`, `email`, `repl`, `web`) is spelled out so a new surface must decide. The changelog is spent where first shown, so an SMS segment or a 1,024-char WhatsApp body would burn it unreadably. Both sites read one local: show-without-spend repeats it, spend-without-show burns it.
 
-Other copies: `transport.routing._INTERACTIVE_SOURCE_TYPES` must stay a subset (held by a test); `web_app._INTERACTIVE_SOURCES` is wider (adds `cli`, `istota_file`); `commands.py` has a narrower one for `!status` / `!stop`.
+Other copies: `transport.routing._INTERACTIVE_SOURCE_TYPES` must stay a subset (held by a test); `webui.app._INTERACTIVE_SOURCES` is wider (adds `cli`, `istota_file`); `commands.py` has a narrower one for `!status` / `!stop`.
 
 ## `build_prompt()`
 
@@ -164,7 +164,7 @@ Background types excluded from context: `scheduled`, `briefing`. Control dir `CO
 ## Security functions
 
 **`build_clean_env(config)`**: PATH, HOME, PYTHONUNBUFFERED, `USER`/`LOGNAME` (the macOS Keychain lookup needs them) and passthrough vars. Sets no cache vars, since `proxy_base_env` derives from it.
-- Sets `SHELLOPTS=pipefail` last (`shell_exec.pipefail_env`, ISSUE-321), because CLI brains run commands through the CLI's own Bash, which `shell_argv` cannot reach. Not `BASH_ENV`, which names a file to source (an exec inlet); `SHELLOPTS` carries option names only.
+- Sets `SHELLOPTS=pipefail` last (`sandbox.shell_exec.pipefail_env`, ISSUE-321), because CLI brains run commands through the CLI's own Bash, which `shell_argv` cannot reach. Not `BASH_ENV`, which names a file to source (an exec inlet); `SHELLOPTS` carries option names only.
 - `_SHELL_STARTUP_ENV_VARS` (`BASH_ENV`, `SHELLOPTS`, `BASHOPTS`) is filtered from the passthrough loop as in `build_stripped_env` (an inherited `xtrace` would echo credentials). Strip first, set second.
 - `set +o pipefail` is the only escape; no config switch. Bash only: `#!/bin/sh` gets it on macOS, not Debian.
 
@@ -181,7 +181,7 @@ Background types excluded from context: `scheduled`, `briefing`. Control dir `CO
 
 **`skill_model_credentials(*sources)`**: copies `SKILL_MODEL_CREDENTIAL_VARS` (token, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`) for `SKILL_MODEL_CALLERS` (`code_review`) into the per-skill map (ISSUE-409). A copy, not a split, since the task's CLI brain needs it too. A name list, not a manifest flag (`sensitive` is index-wide; a `daemon_env` source would let any skill claim any var). Kept out of lookup by `_PROXY_LOOKUP_BLOCKED`.
 
-**`skill_cli_tls_env` / `skill_model_reachability`** (ISSUE-410): inside `code_review`, `build_model_cli_env` reads `proxy_base_env`, which lacked reachability names. Split on whether the value can harm a CLI that never asked for it. `SKILL_CLI_TLS_VARS` (four trust-store names plus `CURL_CA_BUNDLE`, as `forge_cli._CARRY_EXACT`) only add a CA, so every host-side CLI gets them. `SKILL_MODEL_REACHABILITY_VARS` (proxy triple, `ANTHROPIC_BASE_URL`) redirect traffic, including to this deployment's own loopback services (`browse`), and may carry userinfo, so they go per skill to `SKILL_MODEL_CALLERS` and into `_PROXY_LOOKUP_BLOCKED`. Gap-filler, never override: a name the split moved is not read back (but one manifest declaring `SSL_CERT_FILE` sensitive removes it everywhere). Controls: `tests/test_task_env.py::TestTheReachabilityNames`. Open: `feeds` egress proxying needs a per-skill network policy first.
+**`skill_cli_tls_env` / `skill_model_reachability`** (ISSUE-410): inside `code_review`, `build_model_cli_env` reads `proxy_base_env`, which lacked reachability names. Split on whether the value can harm a CLI that never asked for it. `SKILL_CLI_TLS_VARS` (four trust-store names plus `CURL_CA_BUNDLE`, as `sandbox.forge_cli._CARRY_EXACT`) only add a CA, so every host-side CLI gets them. `SKILL_MODEL_REACHABILITY_VARS` (proxy triple, `ANTHROPIC_BASE_URL`) redirect traffic, including to this deployment's own loopback services (`browse`), and may carry userinfo, so they go per skill to `SKILL_MODEL_CALLERS` and into `_PROXY_LOOKUP_BLOCKED`. Gap-filler, never override: a name the split moved is not read back (but one manifest declaring `SSL_CERT_FILE` sensitive removes it everywhere). Controls: `tests/test_task_env.py::TestTheReachabilityNames`. Open: `feeds` egress proxying needs a per-skill network policy first.
 
 **`build_stripped_env()`**: `os.environ` minus credential patterns, for heartbeat and cron commands.
 
@@ -206,7 +206,7 @@ Background types excluded from context: `scheduled`, `briefing`. Control dir `CO
 - `is_no_final_answer(text)`: callers that interpret a result (the confirmation gate, memory indexing) must check it.
 
 ## Other functions
-- `get_user_temp_dir()`: `temp_dir / user_id`, a plain join. Its containment lives in the sandbox plan: `sandbox_plan.build_mount_plan` raises `ValueError` when `user_scope.scoped_user_dir(temp_dir, user_id)` is `None`, since `temp_dir` holds every user's `.control/` and the dir is the `--chdir` target (`tests/test_user_dir_containment.py::TestTheSandboxRefusal`).
+- `get_user_temp_dir()`: `temp_dir / user_id`, a plain join. Its containment lives in the sandbox plan: `sandbox.plan.build_mount_plan` raises `ValueError` when `sandbox.user_scope.scoped_user_dir(temp_dir, user_id)` is `None`, since `temp_dir` holds every user's `.control/` and the dir is the `--chdir` target (`tests/test_user_dir_containment.py::TestTheSandboxRefusal`).
 - `get_task_control_dir`: `None` for a bad id; `task_id` coerced with `int()` (`PurePath` does not collapse `..`). Never raises. `ensure_task_control_dir`: retries once (the temp cleanup can remove an empty level mid-`mkdir`), raises `RuntimeError`, idempotent (`_build_module_briefing_prompt` calls it again).
 - `load_channel_guidelines(config, source_type, user_id=None)`: substitutes `{BOT_NAME}`/`{BOT_DIR}`/`{user_id}`.
 - `_split_credential_env()`: called twice; `proxy_base_env = {**env, **proxy_only_env}` is snapshotted before `ISTOTA_SANDBOXED`.
@@ -221,4 +221,4 @@ Background types excluded from context: `scheduled`, `briefing`. Control dir `CO
 - Required keyword-only `profile`, no default, so a forgotten one is a `TypeError` (ISSUE-389). It decides only the Claude runtime block (`~/.local/bin`, `~/.local/share/claude`, `~/.local/state/claude`, the `~/.claude` tmpfs) and the custom system prompt file bind.
 
 ### `native_fs_roots(...)`
-Returns `(read_roots, write_roots, write_denied_roots)`. **Not the boundary** since tools moved into `istota.sandbox.tool_server` (ISSUE-389); the roots give the model a clear error and are the only confinement on unsandboxed shapes, so they mirror the binds as a projection of the same `MountPlan` (`sandbox_plan.project_fs_roots`). The user dir is scoped in `build_mount_plan` (ISSUE-402). Includes the fallback cache root; no DB root; no site root (ISSUE-194, `.claude/rules/config.md` `SiteConfig`). Denied: RO mounts nested in RW ones (by containment), `{user_temp_dir}/.developer` and `control_dir` (also in `read_only`), appended without an existence check so the list never disagrees with the namespace. Seeded into `BrainRequest.fs_*_roots` under confinement; `execute_task` also seeds the control dir outside it. Gap: a `user_resources` row can reach the control tree only where `temp_dir` is under the workspace; no shipped shape does, and doctor reports it.
+Returns `(read_roots, write_roots, write_denied_roots)`. **Not the boundary** since tools moved into `istota.sandbox.tool_server` (ISSUE-389); the roots give the model a clear error and are the only confinement on unsandboxed shapes, so they mirror the binds as a projection of the same `MountPlan` (`sandbox.plan.project_fs_roots`). The user dir is scoped in `build_mount_plan` (ISSUE-402). Includes the fallback cache root; no DB root; no site root (ISSUE-194, `.claude/rules/config.md` `SiteConfig`). Denied: RO mounts nested in RW ones (by containment), `{user_temp_dir}/.developer` and `control_dir` (also in `read_only`), appended without an existence check so the list never disagrees with the namespace. Seeded into `BrainRequest.fs_*_roots` under confinement; `execute_task` also seeds the control dir outside it. Gap: a `user_resources` row can reach the control tree only where `temp_dir` is under the workspace; no shipped shape does, and doctor reports it.

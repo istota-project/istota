@@ -157,7 +157,7 @@ The two `vault-*` actions default to every configured user and take `-u` for one
 
 All four `* ensure` subcommands (`user`, `resource`, `briefing`, `secret`) share a uniform contract: each computes `created` / `updated` / `noop` honestly by comparing the requested fields against the existing row, writes only when state would change, and prints a final `STATE: created|updated|noop` line. Ansible roles use `changed_when: "'STATE: noop' not in stdout"` for accurate change reporting.
 
-Subsystem helpers that own the contract: `db.upsert_user_resource`, `secrets_store.upsert_secret`, `user_profiles.update_profile_with_status`, and `db.upsert_briefing_config` (via the existing briefing helper). Each returns `(thing, state)` (or just the state string) so the CLI is a thin printer.
+Subsystem helpers that own the contract: `db.upsert_user_resource`, `credentials.store.upsert_secret`, `user_profiles.update_profile_with_status`, and `db.upsert_briefing_config` (via the existing briefing helper). Each returns `(thing, state)` (or just the state string) so the CLI is a thin printer.
 
 `user ensure` writes one table those helpers do not cover: the WhatsApp binding is its own row, so the command compares it before and after and escalates a `noop` to `updated` when it moved. A WhatsApp-only change has to report `updated`, or the role's `changed_when` suppresses the restarts and both processes carry on with a user set snapshotted before the enrollment.
 
