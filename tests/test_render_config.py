@@ -2748,3 +2748,29 @@ def test_unsandboxed_vault_opt_in_renders(tmp_path, allowed):
     path = render(tmp_path, **REQUIRED, ISTOTA_SECURITY_ALLOW_UNSANDBOXED_MULTI_USER_VAULTS=str(allowed).lower())
     config = load_config(path)
     assert config.security.allow_unsandboxed_multi_user_vaults is allowed
+
+
+class TestTheWordPressSection:
+    """ISSUE-591: the image had no variable reaching ``[wordpress]``."""
+
+    def test_absent_unless_asked_for(self, tmp_path):
+        path = render(tmp_path, **REQUIRED)
+        assert "wordpress" not in tomllib.loads(path.read_text())
+
+    def test_both_variables_reach_the_loader(self, tmp_path):
+        config = load_config(render(
+            tmp_path, **REQUIRED,
+            ISTOTA_WORDPRESS_PRIVATE_HOSTS=" wp.internal.example.com, wp.example.org ,",
+            ISTOTA_WORDPRESS_MAX_UPLOAD_MB="40",
+        ))
+        assert config.wordpress.private_hosts == ["wp.internal.example.com", "wp.example.org"]
+        assert config.wordpress.max_upload_mb == 40
+
+    def test_one_variable_alone_leaves_the_other_at_its_default(self, tmp_path):
+        from istota.config import WordPressConfig
+
+        config = load_config(render(
+            tmp_path, **REQUIRED, ISTOTA_WORDPRESS_PRIVATE_HOSTS="wp.example.org",
+        ))
+        assert config.wordpress.private_hosts == ["wp.example.org"]
+        assert config.wordpress.max_upload_mb == WordPressConfig().max_upload_mb

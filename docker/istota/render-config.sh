@@ -778,6 +778,21 @@ vnc_url = "${ISTOTA_BROWSER_VNC_URL:-}"
 TOML
     fi
 
+    # WordPress skill (optional). private_hosts names hosts a site may resolve
+    # to a private address; config.py warns at load about an entry that is not
+    # a bare host name, since the skill matches by exact name.
+    _wp_private_hosts="$(toml_string_list "${ISTOTA_WORDPRESS_PRIVATE_HOSTS:-}")"
+    if [ -n "$_wp_private_hosts" ] || [ -n "${ISTOTA_WORDPRESS_MAX_UPLOAD_MB:-}" ]; then
+        echo "" >> "$CONFIG_FILE"
+        echo "[wordpress]" >> "$CONFIG_FILE"
+        if [ -n "$_wp_private_hosts" ]; then
+            echo "private_hosts = ${_wp_private_hosts}" >> "$CONFIG_FILE"
+        fi
+        if [ -n "${ISTOTA_WORDPRESS_MAX_UPLOAD_MB:-}" ]; then
+            echo "max_upload_mb = ${ISTOTA_WORDPRESS_MAX_UPLOAD_MB}" >> "$CONFIG_FILE"
+        fi
+    fi
+
     # Location tracking (optional)
     if [ "${ISTOTA_LOCATION_ENABLED:-false}" = "true" ]; then
         cat >> "$CONFIG_FILE" <<TOML
