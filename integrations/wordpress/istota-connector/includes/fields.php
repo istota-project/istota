@@ -1145,11 +1145,12 @@ function istota_fields_apply( array $field, $value, array $ops ) {
 				}
 			}
 			$placed = istota_fields_inherit_tags( $def, $target['value'], $filled );
+			$read   = istota_fields_storage_nodes( $field, $work );
 			istota_fields_put( $work, $path, istota_fields_tag_untagged( $def, $placed, $counter ) );
 			$result['written'][] = array( 'op' => $i, 'path' => $where, 'field' => $def, 'value' => $new );
 			$anchors[ $i ]       = $path;
-			// A set names everything at and under its path.
-			istota_fields_name_nodes( $field, $work, $where, true, array(), $named );
+			// A set names its node and what holds it, and below it what it changed.
+			istota_fields_name_changed( $field, $work, $where, $read, $named );
 		} else {
 			// insert, remove and move act on a row of a repeater or flexible content list.
 			$parent_path = array_slice( $path, 0, -1 );
@@ -1379,6 +1380,7 @@ function istota_fields_storage_into( array $def, $value, $id, $path, $prefix, $o
 		'name'     => $name,
 		'flexible' => 'flexible_content' === istota_fields_type( $def ),
 		'clean'    => true,
+		'value'    => $value,
 	);
 	if ( 'object' === $kind ) {
 		$clone = 'clone' === istota_fields_type( $def );
@@ -1429,6 +1431,46 @@ function istota_fields_name_nodes( array $field, $value, $where, $subtree, array
 			$named[ $id ] = true;
 		}
 	}
+}
+
+/**
+ * Mark as named what a set at $where named: the node there and what holds
+ * it, and each node below it whose value now differs from the value $read
+ * (the storage nodes before the set) held at the same identity. A sub-field a
+ * whole-row set writes back as it was read is not named, so one that had
+ * nothing stored keeps nothing stored (Decision 18, as amended).
+ */
+function istota_fields_name_changed( array $field, $value, $where, array $read, array &$named ) {
+	foreach ( istota_fields_storage_nodes( $field, $value ) as $id => $node ) {
+		$path = $node['path'];
+		if ( $path === $where || 0 === strpos( $where, $path . '/' ) ) {
+			$named[ $id ] = true;
+		} elseif ( 0 === strpos( $path, $where . '/' ) ) {
+			if ( ! isset( $read[ $id ] ) || ! istota_fields_same_value( $read[ $id ]['value'], $node['value'] ) ) {
+				$named[ $id ] = true;
+			}
+		}
+	}
+}
+
+/** Whether two normalized values are the same, row identities and key order aside. */
+function istota_fields_same_value( $a, $b ) {
+	try {
+		return istota_fields_canonical_json( istota_fields_strip_tags( $a ) ) === istota_fields_canonical_json( istota_fields_strip_tags( $b ) );
+	} catch ( Istota_Fields_Error $e ) {
+		return false;
+	}
+}
+
+function istota_fields_strip_tags( $value ) {
+	if ( ! is_array( $value ) ) {
+		return $value;
+	}
+	unset( $value[ ISTOTA_FIELDS_ROW_TAG ] );
+	foreach ( $value as $key => $item ) {
+		$value[ $key ] = istota_fields_strip_tags( $item );
+	}
+	return $value;
 }
 
 /** The paths of the fields an inserted $value gives, at every depth, as keys of $out. */

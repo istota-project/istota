@@ -348,6 +348,18 @@ def rest_row(capsys, pid: str, field: str, name: str, text: str) -> dict:
     return rows[0]
 
 
+def unstored_selects(definition: dict, value, rest, out: list) -> None:
+    """The REST values of the single selects `fields get` reads as empty, through groups."""
+    for sub in definition.get("sub_fields") or []:
+        name = sub.get("name")
+        got = value.get(name) if isinstance(value, dict) else None
+        there = rest.get(name) if isinstance(rest, dict) else None
+        if sub.get("type") == "select" and not sub.get("multiple") and got is None:
+            out.append(there)
+        elif sub.get("type") == "group":
+            unstored_selects(sub, got, there, out)
+
+
 @pytest.mark.skipif(not (FIELDS_TYPE and FIELDS_FIELD),
                     reason="ISTOTA_WP_TEST_FIELDS_TYPE and ISTOTA_WP_TEST_FIELDS_FIELD not set")
 def test_fields_edit_on_a_flexible_field(live, capsys):
@@ -439,18 +451,19 @@ def test_fields_edit_on_a_flexible_field(live, capsys):
         assert row1["acf_fc_layout_disabled"] is True and plain(row1[other_text]) == "kept", row1
 
         # So did the third row's storage, down to the sub-fields with nothing
-        # stored, which a REST read shows apart from stored empty values
-        # (Decision 18). Writing the row whole stores all of them, which the
-        # same read then shows; if it does not, this layout cannot tell.
+        # stored (Decision 18). REST reads a single select with nothing stored as
+        # false and one stored empty as "", so those tell the two apart.
         assert rest_row(capsys, pid, field, other_text, "sibling") == sibling
         got = ok(capsys, "fields", "get", "--id", pid, "--path", f"{field}/2")
+        selects: list = []
+        unstored_selects(got["definition"], got["value"], sibling, selects)
+        assert selects, f"the {other['name']} layout has no single select left empty"
+        assert all(v is False for v in selects), selects
+        # Written back whole as read, the row changes nowhere, those included.
         out = ok(capsys, *edit, "--token", got["token"],
                  "--set", f"{field}/2={json.dumps(got['value'])}")
         token = out["token"]
-        assert rest_row(capsys, pid, field, other_text, "sibling") != sibling, (
-            f"the insert stored values for sub-fields it left out, or the {other['name']} "
-            f"layout reads the same stored or not (then pick a field whose layouts hold a "
-            f"select, a range with a default or a relationship)")
+        assert rest_row(capsys, pid, field, other_text, "sibling") == sibling
 
         # A set that drops rows asks first, on a draft too, and writes nothing.
         shrink = ("--set", f"{rows}=[{json.dumps({text: 'only'})}]")

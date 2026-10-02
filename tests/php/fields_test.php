@@ -1570,13 +1570,48 @@ test(
 );
 
 test(
-	'a whole-field set names everything',
+	'a whole-field set names what it changes and what it adds',
 	function () {
 		$plan = plan_of( people_field(), people( array( 'A' ) ), array( array( 'op' => 'set', 'path' => 'people', 'value' => people( array( 'B', 'C' ) ) ) ) );
-		foreach ( $plan as $path => $node ) {
-			same( true, $node['named'], 'named: ' . $path );
-		}
+		same( true, $plan['people']['named'], 'the field itself' );
+		same( true, $plan['people/0/name']['named'], 'a leaf it changed' );
+		same( false, $plan['people/0/age']['named'], 'a leaf it wrote back as read is not named' );
+		same( true, $plan['people/1/name']['named'] && $plan['people/1/age']['named'], 'a row it added is named whole' );
 		same( null, $plan['people/1/name']['source'], 'a row the set added has no source' );
+	}
+);
+
+test(
+	'a whole-row set copied from a read names only the sub-field it changed',
+	function () {
+		// What `fields get` hands back for row 0, with one sub-field changed.
+		$value         = blocks_value();
+		$row           = $value[0];
+		$row['title']  = 'Changed';
+		$plan          = plan_of( blocks_field(), $value, array( array( 'op' => 'set', 'path' => 'blocks/0', 'value' => $row ) ) );
+		same( true, $plan['blocks/0/title']['named'], 'the changed sub-field is named' );
+		same( true, $plan['blocks']['named'], 'and the list holding the row' );
+		same( false, $plan['blocks/0/items/0/link']['named'], 'an unchanged sub-field with nothing stored is not' );
+		same( false, $plan['blocks/0/items']['named'], 'nor an unchanged nested list' );
+		same( false, $plan['blocks/0/options/background']['named'], 'nor an unchanged group field' );
+
+		// A sub-field read as nothing stored (null) that the set fills is named,
+		// so its new row stays.
+		$row                     = $value[0];
+		$row['items'][0]['link'] = array(
+			'url'    => 'https://example.test/',
+			'title'  => 'x',
+			'target' => '',
+		);
+		$plan                    = plan_of( blocks_field(), $value, array( array( 'op' => 'set', 'path' => 'blocks/0', 'value' => $row ) ) );
+		same( null, $value[0]['items'][0]['link'], 'the fixture read the link as nothing stored' );
+		same( true, $plan['blocks/0/items/0/link']['named'], 'a sub-field the set fills from nothing stored is named' );
+		same( true, $plan['blocks/0/items']['named'], 'and so is the list it changed' );
+		same( false, $plan['blocks/0/items/1/link']['named'], 'its unchanged sibling is not' );
+
+		// The node a set addresses is named even when written as it was.
+		$plan = plan_of( blocks_field(), $value, array( array( 'op' => 'set', 'path' => 'blocks/0/title', 'value' => 'First' ) ) );
+		same( true, $plan['blocks/0/title']['named'], 'a set leaf is named, changed or not' );
 	}
 );
 
