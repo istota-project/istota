@@ -485,6 +485,6 @@ class TestDraftHealthPanel:
         assert total == 1 and len(items) == 1
         (action,) = items[0].actions
         assert (action.id, action.method, action.href) == (
-            "review", "LINK", "/health/bloodwork",
+            "review", "LINK", "/health/labs",
         )
         assert sources.is_safe_path(action.href)

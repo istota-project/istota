@@ -162,7 +162,7 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 | Package | Purpose |
 |---|---|
 | `feeds/` | Native RSS/Atom/Tumblr/Are.na — poller, per-user SQLite, routes, OPML |
-| `health/` | Body stats, bloodwork panels, biomarker trends, Garmin sync, immunizations, medical history |
+| `health/` | Body stats, lab panels, biomarker trends, Garmin sync, immunizations, medical history |
 | `location/` (+ `location/logic.py`) | GPS pings, place detection, visit logging, cluster discovery |
 | `money` (vendored) | Beancount ledger, invoicing, transactions, work log, investment portfolio |
 | `briefings/` | Block/source briefings — per-user SQLite, source resolvers, generation, reader and settings routes |

@@ -1,6 +1,6 @@
 # Health tracking
 
-Body stats, bloodwork panels, biomarker trends, Garmin Connect daily summaries, immunization registry, and medical history. Per-user SQLite on local disk at `Config.module_db_path(user, "health")` (default `{db_path.parent}/modules/{user}/health.db`); user-facing uploads stay in the workspace on the mount. All measurements stored metric (kg, cm, °C, mmHg, bpm); the display layer converts to the user's preferred units.
+Body stats, lab panels, biomarker trends, Garmin Connect daily summaries, immunization registry, and medical history. Per-user SQLite on local disk at `Config.module_db_path(user, "health")` (default `{db_path.parent}/modules/{user}/health.db`); user-facing uploads stay in the workspace on the mount. All measurements stored metric (kg, cm, °C, mmHg, bpm); the display layer converts to the user's preferred units.
 
 Health is an on-by-default module with per-user opt-out via `disabled_modules` in user settings.
 
@@ -8,7 +8,7 @@ Health is an on-by-default module with per-user opt-out via `disabled_modules` i
 
 **Body stats** — Time series for weight, blood pressure, resting HR, body fat %, body temp, respiratory rate, SpO2. Manual logging via skill CLI or auto-populated from Garmin sync. Unit-aware input (accepts lb, °F, etc. and converts at log time). BMI derived from latest weight + profile height.
 
-**Bloodwork** — Panel ingestion from three sources: drag-and-drop OCR upload (PDF/image → LLM extraction with review-and-confirm), CSV bulk import, or manual entry via skill CLI. 60+ canonical biomarkers with sex-specific reference ranges, alias normalization, and auto-flagging (H/L/C). Blood-pressure and resting-HR biomarker rows fan out to the stats time series.
+**Labs** — Lab panels of any specimen: bloodwork, urinalysis, stool and saliva tests. Panel ingestion from three sources: drag-and-drop OCR upload (PDF/image → LLM extraction with review-and-confirm), CSV bulk import, or manual entry via skill CLI. Each panel records its specimen (`blood`, `urine`, `stool`, `saliva`, `other`) when the report states it, and the Labs page filters by it; panels from before the field existed have none. 70+ canonical biomarkers with sex-specific reference ranges, alias normalization, and auto-flagging (H/L/C). Urine markers have their own `Urine_` names, so a urine creatinine never joins the blood creatinine trend. Dipstick results with no number (negative, trace, 1+) are not extracted. Unknown markers go in an "Other" category, which is always the last section. Blood-pressure and resting-HR biomarker rows fan out to the stats time series.
 
 **Biomarker trends** — Per-marker trend charts with out-of-range zones shaded. LLM-generated educational explainer cards for flagged markers (never diagnoses or prescriptions — hard guardrails in the prompt). Explainers cached per-user per `(name, direction)`.
 
@@ -41,7 +41,7 @@ Per-user SQLite on local disk (see above). Tables:
 | Table | Purpose |
 |---|---|
 | `stats` | Body stat time series (metric, value, unit, date, source) |
-| `panels` | Bloodwork panels (drawn_at, lab, type, draft/confirmed, content_hash) |
+| `panels` | Lab panels (drawn_at, lab, type, specimen, draft/confirmed, content_hash) |
 | `biomarkers` | Individual biomarker results linked to panels |
 | `biomarker_explainers` | Cached LLM explainer text per (name, direction) |
 | `biomarker_refs` | Bundled canonical biomarker reference ranges and aliases |
@@ -63,10 +63,10 @@ Garmin Connect OAuth tokens are not stored here — they live in the framework-l
 | Path | Content |
 |---|---|
 | `/health/stats` | Netdata-style sparkline grid for all body stats |
-| `/health/bloodwork` | Dates-as-rows × markers-as-columns spreadsheet with category bands |
-| `/health/bloodwork/panel?id=…` | Panel detail with inline-edit table and source preview |
-| `/health/bloodwork/upload` | Drag-and-drop OCR review-and-confirm |
-| `/health/bloodwork/marker?name=…` | Trend chart, related markers, clinical description, explainer card |
+| `/health/labs` | Dates-as-rows × markers-as-columns spreadsheet with category bands, filterable by specimen |
+| `/health/labs/panel?id=…` | Panel detail with inline-edit table and source preview |
+| `/health/labs/upload` | Drag-and-drop OCR review-and-confirm |
+| `/health/labs/marker?name=…` | Trend chart, related markers, clinical description, explainer card |
 | `/health/immunizations` | Registry table, coverage status, import controls |
 | `/health/history/encounter?id=…` | Encounter detail — linked diagnoses, panels, and its documents |
 | `/health/history/diagnoses` | Conditions list; a paperclip badge opens that condition's documents |
@@ -78,7 +78,7 @@ Garmin Connect OAuth tokens are not stored here — they live in the framework-l
 The `health` skill exposes `istota-skill health <subcommand>`. Key subcommands:
 
 - `log`, `stats`, `latest` — body stat CRUD and queries
-- `panels`, `panel`, `add-panel`, `add-biomarker` — bloodwork management
+- `panels`, `panel`, `add-panel`, `add-biomarker` — lab panel management (`--specimen` on `panels` and `add-panel`)
 - `trend`, `summary` — biomarker analysis
 - `upload`, `import-csv`, `export-csv` — bulk data operations
 - `settings`, `set` — profile and display preferences

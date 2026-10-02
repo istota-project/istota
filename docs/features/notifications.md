@@ -37,7 +37,7 @@ Eight sources ship.
 | `outbound_draft` | A reply the bot composed and held at the delivery gate | Send, Discard | The draft is sent or discarded |
 | `cron_job` | A scheduled job the scheduler switched off after five consecutive failures | Nothing in-app; the status note names `!cron enable <name>` | The job's failure counter returns to zero |
 | `connected_service` | A stored credential the remote rejected (Garmin today) | Reconnect, which links to Settings | The service reports connected again |
-| `health_panel` | A bloodwork panel left in draft after OCR | Review, which links to the bloodwork page | The panel leaves draft |
+| `health_panel` | A lab panel left in draft after OCR | Review, which links to the Labs page | The panel leaves draft |
 | `task_alert` | One-shot alerts: a task that failed, a mail throttle notice, a confirmation that timed out, a DMARC warning, a result that reached nobody | Nothing; it clears itself once you have seen it | You open the panel with it visible |
 | `relay_question` | A [relay question](relay.md) another user asked you, waiting for your answer | Open chat, for a question in a room; the view shows the question | The relay is answered, expires, fails or is cancelled |
 | `message_relay` | A change to a relay question you asked: delivered, failed, answered, or an answer kept back | Nothing; `!relay show` has the detail | You open the panel with it visible, or the answer reaches you |
@@ -89,7 +89,7 @@ What varies is whether a producer sends at all, and that is decided per producer
 
 - **Write and deliver** — most sources. A dead Garmin credential delivers because the wiped credential takes the sync job with it, so nothing would ever notice again.
 - **Deliver only where nothing else alerts you** — a relay question. One that went to your room pushes; one that went to WhatsApp or SMS is written and not pushed, since the message on your phone already is the alert. The pushed text never contains the question.
-- **Write, never deliver** — a draft bloodwork panel. The producer is the upload handler and you are looking at the review screen it just returned you to, so pushing "lab results are waiting" at that moment is a notice about something you are in the middle of doing.
+- **Write, never deliver** — a draft lab panel. The producer is the upload handler and you are looking at the review screen it just returned you to, so pushing "lab results are waiting" at that moment is a notice about something you are in the middle of doing.
 - **The producer keeps its own send** — the DMARC canary, the mail throttle, the expired-confirmation notice. Each has its own delivery window already and stamps the row rather than sending twice.
 
 ## Configuration

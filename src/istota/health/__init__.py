@@ -1,4 +1,4 @@
-"""Per-user health module — body stats, bloodwork panels, biomarker trends.
+"""Per-user health module — body stats, lab panels, biomarker trends.
 
 Per-user SQLite at ``{workspace}/health/data/health.db``. On by default;
 per-user opt-out via ``disabled_modules``.

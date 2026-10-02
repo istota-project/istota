@@ -8,6 +8,7 @@ The pipeline is multi-stage:
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -165,7 +166,22 @@ class TestParseLlmJson:
             "drawn_at": None,
             "lab_name": None,
             "panel_type": None,
+            "specimen": None,
         }
+
+    def test_specimen_is_read_and_held_to_the_set(self):
+        """#599. The model's word is normalised; anything off the list is None."""
+        def parsed(specimen):
+            raw = json.dumps({
+                "drawn_at": "2026-05-08", "specimen": specimen,
+                "biomarkers": [{"name": "Urine_pH", "value": 6.0, "unit": ""}],
+            })
+            return health_ocr._parse_llm_response(raw)["specimen"]
+
+        assert parsed(" Urine ") == "urine"
+        assert parsed("plasma") is None
+        assert parsed(["urine"]) is None
+        assert parsed(None) is None
 
     def test_a_truncated_object_does_not_come_back_as_its_inner_array(self):
         """The same loss with no prose at all — the model stopped early.

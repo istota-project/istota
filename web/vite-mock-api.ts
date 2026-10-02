@@ -6355,6 +6355,7 @@ const handlers: MockHandler[] = [
       draft: boolean;
       notes: string | null;
       encounter_id: number | null;
+      specimen?: string | null;
     }
 
     const settings = {
@@ -7044,6 +7045,7 @@ const handlers: MockHandler[] = [
         notes: p.notes,
         has_source: false,
         encounter_id: p.encounter_id,
+        specimen: p.specimen ?? null,
       };
     };
 
@@ -7241,6 +7243,7 @@ const handlers: MockHandler[] = [
           draft: false,
           notes: body.notes ?? null,
           encounter_id: body.encounter_id ?? null,
+          specimen: body.specimen || null,
         };
         panels.push(p);
         return { status: 'ok', id: p.id };
@@ -7262,6 +7265,7 @@ const handlers: MockHandler[] = [
           if (body.lab_name !== undefined) p.lab_name = body.lab_name;
           if (body.panel_type !== undefined) p.panel_type = body.panel_type;
           if (body.notes !== undefined) p.notes = body.notes;
+          if (body.specimen !== undefined) p.specimen = body.specimen || null;
           if (body.encounter_id !== undefined) {
             if (body.encounter_id !== null && !encounters.find((e) => e.id === body.encounter_id)) {
               return { error: 'encounter not found' };
@@ -7636,9 +7640,10 @@ const handlers: MockHandler[] = [
       }
 
       // Spreadsheet matrix: confirmed panels × every biomarker, grouped by category.
-      if (url === '/istota/api/health/bloodwork/matrix' && method === 'GET') {
+      if (url.split('?')[0] === '/istota/api/health/labs/matrix' && method === 'GET') {
+        const specimen = new URL(`http://x${url}`).searchParams.get('specimen');
         const confirmed = panels
-          .filter((p) => !p.draft)
+          .filter((p) => !p.draft && (!specimen || p.specimen === specimen))
           .sort((a, b) => a.drawn_at.localeCompare(b.drawn_at));
         const seenMarker: Record<string, { unit: string }> = {};
         const values: Record<
@@ -7694,8 +7699,10 @@ const handlers: MockHandler[] = [
             category: cat,
           });
         }
+        // "Other" last, as the server's `list_biomarker_refs` orders it.
         const orderedCats = catOrder
           .filter((c) => catMarkers[c]?.length)
+          .sort((a, b) => Number(a === 'Other') - Number(b === 'Other'))
           .map((c) => ({
             name: c,
             markers: [...catMarkers[c]].sort((a, b) =>
@@ -7709,6 +7716,7 @@ const handlers: MockHandler[] = [
             drawn_at: p.drawn_at,
             lab_name: p.lab_name,
             panel_type: p.panel_type,
+            specimen: p.specimen ?? null,
           })),
           values,
         };

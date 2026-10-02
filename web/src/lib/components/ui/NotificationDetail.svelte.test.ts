@@ -210,8 +210,8 @@ describe('actions', () => {
   });
 
   it('renders a link the allowlist accepts', () => {
-    const { container } = open({ link: '/health/bloodwork' });
-    expect(container.ownerDocument.querySelector('a[href$="/health/bloodwork"]')).not.toBeNull();
+    const { container } = open({ link: '/health/labs' });
+    expect(container.ownerDocument.querySelector('a[href$="/health/labs"]')).not.toBeNull();
   });
 
   it('renders a LINK action as a real anchor', () => {

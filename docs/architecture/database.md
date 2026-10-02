@@ -163,7 +163,7 @@ The two Nominatim caches (`geocode_cache`, `reverse_geocode_cache`) remain in th
 | Table | Purpose |
 |---|---|
 | `stats` | Body stat time series (metric, value, unit, date, source) |
-| `panels` | Bloodwork panels |
+| `panels` | Lab panels (blood, urine, stool, saliva) |
 | `biomarkers` | Individual results linked to a panel |
 | `biomarker_explainers` | Cached explainer text per (name, direction) |
 | `biomarker_refs` | Bundled canonical reference ranges and aliases |

@@ -1,6 +1,6 @@
 """Health tracking skill CLI.
 
-Subcommands cover both body stats and bloodwork:
+Subcommands cover both body stats and lab results:
 
 * ``log <metric> <value>`` — record a stat measurement.
 * ``stats [--metric M]`` — list stat entries.
@@ -295,6 +295,7 @@ def cmd_panels(args: argparse.Namespace) -> None:
     try:
         panels = health_db.list_panels(
             conn, since=args.since, limit=args.limit, include_drafts=True,
+            specimen=getattr(args, "specimen", None),
         )
         out = []
         for p in panels:
@@ -304,6 +305,7 @@ def cmd_panels(args: argparse.Namespace) -> None:
                 "drawn_at": p.drawn_at,
                 "lab_name": p.lab_name,
                 "panel_type": p.panel_type,
+                "specimen": p.specimen,
                 "biomarker_count": total,
                 "flagged_count": flagged,
                 "draft": p.draft,
@@ -330,6 +332,7 @@ def cmd_panel(args: argparse.Namespace) -> None:
             "drawn_at": panel.drawn_at,
             "lab_name": panel.lab_name,
             "panel_type": panel.panel_type,
+            "specimen": panel.specimen,
             "draft": panel.draft,
             "notes": panel.notes,
         },
@@ -352,6 +355,7 @@ def cmd_add_panel(args: argparse.Namespace) -> None:
         "drawn_at": args.drawn_at,
         "lab_name": args.lab,
         "panel_type": args.type,
+        "specimen": getattr(args, "specimen", None),
         "notes": args.notes,
     }
     if getattr(args, "ref", None):
@@ -367,6 +371,7 @@ def cmd_add_panel(args: argparse.Namespace) -> None:
             conn,
             drawn_at=args.drawn_at, lab_name=args.lab,
             panel_type=args.type, notes=args.notes,
+            specimen=getattr(args, "specimen", None),
         )
         conn.commit()
     finally:
@@ -763,7 +768,7 @@ def _direct_context():
 
 
 def cmd_import_csv(args: argparse.Namespace) -> None:
-    """Import a bloodwork CSV from a workspace-accessible file path.
+    """Import a labs CSV from a workspace-accessible file path.
 
     In sandbox mode the read + parse happens here (CLI is allowed to read
     files), but the writes are deferred so the scheduler applies them
@@ -1840,9 +1845,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("latest", help="Latest value per metric")
 
-    panels = sub.add_parser("panels", help="List bloodwork panels")
+    from istota.health.db import SPECIMENS
+
+    panels = sub.add_parser("panels", help="List lab panels")
     panels.add_argument("--since")
     panels.add_argument("--limit", type=int, default=20)
+    panels.add_argument(
+        "--specimen", choices=SPECIMENS,
+        help="Only panels run on this specimen",
+    )
 
     panel = sub.add_parser("panel", help="Show a single panel with biomarkers")
     panel.add_argument("id", type=int)
@@ -1851,6 +1862,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_panel.add_argument("--drawn-at", dest="drawn_at", required=True)
     add_panel.add_argument("--lab")
     add_panel.add_argument("--type", dest="type")
+    add_panel.add_argument(
+        "--specimen", choices=SPECIMENS,
+        help="What the sample was; omit when the report does not say",
+    )
     add_panel.add_argument("--notes")
     add_panel.add_argument(
         "--ref",
@@ -1887,7 +1902,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     import_csv = sub.add_parser(
         "import-csv",
-        help="Import a bloodwork CSV (Date,Lab,Marker (unit) layout)",
+        help="Import a labs CSV (Date,Lab,Marker (unit) layout)",
     )
     host_path(import_csv, "file_path", mode=EGRESS)  # see `upload` on the roots
 

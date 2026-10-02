@@ -207,7 +207,7 @@ A **Browsers** page lists each live browser instance (user, slot, idle time) and
 
 "Last active" in the user list counts only interactive tasks. Scheduled jobs, briefings and module pollers do not move it, so someone whose only traffic is automated shows a dash. Their task total still counts everything.
 
-**Health**: body stats grid with sparklines, bloodwork matrix (dates × markers with flag-colored cells, CSV import/export), panel detail with inline edit and source preview, per-marker trend charts with out-of-range zones and LLM explainer, medical history timeline with encounters and diagnoses, immunization tracking with coverage status strip, vaccine drill-down pages with clinical explainers. Garmin Connect (daily-summary sync) is on the general Settings → Connections page, shared with Location. Requires the `health` module to be enabled (on by default).
+**Health**: body stats grid with sparklines, labs matrix (dates × markers with flag-colored cells, a specimen filter, CSV import/export), panel detail with inline edit and source preview, per-marker trend charts with out-of-range zones and LLM explainer, medical history timeline with encounters and diagnoses, immunization tracking with coverage status strip, vaccine drill-down pages with clinical explainers. Garmin Connect (daily-summary sync) is on the general Settings → Connections page, shared with Location. Requires the `health` module to be enabled (on by default).
 
 **Location**: today view (current position, day summary, trips), history (date picker, activity filter, heatmap), places (discover clusters, create/edit/delete, visit stats). Requires GPS tracking to be enabled.
 

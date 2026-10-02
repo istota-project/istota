@@ -1,5 +1,9 @@
 """OCR + LLM extraction pipeline for uploaded lab reports.
 
+A lab report is not always bloodwork: urinalysis, stool and saliva results
+go through the same pipeline, and the model reports which one it read as
+``specimen`` (see :data:`istota.health.db.SPECIMENS`).
+
 Two stages:
 
 1. **Text extraction** — input-format dispatch:
@@ -187,6 +191,7 @@ Shape:
   "drawn_at": "2025-11-28",
   "lab_name": "Kaiser",
   "panel_type": "CBC",
+  "specimen": "blood",
   "biomarkers": [
     {
       "name": "Hemoglobin",
@@ -203,7 +208,8 @@ Shape:
 Panel-level fields (at the top level, alongside ``biomarkers``):
 - ``drawn_at`` (string ``YYYY-MM-DD``, required) — the date the sample was
   collected, NOT the date the report was generated or received. Look for
-  phrases like "Collected", "Drawn", "Specimen received". If absent, use
+  phrases like "Collected", "Drawn", "Specimen received". The sample may be
+  blood, urine, stool or saliva; the rule is the same for each. If absent, use
   the report-date as a fallback. If no date is parseable, omit the field.
 - ``lab_name`` (string, optional) — the lab or clinic that ran the test
   (e.g. "Kaiser", "Quest Diagnostics", "Labcorp"). Omit or set null when
@@ -211,10 +217,17 @@ Panel-level fields (at the top level, alongside ``biomarkers``):
 - ``panel_type`` (string, optional) — a short tag for the panel grouping
   (e.g. "CBC", "CMP", "Lipid Panel", "Thyroid"). Omit when the report
   doesn't name a panel or covers many.
+- ``specimen`` (string, optional) — what the sample was: one of "blood",
+  "urine", "stool", "saliva", "other". Use the report's own wording
+  ("Specimen: Urine", "Urinalysis", "Serum", "Plasma", "Whole blood", "Fecal").
+  Serum, plasma and whole blood are all "blood". Omit when the report does
+  not say and the panel name does not make it plain.
 
 Field rules per biomarker element:
 - ``name`` (string, required) — when the report's marker matches a canonical
-  name or alias below, use the canonical name VERBATIM. Otherwise use the
+  name or alias below, use the canonical name VERBATIM. A marker measured in
+  urine uses the ``Urine_`` canonical name, never the blood one of the same
+  name: urine creatinine is ``Urine_Creatinine``, not ``Creatinine``. Otherwise use the
   name as printed on the report. NEVER append units, parentheses, or extra
   qualifiers to ``name``. Correct: ``"Hemoglobin"``. Wrong: ``"Hemoglobin
   (g/dL)"``, ``"Hematocrit (%)"``, ``"MCV (fL)"``. The unit lives in
@@ -232,13 +245,16 @@ Field rules per biomarker element:
 Skip:
 - Header / footer text, patient demographics, clinic address, accession ids.
 - Non-quantitative rows (comments, "see note", "pending").
+- Qualitative results with no number, such as a urine dipstick's "negative",
+  "trace", "1+" or "2+". Do NOT convert them to a number.
 - Rows that are duplicates of a row above (some labs reprint the same marker
   in a summary block).
 
 Include even when the value looks impossible — the user reviews every row.
 
 If the source contains no biomarker results at all, return
-``{"biomarkers": [], "drawn_at": null, "lab_name": null, "panel_type": null}``.
+``{"biomarkers": [], "drawn_at": null, "lab_name": null, "panel_type": null,
+"specimen": null}``.
 """
 
 
@@ -292,7 +308,7 @@ def _parse_llm_json(raw: str) -> list[dict]:
 
 
 def _parse_llm_response(raw: str) -> dict:
-    """Parse the LLM response into ``{biomarkers, drawn_at, lab_name, panel_type}``.
+    """Parse the LLM response into ``{biomarkers, drawn_at, lab_name, panel_type, specimen}``.
 
     Falls back to an empty payload (``biomarkers=[]``, metadata fields
     None) when the response can't be coerced into the expected shape.
@@ -312,6 +328,7 @@ def _parse_llm_response(raw: str) -> dict:
         "drawn_at": None,
         "lab_name": None,
         "panel_type": None,
+        "specimen": None,
     }
     for candidate in candidate_json_blocks(raw):
         try:
@@ -324,10 +341,14 @@ def _parse_llm_response(raw: str) -> dict:
                 "drawn_at": _coerce_str(parsed.get("drawn_at")),
                 "lab_name": _coerce_str(parsed.get("lab_name")),
                 "panel_type": _coerce_str(parsed.get("panel_type")),
+                "specimen": health_db.normalize_specimen(parsed.get("specimen")),
             }
         elif isinstance(parsed, list) and candidate.whole:
             items = parsed
-            metadata = {"drawn_at": None, "lab_name": None, "panel_type": None}
+            metadata = {
+                "drawn_at": None, "lab_name": None, "panel_type": None,
+                "specimen": None,
+            }
         else:
             continue
         if not isinstance(items, list):
@@ -351,7 +372,7 @@ def _coerce_str(v) -> str | None:
 def _call_brain(
     prompt: str, config, *, read_path: Path | None = None, user_id: str = ""
 ) -> str | None:
-    """Run the bloodwork extraction prompt through the active brain.
+    """Run the lab-report extraction prompt through the active brain.
 
     One line of :func:`istota.health._brain_call.call_health_brain`, which
     holds the confinement rules, the fail-closed refusal and the env narrowing
@@ -496,6 +517,7 @@ def extract_from_panel(ctx: HealthContext, panel: Panel, *, config=None) -> dict
             "drawn_at": None,
             "lab_name": None,
             "panel_type": None,
+            "specimen": None,
             "warnings": [
                 "The LLM extraction step is unavailable on this instance. "
                 "Add biomarkers manually below.",
@@ -521,6 +543,7 @@ def extract_from_panel(ctx: HealthContext, panel: Panel, *, config=None) -> dict
         "drawn_at": parsed["drawn_at"],
         "lab_name": parsed["lab_name"],
         "panel_type": parsed["panel_type"],
+        "specimen": parsed["specimen"],
         "warnings": warnings,
         "raw_text": text,
         "raw_response": response,

@@ -75,7 +75,7 @@ describe('formatDate', () => {
   });
 
   it('takes the caller Intl options in place of the default, not merged with it', () => {
-    // `/health/bloodwork` asks for 2-digit month and day and no short month;
+    // `/health/labs` asks for 2-digit month and day and no short month;
     // a merge would leave `month: 'short'` in and the option would do nothing.
     const opts: Intl.DateTimeFormatOptions = {
       year: 'numeric',

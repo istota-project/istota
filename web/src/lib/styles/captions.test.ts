@@ -77,14 +77,14 @@ const bareRuleBodies = (css: string, cls: string): string[] => {
 /**
  * `.meta` is the one name the migration deliberately left overloaded. Three
  * files use it for something that is not supporting text at all — the chat
- * message's author/timestamp row, the bloodwork marker's stat row, and the
+ * message's author/timestamp row, the labs marker's stat row, and the
  * encounter page's card surface — and folding a layout rule into a typography
  * global would say they were the same thing. They keep the name locally;
  * a Svelte-scoped rule outranks a global, so nothing collides.
  */
 const META_IS_LAYOUT = [
   'lib/components/chat/Message.svelte',
-  'routes/health/bloodwork/marker/+page.svelte',
+  'routes/health/labs/marker/+page.svelte',
   'routes/health/history/encounter/+page.svelte',
   'routes/briefings/+page.svelte',
 ];
