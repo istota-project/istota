@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Literal, Sequence
 
 from .. import db, room_policy, room_veto, speech_gate
 from ..surfaces import is_room_member_for
-from ..untrusted import frame_untrusted
+from istota.lib.untrusted import frame_untrusted
 from . import participants
 from ._types import IncomingMessage, ParticipantRef
 from .routing import transcript_room

@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ...rclone_client import rclone_mkdir, rclone_path_exists, rclone_run
+from istota.lib.rclone_client import rclone_mkdir, rclone_path_exists, rclone_run
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -135,7 +135,7 @@ def get_local_path(config: "Config", remote_path: str) -> Path | None:
 
 # `_rclone_run`, `rclone_mkdir` and `rclone_path_exists` were byte-identical
 # copies of `istota.storage`'s, down to the docstring naming the other module.
-# They live in `istota.rclone_client`, a stdlib-only leaf, which is what lets
+# They live in `istota.lib.rclone_client`, a stdlib-only leaf, which is what lets
 # this skill — which runs in a subprocess and must not pull in the package —
 # share them. The four helpers below that raise on failure stay here: their
 # contract is this module's, not the leaf's, and they were never duplicated.

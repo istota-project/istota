@@ -166,7 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
     reads the same as the one a user types at the skill CLI.
     """
     parser = argparse.ArgumentParser(
-        prog="python -m istota.ocr_leaf",
+        prog="python -m istota.lib.ocr_leaf",
         description="One Tesseract pass over one image",
     )
     sub = parser.add_subparsers(dest="command", required=True)

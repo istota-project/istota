@@ -189,7 +189,7 @@ class TestTheServerDoesNotImportTheSkillsPackage:
 
     This is the reason `git_hardening.py` and `forge_bin.py` were lifted out of
     `skills/` (`.claude/rules/sandbox.md`), and the reason ISSUE-512 lifted the
-    shared untrusted fence to `istota.untrusted` rather than having
+    shared untrusted fence to `istota.lib.untrusted` rather than having
     `session/tools/web_fetch.py` import `istota.skills._untrusted`.
 
     Asserted as a module set rather than a duration: membership is

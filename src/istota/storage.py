@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from .atomic_write import write_text_atomic
-from .filenames import MAX_NAME_BYTES, safe_filename
-from .rclone_client import (
+from istota.lib.atomic_write import write_text_atomic
+from istota.lib.filenames import MAX_NAME_BYTES, safe_filename
+from istota.lib.rclone_client import (
     rclone_cat,
     rclone_cat_checked,
     rclone_mkdir,
@@ -1822,7 +1822,7 @@ def _build_cron_seed(config: "Config", user_id: str) -> str:
 
 
 
-# The rclone API lives in `istota.rclone_client`, a stdlib-only leaf, because
+# The rclone API lives in `istota.lib.rclone_client`, a stdlib-only leaf, because
 # `skills/files/__init__.py` carried a byte-identical copy of it and neither
 # module could import the other — that skill runs in a subprocess and this one
 # pulls in the package. The private names are kept as aliases so this module's
@@ -2581,7 +2581,7 @@ def channel_memory_tokens(config: "Config", conversation_token: str) -> list[str
     import sqlite3
     from contextlib import closing
 
-    from .sqlite_util import connect_read_only
+    from istota.lib.sqlite_util import connect_read_only
 
     validate_conversation_token(conversation_token)
     try:

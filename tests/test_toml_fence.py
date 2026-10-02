@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from istota.toml_fence import (
+from istota.lib.toml_fence import (
     BACKTICK_RUN_RE,
     FENCE_CLOSE_RE,
     FENCE_OPEN_RE,

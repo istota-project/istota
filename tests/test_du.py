@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from istota import du
+from istota.lib import du
 
 REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src" / "istota"
@@ -393,10 +393,14 @@ class TestNoSecondCopy:
             for p in SRC.rglob("*.py")
             if ".st_blocks" in p.read_text(encoding="utf-8")
         )
-        assert hits == ["du.py"], (
+        assert hits == ["lib/du.py"], (
             "a hand-rolled du-style measurement appeared; call du.tree_bytes / "
             "du.iter_tree + du.entry_bytes instead"
         )
+
+    def test_every_allowlisted_path_exists(self):
+        """A path that no longer exists would let the guard pass checking nothing."""
+        assert (SRC / "lib/du.py").is_file()
 
     def test_no_converted_caller_redeclares_the_block_size(self):
         """Three of the four carried their own `_BLOCK = 512` with an identical

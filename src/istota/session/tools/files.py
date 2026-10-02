@@ -20,7 +20,7 @@ from pathlib import Path
 
 from istota.agent.coercion import coerce_arguments
 from istota.agent.tools import AgentTool, ToolResult
-from istota.image_sniff import (
+from istota.lib.image_sniff import (
     MODEL_VISIBLE_MEDIA_TYPES,
     SNIFF_BYTES,
     image_dimensions,
@@ -28,7 +28,7 @@ from istota.image_sniff import (
     sniff_decodable,
 )
 from istota.llm.types import ImageContent, TextContent, ToolParameter, ToolSchema
-from istota.untrusted import IMAGE_NOTICE
+from istota.lib.untrusted import IMAGE_NOTICE
 
 from .edit_engine import (
     Edit,

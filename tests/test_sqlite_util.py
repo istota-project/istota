@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from istota import sqlite_util
+from istota.lib import sqlite_util
 
 REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src" / "istota"
@@ -935,10 +935,14 @@ class TestNoSecondCopy:
             for p in SRC.rglob("*.py")
             if any(n in p.read_text(encoding="utf-8") for n in needles)
         )
-        assert hits == ["sqlite_util.py"], (
+        assert hits == ["lib/sqlite_util.py"], (
             "a read-only URI open appeared outside sqlite_util; call "
             "sqlite_util.connect_read_only"
         )
+
+    def test_every_allowlisted_path_exists(self):
+        """A path that no longer exists would let the guard pass checking nothing."""
+        assert (SRC / "lib" / "sqlite_util.py").is_file()
 
     def test_the_mode_is_chosen_rather_than_fixed(self):
         """The guard above passes for a module that hardcodes either mode.
@@ -947,6 +951,6 @@ class TestNoSecondCopy:
         `connect_read_only` to a single mode puts back exactly one of the two
         defects ISSUE-458 is about, and every other drift guard stays green.
         """
-        body = (SRC / "sqlite_util.py").read_text(encoding="utf-8")
+        body = (SRC / "lib" / "sqlite_util.py").read_text(encoding="utf-8")
         assert "_has_hot_journal" in body
         assert '"ro" if' in body and '"rw"' in body

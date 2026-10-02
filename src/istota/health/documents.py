@@ -20,8 +20,8 @@ import sqlite3
 import time
 from pathlib import Path
 
-from istota.atomic_write import write_bytes_atomic
-from istota.filenames import safe_filename
+from istota.lib.atomic_write import write_bytes_atomic
+from istota.lib.filenames import safe_filename
 from istota.health import db as health_db
 from istota.health.models import Document, HealthContext
 

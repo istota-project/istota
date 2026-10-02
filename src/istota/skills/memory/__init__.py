@@ -65,14 +65,14 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-from istota.atomic_write import write_text_atomic
+from istota.lib.atomic_write import write_text_atomic
 from istota.skills._cli import emit, error_envelope, parse_and_resolve, status_exit_code
 from istota.skills._group_access import (
     GROUP_MEMORY_LABEL,
     group_access_denied,
     group_refusal,
 )
-from istota.untrusted import frame_untrusted
+from istota.lib.untrusted import frame_untrusted
 from istota.user_scope import is_scopable_user_id
 from istota.memory.curation.audit import (
     write_audit_log,

@@ -23,7 +23,7 @@ from typing import Any
 
 from istota.money import config_store
 from istota.money.cli import UserContext
-from istota.timestamps import iso_now as _iso_now
+from istota.lib.timestamps import iso_now as _iso_now
 
 
 logger = logging.getLogger(__name__)

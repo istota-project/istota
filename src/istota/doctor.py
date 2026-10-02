@@ -62,7 +62,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit, urlunsplit
 
-from . import du, sqlite_util
+from istota.lib import du
+from istota.lib import sqlite_util
 from .user_scope import is_within, paths_overlap
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; a runtime import is a cycle
@@ -409,7 +410,7 @@ def _native_key_holders(config: "Config") -> int:
     that helper opens the database read-write *and commits*, and against a
     missing file it creates a zero-byte database that later reads as corruption
     rather than as absence. So this goes through
-    :func:`~istota.sqlite_util.connect_read_only` like every other
+    :func:`~istota.lib.sqlite_util.connect_read_only` like every other
     database-touching check here, which refuses the write and refuses to create.
 
     **What that helper does not buy is sidecar avoidance, which is the reverse
@@ -2161,7 +2162,7 @@ _MODEL_PROBE_MARKER = "healthcheck-ok"
 def _read_user_resources(config: "Config", user_id: str) -> list:
     """The user's resource rows, for the probe's sandbox plan. Never raises.
 
-    Through :func:`~istota.sqlite_util.connect_read_only` rather than through
+    Through :func:`~istota.lib.sqlite_util.connect_read_only` rather than through
     ``db.get_db``, which connects read-write and *commits* on exit. That is
     :func:`check_framework_db`'s rule, and a check reached from the same CLI
     does not get an exemption from it for being a port of daemon-side code.
@@ -2772,7 +2773,7 @@ def _stored_secret_count(config: "Config") -> int:
     are real, and an empty scope would then read as an empty store and soften
     the verdict on the deployment that most needs it.
 
-    Through :func:`~istota.sqlite_util.connect_read_only` like every other
+    Through :func:`~istota.lib.sqlite_util.connect_read_only` like every other
     database-touching check here, for the half of
     :func:`_native_key_holders`'s reason that survived ISSUE-458: an ordinary
     read-write open would, against a missing file, create a zero-byte database

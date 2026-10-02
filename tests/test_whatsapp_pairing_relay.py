@@ -370,9 +370,9 @@ class TestTheRelayLeaf:
         """
         permitted = {
             "src/istota/transport/whatsapp/pairing_relay.py": {
-                "from ...atomic_write import write_bytes_atomic",
+                "from istota.lib.atomic_write import write_bytes_atomic",
             },
-            "src/istota/atomic_write.py": set(),
+            "src/istota/lib/atomic_write.py": set(),
         }
         for relative, allowed in permitted.items():
             source = (REPO_ROOT / relative).read_text()

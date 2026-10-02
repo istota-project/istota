@@ -24,7 +24,7 @@ import json
 import logging
 import re
 
-from istota.llm_json import strip_fences
+from istota.lib.llm_json import strip_fences
 from istota.health._brain_call import call_health_brain
 from istota.health import db as health_db
 from istota.health.models import HealthContext

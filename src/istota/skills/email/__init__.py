@@ -24,7 +24,7 @@ from email.message import EmailMessage
 from email.utils import formatdate, getaddresses, parsedate_to_datetime
 from pathlib import Path
 
-from istota.filenames import (
+from istota.lib.filenames import (
     DEFAULT_MAX_STEM, MAX_NAME_BYTES, filename_parts, safe_filename,
 )
 from istota.skill_host_paths import (
@@ -35,7 +35,7 @@ from istota.skill_host_paths import (
 )
 from istota.skills._cli import parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import EGRESS, WRITE, host_path
-from istota.untrusted import frame_untrusted
+from istota.lib.untrusted import frame_untrusted
 
 logger = logging.getLogger("istota.skills.email")
 

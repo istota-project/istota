@@ -23,7 +23,7 @@ from istota.skills import _credref
 from istota.skills import wordpress as wp
 from istota.skills.wordpress import content as content_mod
 from istota.skills.wordpress import sites
-from istota.untrusted import frame_untrusted
+from istota.lib.untrusted import frame_untrusted
 
 PASSWORD = "SENTINEL-wp-app-password-77c1"
 PUBLIC_IP = "93.184.216.34"

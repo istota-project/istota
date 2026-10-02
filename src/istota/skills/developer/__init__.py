@@ -47,7 +47,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from istota import config as istota_config
-from istota.atomic_write import write_text_atomic
+from istota.lib.atomic_write import write_text_atomic
 # Where the framework credential shim lands, from the module that defines the
 # rule. A stdlib-only leaf, so this costs the skill subprocess nothing.
 from istota.credential_shim import shim_path as credential_shim_path

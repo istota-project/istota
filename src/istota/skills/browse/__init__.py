@@ -31,7 +31,7 @@ from istota.browser_admission import BrowserQueueTimeout, browser_request
 
 import httpx
 
-from istota.image_sniff import SNIFF_BYTES, sniff_raster
+from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
 from istota.skill_host_paths import (
     resolve_host_path,
     user_workspace_root,
@@ -40,7 +40,7 @@ from istota.skill_host_paths import (
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._credref import PAIR, CredentialPair, credential_ref
 from istota.skills._hostpath import WRITE, host_path
-from istota.untrusted import frame_untrusted
+from istota.lib.untrusted import frame_untrusted
 
 DEFAULT_API_URL = "http://localhost:9223"
 # Where a screenshot lands with no `--output`: `screenshots/` under the task's

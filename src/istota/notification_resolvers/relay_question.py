@@ -101,7 +101,7 @@ class RelayQuestionResolver:
         self, config: "Config", conn: "sqlite3.Connection", row: "NotificationRow",
     ) -> "NotificationView | None":
         from ..notification_sources import NotificationAction, NotificationView
-        from ..untrusted import frame_untrusted
+        from istota.lib.untrusted import frame_untrusted
 
         relay = conn.execute(
             "SELECT * FROM message_relays WHERE id=? AND recipient_user_id=?",

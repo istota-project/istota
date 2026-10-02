@@ -12,7 +12,7 @@ content is far more attacker-controlled than a room name (ISSUE-512).
 
 import pytest
 
-from istota.untrusted import MARKER_REDACTION, frame_untrusted, has_marker, unframe_untrusted
+from istota.lib.untrusted import MARKER_REDACTION, frame_untrusted, has_marker, unframe_untrusted
 
 
 class TestTheFence:
@@ -141,7 +141,7 @@ class TestTheImageNotice:
     """
 
     def test_it_is_a_plain_sentence_carrying_no_marker(self):
-        from istota.untrusted import IMAGE_NOTICE
+        from istota.lib.untrusted import IMAGE_NOTICE
 
         # It is the daemon speaking rather than third-party content being
         # quoted, so there is nothing to fence — and a marker here would be one
@@ -151,21 +151,21 @@ class TestTheImageNotice:
         assert IMAGE_NOTICE.strip() == IMAGE_NOTICE
 
     def test_it_survives_being_framed(self):
-        from istota.untrusted import IMAGE_NOTICE, frame_untrusted
+        from istota.lib.untrusted import IMAGE_NOTICE, frame_untrusted
 
         # Nothing frames it today, and if anything ever does it must not be
         # eaten by the redaction — which is what carrying no marker buys.
         assert IMAGE_NOTICE in frame_untrusted(IMAGE_NOTICE, "TEST")
 
     def test_it_says_the_picture_is_data(self):
-        from istota.untrusted import IMAGE_NOTICE
+        from istota.lib.untrusted import IMAGE_NOTICE
 
         lowered = IMAGE_NOTICE.lower()
         assert "data, not instructions" in lowered
         assert "untrusted" in lowered
 
     def test_the_module_docstring_says_why_a_fence_cannot_wrap_pixels(self):
-        import istota.untrusted as untrusted
+        import istota.lib.untrusted as untrusted
 
         assert "pixels" in untrusted.__doc__
         assert "IMAGE_NOTICE" in untrusted.__doc__

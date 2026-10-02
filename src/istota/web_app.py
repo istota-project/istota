@@ -64,11 +64,11 @@ from . import db as _db
 from . import user_profiles
 from . import web_auth, web_auth_mail, web_shutdown
 from .build_info import RUNNING_VERSION, build_description
-from .filenames import filename_parts
+from istota.lib.filenames import filename_parts
 from .brain import make_brain
 from .chat_files import ChatFileError, resolve_chat_file
 from .config import load_config
-from .image_sniff import SNIFF_BYTES, sniff_raster
+from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
 from .ocs import OcsError, ocs_data
 from .usage import SYSTEM_USER_ID
 from .location_logic import (
@@ -10497,7 +10497,7 @@ _REPLY_EXCERPT_CHARS = 200
 def _attachment_stem(filename: str, limit: int = 48) -> str:
     """Filesystem-safe leading part of a stored attachment's name.
 
-    The `istota.filenames` rule in ASCII mode: no directory component, nothing
+    The `istota.lib.filenames` rule in ASCII mode: no directory component, nothing
     that can traverse or confuse a path, so a hostile ``filename`` (it comes
     from the client) can only shorten to ``""``.
     """

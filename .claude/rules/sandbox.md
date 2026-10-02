@@ -76,7 +76,7 @@ A name list, not a `CLAUDE_*` prefix (would eat `passthrough_env_vars`), guarded
 
 ## tool_server.py
 
-`python -m istota.tool_server --fd N`, one per **task attempt**, via `build_bwrap_cmd(..., profile=NATIVE)`, placed in the cgroup from `preexec_fn`. Builds one `ToolEnv` from `hello` and binds the six core tools (`build_default_tools`) (ISSUE-389). Holds no image library (see `image_sniff.py`) and must not import `istota.skills` (`tests/test_tool_server_env.py::TestTheServerDoesNotImportTheSkillsPackage`; why `git_hardening.py`, `forge_bin.py`, `untrusted.py` sit at the package root).
+`python -m istota.tool_server --fd N`, one per **task attempt**, via `build_bwrap_cmd(..., profile=NATIVE)`, placed in the cgroup from `preexec_fn`. Builds one `ToolEnv` from `hello` and binds the six core tools (`build_default_tools`) (ISSUE-389). Holds no image library (see `lib/image_sniff.py`) and must not import `istota.skills` (`tests/test_tool_server_env.py::TestTheServerDoesNotImportTheSkillsPackage`; why `git_hardening.py`, `forge_bin.py`, `lib/untrusted.py` sit at the package root).
 
 - **Wraps nothing**: nested bwrap under `--unshare-user --disable-userns` fails, so `ToolEnv` lost the field.
 - **Places nothing**: membership is inherited at fork; `cgroup.procs` is unbound.
@@ -116,7 +116,7 @@ Scoping a user id under a root (ISSUE-402). A plain join is not a check: `PurePa
 
 ## git_hardening.py
 
-`-c` overrides stopping repo config running programs (`core.fsmonitor`, `diff.external`, `gpg.*`, plus output-reshaping keys parsers need). Repo-local config escapes `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL` and is model-written under `developer.repos_dir`. Extracted from `skills/code_review/engine.py` (still re-exported) so `worktree_reaper` avoids importing `istota.skills` (~190ms); same reason as `forge_bin.py` and `untrusted.py` (ISSUE-512). No imports.
+`-c` overrides stopping repo config running programs (`core.fsmonitor`, `diff.external`, `gpg.*`, plus output-reshaping keys parsers need). Repo-local config escapes `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL` and is model-written under `developer.repos_dir`. Extracted from `skills/code_review/engine.py` (still re-exported) so `worktree_reaper` avoids importing `istota.skills` (~190ms); same reason as `forge_bin.py` and `lib/untrusted.py` (ISSUE-512). No imports.
 
 ## git_remote_scrub.py
 

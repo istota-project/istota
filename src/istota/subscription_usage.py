@@ -59,11 +59,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
-from istota.retry_after import parse_retry_after as _parse_retry_after
-from istota.retry_after import retry_after_from_headers as _retry_after_from_headers
+from istota.lib.retry_after import parse_retry_after as _parse_retry_after
+from istota.lib.retry_after import retry_after_from_headers as _retry_after_from_headers
 
 from . import __version__
-from .atomic_write import write_text_atomic
+from istota.lib.atomic_write import write_text_atomic
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .config import Config
@@ -748,7 +748,7 @@ def _build_opener() -> urllib.request.OpenerDirector:
 
 
 # `parse_retry_after` and `_retry_after_from` used to live here, and this
-# module paid for their hardening. They moved to `istota.retry_after` when the
+# module paid for their hardening. They moved to `istota.lib.retry_after` when the
 # feeds poller became a second caller (ISSUE-347) — a stdlib-only leaf, so a
 # caller with a light import graph need not pull in this module's. Re-exported
 # under both names because this module's tests and its own call sites address

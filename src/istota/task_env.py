@@ -145,7 +145,7 @@ def _write_credential_shim(user_temp_dir: Path) -> Path | None:
     ``execute_task`` does not guard. ``write_text_atomic`` already defaults to
     UTF-8 on the way out, so only the read side was locale-dependent.
     """
-    from .atomic_write import write_text_atomic
+    from istota.lib.atomic_write import write_text_atomic
     from .credential_shim import SHIM_MODE, shim_path
 
     dest = shim_path(user_temp_dir)

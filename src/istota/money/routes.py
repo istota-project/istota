@@ -3031,7 +3031,7 @@ def _portfolio_conn(user_ctx: UserContext):
     ``resolve_for_user`` → ``ensure_initialised`` has already created the
     schema; tests initialise via ``db.init_db`` themselves.
     """
-    from istota import sqlite_util
+    from istota.lib import sqlite_util
 
     if user_ctx.db_path is None:
         raise HTTPException(500, "money DB not configured for this user")

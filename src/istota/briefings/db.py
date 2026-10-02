@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator
 
-from istota import sqlite_util
+from istota.lib import sqlite_util
 from istota.briefings.models import (
     ArchivedBriefing,
     BlockSource,
@@ -32,7 +32,7 @@ from istota.briefings.models import (
     parse_json_dict,
     parse_json_list,
 )
-from istota.timestamps import iso_now as _now_iso
+from istota.lib.timestamps import iso_now as _now_iso
 
 
 logger = logging.getLogger(__name__)

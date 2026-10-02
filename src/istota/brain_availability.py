@@ -17,7 +17,7 @@ from pathlib import Path
 
 import fcntl
 
-from .atomic_write import write_text_atomic
+from istota.lib.atomic_write import write_text_atomic
 
 
 def _path(config, primary: str) -> Path | None:

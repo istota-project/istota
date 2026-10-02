@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from istota import sqlite_util
+from istota.lib import sqlite_util
 from istota.money import portfolio
 from istota.money.core.importers import IMPORT_SOURCES, detect_source
 from istota.money.core.importers.positions_base import ParsedSnapshot, PositionRow

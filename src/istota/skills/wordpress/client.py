@@ -41,7 +41,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from istota.net_guard import ip_is_public
-from istota.untrusted import frame_untrusted
+from istota.lib.untrusted import frame_untrusted
 
 from .sites import SiteError, check_bound
 

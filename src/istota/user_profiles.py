@@ -30,7 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
-from . import avatars, sqlite_util
+from istota import avatars
+from istota.lib import sqlite_util
 
 logger = logging.getLogger(__name__)
 

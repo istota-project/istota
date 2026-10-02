@@ -69,7 +69,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import file_lock, secrets_store
+from istota import secrets_store
+from istota.lib import file_lock
 
 logger = logging.getLogger(__name__)
 

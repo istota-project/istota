@@ -11,7 +11,7 @@ import sqlite3
 
 from ... import db
 from ...config import Config
-from ...timestamps import iso_now as _now
+from istota.lib.timestamps import iso_now as _now
 from ._types import RenderedSms, SmsDeliveryRecord
 from .providers._types import (
     SmsDeliveryEvent,

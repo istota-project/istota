@@ -119,7 +119,7 @@ model-plantable. This tree is bound into no sandbox at any path, so a directory
 in it can only have been created by the writer.
 
 stdlib-only apart from :mod:`istota.llm.types`, which the serializer needs for
-its ``isinstance`` dispatch, and :mod:`istota.du`, which holds the du-style walk
+its ``isinstance`` dispatch, and :mod:`istota.lib.du`, which holds the du-style walk
 and the first-level directory scan the sweep shares with
 ``sandbox_cache_sweeper`` and ``doctor``. Both are leaves that import nothing
 from the package — ``tests/native/test_session_log.py`` asserts that
@@ -144,7 +144,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from istota import du
+from istota.lib import du
 from istota.llm.types import (
     AssistantMessage,
     Content,

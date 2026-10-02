@@ -1077,14 +1077,14 @@ def _good_snapshot() -> su.UsageSnapshot:
 def _staging_names(monkeypatch, root: Path) -> list[str]:
     """Record the staging file names written under ``root``, in order.
 
-    Both writers here go through :mod:`istota.atomic_write`, so the spy sits on
+    Both writers here go through :mod:`istota.lib.atomic_write`, so the spy sits on
     that module's ``mkstemp`` rather than on ``su.os.open`` — which is where
     the name used to be minted and no longer is. Scoped to ``root`` because
     ``tempfile`` is a shared module: anything else in the process staging a
     file during the window would otherwise be counted here and break an exact
     count for a reason that has nothing to do with the subject.
     """
-    from istota import atomic_write
+    from istota.lib import atomic_write
 
     names: list[str] = []
     real = atomic_write.tempfile.mkstemp

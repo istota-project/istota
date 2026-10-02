@@ -238,7 +238,7 @@ One `python -m istota.tool_server` per attempt via `build_bwrap_cmd(..., profile
 - Own `httpx.AsyncClient`, `trust_env=False`, no cookies, GET/text only.
 - `_ip_is_public` on every resolved IP of every hop, fail closed; connection pinned to the validated IP (Host + SNI); manual redirects; no https->http unless `allow_http`.
 - Caps on bytes, chars, redirects, time; honours abort.
-- Output framed `[UNTRUSTED WEB CONTENT …]` with a bounded `Fetched:` header (see `untrusted.py`, `.claude/rules/leaf-modules.md`). The executor folds `untrusted_input` into eager skills when native WebFetch is on and not withheld (`_native_web_fetch_enabled`).
+- Output framed `[UNTRUSTED WEB CONTENT …]` with a bounded `Fetched:` header (see `lib/untrusted.py`, `.claude/rules/leaf-modules.md`). The executor folds `untrusted_input` into eager skills when native WebFetch is on and not withheld (`_native_web_fetch_enabled`).
 - Residual: GET exfiltration (as `browse`). `require_url_provenance` corpus is `_extract_urls(req.prompt)` only, never tool output.
 
 ### Session logs (native-only, `session/session_log.py`)

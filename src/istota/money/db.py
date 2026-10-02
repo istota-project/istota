@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from istota import sqlite_util
+from istota.lib import sqlite_util
 
 
 SCHEMA = """\

@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
-from istota import sqlite_util
+from istota.lib import sqlite_util
 from istota.health.models import (
     Biomarker,
     BiomarkerRef,
@@ -39,7 +39,7 @@ from istota.health.models import (
     Panel,
     Stat,
 )
-from istota.timestamps import iso_now as _now
+from istota.lib.timestamps import iso_now as _now
 
 
 logger = logging.getLogger(__name__)

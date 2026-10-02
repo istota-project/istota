@@ -15,7 +15,7 @@ import httpx
 
 from . import db
 from .shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
-from .toml_fence import find_toml_block
+from istota.lib.toml_fence import find_toml_block
 
 if TYPE_CHECKING:
     from .config import Config

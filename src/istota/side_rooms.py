@@ -53,7 +53,7 @@ from pathlib import Path
 
 from . import db
 from .room_scopes import canonical_token  # noqa: F401 — re-exported; one copy
-from .untrusted import frame_untrusted
+from istota.lib.untrusted import frame_untrusted
 from .whatsapp_requests import (
     CLAIM_RECOVERY_SECONDS,
     ROOM_KINDS,

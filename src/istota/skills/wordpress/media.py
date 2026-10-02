@@ -34,8 +34,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from istota.filenames import safe_filename as _safe_name
-from istota.image_sniff import sniff_decodable
+from istota.lib.filenames import safe_filename as _safe_name
+from istota.lib.image_sniff import sniff_decodable
 from istota.skill_host_paths import memory_refusal, resolve_in_roots
 from istota.skills._hostpath import egress_roots
 

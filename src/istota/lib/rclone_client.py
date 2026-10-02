@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 import subprocess
 
-logger = logging.getLogger("istota.rclone_client")
+logger = logging.getLogger("istota.lib.rclone_client")
 
 
 def rclone_run(args: list[str], **kwargs) -> subprocess.CompletedProcess | None:

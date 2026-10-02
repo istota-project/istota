@@ -13,7 +13,7 @@ from email.utils import parseaddr
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-from . import sqlite_util
+from istota.lib import sqlite_util
 from .user_scope import is_scopable_user_id
 
 logger = logging.getLogger("istota.db")

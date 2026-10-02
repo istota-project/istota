@@ -22,7 +22,7 @@ from istota.session.tools import (
     make_web_fetch_tool,
 )
 from istota.session.tools import web_fetch as wf
-from istota.untrusted import MARKER_REDACTION
+from istota.lib.untrusted import MARKER_REDACTION
 
 
 # --------------------------------------------------------------------------- #

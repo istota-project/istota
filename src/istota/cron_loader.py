@@ -26,9 +26,9 @@ from .storage import OWNER_FILE_MAX_BYTES, get_user_scripts_path, read_owner_tex
 # tell "no opener" from "an opener with no closer". Only the first may ever
 # reach the fence-less document, and only after the hold guard below has
 # ruled out a fence it could not read.
-from .toml_fence import BACKTICK_RUN_RE as _BACKTICK_RUN_RE
-from .toml_fence import FENCE_CLOSE_RE as _TOML_FENCE_CLOSE_RE
-from .toml_fence import FENCE_OPEN_RE as _TOML_FENCE_OPEN_RE
+from istota.lib.toml_fence import BACKTICK_RUN_RE as _BACKTICK_RUN_RE
+from istota.lib.toml_fence import FENCE_CLOSE_RE as _TOML_FENCE_CLOSE_RE
+from istota.lib.toml_fence import FENCE_OPEN_RE as _TOML_FENCE_OPEN_RE
 
 logger = logging.getLogger("istota.cron_loader")
 

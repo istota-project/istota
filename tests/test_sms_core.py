@@ -1115,7 +1115,7 @@ class TestTheDeliveryPathStaysOffTheRuntimeLoop:
         Asserting "it still returns a record" would pass either way, so this
         records the *thread* of every connection open instead.
         """
-        from istota import sqlite_util
+        from istota.lib import sqlite_util
 
         config = _config(tmp_path)
         providers = _providers(_adapter(lambda _req: SmsSendResult("opaque-1", "sent", 1)))

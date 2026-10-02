@@ -44,7 +44,7 @@ import os
 import time
 from pathlib import Path
 
-from ...atomic_write import write_bytes_atomic
+from istota.lib.atomic_write import write_bytes_atomic
 
 logger = logging.getLogger(__name__)
 

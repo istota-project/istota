@@ -31,8 +31,8 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from istota import sqlite_util
-from istota.timestamps import iso_now
+from istota.lib import sqlite_util
+from istota.lib.timestamps import iso_now
 from istota.money.core import rules as rule_engine
 from istota.money.core.models import (
     ClientConfig,

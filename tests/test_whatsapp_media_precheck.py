@@ -31,7 +31,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from istota import db, sqlite_util
+from istota import db
+from istota.lib import sqlite_util
 from istota.config import Config, UserConfig
 from istota.transport.whatsapp import media
 from istota.transport.whatsapp._types import (

@@ -23,8 +23,8 @@ from .nextcloud._http import OcsError, dav_files_url, dav_request
 from .room_relocate import (
     EXIT_OK, EXIT_PARTIAL, EXIT_REFUSED, _descriptor, _preflight, _problem, _refusal, load_vector_extension,
 )
-from .sqlite_util import connect_read_only
-from .toml_fence import BACKTICK_RUN_RE, FENCE_OPEN_RE, find_toml_block
+from istota.lib.sqlite_util import connect_read_only
+from istota.lib.toml_fence import BACKTICK_RUN_RE, FENCE_OPEN_RE, find_toml_block
 from .user_scope import is_scopable_user_id
 
 

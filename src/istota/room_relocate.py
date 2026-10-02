@@ -14,7 +14,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from . import db, sqlite_util
+from istota import db
+from istota.lib import sqlite_util
 
 EXIT_OK = 0
 EXIT_REFUSED = 1

@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Iterator
 
 import httpx
 
-from . import sqlite_util
+from istota.lib import sqlite_util
 
 if TYPE_CHECKING:
     from .config import Config

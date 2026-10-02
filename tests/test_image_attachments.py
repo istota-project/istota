@@ -1011,7 +1011,7 @@ class TestHeif:
         and without knowing one was sent. This pins the extension contract
         from the consumer's side rather than only at the sniff.
         """
-        from istota.image_sniff import EXTENSION_BY_MEDIA_TYPE
+        from istota.lib.image_sniff import EXTENSION_BY_MEDIA_TYPE
         from istota.transport.whatsapp.media import (
             INBOX_NAME_PREFIX, staged_name,
         )

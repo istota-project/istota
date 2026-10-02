@@ -47,8 +47,8 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Literal, Sequence
 
 from . import db
-from .llm_json import candidate_json_blocks
-from .untrusted import frame_untrusted
+from istota.lib.llm_json import candidate_json_blocks
+from istota.lib.untrusted import frame_untrusted
 
 logger = logging.getLogger("istota.speech_gate")
 

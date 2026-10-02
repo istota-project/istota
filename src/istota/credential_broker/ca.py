@@ -25,7 +25,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from ..atomic_write import write_bytes_atomic
+from istota.lib.atomic_write import write_bytes_atomic
 
 
 @dataclass

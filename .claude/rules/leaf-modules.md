@@ -111,7 +111,7 @@ The rclone API `storage.py` and `skills/files/__init__.py` each had a copy of: `
 
 - **A leaf rather than an import of `storage`** because `skills/files` runs in a skill subprocess and `storage` pulls in the package. `storage.py` keeps the private names as aliases so its callers and tests are unchanged.
 - **Only shared code lives here.** `rclone_list`, `rclone_move`, `rclone_download`, `rclone_upload` and `_rclone_run_or_raise` stay in the skill, which is their only caller.
-- **The pin is a source scan, not a mock.** `istota.storage.subprocess` and `istota.rclone_client.subprocess` are the same module object, so patching `rclone_client.subprocess.run` cannot tell a reintroduced local copy apart. `tests/test_rclone_client.py` patches `rclone_client.rclone_run`, which a local copy never calls, and asserts neither converted module contains `subprocess.run(`.
+- **The pin is a source scan, not a mock.** `istota.storage.subprocess` and `istota.lib.rclone_client.subprocess` are the same module object, so patching `rclone_client.subprocess.run` cannot tell a reintroduced local copy apart. `tests/test_rclone_client.py` patches `rclone_client.rclone_run`, which a local copy never calls, and asserts neither converted module contains `subprocess.run(`.
 
 stdlib-only leaf: `subprocess` and `logging`.
 
@@ -205,7 +205,7 @@ stdlib-only leaf, never raises.
 
 ## llm_json.py
 
-Where a markdown code fence starts and ends in **model** output: `toml_fence.py`'s question about a string the model wrote. The expressions it replaced had two different defects, each in its own file:
+Where a markdown code fence starts and ends in **model** output: `lib/toml_fence.py`'s question about a string the model wrote. The expressions it replaced had two different defects, each in its own file:
 
 - `context._parse_relevant_ids` had a bare backtick-run closer, so a run inside the JSON truncated the block.
 - The three health OCR modules were line-anchored on the closer but quadratic on repeated openers with no closer, on input whose size the model chooses. Anchoring narrows them (a decorated closer, a line-leading run inside the body), bounded because valid JSON cannot carry a raw newline in a string.

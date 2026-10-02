@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 
-from istota.file_lock import exclusive_lock
+from istota.lib.file_lock import exclusive_lock
 
 QUEUE_WAIT_TIMEOUT = 90.0
 

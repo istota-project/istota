@@ -22,7 +22,7 @@ from . import location
 from .build_info import build_description
 from .config import load_config
 from .location.models import LocationContext
-from .timestamps import iso_now
+from istota.lib.timestamps import iso_now
 
 logger = logging.getLogger("istota.webhook_receiver")
 

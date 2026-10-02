@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from istota.llm_json import (
+from istota.lib.llm_json import (
     FENCE_CLOSE_RE,
     FENCE_OPEN_RE,
     JsonCandidate,
@@ -504,7 +504,7 @@ class TestThereIsOneCopy:
         offenders = []
         for path in root.rglob("*.py"):
             rel = str(path.relative_to(root))
-            if rel in ("llm_json.py", "session/result.py"):
+            if rel in ("lib/llm_json.py", "session/result.py"):
                 continue
             text = path.read_text(encoding="utf-8")
             # Across the newline: this repo writes `re.compile(\n    r"..."`
@@ -514,3 +514,10 @@ class TestThereIsOneCopy:
             if re.search(r"compile\(\s*r?f?[\"']`{3}", text):
                 offenders.append(rel)
         assert offenders == []
+
+    def test_every_allowlisted_path_exists(self):
+        """A path that no longer exists would let the guards pass checking nothing."""
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent / "src" / "istota"
+        missing = [rel for rel in ("lib/llm_json.py", "session/result.py") if not (root / rel).is_file()]
+        assert missing == []

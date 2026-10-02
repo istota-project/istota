@@ -39,7 +39,7 @@ from istota.skills.email import (
     list_emails,
     search_emails,
 )
-from istota.untrusted import MARKER_REDACTION
+from istota.lib.untrusted import MARKER_REDACTION
 
 BOT = "bot@example.com"
 

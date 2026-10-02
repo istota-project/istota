@@ -37,7 +37,7 @@ import httpx
 from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import TextContent, ToolParameter, ToolSchema
 from istota.net_guard import ip_is_public as _ip_is_public
-from istota.untrusted import frame_untrusted
+from istota.lib.untrusted import frame_untrusted
 
 from .env import ToolEnv, WebFetchPolicy
 

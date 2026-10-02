@@ -35,8 +35,8 @@ from pathlib import Path
 
 import tomli
 
-from istota.atomic_write import write_text_atomic
-from istota.file_lock import exclusive_lock
+from istota.lib.atomic_write import write_text_atomic
+from istota.lib.file_lock import exclusive_lock
 from istota.money.core.ids import new_txn_id
 from istota.money.core.models import WorkEntry
 

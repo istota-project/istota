@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from istota.file_lock import exclusive_lock
+from istota.lib.file_lock import exclusive_lock
 
 REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src" / "istota"
@@ -257,10 +257,15 @@ class TestNoSecondCopy:
             if "time.sleep" not in text and "time.monotonic" not in text:
                 continue
             hits.add(str(path.relative_to(SRC)))
-        assert hits - _SINGLE_SHOT == {"file_lock.py"}, (
+        assert hits - _SINGLE_SHOT == {"lib/file_lock.py"}, (
             "a new flock retry loop appeared; call "
             "file_lock.exclusive_lock with an `on_timeout` instead"
         )
+
+    def test_every_allowlisted_path_exists(self):
+        """A path that no longer exists would let the guard pass checking nothing."""
+        missing = [rel for rel in ("lib/file_lock.py", *_SINGLE_SHOT) if not (SRC / rel).is_file()]
+        assert missing == []
 
     def test_every_single_shot_exemption_still_takes_the_lock(self):
         """A stale exemption is how a guard quietly stops guarding."""

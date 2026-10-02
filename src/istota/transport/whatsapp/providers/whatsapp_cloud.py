@@ -133,7 +133,7 @@ def build_adapter(config: "Config") -> WhatsAppProviderAdapter:
         )
 
     def verify(request: WhatsAppWebhookRequest) -> bool:
-        from ....http_headers import header_value  # noqa: PLC0415
+        from istota.lib.http_headers import header_value  # noqa: PLC0415
         from ..client import SIGNATURE_HEADER, verify_signature  # noqa: PLC0415
 
         return verify_signature(
@@ -354,7 +354,8 @@ async def _stage_one(
     receiver and (under `istota serve`) the web UI share, and the copy is the
     long pole.
     """
-    from .... import db, sqlite_util  # noqa: PLC0415
+    from istota import db  # noqa: PLC0415
+    from istota.lib import sqlite_util  # noqa: PLC0415
     from .. import media as media_rules  # noqa: PLC0415
     from ..client import WhatsAppMediaError, make_client  # noqa: PLC0415
 

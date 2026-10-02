@@ -2546,7 +2546,7 @@ class TestTheDeliveredCaptureFrame:
         )
         result = cmd_screenshot(args)
 
-        from istota.image_sniff import image_dimensions
+        from istota.lib.image_sniff import image_dimensions
 
         written = (workspace / "shot.png").read_bytes()
         assert result["capture"]["image"] == [1429, 804]

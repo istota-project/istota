@@ -153,7 +153,7 @@ thread. ``tests/test_sandbox_cache_sweeper.py`` holds the two pairs equal, the
 same way the forge-CLI version literals are held across the role and the two
 Dockerfiles.
 
-stdlib-only apart from :mod:`istota.du`, which holds the tree walk and the
+stdlib-only apart from :mod:`istota.lib.du`, which holds the tree walk and the
 first-level directory scan this module shares with the session-log sweep and
 with ``doctor``; ``du`` is itself a leaf that imports nothing from the package,
 so the boundary this file depends on still holds one level down. Takes its root
@@ -172,7 +172,7 @@ from collections.abc import Collection, Iterator
 from pathlib import Path
 from typing import NamedTuple
 
-from istota import du
+from istota.lib import du
 from istota.user_scope import is_scopable_user_id, scoped_user_dir
 
 logger = logging.getLogger("istota.sandbox_cache_sweeper")

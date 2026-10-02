@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from ... import db, room_veto
 from ...email_support import get_email_config
-from ...llm_json import find_fenced_block
+from istota.lib.llm_json import find_fenced_block
 from ...notification_resolvers import outbound_draft as draft_source
 from ...notification_store import RaiseResult, deliver_pending
 from ...skills.email import reply_to_email, send_email

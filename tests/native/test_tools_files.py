@@ -725,7 +725,7 @@ class TestReadAnImage:
 
     async def test_it_comes_back_as_two_blocks_text_first(self, tmp_path):
         from istota.llm.types import ImageContent, TextContent
-        from istota.untrusted import IMAGE_NOTICE
+        from istota.lib.untrusted import IMAGE_NOTICE
 
         path = _png(tmp_path)
         result = await _run(make_read_tool(_env(tmp_path)), {"file_path": str(path)})

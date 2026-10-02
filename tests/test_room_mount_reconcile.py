@@ -289,7 +289,7 @@ def test_rclone_fallback_requires_a_missing_file(migrated, returncode, expected)
     import subprocess
     config, old, new = migrated
     config.workspace_path = None
-    with patch("istota.rclone_client.subprocess.run", side_effect=[
+    with patch("istota.lib.rclone_client.subprocess.run", side_effect=[
         subprocess.CompletedProcess([], returncode, stdout="", stderr="read failed"),
         subprocess.CompletedProcess([], 0, stdout="old notes", stderr=""),
     ]) as command:

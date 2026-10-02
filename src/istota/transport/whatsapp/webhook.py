@@ -42,7 +42,7 @@ from datetime import datetime, timedelta, timezone
 
 from ... import commands, confirmations, db, room_veto
 from ...config import Config
-from ...http_headers import header_value
+from istota.lib.http_headers import header_value
 from ..ingest import record_phone_turn
 from . import (
     bsuid_fingerprint,

@@ -92,7 +92,7 @@ from .shell_exec import pipefail_env
 from .skill_host_paths import path_under_roots, workspace_roots
 from .user_scope import is_within, paths_overlap, scoped_user_dir
 from .skills._group_access import GROUP_MEMORY_LABEL
-from .untrusted import frame_untrusted
+from istota.lib.untrusted import frame_untrusted
 from .skills.calendar import get_caldav_client, get_calendars_for_user
 from .skills.whisper.out_of_process import transcribe_audio_out_of_process
 

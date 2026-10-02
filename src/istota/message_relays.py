@@ -539,7 +539,7 @@ def accept_room_reply(conn, config, *, actor_user_id: str, relay_id: str, surfac
 
 
 def _context(relay, outcome: str) -> str:
-    from .untrusted import frame_untrusted
+    from istota.lib.untrusted import frame_untrusted
 
     content = _REPLY_NOTICES[outcome]
     if relay is not None and relay["question"] is not None:

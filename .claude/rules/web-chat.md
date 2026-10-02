@@ -68,7 +68,7 @@ Console at `/chat`. Rooms are per-user channel tokens in `web_chat_rooms`, each 
 
 ### Attachments
 
-- Stored names: `_attachment_stem` plus random suffix, both halves from `istota.filenames.filename_parts`, and the extension allowlist checks the sanitised extension, not the raw one. Chip names persist on `messages.attachments` (via `transport.display_attachment_names`), since retention deletes `tasks`. The client sends `attachment_names` (positional; dropped on count mismatch).
+- Stored names: `_attachment_stem` plus random suffix, both halves from `istota.lib.filenames.filename_parts`, and the extension allowlist checks the sanitised extension, not the raw one. Chip names persist on `messages.attachments` (via `transport.display_attachment_names`), since retention deletes `tasks`. The client sends `attachment_names` (positional; dropped on count mismatch).
 - **Chips link to the file** (ISSUE-206): `transport.ingest.workspace_attachment_paths` stores `messages.attachment_paths` at ingest (`null` = not servable). Reads re-scope to the caller's workspace, so a co-member gets an inert chip. `POST /chat/attachments` returns `workspace_path`.
 - **Intake**: five paths into one `upload()`. Limits from `GET /chat/config` (`max_attachment_mb`, `attachment_extensions`), checked fail-open; the 413 is the backstop. App default 25 MB, Ansible deploys 100 and renders nginx `client_max_body_size` from the same variable. `heic` accepted. Native picks go via `IstotaUploader`, else 3 MiB windows into a blob-backed `File`.
 - A text-less send with attachments stores a `_describe_attachment_only_message` descriptor.

@@ -17,7 +17,7 @@ from importlib.resources import as_file, files
 
 from istota.health import db as health_db
 from istota.health.models import HealthContext
-from istota.timestamps import iso_now as _iso_now
+from istota.lib.timestamps import iso_now as _iso_now
 
 
 logger = logging.getLogger(__name__)

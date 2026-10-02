@@ -12,7 +12,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from istota.timestamps import iso_now, iso_now_seconds
+from istota.lib.timestamps import iso_now, iso_now_seconds
 
 REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src" / "istota"
@@ -106,12 +106,16 @@ class TestNoSecondCopy:
     is not what a reader would grep for and not what would come back.
     """
 
+    def test_every_allowlisted_path_exists(self):
+        """A path that no longer exists would let the guard pass checking nothing."""
+        assert (SRC / "lib" / "timestamps.py").is_file()
+
     def test_the_expression_appears_only_in_timestamps(self):
         needle = "datetime.now(timezone.utc).isoformat()"
         hits = set()
         for path in SRC.rglob("*.py"):
             rel = str(path.relative_to(SRC))
-            if rel == "timestamps.py":
+            if rel == "lib/timestamps.py":
                 continue
             for line in path.read_text(encoding="utf-8").splitlines():
                 if line.strip().startswith("#"):

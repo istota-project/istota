@@ -41,7 +41,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-from istota.file_lock import exclusive_lock
+from istota.lib.file_lock import exclusive_lock
 
 
 class MemoryMdLocked(RuntimeError):
@@ -104,7 +104,7 @@ def memory_md_lock(
     place — it carries no lock state once the FD closes; the OS releases the
     flock on context exit (and unconditionally on process death).
 
-    The acquisition loop itself is `istota.file_lock.exclusive_lock`, shared
+    The acquisition loop itself is `istota.lib.file_lock.exclusive_lock`, shared
     with the money work store and the ledger. This wrapper survives under its
     own name because `MemoryMdLocked` and the anchor-path derivation are part
     of this package's surface."""

@@ -965,7 +965,7 @@ class TestTheShimPlacement:
         read raise `UnicodeDecodeError`, which is the first and not the
         second."""
         monkeypatch.setattr(
-            "istota.atomic_write.write_text_atomic",
+            "istota.lib.atomic_write.write_text_atomic",
             lambda *a, **k: (_ for _ in ()).throw(ValueError("bad codec")),
         )
         user_temp = tmp_path / "temp" / "testuser"
