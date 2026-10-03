@@ -1,16 +1,19 @@
 """Code review skill CLI.
 
 `istota-skill code_review run --worktree <path> [--base <ref>] [--range <r>]
-[--intent <text>] [--agents both]` assembles a review of a branch diff and runs
-it past one or two text-only reviewers through the configured brain.
+[--intent <text>]` reviews a branch diff with one reviewer through the
+configured brain. The reviewer reads a snapshot of the reviewed commit with
+`Read`, `Grep` and `Glob`, inside a namespace that binds the snapshot and
+withholds every scope; where the snapshot or the namespace cannot be built it
+reviews text-only. `--agents` is accepted for one release and ignored.
 
 Where this runs matters more than what it does. The skill proxy spawns the
 module *outside* the sandbox with the daemon's filesystem view, so `load_config`,
 `make_brain` and the worktree are all reachable here and none of them is
-reachable from the model. Everything the reviewers see is assembled by
-`engine.py` from the repository; the caller supplies a path, a range and a line
-of intent, and nothing else. A model-authored prompt never becomes a
-daemon-side read.
+reachable from the model. Everything the reviewer sees is assembled by
+`engine.py` and `snapshot.py` from the repository's object store; the caller
+supplies a path, a range and a line of intent, and nothing else. A
+model-authored prompt never becomes a daemon-side read.
 
 Four things gate a run before a single token is spent, and all four are in
 `cmd_run` rather than spread across the engine:
@@ -48,22 +51,23 @@ from istota.skills._cli import emit, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import REPO, host_path
 
 from . import engine
+from . import snapshot as review_snapshot
 
 logger = logging.getLogger(__name__)
 
-# Context assembly, prompt building and merging happen outside any agent's
+# The diff, the snapshot and the prompt are built outside the reviewer's
 # timeout, so the command's own wall time is `timeout_seconds` plus this. The
 # proxy kills the command at the ceiling `_proxy_ceiling` resolves, and an
 # operator who raises `timeout_seconds` past it should learn about it from a
 # startup warning rather than from a review that dies half-finished.
 #
-# 20, from a measurement rather than an estimate. ISSUE-265 left the number
-# open for want of one; ISSUE-448 made it, on a 6-file, 318-line diff: total
-# command wall time was 240.9s against a 240s agent budget, so everything
-# outside the model calls cost about **one second**. Sixty was reserving a
-# fifth of the whole ceiling for that. The remaining twenty-fold margin covers
-# a diff at `max_diff_chars` with the caller-symbol search over a large
-# repository, which is the part of assembly that can actually take time —
+# 20, from measurements rather than an estimate. ISSUE-448 measured about one
+# second outside the model calls on a 6-file, 318-line diff. The snapshot is
+# now the part that can take time, and it was measured on a development
+# laptop (2026-10-03): this repository's own tree, 2,264 files and 46 MB,
+# took 0.6 to 0.8s; a synthetic 30,000-file, 92 MB tree took 5.0 to 5.2s,
+# diff and commit log included. A smaller host's disk is slower by some
+# factor this does not know, which is what the remaining margin is for —
 # `overhead_seconds` in the envelope is the measurement of every real run, so
 # the next reader can check this against evidence instead of picking another
 # number blind.
@@ -168,6 +172,32 @@ def _db_path() -> str:
     return os.environ.get("ISTOTA_DB_PATH", "").strip()
 
 
+#: Scopes the reviewer namespace withholds when the skill index cannot be read.
+_CORE_WITHHELD_SCOPES = frozenset({"files", "memory", "developer"})
+
+
+def _reviewer_withheld_scopes(config) -> frozenset[str]:
+    """Every scope, so the reviewer's namespace binds the run directory alone.
+
+    The reviewer reads a diff that may come from an outside contributor and
+    has no reason to see the user's workspace, memory or other repositories.
+    """
+    from istota.rooms.scopes import all_scopes
+    from istota.skills._loader import load_skill_index
+
+    try:
+        index = load_skill_index(
+            config.skills_dir, bundled_dir=config.bundled_skills_dir
+        )
+        return _CORE_WITHHELD_SCOPES | all_scopes(index)
+    except Exception as exc:
+        logger.warning(
+            "code_review could not read the skill index (%s: %s); withholding "
+            "files, memory and developer only", type(exc).__name__, exc,
+        )
+        return _CORE_WITHHELD_SCOPES
+
+
 def cmd_run(args):
     from istota import db
     from istota.brain import (
@@ -178,6 +208,10 @@ def cmd_run(args):
     )
     from istota.brain._aliases import split_effort
     from istota.config import load_config
+
+    # Accepted for one release so workflow files that still pass it keep
+    # working, and named back so the caller can drop it.
+    deprecated_flags = ["--agents"] if args.agents is not None else []
 
     config = load_config()
     dev = config.developer
@@ -264,7 +298,7 @@ def cmd_run(args):
     # Only the non-positive case is floored. A `timeout_seconds` of 0 or less
     # otherwise reaches the brains, which disagree about what it means — the
     # native one runs unbounded until the proxy kills the command, `claude_code`
-    # hands it to a `threading.Timer` and kills each agent at once — and neither
+    # hands it to a `threading.Timer` and kills the reviewer at once — and neither
     # is a review. A small *positive* budget is left alone: it is a choice an
     # operator can legitimately make, and raising it would mean overriding the
     # number the envelope reports in the same breath as reporting it.
@@ -276,7 +310,7 @@ def cmd_run(args):
     if proxy_ceiling > 0:
         # Clamped, not just warned about. Left alone, every agent would be given
         # a budget the proxy kills the whole command before it can spend, so
-        # each review would die half-finished having paid for both agents.
+        # each review would die half-finished having paid for its calls.
         # Shrinking is the only outcome that returns anything.
         #
         # Downward only, and the floor bounds how far down rather than being
@@ -296,7 +330,7 @@ def cmd_run(args):
             # place the deployment can say what went wrong.
             logger.warning(
                 "the %ss proxy ceiling for code_review cannot fit a review at "
-                "all: %ss reserved for assembly and the thread join, plus the "
+                "all: %ss reserved for assembly and overrun slack, plus the "
                 "%ss agent floor, needs %ss. The proxy will kill this command "
                 "before it answers. Raise security.skill_proxy_timeouts."
                 "code_review.",
@@ -307,8 +341,8 @@ def cmd_run(args):
     if agent_timeout < configured:
         logger.warning(
             "code_review timeout_seconds of %ss plus %ss reserved for assembly "
-            "and the thread join exceeds the %ss proxy ceiling for this skill, "
-            "so each agent is being given %ss instead. Lower timeout_seconds or "
+            "and overrun slack exceeds the %ss proxy ceiling for this skill, "
+            "so the reviewer is being given %ss instead. Lower timeout_seconds or "
             "raise security.skill_proxy_timeouts.code_review.",
             configured, RESERVED_SECONDS,
             proxy_ceiling, agent_timeout,
@@ -333,10 +367,8 @@ def cmd_run(args):
                 "code_review could not read the call budget for task %s, "
                 "proceeding uncapped: %s", task_id, exc,
             )
-        # `<= 0` means no reviews, matching `max_need_files = 0` next door rather
-        # than reading as "unlimited". Two adjacent knobs where 0 means opposite
-        # things is a trap, and on a spend control the expensive reading is the
-        # wrong one to guess at.
+        # `<= 0` means no reviews rather than "unlimited": on a spend control
+        # the expensive reading is the wrong one to guess at.
         if cap <= 0:
             _skip(
                 "call_cap",
@@ -375,87 +407,120 @@ def cmd_run(args):
         )
 
     cwd = Path(config.temp_dir) if config.temp_dir else Path("/tmp")
+    # Imported here rather than at module scope: `executor` imports
+    # `briefings.generate`, and a top-level import from any of these callers
+    # risks closing a cycle back through it.
+    from istota.executor import (
+        build_daemon_sandbox,
+        build_model_cli_env,
+        persist_brain_usage,
+        release_daemon_sandbox,
+    )
 
-    # Stage 4 of the single-reviewer spec: the engine runs one reviewer and
-    # asks for a snapshot and a namespace through these two callables. Until
-    # the CLI wires the real ones (Stage 5), every run is text-only, and the
-    # engine reports it as `reviewer.tools: false`.
+    # What the two builders made, for the `finally` below: the engine hands
+    # `invoke` the snapshot only when the namespace was built too, so a run
+    # whose namespace was refused still has a run directory to remove.
+    built: dict = {"snapshot": None, "sandbox": None}
+
     def build_snapshot(worktree_path, bundle):
-        raise engine.ReviewError(
-            "the review snapshot is not wired into the CLI yet",
-            reason="snapshot_failed",
+        if not config.temp_dir:
+            raise engine.ReviewError(
+                "no temp_dir is configured to hold the review snapshot",
+                reason="snapshot_failed",
+            )
+        snap = review_snapshot.build_snapshot(
+            worktree_path,
+            bundle,
+            root=Path(config.temp_dir),
+            user_id=user_id,
+            max_bytes=review_cfg.snapshot_max_bytes,
+            max_file_bytes=review_cfg.snapshot_max_file_bytes,
         )
+        built["snapshot"] = snap
+        return snap
 
-    def build_sandbox(snapshot):
-        raise RuntimeError("the reviewer namespace is not wired into the CLI yet")
+    def build_sandbox(snap):
+        box = build_daemon_sandbox(
+            config,
+            user_id,
+            extra_ro_binds=[snap.run_dir],
+            withheld_scopes=_reviewer_withheld_scopes(config),
+        )
+        built["sandbox"] = box
+        return box
 
     agent = "reviewer"
 
     def invoke(prompt: str, timeout: int, *, tools: bool, snapshot=None, sandbox=None):
-        # `tools` is never true while `build_snapshot` above always fails; the
-        # tool-granting request arrives with the snapshot wiring.
-        raw_model = review_cfg.bughunt_model
+        raw_model = review_cfg.model
         # Split here, not in the brain. `resolve_model_name` strips a `:effort`
         # tail and keeps only the base, so a configured "smart:high" handed to
         # it whole runs at default effort and silently drops the operator's
         # setting.
         base_model, effort = split_effort(raw_model)
         brain = make_brain(config.brain)
-        # Imported here rather than at module scope: `executor` imports
-        # `briefings.generate`, and a top-level import from any of these
-        # callers risks closing a cycle back through it.
-        from istota.executor import build_model_cli_env
+        model = brain.resolve_model_name(base_model)
 
-        req = BrainRequest(
-            prompt=prompt,
-            allowed_tools=[],
-            cwd=cwd,
-            # Not `dict(os.environ)` (ISSUE-395). What that carried depends
-            # on how this CLI was started: spawned by the skill proxy it holds
-            # the manifest-injected provider key rather than the daemon's own
-            # credentials, which `_split_credential_env` already removed; run
-            # host-side directly, `os.environ` *is* the daemon environment,
-            # master Fernet key and all. `build_model_cli_env` is the right
-            # answer to both.
-            env=build_model_cli_env(config),
-            timeout_seconds=timeout,
-            model=brain.resolve_model_name(base_model),
-            effort=effort or "",
-            # Streamed, though nothing here consumes the stream, and that is
-            # the point: the two paths differ in what survives a *timeout*
-            # (ISSUE-448). Non-streaming, a timeout is a `TimeoutExpired` out
-            # of `subprocess.run` and `_execute_simple_once` reads usage from an
-            # accounting dict only filled after the process exits and its output
-            # parses — so the call came back with `usage=None`,
-            # `persist_brain_usage` returned immediately, and the most expensive
-            # invocation the deployment makes was the one it never billed. The
-            # streaming path stamps usage at a single exit from the per-request
-            # frames it has already parsed, and returns `partial_text`
-            # (ISSUE-372's fix, which this caller was on the wrong side of).
-            # It also kills the process group rather than the direct child.
-            #
-            # What it does *not* recover is token totals: those come from the
-            # terminal frame's `modelUsage`, which a timed-out run never emits.
-            # The row carries `model_requests` and the context sizes, so the
-            # call is visible rather than absent — a fabricated cost would be
-            # worse than a missing one.
-            streaming=True,
-            on_progress=None,
-            cancel_check=None,
-            on_pid=None,
-            sandbox_wrap=None,
-            result_file=None,
-        )
+        # Two requests built in two places rather than one with conditional
+        # keywords: the grant and its confinement travel together in each, and
+        # `tests/test_brain_request_confinement.py` reads them off the AST.
+        #
+        # `env` is not `dict(os.environ)` (ISSUE-395). What that carried
+        # depends on how this CLI was started: spawned by the skill proxy it
+        # holds the manifest-injected provider key rather than the daemon's own
+        # credentials; run host-side directly, `os.environ` *is* the daemon
+        # environment, master Fernet key and all.
+        #
+        # Streamed, though nothing here consumes the stream, because the two
+        # paths differ in what survives a *timeout* (ISSUE-448): non-streaming,
+        # a timed-out call comes back with `usage=None` and is never billed,
+        # while the streaming path stamps usage from the frames it has parsed
+        # and returns `partial_text`. Token totals still come only from the
+        # terminal frame, which a timed-out run never emits.
+        if tools:
+            # The engine passes both only when the namespace was built. A
+            # `None` wrap here means the deployment confines no task
+            # (`sandbox_enabled = false`); `fs_read_roots` still bounds the
+            # native brain, and the read-only grant keeps the Claude CLI to
+            # Read, Grep and Glob.
+            sandbox_wrap = sandbox.wrap
+            req = BrainRequest(
+                prompt=prompt,
+                allowed_tools=["Read", "Grep", "Glob"],
+                cwd=snapshot.tree_dir,
+                env=build_model_cli_env(config),
+                fs_read_roots=[snapshot.run_dir],
+                sandbox_wrap=sandbox_wrap,
+                timeout_seconds=timeout,
+                model=model,
+                effort=effort or "",
+                streaming=True,
+                on_progress=None,
+                cancel_check=None,
+                on_pid=None,
+                result_file=None,
+            )
+        else:
+            req = BrainRequest(
+                prompt=prompt,
+                allowed_tools=[],
+                cwd=cwd,
+                env=build_model_cli_env(config),
+                sandbox_wrap=None,
+                timeout_seconds=timeout,
+                model=model,
+                effort=effort or "",
+                streaming=True,
+                on_progress=None,
+                cancel_check=None,
+                on_pid=None,
+                result_file=None,
+            )
         primary_started_at = time.time()
         primary_started_monotonic = time.monotonic()
         result = brain.execute(req)
 
-        # Imported here rather than at module scope: `executor` imports
-        # `briefings.generate`, and a top-level import from any of these callers
-        # risks closing a cycle back through it.
-        from istota.executor import persist_brain_usage
-
-        # One row per model call, with no task row behind it. A round is up to
+        # One row per model call, with no task row behind it. A run is up to
         # two invocations (the review and its reformat), so this is real spend.
         persist_brain_usage(
             config, None, usage=result.usage, origin="code_review",
@@ -506,14 +571,25 @@ def cmd_run(args):
             intent=args.intent or "",
             base=args.base,
             explicit_range=getattr(args, "range", None),
-            cfg=engine.ReviewConfig(max_diff_chars=review_cfg.max_diff_chars),
+            cfg=engine.ReviewConfig(
+                max_diff_chars=review_cfg.max_diff_chars,
+                file_budget=review_cfg.file_budget,
+                snapshot_max_bytes=review_cfg.snapshot_max_bytes,
+                snapshot_max_file_bytes=review_cfg.snapshot_max_file_bytes,
+            ),
             invoke=invoke,
             timeout_seconds=agent_timeout,
             build_snapshot=build_snapshot,
             build_sandbox=build_sandbox,
         )
     except engine.ReviewError as exc:
-        _fail(exc.reason, str(exc))
+        _fail(exc.reason, str(exc), deprecated_flags=deprecated_flags)
+    finally:
+        # Every path out of the run, `_fail`'s `SystemExit` and a raise from
+        # the model call included. Neither helper raises.
+        review_snapshot.remove_snapshot(built["snapshot"])
+        if built["sandbox"] is not None:
+            release_daemon_sandbox(built["sandbox"])
 
     rounds = envelope.pop("rounds", 0)
     if rounds and task_id is not None and db_path:
@@ -530,6 +606,7 @@ def cmd_run(args):
                 "task %s: %s", task_id, exc,
             )
     envelope["calls_used"] = calls_used
+    envelope["deprecated_flags"] = deprecated_flags
     envelope["max_calls"] = cap
     # `agent_timeout_seconds` comes back from the engine, which was handed the
     # already-clamped value. These two are what make it readable: without the
@@ -557,8 +634,8 @@ def cmd_run(args):
     if envelope["status"] != "ok":
         # The guard refusals above each log through `_fail` / `_skip`; a run that
         # got as far as calling models and came back with nothing had no line at
-        # any level, because the engine does not log and `invoke` logs only a
-        # call that failed — a reviewer answering unparseably is `success=True`.
+        # any level: `invoke` logs only a call that failed, and a reviewer
+        # answering unparseably is `success=True`.
         # That silence is the expensive part. A broken adapter makes *every*
         # review on the deployment come back this way (ISSUE-271), and since
         # this status no longer blocks the push, nothing else would show it: the
@@ -583,7 +660,7 @@ def cmd_run(args):
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="python -m istota.skills.code_review",
-        description="Review a branch diff with one or two text-only reviewers",
+        description="Review a branch diff with one reviewer over a read-only snapshot",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -616,13 +693,13 @@ def build_parser():
     )
     p_run.add_argument(
         "--agents",
-        choices=["both", "conformance", "bughunt"],
-        help="Force the reviewer set. Default sizes it from the diff",
+        help="Deprecated and ignored: one reviewer always runs. Reported in "
+             "the envelope's deprecated_flags; removed in the next release",
     )
     p_run.add_argument(
         "--timeout",
         type=int,
-        help="Per-agent wall-clock budget in seconds, overriding "
+        help="The reviewer's wall-clock budget in seconds, overriding "
              "[developer.review] timeout_seconds. Still clamped to fit under "
              "the skill proxy's ceiling for this skill",
     )

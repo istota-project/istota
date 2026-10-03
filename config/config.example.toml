@@ -1631,21 +1631,13 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # [developer.review]
 # enabled = true                      # false disables the CLI; the workflow then
 #                                     # reports "review unavailable" and lands anyway
-# conformance_model = "general"       # role alias; a ":effort" modifier is honoured
-# bughunt_model = "smart:high"        # e.g. "general:medium", "smart:high"
-# both_agents_threshold_lines = 150   # over this, both reviewers run
-# boundary_patterns = [               # case-insensitive substrings of changed paths;
-#     "auth", "secret", "credential", "token", "password",   # a hit forces both
-#     "migration", "schema.sql", "billing", "payment", "money",
-#     "crypto", "sandbox", "proxy", "deploy", "ansible",
-# ]
+# model = "smart:high"                # role alias; a ":effort" modifier is honoured.
+#                                     # Was bughunt_model, still read when model is unset
+# file_budget = 8                     # files the reviewer may read beyond the changed
+#                                     # ones; 0 or less reads as 8
+# snapshot_max_bytes = 104857600      # the reviewed commit's tree, written for the
+# snapshot_max_file_bytes = 2097152   # reviewer to read: total and per-file caps
 # max_diff_chars = 200000
-# max_context_chars = 60000
-# max_file_chars = 20000              # per changed file for whole-body inclusion;
-#                                     # over it, that file falls back to its hunks
-# max_callers_per_symbol = 8
-# max_need_files = 6                  # files a reviewer may request on the one
-#                                     # re-invocation; 0 disables the round trip
 # timeout_seconds = 480               # per agent; both run concurrently, so this is
 #                                     # wall time, not half of it. The bug hunter runs
 #                                     # a high-effort model and only on large diffs, and

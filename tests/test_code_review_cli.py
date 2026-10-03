@@ -186,6 +186,8 @@ class StubBrain:
     streaming: list = field(default_factory=list)
     # Wall time one call burns, for the tests that drive a budget to exhaustion.
     delay: float = 0.0
+    # The whole request, for the tests about what a call is granted.
+    requests: list = field(default_factory=list)
 
     def resolve_model_name(self, name: str) -> str:
         return f"resolved/{name}"
@@ -200,6 +202,7 @@ class StubBrain:
         self.prompts.append(req.prompt)
         self.timeouts.append(req.timeout_seconds)
         self.streaming.append(req.streaming)
+        self.requests.append(req)
         script = self.replies.get(agent, [])
         if not script:
             return StubResult(result_text='{"findings": []}')
@@ -263,6 +266,9 @@ def developer_config(tmp_path, monkeypatch):
             db_path=tmp_path / "framework.db",
             temp_dir=tmp_path / "temp",
         )
+        # The per-user temp dir a deployment creates at startup. Without it
+        # `build_daemon_sandbox` refuses and every run here would be text-only.
+        (tmp_path / "temp" / "admin").mkdir(parents=True, exist_ok=True)
         cfg.developer = DeveloperConfig(
             enabled=True,
             # Read back from the environment on purpose: the `worktree` fixture
@@ -291,10 +297,10 @@ class TestReviewConfigParsing:
             "\n"
             "[developer.review]\n"
             "enabled = false\n"
-            'conformance_model = "fast:low"\n'
-            'bughunt_model = "smart:high"\n'
-            "both_agents_threshold_lines = 42\n"
-            'boundary_patterns = ["auth", "billing"]\n'
+            'model = "fast:low"\n'
+            "file_budget = 3\n"
+            "snapshot_max_bytes = 5000\n"
+            "snapshot_max_file_bytes = 700\n"
             "max_diff_chars = 1234\n"
             "max_calls_per_task = 3\n"
             "timeout_seconds = 90\n"
@@ -302,10 +308,10 @@ class TestReviewConfigParsing:
         cfg = load_config(path)
         review = cfg.developer.review
         assert review.enabled is False
-        assert review.conformance_model == "fast:low"
-        assert review.bughunt_model == "smart:high"
-        assert review.both_agents_threshold_lines == 42
-        assert review.boundary_patterns == ["auth", "billing"]
+        assert review.model == "fast:low"
+        assert review.file_budget == 3
+        assert review.snapshot_max_bytes == 5000
+        assert review.snapshot_max_file_bytes == 700
         assert review.max_diff_chars == 1234
         assert review.max_calls_per_task == 3
         assert review.timeout_seconds == 90
@@ -315,18 +321,85 @@ class TestReviewConfigParsing:
         path.write_text('[developer]\nenabled = true\nrepos_dir = "/srv/repos"\n')
         review = load_config(path).developer.review
         assert review.enabled is True
+        assert review.model == "smart:high"
+        assert review.file_budget == 8
+        assert review.snapshot_max_bytes == 104_857_600
+        assert review.snapshot_max_file_bytes == 2_097_152
         assert review.max_calls_per_task == 8
-        assert review.both_agents_threshold_lines == 150
-        assert "auth" in review.boundary_patterns
 
-    def test_unknown_key_is_ignored_rather_than_fatal(self, tmp_path):
+    def test_unknown_key_is_ignored_rather_than_fatal(self, tmp_path, caplog):
         path = tmp_path / "config.toml"
         path.write_text(
             "[developer]\nenabled = true\n"
             "[developer.review]\nno_such_key = 7\nmax_calls_per_task = 2\n"
         )
-        review = load_config(path).developer.review
+        with caplog.at_level("WARNING", logger="istota.config"):
+            review = load_config(path).developer.review
         assert review.max_calls_per_task == 2
+        # Still reported: the hook walks the section with its own unknown list.
+        assert any("developer.review.no_such_key" in r.getMessage() for r in caplog.records)
+
+    def test_bughunt_model_stands_in_for_an_absent_model(self, tmp_path, caplog):
+        """The one reviewer is the correctness reviewer `bughunt_model` chose a
+        model for, so an upgraded deployment keeps the model it configured."""
+        path = tmp_path / "config.toml"
+        path.write_text(
+            "[developer]\nenabled = true\n"
+            '[developer.review]\nbughunt_model = "general:medium"\n'
+        )
+        with caplog.at_level("INFO", logger="istota.config"):
+            review = load_config(path).developer.review
+        assert review.model == "general:medium"
+        assert any("bughunt_model" in r.getMessage() for r in caplog.records)
+
+    def test_model_wins_over_bughunt_model(self, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text(
+            "[developer]\nenabled = true\n"
+            '[developer.review]\nmodel = "fast"\nbughunt_model = "general:medium"\n'
+        )
+        assert load_config(path).developer.review.model == "fast"
+
+    def test_retired_keys_are_dropped_without_an_unknown_key_warning(
+        self, tmp_path, caplog
+    ):
+        """An upgraded deployment did nothing wrong by still having them."""
+        path = tmp_path / "config.toml"
+        path.write_text(
+            "[developer]\nenabled = true\n"
+            "[developer.review]\n"
+            'conformance_model = "general"\n'
+            'bughunt_model = "smart:high"\n'
+            "both_agents_threshold_lines = 150\n"
+            'boundary_patterns = ["auth"]\n'
+            "max_context_chars = 60000\n"
+            "max_file_chars = 20000\n"
+            "max_callers_per_symbol = 8\n"
+            "max_need_files = 6\n"
+        )
+        with caplog.at_level("INFO", logger="istota.config"):
+            review = load_config(path).developer.review
+        assert review.model == "smart:high"
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert not any("unrecognised" in m for m in warnings), warnings
+        infos = " ".join(r.getMessage() for r in caplog.records if r.levelname == "INFO")
+        assert "max_need_files" in infos and "boundary_patterns" in infos
+
+    @pytest.mark.parametrize("value", [0, -3])
+    def test_a_non_positive_file_budget_reads_as_the_default(
+        self, tmp_path, caplog, value
+    ):
+        """Zero files would turn the reviewer back into a text-only one by
+        configuration."""
+        path = tmp_path / "config.toml"
+        path.write_text(
+            "[developer]\nenabled = true\n"
+            f"[developer.review]\nfile_budget = {value}\n"
+        )
+        with caplog.at_level("WARNING", logger="istota.config"):
+            review = load_config(path).developer.review
+        assert review.file_budget == 8
+        assert any("file_budget" in r.getMessage() for r in caplog.records)
 
     def test_author_credit_is_parsed(self, tmp_path):
         """Declared on the dataclass and by the env spec, but never read from TOML.
@@ -360,9 +433,9 @@ class TestCallCounterHelpers:
             assert db.code_review_calls_get(conn, task_row) == 2
 
     def test_a_multi_round_charge_lands_in_one_statement(self, review_db, task_row):
-        """A review whose reviewers took the `need_files` round trip spent two
-        model rounds. Charging both in one upsert is what keeps the guarantee
-        that two concurrent reviews cannot interleave into a single increment."""
+        """The helper takes a count, and charging it in one upsert is what keeps
+        the guarantee that two concurrent reviews cannot interleave into a
+        single increment. A run charges 1 today; the count stays general."""
         with db.get_db(review_db) as conn:
             assert db.code_review_calls_increment(conn, task_row, 2) == 2
             assert db.code_review_calls_increment(conn, task_row, 2) == 4
@@ -564,7 +637,7 @@ class TestReviewRun:
             return StubResult(result_text='{"findings": []}')
 
         monkeypatch.setattr(StubBrain, "execute", lambda self, req: _capture(req))
-        developer_config(bughunt_model="general:medium")
+        developer_config(model="general:medium")
         drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
         assert seen["model"] == "resolved/general"
         assert seen["effort"] == "medium"
@@ -874,6 +947,207 @@ class TestReviewRun:
 
 
 # --------------------------------------------------------------------------
+# The tool grant, its confinement, and cleanup
+# --------------------------------------------------------------------------
+
+
+def run_dirs(tmp_path: Path) -> list[Path]:
+    root = tmp_path / "temp" / ".review"
+    return sorted(root.rglob("run-*")) if root.exists() else []
+
+
+def work_dirs(tmp_path: Path) -> list[Path]:
+    root = tmp_path / "temp" / ".sandbox-work"
+    return sorted(root.rglob("work-*")) if root.exists() else []
+
+
+class TestTheReviewerRequest:
+    def test_the_review_call_reads_the_snapshot_and_nothing_else(
+        self, capsys, tmp_path, worktree, review_env, developer_config, stub_brain
+    ):
+        developer_config()
+        seen = {}
+
+        real_execute = StubBrain.execute
+
+        def _capture(self, req):
+            # Taken while the call runs: the run directory is gone afterwards.
+            seen["tree_files"] = sorted(
+                p.name for p in Path(req.cwd).iterdir()
+            ) if req.allowed_tools else None
+            return real_execute(self, req)
+
+        stub_brain.execute = _capture.__get__(stub_brain)
+        code, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+
+        assert code == 0
+        req = stub_brain.requests[0]
+        assert req.allowed_tools == ["Read", "Grep", "Glob"]
+        assert len(req.fs_read_roots) == 1
+        run_dir = Path(req.fs_read_roots[0])
+        assert run_dir.resolve().parent == (tmp_path / "temp" / ".review" / "admin").resolve()
+        assert run_dir.name.startswith("run-")
+        assert Path(req.cwd) == run_dir / "tree"
+        assert req.sandbox_wrap is not None
+        assert seen["tree_files"] == ["AGENTS.md", "app.py"]
+        assert envelope["reviewer"]["tools"] is True
+        assert envelope["snapshot"]["files"] == 2
+        assert envelope["deprecated_flags"] == []
+
+    def test_the_namespace_withholds_every_scope_and_binds_the_run_dir(
+        self, capsys, monkeypatch, worktree, review_env, developer_config, stub_brain
+    ):
+        from istota import executor
+
+        developer_config()
+        calls = []
+        real = executor.build_daemon_sandbox
+
+        def _spy(config, user_id, **kwargs):
+            calls.append((user_id, kwargs))
+            return real(config, user_id, **kwargs)
+
+        monkeypatch.setattr(executor, "build_daemon_sandbox", _spy)
+        drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+
+        assert len(calls) == 1
+        user_id, kwargs = calls[0]
+        assert user_id == "admin"
+        withheld = kwargs["withheld_scopes"]
+        assert {"files", "memory", "developer"} <= withheld
+        # The whole scope list, not the three named: every private skill too.
+        assert len(withheld) > 3
+        run_dir = Path(stub_brain.requests[0].fs_read_roots[0])
+        assert [Path(p) for p in kwargs["extra_ro_binds"]] == [run_dir]
+
+    def test_the_reformat_call_is_granted_nothing(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        developer_config()
+        stub_brain.replies["reviewer"] = ["prose, not json", findings_json(finding())]
+        drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+
+        tooled, reformat = stub_brain.requests
+        assert tooled.allowed_tools == ["Read", "Grep", "Glob"]
+        assert reformat.allowed_tools == []
+        assert reformat.sandbox_wrap is None
+        assert not reformat.fs_read_roots
+
+    def test_a_refused_namespace_reviews_text_only(
+        self, capsys, tmp_path, worktree, review_env, developer_config, stub_brain
+    ):
+        """A per-user temp dir that is a link names no directory the namespace
+        can be built around: the review still runs, with no tool grant, and
+        says why."""
+        developer_config()
+        (tmp_path / "temp" / "admin").rmdir()
+        (tmp_path / "elsewhere").mkdir()
+        (tmp_path / "temp" / "admin").symlink_to(tmp_path / "elsewhere")
+        code, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+
+        assert code == 0
+        assert envelope["status"] == "ok"
+        assert envelope["reviewer"]["tools"] is False
+        assert envelope["reviewer"]["tools_reason"] == "sandbox_refused"
+        assert [r.allowed_tools for r in stub_brain.requests] == [[]]
+        assert run_dirs(tmp_path) == []
+
+    def test_a_snapshot_that_cannot_be_built_reviews_text_only(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        cfg = developer_config()
+        cfg.temp_dir = ""
+        code, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+
+        assert code == 0
+        assert envelope["reviewer"]["tools"] is False
+        assert envelope["reviewer"]["tools_reason"] == "snapshot_failed"
+        assert envelope["snapshot"] is None
+        assert [r.allowed_tools for r in stub_brain.requests] == [[]]
+
+    def test_a_successful_run_leaves_no_run_or_work_dir(
+        self, capsys, tmp_path, worktree, review_env, developer_config, stub_brain,
+        review_db,
+    ):
+        developer_config()
+        stub_brain.replies["reviewer"] = [findings_json(finding())]
+        drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+
+        assert stub_brain.requests[0].allowed_tools  # the tooled path ran
+        assert run_dirs(tmp_path) == []
+        assert work_dirs(tmp_path) == []
+        with db.get_db(review_db) as conn:
+            assert db.code_review_calls_get(conn, review_env) == 1
+
+    def test_a_failed_model_call_leaves_no_run_or_work_dir(
+        self, capsys, tmp_path, worktree, review_env, developer_config, stub_brain
+    ):
+        developer_config()
+        stub_brain.replies["reviewer"] = [
+            StubResult(success=False, stop_reason="api_error")
+        ]
+        _, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+
+        assert envelope["reason"] == "review_failed"
+        assert stub_brain.requests[0].allowed_tools
+        assert run_dirs(tmp_path) == []
+        assert work_dirs(tmp_path) == []
+
+    def test_a_request_fault_after_the_snapshot_leaves_no_run_or_work_dir(
+        self, capsys, monkeypatch, tmp_path, worktree, review_env,
+        developer_config, stub_brain,
+    ):
+        from istota.skills.code_review import engine
+
+        developer_config()
+        seen = {}
+
+        def _raise(*args, **kwargs):
+            seen["run_dirs"] = run_dirs(tmp_path)
+            raise engine.ReviewError("reaches outside", reason="git_dir_not_allowed")
+
+        monkeypatch.setattr(engine, "_run_reviewer", _raise)
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+            "--agents", "both",
+        )
+
+        assert code == 1
+        assert envelope["reason"] == "git_dir_not_allowed"
+        assert envelope["deprecated_flags"] == ["--agents"]
+        # Control: the snapshot did exist while the run was in progress.
+        assert len(seen["run_dirs"]) == 1
+        assert run_dirs(tmp_path) == []
+        assert work_dirs(tmp_path) == []
+
+    @pytest.mark.parametrize("value", ["both", "conformance", "bughunt"])
+    def test_the_retired_agents_flag_is_accepted_and_reported(
+        self, capsys, worktree, review_env, developer_config, stub_brain, value
+    ):
+        """argparse would otherwise turn an old workflow's flag into a usage
+        error that reads like a broken skill."""
+        developer_config()
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+            "--agents", value,
+        )
+        assert code == 0
+        assert envelope["status"] == "ok"
+        assert envelope["deprecated_flags"] == ["--agents"]
+        assert len(stub_brain.requests) == 1
+
+    def test_the_configured_model_is_the_reviewer_s(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        developer_config(model="fast:low")
+        _, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        req = stub_brain.requests[0]
+        assert req.model == "resolved/fast"
+        assert req.effort == "low"
+        assert envelope["reviewer"]["model"] == "resolved/fast"
+
+
+# --------------------------------------------------------------------------
 # The cap
 # --------------------------------------------------------------------------
 
@@ -919,10 +1193,8 @@ class TestCallCap:
     def test_a_cap_of_zero_permits_nothing_rather_than_everything(
         self, capsys, worktree, review_env, developer_config, stub_brain
     ):
-        """`max_need_files = 0` disables its feature, so a neighbouring knob
-        where 0 silently means "unlimited" is a trap — and on a spend control
-        the expensive reading is the wrong one to guess at. An operator who
-        wants the feature off has `enabled = false`."""
+        """On a spend control the expensive reading of 0 is the wrong one to
+        guess at. An operator who wants the feature off has `enabled = false`."""
         developer_config(max_calls_per_task=0)
         code, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
         assert code == 0
