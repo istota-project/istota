@@ -27,6 +27,7 @@ pytest.importorskip("PIL", reason="Pillow not installed")
 from PIL import Image, ImageDraw, ImageOps  # noqa: E402
 
 from istota import image_attachments  # noqa: E402
+from istota.sandbox import attachment_source  # noqa: E402
 from istota.brain._types import ImageInput  # noqa: E402
 from istota.image_attachments import (  # noqa: E402
     IMAGE_EXTENSIONS,
@@ -493,22 +494,33 @@ class TestNormalization:
 
 
 class TestBindRoots:
-    """An image the sandbox cannot see is copied, even when it needs no rewrite.
+    """Under a sandbox every image becomes a daemon-owned copy.
 
     `build_bwrap_cmd` binds the task temp dir, `{mount}/Users/{user}`,
     `{mount}/Talk` and `{mount}/Channels/{token}` and nothing else, while the
     nc-data fallback in the scheduler hands out `/mnt/nc-data/<user>/files/…`
     paths that are bound by nothing. A small in-limits screenshot arriving that
-    way would be named in the Claude Code directive and be unreadable, so
-    containment — not size or format — is what forces the rewrite here.
+    way would be named in the Claude Code directive and be unreadable.
+
+    An image *under* a bind is copied too (ISSUE-610): the OCR child and the
+    native brain both read the prepared path by name in the daemon, and a path
+    in the workspace is one a task can swap for a link after preparation.
     """
+
+    @pytest.fixture(autouse=True)
+    def _nc_data(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(attachment_source, "NC_DATA_ROOT", tmp_path / "nc-data")
+
+    @staticmethod
+    def _talk_fallback(tmp_path, name="shot.png") -> Path:
+        outside = tmp_path / "nc-data" / "alice" / "files" / "Talk"
+        outside.mkdir(parents=True, exist_ok=True)
+        return outside / name
 
     def test_an_image_outside_every_bind_is_copied_into_the_task_temp_dir(
         self, tmp_path, ocr_calls
     ):
-        outside = tmp_path / "nc-data" / "alice" / "files" / "Talk"
-        outside.mkdir(parents=True)
-        src = _png(outside / "shot.png")
+        src = _png(self._talk_fallback(tmp_path))
         bound = tmp_path / "bound"
         bound.mkdir()
 
@@ -523,7 +535,44 @@ class TestBindRoots:
         # Copied, not degraded: a PNG stays a PNG.
         assert prep.images[0].media_type == "image/png"
 
-    def test_an_image_under_a_bind_is_left_where_it_is(self, tmp_path, ocr_calls):
+    def test_the_rclone_temp_dir_shape_is_copied_in(self, tmp_path, ocr_calls):
+        temp = tmp_path / "temp"
+        temp.mkdir()
+        src = _png(temp / "shot.png")
+
+        prep = prepare_image_attachments(
+            [str(src)], tmp_path / "usertmp", 3,
+            bind_roots=[tmp_path / "bound"], temp_dir=temp,
+        )
+
+        assert prep.images[0].path.is_relative_to((tmp_path / "usertmp").resolve())
+
+    @pytest.mark.parametrize("subdir", ["whatsapp-media", "attachments_ab12cd"])
+    def test_the_daemons_temp_fallback_copies_are_copied_in(
+        self, tmp_path, ocr_calls, subdir
+    ):
+        temp = tmp_path / "temp"
+        (temp / subdir).mkdir(parents=True)
+        src = _png(temp / subdir / "shot.png")
+
+        prep = prepare_image_attachments(
+            [str(src)], tmp_path / "usertmp", 3,
+            bind_roots=[tmp_path / "bound"], temp_dir=temp,
+        )
+
+        assert prep.images[0].path.is_relative_to((tmp_path / "usertmp").resolve())
+
+    def test_a_missing_file_is_reported_as_missing(self, tmp_path, ocr_calls):
+        bound = tmp_path / "bound"
+        bound.mkdir()
+
+        prep = prepare_image_attachments(
+            [str(bound / "gone.png")], tmp_path / "usertmp", 3, bind_roots=[bound],
+        )
+
+        assert prep.ocr_blocks[0].detail == "the file is missing"
+
+    def test_an_image_under_a_bind_is_copied_as_well(self, tmp_path, ocr_calls):
         bound = tmp_path / "bound"
         bound.mkdir()
         src = _png(bound / "shot.png")
@@ -532,33 +581,65 @@ class TestBindRoots:
             [str(src)], tmp_path / "usertmp", 3, bind_roots=[bound],
         )
 
-        assert prep.images[0].path == src.resolve()
+        out = prep.images[0].path
+        assert out.is_relative_to((tmp_path / "usertmp").resolve())
+        assert out.read_bytes() == src.read_bytes()
+        assert ocr_calls[0][0] == str(out)
 
-    def test_containment_is_decided_on_the_resolved_path(self, tmp_path, ocr_calls):
-        """A symlink from inside a bind to a file outside it is still outside.
+    @pytest.mark.parametrize("shape", ["leaf", "directory"])
+    def test_a_link_under_a_bind_is_refused(self, tmp_path, ocr_calls, shape):
+        """ISSUE-610: the link is not followed, wherever it points.
 
-        bwrap binds the *resolved* source, so a link under a bound directory
-        buys the model nothing — the file it points at is in no namespace.
+        The target stands in for a file the daemon can read and no sandbox
+        can see. Before the fix it was decoded, re-encoded into the task's
+        attachments and OCR'd.
         """
-        outside = tmp_path / "elsewhere"
-        outside.mkdir()
-        real = _png(outside / "shot.png")
+        private = tmp_path / "private"
+        private.mkdir()
+        real = _png(private / "shot.png", color=(200, 1, 1))
         bound = tmp_path / "bound"
         bound.mkdir()
-        (bound / "shot.png").symlink_to(real)
+        if shape == "leaf":
+            (bound / "shot.png").symlink_to(real)
+            named = bound / "shot.png"
+        else:
+            (bound / "inbox").symlink_to(private)
+            named = bound / "inbox" / "shot.png"
 
         prep = prepare_image_attachments(
-            [str(bound / "shot.png")], tmp_path / "usertmp", 3, bind_roots=[bound],
+            [str(named)], tmp_path / "usertmp", 3, bind_roots=[bound],
         )
 
-        assert prep.images[0].path.is_relative_to((tmp_path / "usertmp").resolve())
+        assert prep.images == []
+        assert list(ocr_calls) == []
+        assert not (tmp_path / "usertmp").exists() or not any(
+            (tmp_path / "usertmp").iterdir()
+        )
+        assert prep.attachments == [str(named)]
+        assert [b.display_name for b in prep.ocr_blocks] == ["shot.png"]
+        assert prep.ocr_blocks[0].kind == image_attachments.KIND_OMITTED
+
+    def test_an_unexpected_location_outside_every_bind_is_refused(
+        self, tmp_path, ocr_calls
+    ):
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        src = _png(outside / "shot.png")
+
+        prep = prepare_image_attachments(
+            [str(src)], tmp_path / "usertmp", 3, bind_roots=[tmp_path / "bound"],
+        )
+
+        assert prep.images == []
+        assert list(ocr_calls) == []
 
     def test_the_task_temp_dir_itself_never_needs_copying_twice(
         self, tmp_path, ocr_calls
     ):
         """A rewrite already lands under the temp dir, which is always bound."""
         user_tmp = tmp_path / "usertmp"
-        src = _jpeg(tmp_path / "pano.jpg", size=(3000, 2000))
+        user_tmp.mkdir()
+        src = _jpeg(user_tmp / "pano.jpg", size=(3000, 2000))
 
         prep = prepare_image_attachments(
             [str(src)], user_tmp, 3, bind_roots=[user_tmp],
@@ -575,9 +656,7 @@ class TestBindRoots:
         to produce a file that has to hold the same picture — and OCR reads the
         result.
         """
-        outside = tmp_path / "elsewhere"
-        outside.mkdir()
-        src = _jpeg(outside / "scan.jpg", size=(400, 300))
+        src = _jpeg(self._talk_fallback(tmp_path, "scan.jpg"), size=(400, 300))
         bound = tmp_path / "bound"
         bound.mkdir()
 
@@ -601,9 +680,7 @@ class TestBindRoots:
         real.mkdir()
         link = tmp_path / "tmplink"
         link.symlink_to(real)
-        outside = tmp_path / "elsewhere"
-        outside.mkdir()
-        src = _png(outside / "shot.png")
+        src = _png(self._talk_fallback(tmp_path))
 
         prep = prepare_image_attachments(
             [str(src)], link / "alice", 3, bind_roots=[tmp_path / "bound"],

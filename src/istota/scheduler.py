@@ -30,6 +30,7 @@ from croniter import croniter
 # its own back into the package, so there is no cycle to avoid.
 from istota.maintenance import host_pressure as host_pressure_mod
 from istota.sandbox import cgroup as task_cgroup
+from istota.sandbox import attachment_source
 
 logger = logging.getLogger("istota.scheduler")
 # What a partial answer from an interrupted run is labelled with when it is
@@ -926,7 +927,7 @@ def download_talk_attachments(config: Config, attachments: list[str]) -> list[st
                 else:
                     # File may be in a user's Talk folder (NC stores shared files
                     # in the sender's data dir). Check NC data dir if available.
-                    nc_data = Path("/mnt/nc-data")
+                    nc_data = attachment_source.NC_DATA_ROOT
                     found = False
                     if nc_data.is_dir():
                         filename = att.split("/", 1)[1] if "/" in att else att
@@ -991,8 +992,9 @@ def localize_workspace_attachments(
     re-map a web upload's real path and warn about it.
 
     Checked here and read later by name, as a web upload is: a task of the
-    same user can swap the leaf for a symlink in between. Closing that means
-    an fd walk and a copy, for both surfaces at once.
+    same user can swap the leaf for a symlink in between. The executor's
+    readers do not trust this check: `sandbox.attachment_source` opens each
+    attachment with no link followed at any component (ISSUE-610).
     """
     root = config.workspace_root(user_id) if user_id else None
     if root is None:

@@ -28,6 +28,7 @@ pytest.importorskip("PIL", reason="Pillow not installed")
 from PIL import Image  # noqa: E402
 
 from istota import db, executor, image_attachments  # noqa: E402
+from istota.sandbox import attachment_source  # noqa: E402
 from istota.brain._types import BrainResult  # noqa: E402
 from istota.config import BrainConfig, Config, SecurityConfig, UserConfig  # noqa: E402
 from istota.executor import execute_task  # noqa: E402
@@ -203,7 +204,9 @@ class TestEffectivePrompt:
     ):
         """The `effective_prompt` refactor must not cost the shipped audio path."""
         config = _make_config(tmp_path)
-        audio = tmp_path / "inbox" / "memo.m4a"
+        # Where a mountless upload lands: under the per-user temp dir, which
+        # is a root the staging step reads from without a copy.
+        audio = config.temp_dir / "alice" / "inbox" / "memo.m4a"
         audio.parent.mkdir(parents=True, exist_ok=True)
         audio.write_bytes(b"not really audio")
         monkeypatch.setattr(
@@ -238,7 +241,9 @@ class TestEffectivePrompt:
         OCR text is the half that must *not* go there.
         """
         config = _make_config(tmp_path)
-        audio = tmp_path / "inbox" / "memo.m4a"
+        # Where a mountless upload lands: under the per-user temp dir, which
+        # is a root the staging step reads from without a copy.
+        audio = config.temp_dir / "alice" / "inbox" / "memo.m4a"
         audio.parent.mkdir(parents=True, exist_ok=True)
         audio.write_bytes(b"not really audio")
         monkeypatch.setattr(
@@ -634,7 +639,8 @@ class TestPathsAndBinds:
         monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
         monkeypatch.setattr(executor, "_bwrap_supports_remount_ro", lambda: True)
         monkeypatch.setattr(executor, "_bwrap_supports_disable_userns", lambda: True)
-        img = _png(tmp_path / "inbox" / "pano.png", size=(3000, 2000))
+        (link / "alice" / "inbox").mkdir(parents=True)
+        img = _png(link / "alice" / "inbox" / "pano.png", size=(3000, 2000))
         brain = _CaptureBrain()
 
         with db.get_db(config.db_path) as conn:
@@ -703,6 +709,7 @@ class TestPathsAndBinds:
         monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
         monkeypatch.setattr(executor, "_bwrap_supports_remount_ro", lambda: True)
         monkeypatch.setattr(executor, "_bwrap_supports_disable_userns", lambda: True)
+        monkeypatch.setattr(attachment_source, "NC_DATA_ROOT", tmp_path / "nc-data")
         outside = tmp_path / "nc-data" / "alice" / "files" / "Talk"
         img = _png(outside / "shot.png")
         brain = _CaptureBrain()
