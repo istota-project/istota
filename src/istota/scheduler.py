@@ -5545,6 +5545,18 @@ def cleanup_old_temp_files(config: Config, retention_days: int) -> int:
     if not config.temp_dir.exists():
         return 0
 
+    # A code review's run dir holds a whole repository snapshot, so it gets an
+    # hour rather than the retention window below. The private work dir
+    # `build_daemon_sandbox` makes beside it goes on the same rule.
+    try:
+        from .skills.code_review.snapshot import sweep_stale_run_dirs
+
+        swept = sweep_stale_run_dirs(config.temp_dir)
+        if swept:
+            logger.info("Removed %d stale code review run dir(s)", swept)
+    except Exception as e:
+        logger.warning("code_review_run_dir_sweep_failed error=%s", e)
+
     cutoff = time.time() - (retention_days * 24 * 60 * 60)
     deleted = 0
 
