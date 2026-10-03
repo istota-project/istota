@@ -1087,6 +1087,7 @@ def build_daemon_sandbox(
     user_id: str,
     *,
     extra_ro_binds: Iterable[Path] | None = None,
+    withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
 ) -> DaemonSandbox:
     """Bubblewrap for a model call that has no task behind it (ISSUE-397).
 
@@ -1157,6 +1158,17 @@ def build_daemon_sandbox(
     swapped in under it, which is ISSUE-320 reopened. The two gates are one on
     purpose, and narrowing the namespace here means narrowing them together.
 
+    ``withheld_scopes`` narrows that, for a caller whose input is somebody
+    else's content (the code reviewer reads a diff that may come from an
+    outside contributor). It goes to ``build_bwrap_cmd`` as it does for a
+    shared-room task: without ``files`` no ``{mount}/Users/{user_id}`` and no
+    resource mounts, without ``developer`` no repos subtree and no derived
+    cache (``resolve_sandbox_cache_dir`` drops it on the same argument, so the
+    two gates stay one), and with anything withheld no Talk bind and no
+    ``~/.claude`` session directories. It does **not** move the namespace to a
+    ``room-task-<id>`` directory: that choice is ``task_temp_dir``'s, made in
+    ``execute_task``, and this path binds its own ``work_dir`` either way.
+
     Never raises; a failure to read the user's resources costs the resource
     binds, not the wrap.
     """
@@ -1191,6 +1203,7 @@ def build_daemon_sandbox(
         )
         user_resources = []
     is_admin = config.is_admin(user_id)
+    withheld = frozenset(withheld_scopes)
     binds: list[Path] = []
     for path in extra_ro_binds or []:
         try:
@@ -1202,6 +1215,7 @@ def build_daemon_sandbox(
         return build_bwrap_cmd(
             raw_cmd, config, task, is_admin, user_resources, work_dir,
             extra_ro_binds=binds, profile=SandboxProfile.CLAUDE,
+            withheld_scopes=withheld,
         )
 
     return DaemonSandbox(_wrap, work_dir)
