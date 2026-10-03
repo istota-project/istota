@@ -189,8 +189,8 @@ from .brain.claude_code import (  # noqa: E402,F401  (kept after module docstrin
 )
 from .brain.claude_code import CLI_SETTINGS_FILENAME, cli_settings_document  # noqa: E402
 
-# Audio extensions eligible for pre-transcription (matches whisper skill file_types)
-_AUDIO_EXTENSIONS = frozenset({"mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"})
+# Audio extensions eligible for pre-transcription; `webui/app.py` imports this name.
+from .lib.audio_sniff import AUDIO_EXTENSIONS as _AUDIO_EXTENSIONS  # noqa: E402
 
 # Wall clock for pre-transcribing *all* of one send's audio, not each file.
 # `_pre_transcribe_attachments` runs on a worker thread before the brain is
