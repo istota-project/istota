@@ -228,6 +228,14 @@ class TestTheMediaKind:
         assert event.media.staged_path == _STAGED
         assert event.media.error is None
 
+    def test_text_on_an_audio_frame_never_reaches_the_gates(self):
+        event = proto.inbound_event(_inbound(
+            message_type="audio", text="STOP", media_name=_STAGED,
+        ))
+
+        assert event.text is None
+        assert event.media.kind == "audio"
+
     def test_an_image_frame_still_carries_an_image_record(self):
         event = proto.inbound_event(_inbound(
             message_type="image", media_name=_STAGED.replace(".ogg", ".jpg"),

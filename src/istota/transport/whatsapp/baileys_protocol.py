@@ -472,8 +472,10 @@ def _inbound_media(payload: dict[str, Any]) -> WhatsAppInboundMedia | None:
         return None
 
     # The kind is what the sidecar said the message was, and a media field on
-    # any other type is a combination our own sidecar never sends. It costs
-    # the media and keeps the message, like every other unreadable field.
+    # any other type is a combination our own sidecar never sends. It is
+    # refused like every other unreadable field: the record carries a failure,
+    # so STOP, commands and answers still work and a request takes the
+    # media-failed reply rather than running without the file.
     declared = payload.get("message_type")
     if declared not in media_rules.MEDIA_KINDS:
         return _dropped_media("message_type")
@@ -591,6 +593,11 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
         payload.get("callback_data"), "callback_data", MAX_MESSAGE_ID_CHARS,
     )
     inbound_media = _inbound_media(payload)
+    if message_type == "audio":
+        # Audio carries no caption, and the daemon holds that rather than the
+        # sidecar: text on a voice note would reach STOP, the confirmation
+        # parse and `!` dispatch, and spoken words never drive those gates.
+        text = None
     sender = _text(payload, "jid")
     group = None
     if payload.get("group") is True:

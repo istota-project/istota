@@ -118,6 +118,23 @@ has everything it needs — this sentence is there so the prompt is not empty an
 so the turn reads correctly in task history.
 """
 
+
+def media_stand_in(
+    media: WhatsAppInboundMedia | None, attachments: list[str],
+) -> str:
+    """The prompt a message with a file and no words becomes.
+
+    A voice note with its file attached takes the web composer's own
+    descriptor, so the turn reads the same whichever surface it came from and
+    the executor appends the transcript. Everything else, an uncaptioned image
+    included, keeps `MEDIA_ONLY_PROMPT`. Shared with the relay reply path,
+    which builds the same task for a quoted answer.
+    """
+    if media is not None and media.kind == "audio" and attachments:
+        return describe_attachment_only_message(attachments)
+    return MEDIA_ONLY_PROMPT
+
+
 _TEXT_TYPES = frozenset({"text"})
 _CALLBACK_TYPES = frozenset({"interactive", "button"})
 
@@ -1131,16 +1148,8 @@ def _dispatch_inbound(
     attachments = (
         [event.media.staged_path] if event.media is not None else []
     )
-    # A voice note stands in the web composer's own descriptor, so the turn
-    # reads the same whichever surface it came from; the executor appends the
-    # transcript. An uncaptioned image keeps its settled wording.
-    prompt = text or (
-        describe_attachment_only_message(attachments)
-        if event.media is not None and event.media.kind == "audio"
-        else MEDIA_ONLY_PROMPT
-    )
     turn = record_whatsapp_turn(
-        conn, config, user_id, prompt,
+        conn, config, user_id, text or media_stand_in(event.media, attachments),
         external_id=event.message_id, attachments=attachments,
     )
     confirmations.cancel_for_conversation(conn, turn.room_token, user_id, by="whatsapp")
