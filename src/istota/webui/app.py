@@ -1635,6 +1635,10 @@ async def callback(request: Request):
     if not display_name:
         display_name = username
 
+    if _config is not None:
+        # Unthrottled: a user added since load must not be refused here just
+        # because another request checked within the last second.
+        await asyncio.to_thread(refresh_user_profiles_if_changed, _config)
     if not username or (_config and _config.users and username not in _config.users):
         return Response("Access denied: user not configured", status_code=403)
 
@@ -8447,15 +8451,12 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
     stored; the flag is what tells the pane to show it as unrecognized.
 
     `external_turn_display` is read **live from `user_profiles`**, not off the
-    `_config.users` snapshot the rest of this handler uses. That snapshot is
-    rebuilt only by `_reload_config` — at startup and on SIGHUP — while
-    `PUT /settings/profile` writes the row and deliberately syncs nothing in
-    memory (the gates that read these fields read them live). So resolving this
-    one from the snapshot would have the settings pane show the new value, from
-    its own live read, while the transcript kept applying the old one until the
-    web process was restarted. `outbound_approval` below has the same staleness;
-    it is left as-is because nothing edits it yet and closing it means moving
-    `effective_policy` off the snapshot too.
+    `_config.users` snapshot the rest of this handler uses. That snapshot
+    follows `user_profiles` through `refresh_user_profiles_if_changed`, which
+    `_require_api_auth` runs at most once a second, so it can be up to a second
+    behind a save; the live read keeps the transcript in step with the settings
+    pane's own read. `outbound_approval` below reads the snapshot and can lag by
+    the same second.
     """
     from istota import user_profiles  # noqa: PLC0415
     from istota.mail.outbound_policy import VALID_POLICIES, effective_policy  # noqa: PLC0415
@@ -12834,14 +12835,13 @@ def _user_talk_channels(user_id: str) -> list[tuple[str, str]]:
     fallback for a user who has one from config.toml and no row yet.
 
     A caveat that belongs to the whole pair rather than to this function.
-    ``_config.users`` is a snapshot rebuilt at startup and on SIGHUP, so a
-    channel changed through the web API is live here and stale in
-    ``notifications.resolve_destinations`` until a reload — the same staleness
-    `.claude/rules/web-chat.md` records for ``outbound_approval``. Reading the
-    row is still the right answer for a picker, which must show what the user
-    just saved; it means the "Alerts channel" option can name a conversation a
-    bare ``talk`` has not started resolving to yet. A pinned ``talk:<token>``
-    goes through the descriptor path and is unaffected.
+    ``_config.users`` is a snapshot that each process re-applies from
+    ``user_profiles`` when the table changes (the scheduler each loop tick, the
+    web app at most once a second), so a channel changed through the web API is
+    live here and briefly behind in ``notifications.resolve_destinations``.
+    Reading the row is still the right answer for a picker, which must show
+    what the user just saved. A pinned ``talk:<token>`` goes through the
+    descriptor path and is unaffected.
     """
     from istota import user_profiles
 

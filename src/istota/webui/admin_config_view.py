@@ -93,6 +93,7 @@ _EXCLUDED_TOP_LEVEL = {
     # Process state for the live profile refresh, not configuration.
     "_profile_generation",
     "_profile_checked_at",
+    "_profile_refresh_failing",
 }
 
 # Top-level fields rendered as a count rather than their contents: lists of

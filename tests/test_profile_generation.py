@@ -241,3 +241,107 @@ class TestTheCallers:
         finally:
             sched.request_shutdown()
             t.join(timeout=10.0)
+
+    async def test_the_oauth_callback_admits_a_user_added_since_load(
+        self, db_path, tmp_path, monkeypatch,
+    ):
+        """The callback's "user not configured" gate refreshes unthrottled, so
+        a check another request made within the last second cannot refuse a
+        user created since load."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from httpx import ASGITransport, AsyncClient
+
+        import istota.webui.app as web_app
+        from tests.test_room_members_api import _config as _web_config
+
+        cfg = _web_config(db_path, tmp_path)
+        user_profiles.import_from_user_configs(db_path, cfg.users)
+        monkeypatch.setattr(web_app, "_config", cfg)
+        monkeypatch.setattr(web_app.app.state, "istota_config", cfg, raising=False)
+        oauth = MagicMock()
+        oauth.nextcloud.authorize_access_token = AsyncMock(
+            return_value={"user_id": "dave"},
+        )
+        monkeypatch.setattr(web_app, "_oauth", oauth)
+        # Another request has just checked, so the throttled path would skip.
+        refresh_user_profiles_if_changed(cfg, min_interval=60.0)
+        user_profiles.ensure_profile(db_path, "dave", display_name="Dave")
+
+        transport = ASGITransport(app=web_app.app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as c:
+            resp = await c.get("/istota/callback", follow_redirects=False)
+        assert resp.status_code != 403, resp.text
+        assert "dave" in cfg.users
+
+    def test_the_sms_webhook_routes_a_number_saved_since_load(
+        self, tmp_path, monkeypatch,
+    ):
+        from urllib.parse import urlencode
+
+        from fastapi.testclient import TestClient
+        from twilio.request_validator import RequestValidator
+
+        from istota.transport.sms.providers.registry import make_provider_registry
+        from istota.webui import webhook_receiver as receiver
+        from tests.test_sms_twilio import (
+            PUBLIC_URL, USER_NUMBER, _config as _sms_config, _inbound_params,
+        )
+
+        config = _sms_config(tmp_path)
+        config.users = {"alice": UserConfig()}
+        user_profiles.ensure_profile(config.db_path, "alice")
+        refresh_user_profiles_if_changed(config)
+        assert config.find_user_by_sms_number(USER_NUMBER) is None
+        user_profiles.update_profile(
+            config.db_path, "alice", sms_phone_number=USER_NUMBER,
+        )
+        config._profile_checked_at = 0.0  # the check above was not a request
+
+        params = _inbound_params(NumMedia="0")
+        signature = RequestValidator("webhook-secret").compute_signature(
+            PUBLIC_URL, params,
+        )
+        monkeypatch.setattr(receiver, "_config", config)
+        monkeypatch.setattr(receiver, "_sms_providers", make_provider_registry(config))
+        monkeypatch.setattr(receiver, "reload_config", lambda: None)
+        monkeypatch.setattr(receiver.signal, "signal", lambda *_args: None)
+        with TestClient(receiver.app) as client:
+            response = client.post(
+                "/webhooks/sms/twilio",
+                content=urlencode(params).encode(),
+                headers={
+                    "content-type": "application/x-www-form-urlencoded",
+                    "x-twilio-signature": signature,
+                },
+            )
+        assert response.status_code == 200
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute("SELECT task_id FROM processed_sms").fetchone()
+            task = db.get_task(conn, row["task_id"])
+        assert task.user_id == "alice"
+
+
+class TestFailureLogging:
+    def test_a_persistent_failure_warns_once(self, db_path, monkeypatch, caplog):
+        """The scheduler calls every tick; a broken table must not warn on each."""
+        user_profiles.ensure_profile(db_path, "alice")
+        cfg = _config(db_path)
+
+        def _boom(_path, **_kwargs):
+            raise sqlite3.OperationalError("no such table: profile_generation")
+
+        monkeypatch.setattr(user_profiles, "read_profile_generation", _boom)
+        with caplog.at_level("DEBUG", logger="istota.config"):
+            for _ in range(3):
+                assert refresh_user_profiles_if_changed(cfg) is False
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+
+        monkeypatch.undo()
+        assert refresh_user_profiles_if_changed(cfg) is True
+        caplog.clear()
+        monkeypatch.setattr(user_profiles, "read_profile_generation", _boom)
+        with caplog.at_level("WARNING", logger="istota.config"):
+            refresh_user_profiles_if_changed(cfg)
+        assert "user_profiles refresh failed" in caplog.text

@@ -10093,7 +10093,10 @@ def run_daemon(
         # Pick up profile writes from other processes (settings page, `istota
         # user ensure`) before anything below reads `config.users`. One
         # single-row read when nothing changed; never raises.
-        refresh_user_profiles_if_changed(config)
+        refresh_user_profiles_if_changed(
+            config,
+            busy_timeout_ms=config.scheduler.main_loop_read_timeout_ms or None,
+        )
 
         # Dispatch worker threads first — minimizes latency for pending tasks
         try:

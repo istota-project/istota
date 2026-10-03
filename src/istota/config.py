@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
@@ -2176,6 +2177,7 @@ class Config:
     # `refresh_user_profiles_if_changed`, not settings.
     _profile_generation: int = field(default=-1, repr=False, compare=False)
     _profile_checked_at: float = field(default=0.0, repr=False, compare=False)
+    _profile_refresh_failing: bool = field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.workspace_path is None:
@@ -3581,6 +3583,7 @@ _NOT_CONFIGURATION = frozenset({
     # overlay last applied and when it was last checked.
     "_profile_generation",
     "_profile_checked_at",
+    "_profile_refresh_failing",
 })
 """Declared fields that are not settings, and must not be writable from TOML.
 
@@ -5612,8 +5615,12 @@ def _merge_profile_rows(config: "Config", rows: dict) -> None:
         config.users = {**current, **added}
 
 
+_profile_refresh_lock = threading.Lock()
+
+
 def refresh_user_profiles_if_changed(
     config: "Config", *, min_interval: float = 0.0,
+    busy_timeout_ms: int | None = None,
 ) -> bool:
     """Re-apply the ``user_profiles`` overlay when the table has changed.
 
@@ -5624,37 +5631,48 @@ def refresh_user_profiles_if_changed(
     when it moved. True when the overlay was re-applied.
 
     ``min_interval`` (seconds, monotonic) skips the read when this config was
-    checked more recently than that, for callers on a request path. Never
-    raises: a failure is logged and keeps the previous snapshot, and the
-    generation is not recorded, so the next call tries again. Deleted rows are
-    not removed from the snapshot.
+    checked more recently than that, for callers on a request path.
+    ``busy_timeout_ms`` bounds the lock wait, for the scheduler's main loop.
+    Never raises: a failure is logged (WARNING once, then DEBUG until a
+    success) and keeps the previous snapshot, and the generation is not
+    recorded, so the next call tries again. Deleted rows are not removed from
+    the snapshot.
     """
     now = time.monotonic()
     if min_interval > 0 and now - config._profile_checked_at < min_interval:
         return False
     config._profile_checked_at = now
 
-    db_path = config.db_path
-    if db_path is None or not Path(db_path).exists():
-        return False
-    try:
-        from . import user_profiles as _up  # avoid import cycles at module load
+    # Serialised: two web threads interleaving read-merge-record could apply
+    # older rows after newer ones and then record the newer generation.
+    with _profile_refresh_lock:
+        try:
+            db_path = config.db_path
+            if db_path is None or not Path(db_path).exists():
+                return False
+            from . import user_profiles as _up  # avoid import cycles at module load
 
-        # Generation before rows: a write landing between the two reads is
-        # applied now and re-applied next call, never missed.
-        generation = _up.read_profile_generation(Path(db_path))
-        if generation == config._profile_generation:
+            # Generation before rows: a write landing between the two reads is
+            # applied now and re-applied next call, never missed.
+            generation = _up.read_profile_generation(
+                Path(db_path), busy_timeout_ms=busy_timeout_ms,
+            )
+            if generation == config._profile_generation:
+                return False
+            rows = _up.list_profiles(Path(db_path), busy_timeout_ms=busy_timeout_ms)
+            _merge_profile_rows(config, rows)
+        except Exception as e:  # noqa: BLE001
+            level = logging.DEBUG if config._profile_refresh_failing else logging.WARNING
+            logger.log(
+                level,
+                "user_profiles refresh failed (%s); keeping the previous "
+                "per-user settings", e,
+            )
+            config._profile_refresh_failing = True
             return False
-        rows = _up.list_profiles(Path(db_path))
-        _merge_profile_rows(config, rows)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "user_profiles refresh failed (%s); keeping the previous per-user "
-            "settings", e,
-        )
-        return False
-    config._profile_generation = generation
-    return True
+        config._profile_generation = generation
+        config._profile_refresh_failing = False
+        return True
 
 
 def _apply_user_resources(config: "Config") -> None:
