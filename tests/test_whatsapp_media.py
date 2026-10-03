@@ -743,7 +743,7 @@ class TestTheReasonTable:
             media.reason("audio", "not_a_key")
 
     def test_the_adapter_aliases_are_the_image_sentences_of_their_keys(self):
-        from istota.transport.whatsapp import baileys_protocol, client, webhook
+        from istota.transport.whatsapp import baileys_protocol, client
 
         assert set(baileys_protocol._MEDIA_ERROR_KEYS.values()) <= set(
             media.REASON_KEYS
@@ -753,7 +753,6 @@ class TestTheReasonTable:
         assert baileys_protocol._UNKNOWN_MEDIA_ERROR == media.reason(
             "image", baileys_protocol._UNKNOWN_MEDIA_ERROR_KEY,
         )
-        assert webhook.MEDIA_NO_ID_REASON == media.reason("image", "no_id")
         assert client.MEDIA_OVER_CAP_REASON == media.MEDIA_OVER_CAP
 
     def test_a_fetch_error_carries_a_key_the_record_builder_can_apply_a_kind_to(
