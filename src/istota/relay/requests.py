@@ -20,10 +20,11 @@ CONTENT_RETENTION_DAYS = 30
 REQUEST_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 
 
-#: Every request kind. The two side-room kinds (multiplayer D4, D16) ride this
+#: Every request kind. The two room kinds (multiplayer D4, D16) ride this
 #: table rather than a second hold table: `side_whisper` is a task in a shared
-#: room writing to its principal's side room, `room_post` a side-room task's
-#: post into the parent room, held for the member's approval.
+#: room writing to its principal privately (the name predates ISSUE-608 and is
+#: kept to avoid a CHECK rebuild), `room_post` a private-room task's post into
+#: a shared room, held for the member's approval.
 KINDS = ("self_send", "relay_question", "side_whisper", "room_post")
 ROOM_KINDS = ("side_whisper", "room_post")
 _SELF_KINDS = ("self_send", "side_whisper", "room_post")
@@ -95,7 +96,7 @@ def _store_request(
 
     Four kinds. A `self_send` and a `side_whisper` go to the requester and are
     queued at once; a `relay_question` and a `room_post` are held for the
-    requester's approval of the exact preview. The two side-room kinds carry
+    requester's approval of the exact preview. The two room kinds carry
     their own `origin` and `destination` here, where a relay keeps them on its
     `message_relays` row.
     """
@@ -518,8 +519,8 @@ async def drain_requests(config, *, limit: int = 20) -> int:
     rows = await asyncio.to_thread(_pending_requests, config, max(0, min(limit, 100)))
     for row in rows:
         if row["kind"] in ROOM_KINDS:
-            from istota.rooms import side_rooms
-            await side_rooms.deliver_request(config, row)
+            from istota.rooms import private_replies
+            await private_replies.deliver_request(config, row)
             continue
         if row["relay_id"]:
             from istota.relay import relays as message_relays
@@ -595,8 +596,9 @@ def _quotes_prompt(task, text: str) -> bool:
     The whole prompt, one whole line of it, or one whole double-quoted span,
     compared after stripping; attachment names cut out first as
     `_names_recipient` does. Never a substring: a fragment can reverse what
-    was said ("do not tell them X" contains "X"), and a side-room task reads
-    the parent's transcript, so its first call can be shaped by other people.
+    was said ("do not tell them X" contains "X"), and a linked private turn
+    reads the shared room's transcript, so its first call can be shaped by
+    other people.
     """
     wanted = text.strip()
     if not wanted:
@@ -717,16 +719,7 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
                         f"Template message:\n{template if template is not None else '(unavailable)'}")
         else:
             preview += f"Message:\n{service}"
-        # Phone previews must fit intact. No approval of a shortened preview.
-        if origin["surface"] == "sms":
-            from istota.transport.sms.outbound import render_sms
-            if render_sms(preview, config.sms.max_segments).text != preview:
-                raise RequestError("invalid_preview")
-        if origin["surface"] == "whatsapp":
-            from istota.transport.whatsapp.outbound import active_adapter
-            adapter = active_adapter(config)
-            if adapter is None or len(preview) > adapter.caps.service_body_limit:
-                raise RequestError("invalid_preview")
+        check_preview_fits(config, origin, preview)
         row = _store_request(
             conn, actor_user_id=actor_user_id, task_id=task_id, request_key=request_key,
             kind="relay_question", recipient_user_id=recipient_user_id, text=text,
@@ -745,6 +738,23 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
             row = dict(conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=?",
                                     (row["id"],)).fetchone())
         return _question_response(conn, row)
+
+
+def check_preview_fits(config, origin: dict, preview: str) -> None:
+    """Refuse a preview a phone origin would not show whole (`invalid_preview`).
+
+    No approval of a shortened preview: the text approved has to be the text
+    shown. Shared by the relay question and the `room post` hold.
+    """
+    if origin.get("surface") == "sms":
+        from istota.transport.sms.outbound import render_sms
+        if render_sms(preview, config.sms.max_segments).text != preview:
+            raise RequestError("invalid_preview")
+    if origin.get("surface") == "whatsapp":
+        from istota.transport.whatsapp.outbound import active_adapter
+        adapter = active_adapter(config)
+        if adapter is None or len(preview) > adapter.caps.service_body_limit:
+            raise RequestError("invalid_preview")
 
 
 def park_question(conn, config, *, task) -> dict | None:
@@ -824,7 +834,8 @@ async def present_question(config, *, task, success: bool) -> bool:
                 return True
             confirmation.write(conn, task.user_id, task_id=task.id,
                                title=title,
-                               body=("Open the side room to review this post." if post else
+                               body=("Reply YES or NO in your private chat with the bot, "
+                                     "or approve it in notifications." if post else
                                      "Open the private conversation to review this relay question."),
                                room_token=origin.get("room_token"))
             db.drop_pending_steers(conn, task.id)

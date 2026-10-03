@@ -126,16 +126,33 @@ class TestAPrincipalsTurn:
         assert "runs with everything" not in text
         assert "answer-privately" not in text
 
-    def test_the_side_room_verb_is_named_only_where_it_can_run(self, config):
+    def test_the_private_verbs_are_named_only_where_they_can_run(self, config):
         with db.get_db(config.db_path) as conn:
             _shared(conn)
-        assert "istota-skill room whisper" in _card(config, _task("bob"))
+        text = _card(config, _task("bob"), withheld=frozenset())
+        assert "privately with `istota-skill room whisper`" in text
+        assert "answer their question in their private chat instead" in text
+        assert "side room" not in text
+        withheld = _card(config, _task("bob"))
+        assert "goes to them privately with `istota-skill room whisper`" in withheld
+        assert "side room" not in withheld
         assert "room whisper" not in _card(config, _task("bob"), room_cli=False)
 
     def test_room_notes_are_front_stage(self, config):
         with db.get_db(config.db_path) as conn:
             _shared(conn)
         assert "CHANNEL.md" in _card(config, _task("bob"))
+
+    def test_private_notes_are_pointed_at_the_private_chat_on_every_card(self, config):
+        with db.get_db(config.db_path) as conn:
+            _shared(conn)
+            pid = _guest(conn)
+        line = ("A member's private notes about this room cannot be shown or edited "
+                "from here; point them at their private chat with you.")
+        for task in (_task("bob"), _task("alice", guest_participant_id=pid),
+                     _task("bob", source_type="scheduled")):
+            assert line in _card(config, task)
+            assert line in _card(config, task, room_cli=False)
 
     def test_the_card_names_whose_persona_is_in_use(self, config):
         with db.get_db(config.db_path) as conn:
@@ -198,12 +215,13 @@ class TestTheRoomsStandingRule:
                      _task("bob", source_type="scheduled")):
             text = _card(config, task)
             assert self.RULE in text
-            assert "goes to the asker's own side room" in text
+            assert "goes to the asker's own private chat with the bot" in text
+            assert "side room" not in text
             assert "do not add approval rules" in text
 
     @pytest.mark.parametrize("mode, says, not_says", [
         ("direct", "can do nothing beyond the reply.", "for approval"),
-        ("held", "goes to the host's side room for approval", "not answered"),
+        ("held", "goes to the host's private chat with the bot for approval", "not answered"),
         ("off", "A guest's message is recorded and not answered.", "for approval"),
     ])
     def test_the_guest_clause_follows_guest_reply(self, config, mode, says, not_says):
@@ -213,10 +231,10 @@ class TestTheRoomsStandingRule:
         text = _card(config, _task("bob"))
         assert says in text and not_says not in text
 
-    def test_an_unregistered_group_names_no_side_room(self, config):
+    def test_an_unregistered_group_names_no_private_route(self, config):
         text = _card(config, _task("bob", "talk-ref-not-a-room"))
         assert self.RULE in text
-        assert "side room" not in text.split("\n")[2]
+        assert "private chat" not in text.split("\n")[2]
 
     def test_it_follows_the_shared_room_line(self, config):
         with db.get_db(config.db_path) as conn:

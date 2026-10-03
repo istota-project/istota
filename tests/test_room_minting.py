@@ -25,15 +25,32 @@ def test_registration_mints_and_keeps_explicit_legacy_tokens(db_path):
         assert db.register_room(conn, "legacy", "alice", origin="talk").token == "legacy"
 
 
-def test_web_and_side_room_producers_mint(db_path):
+def test_the_web_producer_mints(db_path):
     with db.get_db(db_path) as conn:
-        parent = db.create_web_chat_room(conn, "alice", "Ideas")
-        side = db.ensure_side_room(conn, parent.token, "alice")
-        assert db.is_canonical_room_token(parent.token)
-        assert db.is_canonical_room_token(side.token)
-        assert side.token != parent.token
-        assert db.ensure_side_room(conn, parent.token, "alice").token == side.token
-        assert db.list_room_members(conn, side.token) == ["alice"]
+        room = db.create_web_chat_room(conn, "alice", "Ideas")
+        assert db.is_canonical_room_token(room.token)
+        assert db.list_room_members(conn, room.token) == ["alice"]
+
+
+@pytest.mark.parametrize("has_private_room", [False, True])
+@pytest.mark.parametrize("kind", ["whisper", "confirmation", "proposal", "answer_notice"])
+def test_no_private_delivery_creates_a_room(db_path, kind, has_private_room):
+    """ISSUE-608: a private reply goes to a room the member already has, or
+    the bell. Nothing is minted for it, whichever way it goes."""
+    from istota.rooms.private_replies import deliver_private
+
+    config = Config(db_path=db_path, users={"alice": UserConfig(), "bob": UserConfig()})
+    with db.get_db(db_path) as conn:
+        shared = db.create_web_chat_room(conn, "alice", "Family").token
+        db.add_web_room_member(conn, shared, "bob")
+        if has_private_room:
+            db.create_web_chat_room(conn, "alice", "Mine")
+        before = conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
+        delivery = deliver_private(conn, config, user_id="alice", about_token=shared,
+                                   kind=kind, reference="t1", body="just for you")
+        after = conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
+    assert after == before
+    assert (delivery.dest is not None) is has_private_room
 
 
 def test_talk_ingest_mints_once_but_private_email_keeps_thread_hash(config):

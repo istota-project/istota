@@ -346,51 +346,38 @@ class TestNoMirrorIntoASharedRoom:
 
 
 # ---------------------------------------------------------------------------
-# The side room's email view
+# The heads-up mail (ISSUE-608): a private note about a thread room
 # ---------------------------------------------------------------------------
 
 
-class TestTheSideRoomsEmailView:
+class TestTheHeadsUpMail:
     @pytest.mark.asyncio
     async def test_a_private_mail_to_the_users_own_address(self, config, db_path):
-        from istota.rooms import side_rooms
+        from istota.rooms import private_replies
 
         _start_thread(config)
-        with patch("istota.rooms.side_rooms._send_private_mail") as send:
-            ok = await side_rooms.push_to_email_view(
-                config, user_id=HOST, parent_token=_room_token(config),
-                body="You are free after 7.", reference_id="r1",
-            )
+        with db.get_db(db_path) as conn:
+            delivery = private_replies.deliver_private(
+                conn, config, user_id=HOST, about_token=_room_token(config),
+                kind="confirmation", reference="7:abc", body="You are free after 7.")
+        with patch("istota.rooms.private_replies._send_private_mail") as send:
+            ok = await private_replies.send_private(
+                config, delivery, body="You are free after 7.")
 
         assert ok is True
         kwargs = send.call_args.kwargs
         assert kwargs["to"] == HOST_ADDR
         assert kwargs["subject"].startswith("re: ")
         assert "in_reply_to" not in kwargs and "references" not in kwargs
+        assert "private chat with the bot" in kwargs["body"]
 
-    @pytest.mark.asyncio
-    async def test_nothing_for_a_parent_not_on_email(self, config, db_path):
-        from istota.rooms import side_rooms
-
-        with db.get_db(db_path) as conn:
-            db.register_room(conn, "web-x", HOST, origin="web")
-        with patch("istota.rooms.side_rooms._send_private_mail") as send:
-            ok = await side_rooms.push_to_email_view(
-                config, user_id=HOST, parent_token="web-x", body="x",
-                reference_id="r1",
-            )
-        assert ok is False
-        send.assert_not_called()
-
-    def test_a_shared_thread_routes_confirmations_to_the_email_view(
-        self, config, db_path,
-    ):
-        from istota.rooms import side_rooms
+    def test_a_shared_thread_asks_its_confirmations_privately(self, config, db_path):
+        from istota.rooms import private_replies
 
         task_ids = _start_thread(config)
         with db.get_db(db_path) as conn:
-            route = side_rooms.confirmation_route(conn, db.get_task(conn, task_ids[0]))
-        assert route is not None and route.email_bound
+            about = private_replies.park_about(conn, db.get_task(conn, task_ids[0]))
+        assert about == _room_token(config)
 
 
 # ---------------------------------------------------------------------------
@@ -484,16 +471,18 @@ class TestHeldPostsAndWhispers:
         import asyncio
 
         from istota import confirmations
-        from istota.rooms import side_rooms
+        from istota.rooms import private_replies
         from istota.relay import requests
 
         _start_thread(config)
         with db.get_db(db_path) as conn:
-            side = db.ensure_side_room(conn, _room_token(config), HOST)
+            # From the host's own private chat, linked to the thread room.
+            private = db.create_web_chat_room(conn, HOST, "Mine").token
             ident = db.create_task(conn, user_id=HOST, source_type="web",
-                                   prompt="post it", conversation_token=side.token)
+                                   prompt="post it", conversation_token=private,
+                                   about_room_token=_room_token(config))
             conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
-            side_rooms.hold_room_post(conn, config, actor_user_id=HOST, task_id=ident,
+            private_replies.hold_room_post(conn, config, actor_user_id=HOST, task_id=ident,
                                       request_key="p1", text="Thursday after 7 works")
             requests.park_question(conn, config, task=db.get_task(conn, ident))
             confirmations.approve(conn, db.get_task(conn, ident), config=config, by="web")
@@ -511,22 +500,23 @@ class TestHeldPostsAndWhispers:
     def test_a_whisper_reaches_the_members_own_address(self, config, db_path):
         import asyncio
 
-        from istota.rooms import side_rooms
+        from istota.rooms import private_replies
         from istota.relay import requests
 
         task_ids = _start_thread(config)
         with db.get_db(db_path) as conn:
             conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_ids[0],))
-            side_rooms.enqueue_whisper(conn, config, actor_user_id=HOST,
+            private_replies.enqueue_whisper(conn, config, actor_user_id=HOST,
                                        task_id=task_ids[0], request_key="w1",
                                        text="Only for you.")
-        with patch("istota.rooms.side_rooms._send_private_mail") as send:
+        with patch("istota.rooms.private_replies._send_private_mail") as send:
             asyncio.run(requests.drain_requests(config))
 
         kwargs = send.call_args.kwargs
         assert kwargs["to"] == HOST_ADDR
         assert kwargs["subject"] == "re: Dinner plans"
-        assert kwargs["body"] == "Only for you."
+        assert kwargs["body"].startswith("Only for you.\n\n")
+        assert "private chat with the bot" in kwargs["body"]
 
 
 class TestTheThreadRoomGate:
@@ -657,12 +647,15 @@ class TestTheReplyIsThreadedToItsTrigger:
 class TestAQuestionInAThreadRoomParks:
     @patch("istota.scheduler.post_result_to_email", return_value=True)
     @patch("istota.scheduler.run_coro", return_value=True)
-    def test_the_hosts_question_goes_to_the_side_room_not_the_thread(
+    def test_the_hosts_question_goes_to_their_private_room_not_the_thread(
         self, mock_run_coro, mock_post_email, config, db_path,
     ):
         from istota.scheduler import process_one_task
 
         task_ids = _start_thread(config)
+        with db.get_db(db_path) as conn:
+            private = db.create_web_chat_room(conn, HOST, "Mine").token
+            rooms_before = conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
         with patch(
             "istota.scheduler.execute_task",
             return_value=(True, "Shall I tell Alice Thursday works? Please confirm.",
@@ -672,9 +665,14 @@ class TestAQuestionInAThreadRoomParks:
 
         with db.get_db(db_path) as conn:
             assert db.get_task(conn, task_ids[0]).status == "pending_confirmation"
-            side = db.get_side_room(conn, _room_token(config), HOST)
-            assert side is not None
-            assert db.get_messages(conn, side.token)
+            rows = conn.execute(
+                "SELECT about_room_token, delivery_reference FROM messages "
+                "WHERE room_token = ?", (private,)).fetchall()
+            rooms_after = conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
+        (row,) = rows
+        assert row["about_room_token"] == _room_token(config)
+        assert row["delivery_reference"].startswith(f"private-confirmation:{task_ids[0]}:")
+        assert rooms_after == rooms_before
         mock_post_email.assert_not_called()
 
 

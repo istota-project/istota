@@ -59,6 +59,7 @@ from .storage import (
     read_channel_memory,
     read_dated_memories,
     read_group_memory,
+    read_room_notes,
     read_user_config_file,
     read_user_memory_v2,
 )
@@ -3927,7 +3928,7 @@ def build_allowed_tools(
     tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
     if emissary:
         # A guest's turn takes no outbound action beyond its reply (multiplayer
-        # D2), and a query or a URL is one: the host's backstage notes are in
+        # D2), and a query or a URL is one: the host's notes about the room may be in
         # its prompt. Native builds only what this list names; a CLI brain keeps
         # its own web tools behind `--unshare-net` and the CONNECT allowlist.
         return tools
@@ -5095,9 +5096,9 @@ def _front_stage_cutoff(
 
     Every reader here that puts the room's own transcript in front of the
     model takes it: the task answers into the room, in front of whoever reads
-    it now, so it may draw only on what all of them were present for. A side
-    room's view of its parent is `side_rooms.parent_context`, which reads the
-    parent whole and does not come through here.
+    it now, so it may draw only on what all of them were present for. A linked
+    private turn's view of a shared room is `private_replies.linked_context`,
+    which reads the room whole and does not come through here.
     """
     if not task.conversation_token:
         return db.AudienceCutoff()
@@ -6010,37 +6011,37 @@ def _header_scalar(value: object) -> str:
     return _one_line(str(value or "")).strip()[:_ROOM_SCALAR_MAX_CHARS]
 
 
-def _side_room_prompt(
+def _linked_room_prompt(
     config: Config, task: "db.Task", conn, display_user_id: str, *,
     post_cli_available: bool,
 ) -> tuple[str, str]:
-    """``(system line, user-half block)`` for a task in a side room, else ``("", "")``.
+    """``(system line, user-half block)`` for a linked turn (ISSUE-608), else ``("", "")``.
 
-    The line names the parent by token only, for the reason
+    A linked turn replies to a message about a shared room, in its member's
+    own private room. The line names that room by token only, for the reason
     `room_identity_line` gives for leaving a room's name out of the system
-    half. Opens its own connection when handed none, but never on a database
-    path that does not exist, since opening one would create it. Never raises.
+    half; its transcript goes in the user half, fenced. A link that no longer
+    holds (room gone, member left) gives an ordinary private turn. Never
+    raises, and never opens a database path that does not exist.
     """
+    if not getattr(task, "about_room_token", None):
+        return "", ""
     try:
-        from istota.rooms.side_rooms import parent_context, task_side_room
-
-        def _read(c):
-            side = task_side_room(c, task)
-            return side, (parent_context(c, config, task) if side is not None else "")
+        from istota.rooms.private_replies import linked_context
 
         with db.get_db_if_present(config.db_path, conn) as c:
             if c is None:
                 return "", ""
-            side, block = _read(c)
+            parent, block = linked_context(c, config, task)
     except Exception as exc:
-        logger.warning("side room prompt for task %s failed: %s", task.id, exc)
+        logger.warning("linked room prompt for task %s failed: %s", task.id, exc)
         return "", ""
-    if side is None:
+    if parent is None:
         return "", ""
     line = (
-        f"\nSide room: this is {display_user_id}'s private side room of room "
-        f"{_header_scalar(side.side_of)}. Only they read it, and nothing you "
-        "write here reaches that room."
+        f"\nLinked room: this turn replies to a message about room "
+        f"{_header_scalar(parent)}. Only {display_user_id} reads this "
+        "conversation; nothing you write here reaches that room."
     )
     if post_cli_available:
         line += (
@@ -6050,33 +6051,33 @@ def _side_room_prompt(
     return line, block
 
 
-def _backstage_prompt(config: Config, task: "db.Task", conn) -> str:
-    """The principal's side-room notes, for a task in a shared room (D4 item 4).
+def _my_notes_prompt(config: Config, task: "db.Task", conn) -> str:
+    """The principal's own notes about a shared room, for a task in it (ISSUE-608).
 
-    A shared room's `CHANNEL.md` is front-stage memory, read by everyone in
-    the room. Backstage instructions ("don't bring up the house sale") live in
-    the principal's side room, and a task in the room reads them only when that
-    principal is the speaker or the host a guest's turn runs as
-    (`side_rooms.backstage_room`). User-half material; empty everywhere else,
-    so no other prompt changes. Never raises.
+    A shared room's `CHANNEL.md` is read by everyone in the room. A member's
+    private notes about it ("don't bring up the house sale") are a file in
+    their own workspace, `config/rooms/<token>.md`, read here only when that
+    member is the speaker or the host a held guest's turn runs as
+    (`private_replies.my_notes_room`). User-half material, not fenced: the
+    principal's own words. Empty everywhere else. Never raises.
     """
     try:
-        from istota.rooms.side_rooms import backstage_room
+        from istota.rooms.private_replies import my_notes_room
 
         with db.get_db_if_present(config.db_path, conn) as c:
             if c is None:
                 return ""
-            side = backstage_room(c, task)
-        notes = read_channel_memory(config, side.token) if side is not None else None
+            token = my_notes_room(c, task)
+        notes = read_room_notes(config, task.user_id, token) if token else None
     except Exception as exc:
-        logger.warning("backstage notes for task %s failed: %s", task.id, exc)
+        logger.warning("my notes for task %s failed: %s", task.id, exc)
         return ""
     if not notes:
         return ""
     return (
-        "## Backstage notes (private)\n\n"
-        "From your principal's side room. Only they read these; the room does "
-        "not, so never quote them there.\n\n"
+        "## My notes about this room (private)\n\n"
+        "Written by your principal. Only they read these; the room does not, "
+        "so never quote them there.\n\n"
         f"{notes}"
     )
 
@@ -6242,17 +6243,18 @@ def _room_rule_line(guest_reply: str | None, *, registered: bool) -> str:
     are acting for X" into "I work for X here" and invents an approval rule
     (ISSUE-602). The guest clause follows the room's `guest_reply`, since a
     held room does put a guest's answer to the host first. An unregistered
-    group has no side room yet, so nothing is said about where a confirmation
-    goes.
+    group is not routed privately yet, so nothing is said about where a
+    confirmation goes.
     """
     member = "In this room each member's turn runs as that member, with their own persona and reach"
-    member += (", and a confirmation goes to the asker's own side room." if registered else ".")
+    member += (", and a confirmation goes to the asker's own private chat with the bot."
+               if registered else ".")
     if guest_reply == "off":
         guest = "A guest's message is recorded and not answered."
     elif guest_reply == "held":
         guest = ("A guest's turn runs as the host and can do nothing beyond the "
-                 "reply, which goes to the host's side room for approval before "
-                 "it is posted.")
+                 "reply, which goes to the host's private chat with the bot for "
+                 "approval before it is posted.")
     else:
         guest = "A guest's turn runs as the host and can do nothing beyond the reply."
     return (f"{member} {guest} Describe the room this way if asked; do not add "
@@ -6299,7 +6301,7 @@ def room_card(
         return ""
     try:
         from istota.rooms import policy as room_policy
-        from istota.rooms.side_rooms import canonical_token
+        from istota.rooms.private_replies import canonical_token
 
         def _read(c):
             token = canonical_token(c, task.conversation_token)
@@ -6386,22 +6388,24 @@ def room_card(
     if room_cli_available:
         if guest_turn:
             lines.append(
-                f"Anything else goes to '{principal}''s private side room with "
+                f"Anything else goes to '{principal}' privately with "
                 "`istota-skill room whisper`."
             )
         elif withheld_scopes:
             lines.append(
-                f"Anything only '{principal}' should see goes to their private "
-                "side room with `istota-skill room whisper`."
+                f"Anything only '{principal}' should see goes to them privately "
+                "with `istota-skill room whisper`."
             )
         else:
             lines.append(
-                f"Anything only '{principal}' should see goes to their private "
-                "side room with `istota-skill room whisper`, or "
+                f"Anything only '{principal}' should see goes to them privately "
+                "with `istota-skill room whisper`, or "
                 "`istota-skill room answer-privately` to answer their question "
-                "there instead; post to the room only as your reply."
+                "in their private chat instead; post to the room only as your reply."
             )
     lines.append("Room notes (CHANNEL.md) are read by everyone in this room.")
+    lines.append("A member's private notes about this room cannot be shown or edited "
+                 "from here; point them at their private chat with you.")
     return "".join(f"\n{line}" for line in lines)
 
 
@@ -7174,11 +7178,12 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
                 "`run ... -- sh -c '...'` rather than one `run` per command."
             )
 
-    # A side room (multiplayer D4): the header says which room it belongs to
-    # and that nothing written here reaches it; the parent's transcript goes in
-    # the user half, fenced, since every line of it is somebody else's text.
-    # Empty for every other task, so no other prompt changes.
-    side_room_line, side_context = _side_room_prompt(
+    # A linked turn (ISSUE-608): the header
+    # says which room it is about and that nothing written here reaches it;
+    # that room's transcript goes in the user half, fenced, since every line
+    # of it is somebody else's text. Empty for every other task, so no other
+    # prompt changes.
+    linked_room_line, linked_block = _linked_room_prompt(
         config, task, conn, display_user_id,
         post_cli_available=cli_skill_names is None or "room" in cli_skill_names,
     )
@@ -7205,7 +7210,7 @@ Today's date: {user_date_str}
 User timezone: {user_tz_str}
 Current UTC: {utc_now_str}
 Current task ID: {task.id}
-Conversation token: {display_token}{room_line}{side_room_line}{card}
+Conversation token: {display_token}{room_line}{linked_room_line}{card}
 Source: {display_source}
 Output target: {display_output_target}{per_user_email_line}
 {db_path_line}
@@ -7260,12 +7265,12 @@ You have access to:
         knowledge_facts_section,
         group_memory_section,
         channel_memory_section,
-        _backstage_prompt(config, task, conn),
+        _my_notes_prompt(config, task, conn),
         dated_memories_section,
         recalled_section,
         playbooks_section,
         context_section,
-        side_context,
+        linked_block,
         confirmation_section,
         relay_context,
     ]

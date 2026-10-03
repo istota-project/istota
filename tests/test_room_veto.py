@@ -22,7 +22,7 @@ import pytest
 from istota import confirmations, db
 from istota.rooms import policy as room_policy
 from istota.rooms import veto as room_veto
-from istota.rooms import side_rooms
+from istota.rooms import private_replies
 from istota.relay import requests
 from istota.config import Config, NextcloudConfig, TalkConfig, UserConfig
 from istota.transport._types import ParticipantRef
@@ -198,7 +198,7 @@ class TestOffRecordsNothing:
             _group(conn)
             room_veto.apply(conn, config, room_token="grp", author=_max(), verb="off")
             with pytest.raises(requests.RequestError, match="room_off"):
-                side_rooms._post_destination(conn, "grp", "alice")
+                private_replies._post_destination(conn, "grp", "alice")
 
 
 # ---------------------------------------------------------------------------
@@ -892,7 +892,7 @@ def _email_proposal(config, reply="Thursday at 7 suits Carol."):
     with db.get_db(config.db_path) as conn:
         conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
         task = db.get_task(conn, task_id)
-        proposal = side_rooms.propose_guest_reply(conn, config, task, reply)
+        proposal = private_replies.propose_guest_reply(conn, config, task, reply)
     return task_id, proposal
 
 

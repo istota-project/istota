@@ -92,7 +92,7 @@ class TalkEventSubscriber:
             self._edit_summary("✅ Done")
 
         # A guest's held or cancelled turn owes the room nothing (its answer, if
-        # any, went to the host's side room), so its ack is taken down.
+        # any, went to the host privately), so its ack is taken down.
         elif kind == "confirmation":
             if self._guest_turn:
                 self._delete_ack()

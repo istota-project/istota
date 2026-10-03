@@ -787,7 +787,7 @@ async def cmd_confirm(ctx: CommandContext):
 
     # Every answer names the held mail's sender and subject, and the open set
     # spans the user's rooms. A shared room's own questions are asked in the
-    # asker's side room, which is private.
+    # asker's own private chat.
     refusal = _private_only(ctx, "your held questions")
     if refusal is not None:
         return refusal
@@ -1136,7 +1136,7 @@ def _in_shared_room(ctx: CommandContext) -> bool:
 
     An unreadable roster reads as shared.
     """
-    from istota.rooms.side_rooms import is_shared_room
+    from istota.rooms.private_replies import is_shared_room
 
     if ctx.conn is None:
         # A context built without a connection (CLI, REPL) names no room.
@@ -1512,12 +1512,15 @@ async def cmd_room(ctx: CommandContext):
     # registry, keyed by canonical token, so a per-surface ref must be mapped.
     token = _room_token(ctx)
     room = db.get_room(conn, token)
-    if room is None:
-        return "This room isn't registered yet — send a message first, then set its default."
-
     parts = args.strip().split(maxsplit=1)
     sub = parts[0].lower() if parts else ""
     rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub == "notes":
+        return _room_notes(ctx, room, rest)
+
+    if room is None:
+        return "This room isn't registered yet — send a message first, then set its default."
 
     if not sub:
         # Read-only on the brain: `!brain` is the single writer, and this line
@@ -1613,9 +1616,53 @@ async def cmd_room(ctx: CommandContext):
     return (
         "Usage: `!room` (show), `!room model <alias>`, `!room effort <level>`, "
         "`!room host`, `!room guests <off|held|direct>`, "
-        "`!room group [<id>|none]`. "
+        "`!room group [<id>|none]`, `!room notes [<room>]`. "
         "Use `default` to clear."
     )
+
+
+#: What `!room notes` says in a shared room, whatever was asked: the request
+#: itself has been seen there, so it shows nothing and does nothing else.
+ROOM_NOTES_REFUSAL = "Use your private chat with me for your notes."
+
+
+def _room_notes(ctx: CommandContext, room, query: str) -> str:
+    """`!room notes [<name|n>]`: the user's own notes about a shared room (ISSUE-608).
+
+    Read-only: writes go through the bot or the web pane. Refused in any room
+    that is shared, or that is not registered (nothing then says it is
+    private). In a private room, a bare call lists the user's shared rooms
+    plus any room they have notes for, numbered; a name, token or number shows
+    that room's notes.
+    """
+    from istota import storage
+    from istota.rooms.lookup import Ambiguous, Found, numbered_list, resolve_room
+
+    conn, user_id = ctx.conn, ctx.user_id
+    if room is None or _in_shared_room(ctx):
+        return ROOM_NOTES_REFUSAL
+    noted = storage.room_notes_tokens(ctx.config, user_id)
+    match = resolve_room(conn, user_id, query, include_left_with_notes=noted,
+                         by_number=True)
+    if not query or not isinstance(match, Found):
+        candidates = match.candidates
+        if not candidates:
+            return ("You are not in any shared room, and you have no notes about one. "
+                    "Notes are kept per shared room; ask me to note something about a "
+                    "room, or edit them from the room's menu in web chat.")
+        if isinstance(match, Ambiguous):
+            head = f"More than one room matches \"{query}\". Pick one by number:"
+        elif query:
+            head = f"No room of yours matches \"{query}\". Your rooms:"
+        else:
+            head = "Your shared rooms. `!room notes <name or number>` shows your notes:"
+        return head + "\n" + numbered_list(candidates, mark_notes=True)
+    found = match.candidate
+    label = found.name or found.token
+    notes = storage.read_room_notes(ctx.config, user_id, found.token)
+    if not notes:
+        return f"You have no notes about {label}."
+    return f"**Your notes about {label}**\n\n{notes}"
 
 
 def _room_host(conn, token: str, user_id: str) -> str:
@@ -1643,8 +1690,6 @@ def _room_group(conn, room, user_id: str, value: str) -> str:
     from istota.rooms import policy as room_policy
 
     value = value.strip()
-    if room.side_of:
-        return "A side room has no group link; link the room it belongs to instead."
     if not value:
         if not room.group_id:
             return (

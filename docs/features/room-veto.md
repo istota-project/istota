@@ -16,7 +16,7 @@ While the room is off:
 
 - nothing anyone writes there is recorded, and nothing is answered;
 - tasks waiting to run in the room are cancelled, and a task already running has its answer dropped;
-- every other command in the room is ignored, and a held post into the room is refused;
+- every other command in the room is ignored, and a post into the room is refused, including one a member asked for from their [private chat](shared-rooms.md#private-replies) and has already approved;
 - on the web the room shows that it is switched off and who switched it off, and sending is refused.
 
 The bot confirms in the room on Talk, web and WhatsApp. On email it sends nothing, since any reply would be a mail to everyone on the thread.

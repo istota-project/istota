@@ -32,6 +32,7 @@
   import Composer from '$lib/components/chat/Composer.svelte';
   import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
   import RoomMemory from '$lib/components/chat/RoomMemory.svelte';
+  import { roomMenuItems } from '$lib/components/chat/roomMenu';
   import {
     isTap,
     nextActivation,
@@ -126,6 +127,9 @@
   // The room whose settings modal is open (null = closed).
   let settingsRoom = $state<ChatRoom | null>(null);
   let memoryRoom = $state<ChatRoom | null>(null);
+  // The room whose "My notes" pane is open: the caller's private notes about
+  // it. A separate slot from `memoryRoom` so the two panes never share a buffer.
+  let notesRoom = $state<ChatRoom | null>(null);
 
   let sidebarOpen = $state(false);
   /* The identity the root layout resolved, rather than a `/me` of this page's
@@ -267,24 +271,6 @@
     }
   }
 
-  // A side room sits under its parent (D4); one whose parent is not in the
-  // list stays where activity puts it.
-  const sidebarRooms = $derived.by(() => {
-    const tokens = new Set($rooms.map((r) => r.token));
-    const sides = new Map<string, ChatRoom[]>();
-    for (const r of $rooms) {
-      if (r.side_of && tokens.has(r.side_of)) {
-        sides.set(r.side_of, [...(sides.get(r.side_of) ?? []), r]);
-      }
-    }
-    const out: { room: ChatRoom; nested: boolean }[] = [];
-    for (const r of $rooms) {
-      if (r.side_of && tokens.has(r.side_of)) continue;
-      out.push({ room: r, nested: false });
-      for (const side of sides.get(r.token) ?? []) out.push({ room: side, nested: true });
-    }
-    return out;
-  });
   // Where the composer holds unsent text (ISSUE-205). Scoped to the room's
   // token *and* the logged-in user: the room id is a recycled SQLite rowid, so
   // a deleted room's draft would land in whichever room takes its id next, and
@@ -888,6 +874,17 @@
     sidebarOpen = false;
   }
 
+  // The notes panes are siblings of Settings rather than buttons inside it:
+  // each is a full-width markdown editor, and opening one modal from another
+  // is a shape nothing else in this frontend uses.
+  function roomMenu(room: ChatRoom) {
+    return roomMenuItems(room, {
+      settings: () => (settingsRoom = room),
+      memory: () => (memoryRoom = room),
+      notes: () => (notesRoom = room),
+    });
+  }
+
   function selectView(v: ChatView) {
     session.selectView(v);
     sidebarOpen = false;
@@ -1190,7 +1187,7 @@
         {/if}
       </div>
 
-      {#each sidebarRooms as { room, nested } (room.id)}
+      {#each $rooms as room (room.id)}
         {@const isTalk = isTalkRoom(room)}
         {@const unreadCount = room.unread_count ?? 0}
         {@const unread = unreadCount > 0 && room.id !== $activeRoomId}
@@ -1202,7 +1199,6 @@
 			     briefings archive row (ISSUE-433). -->
         <div
           class="list-row room-row"
-          class:nested
           class:active={room.id === $activeRoomId}
           class:tinted={!!tint}
           style:--room-tint={tint}
@@ -1268,16 +1264,7 @@
               </span>
             </span>
           </button>
-          <KebabMenu
-            ariaLabel="Room actions"
-            items={[
-              { label: 'Settings', onSelect: () => (settingsRoom = room) },
-              // A sibling of Settings rather than a button inside it: the pane
-              // is a full-width markdown editor, and opening one modal from
-              // another is a shape nothing else in this frontend uses.
-              { label: 'Memory', onSelect: () => (memoryRoom = room) },
-            ]}
-          />
+          <KebabMenu ariaLabel="Room actions" items={roomMenu(room)} />
         </div>
       {/each}
     </Sidebar>
@@ -1535,6 +1522,16 @@
       roomId={memoryRoom.id}
       roomName={memoryRoom.name}
       onClose={() => (memoryRoom = null)}
+    />
+  {/if}
+
+  {#if notesRoom}
+    <RoomMemory
+      open
+      kind="mine"
+      roomId={notesRoom.id}
+      roomName={notesRoom.name}
+      onClose={() => (notesRoom = null)}
     />
   {/if}
 
@@ -1929,10 +1926,6 @@
 	   pill, which are the two things in this row that mean something has changed.
 	   `color-mix` over transparent is the idiom this file already uses for a
 	   subtle wash (see @keyframes jump-pulse below). */
-  /* A side room under its parent. */
-  .room-row.nested {
-    padding-left: var(--space-4);
-  }
   .room-notice {
     padding: var(--space-2) var(--space-3) 0;
   }

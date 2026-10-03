@@ -29,6 +29,13 @@ caller is a current member and the group is in the task's resolved set
 Group writes are audited into the group's own store, since the file has
 several authors.
 
+`--room ROOM` targets the caller's own notes about a shared room ("My notes",
+ISSUE-608): `{bot_dir}/config/rooms/{token}.md`, read into the caller's own
+turns in that room. ROOM is a token or a name (`rooms.lookup.resolve_room`).
+Refused from a turn in a shared room (`room_notes_from_shared_room`), since
+the room would see the notes in the answer; refused for a room the caller is
+not a current member of (`room_unavailable`).
+
 All three documents live under a directory `build_bwrap_cmd` binds **read-write**
 into a sandbox, while this CLI runs host-side and unsandboxed with the daemon's
 filesystem view. So neither the path nor the file at the end of it is trusted
@@ -49,9 +56,9 @@ Env vars used:
   ISTOTA_USER_ID            User whose USER.md is targeted.
   NEXTCLOUD_MOUNT_PATH      Mount root.
   ISTOTA_BOT_DIR_NAME       Bot directory name (e.g. "istota").
-  ISTOTA_TASK_ID            Optional, used in audit log entries.
+  ISTOTA_TASK_ID            Audit log entries, and whether the calling task's room is shared.
   ISTOTA_CONVERSATION_TOKEN Optional, used to validate --channel.
-  ISTOTA_DB_PATH            The audit store, and the --group membership check.
+  ISTOTA_DB_PATH            The audit store, the --group membership check and --room.
   ISTOTA_TASK_GROUPS        The task's resolved group set, for --group.
 """
 
@@ -101,6 +108,7 @@ from istota.skills._loader import (
 _USER = "user"
 _CHANNEL = "channel"
 _GROUP = "group"
+_ROOM = "room"
 
 #: Ceiling on what this CLI will read back before editing, matching the
 #: daemon's own `storage.USER_CONFIG_READ_CAP_BYTES`.
@@ -112,6 +120,11 @@ _GROUP = "group"
 #: must be, or the daemon reads a file this CLI cannot edit, or this CLI writes
 #: one the daemon will not load.
 _MAX_USER_MD_READ_BYTES = 16 * 1024 * 1024
+
+#: The daemon's cap on a room-notes file, `storage.NOTES_MAX_BYTES`, restated
+#: for the reason above and held equal by `tests/test_room_notes.py`. A write
+#: past it would leave notes the prompt no longer loads.
+_MAX_ROOM_NOTES_BYTES = 256 * 1024
 
 logger = logging.getLogger(__name__)
 
@@ -283,19 +296,86 @@ def _group_md_path(group_id: str) -> Path:
     return resolved / "GROUP.md"
 
 
+def _room_notes_path(query: str) -> tuple[Path, str]:
+    """The caller's notes file about the shared room ``query`` names, and its token.
+
+    Refused from a turn in a shared room first, before the name is looked at,
+    so the refusal says nothing about which rooms exist. Then the room must
+    resolve among the caller's current shared rooms. ``config/rooms`` is an
+    entry in a directory the caller's sandbox writes, so it is contained under
+    the user's root the way ``config/`` is.
+    """
+    if _channel_notes_shared():
+        _err(
+            "room_notes_from_shared_room",
+            hint="your notes about a room are read and written from your private chat",
+        )
+        sys.exit(1)
+    from istota import db
+    from istota.rooms.lookup import Ambiguous, Found, resolve_room
+
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+    found = None
+    names: list[str] = []
+    if db_path and Path(db_path).is_file():
+        try:
+            with db.get_db(Path(db_path)) as conn:
+                found = resolve_room(conn, _user_id(), query)
+                if isinstance(found, Found):
+                    names = db._room_ref_tokens(
+                        conn, found.room.token, include_surface_refs=False,
+                    )
+        except Exception as exc:  # noqa: BLE001 — an unreadable registry refuses
+            logger.warning("memory: room lookup failed: %s", exc)
+    if not isinstance(found, Found):
+        extra = {"ambiguous": True} if isinstance(found, Ambiguous) else {}
+        _err("room_unavailable", room=query, **extra)
+        sys.exit(1)
+    token = found.room.token
+    config_dir = _user_md_path().parent
+    rooms_dir = contained_overlay_dir(
+        config_dir / "rooms", _mount_path() / "Users" / _user_id(),
+    )
+    if rooms_dir is None:
+        _err("room_notes_outside_user_tree", path=_mount_relative(config_dir / "rooms"))
+        sys.exit(1)
+    # `storage.read_room_notes`' rule: the canonical file, else the first live
+    # alias that exists. Writing to the canonical name while an alias still
+    # held the notes would hide them from every reader behind the new file.
+    for name in [token, *(n for n in names if n != token)]:
+        if "/" in name or name.startswith("."):
+            continue
+        try:
+            (rooms_dir / f"{name}.md").lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            break
+        return rooms_dir / f"{name}.md", token
+    return rooms_dir / f"{token}.md", token
+
+
 class Target(NamedTuple):
     path: Path
     kind: str
     group_id: str | None = None
+    room_token: str | None = None
 
 
 def _resolve_target(args, *, verb: str) -> Target:
-    """Resolve the write/read destination from `--channel` or `--group`."""
+    """Resolve the destination from `--channel`, `--group` or `--room`."""
     token = getattr(args, "channel", None)
     group_id = getattr(args, "group", None)
+    room = getattr(args, "room", None)
     if token and group_id is not None:
         _err("--group and --channel are mutually exclusive")
         sys.exit(1)
+    if room and (token or group_id is not None):
+        _err("--room cannot be combined with --channel or --group")
+        sys.exit(1)
+    if room:
+        path, room_token = _room_notes_path(room)
+        return Target(path, _ROOM, room_token=room_token)
     if group_id is not None:
         return Target(_group_md_path(group_id), _GROUP, group_id)
     if token:
@@ -326,7 +406,11 @@ def _config_for_audit():
     return _Shim()
 
 
-def _read_text(path: Path) -> str:
+def _read_cap(target: Target) -> int:
+    return _MAX_ROOM_NOTES_BYTES if target.kind == _ROOM else _MAX_USER_MD_READ_BYTES
+
+
+def _read_text(path: Path, max_bytes: int = _MAX_USER_MD_READ_BYTES) -> str:
     """Read USER.md or CHANNEL.md, refusing anything that is not a plain file.
 
     Through `_loader.read_overlay_bytes`, which is where this hardening already
@@ -351,7 +435,7 @@ def _read_text(path: Path) -> str:
     verbatim rather than forked — the `path` on the envelope is what says which
     document was refused.
     """
-    raw, reason, _size = read_overlay_bytes(path, max_bytes=_MAX_USER_MD_READ_BYTES)
+    raw, reason, _size = read_overlay_bytes(path, max_bytes=max_bytes)
     if reason is not None:
         _err(reason, path=_mount_relative(path))
         sys.exit(1)
@@ -403,7 +487,8 @@ def _audit_for(args, op: dict, outcome_or_reason: str, *,
 
     USER.md writes go to the user's trail. GROUP.md writes go to the group's
     own, recording who wrote and from which task, since the file has several
-    authors. Channel-memory writes are not audited — CHANNEL.md has no nightly
+    authors. Room-notes writes go to the user's trail, marked with the room.
+    Channel-memory writes are not audited — CHANNEL.md has no nightly
     curator and no audit trail.
     """
     if target.kind == _CHANNEL:
@@ -412,6 +497,12 @@ def _audit_for(args, op: dict, outcome_or_reason: str, *,
     user_id = _user_id()
     entries = [{"op": op, "outcome": outcome_or_reason}] if applied else []
     rejects = [] if applied else [{"op": op, "reason": outcome_or_reason}]
+    if target.kind == _ROOM:
+        write_audit_log(
+            config, user_id, applied=entries, rejected=rejects, source="runtime",
+            extra={"target": "room_notes", "room": target.room_token},
+        )
+        return
     if target.kind == _GROUP:
         write_group_audit_log(
             config, target.group_id, user_id,
@@ -497,7 +588,7 @@ def _do_op(args, op_dict: dict, *, verb: str) -> int:
     path = target.path
     try:
         with memory_md_lock(path, timeout_seconds=5.0, lock_dir=_lock_dir(target)):
-            current = _read_text(path)
+            current = _read_text(path, _read_cap(target))
             doc = parse_sectioned_doc(current)
             new_doc, applied, rejected = apply_ops(doc, [op_dict])
             if rejected:
@@ -520,12 +611,12 @@ def _do_op(args, op_dict: dict, *, verb: str) -> int:
                 # only from a host shell. Reachable by one oversized `--line` or
                 # by enough ordinary appends (ISSUE-339).
                 size = len(new_text.encode("utf-8"))
-                if size > _MAX_USER_MD_READ_BYTES:
+                if size > _read_cap(target):
                     _audit_for(args, op_dict, "would_exceed_read_cap",
                                target=target, applied=False)
                     return _err(
                         "would_exceed_read_cap",
-                        bytes=size, cap=_MAX_USER_MD_READ_BYTES,
+                        bytes=size, cap=_read_cap(target),
                     )
                 _atomic_write(path, new_text)
                 _update_last_seen(path, new_text, target)
@@ -680,7 +771,7 @@ def _channel_notes_shared() -> bool:
 def cmd_show(args) -> int:
     _refuse_retired_skill_flag(args)
     target = _resolve_target(args, verb="show")
-    text = _read_text(target.path)
+    text = _read_text(target.path, _read_cap(target))
     if args.heading:
         doc = parse_sectioned_doc(text)
         section = doc.find(args.heading)
@@ -710,7 +801,7 @@ def cmd_show(args) -> int:
 def cmd_headings(args) -> int:
     _refuse_retired_skill_flag(args)
     target = _resolve_target(args, verb="headings")
-    text = _read_text(target.path)
+    text = _read_text(target.path, _read_cap(target))
     doc = parse_sectioned_doc(text)
     print(json.dumps(
         {"status": "ok", "headings": [s.heading for s in doc.sections]},
@@ -734,6 +825,11 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument(
             "--group",
             help="Target /Groups/<id>/GROUP.md instead of USER.md.",
+        )
+        p.add_argument(
+            "--room",
+            help="Target your own notes about a shared room (its token or name). "
+                 "Only from your private chat.",
         )
 
     def _add_retired_skill_flag(p: argparse.ArgumentParser) -> None:
