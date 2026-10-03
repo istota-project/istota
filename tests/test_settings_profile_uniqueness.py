@@ -190,3 +190,27 @@ async def test_the_profile_get_reports_the_managed_set(client, seeded):  # noqa:
     cookies = await _login(client, "alice")
     resp = await client.get(URL, cookies=cookies)
     assert resp.json()["profile"]["managed"] == ["email_addresses", "timezone"]
+
+
+async def test_an_entry_that_is_not_an_address_is_400(client, seeded):  # noqa: F811
+    cookies = await _login(client, "alice")
+    resp = await client.put(
+        URL, json={"email_addresses": ["alice"]}, cookies=cookies, headers=ORIGIN,
+    )
+    assert resp.status_code == 400
+    assert user_profiles.get_profile(seeded.db_path, "alice").email_addresses == []
+
+
+async def test_a_stored_entry_that_is_not_an_address_is_not_rejudged(
+    client, seeded,  # noqa: F811
+):
+    user_profiles.update_profile(seeded.db_path, "alice", email_addresses=["legacy"])
+    cookies = await _login(client, "alice")
+    resp = await client.put(
+        URL, json={"email_addresses": ["legacy", "Alice@Example.com"]},
+        cookies=cookies, headers=ORIGIN,
+    )
+    assert resp.status_code == 200
+    assert user_profiles.get_profile(seeded.db_path, "alice").email_addresses == [
+        "legacy", "Alice@Example.com",
+    ]

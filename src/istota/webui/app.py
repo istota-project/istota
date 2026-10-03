@@ -2158,6 +2158,7 @@ async def admin_create_user(request: Request, _: dict = Depends(_require_admin),
     identity = await _admin_auth_write(
         web_auth.upsert_identity, config.db_path, payload["user_id"], email,
         create_profile=True, display_name=payload.get("display_name", ""), reject_case_collision=True,
+        reject_address_holders=True,
     )
     return await _admin_send_auth_link(config, identity.user_id, "enrol")
 
@@ -2196,6 +2197,385 @@ async def admin_user_remove(user_id: str, _: dict = Depends(_require_admin), _cs
     await _admin_auth_write(web_auth.delete_identity, _config.db_path, user_id,
                             protected_admins=set(_config.admin_users))
     return {"removed": True}
+
+
+# ---- Admin user settings editor ----
+#
+# One user's profile, WhatsApp binding and login email, for the admin modal.
+# Which fields an admin may write is `user_profiles.ADMIN_EDITABLE_FIELDS`; the
+# validation is `coerce_profile_field`, shared with the self PUT. The WhatsApp
+# number and the login email are not profile columns and are handled beside it.
+
+_ADMIN_WHATSAPP_FIELD = user_profiles.WHATSAPP_NUMBER_FIELD
+_ADMIN_PATCH_FIELDS = (*user_profiles.ADMIN_EDITABLE_FIELDS, _ADMIN_WHATSAPP_FIELD)
+_CONFLICT_KINDS = {"email_addresses": "email", "sms_phone_number": "sms",
+                   _ADMIN_WHATSAPP_FIELD: "whatsapp"}
+
+
+class _FieldRefusal(Exception):
+    """A refusal naming the fields to mark, raised in the write thread.
+
+    Answered in the managed refusal's shape — `error`, `fields`, and `detail`
+    as a top-level string — so the client reads one shape for every 4xx that
+    points at a field.
+    """
+
+    def __init__(self, status: int, error: str, fields: list[str], detail: str):
+        super().__init__(error)
+        self.status, self.error, self.fields, self.detail = status, error, fields, detail
+
+    def response(self) -> JSONResponse:
+        return JSONResponse(
+            {"error": self.error, "fields": self.fields, "detail": self.detail},
+            status_code=self.status,
+        )
+
+
+def _whatsapp_view(binding) -> dict:
+    """The binding as the modal shows it: the number in full, the identity masked."""
+    identity = (binding.jid or binding.bsuid) if binding else ""
+    if binding is None or not (binding.bootstrap_phone_number or identity):
+        status = "unbound"
+    elif binding.opted_out_at:
+        status = "opted_out"
+    elif identity:
+        status = "enrolled"
+    else:
+        status = "awaiting_first_message"
+    return {
+        "number": binding.bootstrap_phone_number if binding else "",
+        "status": status,
+        "identity": user_profiles.mask_whatsapp_identifier(identity) if identity else None,
+        # The stamp asserts nothing on a row with no identity (`WhatsAppBinding`).
+        "provider": binding.provider if identity else None,
+        "last_seen_at": binding.last_seen_at if binding else None,
+    }
+
+
+def _admin_user_options(config) -> dict:
+    from istota.mail.outbound_policy import VALID_POLICIES
+    from istota.skills._loader import load_skill_index
+
+    try:
+        skills = sorted(load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir))
+    except Exception:
+        logger.warning("admin user editor: skill index unavailable", exc_info=True)
+        skills = []
+    return {
+        "modules": _visible_modules(config),
+        "skills": skills,
+        "outbound_approval": ["", *VALID_POLICIES],
+        "outbound_approval_floor": config.email.outbound_approval_floor,
+        "email_enabled": config.email.enabled,
+        "email_login_enabled": config.web.has_method("email"),
+        "sms_enabled": config.sms.enabled,
+        "whatsapp_enabled": config.whatsapp.enabled,
+    }
+
+
+def _admin_user_detail(conn, config, user_id: str) -> dict | None:
+    """The GET body without `options`, read on ``conn``; None without a profile row."""
+    profile = user_profiles.get_profile(config.db_path, user_id, conn=conn)
+    if profile is None:
+        return None
+    identity = web_auth._get_identity(conn, user_id)
+    identity_view = _admin_identity_view(identity)
+    if identity_view is not None:
+        identity_view["state"] = "password_set" if identity.password_hash else "passwordless"
+    return {
+        "user_id": user_id,
+        "is_admin": user_id in config.admin_users,
+        "identity": identity_view,
+        "profile": {field: getattr(profile, field) for field in user_profiles.ADMIN_EDITABLE_FIELDS},
+        "channels": {"log_channel": profile.log_channel, "alerts_channel": profile.alerts_channel},
+        "whatsapp": _whatsapp_view(_db.get_whatsapp_binding(conn, user_id)),
+        "managed": sorted(user_profiles.managed_fields(conn, user_id)),
+    }
+
+
+def _with_options(config, detail: dict) -> dict:
+    detail["options"] = _admin_user_options(config)
+    return detail
+
+
+def _read_admin_user(config, user_id: str) -> dict | None:
+    with _db.get_db(config.db_path) as conn:
+        detail = _admin_user_detail(conn, config, user_id)
+    return None if detail is None else _with_options(config, detail)
+
+
+def _admin_display_name(admin: dict) -> str:
+    return admin.get("display_name") or admin["username"]
+
+
+def _admin_conflict(admin_id: str, user_id: str, field: str, message: str) -> _FieldRefusal:
+    # Neither the holder nor the value is logged: the response names the holder
+    # to the admin, and the log is read more widely than that.
+    logger.info("admin_user_conflict admin=%s user=%s kind=%s",
+                admin_id, user_id, _CONFLICT_KINDS[field])
+    return _FieldRefusal(409, "identity_conflict", [field], message)
+
+
+def _check_admin_conflicts(conn, admin_id: str, user_id: str, updates: dict,
+                           whatsapp: str | None) -> None:
+    """Refuse a value another user holds, naming the holder. One call per kind:
+    an SMS and a WhatsApp number may be the same string and must not share a key."""
+    checks = (
+        ("email_addresses", {"email_addresses": updates.get("email_addresses")}),
+        ("sms_phone_number", {"sms": updates.get("sms_phone_number") or None}),
+        (_ADMIN_WHATSAPP_FIELD, {"whatsapp": whatsapp or None}),
+    )
+    for field, kwargs in checks:
+        conflicts = user_profiles.find_identity_conflicts(conn, user_id, **kwargs)
+        if conflicts:
+            holder = conflicts[sorted(conflicts)[0]]
+            raise _admin_conflict(admin_id, user_id, field, f"Already assigned to {holder}.")
+
+
+def _write_admin_profile(config, admin: dict, user_id: str, updates: dict) -> tuple[dict, list[str]]:
+    """The PATCH's checks and write, in one `BEGIN IMMEDIATE` transaction.
+
+    Returns the GET body and the fields whose value changed. A refusal raises,
+    and every check runs before the first write, so a refused PATCH writes
+    nothing. The notification row commits with the change it reports and is
+    pushed after the commit.
+    """
+    from istota.notifications.resolvers import admin_profile_change
+    from istota.notifications.store import deliver_pending
+
+    admin_id = admin["username"]
+    whatsapp = updates.pop(_ADMIN_WHATSAPP_FIELD, None)
+    pending = None
+    with _db.get_db(config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        stored = user_profiles.get_profile(config.db_path, user_id, conn=conn)
+        if stored is None:
+            raise HTTPException(status_code=404, detail="No profile for this user.")
+        checked = dict(updates)
+        if whatsapp is not None:
+            checked[_ADMIN_WHATSAPP_FIELD] = whatsapp
+        refused = user_profiles.refused_managed_fields(conn, user_id, checked)
+        if refused:
+            raise _FieldRefusal(409, "managed_by_provisioning", refused, MANAGED_FIELDS_DETAIL)
+
+        binding = _db.get_whatsapp_binding(conn, user_id)
+        stored_number = binding.bootstrap_phone_number if binding else ""
+        whatsapp_changed = whatsapp is not None and whatsapp != stored_number
+        _check_admin_conflicts(conn, admin_id, user_id, updates,
+                               whatsapp if whatsapp_changed else None)
+
+        changed = [field for field, value in updates.items()
+                   if not user_profiles._same_value(field, getattr(stored, field), value)]
+        if updates:
+            try:
+                user_profiles.update_profile(config.db_path, user_id, conn=conn, **updates)
+            except ValueError as exc:
+                raise _admin_conflict(admin_id, user_id, "sms_phone_number", str(exc))
+        if whatsapp_changed:
+            # An unchanged number is never rewritten: `set_whatsapp_binding`
+            # discards the latched identity on any change, so a resubmit would
+            # reset an enrolled user.
+            try:
+                if whatsapp:
+                    _db.set_whatsapp_binding(conn, user_id, bootstrap_phone_number=whatsapp)
+                else:
+                    _db.clear_whatsapp_binding(conn, user_id)
+            except ValueError as exc:
+                raise _admin_conflict(admin_id, user_id, _ADMIN_WHATSAPP_FIELD, str(exc))
+            changed.append(_ADMIN_WHATSAPP_FIELD)
+
+        contact = admin_profile_change.contact_fields(changed)
+        if contact and user_id != admin_id:
+            pending = admin_profile_change.write(
+                conn, user_id, admin_name=_admin_display_name(admin), fields=contact,
+            )
+        detail = _admin_user_detail(conn, config, user_id)
+    if pending is not None:
+        deliver_pending(config, [pending])
+    return _with_options(config, detail), changed
+
+
+@api_router.get("/admin/users/{user_id}")
+async def admin_user_detail(user_id: str, _: dict = Depends(_require_admin)):
+    detail = await asyncio.to_thread(_read_admin_user, _config, user_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="No profile for this user.")
+    return detail
+
+
+@api_router.patch("/admin/users/{user_id}")
+async def admin_user_update(
+    user_id: str, request: Request, admin: dict = Depends(_require_admin),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Partial, all-or-nothing update of the fields an admin may set."""
+    config = _config
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid settings request.")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+    unknown = sorted(set(payload) - set(_ADMIN_PATCH_FIELDS))
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"unknown field: {unknown[0]}")
+    current = await asyncio.to_thread(user_profiles.get_profile, config.db_path, user_id)
+    updates: dict[str, object] = {}
+    for field, value in payload.items():
+        try:
+            if field == _ADMIN_WHATSAPP_FIELD:
+                if value is not None and not isinstance(value, str):
+                    raise ValueError(f"{field} must be a string")
+                updates[field] = user_profiles.normalize_whatsapp_phone_number(
+                    (value or "").strip(), allow_empty=True,
+                )
+            else:
+                # No room-bearing field is admin-editable, so the target's
+                # room membership is never consulted here.
+                updates[field] = coerce_profile_field(
+                    field, value, user_id, getattr(current, field, None),
+                )
+        except ValueError as exc:
+            return _FieldRefusal(400, "invalid_field", [field], str(exc)).response()
+    try:
+        detail, changed = await asyncio.to_thread(
+            _write_admin_profile, config, admin, user_id, dict(updates),
+        )
+    except _FieldRefusal as refusal:
+        if refusal.error == "managed_by_provisioning":
+            logger.info("admin_user_update admin=%s user=%s fields=%s managed_refused=%s",
+                        admin["username"], user_id, sorted(updates), refusal.fields)
+        return refusal.response()
+    logger.info("admin_user_update admin=%s user=%s fields=%s managed_refused=[]",
+                admin["username"], user_id, sorted(changed))
+    return detail
+
+
+def _reset_admin_whatsapp(config, user_id: str) -> dict:
+    with _db.get_db(config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if user_profiles.get_profile(config.db_path, user_id, conn=conn) is None:
+            raise HTTPException(status_code=404, detail="No profile for this user.")
+        try:
+            _db.reset_whatsapp_identity(conn, user_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        detail = _admin_user_detail(conn, config, user_id)
+    return _with_options(config, detail)
+
+
+@api_router.post("/admin/users/{user_id}/whatsapp/reset")
+async def admin_user_whatsapp_reset(
+    user_id: str, admin: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin),
+):
+    """Keep the number; forget the latched identity, the window and the opt-out."""
+    detail = await asyncio.to_thread(_reset_admin_whatsapp, _config, user_id)
+    logger.info("admin_user_update admin=%s user=%s fields=%s managed_refused=[]",
+                admin["username"], user_id, ["whatsapp_identity"])
+    return detail
+
+
+def _write_admin_identity(
+    config, admin: dict, user_id: str, email: str, add_to_addresses: bool,
+) -> tuple[dict, str, str | None, list[str]]:
+    """Attach or change the login email, in one transaction with the address append.
+
+    Returns the GET body; ``attached``, ``changed`` or ``unchanged``; why an
+    asked-for append was skipped (``managed``), or None; and the contact
+    fields that changed.
+    """
+    from istota.notifications.resolvers import admin_profile_change
+    from istota.notifications.store import deliver_pending
+
+    pending = None
+    skipped = None
+    with _db.get_db(config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        profile = user_profiles.get_profile(config.db_path, user_id, conn=conn)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="No profile for this user.")
+        previous = web_auth._get_identity(conn, user_id)
+        try:
+            identity = web_auth.upsert_identity(
+                config.db_path, user_id, email, reject_case_collision=True,
+                reject_address_holders=True, conn=conn,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if previous is None:
+            outcome = "attached"
+        elif previous.email != identity.email:
+            outcome = "changed"
+        else:
+            outcome = "unchanged"
+        fields = [] if outcome == "unchanged" else ["login_email"]
+        listed = {web_auth.normalize_email(a) for a in profile.email_addresses}
+        if add_to_addresses and identity.email not in listed:
+            if "email_addresses" in user_profiles.managed_fields(conn, user_id):
+                skipped = "managed"
+            else:
+                user_profiles.update_profile(
+                    config.db_path, user_id, conn=conn,
+                    email_addresses=[*profile.email_addresses, identity.email],
+                )
+                fields.append("email_addresses")
+        if fields and user_id != admin["username"]:
+            pending = admin_profile_change.write(
+                conn, user_id, admin_name=_admin_display_name(admin), fields=fields,
+            )
+        detail = _admin_user_detail(conn, config, user_id)
+    if pending is not None:
+        deliver_pending(config, [pending])
+    return _with_options(config, detail), outcome, skipped, fields
+
+
+@api_router.put("/admin/users/{user_id}/identity")
+async def admin_user_set_identity(
+    user_id: str, request: Request, admin: dict = Depends(_require_admin),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Attach or change the login email. A change signs the user out everywhere
+    and voids their outstanding links; `upsert_identity` does both."""
+    config = _config
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid identity request.")
+    if (not isinstance(payload, dict) or not isinstance(payload.get("email"), str)
+            or not isinstance(payload.get("invite", False), bool)
+            or not isinstance(payload.get("add_to_addresses", False), bool)):
+        raise HTTPException(status_code=400, detail="An email is required.")
+    if not config.web.has_method("email"):
+        raise HTTPException(status_code=400, detail="Email sign-in is not enabled.")
+    email = web_auth.normalize_email(payload["email"])
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+", email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    try:
+        detail, outcome, skipped, fields = await asyncio.to_thread(
+            _write_admin_identity, config, admin, user_id, email,
+            payload.get("add_to_addresses", False),
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("Admin identity update failed")
+        raise HTTPException(status_code=503, detail="Identity could not be updated. Try again later.")
+    invite = "skipped"
+    try:
+        if payload.get("invite", False):
+            invite = "failed"
+            # A send failure is the existing 502, "the identity is saved".
+            await _admin_send_auth_link(config, user_id, "enrol")
+            invite = "sent"
+    finally:
+        logger.info(
+            "admin_user_update admin=%s user=%s fields=%s managed_refused=%s identity=%s invite=%s",
+            admin["username"], user_id, sorted(fields),
+            ["email_addresses"] if skipped else [], outcome, invite,
+        )
+    if skipped:
+        detail["addresses_skipped"] = skipped
+    return detail
 
 
 # ---- Admin dashboard ----
@@ -12379,6 +12759,19 @@ async def settings_vault(user: dict = Depends(_require_api_auth)) -> dict:
         return {"configured": False}
 
 
+def _visible_modules(cfg) -> list[str]:
+    """Module names a settings form may offer: experimental ones only behind their flag."""
+    from istota.modules import EXPERIMENTAL_MODULES, MODULE_NAMES
+
+    out = []
+    for name in sorted(MODULE_NAMES):
+        flag = EXPERIMENTAL_MODULES.get(name)
+        if flag and (cfg is None or not cfg.experimental.is_enabled(flag)):
+            continue
+        out.append(name)
+    return out
+
+
 @api_router.get("/settings/modules")
 async def settings_modules(user: dict = Depends(_require_api_auth)) -> dict:
     """Module registry + per-user enabled state.
@@ -12392,19 +12785,8 @@ async def settings_modules(user: dict = Depends(_require_api_auth)) -> dict:
     via ``[experimental] features`` — they shouldn't appear in the
     settings UI on standard installs.
     """
-    from istota.modules import EXPERIMENTAL_MODULES, MODULE_NAMES
-
-    def _visible(cfg) -> list[str]:
-        out = []
-        for name in sorted(MODULE_NAMES):
-            flag = EXPERIMENTAL_MODULES.get(name)
-            if flag and (cfg is None or not cfg.experimental.is_enabled(flag)):
-                continue
-            out.append(name)
-        return out
-
     if not _config:
-        modules = _visible(None)
+        modules = _visible_modules(None)
         return {
             "modules": modules,
             "disabled": [],
@@ -12412,7 +12794,7 @@ async def settings_modules(user: dict = Depends(_require_api_auth)) -> dict:
         }
 
     username = user["username"]
-    modules = _visible(_config)
+    modules = _visible_modules(_config)
     uc = _config.get_user(username)
     disabled = list(uc.disabled_modules) if uc else []
     return {
@@ -12789,13 +13171,19 @@ _PROFILE_FIELD_SPECS: dict[str, dict] = {
     # post into any conversation whose token the caller has seen (ISSUE-475).
     "log_channel":            {"type": "talk_channel"},
     "alerts_channel":         {"type": "talk_channel"},
-    "email_addresses":        {"type": "list[str]"},
+    # Each entry must look like an address; one already on the stored list is
+    # not re-judged, so a legacy entry cannot refuse an unrelated save.
+    "email_addresses":        {"type": "email_list"},
     "trusted_email_senders":  {"type": "list[str]"},
     "quiet_email_senders":    {"type": "list[str]"},
     "disabled_skills":        {"type": "list[str]"},
     "disabled_modules":       {"type": "list[str]"},
     "max_foreground_workers": {"type": "int"},
     "max_background_workers": {"type": "int"},
+    # Admin-only, below: the authority table says who may send them.
+    "default_briefings":      {"type": "bool"},
+    "sms_phone_number":       {"type": "sms_phone"},
+    "outbound_approval":      {"type": "outbound_approval"},
     "default_destination":    {"type": "descriptor"},
     # A canonical room token, not a descriptor: it names where a destination
     # that named no room lands, on whichever surface asks (ISSUE-477).
@@ -13226,7 +13614,7 @@ def _validate_descriptor_rooms(descriptor: str, user_id: str) -> None:
     permission one, and a 400 out of this function would report it as the
     latter. Nothing is lost by leaving it out: the picker can no longer offer
     such a room, so a save cannot newly pin one from the UI, and an existing pin
-    is not re-judged either way — `_coerce_profile_value` validates a descriptor
+    is not re-judged either way — `coerce_profile_field` validates a descriptor
     only when it differs from the stored one, per purpose. What the user gets
     instead is the `(unavailable)` mark on the pinned option, driven by
     `_unavailable_web_room_pins`, which says the thing a 400 here would have
@@ -13249,7 +13637,7 @@ def _validate_descriptor_rooms(descriptor: str, user_id: str) -> None:
     operator setting a token through ``istota user ensure`` or config.toml is
     trusted, and is also the one who would be repairing a room the user cannot
     reach. That trust is preserved on the way through by the caller rather than
-    here — `_coerce_profile_value` skips a descriptor identical to the stored
+    here — `coerce_profile_field` skips a descriptor identical to the stored
     one, so a value only an operator could have set is never re-judged by a save
     that did not touch it. It has to be the caller's job because ``routing`` is
     one field carrying three descriptors: the settings page diffs top-level
@@ -13409,7 +13797,7 @@ def _validate_descriptor_surfaces(descriptor: str) -> None:
             raise ValueError(f"unknown delivery surface: {dest.surface}")
 
 
-def _coerce_profile_value(
+def coerce_profile_field(
     field: str, value: object, user_id: str, stored: object = None,
 ) -> object:
     """Validate + coerce a profile field. Raises ValueError on bad input.
@@ -13464,6 +13852,54 @@ def _coerce_profile_value(
                 if flag and not (_config and _config.experimental.is_enabled(flag)):
                     raise ValueError(f"unknown module: {v}")
         return out
+    if t == "email_list":
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError(f"{field} must be a list")
+        own = {
+            web_auth.normalize_email(v)
+            for v in (stored or []) if isinstance(v, str)
+        }
+        out = []
+        for v in value:
+            if not isinstance(v, str):
+                raise ValueError(f"{field} entries must be strings")
+            v = v.strip()
+            if not v:
+                continue
+            key = web_auth.normalize_email(v)
+            # The create route's rule. Validated on the folded form and stored
+            # as typed: matching is case-insensitive already, and storing the
+            # folded form would make a resubmitted managed list read as an edit.
+            if key not in own and not re.fullmatch(r"[^\s@]+@[^\s@]+", key):
+                raise ValueError(f"{v!r} is not a valid email address")
+            out.append(v)
+        return out
+    if t == "sms_phone":
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise ValueError(f"{field} must be a string")
+        return user_profiles.normalize_sms_phone_number(value.strip(), allow_empty=True)
+    if t == "outbound_approval":
+        from istota.mail.outbound_policy import VALID_POLICIES, below_floor
+        if value is None:
+            return ""
+        if not isinstance(value, str) or value not in ("", *VALID_POLICIES):
+            raise ValueError(
+                f"{field} must be one of: {', '.join(VALID_POLICIES)}, "
+                "or empty to follow the deployment floor",
+            )
+        floor = _config.email.outbound_approval_floor if _config else "untrusted"
+        # Below the floor is refused rather than stored: `effective_policy`
+        # would raise it to the floor anyway, so the form would show a choice
+        # that does nothing. A stored value from the CLI resubmitted passes.
+        if value != (stored or "") and below_floor(value, floor):
+            raise ValueError(
+                f"{field} cannot be below the deployment floor ({floor})",
+            )
+        return value
     if t == "int":
         try:
             n = int(value)
@@ -13657,7 +14093,7 @@ async def settings_update_profile(
 
     # Read once, before coercion: a room-bearing value identical to the stored
     # one is not re-judged, so an operator-set descriptor survives a save that
-    # merely resubmitted it (see `_coerce_profile_value`).
+    # merely resubmitted it (see `coerce_profile_field`).
     current = None
     if _config is not None and _config.db_path:
         current = user_profiles.get_profile(_config.db_path, user["username"])
@@ -13667,7 +14103,7 @@ async def settings_update_profile(
         if field not in _PROFILE_EDITABLE_FIELDS:
             raise HTTPException(status_code=400, detail=f"unknown field: {field}")
         try:
-            coerced[field] = _coerce_profile_value(
+            coerced[field] = coerce_profile_field(
                 field, value, user["username"], getattr(current, field, None),
             )
         except ValueError as e:
@@ -13874,7 +14310,7 @@ def _validate_briefing_payload(
     # grammar stays permissive so legacy ``both`` / comma lists still parse,
     # while the UI offers only ``_registered_delivery_surfaces()``.
     # ``stored`` is the briefing this upsert replaces, if any. A room value it
-    # already held is not re-judged, the rule `_coerce_profile_value` follows:
+    # already held is not re-judged, the rule `coerce_profile_field` follows:
     # a pin onto a room that became shared since must not stop the user
     # disabling or rescheduling the briefing it sits on.
     try:

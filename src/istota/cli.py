@@ -1497,7 +1497,9 @@ def cmd_auth(args):
             if user_id not in profiles:
                 user_profiles.ensure_profile(db_path, user_id)
             previous = identity
-            identity = web_auth.upsert_identity(db_path, user_id, email)
+            identity = web_auth.upsert_identity(
+                db_path, user_id, email, reject_address_holders=True,
+            )
             if previous is None:
                 state = "created"
             elif previous == identity and password is None and not wants_link:

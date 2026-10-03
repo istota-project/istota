@@ -55,6 +55,19 @@ class TestTheAuthorityTables:
         for field in SELF_EDITABLE_FIELDS:
             assert field in web_app._PROFILE_FIELD_SPECS, field
 
+    def test_every_admin_field_has_a_coercer(self):
+        pytest.importorskip("fastapi")
+        from istota.webui import app as web_app
+
+        for field in ADMIN_EDITABLE_FIELDS:
+            assert field in web_app._PROFILE_FIELD_SPECS, field
+
+    def test_the_admin_patch_accepts_the_admin_set_and_the_whatsapp_number(self):
+        pytest.importorskip("fastapi")
+        from istota.webui import app as web_app
+
+        assert set(web_app._ADMIN_PATCH_FIELDS) == {*ADMIN_EDITABLE_FIELDS, "whatsapp_number"}
+
 
 @pytest.fixture
 def db_path(tmp_path):

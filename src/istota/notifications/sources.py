@@ -272,6 +272,7 @@ def _register_all() -> None:
             "task_alert",
             "message_relay",
             "relay_question",
+            "admin_profile_change",
         ):
             try:
                 module = importlib.import_module(
