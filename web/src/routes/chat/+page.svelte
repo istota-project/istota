@@ -271,24 +271,6 @@
     }
   }
 
-  // A side room sits under its parent (D4); one whose parent is not in the
-  // list stays where activity puts it.
-  const sidebarRooms = $derived.by(() => {
-    const tokens = new Set($rooms.map((r) => r.token));
-    const sides = new Map<string, ChatRoom[]>();
-    for (const r of $rooms) {
-      if (r.side_of && tokens.has(r.side_of)) {
-        sides.set(r.side_of, [...(sides.get(r.side_of) ?? []), r]);
-      }
-    }
-    const out: { room: ChatRoom; nested: boolean }[] = [];
-    for (const r of $rooms) {
-      if (r.side_of && tokens.has(r.side_of)) continue;
-      out.push({ room: r, nested: false });
-      for (const side of sides.get(r.token) ?? []) out.push({ room: side, nested: true });
-    }
-    return out;
-  });
   // Where the composer holds unsent text (ISSUE-205). Scoped to the room's
   // token *and* the logged-in user: the room id is a recycled SQLite rowid, so
   // a deleted room's draft would land in whichever room takes its id next, and
@@ -1205,7 +1187,7 @@
         {/if}
       </div>
 
-      {#each sidebarRooms as { room, nested } (room.id)}
+      {#each $rooms as room (room.id)}
         {@const isTalk = isTalkRoom(room)}
         {@const unreadCount = room.unread_count ?? 0}
         {@const unread = unreadCount > 0 && room.id !== $activeRoomId}
@@ -1217,7 +1199,6 @@
 			     briefings archive row (ISSUE-433). -->
         <div
           class="list-row room-row"
-          class:nested
           class:active={room.id === $activeRoomId}
           class:tinted={!!tint}
           style:--room-tint={tint}
@@ -1945,10 +1926,6 @@
 	   pill, which are the two things in this row that mean something has changed.
 	   `color-mix` over transparent is the idiom this file already uses for a
 	   subtle wash (see @keyframes jump-pulse below). */
-  /* A side room under its parent. */
-  .room-row.nested {
-    padding-left: var(--space-4);
-  }
   .room-notice {
     padding: var(--space-2) var(--space-3) 0;
   }

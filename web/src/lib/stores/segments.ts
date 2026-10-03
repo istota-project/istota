@@ -258,11 +258,9 @@ export interface ChatMessage {
   // False on a row the viewer may not delete: another member's in a shared
   // room. The server's own rule; absent means the delete would be accepted.
   deletable?: boolean;
-  // A row from the viewer's side room shown inline in its parent room, which
-  // only they see because only they are in the side room (multiplayer D4).
-  // Client-only: not part of the parent's transcript and gone on reload, so it
-  // carries no durable id and offers nothing that acts on one.
-  ephemeral?: { roomToken: string; roomName: string };
+  // The shared room a private reply in the viewer's own room is about
+  // (ISSUE-608). `name` is null when the viewer has left that room.
+  aboutRoom?: { token: string; name: string | null };
 
   // ---- Send lifecycle (ISSUE-200) -------------------------------------------
   // User rows this client originated, only. Absent means settled — which every

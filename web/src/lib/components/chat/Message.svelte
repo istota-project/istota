@@ -113,7 +113,7 @@
     // surface it landed on — so a surface that mounts one is the way to fix it,
     // not a flag on the renderer.
     onImageOpen?: (images: string[], index: number) => void;
-    // Open a room by token: the side room an inline private row came from.
+    // Open a room by token: the shared room a private reply is about.
     onOpenRoom?: (token: string) => void;
     // Outbound mail this turn's task composed and the gate is holding. Placed
     // under the turn that produced it, which is where the drafted text and the
@@ -660,23 +660,26 @@
   </div>
 {/snippet}
 
-{#if message.ephemeral}
-  <!-- A row from the reader's side room, shown here because they are looking
-       at its parent. Nobody else in the room sees it; this line says so, and
-       where the durable copy lives. -->
-  <div class="ephemeral-note" role="note">
-    <span>Only you can see this — it is in your side room.</span>
-    {#if onOpenRoom}
+<!-- The shared room a private reply is about (ISSUE-608). It opens that room
+     while the reader is in it; once they have left, it names nothing. -->
+{#snippet aboutChip()}
+  {#if message.aboutRoom}
+    {#if message.aboutRoom.name !== null && onOpenRoom}
       <button
-        class="ephemeral-open"
+        class="room-chip about-chip"
         type="button"
-        onclick={() => onOpenRoom?.(message.ephemeral!.roomToken)}
+        title="Open the room"
+        onclick={() => onOpenRoom?.(message.aboutRoom!.token)}
       >
-        Open
+        re: {message.aboutRoom.name}
       </button>
+    {:else}
+      <span class="room-chip about-chip">
+        re: {message.aboutRoom.name ?? 'a room you left'}
+      </span>
     {/if}
-  </div>
-{/if}
+  {/if}
+{/snippet}
 
 {#if isSystem}
   <!-- Command (!…) output / delivered notifications. Left-aligned block, not a
@@ -734,6 +737,7 @@
           {message.roomName}
         </button>
       {/if}
+      {@render aboutChip()}
       {#if message.searchResults}
         <SearchResults data={message.searchResults} {onJump} />
       {:else}
@@ -807,6 +811,7 @@
               {message.roomName}
             </button>
           {/if}
+          {@render aboutChip()}
           {#if hasActions}
             {@render actionsBar()}
           {/if}
@@ -1768,24 +1773,9 @@
 	   around it. A system row is always its own group (there is no continuation
 	   case for a notice), so it takes the fresh-group top padding unconditionally
 	   rather than through a class. */
-  /* Starts where a message body starts, so it reads as a label on the row
-     below it rather than as a row of its own. */
-  .ephemeral-note {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--chat-row-inline) 0;
-    padding-left: calc(var(--chat-row-inline) + var(--chat-gutter) + var(--chat-avatar-gap));
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-  .ephemeral-open {
-    background: none;
-    border: none;
-    padding: 0;
-    font: inherit;
-    color: var(--accent-blue);
-    cursor: pointer;
+  /* A span when the room cannot be opened: no pointer, no hover. */
+  span.about-chip {
+    cursor: default;
   }
   .cmd-row {
     display: flex;

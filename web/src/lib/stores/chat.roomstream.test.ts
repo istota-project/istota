@@ -261,37 +261,26 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
-  // Multiplayer D4: a row for the reader's side room shows inline in the
-  // parent they are looking at, as a bubble only they see, and stays in the
-  // side room as the durable copy.
-  it('shows a side-room answer inline in its parent, marked as private', async () => {
+  // ISSUE-608: a private reply in the reader's own room carries the shared
+  // room it is about, which the message renders as a chip.
+  it('carries the shared room a streamed private reply is about', async () => {
     vi.useFakeTimers();
-    const side = { ...room(2, 0, 're: Room 1'), side_of: 't1' };
-    api.getChatRooms.mockResolvedValue({ rooms: [room(1), side] });
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2)] });
     api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
     const s = await freshSession();
-    await s.init(); // room 1, the parent, is active
-    queueEvents([row(10, 't2', { text: 'your calendar is clear' })], 10);
+    await s.init(); // room 1, the private room, is active
+    queueEvents(
+      [
+        row(10, 't1', {
+          text: 'your calendar is clear',
+          about_room: { token: 't2', name: 'Family' },
+        }),
+      ],
+      10,
+    );
     await vi.advanceTimersByTimeAsync(2000);
     const shown = get(s.messages).find((m) => m.text === 'your calendar is clear');
-    expect(shown?.ephemeral).toEqual({ roomToken: 't2', roomName: 're: Room 1' });
-    // No durable id in the parent: nothing that acts on one is offered there.
-    expect(shown?.msgId).toBeUndefined();
-    // The side room still counts it, since that is where it lives.
-    expect(get(s.rooms).find((r) => r.id === 2)!.unread_count).toBe(1);
-    s.teardown();
-  });
-
-  it('shows nothing inline from a side room of a room not on screen', async () => {
-    vi.useFakeTimers();
-    const side = { ...room(3, 0, 're: Room 2'), side_of: 't2' };
-    api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2), side] });
-    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
-    const s = await freshSession();
-    await s.init(); // room 1 is active, not room 2
-    queueEvents([row(10, 't3', { text: 'private to room 2' })], 10);
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(get(s.messages)).toHaveLength(0);
+    expect(shown?.aboutRoom).toEqual({ token: 't2', name: 'Family' });
     s.teardown();
   });
 

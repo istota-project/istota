@@ -2809,9 +2809,6 @@ export interface ChatRoom {
    * row's stamp can be written straight onto the room. Absent on older
    * backends → the room keeps whatever position the server gave it. */
   last_activity?: string;
-  /** For a side room (multiplayer D4), the token of the shared room it is the
-   * caller's private companion of. null for every other room. */
-  side_of?: string | null;
   /** The phone surface this room is bound to, a WhatsApp group included; null
    * for every other room. What the sidebar badge and the settings line read. */
   phone_surface?: 'sms' | 'whatsapp' | null;
@@ -2828,8 +2825,7 @@ export interface ChatRoom {
   /** The caller keeps private notes about this room ("My notes"). With
    * `shared`, what makes the room menu offer Room notes and My notes. */
   has_my_notes?: boolean;
-  /** The policy of a shared room; null for a room one human reads and for a
-   * side room. */
+  /** The policy of a shared room; null for a room one human reads. */
   policy?: RoomPolicyView | null;
   /** Set while the room is switched off (multiplayer D8): nothing in it is
    * recorded or answered. null while it is on. */
@@ -2973,6 +2969,10 @@ export interface ChatHistoryMessage {
   // delete endpoint's own owner rule, asked ahead of time. Absent means the
   // endpoint would accept it.
   deletable?: boolean;
+  // A private reply about a shared room (ISSUE-608), in the viewer's own
+  // private room. `name` is null when the viewer is no longer in that room,
+  // and the chip then names nothing and opens nothing.
+  about_room?: { token: string; name: string | null };
 }
 
 /** Cross-room aggregate views (sidebar All / Unread / Starred). */
