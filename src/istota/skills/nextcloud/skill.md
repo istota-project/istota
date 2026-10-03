@@ -278,7 +278,8 @@ a one-to-one with the user themselves. `talk share-file` posts a file into a
 conversation — that is a share, so it grants everyone in the room access.
 From a task, the writes are refused (`reason: shared_room`) in a conversation
 anyone besides the user reads, other than a post into the room the task was
-asked in; `room post` from the user's side room is the held route there.
+asked in; from the user's private chat with you, `istota-skill room post` is
+the held route there.
 
 `talk delete` removes a conversation for everyone and refuses without
 `--confirmed`.

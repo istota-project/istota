@@ -6257,17 +6257,18 @@ def _room_rule_line(guest_reply: str | None, *, registered: bool) -> str:
     are acting for X" into "I work for X here" and invents an approval rule
     (ISSUE-602). The guest clause follows the room's `guest_reply`, since a
     held room does put a guest's answer to the host first. An unregistered
-    group has no side room yet, so nothing is said about where a confirmation
-    goes.
+    group is not routed privately yet, so nothing is said about where a
+    confirmation goes.
     """
     member = "In this room each member's turn runs as that member, with their own persona and reach"
-    member += (", and a confirmation goes to the asker's own side room." if registered else ".")
+    member += (", and a confirmation goes to the asker's own private chat with the bot."
+               if registered else ".")
     if guest_reply == "off":
         guest = "A guest's message is recorded and not answered."
     elif guest_reply == "held":
         guest = ("A guest's turn runs as the host and can do nothing beyond the "
-                 "reply, which goes to the host's side room for approval before "
-                 "it is posted.")
+                 "reply, which goes to the host's private chat with the bot for "
+                 "approval before it is posted.")
     else:
         guest = "A guest's turn runs as the host and can do nothing beyond the reply."
     return (f"{member} {guest} Describe the room this way if asked; do not add "
@@ -6401,22 +6402,24 @@ def room_card(
     if room_cli_available:
         if guest_turn:
             lines.append(
-                f"Anything else goes to '{principal}''s private side room with "
+                f"Anything else goes to '{principal}' privately with "
                 "`istota-skill room whisper`."
             )
         elif withheld_scopes:
             lines.append(
-                f"Anything only '{principal}' should see goes to their private "
-                "side room with `istota-skill room whisper`."
+                f"Anything only '{principal}' should see goes to them privately "
+                "with `istota-skill room whisper`."
             )
         else:
             lines.append(
-                f"Anything only '{principal}' should see goes to their private "
-                "side room with `istota-skill room whisper`, or "
+                f"Anything only '{principal}' should see goes to them privately "
+                "with `istota-skill room whisper`, or "
                 "`istota-skill room answer-privately` to answer their question "
-                "there instead; post to the room only as your reply."
+                "in their private chat instead; post to the room only as your reply."
             )
     lines.append("Room notes (CHANNEL.md) are read by everyone in this room.")
+    lines.append("A member's private notes about this room are never read or written "
+                 "here; point them at their private chat with you.")
     return "".join(f"\n{line}" for line in lines)
 
 

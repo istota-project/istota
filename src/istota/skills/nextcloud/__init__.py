@@ -602,7 +602,7 @@ def _audience_refusal(token: str, *, own_room: bool) -> dict | None:
     """Refuse a write into a conversation someone besides the caller reads.
 
     A task's own answer reaches a shared room only through delivery, which a
-    room's reach gate and the side-room pin bound; this verb posts with the
+    room's reach gate and the linked-room pin bound; this verb posts with the
     bot's credentials wherever the bot is, so without the check a private,
     full-reach task could put anything it read into a room other people read
     (multiplayer Stage 16). The rule is the live Talk roster: every
@@ -634,8 +634,8 @@ def _audience_refusal(token: str, *, own_room: bool) -> dict | None:
             return error_envelope(
                 "that conversation is read by people besides you, so this task "
                 "cannot write into it. An answer for a room other people read "
-                "is posted from that room, or from your side room of it with "
-                "`istota-skill room post`, which holds the text for your approval.",
+                "is posted from that room, or from your private chat with the bot "
+                "with `istota-skill room post`, which holds the text for your approval.",
                 reason="shared_room", token=token,
             )
     return None
