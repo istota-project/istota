@@ -276,6 +276,27 @@ class TestTheRunDirectory:
         assert len(calls) == 3
         assert list((temp_root / ".review" / "alice").iterdir()) == []
 
+    def test_a_user_level_removed_mid_build_is_recreated_once(
+        self, repo, temp_root, monkeypatch
+    ):
+        """The temp cleanup rmdirs an idle, empty level; one retry covers it."""
+        real = snapshot._ensure_user_level
+        calls = []
+
+        def ensure_then_lose(root, user_id):
+            level = real(root, user_id)
+            calls.append(level)
+            if len(calls) == 1:
+                level.rmdir()
+            return level
+
+        monkeypatch.setattr(snapshot, "_ensure_user_level", ensure_then_lose)
+
+        result = snap(repo, temp_root)
+
+        assert len(calls) == 2
+        assert result.run_dir.is_dir()
+
     def test_two_snapshots_get_two_directories(self, repo, temp_root):
         first = snap(repo, temp_root)
         second = snap(repo, temp_root)
@@ -359,6 +380,22 @@ class TestMeta:
         assert "pkg/new.py" not in history
         # Only commits before the range: the branch's own commit is in the diff.
         assert "pkg: add a helper" not in history
+
+
+    def test_a_range_history_cannot_split_still_snapshots(self, repo, temp_root):
+        """`HEAD^!` is a valid range with no `..` to split on; history is
+        advisory, so losing it must not lose the tree."""
+        change(repo)
+        bundle = collect_diff(repo, resolve_range(repo, explicit="HEAD^!"), 200_000)
+
+        result = build_snapshot(
+            repo, bundle, root=temp_root, user_id="alice",
+            max_bytes=BIG, max_file_bytes=BIG,
+        )
+
+        assert (result.tree_dir / "pkg" / "app.py").exists()
+        history = (result.run_dir / "meta" / "history.txt").read_text()
+        assert history == "[history unavailable for this range]\n"
 
 
 class TestGitBatch:

@@ -130,8 +130,14 @@ def build_snapshot(
 
     run_dir = user_level / f"{RUN_DIR_PREFIX}{secrets.token_hex(8)}"
     try:
-        os.mkdir(run_dir, 0o700)
-    except OSError as e:
+        try:
+            os.mkdir(run_dir, 0o700)
+        except FileNotFoundError:
+            # The temp cleanup removes an idle, empty level; one retry, as
+            # `executor.ensure_task_control_dir` does for the same race.
+            _ensure_user_level(Path(root), user_id)
+            os.mkdir(run_dir, 0o700)
+    except (OSError, ValueError) as e:
         raise ReviewError(
             f"Could not create {run_dir}: {e}", reason="snapshot_failed"
         ) from e
@@ -231,7 +237,14 @@ def _fill(
     _write_meta(meta_dir, "stat.txt", bundle.stat.encode("utf-8"))
     changed = "".join(f"{_line_safe(path)}\n" for path in bundle.files)
     _write_meta(meta_dir, "changed.txt", changed.encode("utf-8"))
-    _write_meta(meta_dir, "history.txt", _history(worktree, bundle).encode("utf-8"))
+    try:
+        history = _history(worktree, bundle)
+    except ReviewError as e:
+        # History is advisory; a range form `_range_base` cannot split
+        # (`HEAD^!`) or a slow `git log` must not cost the reviewer the tree.
+        logger.warning("code_review_snapshot_history_failed reason=%s", e.reason)
+        history = "[history unavailable for this range]\n"
+    _write_meta(meta_dir, "history.txt", history.encode("utf-8"))
     _write_meta(meta_dir, "skipped.txt", _skipped_text(skipped).encode("utf-8"))
 
     counts: dict[str, int] = {}
