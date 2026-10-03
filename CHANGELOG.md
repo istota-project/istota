@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The nightly sleep cycle no longer locks the database for about 90 seconds. With `USER.md` curation on, it left its own cleanup writes uncommitted while the curation audit opened a second connection and waited on them, three times in a row, and every other writer in the deployment failed with `database is locked` in that window. Because those audit writes failed, the curator also never remembered which dated `USER.md` bullets it had already flagged, so the same ones came back every night.
+
 ## [0.43.0] - 2026-10-02
 
 Rooms can now hold more than one person. Add other users to a web chat room, bring the bot into a WhatsApp group, or copy it on an email thread with two or more people, and it becomes a shared room alongside the Talk groups that already worked. Every message is recorded, and by default the bot answers only when someone addresses it. People who don't use your installation can take part as guests. The bot answers them on the host's behalf without touching the host's private data, and their replies can be held for your approval first. Each member gets a private side room next to the shared one, for confirmations, private answers and drafts the bot posts only after you approve them. Anyone can switch the bot off in a room with `!<bot name> off`. Households and teams can keep a shared group memory. You can also ask another user of your installation a question: it reaches them in their own room, on WhatsApp or by SMS, and their reply comes back to you word for word. Your SMS and WhatsApp conversations now each have a room in web chat too, including the history from before the room existed.
