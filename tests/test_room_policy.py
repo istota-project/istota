@@ -5,8 +5,7 @@ whatever the host granted, no outbound action beyond the reply, and anything
 else proposed to the host's side room. These pin the `room_policy` table and
 its migration, the host and its loss, the per-surface `guest_reply` default,
 the audience class, the loop cap, the three `guest_reply` values end to end,
-and the backstage-memory rule a shared-room task reads its principal's side
-room by.
+and which shared room's My notes a task may read.
 """
 import asyncio
 import json
@@ -541,37 +540,51 @@ class TestGuestReplyThroughTheScheduler:
 
 
 # ---------------------------------------------------------------------------
-# D4 item 4: backstage memory
+# D4 item 4, as My notes (ISSUE-608)
 # ---------------------------------------------------------------------------
 
 
-class TestBackstage:
-    def test_the_speaker_or_the_host_reads_their_side_room(self, config):
+class TestMyNotesRoom:
+    def test_the_speaker_or_the_host_of_a_held_guest_reads_their_notes(self, config):
+        from istota.rooms.private_replies import my_notes_room
+
         with db.get_db(config.db_path) as conn:
             _group(conn)
-            alices = db.ensure_side_room(conn, "grp", "alice")
             own = db.get_task(conn, _member_turn(conn, config, "alice", "hi").task_id)
             guest = db.get_task(conn, _guest_turn(conn, config).task_id)
+            room_policy.set_guest_reply(conn, "grp", "held")
             bobs = db.get_task(conn, _member_turn(conn, config, "bob", "hi").task_id)
             cron = db.get_task(conn, db.create_task(
                 conn, prompt="digest", user_id="alice", source_type="scheduled",
                 conversation_token="grp"))
-            assert side_rooms.backstage_room(conn, own).token == alices.token
-            assert side_rooms.backstage_room(conn, guest).token == alices.token
-            # Bob has no side room; a cron task has no speaker and is not the
-            # host speaking for a guest.
-            assert side_rooms.backstage_room(conn, bobs) is None
-            assert side_rooms.backstage_room(conn, cron) is None
+            assert my_notes_room(conn, own) == "grp"
+            assert my_notes_room(conn, guest) == "grp"
+            # Bob's own turn reads Bob's notes; a cron task has no speaker.
+            assert my_notes_room(conn, bobs) == "grp"
+            assert my_notes_room(conn, cron) is None
             # A guest task whose principal is no longer the host reads nothing.
             db.remove_room_member(conn, "grp", "alice")
-            assert side_rooms.backstage_room(conn, guest) is None
+            assert my_notes_room(conn, guest) is None
+
+    def test_a_direct_guest_reply_never_loads_the_hosts_notes(self, config):
+        from istota.rooms.private_replies import my_notes_room
+
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            guest = db.get_task(conn, _guest_turn(conn, config).task_id)
+            room_policy.set_guest_reply(conn, "grp", room_policy.DIRECT)
+            assert my_notes_room(conn, guest) is None
+            room_policy.set_guest_reply(conn, "grp", "held")
+            assert my_notes_room(conn, guest) == "grp"
 
     def test_a_private_room_reads_none(self, config):
+        from istota.rooms.private_replies import my_notes_room
+
         with db.get_db(config.db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Mine")
             ident = db.create_task(conn, prompt="hi", user_id="alice", source_type="web",
                                    conversation_token=room.token)
-            assert side_rooms.backstage_room(conn, db.get_task(conn, ident)) is None
+            assert my_notes_room(conn, db.get_task(conn, ident)) is None
 
 
 # ---------------------------------------------------------------------------

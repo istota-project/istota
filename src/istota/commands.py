@@ -1453,12 +1453,15 @@ async def cmd_room(ctx: CommandContext):
     # registry, keyed by canonical token, so a per-surface ref must be mapped.
     token = _room_token(ctx)
     room = db.get_room(conn, token)
-    if room is None:
-        return "This room isn't registered yet — send a message first, then set its default."
-
     parts = args.strip().split(maxsplit=1)
     sub = parts[0].lower() if parts else ""
     rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub == "notes":
+        return _room_notes(ctx, room, rest)
+
+    if room is None:
+        return "This room isn't registered yet — send a message first, then set its default."
 
     if not sub:
         # Read-only on the brain: `!brain` is the single writer, and this line
@@ -1554,9 +1557,52 @@ async def cmd_room(ctx: CommandContext):
     return (
         "Usage: `!room` (show), `!room model <alias>`, `!room effort <level>`, "
         "`!room host`, `!room guests <off|held|direct>`, "
-        "`!room group [<id>|none]`. "
+        "`!room group [<id>|none]`, `!room notes [<room>]`. "
         "Use `default` to clear."
     )
+
+
+#: What `!room notes` says in a shared room, whatever was asked: the request
+#: itself has been seen there, so it shows nothing and does nothing else.
+ROOM_NOTES_REFUSAL = "Use your private chat with me for your notes."
+
+
+def _room_notes(ctx: CommandContext, room, query: str) -> str:
+    """`!room notes [<name|n>]`: the user's own notes about a shared room (ISSUE-608).
+
+    Read-only: writes go through the bot or the web pane. Refused in any room
+    that is shared, or that is not registered (nothing then says it is
+    private). In a private room, a bare call lists the user's shared rooms
+    plus any room they have notes for, numbered; a name, token or number shows
+    that room's notes.
+    """
+    from istota import storage
+    from istota.rooms.lookup import Ambiguous, Found, numbered_list, resolve_room
+
+    conn, user_id = ctx.conn, ctx.user_id
+    if room is None or db.room_is_shared(conn, room.token):
+        return ROOM_NOTES_REFUSAL
+    noted = storage.room_notes_tokens(ctx.config, user_id)
+    match = resolve_room(conn, user_id, query, include_left_with_notes=noted)
+    if not query or not isinstance(match, Found):
+        candidates = match.candidates
+        if not candidates:
+            return ("You are not in any shared room, and you have no notes about one. "
+                    "Notes are kept per shared room; ask me to note something about a "
+                    "room, or edit them from the room's menu in web chat.")
+        if isinstance(match, Ambiguous):
+            head = f"More than one room matches \"{query}\". Pick one by number:"
+        elif query:
+            head = f"No room of yours matches \"{query}\". Your rooms:"
+        else:
+            head = "Your shared rooms. `!room notes <name or number>` shows your notes:"
+        return head + "\n" + numbered_list(candidates, mark_notes=True)
+    found = match.candidate
+    label = found.name or found.token
+    notes = storage.read_room_notes(ctx.config, user_id, found.token)
+    if not notes:
+        return f"You have no notes about {label}."
+    return f"**Your notes about {label}**\n\n{notes}"
 
 
 def _room_host(conn, token: str, user_id: str) -> str:

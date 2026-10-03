@@ -35,6 +35,8 @@ WhatsApp quote is resolved back to its row through the ``private-reply:``
 ledger key first, or a linked turn's answer through its ``task-result:`` key
 (the scheduler tags that answer with the same link).
 
+My notes (`my_notes_room`): which shared room's notes a task may read.
+
 Confirmations (`park_about`, `parked_here`): which park is asked privately,
 and which parked tasks a bare answer in a private room can reach.
 
@@ -319,6 +321,45 @@ def linked_context(conn, config, task) -> tuple[str | None, str]:
                "messages, oldest first. Nothing written in this conversation "
                "reaches it."),
     )
+
+
+# ---------------------------------------------------------------------------
+# My notes
+# ---------------------------------------------------------------------------
+
+#: The surfaces whose turn is the principal speaking, as the backstage rule
+#: (multiplayer D4 item 4) had it.
+_SPEAKER_SURFACES = ("talk", "web")
+
+
+def my_notes_room(conn, task) -> str | None:
+    """The shared room whose notes ``task.user_id`` wrote may go into this task.
+
+    The principal's own turn in a shared room (not a subtask, command, skill
+    or scheduled job), or a guest's turn the host answers, unless the room
+    answers guests ``direct``: an unreviewed reply could repeat the notes.
+    None everywhere else, a private room included.
+    """
+    from istota.rooms import policy as room_policy
+    from istota.rooms.side_rooms import _host_of, is_shared_room
+
+    token = canonical_token(conn, task.conversation_token) if task.conversation_token else None
+    room = db.get_room(conn, token) if token else None
+    if room is None or room.side_of:
+        return None
+    if getattr(task, "guest_participant_id", None) is not None:
+        if _host_of(conn, token) != task.user_id:
+            return None
+        policy = room_policy.get_policy(conn, token)
+        if policy is None or policy.guest_reply == room_policy.DIRECT:
+            return None
+        return token
+    if (task.source_type not in _SPEAKER_SURFACES or task.parent_task_id
+            or task.command or task.skill or task.scheduled_job_id):
+        return None
+    if not is_shared_room(conn, token, is_group_chat=task.is_group_chat):
+        return None
+    return token
 
 
 # ---------------------------------------------------------------------------

@@ -2874,6 +2874,165 @@ def write_group_memory(config: "Config", group_id: str, content: str) -> bool:
 
 
 # =============================================================================
+# My notes: one member's private notes about one room (ISSUE-608)
+# =============================================================================
+
+#: The cap on a room's CHANNEL.md and on a member's notes about a room, as the
+#: web panes save them: prompt text a person writes by hand, so far above any
+#: standing instruction and far below a pasted corpus.
+NOTES_MAX_BYTES = 256 * 1024
+
+ROOM_NOTES_DIR = "rooms"
+
+
+def _room_notes_dir(config: "Config", user_id: str) -> Path | None:
+    """``{bot_dir}/config/rooms`` resolved under the user's own root, or None.
+
+    ``rooms/`` is an entry in a directory the user's sandbox writes, so it is
+    contained the way ``config/`` itself is rather than trusted by name.
+    """
+    config_dir = resolve_user_config_dir(config, user_id)
+    if config_dir is None:
+        return None
+    return _contained_under_user_root(config, user_id, config_dir / ROOM_NOTES_DIR)
+
+
+def room_notes_path(config: "Config", user_id: str, token: str) -> Path | None:
+    """Where ``user_id``'s notes about room ``token`` live, or None on refusal.
+
+    ``{mount}/Users/{user}/{bot_dir}/config/rooms/{token}.md``: under
+    ``config/``, so the memory refusals in ``sandbox.host_paths`` cover it.
+    """
+    try:
+        validate_conversation_token(token)
+    except ValueError:
+        return None
+    notes_dir = _room_notes_dir(config, user_id)
+    if notes_dir is None:
+        return None
+    return notes_dir / f"{token}.md"
+
+
+def read_room_notes(config: "Config", user_id: str, token: str) -> str | None:
+    """The user's notes about a room, or None when absent or blank.
+
+    Tried under the canonical token first and then its live aliases, and only
+    a missing file falls through, as ``read_channel_memory`` does. Never raises.
+    """
+    try:
+        tokens = channel_memory_tokens(config, token)
+    except ValueError:
+        return None
+    for candidate in tokens:
+        path = room_notes_path(config, user_id, candidate)
+        if path is None:
+            return None
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        content, reason = read_regular_file(path, max_bytes=NOTES_MAX_BYTES)
+        if reason is not None:
+            logger.warning("room_notes_read_refused user=%s token=%s reason=%s",
+                           user_id, candidate, reason)
+            return None
+        return content if content and content.strip() else None
+    return None
+
+
+def write_room_notes(config: "Config", user_id: str, token: str, text: str) -> bool:
+    """Replace the user's notes about a room (canonical token only).
+
+    The caller holds ``memory_md_lock`` on the path. False on refusal or
+    failure, never an exception.
+    """
+    path = room_notes_path(config, user_id, token)
+    if path is None:
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning("room_notes_write_failed user=%s errno=%s", user_id, e.errno)
+        return False
+    # Re-checked after the mkdir: the directory may have been created through
+    # a link swapped in since the first check.
+    if room_notes_path(config, user_id, token) != path:
+        return False
+    return write_regular_file(path, text)
+
+
+def room_notes_tokens(config: "Config", user_id: str) -> set[str]:
+    """The tokens ``user_id`` has a non-empty notes file for, as named on disk.
+
+    Names only: a file the listing finds is read through ``read_room_notes``
+    before anything shows it. Never raises; an unreadable directory is empty.
+    """
+    notes_dir = _room_notes_dir(config, user_id)
+    if notes_dir is None:
+        return set()
+    found: set[str] = set()
+    try:
+        entries = list(os.scandir(notes_dir))
+    except OSError:
+        return set()
+    for entry in entries:
+        name = entry.name
+        if not name.endswith(".md"):
+            continue
+        token = name[:-3]
+        if not _TOKEN_PATTERN.match(token):
+            continue
+        try:
+            st = entry.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode) and st.st_size > 0:
+            found.add(token)
+    return found
+
+
+def delete_room_notes_for(config: "Config", user_ids, token: str) -> None:
+    """Remove every listed user's notes about a deleted room. Best effort.
+
+    The directory is opened component by component with ``O_NOFOLLOW`` and the
+    leaf unlinked relative to that fd, because this runs once per member and a
+    link planted at ``config`` or ``rooms`` must not land the unlink anywhere
+    else (the residual ``remove_regular_file`` names for a by-name unlink).
+    """
+    from .skills._loader import open_overlay_dir  # noqa: PLC0415 - import cycle
+
+    if not config.has_workspace:
+        return
+    try:
+        validate_conversation_token(token)
+    except ValueError:
+        return
+    leaf = f"{token}.md"
+    for user_id in user_ids:
+        if not is_scopable_user_id(user_id):
+            continue
+        user_root = _get_mount_path(config, f"Users/{user_id}")
+        fd = open_overlay_dir(user_root, config.bot_dir_name, "config", ROOM_NOTES_DIR)
+        if fd is None:
+            continue
+        try:
+            st = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+            if not stat.S_ISREG(st.st_mode):
+                logger.warning("room_notes_delete_refused user=%s reason=not_a_regular_file",
+                               user_id)
+                continue
+            os.unlink(leaf, dir_fd=fd)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            logger.warning("room_notes_delete_failed user=%s errno=%s", user_id, e.errno)
+        finally:
+            os.close(fd)
+
+
+# =============================================================================
 # Nextcloud OCS sharing functions
 # =============================================================================
 

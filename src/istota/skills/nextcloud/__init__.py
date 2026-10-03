@@ -687,7 +687,8 @@ def _registry_room_named(name: str) -> dict | None:
     own shell. A registry it cannot read must not make the verb unusable; the
     worst case is the behaviour that shipped before the guard.
 
-    Matched case-insensitively with surrounding space stripped, because the
+    Matched by `rooms.lookup.resolve_room` on the exact name alone
+    (`names_only`): case-insensitively with surrounding space stripped, because the
     failure is a person's idea of a room name rather than a token, and
     `#Weekly` and `#weekly` are the same idea. Archived rooms do not
     block: archiving is how a room is closed, and re-creating a closed one is a
@@ -702,8 +703,7 @@ def _registry_room_named(name: str) -> dict | None:
     incident one user action over. It is also why the refusal says the room may
     be hidden — `rooms list` takes the default and will not show it.
     """
-    wanted = (name or "").strip().casefold()
-    if not wanted:
+    if not (name or "").strip():
         return None
     db_path = os.environ.get("ISTOTA_DB_PATH", "")
     user_id = os.environ.get("ISTOTA_USER_ID", "")
@@ -711,17 +711,21 @@ def _registry_room_named(name: str) -> dict | None:
         return None
     try:
         from istota import db
+        from istota.rooms.lookup import Ambiguous, Found, resolve_room
         from istota.transport.routing import (
             private_phone_rooms, room_target_descriptor,
         )
 
         with db.get_db(db_path) as conn:
-            rooms = db.list_member_rooms(conn, user_id, include_dismissed=True)
-            match = next(
-                (r for r in rooms if (r.name or "").strip().casefold() == wanted),
-                None,
+            found = resolve_room(
+                conn, user_id, name, shared_only=False,
+                include_dismissed=True, names_only=True,
             )
-            if match is None:
+            if isinstance(found, Found):
+                match = found.room
+            elif isinstance(found, Ambiguous):
+                match = found.candidates[0].room
+            else:
                 return None
             talk_ref = db.talk_refs_for_member(conn, user_id).get(match.token)
             phone_surface = private_phone_rooms(conn, user_id).get(match.token)

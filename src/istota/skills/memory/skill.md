@@ -145,6 +145,17 @@ Every verb takes `--group`. `--group` and `--channel` together is an error.
 
 Group writes are audited in the group's own store, with the writer's user id and task id.
 
+### My notes about a shared room
+
+The user can keep private notes about a shared room ("don't bring up the house sale here"). They are loaded as "My notes about this room" when the user speaks in that room, and the room never reads them.
+
+```bash
+istota-skill memory show --room "Family"
+istota-skill memory append --room "Family" --heading "Avoid" --line "The house sale"
+```
+
+`--room` takes the room's name or token. It works only from the user's private chat with you: from a shared room it is refused with `room_notes_from_shared_room`, so if the user asks there, tell them to ask in their private chat. A name that matches no room the user is in, or more than one, is refused with `room_unavailable`. `--room` cannot be combined with `--channel` or `--group`.
+
 ### Bot-managed directory layout
 
 Each user has a bot-managed workspace area:

@@ -30,7 +30,7 @@ What this module holds, and what it deliberately does not:
   scheduler's privately routed confirmation path.
 
 Nothing here creates a side room any more; the side-room parts that remain
-(`task_side_room`, `parent_context`, `backstage_room`, `pin_plan`'s side arm)
+(`task_side_room`, `parent_context`, `pin_plan`'s side arm)
 go with the side-room schema, and this module becomes `private_replies`.
 """
 
@@ -252,7 +252,7 @@ def whatsapp_confirmation_body(prompt: str, task_id: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Guest proposals and backstage memory (multiplayer Stage 11)
+# Guest proposals (multiplayer Stage 11)
 # ---------------------------------------------------------------------------
 
 
@@ -387,36 +387,6 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
         logger.info("task %s: guest reply not proposed: %s", task.id, exc)
         return None
     return GuestProposal(parent_token=parent, preview=row["preview"])
-
-
-_SPEAKER_SURFACES = ("talk", "web")
-
-
-def backstage_room(conn, task) -> db.Room | None:
-    """The side room whose notes a task in a shared room may read (D4 item 4).
-
-    The task's principal's side room, and only when that principal is the
-    speaker (their own turn in the room) or the host a guest's turn runs as.
-    A cron job, a subtask or a retry carrying the room's token has neither,
-    so it reads nothing backstage, and nor does a task in a private room.
-    """
-    token = canonical_token(conn, task.conversation_token)
-    room = db.get_room(conn, token) if token else None
-    if room is None or room.side_of:
-        return None
-    if getattr(task, "guest_participant_id", None) is not None:
-        if _host_of(conn, token) != task.user_id:
-            return None
-    else:
-        if (task.source_type not in _SPEAKER_SURFACES or task.parent_task_id
-                or task.command or task.skill or task.scheduled_job_id):
-            return None
-        if not is_shared_room(conn, token, is_group_chat=task.is_group_chat):
-            return None
-    side = db.get_side_room(conn, token, task.user_id)
-    if side is None or db.side_room_parent(conn, side.token) is None:
-        return None
-    return side
 
 
 # ---------------------------------------------------------------------------
@@ -603,33 +573,17 @@ def _post_destination(conn, parent_token: str, user_id: str) -> dict:
     return destination
 
 
-def _named_room(conn, user_id: str, query: str) -> str | None:
-    """A room ``query`` names among ``user_id``'s rooms: its token, a binding
-    ref, or its exact name (case-insensitive) when exactly one room has it.
-
-    A stand-in until `rooms.lookup.resolve_room` (ISSUE-608 Stage 4), which
-    adds prefixes and numbered candidates.
-    """
-    query = (query or "").strip()
-    if not query:
-        return None
-    token = canonical_token(conn, query)
-    if token and db.get_room(conn, token) is not None:
-        return token
-    wanted = query.casefold()
-    named = [room.token for room in db.list_member_rooms(conn, user_id)
-             if room.name and room.name.strip().casefold() == wanted]
-    return named[0] if len(named) == 1 else None
-
-
 def _post_target(conn, task, user_id: str, room: str | None) -> str:
     """The shared room a `room post` goes to: ``--room``, else the turn's link."""
     from istota.rooms.private_replies import linked_room
 
     if room:
-        target = _named_room(conn, user_id, room)
-        if target is None:
+        from istota.rooms.lookup import Found, resolve_room
+
+        found = resolve_room(conn, user_id, room)
+        if not isinstance(found, Found):
             raise RequestError("parent_unavailable")
+        target = found.room.token
     else:
         about = getattr(task, "about_room_token", None)
         if not about:

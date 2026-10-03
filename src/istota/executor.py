@@ -60,6 +60,7 @@ from .storage import (
     read_channel_memory,
     read_dated_memories,
     read_group_memory,
+    read_room_notes,
     read_user_config_file,
     read_user_memory_v2,
 )
@@ -3899,7 +3900,7 @@ def build_allowed_tools(
     tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
     if emissary:
         # A guest's turn takes no outbound action beyond its reply (multiplayer
-        # D2), and a query or a URL is one: the host's backstage notes are in
+        # D2), and a query or a URL is one: the host's notes about the room may be in
         # its prompt. Native builds only what this list names; a CLI brain keeps
         # its own web tools behind `--unshare-net` and the CONNECT allowlist.
         return tools
@@ -6065,33 +6066,33 @@ def _linked_room_prompt(
     return line, block
 
 
-def _backstage_prompt(config: Config, task: "db.Task", conn) -> str:
-    """The principal's side-room notes, for a task in a shared room (D4 item 4).
+def _my_notes_prompt(config: Config, task: "db.Task", conn) -> str:
+    """The principal's own notes about a shared room, for a task in it (ISSUE-608).
 
-    A shared room's `CHANNEL.md` is front-stage memory, read by everyone in
-    the room. Backstage instructions ("don't bring up the house sale") live in
-    the principal's side room, and a task in the room reads them only when that
-    principal is the speaker or the host a guest's turn runs as
-    (`side_rooms.backstage_room`). User-half material; empty everywhere else,
-    so no other prompt changes. Never raises.
+    A shared room's `CHANNEL.md` is read by everyone in the room. A member's
+    private notes about it ("don't bring up the house sale") are a file in
+    their own workspace, `config/rooms/<token>.md`, read here only when that
+    member is the speaker or the host a held guest's turn runs as
+    (`private_replies.my_notes_room`). User-half material, not fenced: the
+    principal's own words. Empty everywhere else. Never raises.
     """
     try:
-        from istota.rooms.side_rooms import backstage_room
+        from istota.rooms.private_replies import my_notes_room
 
         with db.get_db_if_present(config.db_path, conn) as c:
             if c is None:
                 return ""
-            side = backstage_room(c, task)
-        notes = read_channel_memory(config, side.token) if side is not None else None
+            token = my_notes_room(c, task)
+        notes = read_room_notes(config, task.user_id, token) if token else None
     except Exception as exc:
-        logger.warning("backstage notes for task %s failed: %s", task.id, exc)
+        logger.warning("my notes for task %s failed: %s", task.id, exc)
         return ""
     if not notes:
         return ""
     return (
-        "## Backstage notes (private)\n\n"
-        "From your principal's side room. Only they read these; the room does "
-        "not, so never quote them there.\n\n"
+        "## My notes about this room (private)\n\n"
+        "Written by your principal. Only they read these; the room does not, "
+        "so never quote them there.\n\n"
         f"{notes}"
     )
 
@@ -7279,7 +7280,7 @@ You have access to:
         knowledge_facts_section,
         group_memory_section,
         channel_memory_section,
-        _backstage_prompt(config, task, conn),
+        _my_notes_prompt(config, task, conn),
         dated_memories_section,
         recalled_section,
         playbooks_section,

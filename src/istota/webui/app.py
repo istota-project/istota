@@ -71,6 +71,7 @@ from istota.brain import make_brain
 from .chat_files import ChatFileError, resolve_chat_file
 from istota.config import load_config
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
+from istota.storage import NOTES_MAX_BYTES
 from istota.nextcloud.ocs import OcsError, ocs_data
 from istota.usage.telemetry import SYSTEM_USER_ID
 from istota.location.logic import (
@@ -5561,6 +5562,7 @@ def _chat_list_rooms(username: str) -> list[dict]:
         # (ISSUE-342).
         talk_refs = db.talk_refs_for_member(conn, username)
         phone_bindings = db.phone_bindings_for_member(conn, username)
+        noted = _noted_room_tokens(conn, username)
         out: list[dict] = []
         for r in registry:
             handle = db.ensure_web_chat_handle(
@@ -5582,6 +5584,9 @@ def _chat_list_rooms(username: str) -> list[dict]:
             # client can link the two; None for every other room.
             d["side_of"] = r.side_of
             d.update(_room_sharing(conn, r, username))
+            # The kebab offers "My notes" for a shared room and for any room
+            # the user already has notes about (one they have since left alone).
+            d["has_my_notes"] = r.token in noted
             # Standing per-room model/effort default lives on the shared registry
             # room (canonical), not the per-user web handle.
             d["model"] = r.model
@@ -5607,6 +5612,19 @@ def _chat_list_rooms(username: str) -> list[dict]:
                 d["unread_count"] = 0
             out.append(d)
     return out
+
+
+def _noted_room_tokens(conn, username: str) -> set[str]:
+    """Canonical tokens of the rooms ``username`` has notes about."""
+    from istota import storage
+    from istota.rooms.scopes import canonical_token
+
+    try:
+        names = storage.room_notes_tokens(_config, username)
+    except Exception:
+        logger.warning("room notes listing failed for %s", username, exc_info=True)
+        return set()
+    return {canonical_token(conn, token) or token for token in names}
 
 
 def _chat_create_room(username: str, name: str) -> dict:
@@ -6070,8 +6088,16 @@ def _chat_delete_room(username: str, room_id: int) -> str:
         # any member's work in the room, not only the creator's.
         if db.count_active_room_tasks(conn, room.token) > 0:
             return "busy"
+        # Taken before the delete removes the member rows: every member's notes
+        # about the room go with it.
+        members = db.list_room_members(conn, room.token)
         db.delete_web_chat_room(conn, room_id, username)
         token = room.token
+    from istota import storage
+    try:
+        storage.delete_room_notes_for(_config, members, token)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("chat room delete: room notes cleanup failed: %s", exc)
     # Best-effort: drop the channel's CHANNEL.md directory. Outside the DB
     # transaction; a filesystem failure leaves the dir but doesn't fail the API.
     if _config.workspace_path:
@@ -6342,9 +6368,8 @@ def _chat_room_group(
 
 # A room's CHANNEL.md is prompt text, not a document store: it is read into
 # every task in the room, so the cap is about what belongs in a system prompt
-# rather than about what the filesystem can hold. 256 KiB is far above any
-# hand-written standing instruction and far below a pasted corpus.
-_CHANNEL_MEMORY_MAX_BYTES = 256 * 1024
+# rather than about what the filesystem can hold. Shared with My notes.
+_CHANNEL_MEMORY_MAX_BYTES = NOTES_MAX_BYTES
 
 
 def _channel_memory_revision(content: str) -> str:
@@ -6419,9 +6444,7 @@ def _chat_room_memory(username: str, room_id: int) -> dict | None:
         return None
     content = storage.read_channel_memory(_config, room.token)
     with db.get_db(_config.db_path) as conn:
-        # `origin` is token-invariant, so an arbitrary row for this token is the
-        # right one. Don't widen this read to a per-user field without scoping.
-        reg = db.get_room(conn, room.token)
+        shared = db.room_is_shared(conn, room.token)
     return {
         "room_id": room.id,
         "token": room.token,
@@ -6430,9 +6453,9 @@ def _chat_room_memory(username: str, room_id: int) -> dict | None:
         # template for either rather than showing a blank box.
         "content": content or "",
         "exists": content is not None,
-        # A Talk-origin room has one CHANNEL.md across all its members, so a
-        # save is room-global. The UI says so rather than letting it be found.
-        "shared": bool(reg is not None and reg.origin == "talk"),
+        # More than one human reads the room, whatever its surface: a save is
+        # read by all of them. The UI says so rather than letting it be found.
+        "shared": shared,
         # Served from the server so the pane's "start from template" can't
         # drift from what `init_channel_memory` writes.
         "template": storage.CHANNEL_MEMORY_TEMPLATE,
@@ -6494,6 +6517,59 @@ def _chat_save_room_memory(
                 logger.warning("chat room memory save failed for %s: %s", room.token, e)
                 return "failed", None
             if not written:
+                return "failed", None
+    except MemoryMdLocked:
+        return "locked", None
+    return "ok", _channel_memory_revision(content)
+
+
+def _chat_room_notes(username: str, room_id: int) -> dict | None:
+    """The caller's notes about a room, for the My notes pane. None = 404.
+
+    Authorised as the room memory pane is (`_chat_memory_room`): the handle
+    is the caller's and they are a member. The file is theirs alone, so there
+    is no busy refusal; the revision check covers a concurrent task write.
+    """
+    from istota import storage
+    room = _chat_memory_room(username, room_id)
+    if room is None:
+        return None
+    content = storage.read_room_notes(_config, username, room.token)
+    return {
+        "room_id": room.id,
+        "token": room.token,
+        "content": content or "",
+        "exists": content is not None,
+        "revision": _channel_memory_revision(content or ""),
+    }
+
+
+def _chat_save_room_notes(
+    username: str, room_id: int, content: str, revision: str,
+) -> tuple[str, str | None]:
+    """Replace the caller's notes about a room. Returns `(status, new_revision)`.
+
+    Status is ``"not_found"``, ``"conflict"``, ``"locked"``, ``"failed"`` or
+    ``"ok"``, as for the room memory save. The lock is the one the memory
+    skill takes for ``memory --room``, keyed on the same resolved path.
+    """
+    from istota import storage
+    from istota.memory.curation.file_lock import MemoryMdLocked, memory_md_lock
+    room = _chat_memory_room(username, room_id)
+    if room is None:
+        return "not_found", None
+    path = storage.room_notes_path(_config, username, room.token)
+    if path is None:
+        return "failed", None
+    try:
+        with memory_md_lock(
+            path, timeout_seconds=5.0,
+            lock_dir=_channel_memory_lock_dir(username),
+        ):
+            current = storage.read_room_notes(_config, username, room.token) or ""
+            if _channel_memory_revision(current) != revision:
+                return "conflict", None
+            if not storage.write_room_notes(_config, username, room.token, content):
                 return "failed", None
     except MemoryMdLocked:
         return "locked", None
@@ -9106,6 +9182,68 @@ async def chat_save_room_memory(
     if status != "ok":
         return JSONResponse(
             {"error": "could not write channel memory", "code": "failed"},
+            status_code=500,
+        )
+    return {"status": "ok", "revision": new_revision}
+
+
+@api_router.get("/chat/rooms/{room_id}/notes")
+async def chat_room_notes(
+    room_id: int,
+    user: dict = Depends(_require_api_auth),
+):
+    """The caller's own notes about this room ("My notes", ISSUE-608): a file
+    in their workspace, `config/rooms/<token>.md`, read into their own turns
+    in the room and never by the room."""
+    result = await asyncio.to_thread(_chat_room_notes, user["username"], room_id)
+    if result is None:
+        return JSONResponse({"error": "room not found"}, status_code=404)
+    return result
+
+
+@api_router.put("/chat/rooms/{room_id}/notes")
+async def chat_save_room_notes(
+    room_id: int,
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    try:
+        data = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    if not isinstance(data, dict):
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    content = data.get("content")
+    if not isinstance(content, str):
+        return JSONResponse({"error": "content required"}, status_code=400)
+    revision = data.get("revision")
+    if not isinstance(revision, str):
+        return JSONResponse({"error": "revision required"}, status_code=400)
+    if len(content.encode("utf-8")) > NOTES_MAX_BYTES:
+        return JSONResponse(
+            {"error": "notes too large", "code": "too_large",
+             "max_bytes": NOTES_MAX_BYTES},
+            status_code=413,
+        )
+    status, new_revision = await asyncio.to_thread(
+        _chat_save_room_notes, user["username"], room_id, content, revision,
+    )
+    if status == "not_found":
+        return JSONResponse({"error": "room not found"}, status_code=404)
+    if status == "conflict":
+        return JSONResponse(
+            {"error": "notes changed since they were loaded", "code": "conflict"},
+            status_code=409,
+        )
+    if status == "locked":
+        return JSONResponse(
+            {"error": "notes are being written; try again", "code": "locked"},
+            status_code=409,
+        )
+    if status != "ok":
+        return JSONResponse(
+            {"error": "could not write notes", "code": "failed"},
             status_code=500,
         )
     return {"status": "ok", "revision": new_revision}

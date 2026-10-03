@@ -317,19 +317,25 @@ class TestRoomMemoryAuthorization:
         assert write.status_code == 404
         assert not _memory_file(config, room["token"]).exists()
 
-    async def test_talk_origin_room_reports_shared(self, chat_env):
+    async def test_shared_is_whether_more_than_one_human_reads_the_room(self, chat_env):
+        """Not the room's origin (ISSUE-608): a shared web room or a WhatsApp
+        group is read by all its members, and a Talk room one person reads is
+        not shared."""
         client, config = chat_env
         cookies = await _login(client, "alice")
         room = await _first_room(client, cookies)
+        url = f"/istota/api/chat/rooms/{room['id']}/memory"
         with db.get_db(config.db_path) as conn:
             conn.execute(
                 "UPDATE rooms SET origin = 'talk' WHERE token = ?", (room["token"],),
             )
-            conn.commit()
-        body = (await client.get(
-            f"/istota/api/chat/rooms/{room['id']}/memory", cookies=cookies,
-        )).json()
-        assert body["shared"] is True
+        assert (await client.get(url, cookies=cookies)).json()["shared"] is False
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "UPDATE rooms SET origin = 'web' WHERE token = ?", (room["token"],),
+            )
+            db.add_web_room_member(conn, room["token"], "bob")
+        assert (await client.get(url, cookies=cookies)).json()["shared"] is True
 
     async def test_busy_guard_counts_another_members_task(self, chat_env):
         client, config = chat_env
