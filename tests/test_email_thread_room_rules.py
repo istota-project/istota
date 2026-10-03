@@ -21,7 +21,7 @@ import pytest
 
 from istota import db
 from istota.config import Config, EmailConfig, UserConfig
-from istota.rooms import side_rooms
+from istota.rooms import private_replies
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email import threads
 from istota.transport.email.inbound import poll_emails
@@ -137,7 +137,7 @@ class TestNoAnnouncementOnEmail:
                            message_id="<a2@ext.example>", body="Zorg, Thursday?")
         with db.get_db(config.db_path) as conn:
             conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
-            proposal = side_rooms.propose_guest_reply(
+            proposal = private_replies.propose_guest_reply(
                 conn, config, db.get_task(conn, task_id), "Thursday at 7.",
             )
         assert proposal.preview.endswith("Message:\nThursday at 7.")
@@ -170,7 +170,7 @@ class TestTheDisclosureFooter:
                            message_id="<a2@ext.example>", body="Zorg, Thursday?")
         with db.get_db(config.db_path) as conn:
             conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
-            proposal = side_rooms.propose_guest_reply(
+            proposal = private_replies.propose_guest_reply(
                 conn, config, db.get_task(conn, task_id), "Thursday at 7.",
             )
         assert proposal.preview.count(self.FOOTER) == 1

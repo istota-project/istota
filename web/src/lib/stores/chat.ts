@@ -1642,7 +1642,6 @@ function createSession(): ChatSession {
           color: fresh.color ?? null,
           // A host leaving, a member added, a guest arriving: the hostless
           // notice and the settings lock read these, so they follow the poll.
-          side_of: fresh.side_of ?? null,
           phone_surface: fresh.phone_surface ?? null,
           read_only: fresh.read_only ?? false,
           phone_group: fresh.phone_group ?? false,
@@ -2088,36 +2087,8 @@ function createSession(): ChatSession {
     }
     feedAggregateView(row);
     if (room) {
-      showInParent(room, row);
       bumpBackgroundRoom(room.id, row, opts.countUnread ?? true);
     }
-  }
-
-  // Side-room rows already shown inline in their parent, by durable id.
-  const ephemeralShown = new Set<number>();
-
-  // A side-room row, shown inline in the parent the viewer is reading (D4).
-  // Only they receive the side room's rows, so nothing here gates who sees it.
-  function showInParent(room: ChatRoom, row: ChatRoomEvent) {
-    if (row.role === 'user' || !room.side_of || get(view) !== 'room') return;
-    const active = get(rooms).find((r) => r.id === get(activeRoomId));
-    if (!active || active.token !== room.side_of) return;
-    if (typeof row.msg_id === 'number') {
-      if (ephemeralShown.has(row.msg_id)) return;
-      ephemeralShown.add(row.msg_id);
-    }
-    const built = buildHistoryMessage(row);
-    messages.update((arr) =>
-      appendAboveClientOnly(arr, {
-        ...built,
-        msgId: undefined,
-        starred: undefined,
-        taskId: undefined,
-        roomToken: undefined,
-        roomName: undefined,
-        ephemeral: { roomToken: room.token, roomName: room.name },
-      }),
-    );
   }
 
   // `message_deleted` frame: rows another client (or another tab) removed.
@@ -2733,6 +2704,9 @@ function createSession(): ChatSession {
       subject: typeof m.subject === 'string' && m.subject ? m.subject : undefined,
       via: typeof m.via === 'string' && m.via ? m.via : undefined,
       deletable: m.deletable === false ? false : undefined,
+      aboutRoom: m.about_room?.token
+        ? { token: m.about_room.token, name: m.about_room.name ?? null }
+        : undefined,
       // Persisted server-side, so the chip survives leaving the room and
       // coming back (the composer's names are long gone by then).
       attachments: m.attachments?.length ? m.attachments : undefined,

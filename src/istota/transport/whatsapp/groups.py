@@ -87,7 +87,7 @@ def group_destination(conn, room_token: str | None) -> str:
     if not room_token:
         return ""
     room = db.get_room(conn, room_token)
-    if room is None or room.archived or room.side_of:
+    if room is None or room.archived:
         return ""
     binding = db.get_room_binding(conn, room_token, SURFACE)
     if binding is None:
@@ -351,8 +351,8 @@ def apply_roster(conn, config: "Config", roster: WhatsAppGroupRoster) -> "WhatsA
         return WhatsAppEventResult("host_left", leave_group_jid=group_jid)
     for user_id in departed:
         # Membership came from the group, so it goes with the group: a member
-        # who left keeps neither the room's backstage nor a way to post into
-        # it through their side room.
+        # who left keeps neither the room's transcript as context in their
+        # private chat nor a way to post into it from there.
         db.remove_room_member(conn, room.token, user_id)
     return WhatsAppEventResult("roster_synced")
 

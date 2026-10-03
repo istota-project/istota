@@ -781,18 +781,41 @@ describe('delete follows the server owner rule', () => {
   });
 });
 
-describe('a side-room row shown in its parent', () => {
-  it('says only the reader sees it and links to the side room', async () => {
+// ISSUE-608: a private reply names the shared room it is about.
+describe('the chip on a private reply', () => {
+  it('names the room and opens it', async () => {
     const onOpenRoom = vi.fn();
-    const { container, getByText } = render(Message, {
-      message: finished({ ephemeral: { roomToken: 'side-1', roomName: 're: family' } }),
+    const { container } = render(Message, {
+      message: finished({ aboutRoom: { token: 'rm-family', name: 'family' } }),
       onConfirm: noop,
       onReject: noop,
       onOpenRoom,
     });
-    expect(getByText(/Only you can see this/)).toBeTruthy();
-    const open = container.querySelector('.ephemeral-open') as HTMLButtonElement;
-    await fireEvent.click(open);
-    expect(onOpenRoom).toHaveBeenCalledWith('side-1');
+    const chip = container.querySelector('button.about-chip') as HTMLButtonElement;
+    expect(chip.textContent?.trim()).toBe('re: family');
+    await fireEvent.click(chip);
+    expect(onOpenRoom).toHaveBeenCalledWith('rm-family');
+  });
+
+  it('names nothing and opens nothing for a room the reader left', () => {
+    const { container } = render(Message, {
+      message: finished({ aboutRoom: { token: 'rm-family', name: null } }),
+      onConfirm: noop,
+      onReject: noop,
+      onOpenRoom: vi.fn(),
+    });
+    expect(container.querySelector('button.about-chip')).toBeNull();
+    expect(container.querySelector('span.about-chip')?.textContent?.trim()).toBe(
+      're: a room you left',
+    );
+  });
+
+  it('renders no chip on an untagged row', () => {
+    const { container } = render(Message, {
+      message: finished({}),
+      onConfirm: noop,
+      onReject: noop,
+    });
+    expect(container.querySelector('.about-chip')).toBeNull();
   });
 });

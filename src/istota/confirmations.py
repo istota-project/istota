@@ -243,7 +243,7 @@ def cancel_for_conversation(
     marks = ", ".join("?" for _ in refs)
     held = conn.execute(
         f"SELECT id FROM tasks WHERE conversation_token IN ({marks}) AND user_id = ? "
-        f"AND status = 'pending_confirmation' AND NOT {db.SIDE_ROUTED_PARK_SQL}",
+        f"AND status = 'pending_confirmation' AND NOT {db.PRIVATE_PARK_SQL}",
         (*refs, user_id),
     ).fetchall()
     cancelled = db.cancel_pending_confirmations(conn, conversation_token, user_id)
@@ -430,26 +430,25 @@ def resolve(
     if talk_response_id:
         task = db.get_pending_confirmation_by_response_id(conn, talk_response_id)
     if task is None and conversation_token:
-        from istota.rooms.side_rooms import canonical_token, is_shared_room
+        from istota.rooms.private_replies import canonical_token, is_shared_room, parked_here
 
         room_token = canonical_token(conn, conversation_token)
-        # A shared room's questions are asked in its members' side rooms
-        # (multiplayer D4), so a bare "yes" typed in the room is conversation,
-        # never an approval: it would otherwise land on a question the room
-        # never saw. `!confirm <id>` and a reply to the prompt still work.
+        # A shared room's questions are asked in its members' private rooms
+        # (multiplayer D4, ISSUE-608), so a bare "yes" typed in the room is
+        # conversation, never an approval: it would otherwise land on a
+        # question the room never saw. `!confirm <id>` and a reply to the
+        # prompt still work.
         if room_token and is_shared_room(conn, room_token):
             return Resolution(task=task if task is not None and task.user_id == user_id else None)
         task = db.get_pending_confirmation(conn, conversation_token)
-        # A side room also answers what its parent asked this member.
-        side = db.side_room_parent(conn, room_token) if room_token else None
-        if task is None and side is not None and side.side_for_user == user_id:
-            # A parked task carries whichever token its surface named the
-            # parent by: the canonical one, or a binding's ref.
-            refs = [side.side_of] + [b.surface_ref for b in db.list_room_bindings(conn, side.side_of)]
-            for ref in dict.fromkeys(refs):
-                task = db.get_pending_confirmation(conn, ref, user_id=user_id)
-                if task is not None:
-                    break
+        # A private room also answers what a shared room asked this member
+        # there, when it is the only such question open in it.
+        if task is None and room_token:
+            asked_here = parked_here(conn, room_token, user_id)
+            if len(asked_here) > 1:
+                return Resolution(ambiguous=tuple(asked_here))
+            if asked_here:
+                task = asked_here[0]
     if task is None:
         open_for_user = pending_for_user(conn, user_id)
         if len(open_for_user) > 1:

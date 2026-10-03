@@ -43,9 +43,13 @@ def test_migrate_preserves_multiplayer_state_and_native_refs(database):
     with db.get_db(database) as conn:
         old = legacy(conn)
         side = legacy(conn, "side-old", "web")
-        conn.execute("UPDATE rooms SET side_of=?,side_for_user='alice' WHERE token=?", (old, side))
         task = db.create_task(conn, user_id="alice", source_type="talk", prompt="hi",
                               conversation_token=old, output_target=f"room:{old}, talk:{old}, web:{side}")
+        # A private reply about the room, and a turn linked to it (ISSUE-608).
+        note = db.add_message(conn, side, role="system", body="note", origin_surface="web",
+                              about_room_token=old)
+        linked = db.create_task(conn, user_id="alice", source_type="web", prompt="post it",
+                                conversation_token=side, about_room_token=old)
         conn.execute("UPDATE tasks SET talk_delivery_token=? WHERE id=?", (old, task))
         db.add_message(conn, old, role="user", body="hi", origin_surface="talk")
         conn.execute("INSERT INTO room_participants(room_token,surface,surface_ref,kind) VALUES (?, 'talk','guest','guest')", (old,))
@@ -68,7 +72,9 @@ def test_migrate_preserves_multiplayer_state_and_native_refs(database):
         new, new_side = mappings[old], mappings[side]
         assert db.is_canonical_room_token(new)
         assert db.get_room(conn, old) is None
-        assert db.get_room(conn, new_side).side_of == new
+        assert conn.execute("SELECT about_room_token FROM messages WHERE id=?",
+                            (note,)).fetchone()[0] == new
+        assert db.get_task(conn, linked).about_room_token == new
         assert db.get_task(conn, task).output_target == f"room:{new}, talk:{old}, web:{new_side}"
         assert db.get_task(conn, task).talk_delivery_token == old
         for table in ("room_members", "room_participants", "room_policy",
@@ -89,6 +95,30 @@ def test_migrate_preserves_multiplayer_state_and_native_refs(database):
     after = snapshot(database)
     assert room_relocate.migrate_database(database) == 0
     assert snapshot(database) == after
+
+
+def test_migrate_rewrites_private_reply_tags(database):
+    """`messages.about_room_token` and `tasks.about_room_token` name a shared
+    room canonically, so a relocation carries them to the minted token."""
+    with db.get_db(database) as conn:
+        old = legacy(conn)
+        private = db.create_web_chat_room(conn, "alice", "general").token
+        tagged = db.add_message(conn, private, role="system", body="note",
+                                origin_surface="web", about_room_token=old)
+        untagged = db.add_message(conn, private, role="system", body="other",
+                                  origin_surface="web", about_room_token="unrelated")
+        task = db.create_task(conn, user_id="alice", source_type="web", prompt="hi",
+                              conversation_token=private)
+        conn.execute("UPDATE tasks SET about_room_token=?, status='completed' WHERE id=?",
+                     (old, task))
+    assert room_relocate.migrate_database(database) == 0
+    with db.get_db(database) as conn:
+        new = dict(conn.execute("SELECT old_token,new_token FROM room_token_migration"))[old]
+        tags = dict(conn.execute("SELECT id, about_room_token FROM messages WHERE id IN (?, ?)",
+                                 (tagged, untagged)))
+        assert tags == {tagged: new, untagged: "unrelated"}
+        assert conn.execute("SELECT about_room_token FROM tasks WHERE id=?",
+                            (task,)).fetchone()[0] == new
 
 
 @pytest.mark.parametrize("status", ["locked", "running", "pending_confirmation"])
@@ -171,13 +201,11 @@ def test_email_and_memory_handlers_preserve_noncanonical_content(database):
 def test_requests_rebind_same_destination_and_preserve_approval(database):
     with db.get_db(database) as conn:
         old = legacy(conn)
-        side = legacy(conn, "side-old", "web")
         destination = {"kind": "room", "room_token": old, "talk_ref": old, "label": old}
         request(conn, "post", destination, origin={"surface": "talk", "room_token": old, "channel": old, "talk_ref": old})
-        from istota.rooms.side_rooms import _fingerprint
-        request(conn, "whisper", {"kind": "side_room", "room_token": side, "parent": old},
-                fingerprint=_fingerprint(side, old), kind="side_whisper",
-                origin={"surface": "web", "channel": side, "room_token": side})
+        from istota.rooms.private_replies import _fingerprint
+        request(conn, "whisper", {"kind": "private_reply", "about": old, "user": "alice"},
+                fingerprint=_fingerprint("alice", old), kind="side_whisper")
     assert room_relocate.migrate_database(database) == 0
     with db.get_db(database) as conn:
         mapping = dict(conn.execute("SELECT old_token,new_token FROM room_token_migration"))
@@ -189,8 +217,9 @@ def test_requests_rebind_same_destination_and_preserve_approval(database):
         assert post["preview_digest"] == post["approved_digest"] == "preview-digest"
         assert post["content_hash"] == "body-digest"
         whisper = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id='whisper'").fetchone()
-        assert whisper["binding_fingerprint"] == _fingerprint(mapping[side], mapping[old])
-        assert json.loads(whisper["origin"])["channel"] == mapping[side]
+        assert whisper["binding_fingerprint"] == _fingerprint("alice", mapping[old])
+        assert json.loads(whisper["destination"]) == {
+            "kind": "private_reply", "about": mapping[old], "user": "alice"}
 
 
 def test_ambiguous_binding_refuses_without_writes(database):

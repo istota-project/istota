@@ -2809,9 +2809,6 @@ export interface ChatRoom {
    * row's stamp can be written straight onto the room. Absent on older
    * backends → the room keeps whatever position the server gave it. */
   last_activity?: string;
-  /** For a side room (multiplayer D4), the token of the shared room it is the
-   * caller's private companion of. null for every other room. */
-  side_of?: string | null;
   /** The phone surface this room is bound to, a WhatsApp group included; null
    * for every other room. What the sidebar badge and the settings line read. */
   phone_surface?: 'sms' | 'whatsapp' | null;
@@ -2825,8 +2822,10 @@ export interface ChatRoom {
   phone_group?: boolean;
   /** More than one human reads this room, a Talk guest included. */
   shared?: boolean;
-  /** The policy of a shared room; null for a room one human reads and for a
-   * side room. */
+  /** The caller keeps private notes about this room ("My notes"). With
+   * `shared`, what makes the room menu offer Room notes and My notes. */
+  has_my_notes?: boolean;
+  /** The policy of a shared room; null for a room one human reads. */
   policy?: RoomPolicyView | null;
   /** Set while the room is switched off (multiplayer D8): nothing in it is
    * recorded or answered. null while it is on. */
@@ -2970,6 +2969,10 @@ export interface ChatHistoryMessage {
   // delete endpoint's own owner rule, asked ahead of time. Absent means the
   // endpoint would accept it.
   deletable?: boolean;
+  // A private reply about a shared room (ISSUE-608), in the viewer's own
+  // private room. `name` is null when the viewer is no longer in that room,
+  // and the chip then names nothing and opens nothing.
+  about_room?: { token: string; name: string | null };
 }
 
 /** Cross-room aggregate views (sidebar All / Unread / Starred). */
@@ -3368,7 +3371,7 @@ export interface ChatRoomMemory {
   content: string;
   /** False when the file is absent or whitespace-only; both are the empty state. */
   exists: boolean;
-  /** A Talk-origin room shares one file across all its members. */
+  /** More than one human reads the room, so a save is read by all of them. */
   shared: boolean;
   /** Server-supplied starting text for the empty state. */
   template: string;
@@ -3397,12 +3400,43 @@ export class ChatMemoryBusyError extends Error {
   }
 }
 
-export async function saveRoomMemory(
+/** The caller's own notes about a room ("My notes"): a file in their
+ * workspace that only their own turns in the room read. Same revision rule
+ * as the room memory. */
+export interface ChatRoomNotes {
+  room_id: number;
+  token: string;
+  content: string;
+  exists: boolean;
+  revision: string;
+}
+
+export function getRoomNotes(id: number): Promise<ChatRoomNotes> {
+  return apiFetch<ChatRoomNotes>(`/chat/rooms/${id}/notes`);
+}
+
+export function saveRoomNotes(
   id: number,
   content: string,
   revision: string,
 ): Promise<{ status: string; revision: string }> {
-  const resp = await fetch(`${base}/api/chat/rooms/${id}/memory`, {
+  return saveRoomFile(`${base}/api/chat/rooms/${id}/notes`, content, revision);
+}
+
+export function saveRoomMemory(
+  id: number,
+  content: string,
+  revision: string,
+): Promise<{ status: string; revision: string }> {
+  return saveRoomFile(`${base}/api/chat/rooms/${id}/memory`, content, revision);
+}
+
+async function saveRoomFile(
+  url: string,
+  content: string,
+  revision: string,
+): Promise<{ status: string; revision: string }> {
+  const resp = await fetch(url, {
     method: 'PUT',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },

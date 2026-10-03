@@ -134,6 +134,10 @@ class Task:
     #: Who reads the room this turn was written in: `private`, `principals`
     #: or `mixed` (multiplayer D3), computed at ingest. None off a room.
     audience: str | None = None
+    #: The shared room this turn is linked to (ISSUE-608): set when the turn
+    #: replies to or quotes a message tagged with that room, in the private
+    #: room it was written in. Canonical token; None for an unlinked turn.
+    about_room_token: str | None = None
     heartbeat_silent: bool = False
     skip_log_channel: bool = False
     scheduled_job_id: int | None = None
@@ -1147,7 +1151,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # After the author backfill, which is what it reads.
     _migrate_room_participants(conn)
     _migrate_drop_room_data_grants(conn)
-    _migrate_side_rooms(conn)
+    _migrate_private_replies(conn)
     _migrate_room_policy(conn)
     _migrate_room_veto(conn)
     _migrate_room_epochs(conn)
@@ -1403,6 +1407,9 @@ def create_task(
     # reads the room. Written only by `record_inbound`.
     guest_participant_id: int | None = None,
     audience: str | None = None,
+    # The shared room a reply to a tagged message is linked to (ISSUE-608).
+    # Written only by `record_inbound`, from the parent row.
+    about_room_token: str | None = None,
     heartbeat_silent: bool = False,
     skip_log_channel: bool = False,
     scheduled_job_id: int | None = None,
@@ -1456,10 +1463,11 @@ def create_task(
             parent_task_id, is_group_chat, attachments, priority, scheduled_for,
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
             reply_to_message_id, withheld_from_room, guest_participant_id, audience,
+            about_room_token,
             heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
             queue, model, effort, brain, model_namespace,
             talk_delivery_token, skill, skill_args
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -1481,6 +1489,7 @@ def create_task(
             1 if withheld_from_room else 0,
             guest_participant_id,
             audience,
+            about_room_token or None,
             1 if heartbeat_silent else 0,
             1 if skip_log_channel else 0,
             scheduled_job_id,
@@ -1513,7 +1522,7 @@ _TASK_COLUMNS = (
     "priority, attempt_count, max_attempts, created_at, scheduled_for, "
     "output_target, talk_message_id, talk_response_id, reply_to_talk_id, "
     "reply_to_content, reply_to_message_id, withheld_from_room, "
-    "guest_participant_id, audience, heartbeat_silent, skip_log_channel, scheduled_job_id, "
+    "guest_participant_id, audience, about_room_token, heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
     "brain, model_namespace, talk_delivery_token, skill, skill_args, whatsapp_confirmation_request_id"
 )
@@ -1558,6 +1567,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         withheld_from_room=bool(row["withheld_from_room"]),
         guest_participant_id=row["guest_participant_id"],
         audience=row["audience"],
+        about_room_token=row["about_room_token"],
         heartbeat_silent=bool(row["heartbeat_silent"]),
         skip_log_channel=bool(row["skip_log_channel"]),
         scheduled_job_id=row["scheduled_job_id"],
@@ -1627,23 +1637,20 @@ _CLAIM_CHANNEL_GATE_SQL = """
                     AND t2.status IN ('locked', 'running', 'pending_confirmation')
                     AND t2.cancel_requested = 0
                     AND t2.id != tasks.id
-                    AND NOT (t2.status = 'pending_confirmation' AND """ + (
-    "EXISTS (SELECT 1 FROM messages sm WHERE sm.delivery_reference "
-    "LIKE 'side-confirmation:' || t2.id || ':%')") + """)
+                    AND NOT (t2.status = 'pending_confirmation' AND t2.private_park = 1)
                 )
             )
             """
 
-# A shared-room task parked on a question it asked in its principal's side
-# room (multiplayer D4). Such a park neither holds the room's channel gate
-# (above) nor is cancelled by the principal's next message in the room
+# A shared-room task parked on a question it asked its principal privately
+# (multiplayer D4, ISSUE-608). Such a park neither holds the room's channel
+# gate (above) nor is cancelled by the principal's next message in the room
 # (`cancel_pending_confirmations`): the room never saw the question, so its
-# conversation is not an answer to it and must not be held behind it. The
-# side-room row `side_rooms.write_confirmation` writes is the record.
-SIDE_ROUTED_PARK_SQL = (
-    "EXISTS (SELECT 1 FROM messages sm WHERE sm.delivery_reference "
-    "LIKE 'side-confirmation:' || tasks.id || ':%')"
-)
+# conversation is not an answer to it and must not be held behind it. A column
+# rather than the private room's row, because a park with no private room goes
+# to the bell and writes no row anywhere. The scheduler's park sets it
+# (`set_task_private_park`); `set_task_confirmation` clears it.
+PRIVATE_PARK_SQL = "tasks.private_park = 1"
 
 
 def _stuck_running_params(heartbeat_stuck_minutes: int, stuck_running_minutes: int) -> tuple:
@@ -2095,11 +2102,21 @@ def set_task_confirmation(
             confirmation_prompt = ?,
             actions_taken = COALESCE(?, actions_taken),
             execution_trace = COALESCE(?, execution_trace),
+            private_park = 0,
             updated_at = datetime('now')
         WHERE id = ?
         """,
         (confirmation_prompt, actions_taken, execution_trace, task_id),
     )
+
+
+def set_task_private_park(conn: sqlite3.Connection, task_id: int) -> None:
+    """Mark a parked task as asked privately (`PRIVATE_PARK_SQL`).
+
+    Set by the scheduler's park after `set_task_confirmation`, whether the
+    question went to the principal's private room or to the bell.
+    """
+    conn.execute("UPDATE tasks SET private_park = 1 WHERE id = ?", (task_id,))
 
 
 def confirm_task(conn: sqlite3.Connection, task_id: int) -> None:
@@ -2148,7 +2165,7 @@ def cancel_pending_confirmations(
     with write_transaction(conn):
         held = conn.execute(
             f"SELECT id FROM tasks WHERE conversation_token IN ({marks}) AND user_id=? "
-            f"AND status='pending_confirmation' AND NOT {SIDE_ROUTED_PARK_SQL}",
+            f"AND status='pending_confirmation' AND NOT {PRIVATE_PARK_SQL}",
             (*refs, user_id)).fetchall()
         for row in held:
             close_task_questions(conn, row[0])
@@ -2170,7 +2187,8 @@ def get_pending_confirmation(
 
     Returns the most recent task awaiting confirmation, or None if none found.
     ``user_id`` narrows it to that user's tasks, for a caller answering on
-    their behalf from somewhere else (a side room answering its parent).
+    their behalf from somewhere else (a private room answering a shared room's
+    park).
     """
     refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
     marks = ", ".join("?" for _ in refs)
@@ -4163,9 +4181,6 @@ def _usable_as_delivery_default(
     - **A channel room.** `log_channel` and `alerts_channel` are machine-owned;
       the entrypoint even posts into `alerts` at boot, so activity alone would
       hand a user's default to whichever the daemon last wrote to.
-    - **A side room** (multiplayer D4). It is private, but it is the companion
-      of one shared room and is created by the system on that room's need, so
-      a default landing there would file unrelated alerts under that room.
     - **A phone room** (room-surface-model Stage 24). A private SMS or
       WhatsApp room is a read-only transcript of a phone thread, and a bare
       web delivery or a relay question landing there would sit in a room the
@@ -4176,8 +4191,6 @@ def _usable_as_delivery_default(
     if token in channels:
         return False
     if visible_room(conn, user_id, token) is None:
-        return False
-    if is_side_room(conn, token):
         return False
     if room_has_phone_binding(conn, token):
         return False
@@ -4377,7 +4390,17 @@ def delete_web_chat_room(
     room = get_web_chat_room(conn, room_id)
     if room is None or room.user_id != user_id:
         return False
-    token = room.token
+    _delete_room_rows(conn, room.token)
+    return True
+
+
+def _delete_room_rows(conn: sqlite3.Connection, token: str) -> None:
+    """Every row keyed on a room's token, the room itself included.
+
+    The body of `delete_web_chat_room`, shared with the side-room removal in
+    `_migrate_private_replies`. Commits nothing: the caller's transaction
+    holds it.
+    """
     refs = _room_ref_tokens(conn, token, include_surface_refs=False)
     ref_marks = ", ".join("?" for _ in refs)
     # Every member's tasks, not only the caller's: a web room can hold more
@@ -4423,7 +4446,6 @@ def delete_web_chat_room(
     # leaving an orphan handle pointing at a now-deleted room would suppress
     # their default-room creation and yield an empty room list (ISSUE-134).
     conn.execute(f"DELETE FROM web_chat_rooms WHERE token IN ({ref_marks})", refs)
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -4458,10 +4480,6 @@ class Room:
     # queries that compute it (`list_member_rooms`) — a room fetched by token
     # carries None rather than a stale stamp.
     last_activity: str | None = None
-    #: A side room's parent (multiplayer D4), and the one member it is for.
-    #: None on every other room.
-    side_of: str | None = None
-    side_for_user: str | None = None
     #: The group the room is linked to (multiplayer Stage 27), or None.
     group_id: str | None = None
 
@@ -4502,6 +4520,8 @@ class Message:
     #: most one is set by convention; a reader that finds both prefers the label.
     author_user_id: str | None = None
     author_label: str | None = None
+    #: Canonical token of the shared room a private reply is about, or None.
+    about_room_token: str | None = None
 
 
 def _row_to_room(row: sqlite3.Row) -> Room:
@@ -4521,8 +4541,6 @@ def _row_to_room(row: sqlite3.Row) -> Room:
             row["model_namespace"] if "model_namespace" in keys else None
         ),
         last_activity=row["last_activity"] if "last_activity" in keys else None,
-        side_of=row["side_of"] if "side_of" in keys else None,
-        side_for_user=row["side_for_user"] if "side_for_user" in keys else None,
         group_id=row["group_id"] if "group_id" in keys else None,
     )
 
@@ -4550,6 +4568,7 @@ def _row_to_message(row: sqlite3.Row) -> Message:
         ),
         author_user_id=row["author_user_id"] if "author_user_id" in keys else None,
         author_label=row["author_label"] if "author_label" in keys else None,
+        about_room_token=row["about_room_token"] if "about_room_token" in keys else None,
         id=row["id"],
         room_token=row["room_token"],
         role=row["role"],
@@ -5255,91 +5274,6 @@ def get_room(conn: sqlite3.Connection, token: str) -> Room | None:
     return _row_to_room(row) if row else None
 
 
-def is_side_room(conn: sqlite3.Connection, token: str) -> bool:
-    row = conn.execute(
-        "SELECT side_of FROM rooms WHERE token = ?", (token,),
-    ).fetchone()
-    return bool(row and row["side_of"])
-
-
-def get_side_room(
-    conn: sqlite3.Connection, parent_token: str, user_id: str,
-) -> Room | None:
-    """``user_id``'s side room of ``parent_token``, or None when none exists."""
-    row = conn.execute(
-        "SELECT * FROM rooms WHERE side_of = ? AND side_for_user = ?",
-        (parent_token, user_id),
-    ).fetchone()
-    return _row_to_room(row) if row else None
-
-
-def ensure_side_room(
-    conn: sqlite3.Connection, parent_token: str, user_id: str,
-) -> Room:
-    """``user_id``'s side room of ``parent_token``, created on first need (D4).
-
-    **This is the one place the system makes a room, and why it may.** Rooms
-    are user-created: nothing mints a room to deliver into, and an email thread
-    routes into a room a person made. A side room is not a new conversation
-    and not a new audience. It is the private companion of a room the user is
-    *already a member of*, with that user as its only member for good, and it
-    exists only because that room produced something for them alone (a
-    whisper, a confirmation). It never becomes anyone's delivery default
-    (`_usable_as_delivery_default`), never gains a second member, and nothing
-    that is not about its parent is ever routed into it. Refused, with
-    ``ValueError``, for a parent that does not exist, a user who is not a
-    member of it, and a parent that is itself a side room.
-
-    Idempotent, including under a race: the partial unique index on
-    ``(side_of, side_for_user)`` keeps one row, `INSERT OR IGNORE` loses
-    quietly, and only the writer whose row landed makes the membership, the
-    web binding and the web handle.
-    """
-    parent = get_room(conn, parent_token)
-    if parent is None:
-        raise ValueError("parent_unavailable")
-    if parent.side_of:
-        raise ValueError("side_room_of_side_room")
-    if not is_room_member(conn, parent_token, user_id):
-        raise ValueError("not_a_member")
-    existing = get_side_room(conn, parent_token, user_id)
-    if existing is not None:
-        # Fail closed if anything has put a second reader in it.
-        if list_room_members(conn, existing.token) != [user_id]:
-            raise ValueError("side_room_not_private")
-        return existing
-    token = mint_room_token()
-    name = f"re: {room_display_name(parent, None) or 'room'}"[:80]
-    conn.execute(
-        "INSERT OR IGNORE INTO rooms (token, user_id, name, origin, side_of, side_for_user) "
-        "VALUES (?, ?, ?, 'web', ?, ?)",
-        (token, user_id, name, parent_token, user_id),
-    )
-    room = get_side_room(conn, parent_token, user_id)
-    assert room is not None
-    if room.token == token:
-        add_room_member(conn, token, user_id)
-        add_room_binding(conn, token, "web", token)
-        ensure_web_chat_handle(conn, user_id, token, name)
-    return room
-
-
-def side_room_parent(conn: sqlite3.Connection, token: str) -> Room | None:
-    """The side room ``token`` names, when it is one whose member still reads
-    its parent; None for any other room, and for a side room whose member has
-    left the parent or whose parent is gone."""
-    room = get_room(conn, token)
-    if room is None or not room.side_of or not room.side_for_user:
-        return None
-    if list_room_members(conn, token) != [room.side_for_user]:
-        return None
-    if get_room(conn, room.side_of) is None:
-        return None
-    if not is_room_member(conn, room.side_of, room.side_for_user):
-        return None
-    return room
-
-
 def list_rooms(
     conn: sqlite3.Connection, user_id: str, include_archived: bool = False,
 ) -> list[Room]:
@@ -5679,6 +5613,25 @@ def room_has_phone_binding(conn: sqlite3.Connection, room_token: str) -> bool:
     ).fetchone() is not None
 
 
+
+def is_private_room_of(
+    conn: sqlite3.Connection, token: str | None, user_id: str, *, allow_phone: bool = False,
+) -> bool:
+    """Whether ``token`` is a live room whose only member is ``user_id``.
+
+    The one test for "a room only this user reads", shared by the relay's
+    default-room destination and the private-reply resolver. Not archived,
+    members exactly ``[user_id]``, and no SMS or WhatsApp binding unless
+    ``allow_phone``: a phone room is a read-only transcript in web, so only a
+    caller that sends on the phone surface itself may choose one.
+    """
+    room = get_room(conn, token) if token else None
+    if room is None or room.archived:
+        return False
+    if list_room_members(conn, room.token) != [user_id]:
+        return False
+    return allow_phone or not room_has_phone_binding(conn, room.token)
+
 def resolve_room_token(
     conn: sqlite3.Connection, surface: str, surface_ref: str,
 ) -> str | None:
@@ -5735,6 +5688,7 @@ def add_message(
     author_label: str | None = None,
     delivery_reference: str | None = None,
     author_participant_id: int | None = None,
+    about_room_token: str | None = None,
 ) -> int:
     """Append a message to a room's canonical transcript. Returns the new id.
 
@@ -5756,8 +5710,9 @@ def add_message(
         "INSERT INTO messages "
         "(room_token, role, body, title, task_id, origin_surface, external_ids, "
         " attachments, attachment_paths, client_msg_id, reply_to_message_id, "
-        " author_user_id, author_label, delivery_reference, author_participant_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        " author_user_id, author_label, delivery_reference, author_participant_id, "
+        " about_room_token) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         (
             room_token,
             role,
@@ -5777,6 +5732,7 @@ def add_message(
             author_label or None,
             delivery_reference or None,
             author_participant_id,
+            about_room_token or None,
         ),
     ).fetchone()
     return int(row["id"])
@@ -5897,6 +5853,7 @@ def store_turn_message(
     body: str,
     task_id: int,
     origin_surface: str,
+    about_room_token: str | None = None,
 ) -> int | None:
     """Idempotently store a turn's user/assistant message. Returns the new id,
     or None if a row for (room_token, role, task_id) already exists — so a retry
@@ -5911,6 +5868,7 @@ def store_turn_message(
     return add_message(
         conn, room_token, role=role, body=body,
         origin_surface=origin_surface, task_id=task_id,
+        about_room_token=about_room_token,
     )
 
 
@@ -6625,6 +6583,8 @@ _CROSS_ROOM_COLUMNS = (
     # spine too (`web_app._SPINE_COLUMNS`), or a turn would read as external in
     # one view and ordinary in the other.
     "  m.origin_surface AS origin_surface, "
+    # The shared room a private reply is about (ISSUE-608), for the web chip.
+    "  m.about_room_token AS about_room_token, "
     # Truncated in SQLite rather than in the dict builder: this fragment also
     # backs the live room-event stream, which is byte-budgeted, and a reply to
     # a long answer would otherwise carry that whole answer a second time.
@@ -7312,7 +7272,7 @@ def _migrate_message_relays_surfaces(conn: sqlite3.Connection) -> None:
 
 
 # The rebuilt `whatsapp_skill_requests`. A copy of schema.sql's, because this
-# runs before schema.sql; `tests/test_side_rooms.py` holds the two equal.
+# runs before schema.sql; `tests/test_whatsapp_requests.py` holds the two equal.
 _SKILL_REQUESTS_DDL = """CREATE TABLE whatsapp_skill_requests_rebuild (
     id TEXT PRIMARY KEY,
     requester_user_id TEXT NOT NULL,
@@ -7354,7 +7314,7 @@ _SKILL_REQUESTS_INDEXES = (
 
 
 def _migrate_skill_request_room_kinds(conn: sqlite3.Connection) -> None:
-    """Widen `whatsapp_skill_requests` to the side-room kinds (multiplayer D16).
+    """Widen `whatsapp_skill_requests` to the room kinds (multiplayer D16).
 
     `side_whisper` and `room_post` ride the relay request table rather than a
     second hold table, so its `kind` CHECK is rebuilt by the procedure
@@ -7942,31 +7902,106 @@ def _migrate_drop_room_data_grants(conn: sqlite3.Connection) -> None:
         logger.warning("retired room grants table drop failed: %s", e)
 
 
-def _migrate_side_rooms(conn: sqlite3.Connection) -> None:
-    """Add `rooms.side_of` / `rooms.side_for_user` and their unique index.
+def _migrate_private_replies(conn: sqlite3.Connection) -> None:
+    """Private replies replace side rooms (ISSUE-608).
 
-    Markered (`side_rooms_v1`) so a later migration can tell a database that
-    got the columns empty from one that predates them. Nothing is backfilled:
-    no side room existed before this, and minting one here would be exactly
-    the room nobody asked for that the rooms rule forbids.
+    Adds `messages.about_room_token`, `tasks.about_room_token` (the shared
+    room a private reply, or a linked turn, is about) and `tasks.private_park`.
+    Nothing is backfilled: no row was tagged before this.
+
+    Then removes side rooms, which were never rolled out and are deleted
+    rather than migrated: every room with `side_of` set and every row keyed on
+    it (`_delete_room_rows`, the body `delete_web_chat_room` runs), the
+    whispers bound for a side room and any `room_post` asked from one, then
+    the index and the two columns. One transaction of its own, after
+    committing the one it inherited (`_run_migrations`), so a failure rolls
+    back whole and the next boot retries. The `Channels/<token>` directories
+    are left: a migration has no config, and nothing reads them.
+
+    Markered (`private_replies_v1`). A fresh database never has the columns,
+    since `schema.sql` no longer declares them.
     """
-    _add_columns(conn, "rooms", {"side_of": "TEXT", "side_for_user": "TEXT"})
+    _add_columns(conn, "messages", {"about_room_token": "TEXT"})
+    _add_columns(conn, "tasks", {
+        "about_room_token": "TEXT",
+        "private_park": "INTEGER NOT NULL DEFAULT 0",
+    })
     try:
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_rooms_side "
-            "ON rooms (side_of, side_for_user) WHERE side_of IS NOT NULL"
-        )
-        conn.execute(
-            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('side_rooms_v1')"
-        )
+        if conn.execute(
+            "SELECT 1 FROM _migration_state WHERE name = 'private_replies_v1'"
+        ).fetchone():
+            return
     except sqlite3.OperationalError:
-        return  # rooms or the marker table not created yet
+        return  # marker table not created yet: a fresh database
+    room_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(rooms)").fetchall()
+    }
+    if conn.in_transaction:
+        conn.commit()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        request_columns = {
+            row[1] for row in conn.execute(
+                "PRAGMA table_info(whatsapp_skill_requests)"
+            ).fetchall()
+        }
+        # A request table from before the room kinds has neither column, and
+        # no side-room request either; `_migrate_skill_request_room_kinds`
+        # adds them later in this boot.
+        has_requests = {"origin", "destination"} <= request_columns
+        if "side_of" in room_columns:
+            # A question still parked in a side room was asked privately, so
+            # it keeps not holding the shared room once its row is gone.
+            conn.execute(
+                "UPDATE tasks SET private_park = 1 "
+                "WHERE status = 'pending_confirmation' AND EXISTS ("
+                "SELECT 1 FROM messages m WHERE m.delivery_reference "
+                "LIKE 'side-confirmation:' || tasks.id || ':%')"
+            )
+            sides = [
+                row[0] for row in conn.execute(
+                    "SELECT token FROM rooms WHERE side_of IS NOT NULL"
+                ).fetchall()
+            ]
+            if sides and has_requests:
+                marks = ", ".join("?" for _ in sides)
+                conn.execute(
+                    "DELETE FROM whatsapp_skill_requests WHERE kind = 'room_post' "
+                    "AND CASE WHEN json_valid(origin) "
+                    "THEN json_extract(origin, '$.room_token') END IN "
+                    f"({marks})",
+                    sides,
+                )
+            for token in sides:
+                _delete_room_rows(conn, token)
+        if has_requests:
+            # A whisper bound for a side room; one bound for a private room
+            # (`destination.kind = 'private_reply'`) keeps the stored kind name.
+            conn.execute(
+                "DELETE FROM whatsapp_skill_requests WHERE kind = 'side_whisper' "
+                "AND COALESCE(CASE WHEN json_valid(destination) "
+                "THEN json_extract(destination, '$.kind') END, '') != 'private_reply'"
+            )
+        if "side_of" in room_columns:
+            # The index first: SQLite refuses to drop an indexed column.
+            conn.execute("DROP INDEX IF EXISTS idx_rooms_side")
+            conn.execute("ALTER TABLE rooms DROP COLUMN side_of")
+            conn.execute("ALTER TABLE rooms DROP COLUMN side_for_user")
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) "
+            "VALUES ('private_replies_v1')"
+        )
+        conn.execute("COMMIT")
+    except sqlite3.Error as e:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        logger.warning("side-room removal failed, will retry: %s", e)
 
 
 def _migrate_room_group(conn: sqlite3.Connection) -> None:
     """Add `rooms.group_id` (multiplayer Stage 27).
 
-    Markered (`room_group_v1`) like `_migrate_side_rooms`. Nothing is
+    Markered (`room_group_v1`). Nothing is
     backfilled: no room was linked to a group before this, and a link is the
     host's choice, never an inference from who happens to be in the room.
     """

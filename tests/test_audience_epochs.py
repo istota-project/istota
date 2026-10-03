@@ -1,8 +1,8 @@
 """Audience epochs (multiplayer Stage 14, D3).
 
 When a room's audience grows, a new epoch starts, and front-stage readers see
-only what the whole current audience was present for. A side room reads its
-parent whole. These pin the table and its migration, when a join splits (a
+only what the whole current audience was present for. A linked private turn
+reads the room whole. These pin the table and its migration, when a join splits (a
 Talk join always, a web add with `acknowledge_history` never, the first roster
 observation of a room never), and each front-stage reader: the task's
 conversation context from the store, from the tasks fallback and from the Talk
@@ -110,16 +110,16 @@ class TestAJoinHidesEarlierTurnsFromTheFrontStage:
         assert "flights are booked" in context
         assert "house sale" not in context
 
-    def test_a_side_room_task_reads_the_earlier_turns(self, config):
+    def test_a_linked_private_turn_reads_the_earlier_turns(self, config):
         from istota.executor import build_prompt
         with db.get_db(config.db_path) as conn:
             token = _talk_group(conn, config)
             _turn(conn, token, "alice", "the house sale closes friday", "Noted.")
             _sync_talk_roster(conn, config, token, [ALICE, BOB, MAX, BOT])
-            side = db.ensure_side_room(conn, token, "alice")
+            private = db.create_web_chat_room(conn, "alice", "Mine").token
             ident = db.create_task(conn, user_id="alice", source_type="web",
                                    prompt="what did we say before max?",
-                                   conversation_token=side.token)
+                                   conversation_token=private, about_room_token=token)
             composed = build_prompt(db.get_task(conn, ident), [], config, conn=conn)
         assert "house sale closes friday" in composed.user
 

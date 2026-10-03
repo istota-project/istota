@@ -90,7 +90,8 @@ src/istota/
 │   ├── scopes.py         # The withheld-scope set every reach seam reads, the ambient-memory rule, and a task's resolved group set → sandbox.md
 │   ├── policy.py         # Per-room host, guest_reply, audience class and readers; who may change a shared room → transport.md
 │   ├── veto.py           # `!<bot> off|on`, the one-time announcement, and the room-notices queue → transport.md
-│   ├── side_rooms.py     # A member's private room beside a shared one: whispers, held posts, guest proposals, side answers → relay.md
+│   ├── private_replies.py  # What a shared room has for one member, in their own private room: resolver, delivery, linking, whispers, held posts, guest proposals, My notes → transport.md
+│   ├── lookup.py         # Finding a room a person named, among their own rooms → transport.md
 │   ├── surfaces.py       # What role each surface plays in the room model, in one table → leaf-modules.md
 │   └── provision.py      # Default Talk rooms (general/logs/alerts) for a user → leaf-modules.md
 ├── relay/                # Relay questions between users: relays, destinations, requests (the `whatsapp_skill_requests` table) → relay.md

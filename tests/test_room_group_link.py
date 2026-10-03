@@ -204,11 +204,6 @@ class TestWhoSetsTheLink:
         db.archive_group(conn, "work")
         assert room_policy.group_link_refusal(conn, "r1", "alice", "work")
 
-    def test_a_side_room_is_refused(self, conn):
-        _room(conn, "r2", "alice", "bob")
-        side = db.ensure_side_room(conn, "r2", "alice")
-        assert room_policy.group_link_refusal(conn, side.token, "alice", "fam")
-
     def test_clearing_needs_only_the_host(self, conn):
         _room(conn, "r1", "alice")
         assert room_policy.group_link_refusal(conn, "r1", "alice", None) is None
@@ -253,8 +248,3 @@ class TestTheCommand:
         assert out == "You are not a member of group 'bobs'."
         assert db.get_room(conn, "r2").group_id is None
 
-    def test_a_side_room_says_it_has_no_link(self, config, conn):
-        _room(conn, "r2", "alice", "bob")
-        side = db.ensure_side_room(conn, "r2", "alice")
-        out = _say(config, conn, "alice", side.token, "!room group")
-        assert "side room" in out and "!room group <id>" not in out
