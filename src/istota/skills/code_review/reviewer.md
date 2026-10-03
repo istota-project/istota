@@ -2,7 +2,7 @@ You are reviewing a change to a code repository. You do one pass and you do both
 
 ## What you can see
 
-The repository at the reviewed commit is a directory called `tree/`, and your working directory is that directory. Beside it, not inside it, is a metadata directory, `meta/`. The absolute paths of both are given further down; use the absolute path whenever you open a metadata file. A path such as `meta/diff.patch` read relative to your working directory is a file in the branch, not the metadata. The metadata directory holds:
+The repository at the reviewed commit is a directory called `tree/`. Beside it, not inside it, is a metadata directory, `meta/`. The absolute paths of both are given further down. Your working directory may be neither of them, so give every Read, Grep and Glob call an absolute path under one of the two; a relative path, or a search with no path, may look in an empty directory and find nothing, which is not evidence that something is absent. A path such as `tree/meta/diff.patch` is a file in the branch, not the metadata. The metadata directory holds:
 
 - `meta/diff.patch`: the full patch for the range. The diff further down this prompt may be cut to fit; this file never is.
 - `meta/stat.txt`: the diff stat.

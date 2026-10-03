@@ -90,6 +90,12 @@ RESERVED_SECONDS = ASSEMBLY_ALLOWANCE_SECONDS + JOIN_SLACK_SECONDS
 MIN_AGENT_TIMEOUT_SECONDS = 30
 
 
+#: Retired flags this invocation passed, named on every envelope it emits —
+#: guard refusals included — so a caller learns to drop them whatever the
+#: outcome. Set once per process by `main`.
+_deprecated_flags: list[str] = []
+
+
 def _emit(envelope: dict, code: int):
     """The facade contract: one line of JSON on stdout, then an exit code.
 
@@ -97,6 +103,7 @@ def _emit(envelope: dict, code: int):
     exits 0 on an envelope that is deliberately not an error, so the code stays
     explicit and the status check is switched off.
     """
+    envelope.setdefault("deprecated_flags", list(_deprecated_flags))
     emit(envelope, indent=None, ensure_ascii=True, exit_on_error=False)
     sys.exit(code)
 
@@ -208,10 +215,6 @@ def cmd_run(args):
     )
     from istota.brain._aliases import split_effort
     from istota.config import load_config
-
-    # Accepted for one release so workflow files that still pass it keep
-    # working, and named back so the caller can drop it.
-    deprecated_flags = ["--agents"] if args.agents is not None else []
 
     config = load_config()
     dev = config.developer
@@ -431,7 +434,10 @@ def cmd_run(args):
         snap = review_snapshot.build_snapshot(
             worktree_path,
             bundle,
-            root=Path(config.temp_dir),
+            # Resolved: the namespace binds the run directory at its resolved
+            # path, and the prompt, `cwd` and `fs_read_roots` must name the
+            # same one or every path the reviewer is given is missing inside.
+            root=Path(config.temp_dir).resolve(),
             user_id=user_id,
             max_bytes=review_cfg.snapshot_max_bytes,
             max_file_bytes=review_cfg.snapshot_max_file_bytes,
@@ -583,7 +589,7 @@ def cmd_run(args):
             build_sandbox=build_sandbox,
         )
     except engine.ReviewError as exc:
-        _fail(exc.reason, str(exc), deprecated_flags=deprecated_flags)
+        _fail(exc.reason, str(exc))
     finally:
         # Every path out of the run, `_fail`'s `SystemExit` and a raise from
         # the model call included. Neither helper raises.
@@ -606,7 +612,6 @@ def cmd_run(args):
                 "task %s: %s", task_id, exc,
             )
     envelope["calls_used"] = calls_used
-    envelope["deprecated_flags"] = deprecated_flags
     envelope["max_calls"] = cap
     # `agent_timeout_seconds` comes back from the engine, which was handed the
     # already-clamped value. These two are what make it readable: without the
@@ -709,6 +714,10 @@ def build_parser():
 def main(argv=None):
     parser = build_parser()
     args = parse_and_resolve(parser, argv)
+    global _deprecated_flags
+    # Accepted for one release so workflow files that still pass it keep
+    # working, and named back so the caller can drop it.
+    _deprecated_flags = ["--agents"] if getattr(args, "agents", None) is not None else []
     commands = {"run": cmd_run}
 
     def describe(exc: BaseException) -> dict:

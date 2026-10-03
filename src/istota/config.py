@@ -4083,6 +4083,9 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     "developer.review": _review_section,
     # Zero files would make the reviewer text-only by configuration.
     "developer.review.file_budget": _positive_int,
+    # Same reason: a zero cap writes an empty tree for a reviewer with tools.
+    "developer.review.snapshot_max_bytes": _positive_int,
+    "developer.review.snapshot_max_file_bytes": _positive_int,
     # An empty string means "unset" here, not a relative path of `.`.
     "security.sandbox_cache_dir": lambda raw, key: str(raw or ""),
     "security.sandbox_cache_max_gb": _positive_float,

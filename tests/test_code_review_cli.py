@@ -401,6 +401,17 @@ class TestReviewConfigParsing:
         assert review.file_budget == 8
         assert any("file_budget" in r.getMessage() for r in caplog.records)
 
+    @pytest.mark.parametrize("key", ["snapshot_max_bytes", "snapshot_max_file_bytes"])
+    def test_a_non_positive_snapshot_cap_keeps_the_default(self, tmp_path, key):
+        """A zero cap would write an empty tree for a reviewer with tools."""
+        path = tmp_path / "config.toml"
+        path.write_text(
+            "[developer]\nenabled = true\n"
+            f"[developer.review]\n{key} = 0\n"
+        )
+        review = load_config(path).developer.review
+        assert getattr(review, key) == getattr(ReviewConfig(), key)
+
     def test_author_credit_is_parsed(self, tmp_path):
         """Declared on the dataclass and by the env spec, but never read from TOML.
 
@@ -1119,6 +1130,39 @@ class TestTheReviewerRequest:
         assert len(seen["run_dirs"]) == 1
         assert run_dirs(tmp_path) == []
         assert work_dirs(tmp_path) == []
+
+    def test_a_guard_refusal_reports_the_retired_flag_too(
+        self, capsys, worktree, review_env, developer_config, no_brain
+    ):
+        developer_config(enabled=False)
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+            "--agents", "both",
+        )
+        assert code == 0
+        assert envelope["reason"] == "review_disabled"
+        assert envelope["deprecated_flags"] == ["--agents"]
+
+    def test_a_linked_temp_dir_gives_the_reviewer_resolved_paths(
+        self, capsys, tmp_path, worktree, review_env, developer_config, stub_brain
+    ):
+        """The namespace binds the run directory at its resolved path, so the
+        roots, the cwd and the paths in the prompt have to be that one too."""
+        cfg = developer_config()
+        real = tmp_path / "real-temp"
+        (real / "admin").mkdir(parents=True)
+        link = tmp_path / "linked-temp"
+        link.symlink_to(real)
+        cfg.temp_dir = link
+        drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+
+        req = stub_brain.requests[0]
+        assert req.allowed_tools  # the tooled path ran
+        run_dir = Path(req.fs_read_roots[0])
+        assert run_dir == run_dir.resolve()
+        assert run_dir.parent == (real / ".review" / "admin").resolve()
+        assert Path(req.cwd) == run_dir / "tree"
+        assert str(run_dir / "tree") in req.prompt
 
     @pytest.mark.parametrize("value", ["both", "conformance", "bughunt"])
     def test_the_retired_agents_flag_is_accepted_and_reported(
