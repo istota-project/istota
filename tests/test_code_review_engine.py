@@ -1228,10 +1228,12 @@ class TestBuildPrompt:
         bundle = self._bundle(truncated=True, truncated_files=["big.py"])
         prompt = build_prompt(bundle, self._snapshot(tmp_path), "", file_budget=8)
 
-        assert "big.py" in prompt
-        assert "meta/diff.patch" in prompt.split("## The snapshot")[0].split(
-            "Review the changes in"
-        )[1]
+        snapshot = self._snapshot(tmp_path)
+        header = prompt.split("## The snapshot")[0].split("Review the changes in")[1]
+        assert "big.py" in header
+        # Absolute, never cwd-relative: the reviewer's cwd is `tree/`, where
+        # `meta/diff.patch` would be a file the branch itself carries.
+        assert f"The full patch is at {snapshot.run_dir / 'meta' / 'diff.patch'};" in header
 
     def test_a_text_only_run_says_there_are_no_tools(self, tmp_path):
         bundle = self._bundle(truncated=True, truncated_files=["big.py"])
@@ -1242,8 +1244,12 @@ class TestBuildPrompt:
         assert "Read at most" not in prompt
         # The truncation note cannot send a reviewer with no tools to a file.
         tail = prompt.split("Review the changes in", 1)[1]
-        assert "big.py" in tail
-        assert "meta/diff.patch" not in tail.split("## Diff stat")[0]
+        header = tail.split("## Diff stat")[0]
+        assert "big.py" in header
+        assert "meta/diff.patch" not in header
+        # One instruction for an unseen part, matching the no-tools note.
+        assert "is unverified" in header
+        assert "Do not report" not in header
 
     def test_commits_are_included_and_bounded(self, tmp_path):
         commits = "app: add a helper\n\n--\n" + "x" * 10_000

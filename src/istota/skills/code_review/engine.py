@@ -1606,9 +1606,9 @@ finding. An empty "findings" array is a valid review; "ruled_out" may be empty
 too.
 """
 
-# Replaces the snapshot instructions in `reviewer.md` when the run fell back to
-# text-only (the snapshot or the namespace could not be built). The method
-# still applies; the tools do not.
+# Appended after `reviewer.md` on a text-only run (the snapshot or the
+# namespace could not be built), and overrides its tool instructions by saying
+# so. The method still applies; the tools do not.
 _NO_SNAPSHOT = """\
 This run has no tools and no snapshot. The `tree/` and `meta/` directories
 described above do not exist, and Read, Grep and Glob are not available:
@@ -1661,15 +1661,18 @@ def build_prompt(
     if bundle.truncated:
         cut = ", ".join(bundle.truncated_files)
         if snapshot is not None:
+            # Absolute: the reviewer's cwd is `tree/`, where a relative
+            # `meta/diff.patch` would be a file the branch author wrote.
             header.append(
                 f"The diff below was cut to fit. These files are incomplete in it: {cut}. "
-                "The full patch is at meta/diff.patch; read the missing parts there "
-                "before reporting on them."
+                f"The full patch is at {snapshot.run_dir / 'meta' / 'diff.patch'}; read "
+                "the missing parts there before reporting on them."
             )
         else:
             header.append(
                 f"The diff below was cut to fit. These files are incomplete in it: {cut}. "
-                "Do not report a finding that depends on a part you were not shown."
+                "A finding on a part you were not shown is unverified; name the file "
+                'in "settle".'
             )
     if snapshot is not None:
         header.append(
