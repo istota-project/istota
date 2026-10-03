@@ -2825,6 +2825,9 @@ export interface ChatRoom {
   phone_group?: boolean;
   /** More than one human reads this room, a Talk guest included. */
   shared?: boolean;
+  /** The caller keeps private notes about this room ("My notes"). With
+   * `shared`, what makes the room menu offer Room notes and My notes. */
+  has_my_notes?: boolean;
   /** The policy of a shared room; null for a room one human reads and for a
    * side room. */
   policy?: RoomPolicyView | null;
@@ -3366,7 +3369,7 @@ export interface ChatRoomMemory {
   content: string;
   /** False when the file is absent or whitespace-only; both are the empty state. */
   exists: boolean;
-  /** A Talk-origin room shares one file across all its members. */
+  /** More than one human reads the room, so a save is read by all of them. */
   shared: boolean;
   /** Server-supplied starting text for the empty state. */
   template: string;
@@ -3395,12 +3398,43 @@ export class ChatMemoryBusyError extends Error {
   }
 }
 
-export async function saveRoomMemory(
+/** The caller's own notes about a room ("My notes"): a file in their
+ * workspace that only their own turns in the room read. Same revision rule
+ * as the room memory. */
+export interface ChatRoomNotes {
+  room_id: number;
+  token: string;
+  content: string;
+  exists: boolean;
+  revision: string;
+}
+
+export function getRoomNotes(id: number): Promise<ChatRoomNotes> {
+  return apiFetch<ChatRoomNotes>(`/chat/rooms/${id}/notes`);
+}
+
+export function saveRoomNotes(
   id: number,
   content: string,
   revision: string,
 ): Promise<{ status: string; revision: string }> {
-  const resp = await fetch(`${base}/api/chat/rooms/${id}/memory`, {
+  return saveRoomFile(`${base}/api/chat/rooms/${id}/notes`, content, revision);
+}
+
+export function saveRoomMemory(
+  id: number,
+  content: string,
+  revision: string,
+): Promise<{ status: string; revision: string }> {
+  return saveRoomFile(`${base}/api/chat/rooms/${id}/memory`, content, revision);
+}
+
+async function saveRoomFile(
+  url: string,
+  content: string,
+  revision: string,
+): Promise<{ status: string; revision: string }> {
+  const resp = await fetch(url, {
     method: 'PUT',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },

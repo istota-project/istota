@@ -3,19 +3,29 @@
   import {
     getRoomMemory,
     saveRoomMemory,
+    getRoomNotes,
+    saveRoomNotes,
     ChatMemoryConflictError,
     ChatMemoryBusyError,
     type ChatRoomMemory,
+    type ChatRoomNotes,
   } from '$lib/api';
 
   interface Props {
     open?: boolean;
     roomId: number;
     roomName: string;
+    /** `room`: the room's CHANNEL.md, read by everyone in it. `mine`: the
+     * caller's own notes about the room, read only into their own turns. */
+    kind?: 'room' | 'mine';
     onClose: () => void;
   }
 
-  let { open = $bindable(false), roomId, roomName, onClose }: Props = $props();
+  let { open = $bindable(false), roomId, roomName, kind = 'room', onClose }: Props = $props();
+
+  type Loaded = ChatRoomNotes & Partial<Pick<ChatRoomMemory, 'shared' | 'template'>>;
+
+  const mine = $derived(kind === 'mine');
 
   let loading = $state(false);
   let saving = $state(false);
@@ -24,7 +34,7 @@
   // error: the user's text is still in the box and must not be thrown away.
   let conflicted = $state(false);
   let saved = $state(false);
-  let loaded = $state<ChatRoomMemory | null>(null);
+  let loaded = $state<Loaded | null>(null);
   let text = $state('');
   let revision = $state('');
   // The id the current `loaded` belongs to, so reopening the modal on another
@@ -49,7 +59,7 @@
     revision = '';
     const forRoom = roomId;
     try {
-      const data = await getRoomMemory(forRoom);
+      const data: Loaded = mine ? await getRoomNotes(forRoom) : await getRoomMemory(forRoom);
       // A slow response for a room the user has since navigated away from is
       // dropped rather than rendered.
       if (forRoom !== roomId) return;
@@ -59,7 +69,7 @@
       revision = data.revision;
     } catch {
       if (forRoom !== roomId) return;
-      error = "Couldn't load this room's memory.";
+      error = loadFailed;
     } finally {
       if (forRoom === roomId) loading = false;
     }
@@ -82,7 +92,7 @@
   });
 
   function useTemplate() {
-    if (!loaded) return;
+    if (!loaded?.template) return;
     text = loaded.template;
   }
 
@@ -96,7 +106,8 @@
     conflicted = false;
     saved = false;
     try {
-      const res = await saveRoomMemory(loadedRoomId, text, revision);
+      const save = mine ? saveRoomNotes : saveRoomMemory;
+      const res = await save(loadedRoomId, text, revision);
       revision = res.revision;
       loaded = { ...loaded, content: text, exists: text.trim().length > 0 };
       saved = true;
@@ -116,24 +127,31 @@
   function handleOpenChange(next: boolean) {
     if (!next) onClose();
   }
+
+  const title = $derived(mine ? 'My notes' : loaded?.shared ? 'Room notes' : 'Room memory');
+  const description = $derived(
+    mine
+      ? `Your private notes about ${roomName}.`
+      : `Standing notes ${roomName} is given at the start of every message.`,
+  );
+  const loadFailed = $derived(
+    mine ? "Couldn't load your notes." : "Couldn't load this room's memory.",
+  );
 </script>
 
-<Modal
-  bind:open
-  title="Room memory"
-  description={`Standing notes ${roomName} is given at the start of every message.`}
-  onOpenChange={handleOpenChange}
-  width="620px"
->
+<Modal bind:open {title} {description} onOpenChange={handleOpenChange} width="620px">
   {#if loading}
     <p class="caption">Loading…</p>
   {:else if loaded === null}
-    <p class="msg-error">{error || "Couldn't load this room's memory."}</p>
+    <p class="msg-error">{error || loadFailed}</p>
   {:else}
-    {#if loaded.shared}
+    {#if mine}
       <p class="caption shared">
-        This room is shared. Everyone in it reads and writes the same memory.
+        Only you can see these. The bot reads them when it answers you in this room, and when it
+        drafts a reply to a guest for you to approve, if you host.
       </p>
+    {:else if loaded.shared}
+      <p class="caption shared">Everyone in this room can read and edit these.</p>
     {/if}
 
     <TextArea
@@ -141,15 +159,19 @@
       rows={18}
       monospace
       spellcheck="false"
-      aria-label="Room memory (markdown)"
-      placeholder={empty ? 'No memory yet for this room.' : ''}
+      aria-label={mine ? 'My notes (markdown)' : 'Room memory (markdown)'}
+      placeholder={empty ? (mine ? 'No notes yet.' : 'No memory yet for this room.') : ''}
     />
 
     <div class="row">
       <p class="caption">
-        Markdown. Saved to <code>CHANNEL.md</code> and read into every task in this room.
+        {#if mine}
+          Markdown. Saved in your workspace, never shown to the room.
+        {:else}
+          Markdown. Saved to <code>CHANNEL.md</code> and read into every task in this room.
+        {/if}
       </p>
-      {#if empty}
+      {#if empty && loaded.template}
         <button class="link-btn" type="button" onclick={useTemplate}> Start from template </button>
       {/if}
     </div>

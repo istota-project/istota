@@ -32,6 +32,7 @@
   import Composer from '$lib/components/chat/Composer.svelte';
   import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
   import RoomMemory from '$lib/components/chat/RoomMemory.svelte';
+  import { roomMenuItems } from '$lib/components/chat/roomMenu';
   import {
     isTap,
     nextActivation,
@@ -126,6 +127,9 @@
   // The room whose settings modal is open (null = closed).
   let settingsRoom = $state<ChatRoom | null>(null);
   let memoryRoom = $state<ChatRoom | null>(null);
+  // The room whose "My notes" pane is open: the caller's private notes about
+  // it. A separate slot from `memoryRoom` so the two panes never share a buffer.
+  let notesRoom = $state<ChatRoom | null>(null);
 
   let sidebarOpen = $state(false);
   /* The identity the root layout resolved, rather than a `/me` of this page's
@@ -888,6 +892,17 @@
     sidebarOpen = false;
   }
 
+  // The notes panes are siblings of Settings rather than buttons inside it:
+  // each is a full-width markdown editor, and opening one modal from another
+  // is a shape nothing else in this frontend uses.
+  function roomMenu(room: ChatRoom) {
+    return roomMenuItems(room, {
+      settings: () => (settingsRoom = room),
+      memory: () => (memoryRoom = room),
+      notes: () => (notesRoom = room),
+    });
+  }
+
   function selectView(v: ChatView) {
     session.selectView(v);
     sidebarOpen = false;
@@ -1268,16 +1283,7 @@
               </span>
             </span>
           </button>
-          <KebabMenu
-            ariaLabel="Room actions"
-            items={[
-              { label: 'Settings', onSelect: () => (settingsRoom = room) },
-              // A sibling of Settings rather than a button inside it: the pane
-              // is a full-width markdown editor, and opening one modal from
-              // another is a shape nothing else in this frontend uses.
-              { label: 'Memory', onSelect: () => (memoryRoom = room) },
-            ]}
-          />
+          <KebabMenu ariaLabel="Room actions" items={roomMenu(room)} />
         </div>
       {/each}
     </Sidebar>
@@ -1535,6 +1541,16 @@
       roomId={memoryRoom.id}
       roomName={memoryRoom.name}
       onClose={() => (memoryRoom = null)}
+    />
+  {/if}
+
+  {#if notesRoom}
+    <RoomMemory
+      open
+      kind="mine"
+      roomId={notesRoom.id}
+      roomName={notesRoom.name}
+      onClose={() => (notesRoom = null)}
     />
   {/if}
 
