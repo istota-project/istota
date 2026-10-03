@@ -1,0 +1,379 @@
+"""Private replies: what a shared room has for one member, in that member's own room (ISSUE-608).
+
+A shared room is read by several people, so a confirmation, a whisper, a held
+guest proposal or a private answer meant for one of them goes somewhere only
+they read. That place is a room the member already has: their private room on
+the shared room's own surface where there is one, else their private room on
+any other surface. Nothing here creates a room. Where the member has none, the
+notification bell is the last resort.
+
+Three pieces, each a plain function:
+
+- `private_room_for`, the resolver. Composed from the existing "private"
+  decisions (`db.default_web_room`, `db.configured_default_room`,
+  `db._default_room_candidates`, `transport.routing.private_phone_room`), each
+  candidate re-checked by `db.is_private_room_of`, the predicate the relay's
+  default-room destination uses too. SMS is never a destination.
+- `deliver_private`, the record phase, inside the caller's transaction: one
+  `role='system'` row in the member's room, tagged with `about_room_token` and
+  keyed `private-<kind>:<reference>`. The key is unique across the whole
+  `messages` table, so a retry returns the first row, in the room it first
+  landed in. With no private room it writes nothing into any room; a whisper
+  then becomes a `task_alert` bell row.
+- `send_private`, the send phase, after the caller's commit and with its own
+  short connections: the Talk post (after the live audience check, stamping
+  the Talk id onto the row so a Talk reply resolves to it), the WhatsApp send
+  (keyed `private-reply:<row id>`, which is how a quote is resolved back to
+  the row), the heads-up mail for an email-thread parent, and the bell row's
+  delivery. Never raises. Nothing crosses the network under a writer lock.
+
+Stage 1 of the private-replies spec: nothing calls these yet. `side_rooms`
+still holds the side-room machinery these replace; the shared helpers
+(`room_label`, `HEADER_PREFIX`, `_send_private_mail`) are imported from there
+until the rename completes.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sqlite3
+from dataclasses import dataclass
+
+from istota import db
+from istota.rooms.scopes import canonical_token
+
+logger = logging.getLogger(__name__)
+
+KINDS = ("whisper", "confirmation", "proposal", "answer_notice")
+
+#: What the shared room is told when a member's note could not stay out of
+#: sight any other way. Names nobody and carries nothing of the note.
+SHARED_ROOM_NOTICE = (
+    "I've sent a private note to the person who asked. If you don't have a "
+    "private chat with me yet, message me directly."
+)
+
+PRIVATE_NOTE_ALERT = "private_note"
+WHATSAPP_KEY_PREFIX = "private-reply:"
+
+_EMAIL_HINTS = {
+    "confirmation": "Reply in your private chat with the bot, or approve it in notifications.",
+    "proposal": "Reply in your private chat with the bot, or approve it in notifications.",
+    "whisper": "Reply in your private chat with the bot.",
+    "answer_notice": "Reply in your private chat with the bot.",
+}
+
+
+@dataclass(frozen=True)
+class PrivateDestination:
+    """A member's own private room, and how a note reaches it."""
+
+    room_token: str
+    #: ``web``, ``talk`` or ``whatsapp``: the surface the row is recorded as.
+    surface: str
+    #: The room's Talk binding, posted to after the live audience check.
+    talk_ref: str | None = None
+    #: The member's private WhatsApp room: sent to their own chat.
+    whatsapp: bool = False
+
+
+@dataclass(frozen=True)
+class PrivateDelivery:
+    """What the record phase wrote, carried to the send phase."""
+
+    dest: PrivateDestination | None
+    message_id: int | None
+    user_id: str = ""
+    about_token: str = ""
+    kind: str = ""
+    delivery_reference: str = ""
+    #: The bell row a whisper with no private room became, for `deliver_pending`.
+    notice: object = None
+
+
+# ---------------------------------------------------------------------------
+# The resolver
+# ---------------------------------------------------------------------------
+
+
+def _checked(conn, token, user_id: str, *, surface: str, allow_phone: bool = False):
+    if not token or not db.is_private_room_of(conn, token, user_id, allow_phone=allow_phone):
+        return None
+    room = db.get_room(conn, token)
+    talk = db.get_room_binding(conn, room.token, "talk")
+    return PrivateDestination(room_token=room.token, surface=surface,
+                              talk_ref=talk.surface_ref if talk else None,
+                              whatsapp=surface == "whatsapp")
+
+
+def _talk_candidates(conn, user_id: str) -> list[str]:
+    """The configured default room, then the rooms that could be the default.
+
+    `side_rooms.talk_view`'s registry half. Its last resort, the poller's
+    in-memory 1:1 cache, is not carried over: a row is written into the room
+    a note goes to, so it has to be a registry room, and a 1:1 the poller has
+    seen already is one.
+    """
+    configured = db.configured_default_room(conn, user_id)
+    tokens = [configured] if configured else []
+    for room in db._default_room_candidates(conn, user_id):
+        if room.token not in tokens:
+            tokens.append(room.token)
+    return tokens
+
+
+def _talk_room(conn, user_id: str) -> PrivateDestination | None:
+    for token in _talk_candidates(conn, user_id):
+        dest = _checked(conn, token, user_id, surface="talk")
+        if dest is not None and dest.talk_ref:
+            return dest
+    return None
+
+
+def _web_room(conn, user_id: str) -> PrivateDestination | None:
+    handle = db.default_web_room(conn, user_id)
+    return _checked(conn, handle.token, user_id, surface="web") if handle else None
+
+
+def _whatsapp_room(conn, user_id: str) -> PrivateDestination | None:
+    from istota.transport.routing import private_phone_room
+
+    # `private_phone_room` does not look at `archived`; the predicate does.
+    token = private_phone_room(conn, "whatsapp", user_id)
+    return _checked(conn, token, user_id, surface="whatsapp", allow_phone=True)
+
+
+_FALLBACK_ORDER = (_web_room, _talk_room, _whatsapp_room)
+
+
+def private_room_for(conn, config, user_id: str, about_token: str) -> PrivateDestination | None:
+    """The private room a note about ``about_token`` reaches ``user_id`` in, or None.
+
+    First the private room on the shared room's own surface: the member's
+    WhatsApp room for a WhatsApp group, their private Talk room for a Talk
+    room, their default web room for a web-only room. An email thread has no
+    such room (a mail is notification only), so it starts at the fallback.
+    Then any other private room, in a fixed order: web, Talk, WhatsApp. None
+    when there is none; the caller falls back to the bell.
+    """
+    from istota.transport.routing import phone_room
+
+    parent = canonical_token(conn, about_token) if about_token else None
+    first = _web_room
+    phone = phone_room(conn, parent) if parent else None
+    if phone is not None and phone.group and phone.surface == "whatsapp":
+        first = _whatsapp_room
+    elif parent and db.get_room_binding(conn, parent, "talk") is not None:
+        first = _talk_room
+    elif parent and db.get_room_binding(conn, parent, "email") is not None:
+        first = None
+    if first is not None:
+        dest = first(conn, user_id)
+        if dest is not None:
+            return dest
+    for step in _FALLBACK_ORDER:
+        if step is first:
+            continue
+        dest = step(conn, user_id)
+        if dest is not None:
+            return dest
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Record
+# ---------------------------------------------------------------------------
+
+
+def _existing(conn, delivery_reference: str) -> PrivateDestination | None:
+    """The destination a retry already wrote to, so it never moves rooms."""
+    row = conn.execute(
+        "SELECT room_token, origin_surface FROM messages WHERE delivery_reference = ?",
+        (delivery_reference,),
+    ).fetchone()
+    if row is None:
+        return None
+    talk = db.get_room_binding(conn, row["room_token"], "talk")
+    return PrivateDestination(room_token=row["room_token"], surface=row["origin_surface"],
+                              talk_ref=talk.surface_ref if talk else None,
+                              whatsapp=row["origin_surface"] == "whatsapp")
+
+
+def _bell_note(conn, *, user_id: str, about: str, reference: str, body: str, task_id):
+    from istota.notifications.resolvers import task_alert
+    from istota.rooms.side_rooms import room_label
+
+    return task_alert.write(
+        conn, user_id, dedup_key=task_alert.private_note_key(reference),
+        title=f"Private note about {room_label(db.get_room(conn, about))}",
+        body=body, severity="info",
+        params={"alert_type": PRIVATE_NOTE_ALERT, "about_room": about, "task_id": task_id},
+    )
+
+
+def deliver_private(conn, config, *, user_id: str, about_token: str, kind: str,
+                    reference: str, body: str, task_id: int | None = None) -> PrivateDelivery:
+    """Record a note for ``user_id`` about ``about_token``, inside the caller's transaction.
+
+    ``reference`` is unique per note for the caller (it carries the task or
+    request id). A resolver read error is logged and treated as "no private
+    room", which fails toward the bell. Call `send_private` after commit.
+    """
+    if kind not in KINDS:
+        raise ValueError(f"unknown private reply kind: {kind!r}")
+    about = canonical_token(conn, about_token) or about_token
+    delivery_reference = f"private-{kind}:{reference}"
+    dest = _existing(conn, delivery_reference)
+    if dest is None:
+        try:
+            dest = private_room_for(conn, config, user_id, about)
+        except sqlite3.Error as exc:
+            logger.warning("private %s %s: room lookup failed (%s); using the bell",
+                           kind, reference, type(exc).__name__)
+            dest = None
+    common = dict(user_id=user_id, about_token=about, kind=kind,
+                  delivery_reference=delivery_reference)
+    if dest is None:
+        notice = None
+        if kind == "whisper":
+            notice = _bell_note(conn, user_id=user_id, about=about, reference=reference,
+                                body=body, task_id=task_id)
+        return PrivateDelivery(None, None, notice=notice, **common)
+    message_id = db.add_message(
+        conn, dest.room_token, role="system", body=body, origin_surface=dest.surface,
+        about_room_token=about, delivery_reference=delivery_reference,
+    )
+    return PrivateDelivery(dest, message_id, **common)
+
+
+# ---------------------------------------------------------------------------
+# Send
+# ---------------------------------------------------------------------------
+
+
+def _parent_facts(config, about: str) -> tuple[str, bool]:
+    from istota.rooms.side_rooms import room_label
+
+    with db.get_db(config.db_path) as conn:
+        room = db.get_room(conn, about) if about else None
+        email = room is not None and db.get_room_binding(conn, room.token, "email") is not None
+        return room_label(room), email
+
+
+def _stamp_talk(config, message_id: int, talk_id: int) -> None:
+    with db.get_db(config.db_path) as conn:
+        db.set_message_external_id(conn, message_id, "talk", str(talk_id))
+
+
+async def _post_talk(config, delivery: PrivateDelivery, text: str) -> bool:
+    from istota.relay import relays as message_relays
+    from istota.relay.requests import RequestError
+    from istota.transport.talk import TalkTransport
+
+    ref = delivery.dest.talk_ref
+    try:
+        await message_relays.verify_private_audience(
+            config, actor_user_id=delivery.user_id, origin={"talk_ref": ref})
+    except RequestError:
+        logger.warning("private %s: Talk room for %s is not private; not posted",
+                       delivery.delivery_reference, delivery.user_id)
+        return False
+    try:
+        talk_id = await TalkTransport(config).deliver(
+            ref, text, reference_id=delivery.delivery_reference)
+    except Exception as exc:
+        logger.warning("private %s: Talk post failed (%s)",
+                       delivery.delivery_reference, type(exc).__name__)
+        return False
+    if talk_id is None:
+        return False
+    await asyncio.to_thread(_stamp_talk, config, delivery.message_id, talk_id)
+    return True
+
+
+async def _send_whatsapp(config, delivery: PrivateDelivery, text: str) -> bool:
+    from istota.transport.whatsapp import REACHED_META
+    from istota.transport.whatsapp.outbound import current_destination, deliver_whatsapp
+
+    if not await asyncio.to_thread(current_destination, config, delivery.user_id):
+        return False
+    try:
+        record = await deliver_whatsapp(
+            config, logical_key=f"{WHATSAPP_KEY_PREFIX}{delivery.message_id}",
+            user_id=delivery.user_id, text=text,
+        )
+    except Exception as exc:
+        logger.warning("private %s: WhatsApp send failed (%s)",
+                       delivery.delivery_reference, type(exc).__name__)
+        return False
+    return record.status in REACHED_META
+
+
+async def _send_heads_up(config, delivery: PrivateDelivery, label: str, body: str) -> bool:
+    """The heads-up mail for an email-thread parent: notification only.
+
+    A fresh mail to the member's own address with no threading headers, so it
+    can never land on the thread; a reply to it is a new message, not an answer.
+    """
+    from istota.rooms import side_rooms
+
+    if not getattr(config.email, "enabled", False):
+        return False
+    user = config.users.get(delivery.user_id)
+    address = user.email_addresses[0] if user and user.email_addresses else None
+    if not address:
+        return False
+    try:
+        await asyncio.to_thread(
+            side_rooms._send_private_mail, config, to=address,
+            subject=side_rooms.HEADER_PREFIX + label,
+            body=f"{body}\n\n{_EMAIL_HINTS[delivery.kind]}",
+        )
+    except Exception as exc:
+        logger.warning("private %s: heads-up mail failed (%s)",
+                       delivery.delivery_reference, type(exc).__name__)
+        return False
+    return True
+
+
+async def _send(config, delivery: PrivateDelivery, *, header_room_label, body: str) -> bool:
+    from istota.rooms.side_rooms import HEADER_PREFIX
+
+    if delivery.notice is not None:
+        from istota.notifications.store import deliver_pending
+
+        await asyncio.to_thread(deliver_pending, config, [delivery.notice])
+    label, email_parent = await asyncio.to_thread(_parent_facts, config, delivery.about_token)
+    label = header_room_label or label
+    text = f"{HEADER_PREFIX}{label}\n\n{body}"
+    delivered = False
+    dest = delivery.dest
+    if dest is not None and delivery.message_id is not None:
+        if dest.talk_ref and await _post_talk(config, delivery, text):
+            delivered = True
+        if dest.whatsapp and await _send_whatsapp(config, delivery, text):
+            delivered = True
+    if email_parent and await _send_heads_up(config, delivery, label, body):
+        delivered = True
+    return delivered
+
+
+async def send_private(config, delivery: PrivateDelivery, *, body: str,
+                       header_room_label: str | None = None) -> bool:
+    """Push a recorded note to the surface its room lives on. Never raises.
+
+    True when it reached the member outside web: a Talk post, a WhatsApp send
+    the provider accepted, or the heads-up mail handed to SMTP. A web room
+    needs no push (the room-event stream reads the row), so it reports False,
+    and so does every failure; the caller then owes the bell its delivery.
+    ``body`` is what the surface carries, which may differ from the row (a
+    WhatsApp confirmation names its `!confirm` command). Failures are logged
+    with the kind and reference, never the body.
+    """
+    try:
+        return await _send(config, delivery, header_room_label=header_room_label, body=body)
+    except Exception as exc:
+        logger.warning("private %s: send failed (%s)",
+                       delivery.delivery_reference, type(exc).__name__)
+        return False
