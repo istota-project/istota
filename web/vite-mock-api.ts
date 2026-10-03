@@ -1,5 +1,5 @@
 import type { Plugin } from 'vite';
-import type { AdminStats, AdminUsers } from './src/lib/api';
+import type { AdminStats, AdminUserDetail, AdminUserProfile, AdminUsers } from './src/lib/api';
 import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import { readFileSync } from 'node:fs';
@@ -4089,11 +4089,11 @@ const mockAdminUsers: AdminUsers = {
 // One user's settings for the admin editor (`GET`/`PATCH /admin/users/{id}`,
 // `.../whatsapp/reset`, `PUT .../identity`). Carol's email addresses are
 // managed, so the editor's locked state can be seen.
-const mockAdminUserProfiles: Record<string, Record<string, unknown>> = {};
+const mockAdminUserProfiles: Record<string, AdminUserProfile> = {};
 const mockAdminUserWhatsApp: Record<string, { number: string; enrolled: boolean }> = {
   bob: { number: '+15550100002', enrolled: true },
 };
-const mockAdminUserDetail = (userId: string) => {
+const mockAdminUserDetail = (userId: string): AdminUserDetail | undefined => {
   const row = mockAdminUsers.users.find((row) => row.user_id === userId);
   if (!row) return undefined;
   const profile = (mockAdminUserProfiles[userId] ??= {
@@ -4114,7 +4114,9 @@ const mockAdminUserDetail = (userId: string) => {
   return {
     user_id: userId,
     is_admin: row.is_admin,
-    identity: row.identity ? { ...row.identity, state: row.state } : null,
+    identity: row.identity
+      ? { ...row.identity, state: row.state === 'password_set' ? 'password_set' : 'passwordless' }
+      : null,
     profile,
     channels: { log_channel: userId === 'carol' ? 'logtoken' : '', alerts_channel: '' },
     whatsapp: {

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { uploadAvatar, deleteAvatar, AVATAR_ACCEPT, AuthError } from '$lib/api';
-  import { Avatar, AvatarPicker, Select, type SelectOption } from '$lib/components/ui';
+  import { Avatar, AvatarPicker, Select } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import {
     SecurityCard,
@@ -11,25 +11,13 @@
   import { getUserSettings } from '$lib/settings/userSettingsContext';
   import { parseListInput, profileListString } from '$lib/settings/listInput';
   import { isManaged, managedBadge } from '$lib/settings/managed';
+  import { timezoneOptions } from '$lib/settings/timezones';
 
   const settings = getUserSettings();
   const identity = getCurrentUser();
   const profile = $derived(settings.profile);
 
-  // Full IANA timezone list from the browser (no hardcoded list / extra dep).
-  // Older engines may not implement supportedValuesOf — fall back to UTC.
-  const timezoneOptions: SelectOption[] = (() => {
-    let zones: string[];
-    try {
-      zones = (Intl as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.(
-        'timeZone',
-      ) ?? ['UTC'];
-    } catch {
-      zones = ['UTC'];
-    }
-    if (!zones.includes('UTC')) zones = ['UTC', ...zones];
-    return zones.map((z) => ({ value: z, label: z }));
-  })();
+  const zoneOptions = timezoneOptions();
 
   /* The profile picture is deliberately outside `profile` and outside the
      profile's dirty check. It commits on pick through its own multipart call,
@@ -195,7 +183,7 @@
       >
         <Select
           value={profile.timezone || 'UTC'}
-          options={timezoneOptions}
+          options={zoneOptions}
           ariaLabel="Timezone"
           fullWidth
           disabled={isManaged(profile, 'timezone')}
