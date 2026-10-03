@@ -77,9 +77,16 @@ SIGNATURE_HEADER = pywa_utils.HUB_SIG
 #: them as keys and `baileys_protocol._MEDIA_ERRORS` maps each onto the same
 #: sentence. What a user is told is exactly the thing two copies would drift
 #: on, so there is one copy and it is the common module's.
-MEDIA_FETCH_FAILED_REASON = media_rules.MEDIA_FETCH_FAILED
-MEDIA_OVER_CAP_REASON = media_rules.MEDIA_OVER_CAP
-MEDIA_WRITE_FAILED_REASON = media_rules.MEDIA_WRITE_FAILED
+#:
+#: The fetch is kind-blind, so `WhatsAppMediaError` carries a `media.reason`
+#: key and the caller building the record applies the kind (`reason_for`).
+#: These three names are the image sentences, which `reason` still answers.
+MEDIA_FETCH_FAILED_KEY = "fetch_failed"
+MEDIA_OVER_CAP_KEY = "over_cap"
+MEDIA_WRITE_FAILED_KEY = "write_failed"
+MEDIA_FETCH_FAILED_REASON = media_rules.reason("image", MEDIA_FETCH_FAILED_KEY)
+MEDIA_OVER_CAP_REASON = media_rules.reason("image", MEDIA_OVER_CAP_KEY)
+MEDIA_WRITE_FAILED_REASON = media_rules.reason("image", MEDIA_WRITE_FAILED_KEY)
 
 #: The Meta media id, held to one ordinary URL path segment.
 #:
@@ -111,14 +118,19 @@ class WhatsAppMediaError(Exception):
 
     An exception rather than a return value because there is no partial
     success to report: the caller has opened a descriptor and either gets the
-    bytes or unlinks the file. ``reason`` is what reaches the event record, so
-    it is always one of the module constants above and never text from a
-    provider.
+    bytes or unlinks the file. ``key`` is one of the `media.reason` keys above
+    and ``reason`` is its image sentence; `reason_for` gives the sentence for
+    another kind. Either way it is never text from a provider.
     """
 
-    def __init__(self, reason: str):
-        super().__init__(reason)
-        self.reason = reason
+    def __init__(self, key: str):
+        self.key = key
+        self.reason = media_rules.reason("image", key)
+        super().__init__(self.reason)
+
+    def reason_for(self, kind: str) -> str:
+        """This failure's sentence about a file of *kind*."""
+        return media_rules.reason(kind, self.key)
 
 
 def verify_signature(app_secret: str, raw_body: bytes, signature: str) -> bool:
@@ -326,14 +338,14 @@ class WhatsAppClient:
                 "whatsapp.media.fetch_refused reason=media_id: the id is not "
                 "one ordinary path segment",
             )
-            raise WhatsAppMediaError(MEDIA_FETCH_FAILED_REASON)
+            raise WhatsAppMediaError(MEDIA_FETCH_FAILED_KEY)
         try:
             located = await self._client.get_media_url(media_id)
         except Exception:
             # No `exc_info` and no id: a PyWa `WhatsAppError` carries Meta's
             # prose and the response, and an httpx repr carries the Graph URL.
             logger.warning("whatsapp.media.fetch_failed reason=media_url")
-            raise WhatsAppMediaError(MEDIA_FETCH_FAILED_REASON) from None
+            raise WhatsAppMediaError(MEDIA_FETCH_FAILED_KEY) from None
         # Printable and bounded, not merely bounded: the value is what the
         # *uploader* declared, echoed back by Graph, and it reaches the log
         # line below — so an ANSI escape or a newline in it would forge one
@@ -346,11 +358,11 @@ class WhatsAppClient:
                 "whatsapp.media.refused reason=declared_size bytes=%d cap=%d",
                 size, max_bytes,
             )
-            raise WhatsAppMediaError(MEDIA_OVER_CAP_REASON)
+            raise WhatsAppMediaError(MEDIA_OVER_CAP_KEY)
         url = getattr(located, "url", None)
         if not isinstance(url, str) or not url:
             logger.warning("whatsapp.media.fetch_failed reason=no_media_url")
-            raise WhatsAppMediaError(MEDIA_FETCH_FAILED_REASON)
+            raise WhatsAppMediaError(MEDIA_FETCH_FAILED_KEY)
 
         written = 0
         # `aclosing`, not a bare `async for`: breaking out of the loop at the
@@ -368,7 +380,7 @@ class WhatsAppClient:
                                 "bytes=%d cap=%d",
                                 written + len(chunk), max_bytes,
                             )
-                            raise WhatsAppMediaError(MEDIA_OVER_CAP_REASON)
+                            raise WhatsAppMediaError(MEDIA_OVER_CAP_KEY)
                         _write_all(dest_fd, chunk)
                         written += len(chunk)
         except WhatsAppMediaError:
@@ -380,13 +392,13 @@ class WhatsAppClient:
             logger.warning(
                 "whatsapp.media.fetch_failed reason=deadline bytes=%d", written,
             )
-            raise WhatsAppMediaError(MEDIA_FETCH_FAILED_REASON) from None
+            raise WhatsAppMediaError(MEDIA_FETCH_FAILED_KEY) from None
         except OSError:
             logger.warning("whatsapp.media.fetch_failed reason=write")
-            raise WhatsAppMediaError(MEDIA_WRITE_FAILED_REASON) from None
+            raise WhatsAppMediaError(MEDIA_WRITE_FAILED_KEY) from None
         except Exception:
             logger.warning("whatsapp.media.fetch_failed reason=stream")
-            raise WhatsAppMediaError(MEDIA_FETCH_FAILED_REASON) from None
+            raise WhatsAppMediaError(MEDIA_FETCH_FAILED_KEY) from None
         logger.info(
             "whatsapp.media.fetched declared=%s bytes=%d", declared, written,
         )
@@ -509,8 +521,11 @@ def make_client(config: "Config") -> WhatsAppClient:
 
 
 __all__ = [
+    "MEDIA_FETCH_FAILED_KEY",
     "MEDIA_FETCH_FAILED_REASON",
+    "MEDIA_OVER_CAP_KEY",
     "MEDIA_OVER_CAP_REASON",
+    "MEDIA_WRITE_FAILED_KEY",
     "MEDIA_WRITE_FAILED_REASON",
     "SIGNATURE_HEADER",
     "WhatsAppClient",

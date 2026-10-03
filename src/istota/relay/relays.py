@@ -623,12 +623,13 @@ def create_recipient_task(conn, config, relay, *, surface: str, actor_user_id: s
 
 
 def _reply_task(conn, config, *, actor_user_id: str, inbound_id: str, text: str,
-                relay, outcome: str, attachments=None):
-    from istota.transport.whatsapp.webhook import WhatsAppEventResult, MEDIA_ONLY_PROMPT
+                relay, outcome: str, attachments=None, media=None):
+    from istota.transport.whatsapp.webhook import WhatsAppEventResult, media_stand_in
 
     task_id = create_recipient_task(
         conn, config, relay, surface="whatsapp", actor_user_id=actor_user_id,
-        text=text if text else MEDIA_ONLY_PROMPT, outcome=outcome, attachments=attachments,
+        text=text if text else media_stand_in(media, attachments or []),
+        outcome=outcome, attachments=attachments,
     )
     disposition = "relay_answer" if outcome == "accepted" else "relay_rejected"
     conn.execute("UPDATE processed_whatsapp SET task_id=?,disposition=? WHERE message_id=? AND user_id=?",
@@ -676,7 +677,8 @@ def match_whatsapp_reply(conn, config, *, actor_user_id: str, event):
             return None
         paths = [event.media.staged_path] if event.media and event.media.staged_path and not event.media.error else []
         return _reply_task(conn, config, actor_user_id=actor_user_id, inbound_id=event.message_id,
-                           text=text, relay=relay, outcome="media", attachments=paths)
+                           text=text, relay=relay, outcome="media", attachments=paths,
+                           media=event.media)
     if relay is None and not command:
         stored = store_reply_candidate(conn, actor_user_id=actor_user_id, provider=config.whatsapp.provider,
                                        inbound_id=event.message_id, quoted_id=event.reply_to_message_id, text=text)

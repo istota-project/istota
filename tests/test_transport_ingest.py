@@ -196,3 +196,39 @@ class TestWorkspaceAttachmentPaths:
         cfg.db_path = db_path
         cfg.workspace_path = None
         assert workspace_attachment_paths(cfg, "alice", ["/tmp/x.png"]) is None
+
+
+class TestDescribeAttachmentOnlyMessage:
+    """The stand-in text for a send with attachments and nothing typed. Every
+    surface that takes a voice note stores this exact string."""
+
+    def test_one_audio_file_is_a_voice_message(self):
+        from istota.transport.ingest import describe_attachment_only_message
+        assert describe_attachment_only_message(
+            ["/Users/alice/inbox/web-chat/2026-10-03/voice-1-ab.webm"],
+        ) == "Voice message (see attached audio)."
+
+    def test_several_audio_files_are_plural_and_suffix_case_is_ignored(self):
+        from istota.transport.ingest import describe_attachment_only_message
+        assert describe_attachment_only_message(
+            ["a/one.OGG", "b/two.m4a"],
+        ) == "Voice messages (see attached audio)."
+
+    def test_a_mixed_send_names_every_file(self):
+        from istota.transport.ingest import describe_attachment_only_message
+        assert describe_attachment_only_message(
+            ["a/voice.webm", "b/receipt.png"],
+        ) == "(Sent without a message — see attached: voice.webm, receipt.png)"
+
+    def test_audio_suffixes_are_the_audio_sniff_set(self):
+        """The suffix test reads `lib.audio_sniff`, the set the executor's
+        pre-transcription also screens by, so the two cannot disagree."""
+        from istota.lib.audio_sniff import AUDIO_EXTENSIONS
+        from istota.transport.ingest import describe_attachment_only_message
+        for ext in AUDIO_EXTENSIONS:
+            assert describe_attachment_only_message(
+                [f"x/clip.{ext}"],
+            ) == "Voice message (see attached audio)."
+        assert describe_attachment_only_message(["x/clip.amr"]).startswith(
+            "(Sent without a message",
+        )

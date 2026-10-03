@@ -147,6 +147,13 @@ const MEDIA_EXTENSIONS = {
   'image/webp': 'webp',
   'image/heic': 'heic',
   'image/heif': 'heif',
+  'audio/ogg': 'ogg',
+  'audio/mpeg': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/aac': 'aac',
+  'audio/wav': 'wav',
+  'audio/flac': 'flac',
+  'audio/webm': 'webm',
 };
 const MEDIA_EXTENSION_FALLBACK = 'bin';
 
@@ -623,8 +630,8 @@ const NON_CONTENT_KEYS = new Set([
  * fails safe: the cost is silence on a message WhatsApp never redelivered,
  * against a guaranteed loss the other way.
  *
- * **An unsupported *type* is a different thing and still crosses.** An image
- * or a voice note was received and read; the daemon answers for it and is
+ * **An unsupported *type* is a different thing and still crosses.** A video
+ * or a sticker was received and read; the daemon answers for it and is
  * right to claim the id. What is withheld here is only a message that has not
  * arrived yet.
  */
@@ -634,14 +641,24 @@ function hasReadableContent(message) {
   return Object.keys(content).some((key) => !NON_CONTENT_KEYS.has(key));
 }
 
+// Message keys that carry media this surface fetches, in precedence order.
+const MEDIA_KINDS = [
+  ['imageMessage', 'image'],
+  ['audioMessage', 'audio'],
+];
+
 /*
- * The media node this surface will fetch, or null.
+ * The media this surface will fetch, as `{ kind, node }`, or null.
  *
- * **`imageMessage` and nothing else.** Audio, video, documents and stickers
- * each keep the unsupported reply they have now, and a sticker is the case
- * that says why the gate is here rather than at the sniff: a sticker is WebP,
- * so it would pass a signature test cleanly. What excludes it is its message
- * type, which is a thing WhatsApp said rather than a thing the bytes say.
+ * **`imageMessage` and `audioMessage`, and nothing else.** The kind is the
+ * frame's `message_type`, and the daemon sniffs the bytes against that kind
+ * only. A voice note and a forwarded audio file are both `audioMessage` and
+ * are treated alike, whatever `ptt` says. Video (round video notes included),
+ * documents and stickers keep the unsupported reply, and a sticker is the
+ * case that says why the gate is here rather than at the sniff: a sticker is
+ * WebP, so it would pass a signature test cleanly. What excludes it is its
+ * message type, which is a thing WhatsApp said rather than a thing the bytes
+ * say.
  *
  * Top level only, matching `messageText` — a wrapper (a disappearing or an
  * edited message) carries its real content one level down and is left for
@@ -656,8 +673,11 @@ function hasReadableContent(message) {
 function mediaPart(message) {
   const content = message && message.message;
   if (!content || typeof content !== 'object') return null;
-  const part = content.imageMessage;
-  return part && typeof part === 'object' ? part : null;
+  for (const [key, kind] of MEDIA_KINDS) {
+    const node = content[key];
+    if (node && typeof node === 'object') return { kind, node };
+  }
+  return null;
 }
 
 /*
@@ -680,8 +700,11 @@ function messageText(message) {
   if (content.extendedTextMessage && typeof content.extendedTextMessage.text === 'string') {
     return content.extendedTextMessage.text;
   }
+  // Audio carries no caption, so only an image's is read.
   const media = mediaPart(message);
-  if (media && typeof media.caption === 'string') return media.caption;
+  if (media && media.kind === 'image' && typeof media.node.caption === 'string') {
+    return media.node.caption;
+  }
   return null;
 }
 
@@ -2522,8 +2545,9 @@ class Session {
         continue;
       }
       const group = isGroupJid(jid);
-      // Group media stays refused (D6), and an image's caption goes with it:
-      // the model would be answering about a picture nobody can see.
+      // Group media stays refused (D6), image and audio alike, and an
+      // image's caption goes with it: the model would be answering about a
+      // picture nobody can see.
       const part = group ? null : mediaPart(message);
       const text = group && mediaPart(message) ? null : messageText(message);
       if (!part && text === null) {
@@ -2543,15 +2567,16 @@ class Session {
       // message names its sender beside the chat, and whether it mentions
       // the paired account.
       //
-      // An image is typed `image` whether or not the fetch worked: a failed
-      // one carries `media_error` and the daemon answers "that image could
-      // not be fetched", which is a different and better answer from "that
-      // message type is not supported yet".
+      // Media is typed by its kind (`image` or `audio`) whether or not the
+      // fetch worked: a failed one carries `media_error` and the daemon
+      // answers "that image (or voice message) could not be fetched", which
+      // is a different and better answer from "that message type is not
+      // supported yet".
       const delivered = this.link.send(MSG_INBOUND, {
         message_id: message.key.id,
         jid,
         username: message.pushName || null,
-        message_type: part ? 'image' : (text === null ? 'unsupported' : 'text'),
+        message_type: part ? part.kind : (text === null ? 'unsupported' : 'text'),
         text,
         callback_data: null,
         reply_to_message_id: quotedId(message),
@@ -2581,7 +2606,7 @@ class Session {
   }
 
   /*
-   * Fetch one image onto disk and describe it, or say why not.
+   * Fetch one image or audio file onto disk and describe it, or say why not.
    *
    * **No media bytes cross the socket.** The frame names a file the daemon
    * can open; the daemon sniffs it, copies it into the sender's workspace and
@@ -2601,19 +2626,19 @@ class Session {
    * and a Boom error carries the whole request.
    */
   async downloadMedia(message) {
+    const part = mediaPart(message);
     const failure = (raw) => {
       // The same guard `answer` puts in front of `SEND_REASONS`, and for the
       // same reason: a key outside the daemon's table renders as the generic
       // sentence for ever, so a typo at a call site below would cost the
       // diagnostic silently. This is the only producer of a `media_error`.
       const key = MEDIA_ERRORS.has(raw) ? raw : 'download_failed';
-      log('warn', 'inbound media was not staged', { why: key });
+      log('warn', 'inbound media was not staged', { kind: part.kind, why: key });
       return {
         media_name: null, media_mime: null, media_bytes: 0, media_error: key,
       };
     };
-    const part = mediaPart(message);
-    const mime = typeof part.mimetype === 'string' ? part.mimetype : null;
+    const mime = typeof part.node.mimetype === 'string' ? part.node.mimetype : null;
     const collector = newMediaCollector();
     let stream = null;
     // The connect, the `reuploadRequest` round trip and the body all sit
@@ -2685,7 +2710,7 @@ class Session {
       return failure('write_failed');
     }
     log('info', 'inbound media staged', {
-      file: name, bytes: collector.received,
+      kind: part.kind, file: name, bytes: collector.received,
     });
     return {
       media_name: name,
@@ -2998,6 +3023,7 @@ module.exports = {
   MAX_MEDIA_BYTES,
   MEDIA_ERRORS,
   MEDIA_EXTENSIONS,
+  MEDIA_KINDS,
   bareJid,
   chatAddress,
   collectMediaChunk,

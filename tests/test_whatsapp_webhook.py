@@ -22,6 +22,7 @@ import hashlib
 import hmac
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -37,8 +38,11 @@ from istota.transport.whatsapp._types import (
     WhatsAppInboundMedia,
     WhatsAppUserIdentity,
 )
+from istota.transport.ingest import describe_attachment_only_message
 from istota.transport.whatsapp.webhook import (
+    HELP_REPLY,
     MAX_WEBHOOK_BODY,
+    MEDIA_FAILED_AUDIO_REPLY,
     MEDIA_FAILED_REPLY,
     MEDIA_ONLY_PROMPT,
     STOP_REPLY,
@@ -1640,12 +1644,13 @@ class TestInboundDispositions:
     @pytest.mark.parametrize(
         "message_type, body",
         [
-            # `image` is no longer here: it is the one media type this surface
-            # reads, and a Cloud image that reached the transaction with
-            # nothing staged earns the media-failed reply instead — which is
-            # the case below. Everything else keeps the reply it had.
+            # `image` and `audio` are not here: they are the media types this
+            # surface reads, and one that reached the transaction with nothing
+            # staged earns the media-failed reply instead — which is the case
+            # below. Everything else keeps the reply it had.
             ("document", {"document": {"id": "media-2", "caption": "and this"}}),
-            ("audio", {"audio": {"id": "media-3"}}),
+            ("video", {"video": {"id": "media-3"}}),
+            ("sticker", {"sticker": {"id": "media-4"}}),
             ("location", {"location": {"latitude": 1.0, "longitude": 2.0}}),
             ("order", {"order": {"catalog_id": "c1"}}),
             ("unknown", {}),
@@ -2281,6 +2286,108 @@ class TestTheCopyMustHaveBeenMadeForThisUser:
         assert _dispositions(results) == ["media_failed"]
         assert _counts(config, "tasks") == [0]
         assert "media_misattached" in _istota_log(caplog)
+
+
+def _voice_event(*, message_id="wamid.voice", media=None):
+    """A staged voice note: no caption, an `audio` record."""
+    record = media or WhatsAppInboundMedia(
+        staged_path="/Users/alice/inbox/whatsapp_ab12-cd34.ogg",
+        mime_type="audio/ogg; codecs=opus", byte_count=2048,
+        attached_for_user="alice", error=None, kind="audio",
+    )
+    event = _image_event(message_id=message_id, caption=None, media=record)
+    return replace(event, message_type="audio")
+
+
+def _failed_voice(key="fetch_failed"):
+    return WhatsAppInboundMedia(
+        staged_path="", mime_type="", byte_count=0, attached_for_user="alice",
+        error=media.reason("audio", key), kind="audio",
+    )
+
+
+class TestAVoiceNoteBecomesATask:
+    """The web voice memo's string, so both surfaces read a voice note alike."""
+
+    def test_a_staged_voice_note_is_a_task_carrying_the_audio(self, tmp_path):
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+
+        results = _dispatch(config, _voice_event())
+
+        assert _dispositions(results) == ["task"]
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, results[0].task_id)
+        assert task.prompt == "Voice message (see attached audio)."
+        assert task.prompt == describe_attachment_only_message(task.attachments)
+        assert task.attachments == ["/Users/alice/inbox/whatsapp_ab12-cd34.ogg"]
+
+    def test_a_failed_voice_note_earns_the_voice_message_reply(self, tmp_path):
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+
+        results = _dispatch(config, _voice_event(media=_failed_voice()))
+
+        assert _dispositions(results) == ["media_failed"]
+        assert results[0].response_text == MEDIA_FAILED_AUDIO_REPLY
+        assert results[0].response_text != MEDIA_FAILED_REPLY
+        assert results[0].response_logical_key == "media-failed:wamid.voice"
+        assert _counts(config, "tasks") == [0]
+
+    def test_a_voice_note_staged_for_someone_else_is_refused_in_its_words(
+        self, tmp_path,
+    ):
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+        record = WhatsAppInboundMedia(
+            staged_path="/Users/bob/inbox/whatsapp_ab12-cd34.ogg",
+            mime_type="audio/ogg", byte_count=2048,
+            attached_for_user="bob", error=None, kind="audio",
+        )
+
+        results = _dispatch(config, _voice_event(media=record))
+
+        assert _dispositions(results) == ["media_failed"]
+        assert results[0].response_text == MEDIA_FAILED_AUDIO_REPLY
+
+    def test_an_opted_out_sender_gets_no_task_and_no_reply(self, tmp_path):
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+        _handle(config, _text_payload(message_id="wamid.stop", text="STOP"))
+
+        results = _dispatch(
+            config, _voice_event(media=_failed_voice("unattributed")),
+        )
+
+        assert _dispositions(results) == ["opted_out"]
+        assert results[0].response_text is None
+        assert _counts(config, "tasks") == [0]
+
+    def test_a_voice_note_cancels_a_parked_confirmation_and_answers_nothing(
+        self, tmp_path,
+    ):
+        """Spoken words never drive a gate: whatever the note says, it is a
+        new message, so the parked question is cancelled rather than answered."""
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+        token = whatsapp_conversation_token("alice")
+        with db.get_db(config.db_path) as conn:
+            held = db.create_task(
+                conn, prompt="delete it", user_id="alice",
+                source_type="whatsapp", conversation_token=token,
+                output_target="whatsapp",
+            )
+            db.set_task_confirmation(conn, held, "May I delete it?")
+
+        results = _dispatch(config, _voice_event())
+
+        assert _dispositions(results) == ["task"]
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, held).status == "cancelled"
+
+    def test_help_names_voice_notes(self):
+        assert "voice note" in HELP_REPLY
+        assert "plain text" not in HELP_REPLY
 
 
 class TestWhatsAppRoomMint:
