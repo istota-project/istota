@@ -302,6 +302,22 @@ class TestAddingAMember:
         with db.get_db(db_path) as conn:
             assert sorted(db.list_room_members(conn, room.token)) == ["alice", "bob"]
 
+    async def test_an_email_thread_room_refuses_a_member(self, client, db_path):
+        """ISSUE-606: the thread is its host's correspondence."""
+        room = _new_room(db_path)
+        with db.get_db(db_path) as conn:
+            db.add_room_binding(conn, room.token, "email", "<root@test.com>")
+        alice = await _login(client, "alice")
+        resp = await _add(client, alice, room.id, "bob")
+        assert resp.status_code == 409
+        assert resp.json()["read_only"] is True
+        assert "email thread" in resp.json()["error"]
+        listing = await client.get(f"/istota/api/chat/rooms/{room.id}/members",
+                                   cookies=alice)
+        assert listing.json()["email_thread"] is True
+        with db.get_db(db_path) as conn:
+            assert db.list_room_members(conn, room.token) == ["alice"]
+
     async def test_readding_a_member_who_hid_the_room_shows_it_again(self, client, db_path):
         room = _new_room(db_path)
         with db.get_db(db_path) as conn:
@@ -329,6 +345,7 @@ class TestListingMembers:
             # The one row `_new_room` wrote: what the add dialog says an add
             # discloses.
             "message_count": 1,
+            "email_thread": False,
         }
         bob = await _login(client, "bob")
         bob_room = (await _room_ids(client, bob))[room.token]

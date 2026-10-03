@@ -54,6 +54,14 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('RoomMembers', () => {
+  it('offers no add on an email thread room and says why', async () => {
+    getRoomMembers.mockResolvedValue(listing({ email_thread: true }));
+    render(RoomMembers, { roomId: 1, userId: 'alice' });
+    await screen.findByText(/belongs to its host/);
+    expect(screen.queryByRole('button', { name: 'Member to add' })).toBeNull();
+    expect(getChatUsers).not.toHaveBeenCalled();
+  });
+
   it('lists the members and offers only people not already in the room', async () => {
     getRoomMembers.mockResolvedValue(listing());
     render(RoomMembers, { roomId: 1, userId: 'alice' });
