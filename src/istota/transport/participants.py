@@ -70,11 +70,16 @@ def guest_label(ref: ParticipantRef) -> str:
     sentinel: an empty label would render the turn as the room owner's.
     """
     for candidate in (ref.display_name, ref.surface_ref):
-        text = _UNSAFE_LABEL_CHARS.sub(" ", str(candidate or ""))
-        text = " ".join(text.split())[:MAX_LABEL_CHARS].strip()
+        text = flatten_label(candidate)
         if text:
             return text
     return db.UNATTRIBUTED_SENDER
+
+
+def flatten_label(value: object) -> str:
+    """A participant-chosen name as one bounded line, or ``""``."""
+    text = _UNSAFE_LABEL_CHARS.sub(" ", str(value or ""))
+    return " ".join(text.split())[:MAX_LABEL_CHARS].strip()
 
 
 def is_multi_human(

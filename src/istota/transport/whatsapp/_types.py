@@ -183,6 +183,20 @@ class InboundWhatsAppEvent:
 
 
 @dataclass(frozen=True)
+class WhatsAppMention:
+    """One `@<id>` token in a group message's body and whom it names.
+
+    WhatsApp writes the mentioned account's LID or number into the body and
+    the phone renders a name from the mention list (ISSUE-601). `bot` marks
+    the paired account, which crosses with both ids empty.
+    """
+    token: str
+    jid: str = ""
+    lid: str = ""
+    bot: bool = False
+
+
+@dataclass(frozen=True)
 class WhatsAppGroupContext:
     """Where in a WhatsApp group a message was posted, and how it addressed us.
 
@@ -190,11 +204,13 @@ class WhatsAppGroupContext:
     sender whose number WhatsApp withholds arrives with `sender_lid` alone and
     is a guest (D1): only a phone JID can resolve to an istota user.
     `mentions_bot` is the sidecar's answer, since only it knows the paired
-    account's own JIDs.
+    account's own JIDs. `mentions` is what `groups.render_mentions` rewrites
+    the body's `@<id>` tokens from.
     """
     group_jid: str
     sender_lid: str = ""
     mentions_bot: bool = False
+    mentions: tuple[WhatsAppMention, ...] = ()
 
 
 @dataclass(frozen=True)
