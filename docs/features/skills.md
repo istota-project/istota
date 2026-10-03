@@ -80,7 +80,7 @@ dependencies: [caldav, icalendar]
 Calendar operations use CalDAV...
 ```
 
-Supported frontmatter fields: `triggers`, `description`, `always_include`, `admin_only`, `cli`, `experimental` (requires `skill_<name>` in `[experimental] features`), `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `requires_capability`, `exclude_memory`, `exclude_persona`, `env` (JSON-encoded array of env spec objects).
+Supported frontmatter fields: `triggers`, `description`, `always_include`, `admin_only`, `cli`, `experimental` (requires `skill_<name>` in `[experimental] features`), `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `requires_capability`, `exclude_memory`, `exclude_persona`, `env` (JSON-encoded array of env spec objects), `shared_room` (`private` by default, or `safe` for a skill a guest's turn in a [shared room](shared-rooms.md#what-a-task-can-reach) may still use).
 
 `requires_capability` gates a skill on a runtime capability being configured — `browser`, `devbox`, `nextcloud`. A standalone install with no Nextcloud drops the `nextcloud` skill from selection, from the menu, and from the "Skill CLI tools" list, rather than offering something that cannot work.
 

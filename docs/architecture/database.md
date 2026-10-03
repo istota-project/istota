@@ -8,7 +8,7 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 
 | Table | Purpose |
 |---|---|
-| `tasks` | Task queue with full lifecycle: id, status, source_type, user_id, prompt, conversation_token, talk_delivery_token, priority, attempts, `last_heartbeat` (worker-liveness ping for stuck-task reclaim, ISSUE-112), execution trace, model/effort overrides, plus `skill` / `skill_args` for skill-task dispatch |
+| `tasks` | Task queue with full lifecycle: id, status, source_type, user_id, prompt, conversation_token, talk_delivery_token, priority, attempts, `last_heartbeat` (worker-liveness ping for stuck-task reclaim, ISSUE-112), execution trace, model/effort overrides, plus `skill` / `skill_args` for skill-task dispatch. For a room turn, `audience` records who read the room (`private` \| `principals` \| `mixed`), `guest_participant_id` is set when the task answers a guest, and `is_group_chat` when the surface reported a group |
 | `user_resources` | Per-user folder mounts (`folder`) + internal `shared_file` organizer state |
 | `user_profiles` | Per-user profile fields (display_name, timezone, channels, worker overrides, disabled_skills, disabled_modules, email_addresses, trusted_email_senders) |
 | `briefing_configs` | Briefing schedule + delivery (cron, conversation_token, `output`, enabled flag). Content lives in the per-user briefings module DB, not here |
@@ -43,20 +43,37 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 | `web_chat_rooms` | One row per web chat room: `id, user_id, token (channel id), name, archived, created_at, updated_at`. One room = one `conversation_token`, each with its own `CHANNEL.md` |
 | `web_chat_messages` | Bot-delivered (unsolicited) room messages — alerts / logs / notifications routed to the `web` surface via `WebTransport.deliver`: `id, user_id, token, role, title, text, created_at`. Distinct from task-backed turns; merged into room history by time |
 
-### Rooms (unified Talk/web)
+### Rooms
 
-The unified Talk/web room-sync model (defined in `schema.sql`) supersedes the de-facto tasks-as-history store with a surface-neutral room + message model.
+The room model (defined in `schema.sql`) supersedes the de-facto tasks-as-history store with a surface-neutral room + message model. How the tables fit together for a room more than one person reads is in [rooms and multi-user chat](rooms.md).
 
 | Table | Purpose |
 |---|---|
-| `rooms` | Canonical room registry keyed on `conversation_token`; `origin` (talk\|web), display name, `archived` flag, plus the standing per-room `model` / `effort` default applied by `record_inbound` |
-| `room_bindings` | One row per (room, surface) exposing a room; maps canonical token to each surface's ref |
-| `messages` | Canonical transcript (role user\|assistant\|system, `task_id`, `origin_surface`, `external_ids` mirror ledger) |
-| `room_members` | Per-user membership of a shared room; web visibility resolves through this, not the single-owner `rooms.user_id` |
+| `rooms` | Canonical room registry keyed on `conversation_token`; `origin` (the surface it was created on: talk, web, email, sms or whatsapp), display name, `archived` flag, the standing per-room `model` / `effort` / `brain` defaults applied by `record_inbound`, `side_of` / `side_for_user` for a member's [side room](../features/side-rooms.md), and `group_id` for a [group](../features/groups.md) link |
+| `room_bindings` | One row per (room, surface) exposing a room; maps canonical token to each surface's ref. A ref is unique per surface |
+| `room_token_migration` | Permanent forwarding from an old token (a pre-migration token, a phone room's pre-mint hash) to its room. Survives room deletion as a tombstone |
+| `messages` | Canonical transcript (role user\|assistant\|system, `task_id`, `origin_surface`, `external_ids` mirror ledger). Who wrote a row is `author_user_id` for an Istota user, `author_label` for a sanitized outside sender, and `author_participant_id` for the `room_participants` row |
+| `room_members` | Per-user sidebar membership; web visibility resolves through this, not the single-owner `rooms.user_id` |
+| `room_participants` | Everyone seen in a room, Istota user or not: `surface`, `surface_ref`, `user_id`, `kind` (`principal` \| `guest` \| `agent`), `display_name`, `joined_at`, `left_at`. A history: leaving stamps `left_at`, rejoining inserts a new row, and the partial unique index covers present rows only |
+| `room_policy` | Created when a room is first shared or a guest writes in it: `host_user_id`, `speech_mode`, `guest_reply` (`off` \| `held` \| `direct`), `max_bot_turns_without_human`, the veto state and `announced_at` |
+| `room_vetoes` | One row per person who switched the bot off in a room, with `agreed_at` for their own `!<bot> on`. Emptied when the room comes back on |
+| `room_notices` | Veto replies owed to a Talk conversation or WhatsApp group by a process that cannot post there itself, posted at most once by the scheduler's `room-notices` gate (which also posts the one-time announcement, tracked on `room_policy.announced_at`) |
+| `room_epochs` | Audience boundaries: who joined and the highest `messages.id`, `tasks.id` and Talk message id at that moment. `epoch = 0` rows record a surface's first observed roster |
+| `speech_gate_decisions` | The speech gate's audit log: rung, whether it spoke, model, latency and a pointer to the message, never its text. Pruned after `[speech_gate] decision_retention_days` |
 | `room_dismissals` | Per-user "hide this room" tombstone, cleared by the user's own next inbound |
 | `room_read_state` | Per-surface, per-user read cursors driving unread badges |
 | `message_stars` | Per-user starred messages (Talk has no per-message star API, so this is web-only) |
 | `message_deletions` | Hard-delete ledger with its own stream cursor, so a reconnecting client learns what vanished while it was away. Pruned at 30 days |
+
+### Groups
+
+| Table | Purpose |
+|---|---|
+| `groups` | A named set of Istota users with a store of its own; `group_id` is also a directory under `{mount}/Groups/`. `kind` is display-only. Archived rather than deleted |
+| `group_members` | Membership history: removal sets `ended_at` and a re-join inserts a new row |
+| `group_kv` | Key-value store shared by a group's members; `written_by` is provenance, never authorization |
+
+See [groups](../features/groups.md).
 
 ### Notifications
 

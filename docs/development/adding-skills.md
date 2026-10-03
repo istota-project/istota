@@ -51,8 +51,11 @@ Use `{BOT_NAME}`, `{BOT_DIR}`, and `{user_id}` placeholders -- they're substitut
 | `exclude_memory` | bool | Skip memory loading for tasks using this skill |
 | `exclude_persona` | bool | Skip persona loading |
 | `env` | JSON array | Declarative env var specs (see env var sources below) |
+| `shared_room` | string | `private` (default) or `safe`. See below |
 
 Boolean fields default to `false`. List fields default to `[]`. Only include fields that differ from defaults.
+
+`shared_room` decides whether a task that withholds everything can still use the skill. A guest's turn in a [shared room](../features/shared-rooms.md), and a task nobody asked in a shared room, withhold every `private` skill. Mark a skill `safe` only if it reads nothing belonging to the user it runs as: no workspace, no credential, no personal data. Today that is `room`, `untrusted_input` and `sensitive_actions`. Any value other than exactly `safe` reads as `private`. See [rooms and multi-user chat](../architecture/rooms.md#what-a-task-may-reach).
 
 There is no `name` field. The directory name *is* the skill's identity — `_loader.py` takes `name=skill_dir.name` and never reads a `name:` key, so writing one has no effect and renaming a skill means renaming its directory.
 

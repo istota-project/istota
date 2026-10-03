@@ -27,6 +27,7 @@ const sidebars: SidebarsConfig = {
         'architecture/executor',
         'architecture/brain',
         'architecture/context',
+        'architecture/rooms',
         'architecture/memory',
         'architecture/database',
       ],

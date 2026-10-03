@@ -4,7 +4,7 @@ A room can hold more than one person: a Nextcloud Talk group conversation, a web
 
 A room with one person in it behaves exactly as it always did. Nothing on this page applies to a private conversation.
 
-Related pages: [side rooms](side-rooms.md) for the private channel each member has beside a shared room, [switching the bot off](room-veto.md) for the veto, [WhatsApp groups](whatsapp.md#groups), [email thread rooms](email.md#email-thread-rooms), and [groups](groups.md) for a group's shared memory.
+Related pages: [side rooms](side-rooms.md) for the private channel each member has beside a shared room, [switching the bot off](room-veto.md) for the veto, [WhatsApp groups](whatsapp.md#groups), [email thread rooms](email.md#email-thread-rooms), and [groups](groups.md) for a group's shared memory. How it works underneath is in [rooms and multi-user chat](../architecture/rooms.md).
 
 ## Who is in a room
 
@@ -17,6 +17,27 @@ Everyone who writes in a room, or appears on its roster, is a **participant**. T
 Every turn is stored in the room's transcript with its author, guests' turns included. Before this, an unmentioned message in a Talk group was never stored, and a non-user's message was dropped.
 
 A room is **shared** when more than one human is present. One person reading the room on both Talk and web counts once. Bots do not count, and somebody who has left stops counting.
+
+## Whose assistant answers
+
+A shared room has no single owner's bot. Each turn is answered by the assistant of the person the turn runs as, which is the person who wrote it, except on a guest's turn:
+
+| Who wrote the turn | Runs as | Persona | Reach | Personal memory in the prompt |
+|---|---|---|---|---|
+| A member | that member | theirs (`PERSONA.md`) | everything they can reach in their private room | none |
+| A guest | the host | the host's | nothing of the host's | none |
+| Nobody in the room (a subtask, someone else's scheduled job) | the task's user | that user's | nothing | none |
+| A member's own scheduled job or briefing posting here | that member | theirs | everything they can reach | none |
+
+So if Alice and Bob share a room and each has their own `PERSONA.md`, Alice's questions are answered in Alice's persona with Alice's calendar, and Bob's in Bob's with his. Neither sees the other's data unless it was written into the room.
+
+Some things are the same whatever the turn:
+
+- **The deployment's own rules**: the emissary principles, the response guidelines and any custom system prompt are set by the operator for everyone.
+- **The room's settings**: its model, effort and brain apply to every turn in the room, and only the host can change them.
+- **The room's shared context**: the transcript (from the latest join onwards, see [newcomers and history](#newcomers-and-history)) and the room's `CHANNEL.md`, which everyone in the room can read and write.
+
+What is per person, beyond persona and reach: a member's per-skill instructions (`{bot_dir}/config/skills/<skill>.md`) load on their own turns and not on a guest's, and a member's [side room](side-rooms.md) notes are read on their own turns, and on a guest's turn when they are the host.
 
 ## When the bot speaks
 

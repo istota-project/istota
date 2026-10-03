@@ -50,13 +50,14 @@ Tool calling, function dispatch, and the agent loop live in the brain, not the e
 Every interaction follows the same path:
 
 1. **Input** arrives from one of several channels (Talk message, web chat, email, TASKS.md edit, CLI/REPL command, cron trigger)
-2. A **task** is created in the SQLite `tasks` table with status `pending`
-3. The **scheduler** dispatches a `UserWorker` thread for the task's user
-4. The worker **claims** the task (atomic `UPDATE...RETURNING`, setting status to `locked` then `running`)
-5. The **executor** assembles the prompt: persona + resources + memory + context + skills + guidelines + the actual request
-6. The executor resolves which brain to use for this task's source type (`resolve_brain_kind`), builds a `BrainRequest`, and calls `brain.execute(req)`, rerunning through the fallback brain if the primary is unavailable. The default `ClaudeCodeBrain` invokes `claude -p - --output-format stream-json` as a subprocess
-7. The brain returns a `BrainResult`; the executor composes the final text (CM-aware), stores it in the DB, and delivers it to the originating channel
-8. Post-completion: conversation indexed for memory search, deferred DB operations processed, scheduled job counters reset
+2. A turn on a room surface is first **recorded** in the room's transcript. In a room more than one person reads, the speech gate then decides whether the bot answers, and only an answered turn goes on. See [rooms and multi-user chat](rooms.md)
+3. A **task** is created in the SQLite `tasks` table with status `pending`
+4. The **scheduler** dispatches a `UserWorker` thread for the task's user
+5. The worker **claims** the task (atomic `UPDATE...RETURNING`, setting status to `locked` then `running`)
+6. The **executor** assembles the prompt: persona + resources + memory + context + skills + guidelines + the actual request
+7. The executor resolves which brain to use for this task's source type (`resolve_brain_kind`), builds a `BrainRequest`, and calls `brain.execute(req)`, rerunning through the fallback brain if the primary is unavailable. The default `ClaudeCodeBrain` invokes `claude -p - --output-format stream-json` as a subprocess
+8. The brain returns a `BrainResult`; the executor composes the final text (CM-aware), stores it in the DB, and delivers it to the originating channel
+9. Post-completion: conversation indexed for memory search, deferred DB operations processed, scheduled job counters reset
 
 Task lifecycle: `pending` -> `locked` -> `running` -> `completed` | `failed` | `pending_confirmation` -> `cancelled`
 
@@ -123,6 +124,7 @@ Guardrails on this path: subtask creation is **admin-only**, prompt-only (never 
 | `executor.py` | Builds prompts, constructs the per-task environment, orchestrates a `Brain`, composes results |
 | `brain/` | Pluggable model-invocation backend: `Brain` Protocol + `make_brain` factory, `BrainRequest`/`BrainResult` types, stream events, `ClaudeCodeBrain` (subprocess + stream-json + transient-API retry), and `NativeBrain` (Istota's in-process agent loop). The native loop's machinery lives in `llm/` (provider abstraction), `agent/` (the loop + tool dispatch), and `session/` (turn state + compaction). |
 | `context.py` | Selects relevant conversation history using hybrid recent + LLM-triaged approach |
+| `rooms/` | The multi-user room model: speech gate, host and guest policy, what a task in a shared room may reach, side rooms, the veto |
 | `skills/_loader.py` | Loads skill documentation selectively: `always_include`, source types, file types, sticky skills, companions. Keyword and resource matching are deliberately *not* selectors |
 
 ### Storage and state
