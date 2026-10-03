@@ -65,8 +65,13 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from istota.sandbox.host_paths import developer_repos_root, resolve_under_repos
+
+if TYPE_CHECKING:
+    # `snapshot` imports this module, so the dataclass is only named here.
+    from .snapshot import Snapshot
 
 CONFORMANCE = "conformance"
 BUGHUNT = "bughunt"
@@ -183,6 +188,8 @@ class Finding:
     sources: list[str] = field(default_factory=list)
     unverified: bool = False
     outside_diff: bool = False
+    # For an unverified finding, the one check the reviewer says would settle it.
+    settle: str = ""
 
 
 # --------------------------------------------------------------------------
@@ -1301,6 +1308,31 @@ def collect_conventions(
     return _clamp(("".join(parts)), max_chars, "conventions truncated")
 
 
+def collect_commits(worktree: Path, bundle: DiffBundle) -> str:
+    """The subject and body of every commit in the range, or "" when git fails."""
+    try:
+        return _git(
+            worktree,
+            [
+                "log",
+                "--format=%s%n%b%n--",
+                # Not decoration. `log.showSignature` is a repo-local boolean
+                # and `gpg.program` a repo-local path, so a plain `git log`
+                # over a signed commit runs a chosen command as the daemon
+                # user. The `-c` overrides in GIT_HARDENING cover it too; this
+                # is the flag that does not depend on getting the key list
+                # exhaustively right.
+                "--no-show-signature",
+                *NO_FILTERS,
+                END_OF_OPTIONS,
+                _log_range(bundle.rng),
+                "--",
+            ],
+        )
+    except ReviewError:
+        return ""
+
+
 def assemble_context(worktree: Path, bundle: DiffBundle, cfg: ReviewConfig) -> str:
     """Everything the reviewers see beyond the diff itself.
 
@@ -1325,27 +1357,7 @@ def assemble_context(worktree: Path, bundle: DiffBundle, cfg: ReviewConfig) -> s
     if bodies:
         parts.append("## Changed files, whole\n\n" + bodies)
 
-    try:
-        commits = _git(
-            worktree,
-            [
-                "log",
-                "--format=%s%n%b%n--",
-                # Not decoration. `log.showSignature` is a repo-local boolean
-                # and `gpg.program` a repo-local path, so a plain `git log`
-                # over a signed commit runs a chosen command as the daemon
-                # user. The `-c` overrides in GIT_HARDENING cover it too; this
-                # is the flag that does not depend on getting the key list
-                # exhaustively right.
-                "--no-show-signature",
-                *NO_FILTERS,
-                END_OF_OPTIONS,
-                _log_range(bundle.rng),
-                "--",
-            ],
-        )
-    except ReviewError:
-        commits = ""
+    commits = collect_commits(worktree, bundle)
     if commits.strip():
         parts.append("## Commits in the range\n\n" + commits[: budget // 10])
 
@@ -1410,7 +1422,7 @@ def size_review(
 # Prompts
 # --------------------------------------------------------------------------
 
-_OUTPUT_CONTRACT = """\
+_AGENT_OUTPUT_CONTRACT = """\
 Return one JSON object and nothing else. No prose before it, no prose after it,
 no code fence.
 
@@ -1477,7 +1489,7 @@ Distinguish a proven defect from speculation, and say which you have.
 
 _FOCUS = {CONFORMANCE: _CONFORMANCE_FOCUS, BUGHUNT: _BUGHUNT_FOCUS}
 
-# Offered only when there is a round to pay for it — see `build_prompt`. The
+# Offered only when there is a round to pay for it — see `build_agent_prompt`. The
 # instruction to return findings *alongside* the request is what makes the
 # fallback work: if the re-invocation fails or comes back unparseable, the first
 # answer is all there is, and a reviewer that answered "wait" and nothing else
@@ -1508,14 +1520,17 @@ finding, or return an empty list if it retracted all of them.
 """
 
 
-def build_prompt(
+def build_agent_prompt(
     agent: str,
     bundle: DiffBundle,
     context: str,
     intent: str,
     max_need_files: int = 0,
 ) -> str:
-    """The whole prompt one reviewer sees.
+    """The whole prompt one of the two text-only reviewers sees.
+
+    Kept only until `run_review` moves to the single reviewer; `build_prompt`
+    below is its replacement.
 
     Assembled here rather than by the caller: the model that asks for a review
     supplies a worktree, a range and a one-line intent, and nothing else. If it
@@ -1557,6 +1572,122 @@ def build_prompt(
     ]
     if context.strip():
         sections.append(context)
+    sections.append(_AGENT_OUTPUT_CONTRACT)
+    return "\n\n".join(sections)
+
+
+# The single reviewer's method. Read once at import: it is package data, and a
+# review that cannot load its own instructions should fail at startup rather
+# than run a reviewer with no method.
+REVIEWER_METHOD = Path(__file__).with_name("reviewer.md").read_text(encoding="utf-8")
+
+MAX_COMMITS_CHARS = 6_000
+
+_OUTPUT_CONTRACT = """\
+Return one JSON object and nothing else. No prose before it, no prose after it,
+no code fence.
+
+{"findings": [
+  {"severity": "must-fix" | "high" | "medium" | "low",
+   "file": "path/relative/to/the/repository",
+   "line": 123,
+   "claim": "one line, the defect itself",
+   "evidence": "what you observed, or which rule is broken and where the rule lives",
+   "action": "the change you would make",
+   "unverified": false,
+   "settle": "for an unverified finding, the one check that would settle it"}
+],
+ "ruled_out": [
+  {"theory": "one line", "checked": "what you checked and why it cleared"}
+]}
+
+Every finding needs a file and a line. "settle" may be left out of a proven
+finding. An empty "findings" array is a valid review; "ruled_out" may be empty
+too.
+"""
+
+# Replaces the snapshot instructions in `reviewer.md` when the run fell back to
+# text-only (the snapshot or the namespace could not be built). The method
+# still applies; the tools do not.
+_NO_SNAPSHOT = """\
+This run has no tools and no snapshot. The `tree/` and `meta/` directories
+described above do not exist, and Read, Grep and Glob are not available:
+everything you can see is in this prompt. Where a finding rests on code you
+were not shown, report it with "unverified": true and name in "settle" the file
+you would need to read.
+"""
+
+
+def _snapshot_summary(snapshot) -> str:
+    lines = [
+        f"The repository at the reviewed commit is at {snapshot.tree_dir}, and the "
+        f"range's metadata is at {snapshot.run_dir / 'meta'}. The snapshot holds "
+        f"{snapshot.files} files, {snapshot.bytes} bytes."
+    ]
+    if snapshot.truncated:
+        lines.append(
+            "The snapshot reached its size cap, so some files are not in tree/. "
+            "The changed files and the files beside them were written first; "
+            "meta/skipped.txt lists what was left out."
+        )
+    skipped = {reason: count for reason, count in snapshot.skipped.items() if count}
+    if skipped:
+        listed = ", ".join(f"{count} {reason}" for reason, count in sorted(skipped.items()))
+        lines.append(f"Paths left out of tree/, by reason: {listed}.")
+    return "## The snapshot\n\n" + " ".join(lines)
+
+
+def build_prompt(
+    bundle: DiffBundle,
+    snapshot: Snapshot | None,
+    intent: str,
+    *,
+    file_budget: int,
+    commits: str = "",
+) -> str:
+    """The whole prompt the single reviewer sees.
+
+    `snapshot` is `None` on a text-only run, and the prompt then says there are
+    no tools. `commits` is `collect_commits`' output, passed in so this stays a
+    pure function of what the caller already collected.
+
+    Assembled here rather than by the caller: the model that asks for a review
+    supplies a worktree, a range and a one-line intent, and nothing else, so no
+    model-authored string decides what the reviewer reads beyond the intent.
+    """
+    header = [f"Review the changes in {bundle.rng}."]
+    if intent and intent.strip():
+        header.append(f"The author states the intent of the change as: {intent.strip()}")
+    if bundle.truncated:
+        cut = ", ".join(bundle.truncated_files)
+        if snapshot is not None:
+            header.append(
+                f"The diff below was cut to fit. These files are incomplete in it: {cut}. "
+                "The full patch is at meta/diff.patch; read the missing parts there "
+                "before reporting on them."
+            )
+        else:
+            header.append(
+                f"The diff below was cut to fit. These files are incomplete in it: {cut}. "
+                "Do not report a finding that depends on a part you were not shown."
+            )
+    if snapshot is not None:
+        header.append(
+            f"Read at most {file_budget} files beyond the changed files. When you "
+            "reach it, stop and report, marking what you could not check as unverified."
+        )
+
+    sections = [REVIEWER_METHOD.strip(), "\n\n".join(header)]
+    if snapshot is None:
+        sections.append(_NO_SNAPSHOT)
+    else:
+        sections.append(_snapshot_summary(snapshot))
+    sections += [
+        "## Diff stat\n\n" + (bundle.stat or "(empty)"),
+        "## Diff\n\n" + (bundle.body or "(empty)"),
+    ]
+    if commits.strip():
+        sections.append("## Commits in the range\n\n" + commits[:MAX_COMMITS_CHARS])
     sections.append(_OUTPUT_CONTRACT)
     return "\n\n".join(sections)
 
@@ -1651,9 +1782,53 @@ def parse_findings(raw: str, source: str) -> list[Finding]:
                 action=str(item.get("action") or item.get("fix") or "").strip(),
                 sources=[source],
                 unverified=bool(item.get("unverified")),
+                settle=_capped_text(item.get("settle"), MAX_SETTLE_CHARS),
             )
         )
     return findings
+
+
+MAX_SETTLE_CHARS = 300
+MAX_RULED_OUT_ITEMS = 30
+MAX_RULED_OUT_CHARS = 300
+
+
+def _capped_text(value, max_chars: int) -> str:
+    # Only a string counts: a model that writes a number or an object here has
+    # not written a check, and `str()` of a dict is not one either.
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:max_chars]
+
+
+def parse_ruled_out(payload) -> list[dict]:
+    """The reviewer's ruled-out theories, as `{"theory", "checked"}` dicts.
+
+    `payload` is the raw response or the JSON already extracted from it. Every
+    item needs a non-empty `theory`; `checked` defaults to empty. Both are
+    capped, and so is the list, because this is model text the caller relays
+    and nothing downstream bounds it.
+    """
+    if isinstance(payload, str):
+        payload = _extract_json(payload)
+    if not isinstance(payload, dict):
+        return []
+    items = payload.get("ruled_out")
+    if not isinstance(items, list):
+        return []
+    out: list[dict] = []
+    for item in items:
+        if len(out) >= MAX_RULED_OUT_ITEMS:
+            break
+        if not isinstance(item, dict):
+            continue
+        theory = _capped_text(item.get("theory"), MAX_RULED_OUT_CHARS)
+        if not theory:
+            continue
+        out.append(
+            {"theory": theory, "checked": _capped_text(item.get("checked"), MAX_RULED_OUT_CHARS)}
+        )
+    return out
 
 
 def merge_findings(
@@ -2369,7 +2544,7 @@ def run_review(
     def _one(agent: str) -> None:
         try:
             prompt_started = time.monotonic()
-            prompt = build_prompt(
+            prompt = build_agent_prompt(
                 agent, bundle, context, intent, max_need_files=need_limit
             )
             prompt_seconds.append(time.monotonic() - prompt_started)
@@ -2383,7 +2558,7 @@ def run_review(
                 invoke,
                 timeout_seconds,
                 serve=serve if need_limit > 0 else None,
-                build_final_prompt=lambda a=agent: build_prompt(
+                build_final_prompt=lambda a=agent: build_agent_prompt(
                     a, bundle, context, intent
                 ),
             )
