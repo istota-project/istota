@@ -1059,10 +1059,12 @@ class FakeInvoke:
     def __init__(self, *replies, delay: float = 0.0):
         self.replies = list(replies)
         self.calls: list[tuple[str, int, bool]] = []
+        self.handed: list[tuple] = []
         self.delay = delay
 
-    def __call__(self, prompt, timeout, *, tools):
+    def __call__(self, prompt, timeout, *, tools, snapshot=None, sandbox=None):
         self.calls.append((prompt, timeout, tools))
+        self.handed.append((snapshot, sandbox))
         if self.delay:
             time.sleep(self.delay)
         reply = self.replies.pop(0) if self.replies else '{"findings": []}'
@@ -1104,7 +1106,9 @@ class FakeSnapshots:
         self.sandboxes.append(snapshot)
         if self.sandbox_error is not None:
             raise self.sandbox_error
-        return SimpleNamespace(refused=self.refused, wrap=None)
+        sandbox = SimpleNamespace(refused=self.refused, wrap=None)
+        self.built = sandbox
+        return sandbox
 
 
 # The whole envelope `run_review` returns on a clean run. Spelt out rather than
@@ -1420,6 +1424,83 @@ class TestRunReview:
 
         assert envelope["reviewer"]["tools_reason"] == "sandbox_refused"
         assert invoke.calls[0][2] is False
+
+    def test_the_tooled_call_is_handed_what_the_builders_returned(self, repo, tmp_path):
+        """The grant and its confinement travel together: the tooled call gets
+        the very snapshot and namespace objects, and the reformat gets neither."""
+        branch_with_change(repo)
+        invoke = FakeInvoke("prose", answer())
+        fakes = FakeSnapshots(tmp_path)
+
+        self._run(repo, invoke, fakes)
+
+        snapshot = fakes.snapshots[0][2]
+        assert invoke.handed[0][0] is snapshot
+        assert invoke.handed[0][1] is fakes.built
+        assert invoke.handed[1] == (None, None)
+
+    def test_a_text_only_call_is_handed_no_namespace(self, repo, tmp_path):
+        branch_with_change(repo)
+        invoke = FakeInvoke(answer())
+
+        self._run(repo, invoke, FakeSnapshots(tmp_path, refused=True))
+
+        assert invoke.handed == [(None, None)]
+
+    def test_a_snapshot_containment_refusal_is_a_request_fault(self, repo, tmp_path):
+        """Only `snapshot_failed` degrades. A containment refusal from the
+        snapshot step must block the push, not become a text-only review."""
+        branch_with_change(repo)
+        invoke = FakeInvoke(answer())
+        fakes = FakeSnapshots(
+            tmp_path,
+            snapshot_error=ReviewError("reaches outside", reason="git_dir_not_allowed"),
+        )
+
+        with pytest.raises(ReviewError) as excinfo:
+            self._run(repo, invoke, fakes)
+
+        assert excinfo.value.reason == "git_dir_not_allowed"
+        assert invoke.calls == []
+
+    def test_a_redirect_after_the_diff_stops_the_run_before_git_log(
+        self, repo, repos_root, tmp_path
+    ):
+        """The worktree stays writable while the snapshot is built. A `.git`
+        pointed outside the root since `collect_diff` must refuse the run, not
+        hand another repository's history to the reviewer."""
+        branch_with_change(repo)
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        run_git(outside, "init", "-q", "-b", "main", ".")
+        (outside / "f.txt").write_text("x\n")
+        commit(outside, "OUTSIDE_HISTORY_SENTINEL")
+        invoke = FakeInvoke(answer())
+
+        class Redirecting(FakeSnapshots):
+            def build_snapshot(self, worktree, bundle):
+                git = worktree / ".git"
+                moved = worktree.parent / "proj-git-moved"
+                git.rename(moved)
+                (worktree / ".git").write_text(f"gitdir: {outside / '.git'}\n")
+                raise ReviewError("snapshot gave up", reason="snapshot_failed")
+
+        with pytest.raises(ReviewError) as excinfo:
+            self._run(repo, invoke, Redirecting(tmp_path))
+
+        assert excinfo.value.reason == "git_dir_not_allowed"
+        assert invoke.calls == []
+
+    def test_a_raise_after_a_call_keeps_what_that_call_cost(self, repo, tmp_path):
+        branch_with_change(repo)
+        invoke = FakeInvoke("prose", RuntimeError("api exploded"), delay=1.0)
+
+        envelope = self._run(repo, invoke, FakeSnapshots(tmp_path))
+
+        assert envelope["reason"] == "review_failed"
+        assert envelope["reviewer"]["model"] == "resolved/smart"
+        # Both calls' wall time is model time, not overhead.
+        assert envelope["overhead_seconds"] < 1.0
 
     def test_an_empty_range_builds_nothing_and_calls_nothing(self, repo, tmp_path):
         run_git(repo, "checkout", "-q", "-b", "feature")

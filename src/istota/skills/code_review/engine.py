@@ -1344,8 +1344,24 @@ def _reformat_prompt(first_answer: str) -> str:
     )
 
 
-def _run_reviewer(prompt: str, invoke, timeout_seconds: int, *, tools: bool) -> ReviewOutcome:
+def _run_reviewer(
+    prompt: str,
+    invoke,
+    timeout_seconds: int,
+    *,
+    snapshot: Snapshot | None = None,
+    sandbox=None,
+) -> ReviewOutcome:
     """The one review call, and its single text-only reformat.
+
+    The review call has tools exactly when it is handed both a snapshot and a
+    namespace, and `invoke` receives the two objects the builders returned, so
+    the grant and its confinement travel together rather than through state
+    the caller's callables share.
+
+    Never raises. A brain that raises is a failed call, and a `ReviewError` out
+    of a call is a request fault; either way the outcome keeps what the calls
+    before it cost.
 
     The error carries the head of the raw output when the cause was malformed
     JSON: a caller staring at "malformed" with no sample cannot tell a truncated
@@ -1353,6 +1369,7 @@ def _run_reviewer(prompt: str, invoke, timeout_seconds: int, *, tools: bool) -> 
     """
     outcome = ReviewOutcome()
     started = time.monotonic()
+    tooled = snapshot is not None and sandbox is not None
 
     def call(text: str, timeout: int, with_tools: bool) -> ReviewerReply:
         # Charged before the call is made: a brain that raises part-way may
@@ -1360,14 +1377,35 @@ def _run_reviewer(prompt: str, invoke, timeout_seconds: int, *, tools: bool) -> 
         outcome.calls += 1
         call_started = time.monotonic()
         try:
-            reply = invoke(text, timeout, tools=with_tools)
+            if with_tools:
+                reply = invoke(text, timeout, tools=True, snapshot=snapshot, sandbox=sandbox)
+            else:
+                reply = invoke(text, timeout, tools=False, snapshot=None, sandbox=None)
         finally:
             outcome.model_seconds += time.monotonic() - call_started
         if reply.model and not outcome.model:
             outcome.model = reply.model
         return reply
 
-    reply = call(prompt, timeout_seconds, tools)
+    try:
+        return _review_and_reformat(prompt, call, outcome, started, timeout_seconds, tooled)
+    except ReviewError as exc:
+        # A request fault, which must not degrade to `skipped` with the model
+        # failures: `skipped` tells the workflow to land the branch, and landing
+        # one because containment refused the worktree is the inversion of the
+        # refusal.
+        outcome.error = f"reviewer raised {type(exc).__name__}: {exc}"
+        outcome.reason = "request_fault"
+        outcome.fault_reason = exc.reason
+        return outcome
+    except Exception as exc:
+        outcome.error = f"reviewer raised {type(exc).__name__}: {exc}"
+        outcome.reason = "call_failed"
+        return outcome
+
+
+def _review_and_reformat(prompt, call, outcome, started, timeout_seconds, tooled):
+    reply = call(prompt, timeout_seconds, tooled)
     if not reply.ok:
         outcome.error = reply.error or "reviewer call failed"
         outcome.reason = "call_failed"
@@ -1458,14 +1496,17 @@ def run_review(
     Three seams, all callables, which is what keeps this module free of
     `config`, `executor` and `brain` imports:
 
-    - `invoke(prompt, timeout, *, tools) -> ReviewerReply` is the only route to
-      a model. `tools` says whether the call may have the read-only tools; the
-      caller holds the snapshot and namespace they run against.
+    - `invoke(prompt, timeout, *, tools, snapshot, sandbox) -> ReviewerReply`
+      is the only route to a model. With `tools` true it is handed the snapshot
+      and the namespace object `build_sandbox` returned, and with it false both
+      are `None`.
     - `build_snapshot(worktree, bundle) -> Snapshot` writes the reviewed commit
       to a private run directory. The caller owns removing it, whatever this
       returns or raises.
     - `build_sandbox(snapshot)` builds the reviewer's namespace, and reports
-      `refused` when it was wanted and could not be built.
+      `refused` when it was wanted and could not be built. A `ReviewError`
+      from `build_snapshot` other than `snapshot_failed` is a request fault and
+      propagates.
 
     A snapshot that cannot be built or a namespace that is refused degrades the
     run to text-only: a review without tools is still a review, and it is marked
@@ -1544,6 +1585,10 @@ def run_review(
     try:
         snapshot = build_snapshot(worktree, bundle)
     except ReviewError as exc:
+        if exc.reason != "snapshot_failed":
+            # Anything else is the request's fault, a containment refusal
+            # above all, and a degraded review would land the branch anyway.
+            raise
         tools_reason = "snapshot_failed"
         logger.warning(
             "code_review snapshot failed (reason=%s), reviewing text-only: %s",
@@ -1555,6 +1600,7 @@ def run_review(
             "code_review snapshot failed (reason=snapshot_failed, %s), reviewing "
             "text-only: %s", type(exc).__name__, exc,
         )
+    sandbox = None
     if snapshot is not None:
         try:
             sandbox = build_sandbox(snapshot)
@@ -1567,8 +1613,15 @@ def run_review(
             refused = True
         if refused:
             tools_reason = "sandbox_refused"
+            sandbox = None
         else:
             tools = True
+
+    # Again, after the snapshot and before `git log`: the snapshot swallows
+    # its own refusals into `snapshot_failed`, and the worktree is writable
+    # throughout, so a `.git` redirected since `collect_diff` must stop the
+    # run here rather than feed another repository's history to the reviewer.
+    git_dir(worktree)
 
     envelope["snapshot"] = _snapshot_dict(snapshot)
     prompt = build_prompt(
@@ -1579,27 +1632,13 @@ def run_review(
         commits=collect_commits(worktree, bundle),
     )
 
-    try:
-        outcome = _run_reviewer(prompt, invoke, timeout_seconds, tools=tools)
-    except ReviewError as exc:
-        # A request fault, which must not degrade to `skipped` with the model
-        # failures below: `skipped` tells the workflow to land the branch, and
-        # landing one because containment refused the worktree is the inversion
-        # of the refusal.
-        outcome = ReviewOutcome(
-            error=f"reviewer raised {type(exc).__name__}: {exc}",
-            reason="request_fault",
-            fault_reason=exc.reason,
-            calls=1,
-        )
-    except Exception as exc:
-        # A brain that raises is a failed call, not a crashed command. The
-        # invocation was made, so it is charged.
-        outcome = ReviewOutcome(
-            error=f"reviewer raised {type(exc).__name__}: {exc}",
-            reason="call_failed",
-            calls=1,
-        )
+    outcome = _run_reviewer(
+        prompt,
+        invoke,
+        timeout_seconds,
+        snapshot=snapshot if tools else None,
+        sandbox=sandbox if tools else None,
+    )
     model_seconds[0] = outcome.model_seconds
 
     envelope.update(

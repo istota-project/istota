@@ -391,7 +391,7 @@ def cmd_run(args):
 
     agent = "reviewer"
 
-    def invoke(prompt: str, timeout: int, *, tools: bool):
+    def invoke(prompt: str, timeout: int, *, tools: bool, snapshot=None, sandbox=None):
         # `tools` is never true while `build_snapshot` above always fails; the
         # tool-granting request arrives with the snapshot wiring.
         raw_model = review_cfg.bughunt_model
@@ -494,9 +494,11 @@ def cmd_run(args):
             return engine.ReviewerReply(
                 ok=False,
                 error=_failure_error(agent, result.stop_reason, result.result_text),
-                model=req.model,
+                model=result.model_used or req.model,
             )
-        return engine.ReviewerReply(ok=True, text=result.result_text or "", model=req.model)
+        return engine.ReviewerReply(
+            ok=True, text=result.result_text or "", model=result.model_used or req.model
+        )
 
     try:
         envelope = engine.run_review(
