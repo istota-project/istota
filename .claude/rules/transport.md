@@ -52,7 +52,7 @@ The store gate and the confirmation mirror gate are where the membership and vie
 
 ## Multiplayer rooms
 
-A room can hold several humans: a Talk group, a multi-member web room, a Baileys WhatsApp group, an email thread with two or more humans besides the bot. One core pipeline decides speaker, authority, audience and reach; surfaces only normalize. Every rule is a no-op with one human (private goldens stay byte-identical). User docs: `docs/features/shared-rooms.md`, `side-rooms.md`, `room-veto.md`.
+A room can hold several humans: a Talk group, a multi-member web room, a Baileys WhatsApp group, an email thread with two or more humans besides the bot. One core pipeline decides speaker, authority, audience and reach; surfaces only normalize. Every rule is a no-op with one human (private goldens stay byte-identical). User docs: `docs/features/shared-rooms.md`, `side-rooms.md`, `room-veto.md`; the developer-facing walkthrough is `docs/architecture/rooms.md`.
 
 **Record, then decide.** `ingest.record_inbound` stores the user row (`task_id` NULL), asks the speech gate, and creates the task only on speak, returning `InboundResult` with `outcome` `created` / `recorded` / `dropped` / `replayed`. Dedup is `_prior_turn`. Only stored turns are gated; roomless email always gets a task. A private phone turn is stored in a one-human room, where the gate speaks; web refuses a member add to a private phone room for that reason, since a phone turn never sets `addressed_to_bot` and `mention` mode would record texts without answering them (a room shared before the refusal behaves that way until the added member is removed). An unanswered turn has no `Bot:` line; `!export` uses a `last_msg_id` cursor. A declined web turn returns `task_id: null`, `status: "recorded"`.
 

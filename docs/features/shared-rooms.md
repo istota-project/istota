@@ -4,7 +4,7 @@ A room can hold more than one person: a Nextcloud Talk group conversation, a web
 
 A room with one person in it behaves exactly as it always did. Nothing on this page applies to a private conversation.
 
-Related pages: [side rooms](side-rooms.md) for the private channel each member has beside a shared room, [switching the bot off](room-veto.md) for the veto, [WhatsApp groups](whatsapp.md#groups), [email thread rooms](email.md#email-thread-rooms), and [groups](groups.md) for a group's shared memory.
+Related pages: [side rooms](side-rooms.md) for the private channel each member has beside a shared room, [switching the bot off](room-veto.md) for the veto, [WhatsApp groups](whatsapp.md#groups), [email thread rooms](email.md#email-thread-rooms), and [groups](groups.md) for a group's shared memory. How it works underneath is in [rooms and multi-user chat](../architecture/rooms.md).
 
 ## Who is in a room
 

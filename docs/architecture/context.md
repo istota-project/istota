@@ -24,6 +24,14 @@ Cache size is bounded per conversation (`talk_cache_max_per_conversation`, defau
 
 Email tasks use DB-based context from completed tasks matching the conversation token.
 
+## Shared rooms
+
+In a room more than one person reads, three things change. The full model is in [rooms and multi-user chat](rooms.md).
+
+- **Unanswered turns are history too.** Every turn is recorded whether or not the speech gate answered it, so the history holds turns nobody addressed to the bot. An unanswered turn has no bot response after it.
+- **Other people's turns are fenced.** Both history formatters take the task's user as the principal and wrap every other participant's turn as `ROOM PARTICIPANT MESSAGE`, including a guest or an outside correspondent stored with a label and no user id. The bot's own earlier answers are not fenced. In a room several people have written in, the `Replying to` quote is fenced as `QUOTED MESSAGE`.
+- **History starts at the latest join.** When someone joins a room others already read, `db.front_stage_cutoff` returns the boundary, and every history read for that room starts after it: the DB and Talk fetches, the reply-to parent (a parent from before the boundary is not force-included), and recall over past turns. A member's side room reads the parent room's transcript whole.
+
 ## Configuration
 
 All context settings live in the `[conversation]` section:
