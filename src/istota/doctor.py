@@ -9280,6 +9280,73 @@ def _baileys_live_session(name: str, path: Path) -> CheckResult:
     )
 
 
+#: How many duplicated addresses `users.email_address_uniqueness` names before
+#: it summarises the rest as a count, so the detail stays one readable line.
+_DUPLICATE_ADDRESSES_SHOWN = 10
+
+
+def check_email_address_uniqueness(config: "Config", probe: bool) -> CheckResult:
+    """Whether any email address is held by more than one user.
+
+    `find_user_by_email` returns the first holder, so a shared address routes
+    one user's mail to another's tasks. The web and CLI writers refuse a *new*
+    duplicate (`user_profiles.find_identity_conflicts`) but let a stored one be
+    resubmitted, so a deployment carrying one from before that rule keeps it
+    until an operator acts, and this is where it is named. Holders are
+    `user_profiles.email_addresses` and `web_auth_identities.email` alike, read
+    through `user_profiles.duplicate_email_addresses` rather than a second copy
+    of the rule. The addresses and user ids are in the detail on purpose: the
+    audience is an operator, and a count would not say what to fix.
+    """
+    import sqlite3
+
+    from istota import user_profiles
+
+    name = "users.email_address_uniqueness"
+    db_path = Path(config.db_path)
+    if not db_path.exists():
+        return CheckResult(
+            name, SKIP, f"no framework database at {db_path}", scope=DEPLOYMENT,
+        )
+    try:
+        conn = sqlite_util.connect_read_only(db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            duplicates = user_profiles.duplicate_email_addresses(conn)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - a check never raises
+        return CheckResult(
+            name, WARN, f"could not read the user tables: {exc}",
+            remedy=(
+                "Check `runtime.framework_db`, which reports on the database "
+                "itself; this check reads it and nothing else."
+            ),
+            scope=DEPLOYMENT,
+        )
+    if not duplicates:
+        return CheckResult(
+            name, OK, "every email address belongs to one user", scope=DEPLOYMENT,
+        )
+    items = list(duplicates.items())
+    shown = "; ".join(
+        f"{address} ({', '.join(holders)})"
+        for address, holders in items[:_DUPLICATE_ADDRESSES_SHOWN]
+    )
+    if len(items) > _DUPLICATE_ADDRESSES_SHOWN:
+        shown += f"; and {len(items) - _DUPLICATE_ADDRESSES_SHOWN} more"
+    return CheckResult(
+        name, WARN,
+        f"{len(items)} address(es) held by more than one user: {shown}",
+        remedy=(
+            "Remove each address from all but one holder, in that user's "
+            "settings or with `istota user ensure --name <user> --email ...`. "
+            "Mail to a shared address routes to whichever holder is found first."
+        ),
+        scope=DEPLOYMENT,
+    )
+
+
 # The name is part of the registry rather than only of the result, so `only=`
 # can select *before* invoking. Filtering afterwards would mean running every
 # check to discard most of them — which is exactly what the config-load path
@@ -9338,6 +9405,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("web.basemap", check_basemap),
     ("web.avatar_import", check_avatar_import),
     ("config.skill_overlays", check_skill_overlays),
+    ("users.email_address_uniqueness", check_email_address_uniqueness),
     ("sandbox.masks", check_sandbox_masks),
 )
 
@@ -9476,6 +9544,8 @@ CHECK_SCOPES: dict[str, str] = {
     # Deployment: it walks the workspace mount, which a bare `docker run` has
     # none of.
     "config.skill_overlays": DEPLOYMENT,
+    # Deployment: it reads the install's own user tables.
+    "users.email_address_uniqueness": DEPLOYMENT,
     "sandbox.masks": DEPLOYMENT,
 }
 

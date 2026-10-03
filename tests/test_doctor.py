@@ -6187,3 +6187,54 @@ class TestConfigVisibility:
             if r.status in (WARN, FAIL):
                 assert r.remedy.strip()
         assert seen == [SKIP, FAIL, FAIL]
+
+
+class TestEmailAddressUniqueness:
+    """`users.email_address_uniqueness` — duplicates stored before the rule.
+
+    The web and CLI writers refuse a *new* duplicate but let a stored one be
+    resubmitted, so the only place an existing one is surfaced is here.
+    """
+
+    @staticmethod
+    def _run(config):
+        return run_checks(config, only=("users.email_address_uniqueness",))
+
+    def test_ok_on_a_clean_database(self, make_config, tmp_path):
+        from istota import db as db_module, user_profiles
+
+        db_path = tmp_path / "clean.db"
+        db_module.init_db(db_path)
+        user_profiles.ensure_profile(db_path, "alice")
+        user_profiles.update_profile(
+            db_path, "alice", email_addresses=["alice@example.com"],
+        )
+        [result] = self._run(make_config(db_path=db_path))
+        assert result.status == OK
+
+    def test_warns_listing_the_address_and_its_holders(self, make_config, tmp_path):
+        from istota import db as db_module, user_profiles
+        from istota.webui import auth as web_auth
+
+        db_path = tmp_path / "dup.db"
+        db_module.init_db(db_path)
+        for user_id in ("alice", "bob", "carol"):
+            user_profiles.ensure_profile(db_path, user_id)
+        user_profiles.update_profile(
+            db_path, "alice", email_addresses=["shared@example.com"],
+        )
+        user_profiles.update_profile(
+            db_path, "bob", email_addresses=["Shared@Example.com"],
+        )
+        web_auth.upsert_identity(db_path, "carol", "carol@example.com")
+        [result] = self._run(make_config(db_path=db_path))
+        assert result.status == WARN
+        assert "shared@example.com" in result.detail
+        assert "alice" in result.detail and "bob" in result.detail
+        assert "carol" not in result.detail
+        assert result.remedy
+
+    def test_skips_without_a_database(self, make_config, tmp_path):
+        [result] = self._run(make_config(db_path=tmp_path / "absent.db"))
+        assert result.status == SKIP
+        assert not (tmp_path / "absent.db").exists()
