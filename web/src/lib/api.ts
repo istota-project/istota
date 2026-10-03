@@ -1652,6 +1652,10 @@ export async function monarchLogin(
 // --- Phase 6: profile + resources ---
 
 export interface UserProfile {
+  // Read-only: fields the deployment re-writes on every converge. The PUT
+  // refuses an edit to one (409 `managed_by_provisioning`), so the settings
+  // page renders them disabled.
+  managed?: string[];
   user_id: string;
   display_name: string;
   timezone: string;

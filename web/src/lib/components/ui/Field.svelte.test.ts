@@ -40,6 +40,11 @@ describe('Field', () => {
       expect(await screen.findByText('Per hour, before tax')).toBeInTheDocument();
     });
 
+    it('renders a badge beside the label, visible rather than behind a trigger', () => {
+      render(Field, { label: 'Email', badge: 'Set by your administrator', children: input() });
+      expect(screen.getByText('Set by your administrator')).toBeInTheDocument();
+    });
+
     it('shows no hint trigger when there is no hint', () => {
       render(Field, { label: 'Rate', children: input() });
       expect(screen.queryByLabelText('About Rate')).not.toBeInTheDocument();

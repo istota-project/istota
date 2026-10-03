@@ -8,6 +8,7 @@
   import { theme, setTheme, type Theme } from '$lib/stores/theme';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
   import { parseListInput, profileListString } from '$lib/settings/listInput';
+  import { isManaged, managedBadge } from '$lib/settings/managed';
 
   const settings = getUserSettings();
   const profile = $derived(settings.profile);
@@ -118,9 +119,13 @@
     </SettingsCard>
 
     <SettingsCard title="Preferences" description="How Istota behaves for your account.">
-      <SettingsField label="Trusted email senders (fnmatch patterns, comma-separated)">
+      <SettingsField
+        label="Trusted email senders (fnmatch patterns, comma-separated)"
+        badge={managedBadge(profile, 'trusted_email_senders')}
+      >
         <input
           type="text"
+          disabled={isManaged(profile, 'trusted_email_senders')}
           value={profileListString(profile.trusted_email_senders)}
           oninput={(e) => {
             if (profile)
@@ -132,9 +137,11 @@
       </SettingsField>
       <SettingsField
         label="Quiet email senders (filed silently — no task; fnmatch patterns, comma-separated)"
+        badge={managedBadge(profile, 'quiet_email_senders')}
       >
         <input
           type="text"
+          disabled={isManaged(profile, 'quiet_email_senders')}
           value={profileListString(profile.quiet_email_senders)}
           oninput={(e) => {
             if (profile)
@@ -144,9 +151,13 @@
           }}
         />
       </SettingsField>
-      <SettingsField label="Disabled skills (comma-separated)">
+      <SettingsField
+        label="Disabled skills (comma-separated)"
+        badge={managedBadge(profile, 'disabled_skills')}
+      >
         <input
           type="text"
+          disabled={isManaged(profile, 'disabled_skills')}
           value={profileListString(profile.disabled_skills)}
           oninput={(e) => {
             if (profile)
@@ -157,12 +168,17 @@
       {#if settings.allModules.length > 0}
         <!-- labelled={false}: one implicit <label> would claim the first
              checkbox and leave the rest of them unlabelled. -->
-        <Field label="Disabled modules" labelled={false}>
+        <Field
+          label="Disabled modules"
+          labelled={false}
+          badge={managedBadge(profile, 'disabled_modules')}
+        >
           <div class="module-toggles">
             {#each settings.allModules as m (m)}
               <label class="module-chip">
                 <input
                   type="checkbox"
+                  disabled={isManaged(profile, 'disabled_modules')}
                   checked={(profile.disabled_modules || []).includes(m)}
                   onchange={() => toggleDisabledModule(m)}
                 />
@@ -178,6 +194,7 @@
       {/if}
       <SettingsField
         label="Email from outside, in chat"
+        badge={managedBadge(profile, 'external_turn_display')}
         hint="How much of a message that arrived from an external correspondent is shown inline in the chat transcript. The turn itself always appears — this decides how much of its text comes with it."
       >
         <Select
@@ -185,6 +202,7 @@
           options={EXTERNAL_TURN_DISPLAY_OPTIONS}
           ariaLabel="External email display"
           fullWidth
+          disabled={isManaged(profile, 'external_turn_display')}
           onValueChange={(v) => {
             if (profile) profile.external_turn_display = normalizeExternalTurnDisplay(v);
           }}

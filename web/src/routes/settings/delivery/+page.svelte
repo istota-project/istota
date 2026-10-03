@@ -13,6 +13,7 @@
   import { Select, type SelectOption } from '$lib/components/ui';
   import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
+  import { isManaged, managedBadge } from '$lib/settings/managed';
 
   const settings = getUserSettings();
   const profile = $derived(settings.profile);
@@ -199,6 +200,8 @@
       <SettingsField
         labelled={false}
         label="Default delivery destination"
+        badge={managedBadge(profile, 'default_destination') ??
+          managedBadge(profile, 'default_room')}
         hint="Which transport your results and notifications go out on, and — on the two transports that have rooms — which room a delivery that names none of its own lands in. Leave the room automatic and the oldest room you are alone in is used, which changes if you archive that room."
       >
         <div class="route-row">
@@ -207,6 +210,7 @@
             options={destinationOptions(profile.default_destination || 'talk')}
             ariaLabel="Default delivery destination"
             fullWidth
+            disabled={isManaged(profile, 'default_destination')}
             onValueChange={setDestination}
           />
           <!-- The same shape as the alert and log rows: the room picker opens
@@ -226,6 +230,7 @@
               options={defaultRoomOpts()}
               ariaLabel="Default room"
               fullWidth
+              disabled={isManaged(profile, 'default_room')}
               onValueChange={(v) => {
                 if (profile) profile.default_room = v || '';
               }}
@@ -256,6 +261,7 @@
       <SettingsField
         labelled={false}
         label="Send alerts to"
+        badge={managedBadge(profile, 'routing')}
         hint="Optional. Route alerts (heartbeat failures, security and policy notices) to a louder or separate channel, e.g. ntfy for push. 'talk' and 'web' both deliver into a room, which you can pick beside them. Leave on (default) to use the default destination."
       >
         <div class="route-row">
@@ -264,6 +270,7 @@
             options={routeOpts(routeSurface(routeDescriptor('alert')))}
             ariaLabel="Alert delivery destination"
             fullWidth
+            disabled={isManaged(profile, 'routing')}
             onValueChange={(v) => setRouteSurface('alert', routeDescriptor('alert'), v)}
           />
           {#if hasRoom(routeDescriptor('alert'))}
@@ -272,6 +279,7 @@
               options={roomOptionsFor(routeDescriptor('alert'), 'Alerts channel (default)')}
               ariaLabel="Alert delivery room"
               fullWidth
+              disabled={isManaged(profile, 'routing')}
               onValueChange={(v) => setRouteRoom('alert', routeDescriptor('alert'), v)}
             />
           {/if}
@@ -287,6 +295,7 @@
       <SettingsField
         labelled={false}
         label="Send execution log to"
+        badge={managedBadge(profile, 'routing')}
         hint="Optional. The verbose per-task execution log — every tool call plus a final summary. 'talk' delivers into a conversation, which you can pick beside it; email and ntfy get a single final summary. Web chat is not offered: it already shows each task's tool calls in the turn itself. (off) disables it."
       >
         <div class="route-row">
@@ -299,6 +308,7 @@
             })}
             ariaLabel="Execution log destination"
             fullWidth
+            disabled={isManaged(profile, 'routing')}
             onValueChange={(v) => setRouteSurface('log', logRouteValue(), v)}
           />
           {#if hasRoom(logRouteValue())}
@@ -307,6 +317,7 @@
               options={roomOptionsFor(logRouteValue(), 'Logs channel (default)')}
               ariaLabel="Execution log room"
               fullWidth
+              disabled={isManaged(profile, 'routing')}
               onValueChange={(v) => setRouteRoom('log', logRouteValue(), v)}
             />
           {/if}
