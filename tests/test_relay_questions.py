@@ -435,7 +435,7 @@ def test_shared_command_cannot_approve_private_relay(setup):
         shared = db.create_web_chat_room(conn, 'alice', 'Shared')
         db.add_room_member(conn, shared.token, 'bob')
         ctx = CommandContext(config, conn, 'alice', shared.token, str(ident), surface='web')
-        assert 'private conversation' in asyncio.run(cmd_confirm(ctx))
+        assert 'Use your private chat with me' in asyncio.run(cmd_confirm(ctx))
     asyncio.run(requests.drain_requests(config))
     assert not sent
 

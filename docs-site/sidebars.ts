@@ -40,7 +40,6 @@ const sidebars: SidebarsConfig = {
         'features/memory',
         'features/groups',
         'features/shared-rooms',
-        'features/side-rooms',
         'features/room-veto',
         'features/briefings',
         'features/scheduling',

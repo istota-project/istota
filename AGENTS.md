@@ -90,7 +90,8 @@ src/istota/
 │   ├── scopes.py         # The withheld-scope set every reach seam reads, the ambient-memory rule, and a task's resolved group set → sandbox.md
 │   ├── policy.py         # Per-room host, guest_reply, audience class and readers; who may change a shared room → transport.md
 │   ├── veto.py           # `!<bot> off|on`, the one-time announcement, and the room-notices queue → transport.md
-│   ├── side_rooms.py     # A member's private room beside a shared one: whispers, held posts, guest proposals, side answers → relay.md
+│   ├── private_replies.py  # What a shared room has for one member, in their own private room: resolver, delivery, linking, whispers, held posts, guest proposals, My notes → transport.md
+│   ├── lookup.py         # Finding a room a person named, among their own rooms → transport.md
 │   ├── surfaces.py       # What role each surface plays in the room model, in one table → leaf-modules.md
 │   └── provision.py      # Default Talk rooms (general/logs/alerts) for a user → leaf-modules.md
 ├── relay/                # Relay questions between users: relays, destinations, requests (the `whatsapp_skill_requests` table) → relay.md
@@ -106,6 +107,7 @@ src/istota/
 │   ├── git_hardening.py  # The `-c` overrides that stop a repository's own config running a program → sandbox.md
 │   ├── git_remote_scrub.py  # Strips credentials out of the git configs under `developer.repos_dir` → sandbox.md
 │   ├── user_scope.py     # Scoping a user id under a root, in one place → sandbox.md
+│   ├── attachment_source.py  # Where the daemon may read an inbound attachment from, opened with no link followed → sandbox.md
 │   ├── host_paths.py     # Host-path allowlist for the skill CLIs that take one → sandbox.md
 │   ├── cgroup.py         # A cgroup v2 group per task: memory.max, pids.max, cpu.max → sandbox.md
 │   ├── shell_exec.py     # How a command string becomes a shell argv, with `pipefail` on → sandbox.md

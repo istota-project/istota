@@ -165,8 +165,8 @@ def is_vetoed_ref(conn, surface: str, surface_ref: str) -> bool:
 def task_room_vetoed(conn, task) -> bool:
     """Whether the room a task's answer would land in has been switched off.
 
-    A side room is the member's own and is never off; its parent being off
-    does not silence it.
+    A member's private room is never off; a shared room it is linked to being
+    off does not silence it.
     """
     token = getattr(task, "conversation_token", None)
     if not token:
@@ -208,14 +208,14 @@ def apply(
 ) -> VetoOutcome | None:
     """Apply ``!<bot> off|on`` from ``author``, on the caller's connection.
 
-    None when it is not a veto here: no such room, a side room, a bot author,
+    None when it is not a veto here: no such room, a bot author,
     or a room only one human reads (D8 is about the people who did not choose
     the bot, and a private room has none). The caller then treats the text as
     it would any other. Writes the author's participant row, as recording
     their turn would have, so the vetoer is on record as present.
     """
     room = db.get_room(conn, room_token)
-    if room is None or room.side_of or verb not in (OFF, ON):
+    if room is None or verb not in (OFF, ON):
         return None
     kind = participants.classify(conn, config, room_token, author)
     if kind == participants.AGENT:
@@ -349,7 +349,7 @@ def needs_announcement(conn, room_token: str) -> bool:
     operator wants one, is the footer on every mail.
     """
     room = db.get_room(conn, room_token)
-    if room is None or room.archived or room.side_of:
+    if room is None or room.archived:
         return False
     if db.get_room_binding(conn, room_token, "email") is not None:
         return False
@@ -467,7 +467,7 @@ def _claim_announcements(config, limit: int) -> list[dict]:
             "JOIN rooms r ON r.token = p.room_token "
             "LEFT JOIN room_policy rp ON rp.room_token = p.room_token "
             "WHERE p.kind = 'guest' AND p.left_at IS NULL AND NOT r.archived "
-            "AND r.side_of IS NULL AND (rp.room_token IS NULL OR "
+            "AND (rp.room_token IS NULL OR "
             "(rp.announced_at IS NULL AND rp.vetoed_at IS NULL "
             " AND rp.host_user_id IS NOT NULL)) "
             "AND NOT EXISTS (SELECT 1 FROM room_bindings b WHERE "

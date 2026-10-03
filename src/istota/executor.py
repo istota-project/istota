@@ -5,7 +5,6 @@ import errno
 import json
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -60,6 +59,7 @@ from .storage import (
     read_channel_memory,
     read_dated_memories,
     read_group_memory,
+    read_room_notes,
     read_user_config_file,
     read_user_memory_v2,
 )
@@ -89,7 +89,8 @@ from .image_attachments import (
     render_ocr_context,
 )
 from istota.sandbox.shell_exec import pipefail_env
-from istota.sandbox.host_paths import path_under_roots, workspace_roots
+from istota.sandbox.attachment_source import copy_fd, open_attachment, write_copy
+from istota.sandbox.host_paths import workspace_roots
 from istota.sandbox.user_scope import is_within, paths_overlap, scoped_user_dir
 from .skills._group_access import GROUP_MEMORY_LABEL
 from istota.lib.untrusted import frame_untrusted
@@ -236,26 +237,32 @@ def _audio_in_reach(
     user_id: str | None,
     mount_path: "str | Path | None",
     deferred_dir: "str | Path | None",
+    temp_dir: "str | Path | None" = None,
+    control_dir: "str | Path | None" = None,
 ) -> str | None:
     """`audio_path`, or a copy of it the child will be allowed to open.
 
     The transcription child is a skill CLI and resolves its path argument
-    against the allowlist its own environment names (ISSUE-447). Three of the
-    four shapes a Talk attachment arrives in are outside that allowlist, and
-    all three are shipped: `download_talk_attachments` falls back to
+    against the allowlist its own environment names (ISSUE-447). Two of the
+    shapes a Talk attachment arrives in are outside that allowlist, and both
+    are shipped: `download_talk_attachments` falls back to
     `/mnt/nc-data/<user>/files/Talk/<name>` when the bot's own `Talk/` view
     does not hold the file (Nextcloud keeps a shared file in the *sender's*
-    data dir), it falls back again to the bare relative `Talk/<name>` when
-    neither resolves, and the rclone branch copies to `config.temp_dir`
-    rather than to the per-user directory below it. Only `{mount}/Talk/<name>`
-    is in reach as it stands.
+    data dir), and the rclone branch copies to `config.temp_dir` rather than
+    to the per-user directory below it. Those two, the WhatsApp and email
+    copies kept in `temp_dir` when an inbox upload fails, and a restricted
+    task's own `{control_dir}/room-attachments` copy are copied into the task's
+    own temp dir, which is a root because the caller passes it as
+    `ISTOTA_DEFERRED_DIR`. `cleanup_old_temp_files` owns the copy afterwards.
 
-    So the file is copied into the task's own temp dir, which is a root
-    because the caller passes it as `ISTOTA_DEFERRED_DIR` — the same answer
-    `prepare_image_attachments` already gives for an out-of-roots image, and
-    for the same reason: the daemon can read the bytes, and the boundary is
-    about what the *child* may name, not about what the daemon may hand it.
-    `cleanup_old_temp_files` owns the copy afterwards.
+    **Nothing else is copied, and no link is followed** (ISSUE-610). The
+    workspace and the temp dir are bound read-write into the user's sandbox,
+    so a task can turn an inbox file into a symlink, and this copy used to
+    deliver whatever it pointed at back into the sandbox.
+    `sandbox.attachment_source` decides where a source may be and opens it
+    with `O_NOFOLLOW` at every component; the copy is made from that fd, and
+    the landing directory is opened the same way since it is model-writable
+    too. A refusal is None, which the caller logs by basename.
 
     Containment is asked of `skill_host_paths`, never re-derived here: a
     second copy of that rule is the defect ISSUE-447 exists to remove.
@@ -265,11 +272,8 @@ def _audio_in_reach(
     this function was told nothing to scope against, so the judgement belongs
     to the child, which refuses and says why; deciding here would turn a
     caller's silence into a skip with no spawn and no message from the one
-    component that knows. None is reserved for the case where there *are*
-    roots, the path is outside them, and there is nowhere in reach to put a
-    copy.
+    component that knows.
     """
-    source = Path(audio_path)
     roots = workspace_roots(
         mount=mount_path,
         user_id=user_id or "",
@@ -278,26 +282,28 @@ def _audio_in_reach(
     )
     if not roots:
         return audio_path
-    try:
-        resolved = source.resolve()
-    except OSError:
+    opened = open_attachment(
+        audio_path, roots=roots, temp_dir=temp_dir,
+        extra=[control_dir] if control_dir else (),
+    )
+    if opened is None:
         return None
-    if path_under_roots(resolved, roots):
-        return audio_path
-    if not deferred_dir:
-        return None
+    fd, source = opened
     try:
-        landing = Path(deferred_dir) / "transcribe"
-        landing.mkdir(parents=True, exist_ok=True)
+        if source.in_roots:
+            return audio_path
+        if not deferred_dir:
+            return None
         # The leaf is the daemon's to choose, so a sender-supplied name cannot
         # traverse out of the directory; the task id is not in scope here, so
         # the source's own inode keeps two attachments of one name apart.
-        target = landing / f"{resolved.stat().st_ino}-{Path(audio_path).name}"
-        shutil.copyfile(resolved, target)
-    except OSError as e:
-        logger.warning(
-            "Could not stage %s for transcription: %s", Path(audio_path).name, e,
-        )
+        name = f"{os.fstat(fd).st_ino}-{source.parts[-1]}"
+        target = write_copy(fd, Path(deferred_dir), "transcribe", name)
+    except OSError:
+        target = None
+    finally:
+        os.close(fd)
+    if target is None:
         return None
     logger.debug("Staged %s for transcription at %s", audio_path, target)
     return str(target)
@@ -311,11 +317,16 @@ def _pre_transcribe_attachments(
     user_id: str | None = None,
     mount_path: "str | Path | None" = None,
     deferred_dir: "str | Path | None" = None,
+    temp_dir: "str | Path | None" = None,
+    control_dir: "str | Path | None" = None,
+    transcribed: list[str] | None = None,
 ) -> str:
     """Pre-transcribe audio attachments so skill selection sees real text.
 
     Returns an enriched prompt with transcribed text, or the original prompt
-    if no audio attachments or transcription fails.
+    if no audio attachments or transcription fails. Each attachment that
+    produced a non-empty transcript is appended to `transcribed`, as given,
+    so the scheduler can delete exactly those inbox copies (ISSUE-611).
 
     The transcript is *appended* to whatever the sender typed rather than
     replacing it: a voice memo can arrive alongside a written message ("have a
@@ -350,8 +361,8 @@ def _pre_transcribe_attachments(
     carries none of those variables, so the identity is passed explicitly, or
     the child refuses every path and the failure disappears into the debug
     line below. `_audio_in_reach` is the other half: the identity says who is
-    asking, and three of the four shapes a Talk attachment arrives in are
-    still outside every root it names.
+    asking, and two of the shapes a Talk attachment arrives in are still
+    outside every root it names.
     """
     if not attachments:
         return prompt
@@ -386,6 +397,8 @@ def _pre_transcribe_attachments(
                 user_id=user_id,
                 mount_path=mount_path,
                 deferred_dir=deferred_dir,
+                temp_dir=temp_dir,
+                control_dir=control_dir,
             )
             if in_reach is None:
                 # Above debug, deliberately: a refusal the child would report
@@ -394,7 +407,8 @@ def _pre_transcribe_attachments(
                 # merely shorter than it could have been.
                 logger.warning(
                     "Audio attachment %s is outside the roots the transcription "
-                    "child can open and could not be staged; skipping it",
+                    "child can open, is reached through a link, or could not be "
+                    "staged; skipping it",
                     Path(audio_path).name,
                 )
                 continue
@@ -408,6 +422,8 @@ def _pre_transcribe_attachments(
             if result.get("status") == "ok" and result.get("text", "").strip():
                 text = result["text"].strip()
                 transcribed_parts.append(text)
+                if transcribed is not None:
+                    transcribed.append(audio_path)
                 logger.debug(
                     "Pre-transcribed %s: %s",
                     Path(audio_path).name,
@@ -479,13 +495,18 @@ def image_bind_roots(
     the roots here is what lets `prepare_image_attachments` copy such a file in
     even when it needs no resize and no conversion.
 
+    The list is also where a source may be read from at all
+    (`sandbox.attachment_source`, ISSUE-610): an image under one of these roots
+    is opened with no link followed below it, and one under none is accepted
+    only in a Talk fallback shape.
+
     `control_dir` is where the prepared renditions are *written*, and it is in
-    this list to keep an invariant rather than to decide a copy: `_within_binds`
-    tests the source, so nothing today reaches it. The output directory has
-    always been inside `bind_roots` — it used to be, via `user_temp_dir` — and a
-    destination outside the roots the same call is told about is the shape of a
-    later copy loop or a second-pass rendition landing somewhere unreadable.
-    `user_temp_dir` stays: source attachments still arrive there.
+    this list to keep an invariant rather than to decide a copy. The output
+    directory has always been inside `bind_roots` — it used to be, via
+    `user_temp_dir` — and a destination outside the roots the same call is told
+    about is the shape of a later copy loop or a second-pass rendition landing
+    somewhere unreadable. `user_temp_dir` stays: source attachments still
+    arrive there.
 
     Resolved, because `_bind` resolves its source and uses the *resolved* path
     as the in-namespace destination: on a deployment where `temp_dir` sits
@@ -606,8 +627,8 @@ def stage_restricted_attachments(
     under ``{mount}/Users/{user_id}``: the scheduler maps an email or WhatsApp
     inbox attachment there, and that tree is not bound once ``files`` is
     withheld, so without the copy the prompt would name a path the sandbox
-    does not have. Anything else is left as given. A symlink, or a path
-    resolving outside those roots, is not copied.
+    does not have. Anything else is left as given, and so is a path reached
+    through a link at any component (`sandbox.attachment_source`).
 
     ``dest_dir`` is under the task's control directory, which no task can
     write: the daemon writes here, and a destination the model could reach
@@ -617,29 +638,25 @@ def stage_restricted_attachments(
     mount = config.workspace_path
     if not attachments or not mount:
         return attachments
-    try:
-        roots = [(Path(mount) / "Talk").resolve()]
-        if files_withheld:
-            own = scoped_user_dir(Path(mount) / "Users", user_id)
-            if own is not None:
-                roots.append(own.resolve())
-    except OSError:
-        return attachments
+    roots = [Path(mount) / "Talk"]
+    if files_withheld:
+        own = scoped_user_dir(Path(mount) / "Users", user_id)
+        if own is not None:
+            roots.append(own)
     staged: list[str] = []
     used: set[str] = set()
     for raw in attachments:
-        source = Path(raw)
-        try:
-            resolved = source.resolve()
-            inside = any(resolved.is_relative_to(root) for root in roots)
-            usable = inside and not source.is_symlink() and resolved.is_file()
-        except (OSError, ValueError):
-            usable = False
-        if not usable:
+        # Opened with no link followed below the root, and copied from that
+        # fd: the user's other tasks write `{mount}/Users/{user_id}`, so a
+        # resolve-then-open is a race they can win (ISSUE-610).
+        opened = open_attachment(raw, roots=roots)
+        if opened is None:
             staged.append(raw)
             continue
-        name = resolved.name
-        stem, suffix, n = resolved.stem, resolved.suffix, 1
+        src_fd, source = opened
+        leaf = Path(source.parts[-1])
+        name = leaf.name
+        stem, suffix, n = leaf.stem, leaf.suffix, 1
         while name in used:
             n += 1
             name = f"{stem}-{n}{suffix}"
@@ -649,13 +666,17 @@ def stage_restricted_attachments(
             dest_dir.mkdir(mode=0o700, exist_ok=True)
             dest.unlink(missing_ok=True)  # a retry's own earlier copy
             fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(fd, "wb") as out, open(resolved, "rb") as src:
-                shutil.copyfileobj(src, out)
+            try:
+                copy_fd(src_fd, fd)
+            finally:
+                os.close(fd)
         except OSError as exc:
             logger.warning("could not stage attachment %s for a restricted task: %s",
-                           resolved.name, exc)
+                           leaf.name, exc)
             staged.append(raw)
             continue
+        finally:
+            os.close(src_fd)
         staged.append(str(dest))
     return staged
 
@@ -3907,7 +3928,7 @@ def build_allowed_tools(
     tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
     if emissary:
         # A guest's turn takes no outbound action beyond its reply (multiplayer
-        # D2), and a query or a URL is one: the host's backstage notes are in
+        # D2), and a query or a URL is one: the host's notes about the room may be in
         # its prompt. Native builds only what this list names; a CLI brain keeps
         # its own web tools behind `--unshare-net` and the CONNECT allowlist.
         return tools
@@ -5075,9 +5096,9 @@ def _front_stage_cutoff(
 
     Every reader here that puts the room's own transcript in front of the
     model takes it: the task answers into the room, in front of whoever reads
-    it now, so it may draw only on what all of them were present for. A side
-    room's view of its parent is `side_rooms.parent_context`, which reads the
-    parent whole and does not come through here.
+    it now, so it may draw only on what all of them were present for. A linked
+    private turn's view of a shared room is `private_replies.linked_context`,
+    which reads the room whole and does not come through here.
     """
     if not task.conversation_token:
         return db.AudienceCutoff()
@@ -5990,37 +6011,37 @@ def _header_scalar(value: object) -> str:
     return _one_line(str(value or "")).strip()[:_ROOM_SCALAR_MAX_CHARS]
 
 
-def _side_room_prompt(
+def _linked_room_prompt(
     config: Config, task: "db.Task", conn, display_user_id: str, *,
     post_cli_available: bool,
 ) -> tuple[str, str]:
-    """``(system line, user-half block)`` for a task in a side room, else ``("", "")``.
+    """``(system line, user-half block)`` for a linked turn (ISSUE-608), else ``("", "")``.
 
-    The line names the parent by token only, for the reason
+    A linked turn replies to a message about a shared room, in its member's
+    own private room. The line names that room by token only, for the reason
     `room_identity_line` gives for leaving a room's name out of the system
-    half. Opens its own connection when handed none, but never on a database
-    path that does not exist, since opening one would create it. Never raises.
+    half; its transcript goes in the user half, fenced. A link that no longer
+    holds (room gone, member left) gives an ordinary private turn. Never
+    raises, and never opens a database path that does not exist.
     """
+    if not getattr(task, "about_room_token", None):
+        return "", ""
     try:
-        from istota.rooms.side_rooms import parent_context, task_side_room
-
-        def _read(c):
-            side = task_side_room(c, task)
-            return side, (parent_context(c, config, task) if side is not None else "")
+        from istota.rooms.private_replies import linked_context
 
         with db.get_db_if_present(config.db_path, conn) as c:
             if c is None:
                 return "", ""
-            side, block = _read(c)
+            parent, block = linked_context(c, config, task)
     except Exception as exc:
-        logger.warning("side room prompt for task %s failed: %s", task.id, exc)
+        logger.warning("linked room prompt for task %s failed: %s", task.id, exc)
         return "", ""
-    if side is None:
+    if parent is None:
         return "", ""
     line = (
-        f"\nSide room: this is {display_user_id}'s private side room of room "
-        f"{_header_scalar(side.side_of)}. Only they read it, and nothing you "
-        "write here reaches that room."
+        f"\nLinked room: this turn replies to a message about room "
+        f"{_header_scalar(parent)}. Only {display_user_id} reads this "
+        "conversation; nothing you write here reaches that room."
     )
     if post_cli_available:
         line += (
@@ -6030,33 +6051,33 @@ def _side_room_prompt(
     return line, block
 
 
-def _backstage_prompt(config: Config, task: "db.Task", conn) -> str:
-    """The principal's side-room notes, for a task in a shared room (D4 item 4).
+def _my_notes_prompt(config: Config, task: "db.Task", conn) -> str:
+    """The principal's own notes about a shared room, for a task in it (ISSUE-608).
 
-    A shared room's `CHANNEL.md` is front-stage memory, read by everyone in
-    the room. Backstage instructions ("don't bring up the house sale") live in
-    the principal's side room, and a task in the room reads them only when that
-    principal is the speaker or the host a guest's turn runs as
-    (`side_rooms.backstage_room`). User-half material; empty everywhere else,
-    so no other prompt changes. Never raises.
+    A shared room's `CHANNEL.md` is read by everyone in the room. A member's
+    private notes about it ("don't bring up the house sale") are a file in
+    their own workspace, `config/rooms/<token>.md`, read here only when that
+    member is the speaker or the host a held guest's turn runs as
+    (`private_replies.my_notes_room`). User-half material, not fenced: the
+    principal's own words. Empty everywhere else. Never raises.
     """
     try:
-        from istota.rooms.side_rooms import backstage_room
+        from istota.rooms.private_replies import my_notes_room
 
         with db.get_db_if_present(config.db_path, conn) as c:
             if c is None:
                 return ""
-            side = backstage_room(c, task)
-        notes = read_channel_memory(config, side.token) if side is not None else None
+            token = my_notes_room(c, task)
+        notes = read_room_notes(config, task.user_id, token) if token else None
     except Exception as exc:
-        logger.warning("backstage notes for task %s failed: %s", task.id, exc)
+        logger.warning("my notes for task %s failed: %s", task.id, exc)
         return ""
     if not notes:
         return ""
     return (
-        "## Backstage notes (private)\n\n"
-        "From your principal's side room. Only they read these; the room does "
-        "not, so never quote them there.\n\n"
+        "## My notes about this room (private)\n\n"
+        "Written by your principal. Only they read these; the room does not, "
+        "so never quote them there.\n\n"
         f"{notes}"
     )
 
@@ -6222,17 +6243,18 @@ def _room_rule_line(guest_reply: str | None, *, registered: bool) -> str:
     are acting for X" into "I work for X here" and invents an approval rule
     (ISSUE-602). The guest clause follows the room's `guest_reply`, since a
     held room does put a guest's answer to the host first. An unregistered
-    group has no side room yet, so nothing is said about where a confirmation
-    goes.
+    group is not routed privately yet, so nothing is said about where a
+    confirmation goes.
     """
     member = "In this room each member's turn runs as that member, with their own persona and reach"
-    member += (", and a confirmation goes to the asker's own side room." if registered else ".")
+    member += (", and a confirmation goes to the asker's own private chat with the bot."
+               if registered else ".")
     if guest_reply == "off":
         guest = "A guest's message is recorded and not answered."
     elif guest_reply == "held":
         guest = ("A guest's turn runs as the host and can do nothing beyond the "
-                 "reply, which goes to the host's side room for approval before "
-                 "it is posted.")
+                 "reply, which goes to the host's private chat with the bot for "
+                 "approval before it is posted.")
     else:
         guest = "A guest's turn runs as the host and can do nothing beyond the reply."
     return (f"{member} {guest} Describe the room this way if asked; do not add "
@@ -6279,7 +6301,7 @@ def room_card(
         return ""
     try:
         from istota.rooms import policy as room_policy
-        from istota.rooms.side_rooms import canonical_token
+        from istota.rooms.private_replies import canonical_token
 
         def _read(c):
             token = canonical_token(c, task.conversation_token)
@@ -6366,22 +6388,24 @@ def room_card(
     if room_cli_available:
         if guest_turn:
             lines.append(
-                f"Anything else goes to '{principal}''s private side room with "
+                f"Anything else goes to '{principal}' privately with "
                 "`istota-skill room whisper`."
             )
         elif withheld_scopes:
             lines.append(
-                f"Anything only '{principal}' should see goes to their private "
-                "side room with `istota-skill room whisper`."
+                f"Anything only '{principal}' should see goes to them privately "
+                "with `istota-skill room whisper`."
             )
         else:
             lines.append(
-                f"Anything only '{principal}' should see goes to their private "
-                "side room with `istota-skill room whisper`, or "
+                f"Anything only '{principal}' should see goes to them privately "
+                "with `istota-skill room whisper`, or "
                 "`istota-skill room answer-privately` to answer their question "
-                "there instead; post to the room only as your reply."
+                "in their private chat instead; post to the room only as your reply."
             )
     lines.append("Room notes (CHANNEL.md) are read by everyone in this room.")
+    lines.append("A member's private notes about this room cannot be shown or edited "
+                 "from here; point them at their private chat with you.")
     return "".join(f"\n{line}" for line in lines)
 
 
@@ -7154,11 +7178,12 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
                 "`run ... -- sh -c '...'` rather than one `run` per command."
             )
 
-    # A side room (multiplayer D4): the header says which room it belongs to
-    # and that nothing written here reaches it; the parent's transcript goes in
-    # the user half, fenced, since every line of it is somebody else's text.
-    # Empty for every other task, so no other prompt changes.
-    side_room_line, side_context = _side_room_prompt(
+    # A linked turn (ISSUE-608): the header
+    # says which room it is about and that nothing written here reaches it;
+    # that room's transcript goes in the user half, fenced, since every line
+    # of it is somebody else's text. Empty for every other task, so no other
+    # prompt changes.
+    linked_room_line, linked_block = _linked_room_prompt(
         config, task, conn, display_user_id,
         post_cli_available=cli_skill_names is None or "room" in cli_skill_names,
     )
@@ -7185,7 +7210,7 @@ Today's date: {user_date_str}
 User timezone: {user_tz_str}
 Current UTC: {utc_now_str}
 Current task ID: {task.id}
-Conversation token: {display_token}{room_line}{side_room_line}{card}
+Conversation token: {display_token}{room_line}{linked_room_line}{card}
 Source: {display_source}
 Output target: {display_output_target}{per_user_email_line}
 {db_path_line}
@@ -7240,12 +7265,12 @@ You have access to:
         knowledge_facts_section,
         group_memory_section,
         channel_memory_section,
-        _backstage_prompt(config, task, conn),
+        _my_notes_prompt(config, task, conn),
         dated_memories_section,
         recalled_section,
         playbooks_section,
         context_section,
-        side_context,
+        linked_block,
         confirmation_section,
         relay_context,
     ]
@@ -7691,8 +7716,10 @@ def execute_task(
     # this function reads the mutated field any more — every consumer below
     # takes `effective_prompt` explicitly — so the implicit contract the
     # mutation used to carry is gone even though the assignment stays.
+    transcribed_audio: list[str] = []
     enriched_prompt = _pre_transcribe_attachments(
         task.attachments, task.prompt, cancel_check=_cancel_check,
+        transcribed=transcribed_audio,
         # The child is a skill CLI and scopes its path argument against these
         # (ISSUE-447). `config.workspace_path` is None on the mountless
         # shapes, where a web-chat upload lands under the per-user temp dir
@@ -7702,7 +7729,10 @@ def execute_task(
         user_id=task.user_id,
         mount_path=config.workspace_path,
         deferred_dir=user_temp_dir,
+        temp_dir=config.temp_dir,
+        control_dir=control_dir,
     )
+    task.transcribed_audio = tuple(transcribed_audio)
     if enriched_prompt != task.prompt:
         logger.info("Pre-transcribed audio for task %s, enriched prompt for skill selection", task.id)
         task.prompt = enriched_prompt
@@ -7727,6 +7757,7 @@ def execute_task(
             if effective_sandboxing(config)
             else None
         ),
+        temp_dir=config.temp_dir,
     )
     if image_prep.attachments is not task.attachments:
         # In memory only. Nothing writes this back, so a retry regenerates the

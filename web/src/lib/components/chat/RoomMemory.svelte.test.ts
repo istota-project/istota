@@ -10,7 +10,14 @@ const mocks = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => mocks);
 await fillApiDouble(mocks);
 
-const { getRoomMemory, saveRoomMemory, ChatMemoryConflictError, ChatMemoryBusyError } = mocks;
+const {
+  getRoomMemory,
+  saveRoomMemory,
+  getRoomNotes,
+  saveRoomNotes,
+  ChatMemoryConflictError,
+  ChatMemoryBusyError,
+} = mocks;
 
 import RoomMemory from './RoomMemory.svelte';
 
@@ -56,6 +63,8 @@ function buttonNamed(label: string): HTMLButtonElement {
 beforeEach(() => {
   getRoomMemory.mockReset();
   saveRoomMemory.mockReset();
+  getRoomNotes.mockReset();
+  saveRoomNotes.mockReset();
 });
 
 afterEach(cleanup);
@@ -182,13 +191,56 @@ describe('RoomMemory', () => {
   it('says so when the file is shared across a room', async () => {
     getRoomMemory.mockResolvedValue(loaded({ shared: true }));
     mount();
-    await waitFor(() => expect(document.body.textContent).toContain('This room is shared'));
+    await waitFor(() =>
+      expect(document.body.textContent).toContain('Everyone in this room can read and edit these.'),
+    );
   });
 
   it('a private room says nothing about sharing', async () => {
     getRoomMemory.mockResolvedValue(loaded());
     mount();
     await waitFor(() => expect(textarea().value).toContain('Answer briefly.'));
-    expect(document.body.textContent).not.toContain('This room is shared');
+    expect(document.body.textContent).not.toContain('Everyone in this room');
+  });
+});
+
+describe('RoomMemory kind="mine"', () => {
+  function notes(overrides: Record<string, unknown> = {}) {
+    return {
+      room_id: 1,
+      token: 'rm_family',
+      content: 'Do not mention the house sale.\n',
+      exists: true,
+      revision: 'rev-n',
+      ...overrides,
+    };
+  }
+
+  it('reads and saves through the notes endpoints, never the room memory', async () => {
+    getRoomNotes.mockResolvedValue(notes());
+    saveRoomNotes.mockResolvedValue({ status: 'ok', revision: 'rev-n2' });
+    mount({ kind: 'mine' });
+    await waitFor(() => expect(textarea().value).toContain('house sale'));
+    expect(getRoomNotes).toHaveBeenCalledWith(1);
+    expect(getRoomMemory).not.toHaveBeenCalled();
+
+    await fireEvent.input(textarea(), { target: { value: 'Avoid the house sale.' } });
+    await fireEvent.click(buttonNamed('Save'));
+    await waitFor(() =>
+      expect(saveRoomNotes).toHaveBeenCalledWith(1, 'Avoid the house sale.', 'rev-n'),
+    );
+    expect(saveRoomMemory).not.toHaveBeenCalled();
+  });
+
+  it('says only the user sees them and offers no template', async () => {
+    getRoomNotes.mockResolvedValue(notes({ content: '', exists: false }));
+    mount({ kind: 'mine' });
+    await waitFor(() => expect(document.body.textContent).toContain('Only you can see these.'));
+    expect(document.body.textContent).toContain('My notes');
+    expect(
+      [...document.querySelectorAll('button')].some(
+        (b) => b.textContent?.trim() === 'Start from template',
+      ),
+    ).toBe(false);
   });
 });

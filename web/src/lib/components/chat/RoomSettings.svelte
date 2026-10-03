@@ -46,7 +46,6 @@
   // without offering to change them; colour is per member and stays live.
   const lockedReason = $derived(room.policy?.settings_refusal ?? null);
   const locked = $derived(!!lockedReason);
-  const isSideRoom = $derived(!!room.side_of);
 
   // How a guest's turn is answered (D11). Only a shared room has a policy to
   // show, and only its host may change it.
@@ -433,24 +432,22 @@
     </div>
   {/if}
 
-  {#if !isSideRoom}
-    <div class="field">
-      <span>Members</span>
-      <RoomMembers
-        roomId={room.id}
-        {userId}
-        talkBound={onTalk}
-        phoneLabel={room.read_only && !room.phone_group ? phoneLabel : null}
-        onChanged={onMembersChanged}
-        {onLeft}
-      />
-    </div>
+  <div class="field">
+    <span>Members</span>
+    <RoomMembers
+      roomId={room.id}
+      {userId}
+      talkBound={onTalk}
+      phoneLabel={room.read_only && !room.phone_group ? phoneLabel : null}
+      onChanged={onMembersChanged}
+      {onLeft}
+    />
+  </div>
 
-    <div class="field">
-      <span>Group</span>
-      <RoomGroupLink roomId={room.id} />
-    </div>
-  {/if}
+  <div class="field">
+    <span>Group</span>
+    <RoomGroupLink roomId={room.id} />
+  </div>
 
   <div class="field">
     <span>Room token</span>

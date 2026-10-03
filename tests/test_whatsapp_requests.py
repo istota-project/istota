@@ -312,3 +312,99 @@ def test_new_profile_and_attempt_columns(tmp_path, path):
         assert conn.execute("SELECT relay_delivery FROM user_profiles").fetchone()[0] == ""
         assert tuple(conn.execute(
             "SELECT attempt_tool_calls, attempt_first_tool_relay FROM tasks WHERE id=1").fetchone()) == (0, 0)
+
+
+# ---------------------------------------------------------------------------
+# The room kinds (multiplayer D16): `_SKILL_REQUESTS_DDL` against schema.sql
+# ---------------------------------------------------------------------------
+
+_PRE_ROOM_KINDS_REQUESTS = """CREATE TABLE whatsapp_skill_requests (
+    id TEXT PRIMARY KEY,
+    requester_user_id TEXT NOT NULL,
+    origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+    request_key TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question')),
+    recipient_user_id TEXT NOT NULL,
+    relay_id TEXT UNIQUE,
+    text TEXT,
+    content_hash TEXT NOT NULL,
+    service_body TEXT,
+    service_hash TEXT NOT NULL,
+    template_body TEXT,
+    template_hash TEXT,
+    preview TEXT,
+    preview_digest TEXT,
+    provider TEXT NOT NULL,
+    binding_fingerprint TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('held','queued','sending','sent','uncertain','failed','cancelled','expired')),
+    approved_at TEXT,
+    approved_digest TEXT,
+    queue_deadline TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_at TEXT,
+    content_cleared_at TEXT,
+    error_code TEXT,
+    UNIQUE (requester_user_id, origin_task_id, request_key)
+)"""
+
+
+def _pre_room_kinds_db(tmp_path):
+    """A database whose request table predates the room kinds."""
+    old = tmp_path / "old-kinds.db"
+    db.init_db(old)
+    conn = sqlite3.connect(old)
+    try:
+        conn.execute("PRAGMA legacy_alter_table=ON")
+        conn.execute("DROP TABLE whatsapp_skill_requests")
+        conn.execute(_PRE_ROOM_KINDS_REQUESTS)
+        conn.execute("CREATE UNIQUE INDEX idx_whatsapp_request_held_task "
+                     "ON whatsapp_skill_requests(origin_task_id) WHERE state = 'held'")
+        conn.execute("CREATE INDEX idx_whatsapp_request_queue "
+                     "ON whatsapp_skill_requests(state, queue_deadline)")
+        conn.execute("INSERT INTO tasks (id,user_id,source_type,prompt) VALUES (1,'alice','web','x')")
+        conn.execute(
+            "INSERT INTO whatsapp_skill_requests (id,requester_user_id,origin_task_id,request_key,"
+            "kind,recipient_user_id,content_hash,service_body,service_hash,provider,"
+            "binding_fingerprint,state) VALUES ('r1','alice',1,'k','self_send','alice','h',"
+            "'body','sh','baileys','fp','sent')")
+        conn.commit()
+    finally:
+        conn.close()
+    return old
+
+
+def _request_shape(conn):
+    rows = conn.execute(
+        "SELECT type, name, sql FROM sqlite_master WHERE tbl_name='whatsapp_skill_requests' "
+        "AND sql IS NOT NULL ORDER BY type, name").fetchall()
+    out = []
+    for kind, name, sql in rows:
+        sql = re.sub(r"--[^\n]*", "", sql or "")
+        sql = sql.replace('"', "").replace(" IF NOT EXISTS", "")
+        sql = sql.replace("whatsapp_skill_requests_rebuild", "whatsapp_skill_requests")
+        sql = re.sub(r"\s+", " ", sql).replace("( ", "(").replace(" )", ")").strip()
+        out.append((kind, name, sql))
+    return out
+
+
+class TestTheRoomKindsMigration:
+    def test_an_upgraded_request_table_matches_a_fresh_one(self, tmp_path, path):
+        old = _pre_room_kinds_db(tmp_path)
+        db.init_db(old)
+        db.init_db(old)
+        with db.get_db(path) as a, db.get_db(old) as b:
+            cols_a = {r[1]: tuple(r)[2:5] for r in a.execute("PRAGMA table_info(whatsapp_skill_requests)")}
+            cols_b = {r[1]: tuple(r)[2:5] for r in b.execute("PRAGMA table_info(whatsapp_skill_requests)")}
+            assert cols_a == cols_b
+            assert _request_shape(a) == _request_shape(b)
+            # Rows survive the rebuild, and the widened CHECK takes the new kinds.
+            assert b.execute("SELECT state FROM whatsapp_skill_requests WHERE id='r1'").fetchone()[0] == "sent"
+            b.execute("UPDATE whatsapp_skill_requests SET kind='room_post' WHERE id='r1'")
+            b.execute("UPDATE whatsapp_skill_requests SET kind='side_whisper' WHERE id='r1'")
+            with pytest.raises(sqlite3.IntegrityError):
+                b.execute("UPDATE whatsapp_skill_requests SET kind='anything' WHERE id='r1'")
+            # The task-delete trigger still reaches the rebuilt table.
+            b.execute("DELETE FROM tasks WHERE id=1")
+            assert b.execute(
+                "SELECT origin_task_id FROM whatsapp_skill_requests WHERE id='r1'").fetchone()[0] is None

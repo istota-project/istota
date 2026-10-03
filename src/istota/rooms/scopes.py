@@ -122,9 +122,7 @@ def _members_own_schedule(
     a job row owned by its user; a briefing is only ever created by the
     scheduler from the user's own config.
 
-    Current membership is a ``room_members`` row and, where the user has any
-    principal participant row, a present one: Talk records a departure only
-    as ``left_at`` and never removes the member row.
+    Membership is `is_current_member`.
     """
     if task.source_type == "scheduled":
         if task.scheduled_job_id is None:
@@ -140,13 +138,23 @@ def _members_own_schedule(
             return False
     else:
         return False
-    if not db.is_room_member(conn, room_token, task.user_id):
+    return is_current_member(conn, room_token, task.user_id)
+
+
+def is_current_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
+    """Whether ``user_id`` is in ``room_token`` now, not only once.
+
+    A ``room_members`` row and, where the user has any principal participant
+    row, a present one: Talk records a departure only as ``left_at`` and never
+    removes the member row.
+    """
+    if not db.is_room_member(conn, room_token, user_id):
         return False
     present = conn.execute(
         "SELECT COUNT(*), COUNT(*) FILTER (WHERE left_at IS NULL) "
         "FROM room_participants WHERE room_token = ? AND user_id = ? "
         "AND kind = 'principal'",
-        (room_token, task.user_id),
+        (room_token, user_id),
     ).fetchone()
     return present[0] == 0 or present[1] > 0
 
@@ -200,8 +208,8 @@ def ambient_memory_off(conn: sqlite3.Connection | None, task: "db.Task") -> bool
 def canonical_token(conn, token: str | None) -> str | None:
     """The registry token a conversation token names, or None for no room.
 
-    The one copy: `side_rooms` re-exports it, and the memory skill CLI reaches
-    it here without importing `side_rooms`.
+    The one copy: `private_replies` re-exports it, and the memory skill CLI
+    reaches it here without importing `private_replies`.
     """
     if not token:
         return None

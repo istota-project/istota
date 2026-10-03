@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from istota import db
 from istota.config import (
     Config,
@@ -250,3 +252,263 @@ class TestLocalizeWorkspaceAttachments:
 
         assert got == [entry]
         assert "x.png" not in caplog.text
+
+
+class TestATranscribedWhatsAppVoiceNoteLeavesTheInbox:
+    """ISSUE-611: a WhatsApp voice note is deleted once it has done its job.
+
+    The executor reports which audio files produced a transcript on
+    `task.transcribed_audio`; the scheduler deletes those inbox copies after
+    the task completes, and only those. `fake_exec` stands in for the
+    executor's half, which `test_executor.py` pins on its own.
+    """
+
+    def _run(self, config, db_path, *, attachments, source_type="whatsapp",
+             transcribed=lambda paths: paths, success=True, during=None):
+        def fake_exec(task, config, user_resources, *, dry_run=False,
+                      event_writer=None, **kw):
+            if during is not None:
+                during(list(task.attachments or []))
+            task.transcribed_audio = tuple(transcribed(list(task.attachments or [])))
+            if task.transcribed_audio:
+                task.prompt = f"{task.prompt}\n\nTranscribed voice message: hello"
+            return (success, "ok" if success else "boom", None, None)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Process the attached file(s)",
+                user_id="alice", source_type=source_type,
+                attachments=attachments,
+            )
+        with patch("istota.scheduler.execute_task", side_effect=fake_exec), \
+                patch("istota.scheduler.asyncio.run", return_value=None):
+            process_one_task(config)
+        with db.get_db(db_path) as conn:
+            return db.get_task(conn, task_id)
+
+    def test_the_note_is_there_during_the_task_and_gone_after(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        note = _inbox_file(config.workspace_path, "alice", "whatsapp_abc.ogg")
+        seen = []
+
+        task = self._run(
+            config, db_path, attachments=["/Users/alice/inbox/whatsapp_abc.ogg"],
+            during=lambda paths: seen.append(all(os.path.isfile(p) for p in paths)),
+        )
+
+        assert seen == [True]
+        assert task.status == "completed"
+        assert not note.exists()
+
+    def test_a_note_with_no_transcript_is_kept(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        note = _inbox_file(config.workspace_path, "alice", "whatsapp_abc.ogg")
+
+        task = self._run(
+            config, db_path, attachments=["/Users/alice/inbox/whatsapp_abc.ogg"],
+            transcribed=lambda paths: [],
+        )
+
+        assert task.status == "completed"
+        assert note.exists()
+
+    def test_of_two_notes_only_the_transcribed_one_goes(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        ok = _inbox_file(config.workspace_path, "alice", "whatsapp_ok.ogg")
+        bad = _inbox_file(config.workspace_path, "alice", "whatsapp_bad.ogg")
+
+        self._run(
+            config, db_path,
+            attachments=[
+                "/Users/alice/inbox/whatsapp_ok.ogg",
+                "/Users/alice/inbox/whatsapp_bad.ogg",
+            ],
+            transcribed=lambda paths: [p for p in paths if "whatsapp_ok" in p],
+        )
+
+        assert not ok.exists()
+        assert bad.exists()
+
+    def test_a_reshuffled_attachment_list_does_not_shift_the_delete(self, db_path, tmp_path):
+        # The executor reassigns `task.attachments` in place (image renditions
+        # are inserted ahead of the rest); the match must be by value.
+        config = _config(db_path, tmp_path)
+        first = _inbox_file(config.workspace_path, "alice", "whatsapp_first.ogg")
+        second = _inbox_file(config.workspace_path, "alice", "whatsapp_second.ogg")
+
+        def fake_exec(task, config, user_resources, *, dry_run=False,
+                      event_writer=None, **kw):
+            seen = list(task.attachments or [])
+            task.attachments = ["/control/rendition.jpg"] + seen
+            task.transcribed_audio = (seen[0],)
+            return (True, "ok", None, None)
+
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="x", user_id="alice", source_type="whatsapp",
+                attachments=[
+                    "/Users/alice/inbox/whatsapp_first.ogg",
+                    "/Users/alice/inbox/whatsapp_second.ogg",
+                ],
+            )
+        with patch("istota.scheduler.execute_task", side_effect=fake_exec), \
+                patch("istota.scheduler.asyncio.run", return_value=None):
+            process_one_task(config)
+
+        assert not first.exists()
+        assert second.exists()
+
+    def test_a_failed_task_keeps_its_note(self, db_path, tmp_path):
+        # A retry re-transcribes from the file, so it has to still be there.
+        config = _config(db_path, tmp_path)
+        note = _inbox_file(config.workspace_path, "alice", "whatsapp_abc.ogg")
+
+        self._run(
+            config, db_path, attachments=["/Users/alice/inbox/whatsapp_abc.ogg"],
+            success=False,
+        )
+
+        assert note.exists()
+
+    def test_a_web_chat_memo_is_untouched(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        memo = config.workspace_path / "Users" / "alice" / "inbox" / "web-chat" / "memo.webm"
+        memo.parent.mkdir(parents=True)
+        memo.write_bytes(b"webm")
+
+        self._run(config, db_path, source_type="web", attachments=[str(memo)])
+
+        assert memo.exists()
+
+    def test_only_whatsapp_named_inbox_files_are_deleted(self, db_path, tmp_path):
+        # An email attachment in the inbox, even on a WhatsApp-sourced row,
+        # is not a voice note this feature owns.
+        config = _config(db_path, tmp_path)
+        other = _inbox_file(config.workspace_path, "alice", "123_voicemail.ogg")
+
+        self._run(config, db_path, attachments=["/Users/alice/inbox/123_voicemail.ogg"])
+
+        assert other.exists()
+
+    def test_a_note_already_gone_still_completes_with_a_warning(
+        self, db_path, tmp_path, caplog,
+    ):
+        # Gone between the re-localization and the unlink, so the delete
+        # itself is what fails.
+        from istota.skills import _loader
+
+        config = _config(db_path, tmp_path)
+        note = _inbox_file(config.workspace_path, "alice", "whatsapp_abc.ogg")
+        real_open = _loader.open_overlay_dir
+
+        def open_then_vanish(root, *parts):
+            note.unlink()
+            return real_open(root, *parts)
+
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler"), \
+                patch.object(_loader, "open_overlay_dir", side_effect=open_then_vanish):
+            task = self._run(
+                config, db_path, attachments=["/Users/alice/inbox/whatsapp_abc.ogg"],
+            )
+
+        assert task.status == "completed"
+        assert "Could not delete transcribed voice note 'whatsapp_abc.ogg'" in caplog.text
+
+    @pytest.mark.requires_dac
+    def test_an_undeletable_note_still_completes_with_a_warning(
+        self, db_path, tmp_path, caplog,
+    ):
+        config = _config(db_path, tmp_path)
+        note = _inbox_file(config.workspace_path, "alice", "whatsapp_abc.ogg")
+        note.parent.chmod(0o500)
+        try:
+            with caplog.at_level(logging.WARNING, logger="istota.scheduler"):
+                task = self._run(
+                    config, db_path, attachments=["/Users/alice/inbox/whatsapp_abc.ogg"],
+                )
+        finally:
+            note.parent.chmod(0o700)
+
+        assert task.status == "completed"
+        assert note.exists()
+        assert "whatsapp_abc.ogg" in caplog.text
+
+    def test_a_symlinked_inbox_is_never_deleted_through(self, db_path, tmp_path):
+        # The inbox is model-writable: swapped for a link to somewhere else
+        # after the re-localization matched, nothing there may be unlinked.
+        from istota import scheduler
+
+        config = _config(db_path, tmp_path)
+        _inbox_file(config.workspace_path, "alice", "whatsapp_abc.ogg")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        victim = elsewhere / "whatsapp_abc.ogg"
+        victim.write_bytes(b"keep me")
+        inbox = config.workspace_path / "Users" / "alice" / "inbox"
+        real_localize = scheduler.localize_workspace_attachments
+        calls = []
+
+        def localize_then_swap(*args, **kwargs):
+            got = real_localize(*args, **kwargs)
+            calls.append(got)
+            if len(calls) == 2:
+                os.rename(inbox, inbox.with_name("inbox.real"))
+                os.symlink(elsewhere, inbox)
+            return got
+
+        with patch.object(
+            scheduler, "localize_workspace_attachments", side_effect=localize_then_swap,
+        ):
+            self._run(
+                config, db_path, attachments=["/Users/alice/inbox/whatsapp_abc.ogg"],
+            )
+
+        assert len(calls) == 2
+        assert victim.exists()
+
+    def test_the_transcript_is_written_to_the_row_before_the_file_goes(
+        self, db_path, tmp_path,
+    ):
+        config = _config(db_path, tmp_path)
+        _inbox_file(config.workspace_path, "alice", "whatsapp_abc.ogg")
+
+        task = self._run(
+            config, db_path, attachments=["/Users/alice/inbox/whatsapp_abc.ogg"],
+        )
+
+        assert "Transcribed voice message: hello" in task.prompt
+
+    def test_a_raising_delete_does_not_fail_the_task(self, db_path, tmp_path, caplog):
+        config = _config(db_path, tmp_path)
+        _inbox_file(config.workspace_path, "alice", "whatsapp_abc.ogg")
+
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler"), patch(
+            "istota.scheduler.remove_transcribed_voice_notes",
+            side_effect=RuntimeError("boom"),
+        ):
+            task = self._run(
+                config, db_path, attachments=["/Users/alice/inbox/whatsapp_abc.ogg"],
+            )
+
+        assert task.status == "completed"
+        assert "Could not remove transcribed voice notes" in caplog.text
+
+    def test_a_dry_run_deletes_nothing(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        note = _inbox_file(config.workspace_path, "alice", "whatsapp_abc.ogg")
+
+        def fake_exec(task, config, user_resources, *, dry_run=False,
+                      event_writer=None, **kw):
+            task.transcribed_audio = tuple(task.attachments or [])
+            return (True, "ok", None, None)
+
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="x", user_id="alice", source_type="whatsapp",
+                attachments=["/Users/alice/inbox/whatsapp_abc.ogg"],
+            )
+        with patch("istota.scheduler.execute_task", side_effect=fake_exec), \
+                patch("istota.scheduler.asyncio.run", return_value=None):
+            process_one_task(config, dry_run=True)
+
+        assert note.exists()

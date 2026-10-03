@@ -778,13 +778,30 @@ def _confirmation_tokens(conn, token: str) -> list[str]:
 
 def record_whatsapp_turn(
     conn, config, user_id, text, *, record_only=False, external_id=None,
-    reply_to_content=None, attachments=None,
+    reply_to_content=None, attachments=None, quoted_message_id=None,
 ):
-    """Record a private accepted turn; groups keep their own inbound path."""
+    """Record a private accepted turn; groups keep their own inbound path.
+
+    ``quoted_message_id`` is the provider id of the message this one quotes.
+    Only a quote of a private reply (ISSUE-608) means anything here: it is
+    resolved to the tagged row it was sent from, which `record_inbound` then
+    links the turn through. A quote of anything else is ignored, as it always
+    was. The relay's quote match runs before this and keeps precedence.
+    """
+    from istota.rooms.private_replies import quoted_private_reply
+
+    surface_ref = whatsapp_conversation_token(user_id)
+    quoted = quoted_private_reply(
+        conn, user_id=user_id, quoted_id=quoted_message_id,
+        room_token=db.resolve_room_token(conn, "whatsapp", surface_ref),
+    ) if quoted_message_id else None
     return record_phone_turn(
-        conn, config, surface="whatsapp", surface_ref=whatsapp_conversation_token(user_id),
+        conn, config, surface="whatsapp", surface_ref=surface_ref,
         user_id=user_id, text=text, channel_name="WhatsApp", record_only=record_only,
-        external_id=external_id, reply_to_content=reply_to_content, attachments=attachments,
+        external_id=external_id,
+        reply_to_content=quoted[1] if quoted else reply_to_content,
+        reply_to_canonical_id=quoted[0] if quoted else None,
+        attachments=attachments,
     )
 
 
@@ -1151,6 +1168,7 @@ def _dispatch_inbound(
     turn = record_whatsapp_turn(
         conn, config, user_id, text or media_stand_in(event.media, attachments),
         external_id=event.message_id, attachments=attachments,
+        quoted_message_id=event.reply_to_message_id,
     )
     confirmations.cancel_for_conversation(conn, turn.room_token, user_id, by="whatsapp")
     return WhatsAppEventResult("task", user_id=user_id, task_id=turn.task_id)

@@ -25,7 +25,6 @@ EXIT_PARTIAL = 2
 # room. Task and scheduling columns may also contain non-room thread ids.
 REWRITE_COLUMNS: dict[tuple[str, str], str] = {
     ("rooms", "token"): "room_token",
-    ("rooms", "side_of"): "room_token",
     ("room_bindings", "room_token"): "room_token",
     ("room_members", "room_token"): "room_token",
     ("room_participants", "room_token"): "room_token",
@@ -37,10 +36,12 @@ REWRITE_COLUMNS: dict[tuple[str, str], str] = {
     ("room_epochs", "room_token"): "room_token",
     ("speech_gate_decisions", "room_token"): "room_token",
     ("messages", "room_token"): "room_token",
+    ("messages", "about_room_token"): "room_token",
     ("message_deletions", "room_token"): "room_token",
     ("web_chat_rooms", "token"): "room_token",
     ("web_chat_messages", "token"): "room_token",
     ("tasks", "conversation_token"): "room_token",
+    ("tasks", "about_room_token"): "room_token",
     ("briefing_configs", "conversation_token"): "room_token",
     ("scheduled_jobs", "conversation_token"): "room_token",
     ("channel_sleep_cycle_state", "conversation_token"): "room_token",
@@ -74,7 +75,7 @@ REWRITE_COLUMNS: dict[tuple[str, str], str] = {
     ("whatsapp_skill_requests", "origin"): "origin_json",
     ("whatsapp_skill_requests", "destination"): "destination_json",
     ("message_relays", "binding_fingerprint"): "destination_fingerprint",
-    # Includes side_whisper's side_rooms._fingerprint(side, parent), room_post
+    # Includes a whisper's private_replies._fingerprint(user, about), room_post
     # and linked relay destinations; phone binding fingerprints stay intact.
     ("whatsapp_skill_requests", "binding_fingerprint"): "destination_fingerprint",
 }
@@ -123,7 +124,7 @@ PRESERVE_COLUMNS: dict[tuple[str, str], str] = {
 
 
 _REFERENCE_NAMES = {
-    "surface_ref", "side_of", "default_room", "thread_id", "output_target",
+    "surface_ref", "about_room_token", "default_room", "thread_id", "output_target",
     "origin_target", "routing", "default_destination", "log_channel",
     "alerts_channel", "binding_fingerprint",
 }
@@ -237,7 +238,7 @@ def _json_object(value: str) -> dict:
 
 def _origin(value: dict, old: str, new: str) -> dict:
     result = dict(value)
-    for key in ("room_token", "parent"):
+    for key in ("room_token", "parent", "about"):
         if result.get(key) == old:
             result[key] = new
     if result.get("surface") == "web" and result.get("channel") == old:
@@ -270,9 +271,9 @@ def _translated(value: str, handler: str, old: str, new: str) -> str:
 
 
 def _destination_hash(destination: dict) -> str:
-    if destination.get("kind") == "side_room":
-        from istota.rooms.side_rooms import _fingerprint
-        return _fingerprint(destination["room_token"], destination["parent"])
+    if destination.get("kind") == "private_reply":
+        from istota.rooms.private_replies import _fingerprint
+        return _fingerprint(destination["user"], destination["about"])
     from istota.relay.destinations import destination_fingerprint
     return destination_fingerprint(destination)
 
@@ -306,9 +307,9 @@ def _rewrite_destinations(conn, old: str, new: str) -> None:
         ).fetchall()
         for row in rows:
             destination = _json_object(row["destination"])
-            if not any(destination.get(key) == old for key in ("room_token", "parent")):
+            if not any(destination.get(key) == old for key in ("room_token", "parent", "about")):
                 continue
-            if destination.get("kind") not in {"room", "side_room"}:
+            if destination.get("kind") not in {"room", "private_reply"}:
                 raise ValueError("unknown destination kind with a room reference")
             verified = _verified_destination(conn, destination, row["binding_fingerprint"])
             if "fingerprint" in destination and destination["fingerprint"] != row["binding_fingerprint"]:

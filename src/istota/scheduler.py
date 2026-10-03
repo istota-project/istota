@@ -30,6 +30,7 @@ from croniter import croniter
 # its own back into the package, so there is no cycle to avoid.
 from istota.maintenance import host_pressure as host_pressure_mod
 from istota.sandbox import cgroup as task_cgroup
+from istota.sandbox import attachment_source
 
 logger = logging.getLogger("istota.scheduler")
 # What a partial answer from an interrupted run is labelled with when it is
@@ -699,9 +700,17 @@ def _store_room_turn(conn, task, room_token: str | None, body: str) -> int | Non
         return None
     if db.get_room(conn, room_token) is None:
         return None
+    # A linked turn's answer, in its own room, carries the link (ISSUE-608):
+    # a reply to or quote of it links the next turn to the same shared room.
+    about = getattr(task, "about_room_token", None)
+    if about:
+        from istota.rooms.scopes import canonical_token
+        if canonical_token(conn, task.conversation_token) != room_token:
+            about = None
     return db.store_turn_message(
         conn, room_token, role="assistant", body=body,
         task_id=task.id, origin_surface=task.source_type,
+        about_room_token=about or None,
     )
 
 
@@ -932,7 +941,7 @@ def download_talk_attachments(config: Config, attachments: list[str]) -> list[st
                 else:
                     # File may be in a user's Talk folder (NC stores shared files
                     # in the sender's data dir). Check NC data dir if available.
-                    nc_data = Path("/mnt/nc-data")
+                    nc_data = attachment_source.NC_DATA_ROOT
                     found = False
                     if nc_data.is_dir():
                         filename = att.split("/", 1)[1] if "/" in att else att
@@ -997,8 +1006,9 @@ def localize_workspace_attachments(
     re-map a web upload's real path and warn about it.
 
     Checked here and read later by name, as a web upload is: a task of the
-    same user can swap the leaf for a symlink in between. Closing that means
-    an fd walk and a copy, for both surfaces at once.
+    same user can swap the leaf for a symlink in between. The executor's
+    readers do not trust this check: `sandbox.attachment_source` opens each
+    attachment with no link followed at any component (ISSUE-610).
     """
     root = config.workspace_root(user_id) if user_id else None
     if root is None:
@@ -1050,6 +1060,77 @@ def _localize_owner_file(
     except (OSError, ValueError, RuntimeError):
         return None
     return str(resolved)
+
+
+def remove_transcribed_voice_notes(
+    config: Config,
+    user_id: str,
+    row_attachments: list[str],
+    transcribed: "tuple[str, ...] | list[str]",
+) -> None:
+    """Delete the WhatsApp voice notes this completed task transcribed (ISSUE-611).
+
+    The caller writes the transcript into the task row first, since nothing
+    else persists it; after that the inbox copy has no further use and the
+    sender's phone keeps the original. Only a file that produced text is
+    deleted, so a note whose transcription failed, timed out, was cancelled or
+    was refused stays behind as the only trace of that failure.
+
+    `transcribed` names files the way the executor saw them, so the row's
+    attachments are localized again and matched by value. Not by position
+    against `task.attachments`: the executor reassigns that list in place
+    (image renditions, a restricted task's staged copies), and a shifted index
+    would delete a note that was never transcribed. A copy the executor made
+    matches nothing and is left alone. Only
+    ``/Users/<user_id>/inbox/whatsapp_*`` is eligible; a web-chat memo may be
+    the only copy there is.
+
+    The inbox is model-writable, so the delete is relative to an fd from
+    `open_overlay_dir` (no link followed at any component) and the leaf must
+    be a regular file. A failure is a warning and never fails the task.
+    """
+    from .skills._loader import open_overlay_dir  # noqa: PLC0415 - import cycle
+    from .transport.whatsapp.media import INBOX_NAME_PREFIX  # noqa: PLC0415
+
+    root = config.workspace_root(user_id) if user_id else None
+    if root is None or not transcribed:
+        return
+    local_attachments = localize_workspace_attachments(config, user_id, row_attachments)
+    row_for_local = dict(zip(local_attachments, row_attachments))
+    for local in transcribed:
+        row = row_for_local.get(local)
+        parts = owner_path_parts(row, user_id) if isinstance(row, str) else None
+        if (
+            not parts
+            or len(parts) != 2
+            or parts[0] != "inbox"
+            or not parts[1].startswith(f"{INBOX_NAME_PREFIX}_")
+        ):
+            continue
+        leaf = parts[1]
+        fd = open_overlay_dir(root, "inbox")
+        if fd is None:
+            logger.warning(
+                "Not deleting transcribed voice note %r for user %s: the inbox "
+                "is not a plain directory", leaf, user_id,
+            )
+            continue
+        try:
+            if not stat.S_ISREG(os.lstat(leaf, dir_fd=fd).st_mode):
+                logger.warning(
+                    "Not deleting transcribed voice note %r for user %s: not a "
+                    "regular file", leaf, user_id,
+                )
+                continue
+            os.unlink(leaf, dir_fd=fd)
+            logger.info("Deleted transcribed voice note %r for user %s", leaf, user_id)
+        except OSError as exc:
+            logger.warning(
+                "Could not delete transcribed voice note %r for user %s: %s",
+                leaf, user_id, exc.strerror or type(exc).__name__,
+            )
+        finally:
+            os.close(fd)
 
 
 def get_worker_id(user_id: str | None = None) -> str:
@@ -3268,7 +3349,7 @@ def process_one_task(
     if success:
         result = check_chat_file_links(config, task.user_id, result, task_id=task_id)
 
-    from istota.rooms import side_rooms as side_rooms_mod
+    from istota.rooms import private_replies as private_replies_mod
     from istota.relay.requests import held_question, present_question
     with db.get_db(config.db_path) as conn:
         relay_question = held_question(conn, task_id)
@@ -3314,8 +3395,8 @@ def process_one_task(
         _whatsapp_group_turn = is_group_task(config, task)
     # An email thread room's own task (multiplayer D6): its only leg is the
     # reply-all, which must never carry the question, and the room is shared,
-    # so the question parks and goes to the principal's side room and its
-    # private-mail view (D4 item 3).
+    # so the question parks and goes to the principal privately, with a
+    # heads-up mail to their own address (D4 item 3, ISSUE-608).
     _own_email_thread_room = False
     if task.source_type == "email" and not dry_run:
         from .transport.email.threads import thread_room_for_task
@@ -3362,16 +3443,16 @@ def process_one_task(
             return (task_id, False)
 
     # A guest's turn under `guest_reply = held` (multiplayer D4 item 2): the
-    # answer is proposed in the host's side room as a held `room post`, and
+    # answer is proposed to the host privately as a held `room post`, and
     # parks the task on that exact text, instead of reaching the room. From
-    # here on it is a side-routed confirmation like any other; approving it
+    # here on it is a privately routed confirmation like any other; approving it
     # releases the post and completes the task rather than re-running it
     # (`confirmations.approve`). A host who changed or left since the turn
     # gets nothing, and neither does the room.
     guest_route = None
     if success and task.guest_participant_id is not None and not dry_run:
         with db.get_db(config.db_path) as conn:
-            guest_mode = side_rooms_mod.guest_reply_mode(conn, task)
+            guest_mode = private_replies_mod.guest_reply_mode(conn, task)
             if guest_mode == "held":
                 proposed = result
                 if task.source_type == "email":
@@ -3379,7 +3460,7 @@ def process_one_task(
                     # composed, not its narration about composing it.
                     from .transport.email.outbound import composed_email_body
                     proposed = composed_email_body(config, task, result)
-                guest_route = side_rooms_mod.propose_guest_reply(conn, config, task, proposed)
+                guest_route = private_replies_mod.propose_guest_reply(conn, config, task, proposed)
         if guest_mode != "direct" and guest_route is None:
             logger.info("Task %d: guest reply has no host to propose it to; cancelled",
                         task_id)
@@ -3409,9 +3490,15 @@ def process_one_task(
     held_notification: RaiseResult | None = None
 
     # Where a shared-room task's confirmation went instead of the room, when
-    # it parked on one (multiplayer D4). Its Talk view is posted at the tail.
-    from istota.rooms import side_rooms
-    side_confirmation: "side_rooms.ConfirmationRoute | None" = None
+    # it parked on one (multiplayer D4, ISSUE-608): a row in the principal's
+    # own private room, pushed to its surface at the tail (`send_private`).
+    # None for every park asked where it ran.
+    from istota.rooms import private_replies
+    from istota.relay.requests import text_hash
+    private_park: "private_replies.PrivateDelivery | None" = None
+    # The shared room was told only that a private note went out, because its
+    # principal has no private room: that post answers nothing.
+    shared_room_notice = False
 
     # A once-job whose table row was deleted inside the transaction below, and
     # whose CRON.md entry therefore still has to go: `(user_id, job_name)`.
@@ -3425,6 +3512,10 @@ def process_one_task(
     # the hoist introduced: it cannot raise past an already-committed task,
     # and it closes the window where a cron sync re-inserts the deleted row.
     once_job_to_remove: tuple[str, str] | None = None
+    # The WhatsApp voice notes to delete once this transaction has closed,
+    # as `(row attachments, transcribed paths)` (ISSUE-611). Filled only on the
+    # completed branch: a parked or failed task re-runs from the file.
+    voice_notes_to_remove: tuple[list[str], tuple[str, ...]] | None = None
 
     with db.get_db(config.db_path) as conn:
         if success:
@@ -3472,20 +3563,34 @@ def process_one_task(
                 # exact failure the paragraph above records fixing.
                 #
                 # A task in a shared room asks its principal privately
-                # (multiplayer D4): the question goes to their side room and
-                # its Talk view, never into the room everyone reads.
-                side_confirmation = (
-                    guest_route.route if guest_route is not None
-                    else side_rooms.confirmation_route(conn, task)
-                )
-                if side_confirmation is not None:
-                    side_rooms.write_confirmation(conn, side_confirmation, task, result)
-                elif plan_talk and talk_token and not (
+                # (multiplayer D4, ISSUE-608): the question goes to their own
+                # private room, never into the room everyone reads. With no
+                # private room it is the bell's alone, and the room is told
+                # only that a private note went out.
+                _talk_leg = bool(plan_talk and talk_token and not (
                     _talk_is_mirror
                     and is_room_view(origin_surface_for_source_type(
                         task.source_type or ""
                     ))
-                ):
+                ))
+                _about = (
+                    guest_route.parent_token if guest_route is not None
+                    else private_replies.park_about(conn, task)
+                )
+                if _about is not None:
+                    private_park = private_replies.deliver_private(
+                        conn, config, user_id=task.user_id, about_token=_about,
+                        kind="proposal" if guest_route is not None else "confirmation",
+                        reference=f"{task.id}:{text_hash(result)[:16]}",
+                        body=result, task_id=task_id,
+                    )
+                    # Room or bell alike: the shared room never saw the
+                    # question, so the park must not hold it.
+                    db.set_task_private_park(conn, task_id)
+                    if private_park.dest is None and _talk_leg:
+                        post_talk_message = private_replies.SHARED_ROOM_NOTICE
+                        shared_room_notice = True
+                elif _talk_leg:
                     post_talk_message = result
 
                 # Both metered surfaces claim their prompt's ledger key here,
@@ -3503,9 +3608,18 @@ def process_one_task(
                     post_sms_message = (
                         f"{result}\n\nTask #{task_id}. Reply YES or NO."
                     )
-                # A WhatsApp group's question went to the principal's side
-                # room above; asking it in the group is what that prevents.
-                if _own_origin_whatsapp and side_confirmation is None:
+                # A WhatsApp group's question went to the principal privately
+                # above; asking it in the group is what that prevents.
+                if (_own_origin_whatsapp and private_park is not None
+                        and private_park.dest is None):
+                    post_whatsapp_message = private_replies.SHARED_ROOM_NOTICE
+                    # Its own key: the notice must never settle the key the
+                    # question's bell push claims.
+                    post_whatsapp_reference_id = (
+                        f"private-notice:{task_id}:{text_hash(result)[:16]}"
+                    )
+                    shared_room_notice = True
+                if _own_origin_whatsapp and private_park is None:
                     # The buttons carry the answer; the sentence carries the
                     # task id, which is what makes `!confirm <id>` and a later
                     # typed YES work on a client that renders no buttons.
@@ -3547,22 +3661,45 @@ def process_one_task(
                         f"confirmation:{held_notification.notification_id}"
                     )
                     post_sms_reference_id = notification_reference_id
-                    post_whatsapp_reference_id = notification_reference_id
+                    if not shared_room_notice:
+                        post_whatsapp_reference_id = notification_reference_id
                 # Withheld here, and owed at the tail if that push fails —
                 # see the `talk_undelivered` arm at the end of this function
                 # (ISSUE-404). `held_notification` stays in scope for it.
-                if (
-                    post_talk_message is None
-                    and post_sms_message is None
-                    and post_whatsapp_message is None
-                    and not (side_confirmation is not None
-                             and side_confirmation.externally_viewed)
-                ):
+                # A privately routed park is withheld only while it has a
+                # private room to be pushed to (`private_undelivered`); with
+                # none, the bell is the only place the question is, whatever
+                # the shared room was told.
+                if private_park is not None:
+                    _withhold = private_park.dest is not None
+                else:
+                    _withhold = (
+                        post_talk_message is not None
+                        or post_sms_message is not None
+                        or post_whatsapp_message is not None
+                    )
+                if not _withhold:
                     notification_results.append(held_notification)
                     held_notification = None
             else:
                 db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "info", "Task completed successfully")
+                if (
+                    task.source_type == "whatsapp"
+                    and task.transcribed_audio
+                    and not dry_run
+                ):
+                    _row = db.get_task(conn, task_id)
+                    # The file is about to go, so the transcript has to be
+                    # somewhere durable first: the row otherwise keeps the
+                    # transport's stand-in, and history, the sleep cycle and
+                    # `!retry` all read the row.
+                    if _row is not None and task.prompt != _row.prompt:
+                        db.update_task_prompt(conn, task_id, task.prompt)
+                    voice_notes_to_remove = (
+                        list((_row.attachments if _row else None) or []),
+                        task.transcribed_audio,
+                    )
                 if task.source_type == "signup":
                     notification_results.append(task_alert_source.write(
                         conn, task.user_id, dedup_key=f"signup-followup:{task.id}",
@@ -3588,10 +3725,13 @@ def process_one_task(
                     and task.conversation_token
                     and db.get_room(conn, task.conversation_token) is not None
                 ):
+                    # A linked turn's answer carries its link, as in
+                    # `_store_room_turn` (ISSUE-608).
                     stored_assistant_msg_id = db.store_turn_message(
                         conn, task.conversation_token, role="assistant",
                         body=result, task_id=task_id,
                         origin_surface=task.source_type,
+                        about_room_token=task.about_room_token or None,
                     )
                     # A retry that re-completes the task finds the row already
                     # stored (store returns None) — recover its id so the star
@@ -4293,78 +4433,40 @@ def process_one_task(
         # bypasses the delivery plan entirely, and that answer is just as lost.
         # Being inside this block is the same test, stated once.
         talk_undelivered = response_msg_id is None
-    # A shared-room confirmation's Talk view: the principal's own conversation
-    # with the bot, headed with the room's name. Its id is the task's
-    # `talk_response_id`, so a reply to it answers by Path A. A push that
-    # posted nothing owes the withheld notification, as a failed Talk post does.
-    side_undelivered = False
-    if side_confirmation is not None and side_confirmation.externally_viewed:
-        side_msg_id = None
-        side_whatsapp_sent = False
-        side_email_sent = False
-        if side_confirmation.talk_bound:
-            side_msg_id = run_coro(side_rooms.push_to_talk_view(
-                config, user_id=task.user_id,
-                parent_token=side_confirmation.parent_token, body=result,
-                reference_id=f"istota:task:{task.id}:confirmation",
-            ))
-        if side_confirmation.whatsapp_bound:
-            # A WhatsApp group's view is the principal's own chat with the bot.
-            side_whatsapp_sent = bool(run_coro(side_rooms.push_to_whatsapp_view(
-                config, user_id=task.user_id,
-                parent_token=side_confirmation.parent_token,
-                body=side_rooms.whatsapp_confirmation_body(result, task.id),
-                # Per question, so a task that parks twice asks twice: the
-                # ledger key is permanent, and a reused one reads as sent.
-                reference_id=(
-                    f"istota:task:{task.id}:confirmation:"
-                    f"{side_rooms.text_hash(result)[:16]}"
-                ),
-            )))
-        if side_confirmation.email_bound:
-            # An email thread's view is a private mail to the principal's own
-            # address, never a reply on the thread.
-            side_email_sent = bool(run_coro(side_rooms.push_to_email_view(
-                config, user_id=task.user_id,
-                parent_token=side_confirmation.parent_token,
-                body=side_rooms.email_confirmation_body(result, task.id),
-                reference_id=f"istota:task:{task.id}:confirmation",
-            )))
-        side_undelivered = (
-            side_msg_id is None and not side_whatsapp_sent and not side_email_sent
+        if shared_room_notice:
+            # The notice carries nothing to lose, and the bell was delivered
+            # at the park: a failed post owes nobody an alert.
+            talk_undelivered = False
+    # A privately routed question, pushed to the surface of the principal's
+    # private room. A Talk post's id is the task's `talk_response_id`, so a
+    # reply to it answers by Path A. A push that reached nobody owes the
+    # withheld notification, as a failed Talk post does.
+    private_undelivered = False
+    if private_park is not None:
+        from istota.rooms.private_replies import whatsapp_confirmation_body
+        _dest = private_park.dest
+        _private_body = (
+            whatsapp_confirmation_body(result, task.id)
+            if _dest is not None and _dest.whatsapp else result
         )
-        if side_msg_id:
+        private_delivered = run_coro(private_replies.send_private(
+            config, private_park, body=_private_body,
+        ))
+        private_undelivered = _dest is not None and not private_delivered
+        if private_delivered and _dest is not None and _dest.talk_ref:
             try:
                 with db.get_db(config.db_path) as conn:
-                    db.update_talk_response_id(conn, task_id, side_msg_id)
+                    _private_talk_id = db.get_message_external_id(
+                        conn, private_park.message_id, "talk",
+                    )
+                    if _private_talk_id and str(_private_talk_id).isdecimal():
+                        db.update_talk_response_id(conn, task_id, int(_private_talk_id))
             except Exception as e:
                 logger.debug("Failed to store talk_response_id for task %d: %s", task_id, e)
-    # A side-room answer (multiplayer D4 item 1) is stored in the side room
-    # like any side-room task's. Its question was asked in a room the principal
-    # may read on Talk, so the answer goes to their Talk view there as well.
-    if success and not is_confirmation_request and not dry_run:
-        try:
-            with db.get_db(config.db_path) as conn:
-                side_answer_parent = side_rooms.side_answer_parent(conn, task)
-        except Exception as e:
-            logger.warning("Side-answer check failed for task %d: %s", task_id, e)
-            side_answer_parent = None
-        if side_answer_parent:
-            run_coro(side_rooms.push_to_talk_view(
-                config, user_id=task.user_id, parent_token=side_answer_parent,
-                body=result, reference_id=f"istota:task:{task.id}:side-answer",
-            ))
-            run_coro(side_rooms.push_to_whatsapp_view(
-                config, user_id=task.user_id, parent_token=side_answer_parent,
-                body=result, reference_id=f"istota:task:{task.id}:side-answer",
-            ))
-            run_coro(side_rooms.push_to_email_view(
-                config, user_id=task.user_id, parent_token=side_answer_parent,
-                body=result, reference_id=f"istota:task:{task.id}:side-answer",
-            ))
 
-    # Store bot's response message ID for reply tracking
-    if response_msg_id and not is_failure_notify:
+    # Store bot's response message ID for reply tracking. Not the shared-room
+    # notice's: a reply to it in the room must not reach the question.
+    if response_msg_id and not is_failure_notify and not shared_room_notice:
         try:
             with db.get_db(config.db_path) as conn:
                 db.update_talk_response_id(conn, task_id, response_msg_id)
@@ -4623,7 +4725,7 @@ def process_one_task(
     # message failed, and carries neither the question nor its `!confirm` verbs.
     if held_notification is not None and (
         talk_undelivered or sms_undelivered or whatsapp_undelivered
-        or side_undelivered
+        or private_undelivered
     ):
         deliver_pending(config, [held_notification])
 
@@ -4715,6 +4817,18 @@ def process_one_task(
                     "could not stamp the undelivered-result notification",
                     exc_info=True,
                 )
+
+    # Last, after the answer has gone out: this is mount I/O, and a hung mount
+    # must not hold back a reply (ISSUE-387's shape). Nothing here may fail a
+    # task that has already completed.
+    if voice_notes_to_remove is not None:
+        try:
+            remove_transcribed_voice_notes(config, task.user_id, *voice_notes_to_remove)
+        except Exception:
+            logger.warning(
+                "Could not remove transcribed voice notes for task %d", task_id,
+                exc_info=True,
+            )
 
     return task_id, success
 

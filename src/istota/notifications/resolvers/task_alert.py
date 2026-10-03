@@ -280,6 +280,11 @@ def undelivered_key(task_id: int | str) -> str:
     return f"undelivered:{_slug(task_id, limit=24, fallback='0')}"
 
 
+def private_note_key(reference: str) -> str:
+    """A private note for a member with no private room (`rooms.private_replies`)."""
+    return f"private-note:{_slug(reference, limit=64, fallback='0')}"
+
+
 def room_migration_key() -> str:
     return "room-migration:partial"
 

@@ -71,7 +71,7 @@ EMBEDDED_HOLDERS = {
     ("whatsapp_skill_requests", "destination"),
 }
 REFERENCE_NAMES = {
-    "surface_ref", "side_of", "default_room", "thread_id", "output_target",
+    "surface_ref", "about_room_token", "default_room", "thread_id", "output_target",
     "origin_target", "routing", "default_destination", "log_channel",
     "alerts_channel", "binding_fingerprint",
 }

@@ -1288,8 +1288,8 @@ def group_room_for_task(config: Config, task) -> str | None:
 
     Only a task a group's own turn created (source `whatsapp`, its token a
     room bound to a group). A task from anywhere else — a web turn in the
-    group's room included, since D4 makes that view the principals' backstage
-    — never reaches the group through here.
+    group's room included, which the group's own members never see — never
+    reaches the group through here.
     """
     if task is None or task.source_type != "whatsapp" or not task.conversation_token:
         return None

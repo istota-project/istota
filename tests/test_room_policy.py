@@ -2,11 +2,10 @@
 
 A guest's turn runs as the room's host, in emissary mode: room-safe reach
 whatever the host granted, no outbound action beyond the reply, and anything
-else proposed to the host's side room. These pin the `room_policy` table and
+else proposed to the host privately. These pin the `room_policy` table and
 its migration, the host and its loss, the per-surface `guest_reply` default,
 the audience class, the loop cap, the three `guest_reply` values end to end,
-and the backstage-memory rule a shared-room task reads its principal's side
-room by.
+and which shared room's My notes a task may read.
 """
 import asyncio
 import json
@@ -19,7 +18,7 @@ import pytest
 
 from istota import commands, confirmations, db
 from istota.rooms import policy as room_policy
-from istota.rooms import side_rooms
+from istota.rooms import private_replies
 from istota.rooms import speech_gate
 from istota.config import Config, NextcloudConfig, TalkConfig, UserConfig
 from istota.transport._types import ParticipantRef
@@ -392,7 +391,7 @@ def _scheduler_config(tmp_path):
     return config
 
 
-def _run_guest_task(tmp_path, monkeypatch, fake_talk, guest_reply):
+def _run_guest_task(tmp_path, monkeypatch, fake_talk, guest_reply, *, private=True):
     from istota.scheduler import process_one_task
     config = _scheduler_config(tmp_path)
     monkeypatch.setattr("istota.nextcloud.talk.TalkClient.get_participants",
@@ -400,6 +399,9 @@ def _run_guest_task(tmp_path, monkeypatch, fake_talk, guest_reply):
     fake_talk.db_path = config.db_path
     with db.get_db(config.db_path) as conn:
         _group(conn)
+        if private:
+            # The host's own private chat with the bot, where a proposal lands.
+            db.create_web_chat_room(conn, "alice", "Mine")
         room_policy.ensure_policy(conn, "grp")
         room_policy.set_guest_reply(conn, "grp", guest_reply)
         ident = _guest_turn(conn, config).task_id
@@ -421,44 +423,49 @@ class TestGuestReplyThroughTheScheduler:
         # Indexed for the room, never into the host's own memory.
         assert "alice" not in indexed
 
-    def test_held_proposes_the_reply_in_the_hosts_side_room(
+    def test_held_proposes_the_reply_in_the_hosts_private_room(
         self, tmp_path, monkeypatch, fake_talk,
     ):
         config, ident, _ = _run_guest_task(tmp_path, monkeypatch, fake_talk, "held")
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, ident)
-            side = db.get_side_room(conn, "grp", "alice")
+            private = db.default_web_room(conn, "alice").token
             (request,) = conn.execute(
                 "SELECT * FROM whatsapp_skill_requests WHERE origin_task_id = ?", (ident,),
             ).fetchall()
-            side_rows = [r["body"] for r in conn.execute(
-                "SELECT body FROM messages WHERE room_token = ?", (side.token,))]
+            private_rows = conn.execute(
+                "SELECT body, about_room_token, delivery_reference FROM messages "
+                "WHERE room_token = ?", (private,)).fetchall()
             room_rows = [r["body"] for r in conn.execute(
                 "SELECT body FROM messages WHERE room_token = 'grp' AND role != 'user'")]
         assert task.status == "pending_confirmation"
         assert request["kind"] == "room_post" and request["state"] == "held"
         assert request["text"] == REPLY
         assert json.loads(request["destination"])["room_token"] == "grp"
-        assert any(REPLY in body and "Max" in body for body in side_rows)
+        assert json.loads(request["origin"])["room_token"] == private
+        (row,) = private_rows
+        assert REPLY in row["body"] and "Max" in row["body"]
+        assert row["about_room_token"] == "grp"
+        assert row["delivery_reference"].startswith(f"private-proposal:{ident}:")
         assert not any(REPLY in body for body in room_rows)
         sends = [c.args["message"] for c in fake_talk.calls_to("grp", method="send_message")]
         assert not any(REPLY in s for s in sends)
 
-        # The host approves from the side room; the task completes, it is not
-        # re-run, and only the approved text is posted.
+        # The host approves from their private room; the task completes, it is
+        # not re-run, and only the approved text is posted.
         with db.get_db(config.db_path) as conn:
-            found = confirmations.resolve(conn, "alice", conversation_token=side.token).task
+            found = confirmations.resolve(conn, "alice", conversation_token=private).task
             assert found is not None and found.id == ident
             confirmations.apply_answer(
                 conn, found, confirmations.Answer(approve=True, trust_sender=False),
-                config, by="web", conversation_token=side.token,
+                config, by="web", conversation_token=private,
             )
             task = db.get_task(conn, ident)
             row = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id = ?",
                                (request["id"],)).fetchone()
         assert task.status == "completed"
         assert row["state"] == "queued"
-        asyncio.run(side_rooms.deliver_request(config, row))
+        asyncio.run(private_replies.deliver_request(config, row))
         with db.get_db(config.db_path) as conn:
             posted = [r["body"] for r in conn.execute(
                 "SELECT body FROM messages WHERE room_token = 'grp' AND role = 'system'")]
@@ -478,10 +485,10 @@ class TestGuestReplyThroughTheScheduler:
         assert fake_talk.calls_to("grp", method="delete_message")
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, ident)
-            side = db.get_side_room(conn, "grp", "alice")
+            private = db.default_web_room(conn, "alice").token
             confirmations.apply_answer(
                 conn, task, confirmations.Answer(approve=True, trust_sender=False),
-                config, by="web", conversation_token=side.token,
+                config, by="web", conversation_token=private,
             )
             assert db.get_task(conn, ident).status == "completed"
             last_seq = db.get_max_task_event_seq(conn, ident)
@@ -491,6 +498,28 @@ class TestGuestReplyThroughTheScheduler:
         frames = web_app._synthetic_terminal_events(ident, last_seq)
         assert [f["kind"] for f in frames] == ["result", "done"]
         assert frames[0]["payload"]["text"] == REPLY
+
+    def test_with_no_private_room_the_bell_carries_it_and_the_room_is_told(
+        self, tmp_path, monkeypatch, fake_talk,
+    ):
+        from istota.rooms.private_replies import SHARED_ROOM_NOTICE
+
+        config, ident, _ = _run_guest_task(
+            tmp_path, monkeypatch, fake_talk, "held", private=False)
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, ident)
+            bell = conn.execute(
+                "SELECT state, last_delivered_at FROM notifications "
+                "WHERE source = 'confirmation' AND object_id = ?", (str(ident),)).fetchone()
+            rooms = conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
+        assert task.status == "pending_confirmation"
+        assert bell is not None and bell["state"] == "open"
+        assert rooms == 1
+        sends = [c.args["message"] for c in fake_talk.calls_to("grp", method="send_message")]
+        assert SHARED_ROOM_NOTICE in sends
+        assert not any(REPLY in s for s in sends)
+        # The notice is not where a reply answers the question from.
+        assert task.talk_response_id is None
 
     def test_a_declined_proposal_posts_nothing(self, tmp_path, monkeypatch, fake_talk):
         config, ident, _ = _run_guest_task(tmp_path, monkeypatch, fake_talk, "held")
@@ -508,37 +537,51 @@ class TestGuestReplyThroughTheScheduler:
 
 
 # ---------------------------------------------------------------------------
-# D4 item 4: backstage memory
+# D4 item 4, as My notes (ISSUE-608)
 # ---------------------------------------------------------------------------
 
 
-class TestBackstage:
-    def test_the_speaker_or_the_host_reads_their_side_room(self, config):
+class TestMyNotesRoom:
+    def test_the_speaker_or_the_host_of_a_held_guest_reads_their_notes(self, config):
+        from istota.rooms.private_replies import my_notes_room
+
         with db.get_db(config.db_path) as conn:
             _group(conn)
-            alices = db.ensure_side_room(conn, "grp", "alice")
             own = db.get_task(conn, _member_turn(conn, config, "alice", "hi").task_id)
             guest = db.get_task(conn, _guest_turn(conn, config).task_id)
+            room_policy.set_guest_reply(conn, "grp", "held")
             bobs = db.get_task(conn, _member_turn(conn, config, "bob", "hi").task_id)
             cron = db.get_task(conn, db.create_task(
                 conn, prompt="digest", user_id="alice", source_type="scheduled",
                 conversation_token="grp"))
-            assert side_rooms.backstage_room(conn, own).token == alices.token
-            assert side_rooms.backstage_room(conn, guest).token == alices.token
-            # Bob has no side room; a cron task has no speaker and is not the
-            # host speaking for a guest.
-            assert side_rooms.backstage_room(conn, bobs) is None
-            assert side_rooms.backstage_room(conn, cron) is None
+            assert my_notes_room(conn, own) == "grp"
+            assert my_notes_room(conn, guest) == "grp"
+            # Bob's own turn reads Bob's notes; a cron task has no speaker.
+            assert my_notes_room(conn, bobs) == "grp"
+            assert my_notes_room(conn, cron) is None
             # A guest task whose principal is no longer the host reads nothing.
             db.remove_room_member(conn, "grp", "alice")
-            assert side_rooms.backstage_room(conn, guest) is None
+            assert my_notes_room(conn, guest) is None
+
+    def test_a_direct_guest_reply_never_loads_the_hosts_notes(self, config):
+        from istota.rooms.private_replies import my_notes_room
+
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            guest = db.get_task(conn, _guest_turn(conn, config).task_id)
+            room_policy.set_guest_reply(conn, "grp", room_policy.DIRECT)
+            assert my_notes_room(conn, guest) is None
+            room_policy.set_guest_reply(conn, "grp", "held")
+            assert my_notes_room(conn, guest) == "grp"
 
     def test_a_private_room_reads_none(self, config):
+        from istota.rooms.private_replies import my_notes_room
+
         with db.get_db(config.db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "Mine")
             ident = db.create_task(conn, prompt="hi", user_id="alice", source_type="web",
                                    conversation_token=room.token)
-            assert side_rooms.backstage_room(conn, db.get_task(conn, ident)) is None
+            assert my_notes_room(conn, db.get_task(conn, ident)) is None
 
 
 # ---------------------------------------------------------------------------

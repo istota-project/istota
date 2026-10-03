@@ -521,8 +521,14 @@ _REFERENCE_ID_PATTERN = re.compile(r"^istota:task:(\d+):(\w+)$")
 # Talk posts `message_relays` makes. A question carries another user's text
 # and reaches its recipient's task framed, through `recipient_context`; a return
 # is the asker's answer delivered by us. As a bot turn in history either would
-# be third-party text read unframed in the daemon's voice.
-_RELAY_REFERENCE_PREFIXES = ("relay-question:", "relay-return:")
+# be third-party text read unframed in the daemon's voice. The same holds for
+# what a shared room sends a member privately (ISSUE-608): a guest proposal
+# quotes the guest, a whisper and a question were written by a task reading the
+# room. A reply to one reaches its task framed, as the linked room's context.
+_RELAY_REFERENCE_PREFIXES = (
+    "relay-question:", "relay-return:",
+    "private-whisper:", "private-confirmation:", "private-proposal:",
+)
 
 
 def _parse_reference_id(ref_id: str | None) -> tuple[int | None, str | None]:

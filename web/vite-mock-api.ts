@@ -607,6 +607,8 @@ const mockChannelMemory = new Map<string, string>([
 `,
   ],
 ]);
+// My notes, keyed by room token: the caller's private notes about a room.
+const mockRoomNotes = new Map<string, string>();
 // Flip to true in dev to exercise the 409 conflict branch: the next save is
 // refused as though an agent had written the file in the meantime.
 let mockMemoryConflictNext = false;
@@ -1841,6 +1843,29 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
       };
     }
     mockChannelMemory.set(room.token, content);
+    return { status: 'ok', revision: mockMemoryRevision(content) };
+  }
+  // My notes: the caller's private notes about a room, same revision rule.
+  const roomNotes = path.match(/^\/istota\/api\/chat\/rooms\/(\d+)\/notes$/);
+  if (roomNotes && (method === 'GET' || method === 'PUT')) {
+    const room = mockChatRooms.find((r) => r.id === Number(roomNotes[1]));
+    if (!room) return { error: 'room not found', __status: 404 };
+    const stored = mockRoomNotes.get(room.token) ?? '';
+    if (method === 'GET') {
+      return {
+        room_id: room.id,
+        token: room.token,
+        content: stored,
+        exists: stored.trim().length > 0,
+        revision: mockMemoryRevision(stored),
+      };
+    }
+    const content = typeof body?.content === 'string' ? body.content : null;
+    if (content === null) return { error: 'content required', __status: 400 };
+    if (typeof body?.revision !== 'string') return { error: 'revision required', __status: 400 };
+    if (body.revision !== mockMemoryRevision(stored))
+      return { error: 'notes changed since they were loaded', code: 'conflict', __status: 409 };
+    mockRoomNotes.set(room.token, content);
     return { status: 'ok', revision: mockMemoryRevision(content) };
   }
 

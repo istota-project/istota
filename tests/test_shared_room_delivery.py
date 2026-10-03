@@ -157,17 +157,6 @@ class TestThePlanRefusesASharedRoom:
         # Refused, and the reply goes back where the turn was asked.
         assert _legs(plan) == [("talk", private_room.talk_ref)]
 
-    def test_a_side_room_task_still_lands_in_its_side_room(self, tmp_path):
-        """Stage 10's pin runs first and keeps its substitution."""
-        config = _config(tmp_path)
-        with db.get_db(config.db_path) as conn:
-            shared = _shared_web_room(conn)
-            side = db.ensure_side_room(conn, shared, "alice")
-            task = _task(conn, source_type="scheduled", conversation_token=side.token,
-                         output_target=f"web:{shared}")
-        plan = resolve_delivery_plan(config, task, make_registry(config))
-        assert _legs(plan) == [("web", side.token)]
-
 
 # ---------------------------------------------------------------------------
 # The implicit default room

@@ -21,7 +21,7 @@ import pytest
 
 from istota import confirmations, db
 from istota.rooms import policy as room_policy
-from istota.rooms import side_rooms
+from istota.rooms import private_replies
 from istota.relay import requests
 from istota.config import Config, UserConfig
 from istota.transport.registry import make_registry
@@ -297,17 +297,16 @@ class TestTheHostLeaving:
 
     def test_a_member_who_leaves_the_group_leaves_the_room(self, config):
         """Membership came from the group: without this, a member who left
-        could still read the backstage and post into the group."""
+        could still read the group's transcript from their private chat and
+        post into the group."""
+        from istota.rooms.scopes import is_current_member
+
         _apply(config, _roster([ALICE_JID, BOB_JID, GUEST_JID], added_by=ALICE_JID))
         _apply(config, _roster([ALICE_JID, GUEST_JID]))
 
         with db.get_db(config.db_path) as conn:
             assert db.list_room_members(conn, _room(config)) == ["alice"]
-            ident = db.create_task(conn, user_id="bob", source_type="web",
-                                   prompt="post it", conversation_token=_room(config))
-            with pytest.raises(ValueError):
-                db.ensure_side_room(conn, _room(config), "bob")
-            del ident
+            assert not is_current_member(conn, _room(config), "bob")
 
     def test_another_member_leaving_is_not_the_hosts_departure(self, config):
         _apply(config, _roster([ALICE_JID, BOB_JID, GUEST_JID], added_by=BOB_JID))
@@ -531,7 +530,7 @@ class TestTheAnswerGoesToTheGroup:
         assert request.text == "At seven."
 
     def test_a_web_turn_in_the_groups_room_never_reaches_the_group(self, group, sent):
-        """D4: the web view of a group is its principals' backstage."""
+        """D4: a web turn in the group's room is never read in the group."""
         with db.get_db(group.db_path) as conn:
             ident = db.create_task(conn, user_id="alice", source_type="web",
                                    prompt="hi", conversation_token=_room(group),
@@ -586,37 +585,60 @@ class TestTheAnswerGoesToTheGroup:
         assert "target =" not in line
 
 
-class TestTheSideRoomsWhatsAppView:
+def _private_chat(config, user="alice", jid=ALICE_JID):
+    """The member's own WhatsApp chat with the bot, minted by their first
+    message, whose task is then settled so it claims nothing later."""
+    (result,) = _apply(config, proto.inbound_event({
+        "message_id": f"P-{user}", "jid": jid, "message_type": "text", "text": "hi",
+        "timestamp": int(datetime.now(timezone.utc).timestamp()),
+    }))
+    with db.get_db(config.db_path) as conn:
+        conn.execute("UPDATE tasks SET status='completed' WHERE id=?", (result.task_id,))
+        return db.get_task(conn, result.task_id).conversation_token
+
+
+class TestPrivateRepliesFromAGroup:
+    """ISSUE-608: what a group has for one member reaches their own chat,
+    recorded in their private WhatsApp room and tagged with the group."""
+
     def test_a_groups_confirmation_is_asked_in_the_members_own_chat(self, group, sent):
+        from istota.rooms import private_replies
+
+        mine = _private_chat(group)
         (result,) = _apply(group, _message("Istota, book the table?"))
         with db.get_db(group.db_path) as conn:
-            route = side_rooms.confirmation_route(conn, db.get_task(conn, result.task_id))
-        assert route.whatsapp_bound and route.side_token is not None
+            about = private_replies.park_about(conn, db.get_task(conn, result.task_id))
+            delivery = private_replies.deliver_private(
+                conn, group, user_id="alice", about_token=about, kind="confirmation",
+                reference=f"{result.task_id}:abc", body="Book it?")
+        assert about == _room(group)
+        assert delivery.dest.room_token == mine and delivery.dest.whatsapp
 
-        delivered = asyncio.run(side_rooms.push_to_whatsapp_view(
-            group, user_id="alice", parent_token=_room(group),
-            body=side_rooms.whatsapp_confirmation_body("Book it?", result.task_id),
-            reference_id=f"istota:task:{result.task_id}:confirmation",
-        ))
+        delivered = asyncio.run(private_replies.send_private(
+            group, delivery,
+            body=private_replies.whatsapp_confirmation_body("Book it?", result.task_id)))
 
         assert delivered
         (request,) = sent
         assert request.to == ALICE_JID
         assert request.text.startswith("re: Family")
         assert f"!confirm {result.task_id} yes" in request.text
+        assert _rows(group, "SELECT logical_key FROM sent_whatsapp") == [
+            {"logical_key": f"private-reply:{delivery.message_id}"}]
 
     def test_a_long_question_keeps_the_instruction_that_answers_it(self):
-        body = side_rooms.whatsapp_confirmation_body("x" * 10000, 7)
+        body = private_replies.whatsapp_confirmation_body("x" * 10000, 7)
 
         assert body.endswith("`!confirm 7 no`.")
         assert len(body) + len("re: ") + 80 <= 4096
 
     def test_a_whisper_reaches_the_members_own_chat_headed_with_the_room(self, group, sent):
+        mine = _private_chat(group)
         with db.get_db(group.db_path) as conn:
             ident = db.create_task(conn, user_id="alice", source_type="whatsapp",
                                    prompt="hi", conversation_token=_room(group))
             conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
-            side_rooms.enqueue_whisper(conn, group, actor_user_id="alice",
+            private_replies.enqueue_whisper(conn, group, actor_user_id="alice",
                                        task_id=ident, request_key="w1",
                                        text="Only for you.")
         asyncio.run(requests.drain_requests(group))
@@ -625,16 +647,20 @@ class TestTheSideRoomsWhatsAppView:
         assert request.to == ALICE_JID
         assert request.text.startswith("re: Family")
         assert "Only for you." in request.text
+        (row,) = _rows(group, "SELECT room_token, about_room_token FROM messages "
+                              "WHERE body = 'Only for you.'")
+        assert row == {"room_token": mine, "about_room_token": _room(group)}
 
     def test_an_approved_room_post_is_sent_into_the_group(self, group, sent):
         """The held `room post` (and with it every `guest_reply = held`
         proposal) lands in the group once approved."""
+        mine = _private_chat(group)
         with db.get_db(group.db_path) as conn:
-            side = db.ensure_side_room(conn, _room(group), "alice")
-            ident = db.create_task(conn, user_id="alice", source_type="web",
-                                   prompt="post it", conversation_token=side.token)
+            ident = db.create_task(conn, user_id="alice", source_type="whatsapp",
+                                   prompt="post it", conversation_token=mine,
+                                   about_room_token=_room(group))
             conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
-            side_rooms.hold_room_post(conn, group, actor_user_id="alice", task_id=ident,
+            private_replies.hold_room_post(conn, group, actor_user_id="alice", task_id=ident,
                                       request_key="p1", text="Thursday after 7 works")
             requests.park_question(conn, group, task=db.get_task(conn, ident))
             confirmations.approve(conn, db.get_task(conn, ident), config=group, by="web")
