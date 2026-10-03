@@ -392,6 +392,19 @@ class TestRecord:
                        (delivery.message_id,))
         assert row["about_room_token"] == parent
 
+    def test_a_reference_used_in_another_users_room_is_not_taken(self, config):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            alices = _web_room(conn)
+            _web_room(conn, user="bob")
+        first = _deliver(config, parent, user="alice", reference="same")
+        second = _deliver(config, parent, user="bob", reference="same", kind="confirmation")
+        assert first.dest.room_token == alices
+        assert (second.dest, second.message_id) == (None, None)
+        (row,) = _rows(config, "SELECT room_token, body FROM messages "
+                               "WHERE delivery_reference='private-confirmation:same'")
+        assert row["room_token"] == alices
+
     def test_an_unknown_kind_is_refused(self, config):
         with db.get_db(config.db_path) as conn:
             parent = _shared_web(conn)
@@ -500,6 +513,42 @@ class TestSend:
             found = db.find_message_by_external_id(conn, private.canonical, "talk",
                                                    str(post.sent_id))
         assert found == delivery.message_id
+
+    def test_a_whisper_that_reaches_nobody_goes_to_the_bell_too(self, config, sent):
+        with db.get_db(config.db_path) as conn:
+            group = _whatsapp_group(conn)
+            phone = _phone_room(conn)
+            # The room outlives the binding: its token is a function of the user.
+            conn.execute("DELETE FROM whatsapp_user_bindings WHERE user_id='alice'")
+        delivery = _deliver(config, group, kind="whisper", reference="room-whisper:r9",
+                            body="Only for you.")
+        assert delivery.dest.room_token == phone and delivery.notice is None
+        with patch("istota.notifications.store.deliver_pending") as deliver:
+            delivered = asyncio.run(private_replies.send_private(
+                config, delivery, body="Only for you."))
+        assert delivered is False and sent == []
+        (row,) = _rows(config, "SELECT title, body FROM notifications "
+                               "WHERE user_id='alice' AND source='task_alert'")
+        assert row == {"title": "Private note about Family", "body": "Only for you."}
+        deliver.assert_called_once()
+
+    def test_a_delivered_whisper_adds_no_bell_row(self, config, sent):
+        with db.get_db(config.db_path) as conn:
+            group = _whatsapp_group(conn)
+            _phone_room(conn)
+        delivery = _deliver(config, group, kind="whisper", reference="room-whisper:r10")
+        assert asyncio.run(private_replies.send_private(config, delivery, body="x")) is True
+        assert _rows(config, "SELECT id FROM notifications WHERE source='task_alert'") == []
+
+    def test_a_callers_label_is_flattened_onto_one_line(self, config, sent):
+        with db.get_db(config.db_path) as conn:
+            group = _whatsapp_group(conn)
+            _phone_room(conn)
+        delivery = _deliver(config, group)
+        asyncio.run(private_replies.send_private(
+            config, delivery, body="x", header_room_label="Fam\nily"))
+        (request,) = sent
+        assert request.text.split("\n\n", 1)[0] == "re: Fam ily"
 
     def test_a_talk_room_that_is_not_private_gets_nothing(self, config, talk):
         talk["participants"].return_value = PARTICIPANTS_SHARED

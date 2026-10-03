@@ -101,6 +101,9 @@ def _checked(conn, token, user_id: str, *, surface: str, allow_phone: bool = Fal
     if not token or not db.is_private_room_of(conn, token, user_id, allow_phone=allow_phone):
         return None
     room = db.get_room(conn, token)
+    if room.side_of:
+        # Until side rooms are removed: a pinned default can still name one.
+        return None
     talk = db.get_room_binding(conn, room.token, "talk")
     return PrivateDestination(room_token=room.token, surface=surface,
                               talk_ref=talk.surface_ref if talk else None,
@@ -186,14 +189,24 @@ def private_room_for(conn, config, user_id: str, about_token: str) -> PrivateDes
 # ---------------------------------------------------------------------------
 
 
-def _existing(conn, delivery_reference: str) -> PrivateDestination | None:
-    """The destination a retry already wrote to, so it never moves rooms."""
+class _Taken(Exception):
+    """The reference already names a row in a room that is not this user's."""
+
+
+def _existing(conn, delivery_reference: str, user_id: str) -> PrivateDestination | None:
+    """The destination a retry already wrote to, so it never moves rooms.
+
+    The key is unique across every room, so a row under it in a room that is
+    not this user's own is another note's, and must not be taken as this one.
+    """
     row = conn.execute(
         "SELECT room_token, origin_surface FROM messages WHERE delivery_reference = ?",
         (delivery_reference,),
     ).fetchone()
     if row is None:
         return None
+    if not db.is_private_room_of(conn, row["room_token"], user_id, allow_phone=True):
+        raise _Taken()
     talk = db.get_room_binding(conn, row["room_token"], "talk")
     return PrivateDestination(room_token=row["room_token"], surface=row["origin_surface"],
                               talk_ref=talk.surface_ref if talk else None,
@@ -224,14 +237,18 @@ def deliver_private(conn, config, *, user_id: str, about_token: str, kind: str,
         raise ValueError(f"unknown private reply kind: {kind!r}")
     about = canonical_token(conn, about_token) or about_token
     delivery_reference = f"private-{kind}:{reference}"
-    dest = _existing(conn, delivery_reference)
-    if dest is None:
-        try:
+    try:
+        dest = _existing(conn, delivery_reference, user_id)
+        if dest is None:
             dest = private_room_for(conn, config, user_id, about)
-        except sqlite3.Error as exc:
-            logger.warning("private %s %s: room lookup failed (%s); using the bell",
-                           kind, reference, type(exc).__name__)
-            dest = None
+    except _Taken:
+        logger.warning("private %s %s: reference already used in another room; using the bell",
+                       kind, reference)
+        dest = None
+    except sqlite3.Error as exc:
+        logger.warning("private %s %s: room lookup failed (%s); using the bell",
+                       kind, reference, type(exc).__name__)
+        dest = None
     common = dict(user_id=user_id, about_token=about, kind=kind,
                   delivery_reference=delivery_reference)
     if dest is None:
@@ -275,6 +292,11 @@ async def _post_talk(config, delivery: PrivateDelivery, text: str) -> bool:
     try:
         await message_relays.verify_private_audience(
             config, actor_user_id=delivery.user_id, origin={"talk_ref": ref})
+    except message_relays.AudienceUnavailable:
+        # An outage, not a wrong audience (relay.md, "Delivery").
+        logger.warning("private %s: Talk participants unavailable; not posted",
+                       delivery.delivery_reference)
+        return False
     except RequestError:
         logger.warning("private %s: Talk room for %s is not private; not posted",
                        delivery.delivery_reference, delivery.user_id)
@@ -337,25 +359,41 @@ async def _send_heads_up(config, delivery: PrivateDelivery, label: str, body: st
     return True
 
 
+def _late_bell_note(config, delivery: PrivateDelivery, body: str):
+    with db.get_db(config.db_path) as conn:
+        return _bell_note(conn, user_id=delivery.user_id, about=delivery.about_token,
+                          reference=delivery.delivery_reference.split(":", 1)[1],
+                          body=body, task_id=None)
+
+
 async def _send(config, delivery: PrivateDelivery, *, header_room_label, body: str) -> bool:
-    from istota.rooms.side_rooms import HEADER_PREFIX
+    from istota.confirmations import flatten
+    from istota.notifications.store import deliver_pending
+    from istota.rooms.side_rooms import _LABEL_MAX, HEADER_PREFIX
 
     if delivery.notice is not None:
-        from istota.notifications.store import deliver_pending
-
         await asyncio.to_thread(deliver_pending, config, [delivery.notice])
     label, email_parent = await asyncio.to_thread(_parent_facts, config, delivery.about_token)
-    label = header_room_label or label
+    if header_room_label:
+        label = flatten(header_room_label)[:_LABEL_MAX] or label
     text = f"{HEADER_PREFIX}{label}\n\n{body}"
     delivered = False
+    pushed = False
     dest = delivery.dest
     if dest is not None and delivery.message_id is not None:
-        if dest.talk_ref and await _post_talk(config, delivery, text):
-            delivered = True
-        if dest.whatsapp and await _send_whatsapp(config, delivery, text):
-            delivered = True
+        if dest.talk_ref:
+            pushed = True
+            delivered = await _post_talk(config, delivery, text) or delivered
+        if dest.whatsapp:
+            pushed = True
+            delivered = await _send_whatsapp(config, delivery, text) or delivered
     if email_parent and await _send_heads_up(config, delivery, label, body):
         delivered = True
+    if delivery.kind == "whisper" and pushed and not delivered:
+        # A whisper has no park bell behind it: one routed to a surface that
+        # reached nobody there would sit unannounced in a transcript.
+        notice = await asyncio.to_thread(_late_bell_note, config, delivery, body)
+        await asyncio.to_thread(deliver_pending, config, [notice])
     return delivered
 
 
@@ -366,8 +404,11 @@ async def send_private(config, delivery: PrivateDelivery, *, body: str,
     True when it reached the member outside web: a Talk post, a WhatsApp send
     the provider accepted, or the heads-up mail handed to SMTP. A web room
     needs no push (the room-event stream reads the row), so it reports False,
-    and so does every failure; the caller then owes the bell its delivery.
-    ``body`` is what the surface carries, which may differ from the row (a
+    and so does every failure. For a confirmation or a proposal, False means
+    the park's own bell row is still owed its delivery. A whisper owes the
+    caller nothing: it has no park bell, so whenever it was not pushed to the
+    member (no private room, or a push that reached nobody) this function
+    writes and delivers its `private_note` bell row itself. ``body`` is what the surface carries, which may differ from the row (a
     WhatsApp confirmation names its `!confirm` command). Failures are logged
     with the kind and reference, never the body.
     """
