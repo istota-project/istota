@@ -205,6 +205,85 @@ class TestTheInboundEvent:
             proto.inbound_event(payload)
 
 
+_STAGED = "0123456789abcdef0123456789abcdef.ogg"
+
+
+class TestTheMediaKind:
+    """The record's kind is the message type the sidecar declared.
+
+    Never the sniff: bytes can satisfy more than one sniffer, so the declared
+    type decides which pipeline a file may enter and the sniff only confirms.
+    """
+
+    def test_an_audio_frame_carries_an_audio_record(self):
+        event = proto.inbound_event(_inbound(
+            message_type="audio", text=None, media_name=_STAGED,
+            media_mime="audio/ogg; codecs=opus", media_bytes=4096,
+        ))
+
+        assert event.message_type == "audio"
+        assert event.text is None
+        assert event.media is not None
+        assert event.media.kind == "audio"
+        assert event.media.staged_path == _STAGED
+        assert event.media.error is None
+
+    def test_an_image_frame_still_carries_an_image_record(self):
+        event = proto.inbound_event(_inbound(
+            message_type="image", media_name=_STAGED.replace(".ogg", ".jpg"),
+        ))
+
+        assert event.media.kind == "image"
+
+    @pytest.mark.parametrize("wire,key", [
+        ("download_failed", "fetch_failed"),
+        ("over_the_cap", "over_cap"),
+        ("write_failed", "write_failed"),
+        ("something_new", "fetch_unknown"),
+    ])
+    def test_an_audio_media_error_reads_as_the_voice_message_sentence(
+        self, wire, key,
+    ):
+        event = proto.inbound_event(_inbound(
+            message_type="audio", text=None, media_error=wire,
+        ))
+
+        assert event.media.kind == "audio"
+        assert event.media.error == proto.media_rules.reason("audio", key)
+        assert "voice message" in event.media.error
+
+    def test_a_malformed_audio_field_drops_the_media_with_the_audio_reason(self):
+        event = proto.inbound_event(_inbound(
+            message_type="audio", text=None, media_name="../escape",
+        ))
+
+        assert event.media.kind == "audio"
+        assert event.media.error == proto.media_rules.reason(
+            "audio", "fetch_unknown",
+        )
+
+    @pytest.mark.parametrize("message_type", ["text", "video", "unsupported"])
+    def test_media_on_a_type_that_carries_none_is_dropped(self, message_type):
+        """An unexpected combination: the fields are refused, the message kept."""
+        event = proto.inbound_event(_inbound(
+            message_type=message_type, media_name=_STAGED,
+        ))
+
+        assert event.media is not None
+        assert event.media.error is not None
+        assert event.media.staged_path == ""
+        assert event.text == "check the backup"
+
+    def test_a_group_audio_frame_carries_no_record(self):
+        event = proto.inbound_event(_inbound(
+            group=True, jid="120363000000000001@g.us", sender_jid=JID,
+            message_type="audio", text=None, media_name=_STAGED,
+        ))
+
+        assert event.group is not None
+        assert event.media is None
+
+
 class TestTheReceipt:
     @pytest.mark.parametrize(
         ("wire", "mapped"),
