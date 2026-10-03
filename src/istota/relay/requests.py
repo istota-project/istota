@@ -718,16 +718,7 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
                         f"Template message:\n{template if template is not None else '(unavailable)'}")
         else:
             preview += f"Message:\n{service}"
-        # Phone previews must fit intact. No approval of a shortened preview.
-        if origin["surface"] == "sms":
-            from istota.transport.sms.outbound import render_sms
-            if render_sms(preview, config.sms.max_segments).text != preview:
-                raise RequestError("invalid_preview")
-        if origin["surface"] == "whatsapp":
-            from istota.transport.whatsapp.outbound import active_adapter
-            adapter = active_adapter(config)
-            if adapter is None or len(preview) > adapter.caps.service_body_limit:
-                raise RequestError("invalid_preview")
+        check_preview_fits(config, origin, preview)
         row = _store_request(
             conn, actor_user_id=actor_user_id, task_id=task_id, request_key=request_key,
             kind="relay_question", recipient_user_id=recipient_user_id, text=text,
@@ -746,6 +737,23 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
             row = dict(conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=?",
                                     (row["id"],)).fetchone())
         return _question_response(conn, row)
+
+
+def check_preview_fits(config, origin: dict, preview: str) -> None:
+    """Refuse a preview a phone origin would not show whole (`invalid_preview`).
+
+    No approval of a shortened preview: the text approved has to be the text
+    shown. Shared by the relay question and the `room post` hold.
+    """
+    if origin.get("surface") == "sms":
+        from istota.transport.sms.outbound import render_sms
+        if render_sms(preview, config.sms.max_segments).text != preview:
+            raise RequestError("invalid_preview")
+    if origin.get("surface") == "whatsapp":
+        from istota.transport.whatsapp.outbound import active_adapter
+        adapter = active_adapter(config)
+        if adapter is None or len(preview) > adapter.caps.service_body_limit:
+            raise RequestError("invalid_preview")
 
 
 def park_question(conn, config, *, task) -> dict | None:

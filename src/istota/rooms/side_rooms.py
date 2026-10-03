@@ -51,6 +51,7 @@ from istota.relay.requests import (
     RequestError,
     _clean_turn,
     _queue_question,
+    check_preview_fits,
     _question_response,
     _store_request,
     _validate_input,
@@ -236,11 +237,11 @@ def _send_private_mail(config, *, to: str, subject: str, body: str) -> None:
 def whatsapp_confirmation_body(prompt: str, task_id: int) -> str:
     """A privately routed question as the member's WhatsApp chat carries it.
 
-    The question is parked against the shared room's task, so the message
-    names the command that answers it by id as well; a bare YES in that chat
-    answers it too when it is the only one open there. The question is
-    trimmed rather than the instruction, leaving room for the ``re: <room>``
-    header `private_replies.send_private` puts in front.
+    The question is parked against the shared room's task, and a bare YES in
+    that chat answers only a question parked there, so the message names the
+    command that answers it by id. The question is trimmed rather than the
+    instruction, leaving room for the ``re: <room>`` header
+    `private_replies.send_private` puts in front.
     """
     from istota.transport.whatsapp.outbound import WHATSAPP_TEXT_LIMIT, render_whatsapp
 
@@ -563,10 +564,12 @@ def queue_private_answer(conn, config, *, actor_user_id: str, task_id: int) -> d
             # turn is written twice (`.claude/rules/transport.md`, "Phone rooms").
             result = record_phone_turn(conn, config, channel_name=None, **common)
         else:
+            # No model, effort or brain carried over: the private room's own
+            # defaults apply, as on the phone path, so the model and the brain
+            # that runs it are resolved against the same room (ISSUE-420).
             result = record_inbound(
                 conn, config, source_type=dest.surface,
-                output_target="room" if dest.surface == "web" else None,
-                model=task.model, effort=task.effort, **common,
+                output_target="room" if dest.surface == "web" else None, **common,
             )
     if result.task_id is None:
         raise RequestError("no_private_room")
@@ -683,6 +686,8 @@ def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
                    "Only the message below is posted, exactly as written. "
                    "Sending must start within 10 minutes of approval.\n\n"
                    f"Message:\n{text}")
+        # From a phone room the preview goes out by text, and must arrive whole.
+        check_preview_fits(config, origin, preview)
         row = _store_request(
             conn, actor_user_id=actor_user_id, task_id=task_id, request_key=request_key,
             kind="room_post", recipient_user_id=actor_user_id, text=text,

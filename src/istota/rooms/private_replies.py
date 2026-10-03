@@ -350,23 +350,14 @@ def park_about(conn, task) -> str | None:
 
 def parked_here(conn, room_token: str, user_id: str) -> list:
     """``user_id``'s parked tasks whose private question is in ``room_token``."""
-    ids: list[int] = []
-    for prefix in PARK_PREFIXES:
-        rows = conn.execute(
-            "SELECT delivery_reference FROM messages WHERE room_token = ? "
-            "AND delivery_reference LIKE ?",
-            (room_token, prefix + "%"),
-        ).fetchall()
-        for row in rows:
-            raw = row["delivery_reference"][len(prefix):].split(":", 1)[0]
-            if raw.isdecimal() and int(raw) not in ids:
-                ids.append(int(raw))
-    tasks = []
-    for ident in sorted(ids):
-        task = db.get_task(conn, ident)
-        if task is not None and task.user_id == user_id and task.status == "pending_confirmation":
-            tasks.append(task)
-    return tasks
+    clauses = " OR ".join("m.delivery_reference LIKE ? || t.id || ':%'" for _ in PARK_PREFIXES)
+    rows = conn.execute(
+        "SELECT DISTINCT t.id FROM tasks t JOIN messages m ON m.room_token = ? "
+        f"AND ({clauses}) WHERE t.user_id = ? AND t.status = 'pending_confirmation' "
+        "ORDER BY t.id",
+        (room_token, *PARK_PREFIXES, user_id),
+    ).fetchall()
+    return [task for task in (db.get_task(conn, row["id"]) for row in rows) if task is not None]
 
 
 # ---------------------------------------------------------------------------

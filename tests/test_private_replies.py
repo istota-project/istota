@@ -1194,6 +1194,21 @@ class TestRoomPost:
         with pytest.raises(RequestError, match="parent_unavailable"):
             _hold_post(config, bob_gone, user="bob")
 
+    def test_a_preview_a_phone_room_would_cut_short_is_refused(self, config):
+        from istota.relay.requests import RequestError
+
+        config.sms.enabled = True
+        config.sms.max_segments = 4
+        config.users["alice"].sms_phone_number = "+15551234567"
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            sms = _phone_room(conn, surface="sms")
+            ident = _running(conn, "alice", sms, source_type="sms", about_room_token=parent)
+            short = _running(conn, "alice", sms, source_type="sms", about_room_token=parent)
+        with pytest.raises(RequestError, match="invalid_preview"):
+            _hold_post(config, ident, text="x" * 1900)
+        assert _hold_post(config, short, text="Friday works", key="p2")["status"] == "held"
+
     def test_a_member_removed_before_delivery_posts_nothing(self, config):
         with db.get_db(config.db_path) as conn:
             parent = _shared_web(conn)
