@@ -927,6 +927,22 @@ def advisor_active(
     )
 
 
+#: A grant made only of these reads files and nothing else. Daemon-side calls
+#: that hand a model a document or a snapshot (health OCR, the code reviewer)
+#: ask for these, and ``build_claude_cli_flags`` denies everything that writes,
+#: executes or reaches the network for them.
+READ_ONLY_TOOLS = frozenset({"Read", "Grep", "Glob"})
+
+#: Denied in addition to ``Agent`` and ``Workflow`` for a read-only grant. A
+#: deny list rather than an ``--allowedTools`` allowlist, because deny rules
+#: hold under ``--dangerously-skip-permissions`` and the allowlist path was
+#: removed (see the comment in ``build_claude_cli_flags``).
+_READ_ONLY_DENIED_TOOLS = (
+    "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
+    "WebFetch", "WebSearch", "TodoWrite",
+)
+
+
 def build_claude_cli_flags(
     req: BrainRequest, *, unsupported: frozenset[str] = frozenset()
 ) -> list[str]:
@@ -974,6 +990,11 @@ def build_claude_cli_flags(
         # with --dangerously-skip-permissions), the allowlist no longer
         # implicitly blocks Workflow, so it must be denied explicitly again.
         flags += ["--disallowedTools", "Agent", "Workflow"]
+        # A grant of read tools alone still gets the whole default toolset under
+        # skip-permissions, so deny the rest by name. Any other grant keeps the
+        # argv above byte for byte.
+        if all(tool in READ_ONLY_TOOLS for tool in req.allowed_tools):
+            flags += list(_READ_ONLY_DENIED_TOOLS)
 
     def _add(flag: str, *values: str) -> None:
         if flag in unsupported:

@@ -150,6 +150,41 @@ class TestBuildCommandDisallowedTools:
         assert "--allowedTools" not in cmd
         assert "--dangerously-skip-permissions" in cmd
 
+    _WRITE_AND_NETWORK_TOOLS = [
+        "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
+        "WebFetch", "WebSearch", "TodoWrite",
+    ]
+
+    def _disallowed(self, cmd):
+        start = cmd.index("--disallowedTools") + 1
+        end = start
+        while end < len(cmd) and not cmd[end].startswith("--"):
+            end += 1
+        return cmd[start:end]
+
+    @pytest.mark.parametrize(
+        "tools", [["Read"], ["Read", "Grep", "Glob"], ["Glob", "Grep"]],
+    )
+    def test_a_read_only_grant_denies_the_write_and_network_tools(
+        self, tmp_path, tools
+    ):
+        # Skip-permissions hands the model the CLI's whole default toolset, so
+        # a grant of read tools alone has to deny the rest by name.
+        cmd = ClaudeCodeBrain._build_command(self._req(tmp_path, tools))
+        assert self._disallowed(cmd) == [
+            "Agent", "Workflow", *self._WRITE_AND_NETWORK_TOOLS,
+        ]
+        assert cmd.count("--disallowedTools") == 1
+
+    @pytest.mark.parametrize(
+        "tools",
+        [["Read", "Bash"], ["Bash"], ["Read", "Write"],
+         ["Bash", "Read", "Edit", "Write", "Grep", "Glob", "WebFetch"]],
+    )
+    def test_any_other_grant_keeps_todays_argv(self, tmp_path, tools):
+        cmd = ClaudeCodeBrain._build_command(self._req(tmp_path, tools))
+        assert self._disallowed(cmd) == ["Agent", "Workflow"]
+
     def test_no_tool_flags_when_text_only(self, tmp_path):
         # Empty allowed_tools => text-only invocation: no tool flags and no
         # skip-permissions, so the call can't reach a tool.
