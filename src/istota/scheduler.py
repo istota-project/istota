@@ -1048,6 +1048,77 @@ def _localize_owner_file(
     return str(resolved)
 
 
+def remove_transcribed_voice_notes(
+    config: Config,
+    user_id: str,
+    row_attachments: list[str],
+    transcribed: "tuple[str, ...] | list[str]",
+) -> None:
+    """Delete the WhatsApp voice notes this completed task transcribed (ISSUE-611).
+
+    The caller writes the transcript into the task row first, since nothing
+    else persists it; after that the inbox copy has no further use and the
+    sender's phone keeps the original. Only a file that produced text is
+    deleted, so a note whose transcription failed, timed out, was cancelled or
+    was refused stays behind as the only trace of that failure.
+
+    `transcribed` names files the way the executor saw them, so the row's
+    attachments are localized again and matched by value. Not by position
+    against `task.attachments`: the executor reassigns that list in place
+    (image renditions, a restricted task's staged copies), and a shifted index
+    would delete a note that was never transcribed. A copy the executor made
+    matches nothing and is left alone. Only
+    ``/Users/<user_id>/inbox/whatsapp_*`` is eligible; a web-chat memo may be
+    the only copy there is.
+
+    The inbox is model-writable, so the delete is relative to an fd from
+    `open_overlay_dir` (no link followed at any component) and the leaf must
+    be a regular file. A failure is a warning and never fails the task.
+    """
+    from .skills._loader import open_overlay_dir  # noqa: PLC0415 - import cycle
+    from .transport.whatsapp.media import INBOX_NAME_PREFIX  # noqa: PLC0415
+
+    root = config.workspace_root(user_id) if user_id else None
+    if root is None or not transcribed:
+        return
+    local_attachments = localize_workspace_attachments(config, user_id, row_attachments)
+    row_for_local = dict(zip(local_attachments, row_attachments))
+    for local in transcribed:
+        row = row_for_local.get(local)
+        parts = owner_path_parts(row, user_id) if isinstance(row, str) else None
+        if (
+            not parts
+            or len(parts) != 2
+            or parts[0] != "inbox"
+            or not parts[1].startswith(f"{INBOX_NAME_PREFIX}_")
+        ):
+            continue
+        leaf = parts[1]
+        fd = open_overlay_dir(root, "inbox")
+        if fd is None:
+            logger.warning(
+                "Not deleting transcribed voice note %r for user %s: the inbox "
+                "is not a plain directory", leaf, user_id,
+            )
+            continue
+        try:
+            if not stat.S_ISREG(os.lstat(leaf, dir_fd=fd).st_mode):
+                logger.warning(
+                    "Not deleting transcribed voice note %r for user %s: not a "
+                    "regular file", leaf, user_id,
+                )
+                continue
+            os.unlink(leaf, dir_fd=fd)
+            logger.info("Deleted transcribed voice note %r for user %s", leaf, user_id)
+        except OSError as exc:
+            logger.warning(
+                "Could not delete transcribed voice note %r for user %s: %s",
+                leaf, user_id, exc.strerror or type(exc).__name__,
+            )
+        finally:
+            os.close(fd)
+
+
 def get_worker_id(user_id: str | None = None) -> str:
     """Generate a unique worker ID, optionally scoped to a user."""
     base = f"{socket.gethostname()}-{os.getpid()}"
@@ -3421,6 +3492,10 @@ def process_one_task(
     # the hoist introduced: it cannot raise past an already-committed task,
     # and it closes the window where a cron sync re-inserts the deleted row.
     once_job_to_remove: tuple[str, str] | None = None
+    # The WhatsApp voice notes to delete once this transaction has closed,
+    # as `(row attachments, transcribed paths)` (ISSUE-611). Filled only on the
+    # completed branch: a parked or failed task re-runs from the file.
+    voice_notes_to_remove: tuple[list[str], tuple[str, ...]] | None = None
 
     with db.get_db(config.db_path) as conn:
         if success:
@@ -3559,6 +3634,22 @@ def process_one_task(
             else:
                 db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "info", "Task completed successfully")
+                if (
+                    task.source_type == "whatsapp"
+                    and task.transcribed_audio
+                    and not dry_run
+                ):
+                    _row = db.get_task(conn, task_id)
+                    # The file is about to go, so the transcript has to be
+                    # somewhere durable first: the row otherwise keeps the
+                    # transport's stand-in, and history, the sleep cycle and
+                    # `!retry` all read the row.
+                    if _row is not None and task.prompt != _row.prompt:
+                        db.update_task_prompt(conn, task_id, task.prompt)
+                    voice_notes_to_remove = (
+                        list((_row.attachments if _row else None) or []),
+                        task.transcribed_audio,
+                    )
                 if task.source_type == "signup":
                     notification_results.append(task_alert_source.write(
                         conn, task.user_id, dedup_key=f"signup-followup:{task.id}",
@@ -4711,6 +4802,18 @@ def process_one_task(
                     "could not stamp the undelivered-result notification",
                     exc_info=True,
                 )
+
+    # Last, after the answer has gone out: this is mount I/O, and a hung mount
+    # must not hold back a reply (ISSUE-387's shape). Nothing here may fail a
+    # task that has already completed.
+    if voice_notes_to_remove is not None:
+        try:
+            remove_transcribed_voice_notes(config, task.user_id, *voice_notes_to_remove)
+        except Exception:
+            logger.warning(
+                "Could not remove transcribed voice notes for task %d", task_id,
+                exc_info=True,
+            )
 
     return task_id, success
 

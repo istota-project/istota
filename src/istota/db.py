@@ -176,6 +176,11 @@ class Task:
     # halves of one attempt, not task state. The durable copy is what the
     # scheduler writes into the `result` column; there is no column here.
     partial_result: str | None = None
+    # The audio attachments that produced a non-empty transcript this attempt,
+    # as the executor was handed them (ISSUE-611). The same kind of hand-off as
+    # `partial_result`: the scheduler deletes these WhatsApp inbox copies once
+    # the task completes. Never loaded from a row.
+    transcribed_audio: tuple[str, ...] = ()
 
 
 @dataclass
@@ -1938,6 +1943,11 @@ def get_subtask_depth(conn: sqlite3.Connection, task_id: int) -> int:
         current = row["parent_task_id"]
         depth += 1
     return depth
+
+
+def update_task_prompt(conn: sqlite3.Connection, task_id: int, prompt: str) -> None:
+    """Replace a task's stored prompt, for the voice-note transcript (ISSUE-611)."""
+    conn.execute("UPDATE tasks SET prompt = ? WHERE id = ?", (prompt, task_id))
 
 
 def update_task_status(

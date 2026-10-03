@@ -1750,6 +1750,57 @@ class TestPreTranscribeAttachments:
         for needle in ("first part", "second part", "a.mp3", "b.wav"):
             assert needle in result
 
+    @patch(_TRANSCRIBE_PATCH)
+    def test_only_the_files_that_produced_text_are_reported(self, mock_transcribe):
+        # ISSUE-611: the scheduler deletes exactly these, so a failure or an
+        # empty transcript must not be in the list.
+        mock_transcribe.side_effect = [
+            {"status": "ok", "text": "first part"},
+            {"status": "error", "error": "corrupted file"},
+            {"status": "ok", "text": "  "},
+        ]
+        transcribed: list[str] = []
+        _pre_transcribe_attachments(
+            ["/tmp/a.ogg", "/tmp/photo.jpg", "/tmp/b.ogg", "/tmp/c.ogg"], "",
+            transcribed=transcribed,
+        )
+        assert transcribed == ["/tmp/a.ogg"]
+
+    @patch(_TRANSCRIBE_PATCH)
+    def test_a_file_skipped_by_the_budget_is_not_reported(self, mock_transcribe, monkeypatch):
+        monkeypatch.setattr(executor, "_PRE_TRANSCRIBE_TOTAL_TIMEOUT_SECONDS", -1.0)
+        mock_transcribe.return_value = {"status": "ok", "text": "never asked"}
+        transcribed: list[str] = []
+        _pre_transcribe_attachments(["/tmp/a.ogg"], "", transcribed=transcribed)
+        assert transcribed == []
+
+    @patch(_TRANSCRIBE_PATCH)
+    def test_execute_task_hands_the_transcribed_paths_to_the_scheduler(
+        self, mock_transcribe, tmp_path,
+    ):
+        mock_transcribe.side_effect = [
+            {"status": "ok", "text": "call the plumber"},
+            {"status": "error", "error": "corrupted file"},
+        ]
+        mount = tmp_path / "mount"
+        inbox = mount / "Users" / "alice" / "inbox"
+        inbox.mkdir(parents=True)
+        ok = inbox / "whatsapp_ok.ogg"
+        bad = inbox / "whatsapp_bad.ogg"
+        ok.write_bytes(b"OggS")
+        bad.write_bytes(b"OggS")
+        config = Config(temp_dir=tmp_path / "tmp", workspace_path=mount)
+        config.db_path = tmp_path / "istota.db"
+        task = _db.Task(
+            id=7, status="running", source_type="whatsapp", user_id="alice",
+            prompt="Process the attached file(s)",
+            attachments=[str(ok), str(bad)],
+        )
+
+        executor.execute_task(task, config, [], dry_run=True)
+
+        assert task.transcribed_audio == (str(ok),)
+
     def test_all_audio_extensions_recognized(self):
         for ext in ["mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"]:
             assert ext in _AUDIO_EXTENSIONS
