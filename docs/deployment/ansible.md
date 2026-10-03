@@ -135,12 +135,14 @@ istota_users:
 
 `istota_user_profile_mode` decides what the inventory means for a user who already exists.
 
-- `enforce` (the default) keeps inventory authoritative. Each deploy runs `istota user ensure --managed`, which writes every key the inventory names and records those fields as set by the deployment. The web UI then shows them locked on the user's own `/settings` ("Set by your administrator") and refuses an edit with 409. Without the lock, an edit made in the browser was silently reverted on the next deploy. A key you remove from inventory is unlocked on the next deploy.
-- `seed` hands ownership to the web UI. Each deploy runs `istota user ensure --seed`, which writes a new user in full but, for a user that already exists, only fills an empty `sms_phone_number` or an unbound WhatsApp binding. Every other key is left as stored, and every lock is released. Use it when you onboard and edit users through the web UI.
+- `enforce` (the default) keeps inventory authoritative. Each deploy runs `istota user ensure --managed`, which writes every key the inventory names and records those fields as set by the deployment. The web UI then shows them locked, as "Set by your administrator" on the user's own `/settings` and as "Set by deployment" in the admin [user settings editor](../features/web-interface.md#user-settings-editor), and refuses an edit with 409. Without the lock, an edit made in the browser was silently reverted on the next deploy. A key you remove from inventory is unlocked on the next deploy.
+- `seed` hands ownership to the web UI. Each deploy runs `istota user ensure --seed`, which writes a new user in full but, for a user that already exists, only fills an empty `sms_phone_number` or an unbound WhatsApp binding. Every other key is left as stored, and every lock is released. Use it when you onboard and edit users through the web UI. A user you add in the web UI and never list in inventory is unaffected by either mode.
 
 Any other value fails the play. Running `istota user ensure` by hand without either flag writes what it is given and leaves the locks as they are.
 
 The role only touches users listed in `istota_users`. A user you remove from inventory keeps the locks the last deploy recorded, in either mode. Release them by hand with `istota user ensure --name <id> --seed`.
+
+An email address, SMS number or WhatsApp number can belong to one user only. If inventory gives a user one that another user already holds, `istota user ensure` exits 1 naming the holder and the play fails. Moving an address from one inventory user to another can fail one deploy, depending on the order the users are applied in; the next deploy succeeds.
 
 An empty list for `disabled_skills` or `disabled_modules` is the same as omitting it and leaves the stored list alone. `istota user ensure --name <id> --disabled-module ""` clears the module list; the skill list is changed from the web UI.
 
