@@ -27,10 +27,16 @@ Three pieces, each a plain function:
   the row), the heads-up mail for an email-thread parent, and the bell row's
   delivery. Never raises. Nothing crosses the network under a writer lock.
 
-Stage 1 of the private-replies spec: nothing calls these yet. `side_rooms`
-still holds the side-room machinery these replace; the shared helpers
-(`room_label`, `HEADER_PREFIX`, `_send_private_mail`) are imported from there
-until the rename completes.
+Linking (`linked_about`, `quoted_private_reply`, `linked_room`,
+`linked_context`): a reply to or quote of a tagged row links the new turn to
+the shared room the row is about, through `tasks.about_room_token`.
+`transport.ingest.record_inbound` applies the one rule for every surface; a
+WhatsApp quote is resolved back to its row through the ``private-reply:``
+ledger key first.
+
+`side_rooms` still holds the side-room machinery these replace; the shared
+helpers (`room_label`, `HEADER_PREFIX`, `_send_private_mail`,
+`transcript_context`) are imported from there until the rename completes.
 """
 
 from __future__ import annotations
@@ -182,6 +188,110 @@ def private_room_for(conn, config, user_id: str, about_token: str) -> PrivateDes
         if dest is not None:
             return dest
     return None
+
+
+# ---------------------------------------------------------------------------
+# Linking
+# ---------------------------------------------------------------------------
+
+#: The prompt snapshot of a quoted parent, as web and Talk cap theirs.
+REPLY_SNAPSHOT_CHARS = 1000
+
+
+def linked_about(conn, parent_message_id: int | None, room_token: str | None) -> str | None:
+    """The shared room a reply to ``parent_message_id`` is linked to, or None.
+
+    The one linking rule, applied by `transport.ingest.record_inbound` for
+    every surface that supplies a parent: the parent row is in the same room
+    as the new turn and is tagged with ``about_room_token``. Nothing else
+    links a turn, and nothing carries a link forward to the next one.
+    """
+    if parent_message_id is None or not room_token:
+        return None
+    row = conn.execute(
+        "SELECT room_token, about_room_token FROM messages WHERE id = ?",
+        (int(parent_message_id),),
+    ).fetchone()
+    if row is None or row["room_token"] != room_token:
+        return None
+    return row["about_room_token"] or None
+
+
+def quoted_private_reply(conn, *, user_id: str, quoted_id: str | None,
+                         room_token: str | None) -> tuple[int, str] | None:
+    """``(messages.id, body)`` of the tagged row a WhatsApp quote names, or None.
+
+    `send_private` keys a WhatsApp send ``private-reply:<messages.id>``, so the
+    provider id the quote carries leads back to the row through `sent_whatsapp`
+    (the shape `relays._quoted_relay` uses for ``relay-question:``). The row is
+    then checked rather than trusted: ``messages.id`` has no AUTOINCREMENT, so
+    a rowid can be reused once the newest rows are gone. It must be in this
+    user's private WhatsApp room, carry ``about_room_token``, and have been
+    written by `deliver_private`. Anything else is an ordinary quote, ignored.
+    """
+    if not quoted_id or not room_token:
+        return None
+    row = conn.execute(
+        "SELECT logical_key FROM sent_whatsapp WHERE meta_message_id = ? AND user_id = ? "
+        "AND logical_key LIKE ? ORDER BY id DESC LIMIT 1",
+        (quoted_id, user_id, WHATSAPP_KEY_PREFIX + "%"),
+    ).fetchone()
+    if row is None:
+        return None
+    raw = row["logical_key"][len(WHATSAPP_KEY_PREFIX):]
+    if not raw.isdecimal():
+        return None
+    message = conn.execute(
+        "SELECT id, room_token, body, about_room_token, delivery_reference "
+        "FROM messages WHERE id = ?",
+        (int(raw),),
+    ).fetchone()
+    if (
+        message is None
+        or message["room_token"] != room_token
+        or not message["about_room_token"]
+        or not (message["delivery_reference"] or "").startswith("private-")
+    ):
+        return None
+    return int(message["id"]), message["body"][:REPLY_SNAPSHOT_CHARS]
+
+
+def linked_room(conn, task) -> str | None:
+    """The shared room a linked task may read and post into, or None.
+
+    A link is checked again at execution, because a room can go and a member
+    can leave between the reply and the run: the room must still exist and
+    the task's user must still be a member. The task's own room must still be
+    private, since the linked prompt tells the model only that user reads it.
+    """
+    about = getattr(task, "about_room_token", None)
+    if not about:
+        return None
+    parent = canonical_token(conn, about)
+    if not parent or db.get_room(conn, parent) is None:
+        return None
+    if not db.is_room_member(conn, parent, task.user_id):
+        return None
+    own = canonical_token(conn, task.conversation_token) if task.conversation_token else None
+    if not own or own == parent or db.room_is_shared(conn, own):
+        return None
+    return parent
+
+
+def linked_context(conn, config, task) -> tuple[str | None, str]:
+    """``(parent token, user-half transcript block)`` for a linked task, else ``(None, "")``."""
+    from istota.rooms.side_rooms import transcript_context
+
+    parent = linked_room(conn, task)
+    if parent is None:
+        return None, ""
+    return parent, transcript_context(
+        conn, config, parent,
+        heading="## Linked room (read-only)",
+        intro=("This turn replies to a message about a shared room. Its recent "
+               "messages, oldest first. Nothing written in this conversation "
+               "reaches it."),
+    )
 
 
 # ---------------------------------------------------------------------------

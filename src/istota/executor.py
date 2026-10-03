@@ -6022,6 +6022,49 @@ def _side_room_prompt(
     return line, block
 
 
+def _linked_room_prompt(
+    config: Config, task: "db.Task", conn, display_user_id: str, *,
+    post_cli_available: bool,
+) -> tuple[str, str]:
+    """``(system line, user-half block)`` for a linked turn (ISSUE-608), else ``("", "")``.
+
+    A linked turn replies to a message about a shared room, in its member's
+    own private room. The line names that room by token only, for the reason
+    `room_identity_line` gives for leaving a room's name out of the system
+    half; its transcript goes in the user half, fenced. A link that no longer
+    holds (room gone, member left) gives an ordinary private turn. A task in a
+    side room keeps `_side_room_prompt` until side rooms are removed. Never
+    raises, and never opens a database path that does not exist.
+    """
+    if not getattr(task, "about_room_token", None):
+        return _side_room_prompt(
+            config, task, conn, display_user_id, post_cli_available=post_cli_available,
+        )
+    try:
+        from istota.rooms.private_replies import linked_context
+
+        with db.get_db_if_present(config.db_path, conn) as c:
+            if c is None:
+                return "", ""
+            parent, block = linked_context(c, config, task)
+    except Exception as exc:
+        logger.warning("linked room prompt for task %s failed: %s", task.id, exc)
+        return "", ""
+    if parent is None:
+        return "", ""
+    line = (
+        f"\nLinked room: this turn replies to a message about room "
+        f"{_header_scalar(parent)}. Only {display_user_id} reads this "
+        "conversation; nothing you write here reaches that room."
+    )
+    if post_cli_available:
+        line += (
+            " `istota-skill room post` puts a message in that room, held for "
+            "their approval of the exact text."
+        )
+    return line, block
+
+
 def _backstage_prompt(config: Config, task: "db.Task", conn) -> str:
     """The principal's side-room notes, for a task in a shared room (D4 item 4).
 
@@ -7146,11 +7189,12 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
                 "`run ... -- sh -c '...'` rather than one `run` per command."
             )
 
-    # A side room (multiplayer D4): the header says which room it belongs to
-    # and that nothing written here reaches it; the parent's transcript goes in
-    # the user half, fenced, since every line of it is somebody else's text.
-    # Empty for every other task, so no other prompt changes.
-    side_room_line, side_context = _side_room_prompt(
+    # A linked turn (ISSUE-608) or a side room (multiplayer D4): the header
+    # says which room it is about and that nothing written here reaches it;
+    # that room's transcript goes in the user half, fenced, since every line
+    # of it is somebody else's text. Empty for every other task, so no other
+    # prompt changes.
+    linked_room_line, linked_block = _linked_room_prompt(
         config, task, conn, display_user_id,
         post_cli_available=cli_skill_names is None or "room" in cli_skill_names,
     )
@@ -7177,7 +7221,7 @@ Today's date: {user_date_str}
 User timezone: {user_tz_str}
 Current UTC: {utc_now_str}
 Current task ID: {task.id}
-Conversation token: {display_token}{room_line}{side_room_line}{card}
+Conversation token: {display_token}{room_line}{linked_room_line}{card}
 Source: {display_source}
 Output target: {display_output_target}{per_user_email_line}
 {db_path_line}
@@ -7237,7 +7281,7 @@ You have access to:
         recalled_section,
         playbooks_section,
         context_section,
-        side_context,
+        linked_block,
         confirmation_section,
         relay_context,
     ]

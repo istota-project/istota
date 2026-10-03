@@ -134,6 +134,10 @@ class Task:
     #: Who reads the room this turn was written in: `private`, `principals`
     #: or `mixed` (multiplayer D3), computed at ingest. None off a room.
     audience: str | None = None
+    #: The shared room this turn is linked to (ISSUE-608): set when the turn
+    #: replies to or quotes a message tagged with that room, in the private
+    #: room it was written in. Canonical token; None for an unlinked turn.
+    about_room_token: str | None = None
     heartbeat_silent: bool = False
     skip_log_channel: bool = False
     scheduled_job_id: int | None = None
@@ -1398,6 +1402,9 @@ def create_task(
     # reads the room. Written only by `record_inbound`.
     guest_participant_id: int | None = None,
     audience: str | None = None,
+    # The shared room a reply to a tagged message is linked to (ISSUE-608).
+    # Written only by `record_inbound`, from the parent row.
+    about_room_token: str | None = None,
     heartbeat_silent: bool = False,
     skip_log_channel: bool = False,
     scheduled_job_id: int | None = None,
@@ -1451,10 +1458,11 @@ def create_task(
             parent_task_id, is_group_chat, attachments, priority, scheduled_for,
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
             reply_to_message_id, withheld_from_room, guest_participant_id, audience,
+            about_room_token,
             heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
             queue, model, effort, brain, model_namespace,
             talk_delivery_token, skill, skill_args
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -1476,6 +1484,7 @@ def create_task(
             1 if withheld_from_room else 0,
             guest_participant_id,
             audience,
+            about_room_token or None,
             1 if heartbeat_silent else 0,
             1 if skip_log_channel else 0,
             scheduled_job_id,
@@ -1508,7 +1517,7 @@ _TASK_COLUMNS = (
     "priority, attempt_count, max_attempts, created_at, scheduled_for, "
     "output_target, talk_message_id, talk_response_id, reply_to_talk_id, "
     "reply_to_content, reply_to_message_id, withheld_from_room, "
-    "guest_participant_id, audience, heartbeat_silent, skip_log_channel, scheduled_job_id, "
+    "guest_participant_id, audience, about_room_token, heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
     "brain, model_namespace, talk_delivery_token, skill, skill_args, whatsapp_confirmation_request_id"
 )
@@ -1553,6 +1562,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         withheld_from_room=bool(row["withheld_from_room"]),
         guest_participant_id=row["guest_participant_id"],
         audience=row["audience"],
+        about_room_token=row["about_room_token"],
         heartbeat_silent=bool(row["heartbeat_silent"]),
         skip_log_channel=bool(row["skip_log_channel"]),
         scheduled_job_id=row["scheduled_job_id"],

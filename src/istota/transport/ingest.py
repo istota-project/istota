@@ -781,6 +781,13 @@ def record_inbound(
             conn, room_token, surface, str(reply_to_message_id),
         )
 
+    # 2d. A reply to a message tagged with a shared room links this turn to
+    #     that room (ISSUE-608): the one linking rule, for every surface that
+    #     supplied a parent above. The parent must be in this turn's own room.
+    from istota.rooms.private_replies import linked_about
+
+    about_room_token = linked_about(conn, reply_to_canonical_id, transcript_token)
+
     stores_row = room_surface or mirror_only
     if stores_row or platform_message_id is not None:
         prior = _prior_turn(
@@ -910,6 +917,7 @@ def record_inbound(
         withheld_from_room=withheld_from_room,
         guest_participant_id=guest_participant_id,
         audience=audience,
+        about_room_token=about_room_token,
         output_target=output_target,
         talk_delivery_token=delivery_token,
         model=model,
@@ -929,6 +937,7 @@ def record_inbound(
 def record_phone_turn(
     conn, config, *, surface, surface_ref, user_id, text, channel_name,
     record_only=False, external_id=None, reply_to_content=None, attachments=None,
+    reply_to_canonical_id=None,
 ):
     """Record an accepted private phone turn and its permanent pre-room alias."""
     result = record_inbound(
@@ -936,6 +945,7 @@ def record_phone_turn(
         text=text, source_type=surface, channel_name=channel_name,
         output_target=surface, mirror_to_room=False, queue="foreground",
         external_id=external_id, reply_to_content=reply_to_content,
+        reply_to_canonical_id=reply_to_canonical_id,
         attachments=attachments, is_command=text.startswith("!"), record_only=record_only,
     )
     if result.message_id is not None:

@@ -1,9 +1,10 @@
 """Private replies (ISSUE-608): what a shared room has for one member, in their own room.
 
-Stage 1 of the private-replies spec: the resolver that picks a member's own
-private room, the record-then-send delivery primitive, the bell fallback when
-there is no private room, and the two `about_room_token` columns. Nothing in
-the product calls these yet; the call sites move onto them in Stage 3.
+The resolver that picks a member's own private room, the record-then-send
+delivery primitive, the bell fallback when there is no private room, the two
+`about_room_token` columns, and linking: a reply to or quote of a tagged row
+links the turn to its shared room, which the prompt and the delivery plan
+then read. The verbs and confirmations move onto these in Stage 3.
 """
 import asyncio
 import sqlite3
@@ -274,6 +275,9 @@ class TestTheResolver:
             first = plain_talk_room(conn, "alice", name="first")
             conn.execute("UPDATE rooms SET created_at='2000-01-01' WHERE token=?",
                          (other_shared.canonical,))
+            # Same-second rooms order by their random token; pin "first" older.
+            conn.execute("UPDATE rooms SET created_at='2001-01-01' WHERE token=?",
+                         (first.canonical,))
             plain_talk_room(conn, "alice", name="second")
         dest = _resolve(config, parent)
         assert dest.room_token == first.canonical
@@ -605,3 +609,333 @@ class TestSend:
         with patch("istota.rooms.side_rooms._send_private_mail") as send:
             asyncio.run(private_replies.send_private(config, delivery, body="x"))
         send.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Linking
+# ---------------------------------------------------------------------------
+
+
+def _tagged(conn, room, about, *, body="Shall I?", reference="7:abc", kind="confirmation"):
+    return db.add_message(conn, room, role="system", body=body, origin_surface="web",
+                          about_room_token=about,
+                          delivery_reference=f"private-{kind}:{reference}")
+
+
+def _web_turn(conn, config, room, parent_id, *, user="alice", text="post that it works"):
+    from istota.transport.ingest import record_inbound
+
+    return record_inbound(conn, config, surface="web", surface_ref=room, user_id=user,
+                          text=text, source_type="web", output_target="room",
+                          reply_to_canonical_id=parent_id)
+
+
+def _about(config, task_id):
+    with db.get_db(config.db_path) as conn:
+        return db.get_task(conn, task_id).about_room_token
+
+
+class TestLinking:
+    def test_a_web_reply_to_a_tagged_row_links_the_turn(self, config):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            web = _web_room(conn)
+            row = _tagged(conn, web, parent)
+            result = _web_turn(conn, config, web, row)
+        assert _about(config, result.task_id) == parent
+
+    def test_a_reply_to_an_untagged_row_does_not(self, config):
+        with db.get_db(config.db_path) as conn:
+            _shared_web(conn)
+            web = _web_room(conn)
+            row = db.add_message(conn, web, role="assistant", body="hi", origin_surface="web")
+            result = _web_turn(conn, config, web, row)
+        assert _about(config, result.task_id) is None
+
+    def test_a_parent_in_another_room_does_not(self, config):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            web = _web_room(conn)
+            other = _web_room(conn, name="other")
+            row = _tagged(conn, other, parent)
+            result = _web_turn(conn, config, web, row)
+        assert _about(config, result.task_id) is None
+
+    def test_an_unquoted_turn_is_not_linked_after_a_linked_one(self, config):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            web = _web_room(conn)
+            row = _tagged(conn, web, parent)
+            first = _web_turn(conn, config, web, row)
+            second = _web_turn(conn, config, web, None, text="and the weather?")
+        assert _about(config, first.task_id) == parent
+        assert _about(config, second.task_id) is None
+
+    def test_a_talk_reply_to_a_tagged_row_links_the_turn(self, config):
+        from istota.transport.ingest import record_inbound
+
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_talk(conn)
+            mine = plain_talk_room(conn, "alice", name="talk")
+            row = db.add_message(conn, mine.canonical, role="system", body="Shall I?",
+                                 origin_surface="talk", about_room_token=parent,
+                                 delivery_reference="private-confirmation:7:abc")
+            db.set_message_external_id(conn, row, "talk", "4242")
+            result = record_inbound(conn, config, surface="talk", surface_ref=mine.talk_ref,
+                                    user_id="alice", text="yes, post it",
+                                    platform_message_id=4300, external_id="4300",
+                                    reply_to_message_id=4242)
+        assert _about(config, result.task_id) == parent
+
+
+def _baileys_event(text, *, quote=None, ident="IN1"):
+    import time
+
+    from istota.transport.whatsapp.baileys_protocol import inbound_event
+
+    return inbound_event(dict(message_id=ident, jid=ALICE_JID, message_type="text", text=text,
+                              reply_to_message_id=quote, timestamp=int(time.time())))
+
+
+def _receive(config, event):
+    from istota.transport.whatsapp.webhook import handle_whatsapp_batch
+
+    with db.get_db(config.db_path) as conn:
+        return handle_whatsapp_batch(conn, config, [event], provider="baileys")[0]
+
+
+class TestWhatsAppQuoteLinking:
+    def _sent_note(self, config, sent, about):
+        delivery = _deliver(config, about, kind="whisper", reference="room-whisper:1",
+                            body="Friday is free.")
+        assert asyncio.run(private_replies.send_private(config, delivery, body="Friday is free."))
+        return delivery, f"BOT{len(sent)}"
+
+    def _setup(self, config):
+        with db.get_db(config.db_path) as conn:
+            group = _whatsapp_group(conn)
+            mine = _phone_room(conn)
+        return group, mine
+
+    def test_a_quote_of_a_private_reply_links_the_turn_through_the_webhook(self, config, sent):
+        group, mine = self._setup(config)
+        delivery, provider_id = self._sent_note(config, sent, group)
+        result = _receive(config, _baileys_event("post that Friday works", quote=provider_id))
+        assert result.disposition == "task"
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, result.task_id)
+            (turn,) = conn.execute(
+                "SELECT reply_to_message_id FROM messages WHERE task_id = ?", (task.id,),
+            ).fetchall()
+        assert task.about_room_token == group
+        assert task.conversation_token == mine
+        assert task.reply_to_message_id == delivery.message_id
+        assert task.reply_to_content == "Friday is free."
+        assert turn["reply_to_message_id"] == delivery.message_id
+
+    def test_an_unquoted_message_and_an_unknown_quote_are_not_linked(self, config, sent):
+        group, _mine = self._setup(config)
+        self._sent_note(config, sent, group)
+        plain = _receive(config, _baileys_event("hello", ident="IN2"))
+        stray = _receive(config, _baileys_event("hello", quote="SOMEONE-ELSE", ident="IN3"))
+        assert _about(config, plain.task_id) is None
+        assert _about(config, stray.task_id) is None
+
+    def test_a_reused_rowid_that_is_no_longer_a_private_reply_is_ignored(self, config, sent):
+        group, mine = self._setup(config)
+        delivery, provider_id = self._sent_note(config, sent, group)
+        with db.get_db(config.db_path) as conn:
+            conn.execute("DELETE FROM messages WHERE id = ?", (delivery.message_id,))
+            reused = db.add_message(conn, mine, role="assistant", body="unrelated",
+                                    origin_surface="whatsapp")
+        assert reused == delivery.message_id
+        result = _receive(config, _baileys_event("post it", quote=provider_id))
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, result.task_id)
+        assert task.about_room_token is None
+        assert task.reply_to_message_id is None
+
+    def test_another_users_ledger_row_is_not_resolved(self, config, sent):
+        group, mine = self._setup(config)
+        _delivery, provider_id = self._sent_note(config, sent, group)
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE sent_whatsapp SET user_id = 'bob'")
+            found = private_replies.quoted_private_reply(
+                conn, user_id="alice", quoted_id=provider_id, room_token=mine)
+            control = conn.execute("SELECT 1 FROM sent_whatsapp WHERE meta_message_id = ?",
+                                   (provider_id,)).fetchone()
+        assert control is not None
+        assert found is None
+
+    def test_a_relay_quote_keeps_precedence(self, config, sent, monkeypatch):
+        from istota.relay import relays
+        from istota.transport.whatsapp.webhook import WhatsAppEventResult
+
+        group, _mine = self._setup(config)
+        _delivery, provider_id = self._sent_note(config, sent, group)
+        claimed = WhatsAppEventResult("relay_answer", user_id="alice")
+        monkeypatch.setattr(relays, "match_whatsapp_reply", lambda *a, **k: claimed)
+        result = _receive(config, _baileys_event("yes", quote=provider_id))
+        assert result is claimed
+        assert _rows(config, "SELECT id FROM tasks WHERE about_room_token IS NOT NULL") == []
+
+
+# ---------------------------------------------------------------------------
+# The linked prompt
+# ---------------------------------------------------------------------------
+
+
+def _linked_task(conn, room, about, *, user="alice", prompt="post that it works"):
+    ident = db.create_task(conn, user_id=user, source_type="web", prompt=prompt,
+                           conversation_token=room, about_room_token=about)
+    return db.get_task(conn, ident)
+
+
+def _dry_run(config, task, monkeypatch):
+    from istota import executor
+
+    monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
+    success, result, _a, _t = executor.execute_task(task, config, [], dry_run=True)
+    assert success, result
+    system, user = result.split("===== USER =====", 1)
+    return system, user
+
+
+@pytest.fixture
+def local_config(tmp_path):
+    """No Nextcloud: a dry run assembles with no network on its path."""
+    config = _config(tmp_path)
+    config.nextcloud = NextcloudConfig()
+    config.talk = TalkConfig(enabled=False)
+    return config
+
+
+class TestTheLinkedPrompt:
+    def test_the_system_line_names_the_room_by_token_and_its_transcript_is_user_half(
+        self, local_config, monkeypatch,
+    ):
+        config = local_config
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn, name="SECRET-ROOM-NAME")
+            db.add_message(conn, parent, role="user", body="flights are booked for friday",
+                           origin_surface="web", author_user_id="bob")
+            web = _web_room(conn)
+            task = _linked_task(conn, web, parent)
+        system, user = _dry_run(config, task, monkeypatch)
+        assert f"Linked room: this turn replies to a message about room {parent}." in system
+        assert "Only alice reads this conversation" in system
+        assert "SECRET-ROOM-NAME" not in system
+        assert "flights are booked for friday" not in system
+        assert "flights are booked for friday" in user
+        assert "UNTRUSTED PARENT ROOM TRANSCRIPT" in user
+        assert "## Linked room (read-only)" in user
+
+    def test_a_member_who_left_gets_an_ordinary_private_turn(self, local_config, monkeypatch):
+        config = local_config
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            db.add_message(conn, parent, role="user", body="after you left",
+                           origin_surface="web", author_user_id="alice")
+            bob_web = _web_room(conn, user="bob", name="bob's")
+            db.drop_web_room_member(conn, parent, "bob")
+            task = _linked_task(conn, bob_web, parent, user="bob")
+        system, user = _dry_run(config, task, monkeypatch)
+        assert "Linked room:" not in system
+        assert "after you left" not in system + user
+
+    def test_a_room_that_is_gone_links_to_nothing(self, config):
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            task = _linked_task(conn, web, "rm_gone")
+            assert private_replies.linked_room(conn, task) is None
+
+    def test_a_private_room_that_became_shared_no_longer_links(self, config):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            web = _web_room(conn)
+            db.add_web_room_member(conn, web, "bob")
+            task = _linked_task(conn, web, parent)
+            assert private_replies.linked_room(conn, task) is None
+
+    def test_an_unlinked_task_carries_no_linked_block(self, local_config, monkeypatch):
+        config = local_config
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            db.add_message(conn, parent, role="user", body="room chatter",
+                           origin_surface="web", author_user_id="bob")
+            web = _web_room(conn)
+            ident = db.create_task(conn, user_id="alice", source_type="web", prompt="hi",
+                                   conversation_token=web)
+            task = db.get_task(conn, ident)
+        system, user = _dry_run(config, task, monkeypatch)
+        assert "Linked room:" not in system
+        assert "room chatter" not in user
+
+
+# ---------------------------------------------------------------------------
+# Delivery pinning
+# ---------------------------------------------------------------------------
+
+
+class TestThePin:
+    @pytest.mark.parametrize("target", ["web:{parent}", "room:{parent}", "talk:{talk}"])
+    def test_a_linked_task_never_delivers_into_its_room(self, config, target):
+        from istota.transport.registry import make_registry
+        from istota.transport.routing import resolve_delivery_plan
+
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            db.add_room_binding(conn, parent, "talk", "family-talk")
+            web = _web_room(conn)
+            spec = target.format(parent=parent, talk="family-talk")
+            ident = db.create_task(conn, user_id="alice", source_type="web", prompt="x",
+                                   conversation_token=web, output_target=spec,
+                                   about_room_token=parent)
+            task = db.get_task(conn, ident)
+            control_id = db.create_task(conn, user_id="alice", source_type="web", prompt="x",
+                                        conversation_token=web, output_target=spec)
+            control = db.get_task(conn, control_id)
+        registry = make_registry(config)
+        plan = resolve_delivery_plan(config, task, registry)
+        assert all(d.channel not in (parent, "family-talk") for d in plan)
+        assert [(d.surface, d.channel) for d in plan] == [("web", "stream")]
+        # The shared-room refusal would drop these too; the pin's own effect
+        # is what `pin_plan` returns, asserted below against the control.
+        from istota.rooms.side_rooms import pin_plan
+        from istota.transport.routing import Destination
+        into = [Destination("web", parent, "push"), Destination("talk", "family-talk", "push")]
+        assert pin_plan(config, task, into, fallback=lambda: []) == []
+        assert pin_plan(config, control, into, fallback=lambda: []) == into
+
+    def test_the_fallback_is_used_only_when_the_plan_empties(self, config):
+        from istota.rooms.side_rooms import pin_plan
+        from istota.transport.routing import Destination
+
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_talk(conn)
+            parent_ref = db.get_room_binding(conn, parent, "talk").surface_ref
+            mine = plain_talk_room(conn, "alice", name="talk")
+            ident = db.create_task(conn, user_id="alice", source_type="talk", prompt="x",
+                                   conversation_token=mine.canonical,
+                                   about_room_token=parent)
+            task = db.get_task(conn, ident)
+        own = Destination("talk", mine.talk_ref, "push")
+        emptied = pin_plan(config, task, [Destination("talk", parent_ref, "push")],
+                           fallback=lambda: [own])
+        assert emptied == [own]
+        kept = pin_plan(config, task, [Destination("talk", parent_ref, "push"),
+                                       Destination("email", None, "push")],
+                        fallback=lambda: [own])
+        assert kept == [Destination("email", None, "push")]
+
+    def test_an_unlinked_task_is_untouched(self, config):
+        from istota.rooms.side_rooms import pin_plan
+        from istota.transport.routing import Destination
+
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            ident = db.create_task(conn, user_id="alice", source_type="web", prompt="x",
+                                   conversation_token=web)
+            task = db.get_task(conn, ident)
+        plan = [Destination("web", web, "push")]
+        assert pin_plan(config, task, plan, fallback=lambda: []) == plan

@@ -1523,12 +1523,21 @@ def resolve_delivery_plan(
         seen.add(key)
         resolved.append(r)
 
-    # A side room's output never reaches its parent (multiplayer D4); posting
+    # A side room's output never reaches its parent (multiplayer D4), and a
+    # linked turn's never reaches the room it is linked to (ISSUE-608); posting
     # there is the held `room post` verb. Before the shared-room refusal, which
     # would otherwise drop the parent first and leave the pin nothing to
     # substitute the side room for.
     from istota.rooms.side_rooms import pin_plan
-    resolved = pin_plan(config, task, resolved)
+
+    def _own_room() -> list[Destination]:
+        return [
+            r for r in (_resolve_one(config, task, registry, d)
+                        for d in _infer_default_plan(task))
+            if r is not None
+        ]
+
+    resolved = pin_plan(config, task, resolved, fallback=_own_room)
 
     # Only the room the task ran in may receive it if that room is shared. A
     # briefing has no such room: its blocks are assembled daemon-side from the

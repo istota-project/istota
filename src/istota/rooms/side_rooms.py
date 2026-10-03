@@ -111,19 +111,33 @@ def _speaker(config, row) -> str:
 def parent_context(conn, config, task) -> str:
     """The parent room's recent transcript for a side-room task, or "".
 
-    User-half material, fenced as untrusted: every line in it was written by
-    somebody else in a room the member does not control. All of it, not only
-    what the member saw, because the side room is where the member reads the
-    room back (Stage 14 limits front-stage context by epoch; a side room is
-    the unrestricted side). Newest kept when the cap bites.
+    All of it, not only what the member saw, because the side room is where
+    the member reads the room back (Stage 14 limits front-stage context by
+    epoch; a side room is the unrestricted side).
     """
     side = task_side_room(conn, task)
     if side is None:
         return ""
+    return transcript_context(
+        conn, config, side.side_of,
+        heading="## Parent room (read-only)",
+        intro=("This side room belongs to a shared room. Its recent messages, "
+               "oldest first. Nothing written in this side room reaches it."),
+    )
+
+
+def transcript_context(conn, config, room_token: str, *, heading: str, intro: str) -> str:
+    """A shared room's recent transcript as a user-half block, or "".
+
+    User-half material, fenced as untrusted: every line in it was written by
+    somebody else in a room the member does not control. Newest kept when the
+    cap bites. Shared by side-room tasks and linked turns (ISSUE-608) until
+    side rooms are gone.
+    """
     rows = conn.execute(
         "SELECT role, body, author_user_id, author_label, created_at FROM messages "
         "WHERE room_token = ? ORDER BY id DESC LIMIT ?",
-        (side.side_of, PARENT_CONTEXT_MESSAGES),
+        (room_token, PARENT_CONTEXT_MESSAGES),
     ).fetchall()
     lines: list[str] = []
     used = 0
@@ -136,12 +150,7 @@ def parent_context(conn, config, task) -> str:
     if not lines:
         return ""
     transcript = frame_untrusted("\n".join(reversed(lines)), UNTRUSTED_LABEL)
-    return (
-        "## Parent room (read-only)\n\n"
-        "This side room belongs to a shared room. Its recent messages, oldest "
-        "first. Nothing written in this side room reaches it.\n\n"
-        f"{transcript}"
-    )
+    return f"{heading}\n\n{intro}\n\n{transcript}"
 
 
 # ---------------------------------------------------------------------------
@@ -149,46 +158,73 @@ def parent_context(conn, config, task) -> str:
 # ---------------------------------------------------------------------------
 
 
-def pin_plan(config, task, plan: list) -> list:
-    """Drop every destination of a side-room task that lands in its parent.
+def pin_plan(config, task, plan: list, *, fallback=None) -> list:
+    """Drop every destination that lands in the room a task must not post into.
 
-    Keyed on the destination's channel resolved to a room token, so a parent
-    named by its canonical token, by its web token or by its Talk ref is caught
-    alike. A read that fails keeps the plan: this runs for every task, and the
-    database being unreadable is not a side-room question.
+    Two keys, both until side rooms are removed. A linked task (ISSUE-608,
+    ``tasks.about_room_token``) never delivers into the shared room it is
+    linked to; a side-room task never delivers into its parent. Keyed on the
+    destination's channel resolved to a room token, so a room named by its
+    canonical token, by its web token or by its Talk ref is caught alike.
+
+    When that empties the plan, a linked task falls back to ``fallback()``,
+    the task's own room by its origin's default plan, and a side-room task to
+    its side room. A read that fails keeps the plan: this runs for every task,
+    and the database being unreadable is not a question about either room.
     """
     if not plan or not getattr(task, "conversation_token", None) or not config.db_path:
         return plan
     # Opening a path that does not exist would create it, and a database that
-    # does not exist holds no side room.
+    # does not exist holds no room to pin against.
     if not Path(config.db_path).exists():
         return plan
     try:
         with db.get_db(config.db_path) as conn:
-            token = canonical_token(conn, task.conversation_token)
-            room = db.get_room(conn, token) if token else None
-            if room is None or not room.side_of:
+            parent, side = _pinned_parent(conn, task)
+            if parent is None:
                 return plan
-            parent = room.side_of
             parent_refs = {parent} | {b.surface_ref for b in db.list_room_bindings(conn, parent)}
             kept = []
             dropped = False
             for dest in plan:
                 channel = getattr(dest, "channel", None)
                 if channel and (channel in parent_refs or canonical_token(conn, channel) == parent):
-                    logger.info("task %s: dropped a delivery into its side room's parent",
+                    logger.info("task %s: dropped a delivery into the room it must not post into",
                                 getattr(task, "id", "?"))
                     dropped = True
                     continue
                 kept.append(dest)
-            if dropped and not kept:
-                # What would have gone to the parent goes to the side room.
-                from istota.transport.routing import Destination
-                kept.append(Destination("web", room.token, "push"))
-            return kept
     except Exception as exc:
-        logger.warning("side room pin check failed for task %s: %s", getattr(task, "id", "?"), exc)
+        logger.warning("room pin check failed for task %s: %s", getattr(task, "id", "?"), exc)
         return plan
+    if dropped and not kept:
+        if side is not None:
+            # What would have gone to the parent goes to the side room.
+            from istota.transport.routing import Destination
+            kept.append(Destination("web", side.token, "push"))
+        elif fallback is not None:
+            for dest in fallback():
+                channel = getattr(dest, "channel", None)
+                if not (channel and channel in parent_refs):
+                    kept.append(dest)
+    return kept
+
+
+def _pinned_parent(conn, task):
+    """``(room token, side room)`` for the room a task may not deliver into.
+
+    The linked room first: a linked task runs in its member's private room,
+    which is never a side room. ``(None, None)`` for every other task.
+    """
+    about = getattr(task, "about_room_token", None)
+    if about:
+        parent = canonical_token(conn, about) or about
+        return parent, None
+    token = canonical_token(conn, task.conversation_token)
+    room = db.get_room(conn, token) if token else None
+    if room is None or not room.side_of:
+        return None, None
+    return room.side_of, room
 
 
 # ---------------------------------------------------------------------------
