@@ -4990,7 +4990,7 @@ class TestProfileEndpoints:
         cookies = await self._login(client, "alice", "Alice")
         resp = await client.put(
             "/istota/api/settings/profile",
-            json={"max_foreground_workers": "not-a-number"},
+            json={"email_addresses": "not-a-list"},
             cookies=cookies,
             headers={"origin": "https://example.com"},
         )

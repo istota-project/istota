@@ -456,6 +456,71 @@ class TestAnsibleOutboundApprovalSurface:
         assert seen[flag.lstrip("-").replace("-", "_")] == value
 
 
+class TestTheUserProfileMode:
+    """`istota_user_profile_mode` picks `--managed` (enforce) or `--seed`.
+
+    `enforce` is the default so an existing deployment keeps its behaviour;
+    the only visible change is that the fields it already overwrites now show
+    as locked in the web UI instead of appearing editable.
+    """
+
+    def _render_mode(self, mode) -> str:
+        env = Environment()
+        return env.from_string(_ensure_profiles_command()).render(
+            istota_home="/srv/app/istota",
+            istota_package="istota",
+            istota_repo_dir="/srv/app/istota",
+            istota_user_profile_mode=mode,
+            user_id="alice",
+            user_item={"key": "alice", "value": {"display_name": "Alice"}},
+        )
+
+    def test_the_default_is_enforce(self):
+        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
+        assert defaults["istota_user_profile_mode"] == "enforce"
+
+    def test_enforce_passes_managed(self):
+        rendered = self._render_mode("enforce")
+        assert "--managed" in rendered.split()
+        assert "--seed" not in rendered.split()
+
+    def test_seed_passes_seed(self):
+        rendered = self._render_mode("seed")
+        assert "--seed" in rendered.split()
+        assert "--managed" not in rendered.split()
+
+    def test_the_mode_is_asserted_before_the_ensure(self):
+        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        names = [t.get("name") for t in tasks if isinstance(t, dict)]
+        assert names.index("Validate user profile mode") < names.index(
+            "Ensure user_profiles rows"
+        )
+        assertion = next(
+            t for t in tasks
+            if isinstance(t, dict) and t.get("name") == "Validate user profile mode"
+        )
+        condition = " ".join(assertion["assert"]["that"])
+        assert "'enforce'" in condition and "'seed'" in condition
+
+    @pytest.mark.parametrize("flag", ["--managed", "--seed"])
+    def test_the_cli_parser_accepts_the_flag_the_role_renders(
+        self, flag, monkeypatch, tmp_path,
+    ):
+        import istota.cli as cli
+
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{tmp_path / "test.db"}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+        )
+        seen = {}
+        monkeypatch.setattr(cli, "cmd_user_ensure", lambda args: seen.update(vars(args)))
+        monkeypatch.setattr(
+            "sys.argv",
+            ["istota", "-c", str(cfg), "user", "ensure", "--name", "alice", flag],
+        )
+        cli.main()
+        assert seen[flag.lstrip("-")] is True
 
 
 class TestNothingChownsToTheUserBeforeItExists:

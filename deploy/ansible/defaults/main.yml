@@ -524,6 +524,11 @@ istota_experimental_features: []
 # docs/deployment/ansible.md and docs/configuration/per-user.md for examples.
 istota_users: {}
 
+# How `istota_users` profile fields are applied on each deploy.
+#   enforce: inventory is authoritative; fields it names are locked in the web UI.
+#   seed:    inventory seeds new users and empty identities only; the web UI owns the rest.
+istota_user_profile_mode: enforce
+
 # Per-user secrets are upserted into the encrypted secrets table. Set
 # istota_secret_key and vault these values; invalid service/key pairs fail the
 # play. See docs/configuration/credentials.md for supported keys and examples.

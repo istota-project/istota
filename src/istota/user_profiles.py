@@ -28,7 +28,7 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator
 
 from istota.webui import avatars
 from istota.lib import sqlite_util
@@ -141,6 +141,28 @@ _BOOL_COLUMN_DEFAULTS = {
 _BOOL_COLUMNS = frozenset(_BOOL_COLUMN_DEFAULTS)
 _E164_PATTERN = re.compile(r"^\+[1-9][0-9]{7,14}$")
 
+# Who may write which profile column: the one list the self PUT
+# (`web_app._PROFILE_EDITABLE_FIELDS` is derived from it), the admin PATCH and
+# `istota user ensure` check against, so the three cannot drift apart. Worker
+# caps are a resource limit and are admin-only: a user raising their own cap is
+# the wrong direction. The SMS number is an operator-bound identity. The
+# WhatsApp number and the login email are not profile columns and are handled
+# beside these tuples, not in them.
+SELF_EDITABLE_FIELDS = (
+    "display_name", "timezone", "log_channel", "alerts_channel",
+    "email_addresses", "trusted_email_senders", "quiet_email_senders",
+    "disabled_skills", "disabled_modules",
+    "default_destination", "default_room", "routing",
+    "briefing_email_html", "timezone_follow_location",
+    "external_turn_display", "relay_delivery",
+)
+ADMIN_EDITABLE_FIELDS = (
+    "display_name", "timezone", "email_addresses",
+    "trusted_email_senders", "quiet_email_senders", "outbound_approval",
+    "disabled_skills", "disabled_modules", "default_briefings",
+    "max_foreground_workers", "max_background_workers", "sms_phone_number",
+)
+
 
 def is_e164(value: object) -> bool:
     """Whether ``value`` is an exact E.164 number.
@@ -230,6 +252,140 @@ def _raise_phone_conflict(exc: sqlite3.IntegrityError) -> None:
     raise exc
 
 
+def _rows_or_none(
+    conn: sqlite3.Connection, sql: str, params: tuple = (),
+) -> list | None:
+    """``fetchall``, or None when the table is not there yet.
+
+    `istota user ensure` runs against databases a deploy has not migrated, and
+    a table that does not exist holds no identity.
+    """
+    try:
+        return conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        return None
+
+
+def _email_holdings(conn: sqlite3.Connection) -> dict[str, dict[str, set[str]]]:
+    """Case-folded address -> holder -> how they hold it (``address``/``login``)."""
+    from istota.webui.auth import normalize_email
+
+    holdings: dict[str, dict[str, set[str]]] = {}
+    for row in _rows_or_none(
+        conn, "SELECT user_id, email_addresses FROM user_profiles",
+    ) or []:
+        for address in _parse_json_list(row[1]):
+            key = normalize_email(address)
+            if key:
+                holdings.setdefault(key, {}).setdefault(row[0], set()).add("address")
+    for row in _rows_or_none(
+        conn, "SELECT user_id, email FROM web_auth_identities",
+    ) or []:
+        key = normalize_email(row[1] or "")
+        if key:
+            holdings.setdefault(key, {}).setdefault(row[0], set()).add("login")
+    return holdings
+
+
+def email_address_holders(conn: sqlite3.Connection) -> dict[str, set[str]]:
+    """Every case-folded address mapped to the users who hold it.
+
+    Both kinds of holder count. An inbound-routing address in
+    ``email_addresses`` routes mail; a login email in ``web_auth_identities``
+    names who the address belongs to. Mail routing to one user while the login
+    belongs to another is never intended, so a login email held by somebody
+    else is a holder too.
+    """
+    return {
+        address: set(holders)
+        for address, holders in _email_holdings(conn).items()
+    }
+
+
+def duplicate_email_addresses(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """Addresses more than one user holds, each with its sorted holders.
+
+    A holder whose only claim is the login email is labelled ``<user> (login)``,
+    because the fix differs: a routing address is removed from the profile, a
+    login email through the admin Users page or `istota auth`.
+    """
+    out: dict[str, list[str]] = {}
+    for address, holders in sorted(_email_holdings(conn).items()):
+        if len(holders) < 2:
+            continue
+        out[address] = [
+            f"{user} (login)" if kinds == {"login"} else user
+            for user, kinds in sorted(holders.items())
+        ]
+    return out
+
+
+def find_identity_conflicts(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    email_addresses: "list[str] | None" = None,
+    sms: str | None = None,
+    whatsapp: str | None = None,
+) -> dict[str, str]:
+    """``{value: holder_user_id}`` for each value another user already holds.
+
+    The uniqueness rule the self PUT, the admin PATCH and `istota user ensure`
+    apply before writing. Only *adding* a held value is a conflict: an address
+    already on ``user_id``'s own stored list passes even when somebody else
+    holds it too, because a deployment may carry a duplicate from before this
+    rule and refusing the resubmit would fail every unrelated save by either
+    holder (and every deploy re-asserting the inventory). Doctor's
+    ``users.email_address_uniqueness`` is where those are surfaced.
+
+    The SMS and WhatsApp numbers have unique indexes already; this pre-check
+    exists so the refusal can name the holder instead of surfacing an
+    ``IntegrityError``. Keys are the values as submitted.
+    """
+    from istota.webui.auth import normalize_email
+
+    conflicts: dict[str, str] = {}
+    if email_addresses:
+        holders = email_address_holders(conn)
+        stored = _rows_or_none(
+            conn,
+            "SELECT email_addresses FROM user_profiles WHERE user_id = ?",
+            (user_id,),
+        ) or []
+        own = {
+            normalize_email(a)
+            for row in stored for a in _parse_json_list(row[0])
+        }
+        for address in email_addresses:
+            key = normalize_email(address or "")
+            if not key or key in own:
+                continue
+            others = sorted(holders.get(key, set()) - {user_id})
+            if others:
+                conflicts[address] = others[0]
+    if sms:
+        rows = _rows_or_none(
+            conn,
+            "SELECT user_id FROM user_profiles "
+            "WHERE sms_phone_number = ? AND user_id <> ? ORDER BY user_id",
+            (sms, user_id),
+        )
+        if rows:
+            conflicts[sms] = rows[0][0]
+    if whatsapp:
+        rows = _rows_or_none(
+            conn,
+            "SELECT user_id FROM whatsapp_user_bindings "
+            "WHERE bootstrap_phone_number = ? AND user_id <> ? ORDER BY user_id",
+            (whatsapp, user_id),
+        )
+        if rows:
+            conflicts[whatsapp] = rows[0][0]
+    return conflicts
+
+
 def _coerce_bool(value: object, default: bool = True) -> bool:
     """Coerce a stored/int/None value to bool; None → default."""
     if value is None:
@@ -240,10 +396,15 @@ def _coerce_bool(value: object, default: bool = True) -> bool:
 
 
 @contextmanager
-def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
-    """Open a connection with 30s timeout, matching db.get_db semantics."""
+def _connect(
+    db_path: Path, *, busy_timeout_ms: int | None = None,
+) -> Iterator[sqlite3.Connection]:
+    """Open a connection with 30s timeout, matching db.get_db semantics.
+
+    ``busy_timeout_ms`` overrides it, for reads on the scheduler's main loop.
+    """
     with sqlite_util.open_db(
-        db_path, busy_timeout_ms=None, foreign_keys=False, commit=True,
+        db_path, busy_timeout_ms=busy_timeout_ms, foreign_keys=False, commit=True,
     ) as conn:
         yield conn
 
@@ -364,10 +525,26 @@ def get_profile(
     return _row_to_profile(row) if row else None
 
 
-def list_profiles(db_path: Path) -> dict[str, UserProfile]:
+def read_profile_generation(
+    db_path: Path, *, busy_timeout_ms: int | None = None,
+) -> int:
+    """The ``profile_generation`` counter, bumped by triggers on every write.
+
+    Raises when the table is missing; the caller decides what that means.
+    """
+    with _connect(db_path, busy_timeout_ms=busy_timeout_ms) as conn:
+        row = conn.execute(
+            "SELECT generation FROM profile_generation WHERE id = 1"
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def list_profiles(
+    db_path: Path, *, busy_timeout_ms: int | None = None,
+) -> dict[str, UserProfile]:
     """Return all stored profiles keyed by user_id."""
     out: dict[str, UserProfile] = {}
-    with _connect(db_path) as conn:
+    with _connect(db_path, busy_timeout_ms=busy_timeout_ms) as conn:
         rows = conn.execute(
             "SELECT * FROM user_profiles ORDER BY user_id"
         ).fetchall()
@@ -384,6 +561,7 @@ def ensure_profile(
     display_name: str = "",
     timezone: str = "",
     seed_from: "object | None" = None,
+    conn: sqlite3.Connection | None = None,
 ) -> UserProfile:
     """Insert a row for ``user_id`` if missing, return the resulting profile.
 
@@ -400,12 +578,33 @@ def ensure_profile(
     moment it exists. This eliminates the "DB has display_name but TOML
     has email_addresses" split-brain that would otherwise happen when the
     web callback auto-seeds before the scheduler's TOML import runs.
+
+    Pass ``conn`` to read and insert inside the caller's transaction.
     """
-    existing = get_profile(db_path, user_id)
+    existing = get_profile(db_path, user_id, conn=conn)
     if existing is not None:
         return existing
 
-    profile = UserProfile(
+    profile = _seeded_profile(
+        user_id, display_name=display_name, timezone=timezone, seed_from=seed_from,
+    )
+    if conn is None:
+        _insert(db_path, profile)
+    else:
+        insert_profile(conn, profile)
+    logger.info("ensured user_profile user=%s (new row)", user_id)
+    return profile
+
+
+def _seeded_profile(
+    user_id: str,
+    *,
+    display_name: str = "",
+    timezone: str = "",
+    seed_from: "object | None" = None,
+) -> UserProfile:
+    """The row ``ensure_profile`` inserts for a user it has not seen."""
+    return UserProfile(
         user_id=user_id,
         display_name=display_name or _attr(seed_from, "display_name") or user_id,
         timezone=timezone or _attr(seed_from, "timezone") or "UTC",
@@ -434,9 +633,6 @@ def ensure_profile(
             _attr(seed_from, "timezone_follow_location"), False,
         ),
     )
-    _insert(db_path, profile)
-    logger.info("ensured user_profile user=%s (new row)", user_id)
-    return profile
 
 
 def ensure_profile_with_status(
@@ -482,9 +678,37 @@ def upsert_profile(db_path: Path, profile: UserProfile) -> None:
     _insert(db_path, profile, replace=True)
 
 
+def _same_value(col: str, current: object, value: object) -> bool:
+    """Whether writing ``value`` to ``col`` would leave ``current`` as it is.
+
+    The rule `update_profile_with_status` reports ``noop`` by and the managed
+    check passes a resubmitted value by, so a save that sends back what is
+    stored is never an edit. Each column compares the way ``update_profile``
+    would store it.
+    """
+    if col in _LIST_COLUMNS:
+        return list(current or []) == list(value or [])
+    if col in _DICT_COLUMNS:
+        return dict(current or {}) == dict(value or {})
+    if col in _BOOL_COLUMNS:
+        bool_default = _BOOL_COLUMN_DEFAULTS[col]
+        return _coerce_bool(current, bool_default) == _coerce_bool(value, bool_default)
+    if col == "default_destination":
+        return (current or "talk") == (value or "talk")
+    if col == "email_reply_routing":
+        return (current or "origin+thread") == (value or "origin+thread")
+    if col == "external_turn_display":
+        return (current or "collapsed") == (value or "collapsed")
+    if col in {"max_foreground_workers", "max_background_workers"}:
+        return int(current or 0) == int(value or 0)
+    return (current or "") == (value or "")
+
+
 def update_profile_with_status(
     db_path: Path,
     user_id: str,
+    *,
+    conn: sqlite3.Connection | None = None,
     **fields: object,
 ) -> "tuple[UserProfile, str]":
     """Idempotent partial update. Returns ``(profile, state)``.
@@ -501,8 +725,12 @@ def update_profile_with_status(
     - If row exists and every field in ``fields`` already matches: no
       write. State is ``"noop"``.
     - Otherwise: apply via :func:`update_profile`. State is ``"updated"``.
+
+    Pass ``conn`` to run the read, the insert and the update inside the
+    caller's transaction, uncommitted; `istota user ensure` writes the managed
+    set beside the profile that way.
     """
-    existing = get_profile(db_path, user_id)
+    existing = get_profile(db_path, user_id, conn=conn)
     if existing is None:
         seed_display = fields.get("display_name")
         seed_tz = fields.get("timezone")
@@ -510,76 +738,42 @@ def update_profile_with_status(
             db_path, user_id,
             display_name=seed_display if isinstance(seed_display, str) else "",
             timezone=seed_tz if isinstance(seed_tz, str) else "",
+            conn=conn,
         )
-        if fields:
-            profile = update_profile(db_path, user_id, **fields)
-        else:
-            profile = get_profile(db_path, user_id)
-            assert profile is not None
+        profile = update_profile(db_path, user_id, conn=conn, **fields)
         return profile, "created"
 
     if not fields:
         return existing, "noop"
 
-    same = True
-    for col, value in fields.items():
-        if col not in _PROFILE_COLUMNS:
-            same = False  # update_profile will raise — let it; treat as change
-            break
-        current = getattr(existing, col)
-        if col in _LIST_COLUMNS:
-            if list(current or []) != list(value or []):
-                same = False
-                break
-        elif col in _DICT_COLUMNS:
-            if dict(current or {}) != dict(value or {}):
-                same = False
-                break
-        elif col in _BOOL_COLUMNS:
-            bool_default = _BOOL_COLUMN_DEFAULTS[col]
-            if _coerce_bool(current, bool_default) != _coerce_bool(value, bool_default):
-                same = False
-                break
-        elif col == "default_destination":
-            if (current or "talk") != (value or "talk"):
-                same = False
-                break
-        elif col == "email_reply_routing":
-            if (current or "origin+thread") != (value or "origin+thread"):
-                same = False
-                break
-        elif col == "external_turn_display":
-            if (current or "collapsed") != (value or "collapsed"):
-                same = False
-                break
-        elif col in {"max_foreground_workers", "max_background_workers"}:
-            if int(current or 0) != int(value or 0):
-                same = False
-                break
-        else:
-            if (current or "") != (value or ""):
-                same = False
-                break
-
+    same = all(
+        col in _PROFILE_COLUMNS and _same_value(col, getattr(existing, col), value)
+        for col, value in fields.items()
+    )
     if same:
         return existing, "noop"
 
-    profile = update_profile(db_path, user_id, **fields)
+    profile = update_profile(db_path, user_id, conn=conn, **fields)
     return profile, "updated"
 
 
 def update_profile(
     db_path: Path,
     user_id: str,
+    *,
+    conn: sqlite3.Connection | None = None,
     **fields: object,
 ) -> UserProfile:
     """Partial update — only specified columns change. Returns the new profile.
 
     Raises ValueError if the user has no row yet (caller should ensure first)
     or if an unknown field is passed (defends against schema drift).
+
+    Pass ``conn`` to write inside the caller's transaction; nothing is
+    committed here then, and the returned profile is read on that connection.
     """
     if not fields:
-        existing = get_profile(db_path, user_id)
+        existing = get_profile(db_path, user_id, conn=conn)
         if existing is None:
             raise ValueError(f"no user_profile row for {user_id!r}")
         return existing
@@ -614,21 +808,110 @@ def update_profile(
 
     sets.append("updated_at = datetime('now')")
     params.append(user_id)
+    sql = f"UPDATE user_profiles SET {', '.join(sets)} WHERE user_id = ?"
 
-    try:
-        with _connect(db_path) as conn:
-            cur = conn.execute(
-                f"UPDATE user_profiles SET {', '.join(sets)} WHERE user_id = ?",
-                params,
-            )
-            if cur.rowcount == 0:
-                raise ValueError(f"no user_profile row for {user_id!r}")
-    except sqlite3.IntegrityError as exc:
-        _raise_phone_conflict(exc)
+    def _apply(target: sqlite3.Connection) -> None:
+        try:
+            cur = target.execute(sql, params)
+        except sqlite3.IntegrityError as exc:
+            _raise_phone_conflict(exc)
+        if cur.rowcount == 0:
+            raise ValueError(f"no user_profile row for {user_id!r}")
 
-    updated = get_profile(db_path, user_id)
+    if conn is not None:
+        _apply(conn)
+    else:
+        with _connect(db_path) as own:
+            _apply(own)
+
+    updated = get_profile(db_path, user_id, conn=conn)
     assert updated is not None  # row was just updated
     return updated
+
+
+# --- Provisioning ownership: managed fields --------------------------------
+#
+# A field `istota user ensure --managed` asserted is re-written on every deploy,
+# so the web refuses to edit it rather than let an edit be reverted silently.
+# The CLI is the only writer of `user_profile_managed_fields`.
+
+# Not a profile column: the WhatsApp number lives on `whatsapp_user_bindings`.
+WHATSAPP_NUMBER_FIELD = "whatsapp_number"
+MANAGEABLE_FIELDS = frozenset({*_PROFILE_COLUMNS, WHATSAPP_NUMBER_FIELD})
+
+
+def managed_fields(conn: sqlite3.Connection, user_id: str) -> set[str]:
+    """The fields provisioning asserts for ``user_id``; empty before the migration."""
+    rows = _rows_or_none(
+        conn,
+        "SELECT field FROM user_profile_managed_fields WHERE user_id = ?",
+        (user_id,),
+    )
+    return {row[0] for row in rows or []}
+
+
+def set_managed_fields(
+    conn: sqlite3.Connection, user_id: str, fields: "Iterable[str]",
+) -> bool:
+    """Replace ``user_id``'s managed set with ``fields``. True when it changed.
+
+    Writes on ``conn`` and commits nothing. An empty set on a database without
+    the table is a no-op rather than an error: there is nothing to release.
+    """
+    wanted = set(fields)
+    unknown = wanted - MANAGEABLE_FIELDS
+    if unknown:
+        raise ValueError(f"unknown managed field(s): {sorted(unknown)}")
+    if not wanted and _rows_or_none(
+        conn, "SELECT 1 FROM user_profile_managed_fields LIMIT 1",
+    ) is None:
+        return False
+    if managed_fields(conn, user_id) == wanted:
+        return False
+    conn.execute(
+        "DELETE FROM user_profile_managed_fields WHERE user_id = ?", (user_id,),
+    )
+    conn.executemany(
+        "INSERT INTO user_profile_managed_fields (user_id, field) VALUES (?, ?)",
+        [(user_id, field) for field in sorted(wanted)],
+    )
+    return True
+
+
+def refused_managed_fields(
+    conn: sqlite3.Connection, user_id: str, updates: "dict[str, object]",
+) -> list[str]:
+    """The managed fields in ``updates`` whose value differs from the stored one.
+
+    The check both web writers run before writing, inside their transaction.
+    A managed field resubmitted unchanged is not an edit and passes, by the
+    rule `_same_value` states, because the settings page and the admin modal
+    send back whatever they loaded and an unrelated save must not be refused.
+    ``updates`` holds coerced values; ``whatsapp_number`` is compared with the
+    binding's bootstrap number.
+    """
+    managed = managed_fields(conn, user_id)
+    if not managed:
+        return []
+    stored = get_profile(Path(), user_id, conn=conn) or UserProfile(user_id=user_id)
+    refused: list[str] = []
+    for name, value in updates.items():
+        if name not in managed:
+            continue
+        if name == WHATSAPP_NUMBER_FIELD:
+            rows = _rows_or_none(
+                conn,
+                "SELECT bootstrap_phone_number FROM whatsapp_user_bindings "
+                "WHERE user_id = ?",
+                (user_id,),
+            )
+            current = (rows[0][0] if rows else "") or ""
+            if (value or "") != current:
+                refused.append(name)
+        elif name in _PROFILE_COLUMNS:
+            if not _same_value(name, getattr(stored, name), value):
+                refused.append(name)
+    return sorted(refused)
 
 
 def delete_profile(db_path: Path, user_id: str) -> bool:
@@ -657,6 +940,9 @@ def delete_profile(db_path: Path, user_id: str) -> bool:
         conn.execute(
             "DELETE FROM whatsapp_user_bindings WHERE user_id = ?", (user_id,),
         )
+        # A re-created user starts unlocked: the next `--managed` converge
+        # records what it asserts again.
+        set_managed_fields(conn, user_id, ())
         cur = conn.execute(
             "DELETE FROM user_profiles WHERE user_id = ?", (user_id,),
         )

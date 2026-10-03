@@ -24,6 +24,8 @@
   import { SettingsCard } from '$lib/components/settings';
   import { formatRelative } from '$lib/dateFormat';
   import UserCell from '$lib/admin/UserCell.svelte';
+  import { signInStateLabel } from '$lib/admin/signInState';
+  import AdminUserModal from './AdminUserModal.svelte';
 
   let view = $state<AdminUsers | null>(null);
   let error = $state('');
@@ -32,7 +34,8 @@
   let userId = $state('');
   let email = $state('');
   let displayName = $state('');
-  let attaching = $state(false);
+  /* The user whose settings editor is open, or null. */
+  let editing = $state<string | null>(null);
   let formOpen = $state(false);
   let formError = $state('');
   let aboutCollapsed = $state(true);
@@ -61,7 +64,7 @@
     event.preventDefault();
     if (busy) return;
     formError = '';
-    if (!attaching && !/^[a-z0-9][a-z0-9._-]{0,31}$/.test(userId)) {
+    if (!/^[a-z0-9][a-z0-9._-]{0,31}$/.test(userId)) {
       formError =
         'Use 1–32 lowercase letters, digits, dots, underscores or hyphens, starting with a letter or digit.';
       return;
@@ -70,9 +73,11 @@
     try {
       await createAdminUser({ user_id: userId, email, display_name: displayName });
       notice = 'Identity saved and invitation sent.';
+      const created = userId;
       userId = email = displayName = '';
-      attaching = false;
       formOpen = false;
+      // The editor holds everything the create form does not ask for.
+      editing = created;
     } catch (e) {
       if (e instanceof AuthError) failed(e);
       else formError = e instanceof Error ? e.message : 'The user operation failed.';
@@ -82,35 +87,24 @@
     }
   }
 
-  function attach(user: AdminUser) {
-    if (busy) return;
-    userId = user.user_id;
-    email = user.identity?.email ?? '';
-    displayName = '';
-    attaching = true;
+  function edit(user: AdminUser) {
     error = notice = '';
-    formError = '';
-    formOpen = true;
+    editing = user.user_id;
   }
 
   function add() {
     userId = email = displayName = '';
     error = notice = formError = '';
-    attaching = false;
     formOpen = true;
   }
 
   function userActions(user: AdminUser): KebabItem[] {
-    if (!user.identity)
-      return [
-        {
-          label: 'Attach email',
-          disabled: busy || !view?.email_enabled,
-          onSelect: () => attach(user),
-        },
-      ];
+    const editItem: KebabItem = { label: 'Edit settings', onSelect: () => edit(user) };
+    // A login email is attached from the editor's Login section.
+    if (!user.identity) return [editItem];
     const mailDisabled = busy || !view?.email_enabled || user.identity?.disabled;
     return [
+      editItem,
       { label: 'Send invitation', disabled: mailDisabled, onSelect: () => act(user, 'invite') },
       { label: 'Send password reset', disabled: mailDisabled, onSelect: () => act(user, 'reset') },
       {
@@ -213,7 +207,9 @@
             >
             <tbody>
               {#each view.users as user (user.user_id)}
-                <tr>
+                <!-- The row is a shortcut; the kebab's "Edit settings" is the
+                     keyboard route to the same editor. -->
+                <tr class="row-clickable" onclick={() => edit(user)}>
                   <td>
                     <UserCell
                       userId={user.user_id}
@@ -226,13 +222,7 @@
                   >
                   <td class="access">
                     {#if user.identity?.disabled}<Badge variant="partial">Disabled</Badge>{:else}
-                      <span
-                        >{user.state === 'nextcloud_only'
-                          ? 'Nextcloud only'
-                          : user.state === 'passwordless'
-                            ? 'Email code'
-                            : 'Password set'}</span
-                      >
+                      <span>{signInStateLabel(user.identity, user.state)}</span>
                     {/if}
                   </td>
                   <td class="last-login"
@@ -279,39 +269,21 @@
   {/if}
 </div>
 
-<Modal
-  bind:open={formOpen}
-  title={attaching ? 'Attach email' : 'Add user'}
-  description={attaching
-    ? `Set up email sign-in for ${userId}.`
-    : 'Send an invitation to set up web access.'}
->
-  <form aria-label={attaching ? 'Attach email' : 'Add user'} onsubmit={submit} class="user-form">
+<Modal bind:open={formOpen} title="Add user" description="Send an invitation to set up web access.">
+  <form aria-label="Add user" onsubmit={submit} class="user-form">
     {#if formError}<p class="banner error" role="alert">{formError}</p>{/if}
     <Field
       label="User ID"
-      warning={attaching
-        ? 'The existing ID is preserved. Attaching email ends older Nextcloud sessions.'
-        : 'This becomes a directory name: 1–32 lowercase letters, digits, dots, underscores or hyphens; start with a letter or digit.'}
+      warning="This becomes a directory name: 1–32 lowercase letters, digits, dots, underscores or hyphens; start with a letter or digit."
     >
-      <Input
-        aria-label="User ID"
-        bind:value={userId}
-        required
-        readonly={attaching}
-        disabled={busy}
-      />
+      <Input aria-label="User ID" bind:value={userId} required disabled={busy} />
     </Field>
     <Field label="Email"><Input type="email" bind:value={email} required disabled={busy} /></Field>
-    {#if !attaching}
-      <Field label="Display name (optional)"
-        ><Input bind:value={displayName} disabled={busy} /></Field
-      >
-      <p class="form-note">
-        New users can sign in immediately. Their background work starts after the next daemon
-        reload.
-      </p>
-    {/if}
+    <Field label="Display name (optional)"><Input bind:value={displayName} disabled={busy} /></Field
+    >
+    <p class="form-note">
+      New users can sign in immediately. Their background work starts after the next daemon reload.
+    </p>
     <div class="form-actions dialog-actions">
       <Button variant="ghost" onclick={() => (formOpen = false)} disabled={busy}>Cancel</Button>
       <Button
@@ -319,11 +291,20 @@
         variant="primary"
         loading={busy}
         loadingLabel="Sending…"
-        disabled={!view?.email_enabled}>{attaching ? 'Attach and invite' : 'Add and invite'}</Button
+        disabled={!view?.email_enabled}>Add and invite</Button
       >
     </div>
   </form>
 </Modal>
+
+{#if editing}
+  <AdminUserModal
+    userId={editing}
+    onClose={() => (editing = null)}
+    onChanged={load}
+    onSignedOut={() => window.location.assign(`${base}/login`)}
+  />
+{/if}
 
 <ConfirmDialog
   bind:open={confirmOpen}
@@ -370,6 +351,12 @@
   }
   .access {
     width: 8rem;
+  }
+  .row-clickable {
+    cursor: pointer;
+  }
+  .row-clickable:hover {
+    background: var(--surface-raised);
   }
   .last-login {
     width: 7rem;

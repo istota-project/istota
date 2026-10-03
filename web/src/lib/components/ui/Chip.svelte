@@ -14,12 +14,22 @@
      * report the same thing the fill does.
      */
     'aria-pressed'?: boolean;
+    /** A toggle the user may not change here: a field the deployment owns. */
+    disabled?: boolean;
   }
 
-  let { checked = false, icon = false, onclick, children, title, ...rest }: Props = $props();
+  let {
+    checked = false,
+    icon = false,
+    onclick,
+    children,
+    title,
+    disabled = false,
+    ...rest
+  }: Props = $props();
 </script>
 
-<button class="chip" class:checked class:icon {onclick} {title} type="button" {...rest}
+<button class="chip" class:checked class:icon {onclick} {title} {disabled} type="button" {...rest}
   >{#if children}{@render children()}{/if}</button
 >
 
@@ -45,9 +55,14 @@
     padding: var(--space-1);
   }
 
-  .chip:hover {
+  .chip:hover:not(:disabled) {
     color: var(--text-primary);
     background: var(--surface-raised);
+  }
+
+  .chip:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .chip.checked {
