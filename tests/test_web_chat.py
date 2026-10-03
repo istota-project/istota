@@ -1153,7 +1153,7 @@ class TestChatMessagesApi:
         with db.get_db(mod._config.db_path) as c:
             task = db.get_task(c, task_id)
         assert task.attachments == [audio]
-        assert "Voice message" in task.prompt
+        assert task.prompt == "Voice message (see attached audio)."
 
     async def test_attachment_only_send_describes_the_files(self, chat_client):
         """A non-audio attachment sent with no text gets a descriptor naming
@@ -1170,7 +1170,7 @@ class TestChatMessagesApi:
         import istota.webui.app as mod
         with db.get_db(mod._config.db_path) as c:
             task = db.get_task(c, resp.json()["task_id"])
-        assert "receipt-99.png" in task.prompt
+        assert task.prompt == "(Sent without a message — see attached: receipt-99.png)"
 
     async def test_attachment_only_turn_round_trips_in_history(self, chat_client):
         cookies = await _login(chat_client, "alice")
@@ -1185,7 +1185,8 @@ class TestChatMessagesApi:
             f"/istota/api/chat/rooms/{room['id']}/messages", cookies=cookies,
         )).json()
         user_msgs = [m for m in data["messages"] if m["role"] == "user"]
-        assert user_msgs and "Voice message" in user_msgs[0]["text"]
+        assert user_msgs
+        assert user_msgs[0]["text"] == "Voice message (see attached audio)."
 
     async def test_history_round_trip(self, chat_client):
         cookies = await _login(chat_client, "alice")

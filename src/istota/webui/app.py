@@ -7738,30 +7738,6 @@ def _validate_chat_attachments(username: str, paths: list) -> list[str] | None:
     return out
 
 
-def _describe_attachment_only_message(attachments: list[str]) -> str:
-    """Stand-in prompt for a send that carried attachments but no typed text.
-
-    Voice memos are the motivating case: the recording is the message. The
-    descriptor names what arrived so the turn is legible everywhere the raw
-    prompt is read (transcript, conversation context, the Talk mirror repost),
-    and it keeps the prompt useful when transcription is unavailable — the
-    model still sees "there is audio here" plus the attachment path, and can
-    reach for the whisper skill itself.
-    """
-    from istota.executor import _AUDIO_EXTENSIONS
-
-    names = [os.path.basename(p) for p in attachments]
-    audio = [
-        n for n in names
-        if os.path.splitext(n)[1].lstrip(".").lower() in _AUDIO_EXTENSIONS
-    ]
-    if audio and len(audio) == len(names):
-        label = "Voice message" if len(audio) == 1 else "Voice messages"
-        return f"{label} (see attached audio)."
-    joined = ", ".join(names)
-    return f"(Sent without a message — see attached: {joined})"
-
-
 def _is_own_replay(conn, token: str, client_msg_id: str, username: str) -> bool:
     """Whether this key already names a turn *this* sender created in this room.
 
@@ -9664,7 +9640,8 @@ async def chat_send_message(
     if not text:
         if not attachments:
             return JSONResponse({"error": "text or attachment required"}, status_code=400)
-        text = _describe_attachment_only_message(attachments)
+        from istota.transport.ingest import describe_attachment_only_message
+        text = describe_attachment_only_message(attachments)
 
     # A leading "!" is either a `!model` prefix (strip + carry overrides into the
     # task) or a `!command` (run synchronously, return inline — no task row, no
