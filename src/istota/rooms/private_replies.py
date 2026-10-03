@@ -47,7 +47,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from istota import db
-from istota.rooms.scopes import canonical_token
+from istota.rooms.scopes import canonical_token, is_current_member
 
 logger = logging.getLogger(__name__)
 
@@ -260,17 +260,19 @@ def linked_room(conn, task) -> str | None:
     """The shared room a linked task may read and post into, or None.
 
     A link is checked again at execution, because a room can go and a member
-    can leave between the reply and the run: the room must still exist and
-    the task's user must still be a member. The task's own room must still be
+    can leave between the reply and the run: the room must still exist, not
+    archived, and the task's user must still be a current member (a Talk
+    departure keeps the member row, so `is_current_member`). The task's own room must still be
     private, since the linked prompt tells the model only that user reads it.
     """
     about = getattr(task, "about_room_token", None)
     if not about:
         return None
     parent = canonical_token(conn, about)
-    if not parent or db.get_room(conn, parent) is None:
+    room = db.get_room(conn, parent) if parent else None
+    if room is None or room.archived:
         return None
-    if not db.is_room_member(conn, parent, task.user_id):
+    if not is_current_member(conn, parent, task.user_id):
         return None
     own = canonical_token(conn, task.conversation_token) if task.conversation_token else None
     if not own or own == parent or db.room_is_shared(conn, own):

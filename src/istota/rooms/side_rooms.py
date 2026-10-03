@@ -203,7 +203,14 @@ def pin_plan(config, task, plan: list, *, fallback=None) -> list:
             from istota.transport.routing import Destination
             kept.append(Destination("web", side.token, "push"))
         elif fallback is not None:
-            for dest in fallback():
+            try:
+                own = fallback()
+            except Exception as exc:
+                # The planner's last interactive rung still answers the origin.
+                logger.warning("room pin fallback failed for task %s: %s",
+                               getattr(task, "id", "?"), exc)
+                own = []
+            for dest in own:
                 channel = getattr(dest, "channel", None)
                 if not (channel and channel in parent_refs):
                     kept.append(dest)

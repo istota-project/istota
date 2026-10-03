@@ -849,6 +849,28 @@ class TestTheLinkedPrompt:
             task = _linked_task(conn, web, "rm_gone")
             assert private_replies.linked_room(conn, task) is None
 
+    def test_a_talk_departure_ends_the_link_though_the_member_row_stays(self, config):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_talk(conn)
+            db.upsert_room_participant(conn, room_token=parent, surface="talk",
+                                       surface_ref="alice", kind="principal", user_id="alice")
+            web = _web_room(conn)
+            task = _linked_task(conn, web, parent)
+            assert private_replies.linked_room(conn, task) == parent
+            conn.execute("UPDATE room_participants SET left_at = datetime('now') "
+                         "WHERE room_token = ? AND user_id = 'alice'", (parent,))
+            assert db.is_room_member(conn, parent, "alice")
+            assert private_replies.linked_room(conn, task) is None
+
+    def test_an_archived_room_links_to_nothing(self, config):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            web = _web_room(conn)
+            task = _linked_task(conn, web, parent)
+            assert private_replies.linked_room(conn, task) == parent
+            db.set_room_archived(conn, parent, True)
+            assert private_replies.linked_room(conn, task) is None
+
     def test_a_private_room_that_became_shared_no_longer_links(self, config):
         with db.get_db(config.db_path) as conn:
             parent = _shared_web(conn)
