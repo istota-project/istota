@@ -102,12 +102,19 @@ def _mpeg_type(head: bytes) -> str | None:
     if len(head) < 2 or head[0] != 0xFF:
         return None
     second = head[1]
+    third = head[2] if len(head) > 2 else None
     layer = (second >> 1) & 0b11
     if second & 0xF0 == 0xF0 and layer == 0b00:
+        # Sampling-frequency indexes 13 to 15 are reserved.
+        if third is not None and (third >> 2) & 0xF >= 13:
+            return None
         return "audio/aac"
     # Eleven sync bits, a version other than the reserved `01`, layer III.
     version = (second >> 3) & 0b11
     if second & 0xE0 == 0xE0 and version != 0b01 and layer == 0b01:
+        # Bitrate index 15 is "bad" and sample-rate index 3 is reserved.
+        if third is not None and ((third >> 4) == 0xF or (third >> 2) & 0b11 == 0b11):
+            return None
         return "audio/mpeg"
     return None
 

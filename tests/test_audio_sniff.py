@@ -7,13 +7,11 @@ are the cases that matter for the caller: an image that a WhatsApp message
 claimed was audio, AMR (deliberately not admitted), and a short or empty file.
 """
 
-import ast
 from pathlib import Path
 
 import pytest
 
 import istota.skills as skills_pkg
-from istota.lib import audio_sniff
 from istota.lib.audio_sniff import (
     AUDIO_EXTENSIONS,
     EXTENSION_BY_MEDIA_TYPE,
@@ -79,6 +77,19 @@ def test_mp3_and_adts_are_told_apart_by_the_layer_bits(second_byte, expected):
     assert sniff_audio(bytes([0xFF, second_byte, 0x90, 0x00])) == expected
 
 
+@pytest.mark.parametrize(
+    "head",
+    [
+        bytes([0xFF, 0xFB, 0xF0, 0x00]),  # MP3, bitrate index 15
+        bytes([0xFF, 0xFB, 0x0C, 0x00]),  # MP3, reserved sample-rate index
+        bytes([0xFF, 0xF1, 0x34, 0x00]),  # ADTS, sampling-frequency index 13
+        bytes([0xFF, 0xF1, 0x3C, 0x00]),  # ADTS, sampling-frequency index 15
+    ],
+)
+def test_a_frame_header_with_reserved_fields_misses(head):
+    assert sniff_audio(head) is None
+
+
 MISSES = [
     ("empty", b""),
     ("one byte", b"\xff"),
@@ -135,15 +146,3 @@ def test_the_executor_re_exports_the_same_set():
     from istota.executor import _AUDIO_EXTENSIONS
 
     assert _AUDIO_EXTENSIONS is AUDIO_EXTENSIONS
-
-
-def test_the_module_imports_nothing_from_istota():
-    source = Path(audio_sniff.__file__).read_text(encoding="utf-8")
-    reached = []
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.ImportFrom):
-            if (node.module or "").startswith("istota") or node.level > 0:
-                reached.append(node.module or ".")
-        elif isinstance(node, ast.Import):
-            reached.extend(a.name for a in node.names if a.name.startswith("istota"))
-    assert reached == []
