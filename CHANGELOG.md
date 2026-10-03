@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- An @-mention in a WhatsApp group is stored as a name, not as the mentioned account's LID or phone number. WhatsApp puts the ID in the message text and lets the phone fill in the name, so the room transcript and the prompt showed a long number where the phone showed the bot's name, and a mention of a member could put their number in front of everyone in the room. The sidecar now sends the mention list and the daemon rewrites each one to the bot's name, the user's display name, the name a guest last posted under, or `@member`. Restart the Baileys sidecar together with the daemon.
+
 ## [0.43.0] - 2026-10-02
 
 Rooms can now hold more than one person. Add other users to a web chat room, bring the bot into a WhatsApp group, or copy it on an email thread with two or more people, and it becomes a shared room alongside the Talk groups that already worked. Every message is recorded, and by default the bot answers only when someone addresses it. People who don't use your installation can take part as guests. The bot answers them on the host's behalf without touching the host's private data, and their replies can be held for your approval first. Each member gets a private side room next to the shared one, for confirmations, private answers and drafts the bot posts only after you approve them. Anyone can switch the bot off in a room with `!<bot name> off`. Households and teams can keep a shared group memory. You can also ask another user of your installation a question: it reaches them in their own room, on WhatsApp or by SMS, and their reply comes back to you word for word. Your SMS and WhatsApp conversations now each have a room in web chat too, including the history from before the room existed.

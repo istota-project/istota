@@ -42,7 +42,7 @@ GROUP = "120363000000000001@g.us"
 ALICE_JID = "15551234567@s.whatsapp.net"
 BOB_JID = "15557654321@s.whatsapp.net"
 GUEST_JID = "15559990000@s.whatsapp.net"
-GUEST_LID = "277009032835160@lid"
+GUEST_LID = "100000000000042@lid"
 def _room(config):
     with db.get_db(config.db_path) as conn:
         return db.resolve_room_token(conn, "whatsapp", GROUP)
@@ -108,10 +108,12 @@ def _roster(members, *, added_by="", bot_present=True, subject="Family"):
 
 
 def _message(text, *, sender=ALICE_JID, lid="", message_id="M1",
-             mentions_bot=False, reply_to=None, username="Someone"):
+             mentions_bot=False, reply_to=None, username="Someone",
+             mentions=()):
     return proto.inbound_event({
         "message_id": message_id, "jid": GROUP, "group": True,
         "sender_jid": sender, "sender_lid": lid, "mentions_bot": mentions_bot,
+        "mentions": list(mentions),
         "message_type": "text", "text": text, "username": username,
         "reply_to_message_id": reply_to,
         "timestamp": int(datetime.now(timezone.utc).timestamp()),
@@ -352,6 +354,93 @@ class TestATurnInTheGroup:
     def test_a_mention_addresses_the_bot(self, group):
         (result,) = _apply(group, _message("@zz can you check", mentions_bot=True))
         assert result.task_id is not None
+
+    def test_a_mention_is_stored_as_a_name_not_a_number(self, group):
+        """ISSUE-601: WhatsApp writes `@<LID>` or `@<number>` where the phone
+        showed a name. The bot, a mapped member and an unmapped guest each
+        become a name, and no digit run from a mention reaches the room."""
+        text = ("@100000000000042 ask @15557654321 and @388000000000000 "
+                "about @15559990000")
+        mentions = [
+            {"token": "@100000000000042", "jid": "", "lid": "", "bot": True},
+            {"token": "@15557654321", "jid": BOB_JID, "lid": "", "bot": False},
+            {"token": "@388000000000000", "jid": "", "lid": "388000000000000@lid",
+             "bot": False},
+            {"token": "@15559990000", "jid": GUEST_JID, "lid": "", "bot": False},
+        ]
+        (result,) = _apply(group, _message(
+            text, mentions_bot=True, mentions=mentions,
+        ))
+
+        (row,) = _rows(group, "SELECT body FROM messages WHERE room_token=?",
+                       (_room(group),))
+        assert row["body"] == "@Istota ask @Bob and @member about @member"
+        assert _task(group, result.task_id).prompt.endswith(row["body"])
+
+    def test_a_guest_mention_takes_the_name_they_posted_under(self, group):
+        """A guest who has spoken in the group is named as they named
+        themselves, which is text they chose and stays in the user half."""
+        _apply(group, _message("hello", sender=GUEST_JID, message_id="G1",
+                               username="Carol\nthe  guest"))
+        _apply(group, _message(
+            "thanks @15559990000", message_id="M2",
+            mentions=[{"token": "@15559990000", "jid": GUEST_JID, "lid": "",
+                       "bot": False}],
+        ))
+
+        bodies = [r["body"] for r in _rows(
+            group, "SELECT body FROM messages WHERE room_token=? ORDER BY id",
+            (_room(group),))]
+        assert bodies[-1] == "thanks @Carol the guest"
+
+    def test_a_number_outside_the_room_is_not_named_from_the_bindings(self, group):
+        """A sender's client chooses the mention list. A user of the
+        installation who is not in the group must not be named, or a guest
+        could ask which numbers belong to users here."""
+        dave_jid = "15550001111@s.whatsapp.net"
+        with db.get_db(group.db_path) as conn:
+            db.set_whatsapp_binding(conn, "dave", bootstrap_phone_number="+15550001111")
+            db.latch_whatsapp_jid(conn, "dave", jid=dave_jid)
+        group.users["dave"] = UserConfig(display_name="Dave")
+
+        _apply(group, _message(
+            "who is @15550001111", sender=GUEST_JID, mentions=[
+                {"token": "@15550001111", "jid": dave_jid, "lid": "", "bot": False},
+            ],
+        ))
+
+        (row,) = _rows(group, "SELECT body FROM messages WHERE room_token=?",
+                       (_room(group),))
+        assert row["body"] == "who is @member"
+
+    def test_the_classifier_reads_the_rendered_names(self, group, monkeypatch):
+        from istota.transport.whatsapp import groups
+        from istota.transport import ingest
+
+        seen = {}
+        monkeypatch.setattr(group.speech_gate, "mode", "classifier")
+        monkeypatch.setattr(
+            ingest, "classify_ahead",
+            lambda config, **kwargs: seen.setdefault("text", kwargs["text"]),
+        )
+
+        groups.classify_group_event(group, _message(
+            "ask @15557654321", mentions=[
+                {"token": "@15557654321", "jid": BOB_JID, "lid": "", "bot": False},
+            ],
+        ))
+
+        assert seen["text"] == "ask @Bob"
+
+    def test_a_token_is_replaced_whole_and_not_inside_a_longer_number(self, group):
+        _apply(group, _message(
+            "@1555765432 and @15557654321", mentions=[
+                {"token": "@15557654321", "jid": BOB_JID, "lid": "", "bot": False},
+            ],
+        ))
+        (row,) = _rows(group, "SELECT body FROM messages WHERE room_token=?",
+                       (_room(group),))
+        assert row["body"] == "@1555765432 and @Bob"
 
     def test_a_quoted_reply_to_a_bot_message_addresses_the_bot(self, group):
         with db.get_db(group.db_path) as conn:

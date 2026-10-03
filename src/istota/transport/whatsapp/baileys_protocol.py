@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -64,6 +65,7 @@ from ._types import (
     WhatsAppGroupMember,
     WhatsAppGroupRoster,
     WhatsAppInboundMedia,
+    WhatsAppMention,
     WhatsAppSendFailure,
     WhatsAppSendOutcome,
     WhatsAppSendRequest,
@@ -149,6 +151,13 @@ MAX_JID_CHARS = 128
 
 #: WhatsApp caps a group at 1,024 members; a roster past this is not one.
 MAX_GROUP_MEMBERS = 1024
+
+#: The sidecar's own cut on a message's mention list (`MAX_MENTIONS`).
+MAX_MENTIONS = 32
+
+#: A mention token as WhatsApp writes it: `@` and the digits of a JID's user
+#: part. Anything else is not a token this side rewrites.
+_MENTION_TOKEN = re.compile(r"@[0-9]{1,32}")
 
 #: Every `media_error` the sidecar may name, and the local sentence each
 #: becomes. `_SEND_REASONS`' rule, for its reason: the sidecar's own words
@@ -308,6 +317,36 @@ def _bounded_text(value: object, name: str, limit: int) -> str | None:
     if text is not None and len(text) > limit:
         raise BaileysProtocolError(f"{name} exceeds {limit} characters")
     return text
+
+
+def _group_mentions(value: object) -> tuple[WhatsAppMention, ...]:
+    """The `mentions` list, with malformed entries dropped (ISSUE-601).
+
+    Dropped rather than refused, unlike a roster member: a mention only
+    decides how the turn's text reads, and refusing the line would lose the
+    turn. An entry dropped here keeps its `@<id>` token in the text.
+    """
+    if not isinstance(value, list):
+        return ()
+    out: list[WhatsAppMention] = []
+    dropped = 0
+    for entry in value[:MAX_MENTIONS]:
+        token = entry.get("token") if isinstance(entry, dict) else None
+        jid = entry.get("jid", "") if isinstance(entry, dict) else None
+        lid = entry.get("lid", "") if isinstance(entry, dict) else None
+        if (
+            not isinstance(token, str) or not _MENTION_TOKEN.fullmatch(token)
+            or not isinstance(jid, str) or len(jid) > MAX_JID_CHARS
+            or not isinstance(lid, str) or len(lid) > MAX_JID_CHARS
+        ):
+            dropped += 1
+            continue
+        out.append(WhatsAppMention(
+            token=token, jid=jid, lid=lid, bot=entry.get("bot") is True,
+        ))
+    if dropped:
+        logger.warning("whatsapp.baileys.mentions_dropped count=%d", dropped)
+    return tuple(out)
 
 
 def _error_code(value: object) -> str | None:
@@ -544,6 +583,7 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
             group = WhatsAppGroupContext(
                 group_jid=sender, sender_lid=sender_lid,
                 mentions_bot=payload.get("mentions_bot") is True,
+                mentions=_group_mentions(payload.get("mentions")),
             )
             sender = sender_jid
     return InboundWhatsAppEvent(

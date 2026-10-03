@@ -501,19 +501,69 @@ function groupSender(key, lidToPn) {
   };
 }
 
-/*
- * Whether a message @-mentions the paired account (D5). Only this side knows
- * the account's own JIDs, phone and LID, so the answer crosses as a bit and
- * the mention list never does.
- */
-function mentionsBot(message, botIds) {
+function mentionedJids(message) {
   const content = message && message.message;
   const context = content && content.extendedTextMessage &&
     content.extendedTextMessage.contextInfo;
   const mentioned = context && context.mentionedJid;
-  if (!Array.isArray(mentioned) || !Array.isArray(botIds)) return false;
+  return Array.isArray(mentioned) ? mentioned : [];
+}
+
+/*
+ * Whether a message @-mentions the paired account (D5). Only this side knows
+ * the account's own JIDs, phone and LID, so the answer crosses as a bit.
+ */
+function mentionsBot(message, botIds) {
+  if (!Array.isArray(botIds)) return false;
   const mine = new Set(botIds.map(bareJid).filter(Boolean));
-  return mentioned.some((jid) => mine.has(bareJid(jid)));
+  return mentionedJids(message).some((jid) => mine.has(bareJid(jid)));
+}
+
+// A mention list longer than this is cut; the rest keep their tokens.
+const MAX_MENTIONS = 32;
+
+/*
+ * The mentions a group message's body carries, as `[{token, jid, lid, bot}]`
+ * (ISSUE-601).
+ *
+ * WhatsApp writes `@<user part of the JID>` into the body and the phone
+ * renders the name from `mentionedJid`, so on a LID-addressed group the body
+ * holds a LID and on a phone-addressed one a member's number. The daemon owns
+ * the names, so the list crosses and the daemon rewrites each token. The
+ * list is whatever the sender's client put in `mentionedJid`, not limited to
+ * the roster, so the daemon names a mention only from the room's own
+ * participants. The paired account's entry is `bot: true` with both ids
+ * empty; its token is the user part the body already carried. A mention whose
+ * token the body does not carry is left out.
+ */
+function groupMentions(message, botIds, lidToPn) {
+  const text = messageText(message);
+  if (typeof text !== 'string') return [];
+  const mine = new Set((botIds || []).map(bareJid).filter(Boolean));
+  const seen = new Set();
+  const out = [];
+  for (const mentioned of mentionedJids(message)) {
+    const bare = bareJid(mentioned);
+    if (!bare) continue;
+    const token = `@${bare.slice(0, bare.lastIndexOf('@'))}`;
+    if (seen.has(token) || !text.includes(token)) continue;
+    seen.add(token);
+    if (mine.has(bare)) {
+      out.push({ token, jid: '', lid: '', bot: true });
+    } else if (bare.endsWith(USER_JID_DOMAIN)) {
+      out.push({ token, jid: bare, lid: '', bot: false });
+    } else if (bare.endsWith(LID_JID_DOMAIN)) {
+      const pn = lidToPn && lidToPn.get(bare);
+      out.push({
+        token,
+        jid: typeof pn === 'string' && pn.endsWith(USER_JID_DOMAIN) ? pn : '',
+        lid: bare,
+        bot: false,
+      });
+    }
+    if (out.length >= MAX_MENTIONS) break;
+  }
+  return out;
 }
 
 // WhatsApp caps a group at 1,024 members; the daemon refuses a longer roster.
@@ -2509,6 +2559,9 @@ class Session {
         sender_jid: sender.jid,
         sender_lid: sender.lid,
         mentions_bot: group ? mentionsBot(message, this.botIds()) : false,
+        mentions: group
+          ? groupMentions(message, this.botIds(), this.groupRosters.get(jid))
+          : [],
         timestamp: Number(message.messageTimestamp) || Math.floor(Date.now() / 1000),
         media_name: media.media_name,
         media_mime: media.media_mime,
@@ -2949,6 +3002,8 @@ module.exports = {
   chatAddress,
   collectMediaChunk,
   groupSender,
+  groupMentions,
+  MAX_MENTIONS,
   mentionsBot,
   rosterParticipants,
   deriveMediaDir,

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from istota import confirmations, db
@@ -43,7 +44,12 @@ from .._types import ParticipantRef
 from ..ingest import record_inbound
 from . import identity as identity_rules
 from . import jid_fingerprint, message_fingerprint
-from ._types import InboundWhatsAppEvent, WhatsAppGroupMember, WhatsAppGroupRoster
+from ._types import (
+    InboundWhatsAppEvent,
+    WhatsAppGroupMember,
+    WhatsAppGroupRoster,
+    WhatsAppMention,
+)
 
 if TYPE_CHECKING:
     from ...config import Config
@@ -55,6 +61,10 @@ logger = logging.getLogger(__name__)
 SURFACE = "whatsapp"
 
 _TEXT_TYPES = frozenset({"text"})
+
+#: What a mention of somebody the room cannot name becomes: neither a number
+#: nor a LID.
+UNNAMED_MENTION = "@member"
 
 
 def group_room_token(group_jid: str) -> str:
@@ -105,6 +115,71 @@ def addressed_to_bot(
         return False
     rest = spoken[len(name):]
     return not rest or not rest[0].isalnum()
+
+
+def _mention_name(
+    conn, config: "Config", room_token: str, mention: WhatsAppMention,
+) -> str:
+    """The name a mention renders as, read from this room's own roster only.
+
+    Never from `identity.group_member_user`: a mention list is whatever the
+    sender's client put in it, and resolving an arbitrary number through the
+    bindings would let anyone in the group learn whether it belongs to a user
+    of this installation, and that user's name.
+    """
+    if mention.bot:
+        return (getattr(config, "bot_name", "") or "").strip()
+    refs = [
+        ref for ref in (
+            identity_rules.normalize_jid(mention.jid),
+            identity_rules.normalize_lid(mention.lid),
+        ) if ref
+    ]
+    if not refs:
+        return ""
+    row = conn.execute(
+        "SELECT user_id, display_name FROM room_participants "
+        "WHERE room_token = ? AND surface = ? AND surface_ref IN "
+        f"({', '.join('?' for _ in refs)}) "
+        "ORDER BY (left_at IS NULL) DESC, id DESC LIMIT 1",
+        (room_token, SURFACE, *refs),
+    ).fetchone()
+    if row is None:
+        return ""
+    user_id, display_name = row
+    if user_id:
+        user = config.users.get(user_id)
+        return getattr(user, "display_name", "") or user_id
+    return display_name or ""
+
+
+def render_mentions(
+    conn, config: "Config", room_token: str, text: str,
+    mentions: tuple[WhatsAppMention, ...],
+) -> str:
+    """``text`` with each mention's ``@<id>`` token as a name (ISSUE-601).
+
+    WhatsApp writes the mentioned account's LID or number into the body, so
+    without this the room's transcript and the prompt read ``@<LID>``
+    where the phone showed a name, and a phone-addressed mention puts a
+    member's number in front of everyone in the room. The bot is named by
+    ``bot_name``, an istota user in this room by their display name, anyone
+    else in it by the name they last posted under, and everyone else,
+    including a number nobody in the room holds, by `UNNAMED_MENTION`. A name is
+    text its owner chose, so it is flattened like a guest label; the whole
+    turn stays in the user half, fenced as any participant's words are.
+    """
+    for mention in mentions:
+        name = participants.flatten_label(
+            _mention_name(conn, config, room_token, mention),
+        ).lstrip("@").strip()
+        replacement = f"@{name}" if name else UNNAMED_MENTION
+        # A token is never followed by a digit, so `@123` leaves `@1234` alone.
+        text = re.sub(
+            re.escape(mention.token) + r"(?![0-9])",
+            lambda _match, value=replacement: value, text,
+        )
+    return text
 
 
 def _member_refs(member: WhatsAppGroupMember) -> tuple[str, str]:
@@ -350,6 +425,7 @@ def classify_group_event(config: "Config", event) -> "GateDecision | None":
             user_id = (
                 identity_rules.group_member_user(conn, sender_jid) if sender_jid else None
             )
+            text = render_mentions(conn, config, room.token, text, group.mentions)
             addressed = addressed_to_bot(
                 conn, config, text, mentions_bot=group.mentions_bot,
                 reply_to_message_id=event.reply_to_message_id,
@@ -398,7 +474,9 @@ def handle_group_message(
         _set_disposition(conn, event, result.disposition, result.task_id)
         return result
 
-    text = (event.text or "").strip()
+    text = render_mentions(
+        conn, config, room.token, (event.text or "").strip(), event.group.mentions,
+    )
     # `!<bot> off|on` is heard from anyone in the group, and its answer goes
     # into the group (multiplayer D8). A room switched off records nothing
     # else (D12): the message is claimed, so it is never seen twice, and that
@@ -483,4 +561,5 @@ __all__ = [
     "group_destination",
     "group_room_token",
     "handle_group_message",
+    "render_mentions",
 ]
