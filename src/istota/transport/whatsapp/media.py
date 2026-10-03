@@ -55,6 +55,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from istota.lib import audio_sniff
 from istota.lib import du
 from istota.lib import image_sniff
 from . import message_fingerprint
@@ -125,7 +126,52 @@ a frame that never arrived, a daemon killed between the write and the copy.
 INBOX_NAME_PREFIX = "whatsapp"
 """What an inbox copy is called, so a user can see where it came from."""
 
-MEDIA_UNATTRIBUTED = "the image was not attributed to a user"
+_REASONS: dict[tuple[str, str], str] = {
+    ("image", "unattributed"): "the image was not attributed to a user",
+    ("image", "not_placed"): "the image could not be placed in the user's workspace",
+    ("image", "fetch_failed"): "the image could not be downloaded from WhatsApp",
+    ("image", "over_cap"): "the image was larger than this surface accepts",
+    ("image", "write_failed"): "the image could not be written to disk",
+    ("image", "no_id"): "the image named no media id",
+    ("image", "fetch_unknown"): "the image could not be fetched",
+    ("audio", "unattributed"): "the voice message was not attributed to a user",
+    ("audio", "not_placed"): (
+        "the voice message could not be placed in the user's workspace"
+    ),
+    ("audio", "fetch_failed"): (
+        "the voice message could not be downloaded from WhatsApp"
+    ),
+    ("audio", "over_cap"): "the voice message was larger than this surface accepts",
+    ("audio", "write_failed"): "the voice message could not be written to disk",
+    ("audio", "no_id"): "the voice message named no media id",
+    ("audio", "fetch_unknown"): "the voice message could not be fetched",
+}
+"""Every reason a media record may carry, per kind: the only copy of the prose.
+
+The kind-free half is the key, which is what crosses the sidecar wire and what
+`client.WhatsAppMediaError` carries; the kind is applied where the record is
+built, since the record knows what it holds. The image strings are the ones
+this surface shipped with, byte for byte, so existing log searches match.
+"""
+
+MEDIA_KINDS: tuple[str, ...] = ("image", "audio")
+REASON_KEYS: tuple[str, ...] = (
+    "unattributed", "not_placed", "fetch_failed", "over_cap", "write_failed",
+    "no_id", "fetch_unknown",
+)
+
+
+def reason(kind: str, key: str) -> str:
+    """The fixed sentence for *key* about a file of *kind*.
+
+    Raises `KeyError` for a pair outside the table: both arguments are this
+    package's own constants, never a value off the wire, so an unknown pair is
+    a programming error, found by the first test that reaches the call site.
+    """
+    return _REASONS[(kind, key)]
+
+
+MEDIA_UNATTRIBUTED = reason("image", "unattributed")
 """What a staged file the pre-check would not name a user for becomes.
 
 Both adapters reach it and each reaches it for its own reasons: an unknown
@@ -137,7 +183,7 @@ photograph has to keep working for exactly the opted-out sender this reason is
 most often about.
 """
 
-MEDIA_NOT_PLACED = "the image could not be placed in the user's workspace"
+MEDIA_NOT_PLACED = reason("image", "not_placed")
 """What a decodable image nothing could copy into an inbox becomes.
 
 Distinct from a file the sniff refused, which is not an image at all and takes
@@ -145,19 +191,20 @@ the `unsupported_type` reply the surface already had. This one is istota's own
 failure and says so.
 """
 
-MEDIA_FETCH_FAILED = "the image could not be downloaded from WhatsApp"
-MEDIA_OVER_CAP = "the image was larger than this surface accepts"
-MEDIA_WRITE_FAILED = "the image could not be written to disk"
+MEDIA_FETCH_FAILED = reason("image", "fetch_failed")
+MEDIA_OVER_CAP = reason("image", "over_cap")
+MEDIA_WRITE_FAILED = reason("image", "write_failed")
 """The three ways a *fetch* ends badly, in one place because both adapters
 reach them.
 
 The sidecar names them as keys (`download_failed`, `over_the_cap`,
 `write_failed`, since its own words carry the destination JID and, on a Boom
-error, the whole request) and `baileys_protocol._MEDIA_ERRORS` maps each key
-onto the sentence here; `client.fetch_media` raises them directly, because on
-that adapter the daemon is the fetcher and there is no wire to cross. This
-module is the authoritative copy of the prose and the only one — a second
-spelling drifts, and what a user is told is the thing that would drift.
+error, the whole request) and `baileys_protocol._MEDIA_ERROR_KEYS` maps each
+onto a `reason` key; `client.fetch_media` raises the keys directly, because on
+that adapter the daemon is the fetcher and there is no wire to cross.
+`_REASONS` is the authoritative copy of the prose and the only one — a second
+spelling drifts, and what a user is told is the thing that would drift. These
+names are the image sentences, for callers that only ever handle images.
 
 Neither adapter may build a reason from an exception: Meta's prose, PyWa's
 exception text and an httpx repr all carry the request URL, which carries the
@@ -365,28 +412,46 @@ def open_staged_write(media_dir: Path, name: str) -> int:
     )
 
 
-def sniff_staged(path: Path) -> str | None:
-    """What the staged bytes actually are, or None.
+_SNIFF_READ_BYTES = max(image_sniff.SNIFF_BYTES, audio_sniff.SNIFF_BYTES)
 
-    `image_sniff.sniff_decodable` over the first `SNIFF_BYTES`, and **no
+_EXTENSION_BY_KIND: dict[str, dict[str, str]] = {
+    "image": image_sniff.EXTENSION_BY_MEDIA_TYPE,
+    "audio": audio_sniff.EXTENSION_BY_MEDIA_TYPE,
+}
+
+
+def sniff_staged(path: Path, kind: str = "image") -> str | None:
+    """What the staged bytes actually are, for a file of *kind*, or None.
+
+    `image_sniff.sniff_decodable` for an image and `audio_sniff.sniff_audio`
+    for audio, over one read of the larger of the two `SNIFF_BYTES`, and **no
     signature table of its own** — a second sniffer is exactly the duplication
-    that module exists to prevent, and a test asserts the absence.
+    those modules exist to prevent, and a test asserts the absence.
+
+    The kind picks the sniffer and the sniff only confirms it: audio bytes
+    staged as an image answer `None`, and image bytes staged as audio do too,
+    because the declared message type decides which pipeline a file may enter.
 
     `None` means delete it and treat the message as unsupported: it is the
     SVG-named-`.png` case, and the MP4-with-an-`ftyp`-box case, and every
-    other file a declared mimetype would have got wrong.
+    other file a declared mimetype would have got wrong. An unknown kind
+    answers `None` as well.
     """
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
         return None
     try:
-        head = os.read(fd, image_sniff.SNIFF_BYTES)
+        head = os.read(fd, _SNIFF_READ_BYTES)
     except OSError:
         return None
     finally:
         os.close(fd)
-    return image_sniff.sniff_decodable(head)
+    if kind == "image":
+        return image_sniff.sniff_decodable(head)
+    if kind == "audio":
+        return audio_sniff.sniff_audio(head)
+    return None
 
 
 def staging_bytes(media_dir: Path) -> int:
@@ -590,13 +655,18 @@ def precheck(
 
 
 def stage_to_attachment(
-    config: "Config", user_id: str, staged: Path
+    config: "Config", user_id: str, staged: Path, kind: str = "image"
 ) -> str | None:
     """Sniff a staged file, copy it into the user's inbox, unlink the staged one.
 
     Returns the path that goes on `task.attachments`, or `None` for a file
-    that is not a decodable image or could not be placed — in which case the
+    that does not sniff as *kind* or could not be placed — in which case the
     staged file is gone and the message takes the media-failed path.
+
+    *kind* is the record's, which is the declared message type. It picks the
+    sniffer and the extension table, so an image goes on to
+    `prepare_image_attachments` and audio to the executor's pre-transcription
+    pass, each picked up by the suffix this function writes.
 
     **The inbox copy is named from this function's own sniff, always**, and
     never from the staged file's suffix or from a declared mimetype.
@@ -646,12 +716,12 @@ def stage_to_attachment(
             "step was handed a path this module did not name",
         )
         return None
-    media_type = sniff_staged(staged)
+    media_type = sniff_staged(staged, kind)
     if media_type is None:
         logger.info(
-            "whatsapp.media.rejected reason=not_a_decodable_image file=%s: "
-            "staged bytes matched no signature the image pipeline can open",
-            staged.stem,
+            "whatsapp.media.rejected reason=not_decodable kind=%s file=%s: "
+            "staged bytes matched no signature that kind's pipeline can open",
+            kind if kind in MEDIA_KINDS else "unknown", staged.stem,
         )
         discard_staged(staged)
         return None
@@ -659,14 +729,14 @@ def stage_to_attachment(
     byte_count = _size(staged)
     if byte_count > MAX_MEDIA_BYTES:
         logger.warning(
-            "whatsapp.media.rejected reason=over_the_file_cap file=%s "
+            "whatsapp.media.rejected reason=over_the_file_cap kind=%s file=%s "
             "bytes=%d cap=%d",
-            staged.stem, byte_count, MAX_MEDIA_BYTES,
+            kind, staged.stem, byte_count, MAX_MEDIA_BYTES,
         )
         discard_staged(staged)
         return None
 
-    extension = image_sniff.EXTENSION_BY_MEDIA_TYPE[media_type]
+    extension = _EXTENSION_BY_KIND[kind][media_type]
     inbox_name = f"{INBOX_NAME_PREFIX}_{staged.stem}.{extension}"
     try:
         ensure_user_directories_v2(config, user_id)
@@ -674,8 +744,8 @@ def stage_to_attachment(
         if remote_path:
             discard_staged(staged)
             logger.info(
-                "whatsapp.media.attached type=%s bytes=%d file=%s",
-                media_type, byte_count, staged.stem,
+                "whatsapp.media.attached kind=%s type=%s bytes=%d file=%s",
+                kind, media_type, byte_count, staged.stem,
             )
             return remote_path
         # The upload failed and these bytes are the only copy, so they are
@@ -687,16 +757,16 @@ def stage_to_attachment(
         local = fallback_dir / inbox_name
         shutil.move(str(staged), str(local))
         logger.warning(
-            "whatsapp.media.inbox_upload_failed type=%s file=%s: attaching a "
-            "local copy outside the staging directory instead",
-            media_type, staged.stem,
+            "whatsapp.media.inbox_upload_failed kind=%s type=%s file=%s: "
+            "attaching a local copy outside the staging directory instead",
+            kind, media_type, staged.stem,
         )
         return str(local)
     except (OSError, ValueError):
         logger.warning(
-            "whatsapp.media.stage_failed type=%s file=%s: the staged file "
-            "could not be placed in the inbox",
-            media_type, staged.stem,
+            "whatsapp.media.stage_failed kind=%s type=%s file=%s: the staged "
+            "file could not be placed in the inbox",
+            kind, media_type, staged.stem,
         )
         discard_staged(staged)
         return None
@@ -741,6 +811,7 @@ __all__ = [
     "MEDIA_DIR_NAME",
     "MEDIA_FILE_MODE",
     "MEDIA_FETCH_FAILED",
+    "MEDIA_KINDS",
     "MEDIA_NOT_PLACED",
     "MEDIA_OVER_CAP",
     "MEDIA_WRITE_FAILED",
@@ -748,6 +819,7 @@ __all__ = [
     "MEDIA_STAGING_CEILING_BYTES",
     "MEDIA_UNATTRIBUTED",
     "NO_MESSAGE_ID",
+    "REASON_KEYS",
     "STAGED_NAME_RE",
     "bounded_media_type",
     "default_media_dir",
@@ -758,6 +830,7 @@ __all__ = [
     "open_staged_write",
     "precheck",
     "prune_media_dir",
+    "reason",
     "sniff_staged",
     "stage_to_attachment",
     "staged_name",

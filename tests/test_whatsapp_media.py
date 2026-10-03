@@ -600,3 +600,169 @@ class TestTheCaps:
         assert media.MEDIA_STAGING_CEILING_BYTES == 256 * 1024 * 1024
         assert media.MEDIA_ORPHAN_SECONDS == 600
         assert media.MEDIA_DIR_NAME == "whatsapp-media"
+
+
+AUDIO_FIXTURES = Path(__file__).parent / "fixtures" / "audio"
+
+
+class TestTheKindPicksThePipeline:
+    """The declared message type decides which pipeline a file may enter,
+    and the sniff only confirms the bytes match it."""
+
+    def _stage(self, config, payload, ext):
+        staging = media.ensure_media_dir(media.default_media_dir(config))
+        name = media.staged_name("wamid.voice", ext)
+        fd = media.open_staged_write(staging, name)
+        try:
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+        return staging / name
+
+    def test_an_ogg_voice_note_staged_as_bin_lands_in_the_inbox_as_ogg(
+        self, tmp_path
+    ):
+        config = _config(tmp_path)
+        payload = (AUDIO_FIXTURES / "voice.ogg").read_bytes()
+        staged = self._stage(config, payload, "bin")
+
+        attachment = media.stage_to_attachment(config, "alice", staged, kind="audio")
+
+        assert attachment is not None
+        assert attachment.startswith("/Users/alice/inbox/")
+        landed = config.workspace_path / attachment.lstrip("/")
+        assert landed.name == f"{media.INBOX_NAME_PREFIX}_{staged.stem}.ogg"
+        assert landed.read_bytes() == payload
+        assert not staged.exists()
+
+    @pytest.mark.parametrize(
+        "fixture,expected",
+        [("voice.ogg", "audio/ogg"), ("tone.m4a", "audio/mp4"),
+         ("tone.mp3", "audio/mpeg")],
+    )
+    def test_audio_bytes_sniff_as_audio_only_under_the_audio_kind(
+        self, tmp_path, fixture, expected
+    ):
+        staging = media.ensure_media_dir(tmp_path / "whatsapp-media")
+        path = staging / media.staged_name("wamid.x", "bin")
+        path.write_bytes((AUDIO_FIXTURES / fixture).read_bytes())
+
+        assert media.sniff_staged(path, "audio") == expected
+        assert media.sniff_staged(path, "image") is None
+        assert media.sniff_staged(path) is None
+
+    def test_an_unknown_kind_sniffs_as_nothing(self, tmp_path):
+        staging = media.ensure_media_dir(tmp_path / "whatsapp-media")
+        path = staging / media.staged_name("wamid.x", "png")
+        path.write_bytes(PNG)
+
+        assert media.sniff_staged(path, "video") is None
+
+    def test_audio_staged_as_an_image_is_refused_and_discarded(self, tmp_path):
+        config = _config(tmp_path)
+        staged = self._stage(
+            config, (AUDIO_FIXTURES / "voice.ogg").read_bytes(), "ogg",
+        )
+
+        assert media.stage_to_attachment(config, "alice", staged) is None
+        assert not staged.exists()
+
+    def test_an_image_staged_as_audio_is_refused_and_discarded(self, tmp_path):
+        config = _config(tmp_path)
+        staged = self._stage(config, PNG, "png")
+
+        assert media.stage_to_attachment(config, "alice", staged, kind="audio") is None
+        assert not staged.exists()
+
+    def test_over_cap_audio_is_refused_at_the_funnel(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(media, "MAX_MEDIA_BYTES", 1024)
+        config = _config(tmp_path)
+        payload = (AUDIO_FIXTURES / "voice.ogg").read_bytes() + b"\x00" * 4096
+        staged = self._stage(config, payload, "ogg")
+
+        assert media.stage_to_attachment(config, "alice", staged, kind="audio") is None
+        assert not staged.exists()
+
+    def test_the_sniff_delegates_to_both_leaves_and_holds_no_table(self):
+        body = source_of(media.sniff_staged).split('"""')[-1]
+        assert "sniff_decodable" in body
+        assert "sniff_audio" in body
+        for signature in ("OggS", "ID3", "fLaC", "WAVE", "ftyp"):
+            assert signature not in body
+
+
+class TestTheReasonTable:
+    def test_the_image_sentences_are_the_ones_this_surface_shipped_with(self):
+        """Pinned byte for byte, so log searches and the reply wording that
+        predate the table still match."""
+        assert media.MEDIA_UNATTRIBUTED == "the image was not attributed to a user"
+        assert media.MEDIA_NOT_PLACED == (
+            "the image could not be placed in the user's workspace"
+        )
+        assert media.MEDIA_FETCH_FAILED == (
+            "the image could not be downloaded from WhatsApp"
+        )
+        assert media.MEDIA_OVER_CAP == (
+            "the image was larger than this surface accepts"
+        )
+        assert media.MEDIA_WRITE_FAILED == "the image could not be written to disk"
+        assert media.reason("image", "no_id") == "the image named no media id"
+        assert media.reason("image", "fetch_unknown") == (
+            "the image could not be fetched"
+        )
+
+    def test_every_kind_has_every_key_and_the_audio_ones_say_so(self):
+        for kind in media.MEDIA_KINDS:
+            for key in media.REASON_KEYS:
+                sentence = media.reason(kind, key)
+                assert sentence.startswith(
+                    "the voice message " if kind == "audio" else "the image "
+                )
+        assert media.reason("audio", "fetch_failed") == (
+            "the voice message could not be downloaded from WhatsApp"
+        )
+
+    def test_an_unknown_pair_is_a_programming_error(self):
+        with pytest.raises(KeyError):
+            media.reason("video", "fetch_failed")
+        with pytest.raises(KeyError):
+            media.reason("audio", "not_a_key")
+
+    def test_the_adapter_aliases_are_the_image_sentences_of_their_keys(self):
+        from istota.transport.whatsapp import baileys_protocol, client, webhook
+
+        assert set(baileys_protocol._MEDIA_ERROR_KEYS.values()) <= set(
+            media.REASON_KEYS
+        )
+        for wire, key in baileys_protocol._MEDIA_ERROR_KEYS.items():
+            assert baileys_protocol._MEDIA_ERRORS[wire] == media.reason("image", key)
+        assert baileys_protocol._UNKNOWN_MEDIA_ERROR == media.reason(
+            "image", baileys_protocol._UNKNOWN_MEDIA_ERROR_KEY,
+        )
+        assert webhook.MEDIA_NO_ID_REASON == media.reason("image", "no_id")
+        assert client.MEDIA_OVER_CAP_REASON == media.MEDIA_OVER_CAP
+
+    def test_a_fetch_error_carries_a_key_the_record_builder_can_apply_a_kind_to(
+        self,
+    ):
+        from istota.transport.whatsapp.client import (
+            MEDIA_OVER_CAP_KEY,
+            WhatsAppMediaError,
+        )
+
+        error = WhatsAppMediaError(MEDIA_OVER_CAP_KEY)
+
+        assert error.reason == media.MEDIA_OVER_CAP
+        assert error.reason_for("audio") == media.reason("audio", "over_cap")
+
+
+class TestTheRecordKind:
+    def test_a_record_defaults_to_image(self):
+        from istota.transport.whatsapp._types import WhatsAppInboundMedia
+
+        record = WhatsAppInboundMedia(
+            staged_path="", mime_type="", byte_count=0,
+            attached_for_user="", error=None,
+        )
+
+        assert record.kind == "image"

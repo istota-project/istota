@@ -113,7 +113,7 @@ has everything it needs — this sentence is there so the prompt is not empty an
 so the turn reads correctly in task history.
 """
 
-MEDIA_NO_ID_REASON = "the image named no media id"
+MEDIA_NO_ID_REASON = media_rules.reason("image", "no_id")
 """What an `image` message Meta sent without a readable media id becomes.
 
 There is nothing to fetch, so the record carries an `error` rather than being

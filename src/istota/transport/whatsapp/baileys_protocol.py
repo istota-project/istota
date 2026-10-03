@@ -167,14 +167,21 @@ _MENTION_TOKEN = re.compile(r"@[0-9]{1,32}")
 #: **The prose itself lives in `media.py`**, because the Cloud adapter says the
 #: same three things about its own fetch — there the daemon *is* the fetcher,
 #: so `client.fetch_media` raises them directly with no wire to cross. What a
-#: user is told is exactly what two copies would drift on. The keys stay here,
-#: since they are this adapter's wire vocabulary and the sidecar's own.
-_MEDIA_ERRORS: dict[str, str] = {
-    "download_failed": media_rules.MEDIA_FETCH_FAILED,
-    "over_the_cap": media_rules.MEDIA_OVER_CAP,
-    "write_failed": media_rules.MEDIA_WRITE_FAILED,
+#: user is told is exactly what two copies would drift on. The wire keys stay
+#: here, since they are this adapter's vocabulary and the sidecar's own, and
+#: each maps onto a kind-free `media.reason` key: the sidecar's key says what
+#: went wrong, and the record's kind says what it went wrong with.
+_MEDIA_ERROR_KEYS: dict[str, str] = {
+    "download_failed": "fetch_failed",
+    "over_the_cap": "over_cap",
+    "write_failed": "write_failed",
 }
-_UNKNOWN_MEDIA_ERROR = "the image could not be fetched"
+_UNKNOWN_MEDIA_ERROR_KEY = "fetch_unknown"
+_MEDIA_ERRORS: dict[str, str] = {
+    wire: media_rules.reason("image", key)
+    for wire, key in _MEDIA_ERROR_KEYS.items()
+}
+_UNKNOWN_MEDIA_ERROR = media_rules.reason("image", _UNKNOWN_MEDIA_ERROR_KEY)
 
 #: Baileys' receipt vocabulary mapped onto the ledger's. A status this surface
 #: does not model yields `None` and the caller drops the receipt — inventing a
