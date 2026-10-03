@@ -30,6 +30,8 @@ from istota.brain.claude_code import DEFAULT_ALIASES, HAIKU, OPUS, SONNET
 from istota.config import Config, NextcloudConfig, SchedulerConfig, TalkConfig, UserConfig
 from istota.memory.knowledge_graph import add_fact, ensure_table
 
+from .support.rooms import plain_talk_room
+
 # The root conftest neutralizes `subscription_usage.get_snapshot` for the whole
 # suite, so a doctor sweep on a laptop cannot read the real keychain or reach the
 # real endpoint. `TestCmdUsage`'s shared-cache case is the one test here that
@@ -1285,6 +1287,323 @@ class TestCmdMemory:
         assert "speaks" in result
 
 
+_PRIVATE_TEXT = "alice private sentinel text"
+
+
+def _shared_room(config, origin="web"):
+    """A room alice and bob are both members of: shared by `room_is_shared`."""
+    config.users = {"alice": UserConfig(), "bob": UserConfig()}
+    with db.get_db(config.db_path) as conn:
+        if origin == "talk":
+            shape = plain_talk_room(conn, "alice")
+            token, ref = shape.canonical, shape.talk_ref
+        else:
+            token = db.register_room(conn, None, "alice", origin=origin, name="g").token
+            ref = token
+        db.add_room_member(conn, token, "bob")
+        conn.commit()
+    return token, ref
+
+
+def _private_talk_room(config):
+    with db.get_db(config.db_path) as conn:
+        shape = plain_talk_room(conn, "alice")
+        conn.commit()
+    return shape.canonical, shape.talk_ref
+
+
+def _write_user_md(config, text=_PRIVATE_TEXT):
+    (config.workspace_path / "Users/alice/istota/config/USER.md").write_text(text)
+
+
+def _talk_sends(fake_talk, ref):
+    return [c.args["message"] for c in fake_talk.calls_to(ref, method="send_message")]
+
+
+class TestPersonalCommandsInSharedRooms:
+    """ISSUE-609: a command whose reply is personal is refused in a shared room.
+
+    On Talk a command's reply is posted into the conversation, so in a group it
+    is read by everyone; the refusal holds on every surface so the rule is one
+    rule.
+    """
+
+    @pytest.mark.parametrize("args", ["user", "facts", "facts alice"])
+    async def test_a_talk_group_gets_the_refusal_and_none_of_the_memory(
+        self, make_config, fake_talk, args,
+    ):
+        config = make_config()
+        fake_talk.db_path = config.db_path
+        _write_user_md(config)
+        _add_facts(config, [("alice", "secret_is", _PRIVATE_TEXT)])
+        _token, ref = _shared_room(config, origin="talk")
+
+        result = await dispatch(config, "alice", ref, f"!memory {args}", surface="talk")
+
+        assert result.delivered
+        sends = _talk_sends(fake_talk, ref)
+        assert len(sends) == 1
+        assert "private chat with me" in sends[0]
+        assert _PRIVATE_TEXT.lower() not in sends[0].lower()
+        assert fake_talk.refusals == []
+
+    @pytest.mark.parametrize("surface,origin", [("web", "web"), ("whatsapp", "whatsapp")])
+    @pytest.mark.parametrize("args", ["user", "facts"])
+    async def test_web_and_whatsapp_group_refuse_too(self, make_config, surface, origin, args):
+        config = make_config()
+        _write_user_md(config)
+        _add_facts(config, [("alice", "secret_is", _PRIVATE_TEXT)])
+        token, _ref = _shared_room(config, origin=origin)
+
+        result = await dispatch(config, "alice", token, f"!memory {args}", surface=surface)
+
+        assert "private chat with me" in result.text
+        assert _PRIVATE_TEXT.lower() not in result.text.lower()
+
+    @pytest.mark.parametrize("args", ["user", "facts"])
+    async def test_a_private_talk_room_still_shows_the_memory(
+        self, make_config, fake_talk, args,
+    ):
+        config = make_config()
+        fake_talk.db_path = config.db_path
+        _write_user_md(config)
+        _add_facts(config, [("alice", "secret_is", _PRIVATE_TEXT)])
+        _token, ref = _private_talk_room(config)
+
+        await dispatch(config, "alice", ref, f"!memory {args}", surface="talk")
+
+        sends = _talk_sends(fake_talk, ref)
+        assert len(sends) == 1 and _PRIVATE_TEXT.lower() in sends[0].lower()
+
+    async def test_channel_notes_stay_readable_in_a_shared_room(self, make_config):
+        config = make_config()
+        token, _ = _shared_room(config)
+        channel = config.workspace_path / "Channels" / token
+        channel.mkdir(parents=True, exist_ok=True)
+        (channel / "CHANNEL.md").write_text("Team notes everyone reads")
+
+        result = await dispatch(config, "alice", token, "!memory channel", surface="web")
+
+        assert "Team notes everyone reads" in result.text
+
+    @pytest.mark.parametrize("command,seed", [
+        ("!status", "task"),
+        ("!cron", "job"),
+        ("!trust", "sender"),
+        ("!usage", None),
+        (f"!search {_PRIVATE_TEXT}", None),
+    ])
+    async def test_other_personal_commands_are_refused(self, make_config, command, seed):
+        config = make_config()
+        token, _ = _shared_room(config)
+        with db.get_db(config.db_path) as conn:
+            if seed == "task":
+                _task(conn, _PRIVATE_TEXT, token="elsewhere", status="pending")
+            elif seed == "job":
+                _insert_job(conn, name=_PRIVATE_TEXT)
+            elif seed == "sender":
+                db.add_trusted_sender(conn, "alice", f"{_PRIVATE_TEXT.lower()}@example.com")
+            conn.commit()
+
+        result = await dispatch(config, "alice", token, command, surface="web")
+
+        assert "private chat with me" in result.text
+        assert _PRIVATE_TEXT.lower() not in result.text.lower()
+
+    async def test_cron_enable_still_works_in_a_shared_room(self, make_config):
+        config = make_config()
+        token, _ = _shared_room(config)
+        with db.get_db(config.db_path) as conn:
+            _insert_job(conn, name="digest", enabled=0)
+            conn.commit()
+
+        result = await dispatch(config, "alice", token, "!cron enable digest", surface="web")
+
+        assert "Enabled" in result.text
+
+    async def test_more_shows_only_this_rooms_tasks_in_a_shared_room(self, make_config):
+        config = make_config()
+        token, _ = _shared_room(config)
+        trace = json.dumps([{"type": "text", "text": "trace text"}])
+        with db.get_db(config.db_path) as conn:
+            elsewhere = _task(conn, _PRIVATE_TEXT, token="elsewhere", status="completed",
+                              source_type="web")
+            here = _task(conn, "a room question", token=token, status="completed",
+                         source_type="web")
+            conn.execute("UPDATE tasks SET execution_trace = ?", (trace,))
+            conn.commit()
+
+        refused = await dispatch(config, "alice", token, f"!more {elsewhere}", surface="web")
+        shown = await dispatch(config, "alice", token, f"!more {here}", surface="web")
+
+        assert "private chat with me" in refused.text
+        assert _PRIVATE_TEXT not in refused.text
+        assert "trace text" in shown.text
+
+
+    @pytest.mark.parametrize("command", ["!confirm", "!confirm 1", "!yes", "!drafts"])
+    async def test_held_questions_and_mail_are_refused(self, make_config, command):
+        config = make_config()
+        token, _ = _shared_room(config)
+        with db.get_db(config.db_path) as conn:
+            held = _task(conn, _PRIVATE_TEXT, token="elsewhere", status="pending_confirmation",
+                         source_type="web")
+            conn.execute("UPDATE tasks SET confirmation_prompt = ? WHERE id = ?", (_PRIVATE_TEXT, held))
+            conn.commit()
+
+        result = await dispatch(config, "alice", token, command, surface="web")
+
+        assert "private chat with me" in result.text
+        assert _PRIVATE_TEXT not in result.text
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, held).status == "pending_confirmation"
+
+    @pytest.mark.parametrize("verb", ["!retry", "!resume"])
+    async def test_retry_does_not_quote_another_rooms_task(self, make_config, verb):
+        config = make_config()
+        token, _ = _shared_room(config)
+        with db.get_db(config.db_path) as conn:
+            elsewhere = _task(conn, _PRIVATE_TEXT, token="elsewhere", status="failed",
+                              source_type="web")
+            conn.commit()
+
+        result = await dispatch(config, "alice", token, f"{verb} #{elsewhere}", surface="web")
+
+        assert "private chat with me" in result.text
+        assert _PRIVATE_TEXT not in result.text
+
+    async def test_a_room_shared_only_through_its_roster_refuses(self, make_config):
+        config = make_config()
+        _write_user_md(config)
+        with db.get_db(config.db_path) as conn:
+            token = db.register_room(conn, None, "alice", origin="talk", name="g").token
+            db.upsert_room_participant(
+                conn, room_token=token, surface="talk", surface_ref="alice",
+                kind="principal", user_id="alice",
+            )
+            db.upsert_room_participant(
+                conn, room_token=token, surface="talk", surface_ref="guest/abc",
+                kind="guest", display_name="Max",
+            )
+            conn.commit()
+
+        result = await dispatch(config, "alice", token, "!memory user", surface="talk")
+
+        assert "private chat with me" in result.text
+        assert _PRIVATE_TEXT not in result.text
+
+    async def test_more_refuses_a_turn_from_before_someone_joined(self, make_config):
+        config = make_config()
+        trace = json.dumps([{"type": "text", "text": "trace text"}])
+        with db.get_db(config.db_path) as conn:
+            token = db.register_room(conn, None, "alice", origin="web", name="r").token
+            before = _task(conn, _PRIVATE_TEXT, token=token, status="completed", source_type="web")
+            db.add_room_member(conn, token, "bob")
+            db.upsert_room_participant(
+                conn, room_token=token, surface="web", surface_ref="bob",
+                kind="principal", user_id="bob",
+            )
+            after = _task(conn, "asked with bob here", token=token, status="completed",
+                          source_type="web")
+            conn.execute("UPDATE tasks SET execution_trace = ?", (trace,))
+            conn.commit()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+
+        refused = await dispatch(config, "alice", token, f"!more {before}", surface="web")
+        shown = await dispatch(config, "alice", token, f"!more {after}", surface="web")
+
+        assert "private chat with me" in refused.text
+        assert _PRIVATE_TEXT not in refused.text
+        assert "trace text" in shown.text
+
+    async def test_an_admins_check_in_a_shared_room_is_the_verdict_only(self, make_config):
+        from istota.doctor import CheckResult
+
+        config = make_config(admin_users=["alice"])
+        token, _ = _shared_room(config)
+        clean = [CheckResult(name="runtime.platform", status="ok", detail=_PRIVATE_TEXT)]
+
+        with patch("istota.doctor.run_checks", return_value=clean):
+            result = await dispatch(config, "alice", token, "!check", surface="web")
+
+        assert "OK" in result.text
+        assert "runtime.platform" not in result.text
+        assert _PRIVATE_TEXT not in result.text
+
+    async def test_the_surfaces_group_flag_is_enough(self, make_config):
+        """A Talk group the registry has not recorded is still a group."""
+        config = make_config()
+        _write_user_md(config)
+
+        result = await dispatch(
+            config, "alice", "unrecorded", "!memory user", surface="web",
+            is_group_chat=True,
+        )
+
+        assert "private chat with me" in result.text
+
+    async def test_a_talk_group_whose_roster_failed_is_refused(self, make_config, fake_talk):
+        """The poller passes its own reading when the roster fetch failed."""
+        from istota.transport.talk.inbound import poll_talk_conversations
+
+        config = make_config()
+        fake_talk.db_path = config.db_path
+        fake_talk.known_channels.add("grp609")
+        _write_user_md(config)
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockTalkClient:
+            mock_talk = MockTalkClient.return_value
+            mock_talk.list_conversations = AsyncMock(
+                return_value=[{"token": "grp609", "type": 2, "name": "Group"}]
+            )
+            mock_talk.get_participants = AsyncMock(side_effect=RuntimeError("503"))
+            mock_talk.poll_messages = AsyncMock(return_value=[{
+                "id": 101, "actorId": "alice", "actorType": "users",
+                "message": "!memory user", "messageType": "comment",
+                "messageParameters": {},
+            }])
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "grp609", 50)
+
+            await poll_talk_conversations(config)
+
+        sends = _talk_sends(fake_talk, "grp609")
+        assert len(sends) == 1
+        assert "private chat with me" in sends[0]
+        assert _PRIVATE_TEXT not in sends[0]
+
+
+class TestMemoryReadsAreHardened:
+    """ISSUE-609: `!memory` reads through the storage helpers, not `read_text`."""
+
+    async def test_a_symlinked_user_md_is_not_followed(self, make_config, tmp_path):
+        config = make_config()
+        target = tmp_path / "elsewhere.txt"
+        target.write_text(_PRIVATE_TEXT)
+        (config.workspace_path / "Users/alice/istota/config/USER.md").symlink_to(target)
+
+        result = await _memory(config, "user")
+
+        assert _PRIVATE_TEXT not in result
+
+    async def test_channel_notes_under_an_alias_are_found(self, make_config):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            token = db.register_room(conn, None, "alice", origin="web", name="r").token
+            conn.execute(
+                "INSERT INTO room_token_migration (old_token, new_token, migrated_at) "
+                "VALUES (?, ?, datetime('now'))",
+                ("oldtoken1", token),
+            )
+            conn.commit()
+        old = config.workspace_path / "Channels" / "oldtoken1"
+        old.mkdir(parents=True)
+        (old / "CHANNEL.md").write_text("Notes kept under the alias")
+
+        result = await dispatch(config, "alice", token, "!memory channel", surface="web")
+
+        assert "Notes kept under the alias" in result.text
+
+
 # =============================================================================
 # TestDbHelpers
 # =============================================================================
@@ -1638,6 +1957,14 @@ class TestCmdCheck:
         )
 
     class _Broken:
+        """Reads work; only the commit fails."""
+
+        def __init__(self, conn):
+            self._conn = conn
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
         def commit(self):
             raise sqlite3.OperationalError("cannot commit - no transaction is active")
 
@@ -1648,9 +1975,10 @@ class TestCmdCheck:
     @pytest.mark.parametrize("broken", [True, False], ids=["uncommittable", "none"])
     async def test_an_unusable_connection_is_not_fatal(self, make_config, broken):
         config = make_config(admin_users=["alice"])
-        conn = self._Broken() if broken else None
 
-        with patch("istota.doctor.run_checks", return_value=self._clean()):
+        with db.get_db(config.db_path) as real, \
+                patch("istota.doctor.run_checks", return_value=self._clean()):
+            conn = self._Broken(real) if broken else None
             result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
 
         assert "runtime.platform" in result
