@@ -87,6 +87,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- private-room turn replies about, copied off the tagged message it
     -- quotes. NULL for every unlinked turn; nothing carries it forward.
     about_room_token TEXT,
+    -- 1 when the scheduler parked this task on a question it asked its
+    -- principal privately (ISSUE-608): in their own private room, or through
+    -- the bell when they have none. Such a park neither holds the shared
+    -- room's channel gate nor is cancelled by the next message there.
+    private_park INTEGER NOT NULL DEFAULT 0,
 
     -- Silent mode (for scheduled jobs with silent_unless_action)
     heartbeat_silent INTEGER DEFAULT 0,  -- Whether to suppress output on no-action
@@ -1292,25 +1297,16 @@ CREATE TABLE IF NOT EXISTS rooms (
     -- bound to the room, written against the writing surface's lane and read
     -- against the inbound one. NULL = not recorded.
     model_namespace TEXT,
-    -- A side room (multiplayer D4): one member's private companion of the
-    -- shared room `side_of`, for `side_for_user` alone. NULL on every other
-    -- room. db._migrate_side_rooms adds both columns to an existing table. No
-    -- foreign key: deleting the parent must not be refused or cascade into the
-    -- member's own transcript; a side room whose parent is gone posts nowhere.
-    side_of     TEXT,
-    side_for_user TEXT,
     -- The group this room is linked to (multiplayer Stage 27), or NULL. A
     -- linked room's tasks carry that group's material and no other, and only
     -- while every reader is a current member (`room_scopes.task_group_ids`);
     -- the link narrows the audience rule and never widens it. Set by the host,
-    -- to a group the host belongs to. No foreign key, for the reason `side_of`
-    -- has none: a group is archived rather than deleted, and a link to one that
-    -- is gone or archived loads nothing. db._migrate_room_group adds it.
+    -- to a group the host belongs to. No foreign key: a group is archived rather
+    -- than deleted, and a link to one that is gone or archived loads nothing.
+    -- db._migrate_room_group adds it.
     group_id    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_rooms_side
-ON rooms (side_of, side_for_user) WHERE side_of IS NOT NULL;
 
 -- Permanent forwarding from pre-migration tokens, including descriptors in
 -- mail already sent. No room FK: the mapping must survive room deletion.
@@ -1595,7 +1591,7 @@ CREATE TABLE IF NOT EXISTS room_notices (
 -- than `started_at`, whose one-second resolution cannot order a join against a
 -- turn in the same second. Front-stage readers drop everything at or below the
 -- highest boundary of any epoch whose joiner is still in the audience
--- (`db.front_stage_cutoff`); a side room reads its parent whole. A row with
+-- (`db.front_stage_cutoff`); a linked private turn reads the room whole. A row with
 -- `epoch = 0` is not an epoch: it records that a surface's audience has been
 -- observed once (`reason = 'baseline:<surface>'`), since the first roster a
 -- room is seen with is who the transcript was written for, not a join.
@@ -1930,7 +1926,8 @@ CREATE TABLE IF NOT EXISTS whatsapp_skill_requests (
     content_cleared_at TEXT,
     error_code TEXT,
     -- JSON: the private conversation a held request was asked from, and where
-    -- a side_whisper or room_post goes. A relay question keeps both on its
+    -- a side_whisper (a whisper; the stored kind name is historical) or
+    -- room_post goes. A relay question keeps both on its
     -- message_relays row instead.
     origin TEXT,
     destination TEXT,

@@ -18,7 +18,7 @@ from .._cli import parse_and_resolve, run_skill_cli
 
 def _dispatch(args):
     from istota import db
-    from istota.rooms import side_rooms
+    from istota.rooms import private_replies
     from ...config import load_config
     from istota.relay.requests import RequestError
 
@@ -30,13 +30,13 @@ def _dispatch(args):
     with db.get_db(Path(path)) as conn:
         config = load_config()
         if args.command == "answer-privately":
-            return side_rooms.queue_private_answer(
+            return private_replies.queue_private_answer(
                 conn, config, actor_user_id=actor, task_id=int(task))
         if args.command == "whisper":
-            return side_rooms.enqueue_whisper(
+            return private_replies.enqueue_whisper(
                 conn, config, actor_user_id=actor, task_id=int(task),
                 request_key=args.request_key, text=args.text)
-        return side_rooms.hold_room_post(
+        return private_replies.hold_room_post(
             conn, config, actor_user_id=actor, task_id=int(task),
             request_key=args.request_key, text=args.text, room=args.room)
 

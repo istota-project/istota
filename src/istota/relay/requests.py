@@ -96,7 +96,7 @@ def _store_request(
 
     Four kinds. A `self_send` and a `side_whisper` go to the requester and are
     queued at once; a `relay_question` and a `room_post` are held for the
-    requester's approval of the exact preview. The two side-room kinds carry
+    requester's approval of the exact preview. The two room kinds carry
     their own `origin` and `destination` here, where a relay keeps them on its
     `message_relays` row.
     """
@@ -519,8 +519,8 @@ async def drain_requests(config, *, limit: int = 20) -> int:
     rows = await asyncio.to_thread(_pending_requests, config, max(0, min(limit, 100)))
     for row in rows:
         if row["kind"] in ROOM_KINDS:
-            from istota.rooms import side_rooms
-            await side_rooms.deliver_request(config, row)
+            from istota.rooms import private_replies
+            await private_replies.deliver_request(config, row)
             continue
         if row["relay_id"]:
             from istota.relay import relays as message_relays
@@ -596,8 +596,9 @@ def _quotes_prompt(task, text: str) -> bool:
     The whole prompt, one whole line of it, or one whole double-quoted span,
     compared after stripping; attachment names cut out first as
     `_names_recipient` does. Never a substring: a fragment can reverse what
-    was said ("do not tell them X" contains "X"), and a side-room task reads
-    the parent's transcript, so its first call can be shaped by other people.
+    was said ("do not tell them X" contains "X"), and a linked private turn
+    reads the shared room's transcript, so its first call can be shaped by
+    other people.
     """
     wanted = text.strip()
     if not wanted:

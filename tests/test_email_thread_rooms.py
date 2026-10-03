@@ -360,7 +360,7 @@ class TestTheHeadsUpMail:
             delivery = private_replies.deliver_private(
                 conn, config, user_id=HOST, about_token=_room_token(config),
                 kind="confirmation", reference="7:abc", body="You are free after 7.")
-        with patch("istota.rooms.side_rooms._send_private_mail") as send:
+        with patch("istota.rooms.private_replies._send_private_mail") as send:
             ok = await private_replies.send_private(
                 config, delivery, body="You are free after 7.")
 
@@ -471,7 +471,7 @@ class TestHeldPostsAndWhispers:
         import asyncio
 
         from istota import confirmations
-        from istota.rooms import side_rooms
+        from istota.rooms import private_replies
         from istota.relay import requests
 
         _start_thread(config)
@@ -482,7 +482,7 @@ class TestHeldPostsAndWhispers:
                                    prompt="post it", conversation_token=private,
                                    about_room_token=_room_token(config))
             conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
-            side_rooms.hold_room_post(conn, config, actor_user_id=HOST, task_id=ident,
+            private_replies.hold_room_post(conn, config, actor_user_id=HOST, task_id=ident,
                                       request_key="p1", text="Thursday after 7 works")
             requests.park_question(conn, config, task=db.get_task(conn, ident))
             confirmations.approve(conn, db.get_task(conn, ident), config=config, by="web")
@@ -500,16 +500,16 @@ class TestHeldPostsAndWhispers:
     def test_a_whisper_reaches_the_members_own_address(self, config, db_path):
         import asyncio
 
-        from istota.rooms import side_rooms
+        from istota.rooms import private_replies
         from istota.relay import requests
 
         task_ids = _start_thread(config)
         with db.get_db(db_path) as conn:
             conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_ids[0],))
-            side_rooms.enqueue_whisper(conn, config, actor_user_id=HOST,
+            private_replies.enqueue_whisper(conn, config, actor_user_id=HOST,
                                        task_id=task_ids[0], request_key="w1",
                                        text="Only for you.")
-        with patch("istota.rooms.side_rooms._send_private_mail") as send:
+        with patch("istota.rooms.private_replies._send_private_mail") as send:
             asyncio.run(requests.drain_requests(config))
 
         kwargs = send.call_args.kwargs
@@ -655,6 +655,7 @@ class TestAQuestionInAThreadRoomParks:
         task_ids = _start_thread(config)
         with db.get_db(db_path) as conn:
             private = db.create_web_chat_room(conn, HOST, "Mine").token
+            rooms_before = conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
         with patch(
             "istota.scheduler.execute_task",
             return_value=(True, "Shall I tell Alice Thursday works? Please confirm.",
@@ -667,12 +668,11 @@ class TestAQuestionInAThreadRoomParks:
             rows = conn.execute(
                 "SELECT about_room_token, delivery_reference FROM messages "
                 "WHERE room_token = ?", (private,)).fetchall()
-            side_rooms = conn.execute(
-                "SELECT COUNT(*) FROM rooms WHERE side_of IS NOT NULL").fetchone()[0]
+            rooms_after = conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
         (row,) = rows
         assert row["about_room_token"] == _room_token(config)
         assert row["delivery_reference"].startswith(f"private-confirmation:{task_ids[0]}:")
-        assert side_rooms == 0
+        assert rooms_after == rooms_before
         mock_post_email.assert_not_called()
 
 

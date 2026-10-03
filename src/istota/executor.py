@@ -5068,9 +5068,9 @@ def _front_stage_cutoff(
 
     Every reader here that puts the room's own transcript in front of the
     model takes it: the task answers into the room, in front of whoever reads
-    it now, so it may draw only on what all of them were present for. A side
-    room's view of its parent is `side_rooms.parent_context`, which reads the
-    parent whole and does not come through here.
+    it now, so it may draw only on what all of them were present for. A linked
+    private turn's view of a shared room is `private_replies.linked_context`,
+    which reads the room whole and does not come through here.
     """
     if not task.conversation_token:
         return db.AudienceCutoff()
@@ -5983,46 +5983,6 @@ def _header_scalar(value: object) -> str:
     return _one_line(str(value or "")).strip()[:_ROOM_SCALAR_MAX_CHARS]
 
 
-def _side_room_prompt(
-    config: Config, task: "db.Task", conn, display_user_id: str, *,
-    post_cli_available: bool,
-) -> tuple[str, str]:
-    """``(system line, user-half block)`` for a task in a side room, else ``("", "")``.
-
-    The line names the parent by token only, for the reason
-    `room_identity_line` gives for leaving a room's name out of the system
-    half. Opens its own connection when handed none, but never on a database
-    path that does not exist, since opening one would create it. Never raises.
-    """
-    try:
-        from istota.rooms.side_rooms import parent_context, task_side_room
-
-        def _read(c):
-            side = task_side_room(c, task)
-            return side, (parent_context(c, config, task) if side is not None else "")
-
-        with db.get_db_if_present(config.db_path, conn) as c:
-            if c is None:
-                return "", ""
-            side, block = _read(c)
-    except Exception as exc:
-        logger.warning("side room prompt for task %s failed: %s", task.id, exc)
-        return "", ""
-    if side is None:
-        return "", ""
-    line = (
-        f"\nSide room: this is {display_user_id}'s private side room of room "
-        f"{_header_scalar(side.side_of)}. Only they read it, and nothing you "
-        "write here reaches that room."
-    )
-    if post_cli_available:
-        line += (
-            " `istota-skill room post` puts a message in that room, held for "
-            "their approval of the exact text."
-        )
-    return line, block
-
-
 def _linked_room_prompt(
     config: Config, task: "db.Task", conn, display_user_id: str, *,
     post_cli_available: bool,
@@ -6033,14 +5993,11 @@ def _linked_room_prompt(
     own private room. The line names that room by token only, for the reason
     `room_identity_line` gives for leaving a room's name out of the system
     half; its transcript goes in the user half, fenced. A link that no longer
-    holds (room gone, member left) gives an ordinary private turn. A task in a
-    side room keeps `_side_room_prompt` until side rooms are removed. Never
+    holds (room gone, member left) gives an ordinary private turn. Never
     raises, and never opens a database path that does not exist.
     """
     if not getattr(task, "about_room_token", None):
-        return _side_room_prompt(
-            config, task, conn, display_user_id, post_cli_available=post_cli_available,
-        )
+        return "", ""
     try:
         from istota.rooms.private_replies import linked_context
 
@@ -6316,7 +6273,7 @@ def room_card(
         return ""
     try:
         from istota.rooms import policy as room_policy
-        from istota.rooms.side_rooms import canonical_token
+        from istota.rooms.private_replies import canonical_token
 
         def _read(c):
             token = canonical_token(c, task.conversation_token)
@@ -7193,7 +7150,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
                 "`run ... -- sh -c '...'` rather than one `run` per command."
             )
 
-    # A linked turn (ISSUE-608) or a side room (multiplayer D4): the header
+    # A linked turn (ISSUE-608): the header
     # says which room it is about and that nothing written here reaches it;
     # that room's transcript goes in the user half, fenced, since every line
     # of it is somebody else's text. Empty for every other task, so no other

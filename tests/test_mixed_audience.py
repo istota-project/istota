@@ -22,7 +22,7 @@ from __future__ import annotations
 import pytest
 
 from istota import db
-from istota.rooms import side_rooms
+from istota.rooms import private_replies
 from istota.relay.requests import RequestError
 
 from .test_shared_room_restriction import (
@@ -118,7 +118,7 @@ class TestTheCard:
 
 
 # ---------------------------------------------------------------------------
-# The side-room answer (D4 item 1)
+# The private answer (D4 item 1)
 # ---------------------------------------------------------------------------
 
 
@@ -136,9 +136,9 @@ class TestThePrivateAnswer:
         with db.get_db(config.db_path) as conn:
             origin = _running(conn, "alice", token)
             rooms_before = conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
-            result = side_rooms.queue_private_answer(
+            result = private_replies.queue_private_answer(
                 conn, config, actor_user_id="alice", task_id=origin)
-            again = side_rooms.queue_private_answer(
+            again = private_replies.queue_private_answer(
                 conn, config, actor_user_id="alice", task_id=origin)
             task = db.get_task(conn, result["task_id"])
             rows = conn.execute(
@@ -164,7 +164,7 @@ class TestThePrivateAnswer:
             origin = _running(conn, "alice", token)
             tasks_before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
             with pytest.raises(RequestError, match="no_private_room"):
-                side_rooms.queue_private_answer(
+                private_replies.queue_private_answer(
                     conn, config, actor_user_id="alice", task_id=origin)
             assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == tasks_before
 
@@ -174,7 +174,7 @@ class TestThePrivateAnswer:
         _guest(config, token)
         with db.get_db(config.db_path) as conn:
             origin = _running(conn, "alice", token)
-            new = side_rooms.queue_private_answer(
+            new = private_replies.queue_private_answer(
                 conn, config, actor_user_id="alice", task_id=origin)["task_id"]
             conn.execute("UPDATE tasks SET status='pending'")
         from istota.executor import _ambient_memory_off
@@ -191,7 +191,7 @@ class TestThePrivateAnswer:
         with db.get_db(config.db_path) as conn:
             origin = _running(conn, "alice", token, guest_participant_id=pid)
             with pytest.raises(RequestError, match="guest_turn"):
-                side_rooms.queue_private_answer(
+                private_replies.queue_private_answer(
                     conn, config, actor_user_id="alice", task_id=origin)
 
     def test_refused_outside_a_shared_room_and_from_a_background_task(self, config):
@@ -200,13 +200,13 @@ class TestThePrivateAnswer:
         with db.get_db(config.db_path) as conn:
             ident = _running(conn, "alice", private)
             with pytest.raises(RequestError, match="not_a_shared_room"):
-                side_rooms.queue_private_answer(conn, config, actor_user_id="alice", task_id=ident)
+                private_replies.queue_private_answer(conn, config, actor_user_id="alice", task_id=ident)
             ident = _running(conn, "alice", shared, source_type="scheduled")
             with pytest.raises(RequestError, match="unsupported_origin"):
-                side_rooms.queue_private_answer(conn, config, actor_user_id="alice", task_id=ident)
+                private_replies.queue_private_answer(conn, config, actor_user_id="alice", task_id=ident)
             ident = _running(conn, "bob", shared)
             with pytest.raises(RequestError, match="task_unavailable"):
-                side_rooms.queue_private_answer(conn, config, actor_user_id="alice", task_id=ident)
+                private_replies.queue_private_answer(conn, config, actor_user_id="alice", task_id=ident)
 
     def test_a_talk_departure_refuses_though_the_member_row_stays(self, config):
         token = _room(config, shared=True)
@@ -219,7 +219,7 @@ class TestThePrivateAnswer:
             origin = _running(conn, "alice", token)
             assert db.is_room_member(conn, token, "alice")
             with pytest.raises(RequestError, match="not_a_shared_room"):
-                side_rooms.queue_private_answer(
+                private_replies.queue_private_answer(
                     conn, config, actor_user_id="alice", task_id=origin)
 
     def test_its_answer_never_reaches_the_shared_room(self, config):
@@ -230,7 +230,7 @@ class TestThePrivateAnswer:
         private = _room(config, shared=False)
         with db.get_db(config.db_path) as conn:
             origin = _running(conn, "alice", token)
-            new = side_rooms.queue_private_answer(
+            new = private_replies.queue_private_answer(
                 conn, config, actor_user_id="alice", task_id=origin)["task_id"]
             task = db.get_task(conn, new)
         plan = resolve_delivery_plan(config, task, make_registry(config))

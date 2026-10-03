@@ -3876,11 +3876,14 @@ def _room_events_batch(
         undeletable = _undeletable_message_ids(
             conn, username, [(r["msg_id"], r["room_token"]) for r in rows[:want]],
         ) if len(rows) <= want else set()
+        about_names = _about_room_names(
+            conn, username, [r["about_room_token"] for r in rows[:want]],
+        ) if len(rows) <= want else {}
     truncated = len(rows) > want
     events: list[dict] = []
     total = 0
     for r in rows[:want]:
-        d = _cross_room_message_dict(r, username)
+        d = _cross_room_message_dict(r, username, about_names=about_names)
         if r["msg_id"] in undeletable:
             d["deletable"] = False
         total += len(json.dumps(d))
@@ -3973,7 +3976,6 @@ def _room_snapshot(username: str) -> dict[str, dict]:
                 "origin": r.origin,
                 "talk_token": talk_refs.get(r.token),
                 **_room_phone_fields(r, phone_bindings.get(r.token)),
-                "side_of": r.side_of,
                 "model": r.model,
                 "effort": r.effort,
                 # The room's standing brain pin, beside the model and effort it
@@ -5580,9 +5582,6 @@ def _chat_list_rooms(username: str) -> list[dict]:
             d["origin"] = r.origin
             d["talk_token"] = talk_refs.get(r.token)
             d.update(_room_phone_fields(r, phone_bindings.get(r.token)))
-            # The shared room a side room belongs to (multiplayer D4), so the
-            # client can link the two; None for every other room.
-            d["side_of"] = r.side_of
             d.update(_room_sharing(conn, r, username))
             # The kebab offers "My notes" for a shared room and for any room
             # the user already has notes about (one they have since left alone).
@@ -6133,7 +6132,7 @@ def _chat_member_room(conn, username: str, room_id: int):
 def _room_sharing(conn, reg, username: str) -> dict:
     """``shared`` and ``policy`` for one room, as the settings modal reads them.
 
-    ``policy`` is None for a room one human reads and for a side room. For a
+    ``policy`` is None for a room one human reads. For a
     shared room it carries the host, the guest reply mode and
     ``settings_refusal``, which is `room_policy.settings_refusal`'s own answer,
     so the modal's read-only state and the PATCH's 403 are one rule. Asking it
@@ -6146,8 +6145,6 @@ def _room_sharing(conn, reg, username: str) -> dict:
     off = _room_off(conn, reg)
     if reg is None or not db.room_is_shared(conn, reg.token):
         return {"shared": False, "policy": None, "off": off}
-    if reg.side_of:
-        return {"shared": True, "policy": None, "off": off}
     refusal = room_policy.settings_refusal(conn, reg.token, username)
     policy = room_policy.get_policy(conn, reg.token)
     if policy is None:
@@ -6236,10 +6233,6 @@ def _chat_add_member(
         handle, reg = found
         if _is_talk_backed(conn, reg, handle.token):
             return 409, {"error": "membership of a Talk room is managed in Talk"}
-        # A side room is one member's private channel (multiplayer D4); a
-        # second member would read answers given at that member's full reach.
-        if reg.side_of:
-            return 409, {"error": "a side room is private to its member"}
         # A private phone thread has one reader. A second member makes it
         # shared, and a shared phone room is answered, recorded into and
         # backfilled by nothing (`routing.private_phone_room` refuses it).
@@ -6340,8 +6333,6 @@ def _chat_room_group(
         if found is None:
             return 404, {"error": "room not found"}
         _handle, reg = found
-        if reg.side_of:
-            return 409, {"error": "a side room is private to its member"}
         if group_id is not _UNSET:
             refusal = room_policy.group_link_refusal(conn, reg.token, username, group_id)
             if refusal:
@@ -6717,10 +6708,6 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
         reg = db.get_room(conn, token)
         if reg is None or reg.origin != "web":
             return "not_found", None  # only web-origin rooms promote
-        # A side room's Talk view is its member's own conversation with the
-        # bot; a Talk conversation of its own could gain participants.
-        if reg.side_of:
-            return "not_found", None
         # Binding a Talk conversation changes where every member's room
         # lives, so in a shared room it is the host's call.
         from istota.rooms.policy import settings_refusal
@@ -7120,6 +7107,7 @@ _SPINE_COLUMNS = (
     # pieces precisely so the room tail and the history query cannot disagree
     # about what a reader sees.
     "  m.origin_surface AS origin_surface, "
+    "  m.about_room_token AS about_room_token, "
     # Truncated here rather than in the dict builder, matching the cross-room
     # fragment: no read path needs more of the parent than the excerpt cap.
     # The literal must track `_REPLY_EXCERPT_CHARS` below.
@@ -7647,6 +7635,10 @@ def _chat_room_messages(
             conn, username,
             [(r["msg_id"], token) for r in msg_rows] + [(n.id, token) for n in notes],
         )
+        about_names = _about_room_names(
+            conn, username,
+            [r["about_room_token"] for r in msg_rows] + [n.about_room_token for n in notes],
+        )
 
         # 4. Paging metadata: the page's oldest spine (or aux-only) row gives the
         #    next cursor; `has_more` ORs a spine probe with a band-eligible
@@ -7702,6 +7694,9 @@ def _chat_room_messages(
         cited = _row_reply_to(r)
         if cited is not None:
             d["reply_to"] = cited
+        about = _about_room_field(r["about_room_token"], about_names)
+        if about is not None:
+            d["about_room"] = about
         messages.append(d)
         if tid is not None:
             seen.add((r["role"], tid))
@@ -7745,12 +7740,16 @@ def _chat_room_messages(
     # stable key so an idle poll appends only ones that arrived later.
     for n in notes:
         text = f"**{n.title}**\n\n{n.body}" if n.title else n.body
-        messages.append({
+        note = {
             "role": n.role, "text": text, "notif_id": n.id,
             "created_at": n.created_at,
             # `notif_id` kept for back-compat; `msg_id` is the uniform star key.
             "msg_id": n.id, "starred": n.id in note_star_ids,
-        })
+        }
+        about = _about_room_field(n.about_room_token, about_names)
+        if about is not None:
+            note["about_room"] = about
+        messages.append(note)
     # Normalize every turn's created_at to explicit ISO 8601 UTC. The stored
     # values are naive UTC (SQLite datetime('now') / strftime, and the Talk-cache
     # backfill), which the browser's new Date() parses as *local* time — the
@@ -9537,7 +9536,35 @@ async def _delete_from_talk(
         )
 
 
-def _cross_room_message_dict(r, username: str) -> dict:
+def _about_room_names(conn, username: str, tokens) -> dict:
+    """``{token: name or None}`` for the shared rooms private replies are about.
+
+    None when ``username`` is no longer a current member of the room, or it is
+    gone: the chip then reads "a room you left" and links nowhere, so a room
+    the reader cannot open is never named to them.
+    """
+    from istota import db
+    from istota.rooms.scopes import is_current_member
+
+    names: dict = {}
+    for token in {t for t in tokens if t}:
+        room = db.get_room(conn, token)
+        if room is None or not is_current_member(conn, token, username):
+            names[token] = None
+            continue
+        handle = db.get_web_chat_room_by_token(conn, token)
+        names[token] = db.room_display_name(room, handle) or "a shared room"
+    return names
+
+
+def _about_room_field(token, names: dict | None) -> dict | None:
+    """A tagged row's ``about_room`` payload (ISSUE-608), or None for any other row."""
+    if not token:
+        return None
+    return {"token": token, "name": (names or {}).get(token)}
+
+
+def _cross_room_message_dict(r, username: str, *, about_names: dict | None = None) -> dict:
     """One `db._CROSS_ROOM_COLUMNS` row → the history payload shape.
 
     Shared by the paginated aggregate views and the live room-event stream, so
@@ -9571,6 +9598,11 @@ def _cross_room_message_dict(r, username: str) -> dict:
     cited = _row_reply_to(r)
     if cited is not None:
         d["reply_to"] = cited
+    about = _about_room_field(
+        r["about_room_token"] if "about_room_token" in r.keys() else None, about_names,
+    )
+    if about is not None:
+        d["about_room"] = about
     d["created_at"] = _iso_utc(d.get("created_at"))
     return d
 
@@ -9596,6 +9628,9 @@ def _chat_aggregate_messages(
         undeletable = _undeletable_message_ids(
             conn, username, [(r["msg_id"], r["room_token"]) for r in rows[:limit]],
         )
+        about_names = _about_room_names(
+            conn, username, [r["about_room_token"] for r in rows[:limit]],
+        )
     has_more = len(rows) > limit
     rows = rows[:limit]
     # Rows arrive newest-first; the page's last row is its oldest → the cursor
@@ -9604,7 +9639,8 @@ def _chat_aggregate_messages(
     oldest_cursor = (
         {"ts": rows[-1]["created_at"], "id": rows[-1]["msg_id"]} if rows else None
     )
-    messages = [_cross_room_message_dict(r, username) for r in reversed(rows)]
+    messages = [_cross_room_message_dict(r, username, about_names=about_names)
+                for r in reversed(rows)]
     for m in messages:
         if m["msg_id"] in undeletable:
             m["deletable"] = False

@@ -11,8 +11,8 @@ rule below is a no-op for it.
   claims it with `!room host` (D14). Losing a host is sticky: a host who comes
   back has to claim the room like anyone else, since no hand-off is automatic.
 - **`guest_reply`** decides what a guest-triggered answer does (D11): `off`
-  records the turn and answers nothing, `held` proposes the answer in the
-  host's side room, `direct` posts it in the room at room-safe reach.
+  records the turn and answers nothing, `held` proposes the answer to the
+  host privately, `direct` posts it in the room at room-safe reach.
 - **The loop cap** (D9): at most `max_bot_turns_without_human` bot turns since
   a principal last spoke, after which a guest's turn is recorded only.
 - **The audience class** (D3): `private` for one human, `principals` when
@@ -138,7 +138,7 @@ def _first_present_member(conn: sqlite3.Connection, room: db.Room) -> str | None
 
 
 def ensure_policy(conn: sqlite3.Connection, room_token: str) -> RoomPolicy | None:
-    """The room's policy, made now if it has none. None for no room or a side room.
+    """The room's policy, made now if it has none. None for no room.
 
     The host is fixed here, once: the creator if they are still in the room,
     else the first member who is.
@@ -148,7 +148,7 @@ def ensure_policy(conn: sqlite3.Connection, room_token: str) -> RoomPolicy | Non
     if policy is not None:
         return policy
     room = db.get_room(conn, room_token)
-    if room is None or room.side_of:
+    if room is None:
         return None
     conn.execute(
         "INSERT OR IGNORE INTO room_policy (room_token, host_user_id, guest_reply) "
@@ -209,13 +209,13 @@ def settings_refusal(conn: sqlite3.Connection, room_token: str, user_id: str) ->
     A room's name, model, effort and brain, and whether it is also a Talk
     conversation, apply to every member's turn. In a room more than one human
     reads they are therefore the host's, the same authority `!room guests`
-    takes; in a private room or a side room the one member changes them freely.
+    takes; in a private room the one member changes them freely.
     Per-member choices (a colour, hiding the room) and the room's notes are not
     settings: every member has those.
     """
     room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     room = db.get_room(conn, room_token)
-    if room is None or room.side_of or not db.room_is_shared(conn, room_token):
+    if room is None or not db.room_is_shared(conn, room_token):
         return None
     host = current_host(conn, ensure_policy(conn, room_token))
     if host == user_id:
@@ -251,9 +251,8 @@ def group_link_refusal(
 
     The link decides whose shared memory every member's turn carries, so it is
     a room setting and takes `settings_refusal`'s authority: the host in a room
-    more than one human reads, the one member of a private room. A side room
-    has no link, since it is one member's companion of a room that may have
-    one. Linking also needs the caller to be a current member of a live group;
+    more than one human reads, the one member of a private room. Linking also
+    needs the caller to be a current member of a live group;
     every refusal of the group reads the same, as `kv --group`'s does, so the
     command is not a way to learn which groups exist.
     """
@@ -261,8 +260,6 @@ def group_link_refusal(
     room = db.get_room(conn, room_token)
     if room is None:
         return "This room isn't registered yet."
-    if room.side_of:
-        return "A side room is private to you; link the room it belongs to instead."
     if not host_present(conn, room_token, user_id):
         return "Only a member of this room can link it to a group."
     refusal = settings_refusal(conn, room_token, user_id)

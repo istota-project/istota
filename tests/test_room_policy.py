@@ -2,7 +2,7 @@
 
 A guest's turn runs as the room's host, in emissary mode: room-safe reach
 whatever the host granted, no outbound action beyond the reply, and anything
-else proposed to the host's side room. These pin the `room_policy` table and
+else proposed to the host privately. These pin the `room_policy` table and
 its migration, the host and its loss, the per-surface `guest_reply` default,
 the audience class, the loop cap, the three `guest_reply` values end to end,
 and which shared room's My notes a task may read.
@@ -18,7 +18,7 @@ import pytest
 
 from istota import commands, confirmations, db
 from istota.rooms import policy as room_policy
-from istota.rooms import side_rooms
+from istota.rooms import private_replies
 from istota.rooms import speech_gate
 from istota.config import Config, NextcloudConfig, TalkConfig, UserConfig
 from istota.transport._types import ParticipantRef
@@ -438,8 +438,6 @@ class TestGuestReplyThroughTheScheduler:
                 "WHERE room_token = ?", (private,)).fetchall()
             room_rows = [r["body"] for r in conn.execute(
                 "SELECT body FROM messages WHERE room_token = 'grp' AND role != 'user'")]
-            no_side_room = conn.execute(
-                "SELECT COUNT(*) FROM rooms WHERE side_of IS NOT NULL").fetchone()[0]
         assert task.status == "pending_confirmation"
         assert request["kind"] == "room_post" and request["state"] == "held"
         assert request["text"] == REPLY
@@ -449,7 +447,6 @@ class TestGuestReplyThroughTheScheduler:
         assert REPLY in row["body"] and "Max" in row["body"]
         assert row["about_room_token"] == "grp"
         assert row["delivery_reference"].startswith(f"private-proposal:{ident}:")
-        assert no_side_room == 0
         assert not any(REPLY in body for body in room_rows)
         sends = [c.args["message"] for c in fake_talk.calls_to("grp", method="send_message")]
         assert not any(REPLY in s for s in sends)
@@ -468,7 +465,7 @@ class TestGuestReplyThroughTheScheduler:
                                (request["id"],)).fetchone()
         assert task.status == "completed"
         assert row["state"] == "queued"
-        asyncio.run(side_rooms.deliver_request(config, row))
+        asyncio.run(private_replies.deliver_request(config, row))
         with db.get_db(config.db_path) as conn:
             posted = [r["body"] for r in conn.execute(
                 "SELECT body FROM messages WHERE room_token = 'grp' AND role = 'system'")]

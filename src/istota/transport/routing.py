@@ -1523,12 +1523,11 @@ def resolve_delivery_plan(
         seen.add(key)
         resolved.append(r)
 
-    # A side room's output never reaches its parent (multiplayer D4), and a
-    # linked turn's never reaches the room it is linked to (ISSUE-608); posting
-    # there is the held `room post` verb. Before the shared-room refusal, which
-    # would otherwise drop the parent first and leave the pin nothing to
-    # substitute the side room for.
-    from istota.rooms.side_rooms import pin_plan
+    # A linked turn's output never reaches the room it is linked to
+    # (ISSUE-608); posting there is the held `room post` verb. Before the
+    # shared-room refusal, which would otherwise drop that room first and leave
+    # the pin nothing to substitute the task's own room for.
+    from istota.rooms.private_replies import pin_plan
 
     def _own_room() -> list[Destination]:
         return [
@@ -1551,8 +1550,8 @@ def resolve_delivery_plan(
     )
 
     # Last, so an interactive reply is never eaten. It names the task's own
-    # origin, which neither rule above refuses: not a side room's parent, and
-    # the room the task ran in.
+    # origin, which neither rule above refuses: not a linked turn's shared
+    # room, and the room the task ran in.
     if not resolved and task.source_type in _INTERACTIVE_SOURCE_TYPES:
         fb = _reply_origin_destination(config, task)
         if fb is not None:

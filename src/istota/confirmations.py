@@ -243,7 +243,7 @@ def cancel_for_conversation(
     marks = ", ".join("?" for _ in refs)
     held = conn.execute(
         f"SELECT id FROM tasks WHERE conversation_token IN ({marks}) AND user_id = ? "
-        f"AND status = 'pending_confirmation' AND NOT {db.SIDE_ROUTED_PARK_SQL}",
+        f"AND status = 'pending_confirmation' AND NOT {db.PRIVATE_PARK_SQL}",
         (*refs, user_id),
     ).fetchall()
     cancelled = db.cancel_pending_confirmations(conn, conversation_token, user_id)
@@ -430,8 +430,7 @@ def resolve(
     if talk_response_id:
         task = db.get_pending_confirmation_by_response_id(conn, talk_response_id)
     if task is None and conversation_token:
-        from istota.rooms.private_replies import parked_here
-        from istota.rooms.side_rooms import canonical_token, is_shared_room
+        from istota.rooms.private_replies import canonical_token, is_shared_room, parked_here
 
         room_token = canonical_token(conn, conversation_token)
         # A shared room's questions are asked in its members' private rooms

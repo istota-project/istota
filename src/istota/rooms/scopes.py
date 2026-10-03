@@ -208,8 +208,8 @@ def ambient_memory_off(conn: sqlite3.Connection | None, task: "db.Task") -> bool
 def canonical_token(conn, token: str | None) -> str | None:
     """The registry token a conversation token names, or None for no room.
 
-    The one copy: `side_rooms` re-exports it, and the memory skill CLI reaches
-    it here without importing `side_rooms`.
+    The one copy: `private_replies` re-exports it, and the memory skill CLI
+    reaches it here without importing `private_replies`.
     """
     if not token:
         return None

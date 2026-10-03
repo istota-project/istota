@@ -3184,7 +3184,7 @@ def process_one_task(
     if success:
         result = check_chat_file_links(config, task.user_id, result, task_id=task_id)
 
-    from istota.rooms import side_rooms as side_rooms_mod
+    from istota.rooms import private_replies as private_replies_mod
     from istota.relay.requests import held_question, present_question
     with db.get_db(config.db_path) as conn:
         relay_question = held_question(conn, task_id)
@@ -3287,7 +3287,7 @@ def process_one_task(
     guest_route = None
     if success and task.guest_participant_id is not None and not dry_run:
         with db.get_db(config.db_path) as conn:
-            guest_mode = side_rooms_mod.guest_reply_mode(conn, task)
+            guest_mode = private_replies_mod.guest_reply_mode(conn, task)
             if guest_mode == "held":
                 proposed = result
                 if task.source_type == "email":
@@ -3295,7 +3295,7 @@ def process_one_task(
                     # composed, not its narration about composing it.
                     from .transport.email.outbound import composed_email_body
                     proposed = composed_email_body(config, task, result)
-                guest_route = side_rooms_mod.propose_guest_reply(conn, config, task, proposed)
+                guest_route = private_replies_mod.propose_guest_reply(conn, config, task, proposed)
         if guest_mode != "direct" and guest_route is None:
             logger.info("Task %d: guest reply has no host to propose it to; cancelled",
                         task_id)
@@ -3415,6 +3415,9 @@ def process_one_task(
                         reference=f"{task.id}:{text_hash(result)[:16]}",
                         body=result, task_id=task_id,
                     )
+                    # Room or bell alike: the shared room never saw the
+                    # question, so the park must not hold it.
+                    db.set_task_private_park(conn, task_id)
                     if private_park.dest is None and _talk_leg:
                         post_talk_message = private_replies.SHARED_ROOM_NOTICE
                         shared_room_notice = True
@@ -4255,7 +4258,7 @@ def process_one_task(
     # withheld notification, as a failed Talk post does.
     private_undelivered = False
     if private_park is not None:
-        from istota.rooms.side_rooms import whatsapp_confirmation_body
+        from istota.rooms.private_replies import whatsapp_confirmation_body
         _dest = private_park.dest
         _private_body = (
             whatsapp_confirmation_body(result, task.id)

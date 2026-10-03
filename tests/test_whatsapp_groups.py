@@ -21,7 +21,7 @@ import pytest
 
 from istota import confirmations, db
 from istota.rooms import policy as room_policy
-from istota.rooms import side_rooms
+from istota.rooms import private_replies
 from istota.relay import requests
 from istota.config import Config, UserConfig
 from istota.transport.registry import make_registry
@@ -297,17 +297,16 @@ class TestTheHostLeaving:
 
     def test_a_member_who_leaves_the_group_leaves_the_room(self, config):
         """Membership came from the group: without this, a member who left
-        could still read the backstage and post into the group."""
+        could still read the group's transcript from their private chat and
+        post into the group."""
+        from istota.rooms.scopes import is_current_member
+
         _apply(config, _roster([ALICE_JID, BOB_JID, GUEST_JID], added_by=ALICE_JID))
         _apply(config, _roster([ALICE_JID, GUEST_JID]))
 
         with db.get_db(config.db_path) as conn:
             assert db.list_room_members(conn, _room(config)) == ["alice"]
-            ident = db.create_task(conn, user_id="bob", source_type="web",
-                                   prompt="post it", conversation_token=_room(config))
-            with pytest.raises(ValueError):
-                db.ensure_side_room(conn, _room(config), "bob")
-            del ident
+            assert not is_current_member(conn, _room(config), "bob")
 
     def test_another_member_leaving_is_not_the_hosts_departure(self, config):
         _apply(config, _roster([ALICE_JID, BOB_JID, GUEST_JID], added_by=BOB_JID))
@@ -531,7 +530,7 @@ class TestTheAnswerGoesToTheGroup:
         assert request.text == "At seven."
 
     def test_a_web_turn_in_the_groups_room_never_reaches_the_group(self, group, sent):
-        """D4: the web view of a group is its principals' backstage."""
+        """D4: a web turn in the group's room is never read in the group."""
         with db.get_db(group.db_path) as conn:
             ident = db.create_task(conn, user_id="alice", source_type="web",
                                    prompt="hi", conversation_token=_room(group),
@@ -617,7 +616,7 @@ class TestPrivateRepliesFromAGroup:
 
         delivered = asyncio.run(private_replies.send_private(
             group, delivery,
-            body=side_rooms.whatsapp_confirmation_body("Book it?", result.task_id)))
+            body=private_replies.whatsapp_confirmation_body("Book it?", result.task_id)))
 
         assert delivered
         (request,) = sent
@@ -628,7 +627,7 @@ class TestPrivateRepliesFromAGroup:
             {"logical_key": f"private-reply:{delivery.message_id}"}]
 
     def test_a_long_question_keeps_the_instruction_that_answers_it(self):
-        body = side_rooms.whatsapp_confirmation_body("x" * 10000, 7)
+        body = private_replies.whatsapp_confirmation_body("x" * 10000, 7)
 
         assert body.endswith("`!confirm 7 no`.")
         assert len(body) + len("re: ") + 80 <= 4096
@@ -639,7 +638,7 @@ class TestPrivateRepliesFromAGroup:
             ident = db.create_task(conn, user_id="alice", source_type="whatsapp",
                                    prompt="hi", conversation_token=_room(group))
             conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
-            side_rooms.enqueue_whisper(conn, group, actor_user_id="alice",
+            private_replies.enqueue_whisper(conn, group, actor_user_id="alice",
                                        task_id=ident, request_key="w1",
                                        text="Only for you.")
         asyncio.run(requests.drain_requests(group))
@@ -661,7 +660,7 @@ class TestPrivateRepliesFromAGroup:
                                    prompt="post it", conversation_token=mine,
                                    about_room_token=_room(group))
             conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
-            side_rooms.hold_room_post(conn, group, actor_user_id="alice", task_id=ident,
+            private_replies.hold_room_post(conn, group, actor_user_id="alice", task_id=ident,
                                       request_key="p1", text="Thursday after 7 works")
             requests.park_question(conn, group, task=db.get_task(conn, ident))
             confirmations.approve(conn, db.get_task(conn, ident), config=group, by="web")
