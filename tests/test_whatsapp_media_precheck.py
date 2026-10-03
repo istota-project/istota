@@ -28,6 +28,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -759,6 +760,94 @@ class TestTheBaileysStagingStep:
         stage_inbound_media(config, _media_dir(config), _image_event(name))
 
         assert not orphan.exists()
+
+
+VOICE = (Path(__file__).parent / "fixtures" / "audio" / "voice.ogg").read_bytes()
+
+
+def _audio_event(name, *, message_id="BAE5F00D"):
+    """A voice note as the decoder hands it over: no caption, kind audio."""
+    event = _image_event(name, caption=None, message_id=message_id)
+    return dataclasses.replace(
+        event, message_type="audio",
+        media=dataclasses.replace(
+            event.media, mime_type="audio/ogg; codecs=opus",
+            byte_count=len(VOICE), kind="audio",
+        ),
+    )
+
+
+class TestTheBaileysStagingStepForAudio:
+    """The same three calls for a voice note, with the kind carried through."""
+
+    def test_a_staged_voice_note_becomes_an_ogg_in_the_inbox(self, tmp_path):
+        config = _config(tmp_path)
+        _bind_identity(config.db_path, jid=USER_JID)
+        name = _stage_a_file(config, VOICE, ext="bin")
+
+        staged = stage_inbound_media(config, _media_dir(config),
+                                     _audio_event(name))
+
+        assert staged.media.error is None
+        assert staged.media.kind == "audio"
+        assert staged.media.attached_for_user == "alice"
+        assert staged.media.staged_path.startswith("/Users/alice/inbox/whatsapp_")
+        assert staged.media.staged_path.endswith(".ogg")
+        assert not (_media_dir(config) / name).exists()
+
+    def test_audio_bytes_that_sniff_as_nothing_drop_the_record(self, tmp_path):
+        """Not audio this pipeline decodes, so the message takes the
+        unsupported reply rather than the failed-fetch one."""
+        config = _config(tmp_path)
+        _bind_identity(config.db_path, jid=USER_JID)
+        name = _stage_a_file(config, b"#!AMR\n" + b"\x00" * 64, ext="bin")
+
+        staged = stage_inbound_media(config, _media_dir(config),
+                                     _audio_event(name))
+
+        assert staged.media is None
+        assert not (_media_dir(config) / name).exists()
+        with db.get_db(config.db_path) as conn:
+            (result,) = handle_whatsapp_batch(
+                conn, config, [staged], provider=BAILEYS,
+            )
+        assert result.disposition == "unsupported_type"
+
+    def test_image_bytes_declared_as_audio_are_refused(self, tmp_path):
+        """The kind gates and the sniff only confirms it."""
+        config = _config(tmp_path)
+        _bind_identity(config.db_path, jid=USER_JID)
+        name = _stage_a_file(config, PNG, ext="bin")
+
+        staged = stage_inbound_media(config, _media_dir(config),
+                                     _audio_event(name))
+
+        assert staged.media is None
+        assert not (config.workspace_path / "Users").exists()
+
+    def test_an_unknown_sender_gets_the_voice_message_reason(self, tmp_path):
+        config = _config(tmp_path)
+        name = _stage_a_file(config, VOICE, ext="bin")
+
+        staged = stage_inbound_media(config, _media_dir(config),
+                                     _audio_event(name))
+
+        assert staged.media.kind == "audio"
+        assert staged.media.error == media.reason("audio", "unattributed")
+        assert not (_media_dir(config) / name).exists()
+
+    def test_a_staged_file_that_is_gone_is_a_voice_message_failure(
+        self, tmp_path,
+    ):
+        config = _config(tmp_path)
+        _bind_identity(config.db_path, jid=USER_JID)
+        name = media.staged_name("BAE5F00D", "bin")
+
+        staged = stage_inbound_media(config, _media_dir(config),
+                                     _audio_event(name))
+
+        assert staged.media.kind == "audio"
+        assert staged.media.error == media.reason("audio", "not_placed")
 
 
 class TestNothingStagesUnderTheWriteLock:

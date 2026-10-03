@@ -10,7 +10,7 @@ Your one-to-one WhatsApp chat has a room, on either adapter. The first message y
 
 In web chat the room is marked with a chat-bubble icon and is read-only: there is no composer, and a question waiting for your confirmation says to reply on WhatsApp. Your own messages show as yours, with a "Sent on WhatsApp" line. Nothing written into the room is ever sent to WhatsApp unless it was addressed to WhatsApp on purpose, so reading the room in web chat costs nothing and opens no window. A reminder or scheduled job you ask for on WhatsApp is sent to WhatsApp and also recorded in the room. The room is never chosen automatically as your default web room. Deleting the room also deletes the WhatsApp task history from before it existed, and is refused while a task from that history is still running or waiting for an answer; your next message then creates a new, empty room. The room has one reader: web chat refuses to add anyone else to it. A **group** the bot's number is in is a separate room on the Baileys adapter, and it is read-only in web chat too: a message sent from web would reach nobody in the group, so you write in the group on WhatsApp. Its waiting questions can still be answered from web chat, and it can still take members (see [Groups](#groups)).
 
-Both adapters handle private text messages, photographs, and the STOP, START and HELP keywords. Documents, audio, video, stickers, contacts, locations, reactions, edits, deletions, calls, Flows and payments are not handled: an unsupported message gets one fixed reply asking for text, and nothing is downloaded. Confirmation questions carry Yes and No buttons on Cloud and arrive as plain text on Baileys; either way a typed `YES` or `NO` answers them, and so does `!confirm <id> yes|no`.
+Both adapters handle private text messages, photographs, voice notes and audio files, and the STOP, START and HELP keywords. Documents, video, stickers, contacts, locations, reactions, edits, deletions, calls, Flows and payments are not handled: an unsupported message gets one fixed reply asking for text, and nothing is downloaded. Confirmation questions carry Yes and No buttons on Cloud and arrive as plain text on Baileys; either way a typed `YES` or `NO` answers them, and so does `!confirm <id> yes|no`.
 
 ## Choosing an adapter
 
@@ -280,9 +280,17 @@ A copy lands in your own Istota folder, under `inbox/`, the way an email attachm
 
 JPEG, PNG, GIF, WebP and HEIC are read. An iPhone photograph works: HEIC is converted before the model sees it. What decides the format is the file's own bytes rather than its name or the type the sender's phone declared, so a file that is not really an image is refused rather than decoded. One image may be up to 16 MB; a larger one, or a download that fails, gets a reply asking you to send it again, which is deliberately a different sentence from the one an unsupported message type gets.
 
-One image per message. Video, voice notes, documents and stickers are still refused — a photograph sent as a *document* rather than as a photo is refused with them, because Istota reads the message type before it reads the file.
+One image per message. Video, documents and stickers are still refused. A photograph sent as a *document* rather than as a photo is refused with them, because Istota reads the message type before it reads the file.
 
 Nothing is downloaded for a sender Istota does not recognise, for a message it has already handled, or for somebody who has sent STOP. On Meta's Cloud adapter that means no request is made at all; on Baileys the sidecar has already fetched the file by then, and Istota deletes it without copying it anywhere.
+
+## Sending a voice note
+
+Record a voice note, or forward an audio file, and Istota answers what was said. The file is copied into `inbox/` like a photograph, and the task is the same one a voice memo recorded in web chat produces: its text is "Voice message (see attached audio).", and the recording is transcribed before the model sees the request, so the model, memory and conversation search all work from the words.
+
+The spoken words are never read as a keyword, a command or a confirmation answer. Saying "stop" does not opt you out and saying "yes" does not approve a waiting question; type those. A voice note does count as a new message, so it cancels a question that was waiting on you, as any other message would.
+
+Ogg (what WhatsApp records), MP3, AAC, M4A, WAV, FLAC and WebM are read, again by the file's own bytes. AMR, which some older phones send for forwarded clips, is not, and gets the unsupported reply. The 16 MB limit is the same as for images, which is over an hour of WhatsApp speech. A download that fails gets "That voice message could not be fetched. Please send it again." If transcription fails, the model still gets the request and the file and can transcribe it itself. Voice notes in a group are refused, as group photographs are. Replies stay text.
 
 ## Groups
 

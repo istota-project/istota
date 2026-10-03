@@ -146,6 +146,7 @@ from istota.notifications.store import (
 )
 from istota.notifications.delivery import effective_log_destinations, send_notification
 from istota.sandbox.process_group import kill_group_if_live
+from istota.sandbox.host_paths import owner_path_parts, path_under_roots
 from .session.session_log import (
     SWEEP_STATE_KEY,
     SWEEP_STATE_NAMESPACE,
@@ -170,7 +171,7 @@ from istota.rooms.surfaces import (
 )
 from .transport.registry import _surface_for_source_type
 from .transport.routing import private_phone_room
-from .storage import ensure_user_directories_v2
+from .storage import BOT_USER_BASE, ensure_user_directories_v2
 
 # Deferred-op handlers were extracted to a sibling module; re-export the
 # names so existing tests and call-sites that import them from this module
@@ -964,6 +965,85 @@ def download_talk_attachments(config: Config, attachments: list[str]) -> list[st
             local_paths.append(att)
 
     return local_paths
+
+
+def localize_workspace_attachments(
+    config: Config, user_id: str, attachments: list[str],
+) -> list[str]:
+    """Map the task's own ``/Users/<user_id>/...`` attachments onto the mount.
+
+    WhatsApp media and email attachments are copied into the user's inbox and
+    the task row names them the way the user sees them in their workspace.
+    That is not a host path, so without this the executor's audio
+    pre-transcription and image preparation found no file and skipped every
+    one. Talk has `download_talk_attachments` for the same job.
+
+    Only the task user's own directory is mapped. The parse is
+    `owner_path_parts` (no ``..``, no empty component, exact owner id), the
+    resolved path must stay under the user's resolved root, and the leaf must
+    be a regular file that is not itself a symlink. Anything else, and every
+    entry when there is no workspace, is passed through unchanged, which is
+    what the executor saw before. A refusal logs the basename only.
+
+    An entry already naming a host path under the workspace or the temp dir
+    passes through untouched: on a macOS standalone install the workspace
+    itself sits under ``/Users/<user_id>/``, so the prefix test alone would
+    re-map a web upload's real path and warn about it.
+
+    Checked here and read later by name, as a web upload is: a task of the
+    same user can swap the leaf for a symlink in between. Closing that means
+    an fd walk and a copy, for both surfaces at once.
+    """
+    root = config.workspace_root(user_id) if user_id else None
+    if root is None:
+        return list(attachments)
+    prefix = f"{BOT_USER_BASE}/{user_id}/"
+    try:
+        resolved_root = root.resolve()
+    except (OSError, ValueError):
+        return list(attachments)
+
+    host_roots = [config.workspace_path, config.temp_dir]
+    local_paths: list[str] = []
+    for att in attachments:
+        if (
+            not isinstance(att, str)
+            or not att.startswith(prefix)
+            or any(root is not None and Path(att).is_relative_to(root) for root in host_roots)
+        ):
+            local_paths.append(att)
+            continue
+        local = _localize_owner_file(root, resolved_root, att, user_id)
+        if local is None:
+            logger.warning(
+                "Workspace attachment %r for user %s is not a readable file "
+                "in their workspace; leaving it as named",
+                Path(att).name, user_id,
+            )
+            local_paths.append(att)
+        else:
+            local_paths.append(local)
+    return local_paths
+
+
+def _localize_owner_file(
+    root: Path, resolved_root: Path, entry: str, user_id: str,
+) -> str | None:
+    parts = owner_path_parts(entry, user_id)
+    if not parts:
+        return None
+    candidate = root.joinpath(*parts)
+    try:
+        if candidate.is_symlink():
+            return None
+        resolved = candidate.resolve(strict=True)
+        if not path_under_roots(resolved, [resolved_root]):
+            return None
+        if not stat.S_ISREG(resolved.lstat().st_mode):
+            return None
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return str(resolved)
 
 
 def get_worker_id(user_id: str | None = None) -> str:
@@ -2979,6 +3059,12 @@ def process_one_task(
                 local_attachments = download_talk_attachments(config, task.attachments)
                 # Create modified task with local paths
                 task = replace(task, attachments=local_attachments)
+            elif task.attachments:
+                # WhatsApp media and email attachments are named by their
+                # workspace path; map them onto the mount for the executor.
+                task = replace(task, attachments=localize_workspace_attachments(
+                    config, task.user_id, task.attachments,
+                ))
 
             # Execute the task (outside the db context to avoid long locks)
             success, result, actions_taken, execution_trace = execute_task(

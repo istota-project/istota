@@ -44,7 +44,7 @@ from istota import commands, confirmations, db
 from istota.rooms import veto as room_veto
 from ...config import Config
 from istota.lib.http_headers import header_value
-from ..ingest import record_phone_turn
+from ..ingest import describe_attachment_only_message, record_phone_turn
 from . import (
     bsuid_fingerprint,
     identity as identity_rules,
@@ -86,8 +86,8 @@ UNSUPPORTED_REPLY = (
     "Please resend the request as text."
 )
 HELP_REPLY = (
-    "This is an Istota assistant. Send a request as plain text and you will "
-    "get one reply. Send STOP to stop messages, START to resume."
+    "This is an Istota assistant. Send a request as text or a voice note and "
+    "you will get one reply. Send STOP to stop messages, START to resume."
 )
 STOP_REPLY = "You will get no further WhatsApp messages. Send START to resume."
 START_REPLY = "WhatsApp messages are on again."
@@ -103,6 +103,11 @@ a file past the per-file cap, or a pre-check that could not be answered. This
 one asks for the thing they already did.
 """
 
+MEDIA_FAILED_AUDIO_REPLY = (
+    "That voice message could not be fetched. Please send it again."
+)
+"""`MEDIA_FAILED_REPLY` for a voice note, on the same logical key."""
+
 MEDIA_ONLY_PROMPT = "The user sent an image with no caption."
 """The prompt an uncaptioned image becomes.
 
@@ -113,14 +118,22 @@ has everything it needs — this sentence is there so the prompt is not empty an
 so the turn reads correctly in task history.
 """
 
-MEDIA_NO_ID_REASON = "the image named no media id"
-"""What an `image` message Meta sent without a readable media id becomes.
 
-There is nothing to fetch, so the record carries an `error` rather than being
-dropped — dropping it would send a *captioned* image back through the narrowed
-`unsupported_type` gate, which answers "photographs are not supported" for what
-is really a payload this normalizer could not read.
-"""
+def media_stand_in(
+    media: WhatsAppInboundMedia | None, attachments: list[str],
+) -> str:
+    """The prompt a message with a file and no words becomes.
+
+    A voice note with its file attached takes the web composer's own
+    descriptor, so the turn reads the same whichever surface it came from and
+    the executor appends the transcript. Everything else, an uncaptioned image
+    included, keeps `MEDIA_ONLY_PROMPT`. Shared with the relay reply path,
+    which builds the same task for a quoted answer.
+    """
+    if media is not None and media.kind == "audio" and attachments:
+        return describe_attachment_only_message(attachments)
+    return MEDIA_ONLY_PROMPT
+
 
 _TEXT_TYPES = frozenset({"text"})
 _CALLBACK_TYPES = frozenset({"interactive", "button"})
@@ -376,6 +389,11 @@ def _message_shape(message: Mapping[str, object]) -> tuple[str, str | None, str 
         image = message.get("image")
         image = image if isinstance(image, Mapping) else {}
         return "image", _optional_text(image.get("caption")), None
+    if declared == "audio":
+        # No caption: Cloud audio carries none. A voice note's words are
+        # transcribed in the executor, after every gate here has run, so a
+        # spoken "STOP" or "yes" never opts out or answers anything.
+        return "audio", None, None
     if declared == "interactive":
         interactive = message.get("interactive")
         interactive = interactive if isinstance(interactive, Mapping) else {}
@@ -415,7 +433,10 @@ def _inbound_event(
     # record at all, which the reset above arranges by taking `image` off the
     # type. Baileys refuses a group message in the sidecar, before anything is
     # downloaded; this is the same refusal one module over.
-    media = _pending_media(message) if message_type == "image" else None
+    media = (
+        _pending_media(message, message_type)
+        if message_type in media_rules.MEDIA_KINDS else None
+    )
     return InboundWhatsAppEvent(
         message_id=_required_text(message, "id", "message id"),
         waba_id=waba_id,
@@ -430,8 +451,13 @@ def _inbound_event(
     )
 
 
-def _pending_media(message: Mapping[str, object]) -> WhatsAppInboundMedia:
-    """The media record for a Cloud `image`, naming bytes still to be fetched.
+def _pending_media(
+    message: Mapping[str, object], kind: str,
+) -> WhatsAppInboundMedia:
+    """The media record for a Cloud `image` or `audio`, naming bytes to fetch.
+
+    *kind* is Meta's declared type and the record's kind; the object holding
+    the id and mimetype is the one named by it (`message["audio"]`).
 
     Meta's callback carries a media id rather than the file, so what this
     builds is a record with an empty `staged_path` and a `remote_id`:
@@ -446,32 +472,45 @@ def _pending_media(message: Mapping[str, object]) -> WhatsAppInboundMedia:
     `media.stage_to_attachment` is authoritative, because a sender controls
     what they upload and the file is about to be decoded by Pillow and copied
     into somebody's workspace.
+
+    A missing id is a record carrying the kind's `no_id` reason rather than no
+    record: dropping it would send a *captioned* image back through the
+    narrowed `unsupported_type` gate, which answers "not supported" for what is
+    really a payload this normalizer could not read.
     """
-    image = message.get("image")
-    image = image if isinstance(image, Mapping) else {}
-    remote_id = _optional_text(image.get("id"))
+    part = message.get(kind)
+    part = part if isinstance(part, Mapping) else {}
+    remote_id = _optional_text(part.get("id"))
     if not remote_id:
         # No value off the wire in the log line: the id is what could not be
         # read, and a message id is already a fingerprint by the time anything
         # here logs one.
         logger.warning(
-            "whatsapp.inbound.media_unreadable: an image message named no "
-            "media id",
+            "whatsapp.inbound.media_unreadable kind=%s: the message named no "
+            "media id", kind,
         )
         return WhatsAppInboundMedia(
             staged_path="", mime_type="", byte_count=0, attached_for_user="",
-            error=MEDIA_NO_ID_REASON,
+            error=media_rules.reason(kind, "no_id"), kind=kind,
+        )
+    if kind == "audio":
+        # Logged and nothing more: a forwarded audio file is handled exactly
+        # as a recorded voice note, as the web composer handles both.
+        logger.debug(
+            "whatsapp.inbound.audio voice=%s",
+            "true" if part.get("voice") is True else "false",
         )
     return WhatsAppInboundMedia(
         staged_path="",
         # Printable and bounded, in `media.py` because `client.fetch_media`
         # reads the same field off Meta's media-url answer and the two must
         # not drift on what a value fit to log is.
-        mime_type=media_rules.bounded_media_type(image.get("mime_type")),
+        mime_type=media_rules.bounded_media_type(part.get("mime_type")),
         byte_count=0,
         attached_for_user="",
         error=None,
         remote_id=remote_id,
+        kind=kind,
     )
 
 
@@ -972,7 +1011,7 @@ def _media_for_user(
         event,
         media=replace(
             media, staged_path="", mime_type="", byte_count=0,
-            error=media_rules.MEDIA_UNATTRIBUTED,
+            error=media_rules.reason(media.kind, "unattributed"),
         ),
     )
 
@@ -1099,7 +1138,10 @@ def _dispatch_inbound(
         )
         return WhatsAppEventResult(
             "media_failed", user_id=user_id,
-            response_text=MEDIA_FAILED_REPLY,
+            response_text=(
+                MEDIA_FAILED_AUDIO_REPLY if event.media.kind == "audio"
+                else MEDIA_FAILED_REPLY
+            ),
             response_logical_key=f"media-failed:{event.message_id}",
         )
 
@@ -1107,7 +1149,7 @@ def _dispatch_inbound(
         [event.media.staged_path] if event.media is not None else []
     )
     turn = record_whatsapp_turn(
-        conn, config, user_id, text or MEDIA_ONLY_PROMPT,
+        conn, config, user_id, text or media_stand_in(event.media, attachments),
         external_id=event.message_id, attachments=attachments,
     )
     confirmations.cancel_for_conversation(conn, turn.room_token, user_id, by="whatsapp")

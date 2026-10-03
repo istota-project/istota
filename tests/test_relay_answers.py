@@ -236,6 +236,25 @@ def test_media_caption_never_authorizes_sharing(setup, explicit):
         assert 'What time?' in task.reply_to_content
 
 
+def test_a_quoted_voice_note_is_described_as_one(setup):
+    """A voice answer to a quoted question reads as a voice note, not as an
+    image, and it never answers the relay: spoken words are not consent."""
+    from dataclasses import replace
+    from istota.transport.whatsapp._types import WhatsAppInboundMedia
+    config = setup[0]
+    relay = question(setup)
+    incoming = replace(event(config, ''), message_type='audio', text=None, media=WhatsAppInboundMedia(
+        staged_path='/tmp/whatsapp_voice.ogg', mime_type='audio/ogg', byte_count=5,
+        attached_for_user='bob', error=None, kind='audio'))
+    result = receive(config, incoming)
+    assert result.disposition == 'relay_rejected'
+    with db.get_db(config.db_path) as conn:
+        assert relays.get_relay(conn, actor_user_id='alice', relay_id=relay)['answer_text'] is None
+        task = db.get_task(conn, result.task_id)
+        assert task.prompt == 'Voice message (see attached audio).'
+        assert task.attachments == ['/tmp/whatsapp_voice.ogg']
+
+
 def test_foreign_and_unknown_id_are_indistinguishable(setup):
     config = setup[0]
     relay = question(setup)

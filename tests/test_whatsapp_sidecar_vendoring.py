@@ -51,7 +51,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from istota.lib import image_sniff
+from istota.lib import audio_sniff, image_sniff
 from istota.transport.whatsapp import baileys_protocol as proto
 from istota.transport.whatsapp import identity, media
 
@@ -967,26 +967,48 @@ class TestTheSidecarsInboundMedia:
     @pytest.mark.parametrize(
         "content,expected",
         [
-            ({"imageMessage": {"mimetype": "image/jpeg"}}, True),
-            ({"imageMessage": {"mimetype": "image/jpeg"}, "x": 1}, True),
-            ({"conversation": "hello"}, False),
+            ({"imageMessage": {"mimetype": "image/jpeg"}}, "image"),
+            ({"imageMessage": {"mimetype": "image/jpeg"}, "x": 1}, "image"),
+            # A voice note and a forwarded audio file are one kind: `ptt`
+            # decides nothing here.
+            ({"audioMessage": {"mimetype": "audio/ogg; codecs=opus",
+                               "ptt": True}}, "audio"),
+            ({"audioMessage": {"mimetype": "audio/mp4"}}, "audio"),
+            ({"conversation": "hello"}, None),
             # Every one of these is a Non-goal, and each keeps the
             # `unsupported_type` reply it has now. A sticker is WebP and would
             # pass the sniff, which is exactly why it is excluded by message
-            # type up here rather than by the sniff down there.
-            ({"videoMessage": {"mimetype": "video/mp4"}}, False),
-            ({"documentMessage": {"mimetype": "image/jpeg"}}, False),
-            ({"stickerMessage": {"mimetype": "image/webp"}}, False),
-            ({"audioMessage": {"mimetype": "audio/ogg"}}, False),
-            ({}, False),
+            # type up here rather than by the sniff down there. A round video
+            # note is video, not audio.
+            ({"videoMessage": {"mimetype": "video/mp4"}}, None),
+            ({"ptvMessage": {"mimetype": "video/mp4"}}, None),
+            ({"documentMessage": {"mimetype": "audio/ogg"}}, None),
+            ({"stickerMessage": {"mimetype": "image/webp"}}, None),
+            ({"audioMessage": 7}, None),
+            ({}, None),
         ],
     )
-    def test_only_an_image_message_is_media(self, content, expected):
+    def test_an_image_or_an_audio_message_is_media(self, content, expected):
         found = self._call(
-            f"Boolean(m.mediaPart({{message: {json.dumps(content)}}}))"
+            f"(m.mediaPart({{message: {json.dumps(content)}}}) || {{}}).kind || null"
         )
 
-        assert found is expected
+        assert found == expected
+
+    def test_the_node_handed_back_is_the_message_types_own(self):
+        """`downloadMedia` reads the declared mimetype off the node, so the
+        node must be the one under the key the kind was decided from."""
+        assert self._call(
+            "m.mediaPart({message: {audioMessage: {mimetype: 'audio/ogg'}}})"
+        ) == {"kind": "audio", "node": {"mimetype": "audio/ogg"}}
+
+    def test_the_sidecars_kinds_are_the_daemons_kinds(self):
+        """The kind is the frame's `message_type`, and the daemon builds a
+        record only for a kind it knows; one the sidecar adds alone is
+        downloaded, staged and then dropped as an unexpected combination."""
+        kinds = self._call("m.MEDIA_KINDS.map(([, kind]) => kind)")
+
+        assert sorted(kinds) == sorted(media.MEDIA_KINDS)
 
     def test_a_message_that_is_not_one_yields_nothing(self):
         for expression in ("null", "{}", "{message: null}", "{message: 7}"):
@@ -999,6 +1021,10 @@ class TestTheSidecarsInboundMedia:
             ({"imageMessage": {}}, None),
             ({"imageMessage": {"caption": 7}}, None),
             ({"conversation": "plain"}, "plain"),
+            # Audio has no caption; a stray one is not read, so a voice note
+            # never reaches the daemon's text gates.
+            ({"audioMessage": {"ptt": True}}, None),
+            ({"audioMessage": {"caption": "STOP"}}, None),
             # Deliberately not read: those types keep the unsupported reply,
             # and a caption without the bytes is a message answered about an
             # image nobody can see.
@@ -1075,7 +1101,7 @@ class TestTheSidecarsInboundMedia:
         fingerprint — the salt is the daemon's — so the validator is
         deliberately wider than that format, and the thing that has to hold
         is that what this mints passes it."""
-        for ext in ("jpg", "png", "heic", "bin"):
+        for ext in ("jpg", "png", "heic", "ogg", "m4a", "bin"):
             name = self._call(f"m.stagedMediaName({json.dumps(ext)})")
 
             assert media.is_staged_name(name), name
@@ -1094,6 +1120,10 @@ class TestTheSidecarsInboundMedia:
             ("image/heic", "heic"),
             ("image/JPEG", "jpg"),
             ("image/jpeg; codecs=x", "jpg"),
+            ("audio/ogg; codecs=opus", "ogg"),
+            ("audio/mpeg", "mp3"),
+            ("audio/mp4", "m4a"),
+            ("audio/amr", "bin"),
             ("application/pdf", "bin"),
             ("../../etc/passwd", "bin"),
             ("", "bin"),
@@ -1122,7 +1152,10 @@ class TestTheSidecarsInboundMedia:
         `image/jpeg` mapped to `png` — the claim is about the *mapping*, so a
         value-set check could not carry it.
         """
-        assert self._call("m.MEDIA_EXTENSIONS") == image_sniff.EXTENSION_BY_MEDIA_TYPE
+        assert self._call("m.MEDIA_EXTENSIONS") == {
+            **image_sniff.EXTENSION_BY_MEDIA_TYPE,
+            **audio_sniff.EXTENSION_BY_MEDIA_TYPE,
+        }
 
     # --- the staged write --------------------------------------------------
 

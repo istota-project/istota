@@ -220,8 +220,8 @@ def _is_pending(event: object) -> bool:
     )
 
 
-def _media_failed(reason: str) -> WhatsAppInboundMedia:
-    """A record naming a failure and no file.
+def _media_failed(kind: str, key: str) -> WhatsAppInboundMedia:
+    """A record naming a failure and no file, in *kind*'s words for *key*.
 
     The same four fields `baileys_bridge._media_failed` sets, and deliberately
     a second constructor rather than a shared one: what the record *means* —
@@ -232,9 +232,11 @@ def _media_failed(reason: str) -> WhatsAppInboundMedia:
     for a `_types` record in the common module on behalf of two callers that
     each build every other record inline.
     """
+    from .. import media as media_rules  # noqa: PLC0415
+
     return WhatsAppInboundMedia(
         staged_path="", mime_type="", byte_count=0, attached_for_user="",
-        error=reason,
+        error=media_rules.reason(kind, key), kind=kind,
     )
 
 
@@ -266,9 +268,9 @@ async def stage_cloud_media(
     3. **Consume.** `media.stage_to_attachment`, which sniffs the bytes, names
        the inbox copy from its own answer and unlinks the staged file. The
        sniff is asked first, for the reason `baileys_bridge.stage_inbound_media`
-       step 2 gives: a file that is not a decodable image is not an image at
-       all and takes the `unsupported_type` reply the surface already had,
-       while one that could not be placed is istota's own failure and says so.
+       step 2 gives: a file that does not sniff as the record's kind takes
+       the `unsupported_type` reply the surface already had, while one that
+       could not be placed is istota's own failure and says so.
 
     **Never raises**, which is the contract the route rests on: `_stage_one`
     carries a catch-all and everything outside it is a list rebuild. A media
@@ -325,7 +327,8 @@ async def stage_cloud_media(
         )
         for index in pending:
             staged[index] = replace(
-                events[index], media=_media_failed(media_rules.MEDIA_NOT_PLACED),
+                events[index],
+                media=_media_failed(events[index].media.kind, "not_placed"),
             )
         return tuple(staged)
 
@@ -362,6 +365,7 @@ async def _stage_one(
     incoming = event.media
     if incoming is None:  # pragma: no cover - `_is_pending` is the caller's gate
         return event
+    kind = incoming.kind
     staged_path = None
     fd = None
     try:
@@ -379,7 +383,7 @@ async def _stage_one(
                 message_fingerprint(event.message_id),
             )
             return replace(
-                event, media=_media_failed(media_rules.MEDIA_UNATTRIBUTED),
+                event, media=_media_failed(kind, "unattributed"),
             )
         # Asked with the *cap* rather than with Meta's declared size, which is
         # one round trip away and would be paid for a fetch this may refuse.
@@ -391,7 +395,7 @@ async def _stage_one(
             incoming_bytes=media_rules.MAX_MEDIA_BYTES,
         ):
             return replace(
-                event, media=_media_failed(media_rules.MEDIA_NOT_PLACED),
+                event, media=_media_failed(kind, "not_placed"),
             )
 
         # `bin`, because the bytes have not been read yet and the only type in
@@ -414,17 +418,17 @@ async def _stage_one(
 
         # No "can it be opened" question here, unlike the Baileys step: this
         # call wrote the file moments ago and holds the only name for it, so
-        # `None` from the sniff means the bytes are not a decodable image
+        # `None` from the sniff means the bytes are not the record's kind
         # rather than that the file went missing.
-        if media_rules.sniff_staged(staged_path) is None:
+        if media_rules.sniff_staged(staged_path, kind) is None:
             media_rules.discard_staged(staged_path)
             return replace(event, media=None)
         attachment = await asyncio.to_thread(
-            media_rules.stage_to_attachment, config, user_id, staged_path,
+            media_rules.stage_to_attachment, config, user_id, staged_path, kind,
         )
         if attachment is None:
             return replace(
-                event, media=_media_failed(media_rules.MEDIA_NOT_PLACED),
+                event, media=_media_failed(kind, "not_placed"),
             )
         return replace(
             event,
@@ -435,7 +439,7 @@ async def _stage_one(
         )
     except WhatsAppMediaError as exc:
         # The fetcher's own refusal, already named by one of its fixed reasons.
-        return replace(event, media=_media_failed(exc.reason))
+        return replace(event, media=_media_failed(kind, exc.key))
     except Exception:
         # No `exc_info` and no path: a traceback here prints frames holding the
         # media URL, which carries the recipient and the token's path segment.
@@ -443,7 +447,7 @@ async def _stage_one(
             "whatsapp.media.staging_failed message=%s",
             message_fingerprint(event.message_id),
         )
-        return replace(event, media=_media_failed(media_rules.MEDIA_NOT_PLACED))
+        return replace(event, media=_media_failed(kind, "not_placed"))
     finally:
         if fd is not None:
             with contextlib.suppress(OSError):

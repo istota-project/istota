@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- WhatsApp takes voice notes and audio files on both adapters. A voice note becomes the same task a web chat voice memo does, "Voice message (see attached audio).", with the recording copied into your `inbox/` and transcribed before the model sees the request. Spoken words are never read as STOP, a command or a confirmation answer, and voice notes in groups are still refused, as group photos are. Ogg, MP3, AAC, M4A, WAV, FLAC and WebM are read; AMR is not.
+
+  **Upgrade note:** on Baileys, voice notes need the new sidecar, so rebuild and redeploy it with the full Ansible play. Updating the daemon first is safe: until the sidecar is replaced, a voice note gets the unsupported reply as it does today. The Cloud adapter needs nothing beyond the daemon update.
+
 ### Changed
 
 - **A shared room no longer presents itself as the host's bot.** The room's announcement now says the bot acts for each member when that member asks, and says what happens to anyone else's messages under the room's guest-reply setting. The opening is in the default persona's voice; a deployment with its own persona can replace it with `config/room-announcement.md` (`{BOT_NAME}`, `{BOT_DIR}`, `{HOST}`), and the guest and off-switch sentences always follow. Rooms already announced are not announced again (ISSUE-602).
@@ -17,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Commands no longer post your personal memory, tasks or mail into a shared room** (ISSUE-609). On Talk a command's reply goes into the conversation, so `!memory user` or `!memory facts` in a group showed everyone your `USER.md` or your facts; in a room with more than one person these, `!status`, `!usage`, `!search`, `!confirm`, `!drafts`, the `!cron` and `!trust` listings, and `!more` or `!retry` on another room's task now answer "Use your private chat with me", while `!memory channel` still works. `!memory` also reads through the hardened file readers now: it refuses a symlinked `USER.md`, and it finds room notes stored under an old room token.
+- Images and audio that arrive by email or WhatsApp are now read by the task. Their inbox path was handed to the task as a Nextcloud path rather than a file on the mount, so images were never converted or OCR'd and audio was never transcribed, and the model had to find the file itself. The scheduler now maps the sender's own inbox paths onto the mount before the task runs, as it already did for Talk attachments.
 - **The bot no longer invents approval rules when asked how a shared room works.** The room card now states the room's rule on every turn: each member's turn runs as that member, a confirmation goes to the asker's own side room, and what happens to a guest's message under the room's guest-reply setting (ISSUE-602).
 - The nightly sleep cycle no longer locks the database for about 90 seconds. With `USER.md` curation on, it left its own cleanup writes uncommitted while the curation audit opened a second connection and waited on them, three times in a row, and every other writer in the deployment failed with `database is locked` in that window. Because those audit writes failed, the curator also never remembered which dated `USER.md` bullets it had already flagged, so the same ones came back every night.
 - A scheduled feeds poll no longer fails the task when every feed it polled errored. A run often polls just one due feed, so one dead feed failed the whole task, which was retried a minute later and found nothing due. The run now reports `partial_error` with each feed's error, as it already did when only some feeds failed, and the dead feed shows its error on the feed itself. A run in which every feed was rate-limited still fails.

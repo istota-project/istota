@@ -1905,6 +1905,44 @@ class TestTheAudioTheChildIsActuallyHandedIsInReach:
         assert seen["argv"][-1] == str(source)
 
 
+class TestAWhatsAppVoiceNoteIsTranscribed:
+    """The WhatsApp half end to end, from the task row to the transcript.
+
+    The staging step names the inbox copy `/Users/<uid>/inbox/...`, the
+    scheduler maps it onto the mount, and the pass this file covers takes it
+    from there. Only the child is stubbed.
+    """
+
+    @patch(_TRANSCRIBE_PATCH)
+    def test_a_localized_ogg_is_transcribed_into_the_prompt(
+        self, mock_transcribe, tmp_path,
+    ):
+        from istota.scheduler import localize_workspace_attachments
+        from istota.transport.ingest import describe_attachment_only_message
+
+        mount = tmp_path / "mount"
+        inbox = mount / "Users" / "alice" / "inbox"
+        inbox.mkdir(parents=True)
+        fixture = Path(__file__).parent / "fixtures" / "audio" / "voice.ogg"
+        (inbox / "whatsapp_ab12-cd34.ogg").write_bytes(fixture.read_bytes())
+        deferred = tmp_path / "temp" / "alice"
+        deferred.mkdir(parents=True)
+        config = Config(workspace_path=mount, temp_dir=tmp_path / "temp")
+        row = ["/Users/alice/inbox/whatsapp_ab12-cd34.ogg"]
+        mock_transcribe.return_value = {"status": "ok", "text": "buy milk"}
+
+        attachments = localize_workspace_attachments(config, "alice", row)
+        out = _pre_transcribe_attachments(
+            attachments, describe_attachment_only_message(row),
+            user_id="alice", mount_path=mount, deferred_dir=deferred,
+        )
+
+        assert mock_transcribe.call_count == 1
+        assert os.path.isfile(mock_transcribe.call_args[0][0])
+        assert out.startswith("Voice message (see attached audio).")
+        assert "Transcribed voice message: buy milk" in out
+
+
 class TestPreTranscriptionStaysOutOfTheDaemon:
     """ISSUE-273.
 
