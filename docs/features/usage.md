@@ -32,7 +32,7 @@ The context columns are NULL rather than 0 when unmeasured, because SQL `AVG` sk
 | `task` | A user's task |
 | `sleep_cycle` | The nightly memory pass |
 | `shared_blocks` | Generating a module-owned shared briefing block |
-| `code_review` | The `code_review` skill's reviewers |
+| `code_review` | The `code_review` skill's reviewer |
 | `context_triage` | Selecting conversation context for a task. The most frequent non-task origin, and it carries no `task_id` |
 | `health_ocr` | Reading an uploaded health document |
 | `health_encounter_ocr` | Reading an uploaded encounter document |

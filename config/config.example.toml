@@ -1597,18 +1597,19 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # ----------------------------------------------------------------------------
 # Code review (`istota-skill code_review run`)
 # ----------------------------------------------------------------------------
-# One or two text-only reviewers over a branch diff, run daemon-side through the
-# configured brain. Gated by `developer.enabled` and an admin check as well as
-# the flag below, so there is no separate feature switch. The defaults give a
-# working review on any repository you have already enabled [developer] for.
+# One reviewer over a branch diff, run daemon-side through the configured
+# brain. Gated by `developer.enabled` and an admin check as well as the flag
+# below, so there is no separate feature switch. The defaults give a working
+# review on any repository you have already enabled [developer] for.
 #
-# The reviewers are invoked with no tools requested and no sandbox wrapper: the
-# CLI assembles everything they see from the repository, because a model-authored
-# prompt deciding what the daemon reads is the boundary this design exists to
-# keep. On the native brain an empty tool list is enforced in-process; on
-# claude_code it means the CLI is passed neither an allow-list nor
-# --dangerously-skip-permissions, which leaves the guarantee resting on the
-# upstream CLI's own default rather than on something this repo enforces.
+# The reviewer reads the code itself with Read, Grep and Glob, over a copy of
+# the reviewed commit written out of git into {temp_dir}/.review/ (never the
+# worktree, which the model can write). On a sandboxed deployment it runs in a
+# namespace that binds that copy read-only and withholds every scope, so the
+# user's workspace, memory and repositories are not visible to it; on
+# claude_code the CLI is given those three tools and no MCP server. Where the
+# copy or the namespace cannot be built, it reviews the diff text-only and the
+# envelope says so. The copy is removed after the run and swept after an hour.
 #
 # Two ceilings sit above `timeout_seconds`, and the lower one bites first. The
 # skill proxy kills the command at this skill's own ceiling — 540s, and *not*
@@ -1620,13 +1621,15 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #
 # A `timeout_seconds` that does not fit under the proxy ceiling is clamped down
 # rather than honoured, since the alternative is a review killed half-finished
-# having already paid for its agents. The fit reserves 30s: 20 for assembly and
-# 10 for the thread join the CLI really waits out. The clamp warns into the
-# daemon log and reports itself in the envelope as `agent_timeout_clamped`,
-# alongside the `agent_timeout_seconds` each reviewer actually got.
+# having already paid for its model call. The fit reserves 30s: 20 for the diff,
+# the snapshot and the prompt, and 10 for a brain that overruns its own timeout.
+# The clamp warns into the daemon log and reports itself in the envelope as
+# `agent_timeout_clamped`, alongside the `agent_timeout_seconds` the reviewer
+# actually got.
 #
 # `overhead_seconds` in the envelope is what everything outside the model calls
-# cost on that run, which is the evidence the 20s reserve is sized from.
+# cost on that run, snapshot included, which is the evidence the 20s reserve is
+# sized from.
 
 # [developer.review]
 # enabled = true                      # false disables the CLI; the workflow then
@@ -1636,19 +1639,18 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # file_budget = 8                     # files the reviewer may read beyond the changed
 #                                     # ones; 0 or less reads as 8
 # snapshot_max_bytes = 104857600      # the reviewed commit's tree, written for the
-# snapshot_max_file_bytes = 2097152   # reviewer to read: total and per-file caps
-# max_diff_chars = 200000
-# timeout_seconds = 480               # per agent; both run concurrently, so this is
-#                                     # wall time, not half of it. The bug hunter runs
-#                                     # a high-effort model and only on large diffs, and
-#                                     # 240 was measured too short for it on every real
-#                                     # one. --timeout on `run` overrides it for one run
-# max_calls_per_task = 8              # review rounds per task. A round is a wave of model
-#                                     # calls, not a run: a run charges 1, or 2 when a
-#                                     # reviewer takes its max_need_files round trip. One
-#                                     # wave is up to four invocations (two agents, each
-#                                     # retrying a malformed answer once), so a run is at
-#                                     # most two rounds and six calls.
+# snapshot_max_file_bytes = 2097152   # reviewer to read: total and per-file caps,
+#                                     # changed files first; 0 or less keeps the default
+# max_diff_chars = 200000             # the diff in the prompt; the full patch is in
+#                                     # the snapshot either way
+# timeout_seconds = 480               # the reviewer's budget, a reformat of an unusable
+#                                     # answer included. It runs a high-effort model and
+#                                     # reads files, and 240 was measured too short on
+#                                     # real diffs. --timeout on `run` overrides it for
+#                                     # one run
+# max_calls_per_task = 8              # review runs per task that reached the model. A
+#                                     # run charges 1: the review, plus one text-only
+#                                     # reformat call if the first answer was unusable.
 #                                     # 0 or less permits none — use enabled = false to
 #                                     # switch the feature off. At the cap the review
 #                                     # degrades to skipped rather than erroring
