@@ -929,14 +929,16 @@ def advisor_active(
 
 #: A grant made only of these reads files and nothing else. Daemon-side calls
 #: that hand a model a document or a snapshot (health OCR, the code reviewer)
-#: ask for these, and ``build_claude_cli_flags`` denies everything that writes,
-#: executes or reaches the network for them.
+#: ask for these, and ``build_claude_cli_flags`` gives them exactly these
+#: built-ins and no MCP server.
 READ_ONLY_TOOLS = frozenset({"Read", "Grep", "Glob"})
 
-#: Denied in addition to ``Agent`` and ``Workflow`` for a read-only grant. A
-#: deny list rather than an ``--allowedTools`` allowlist, because deny rules
-#: hold under ``--dangerously-skip-permissions`` and the allowlist path was
-#: removed (see the comment in ``build_claude_cli_flags``).
+#: The order ``--tools`` names a read-only grant in, so one grant has one argv.
+_READ_ONLY_TOOL_ORDER = ("Read", "Grep", "Glob")
+
+#: Denied in addition to ``Agent`` and ``Workflow`` for a read-only grant, as a
+#: backstop behind ``--tools``. Deny rules hold under
+#: ``--dangerously-skip-permissions``.
 _READ_ONLY_DENIED_TOOLS = (
     "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
     "WebFetch", "WebSearch", "TodoWrite",
@@ -990,11 +992,23 @@ def build_claude_cli_flags(
         # with --dangerously-skip-permissions), the allowlist no longer
         # implicitly blocks Workflow, so it must be denied explicitly again.
         flags += ["--disallowedTools", "Agent", "Workflow"]
-        # A grant of read tools alone still gets the whole default toolset under
-        # skip-permissions, so deny the rest by name. Any other grant keeps the
-        # argv above byte for byte.
+        # A grant of read tools alone would still get the whole default toolset
+        # under skip-permissions. Not through `_add`: a surface that dropped
+        # one of these as unsupported would run the read-only grant with every
+        # tool. Any other grant keeps the argv above byte for byte.
+        #
+        # `--tools` restricts which built-ins exist at all, so a tool a later
+        # CLI release adds is absent rather than allowed; it is not the
+        # `--allowedTools` permission allowlist removed above. It names the
+        # tools granted, no more. `--strict-mcp-config` with no `--mcp-config`
+        # drops every MCP server, the account's claude.ai connectors included.
+        # Probed on Claude Code 2.1.280: the deny list alone still left Monitor,
+        # Skill, SendMessage, Cron*, RemoteTrigger and the connectors; with both
+        # flags `system/init` lists the granted tools and no MCP server.
         if all(tool in READ_ONLY_TOOLS for tool in req.allowed_tools):
+            granted = [t for t in _READ_ONLY_TOOL_ORDER if t in req.allowed_tools]
             flags += list(_READ_ONLY_DENIED_TOOLS)
+            flags += ["--tools", ",".join(granted), "--strict-mcp-config"]
 
     def _add(flag: str, *values: str) -> None:
         if flag in unsupported:

@@ -177,6 +177,26 @@ class TestBuildCommandDisallowedTools:
         assert cmd.count("--disallowedTools") == 1
 
     @pytest.mark.parametrize(
+        ("tools", "named"),
+        [
+            (["Read"], "Read"),
+            (["Read", "Grep", "Glob"], "Read,Grep,Glob"),
+            (["Glob", "Grep", "Glob"], "Grep,Glob"),
+        ],
+    )
+    def test_a_read_only_grant_has_only_its_built_ins_and_no_mcp(
+        self, tmp_path, tools, named
+    ):
+        # The deny list fails open on a tool a later CLI adds; `--tools` names
+        # the built-ins that exist, and `--strict-mcp-config` with no config
+        # drops every MCP server, the account's claude.ai connectors included.
+        cmd = ClaudeCodeBrain._build_command(self._req(tmp_path, tools))
+        assert cmd[cmd.index("--tools") + 1] == named
+        assert cmd.count("--tools") == 1
+        assert "--strict-mcp-config" in cmd
+        assert "--mcp-config" not in cmd
+
+    @pytest.mark.parametrize(
         "tools",
         [["Read", "Bash"], ["Bash"], ["Read", "Write"],
          ["Bash", "Read", "Edit", "Write", "Grep", "Glob", "WebFetch"]],
@@ -184,6 +204,8 @@ class TestBuildCommandDisallowedTools:
     def test_any_other_grant_keeps_todays_argv(self, tmp_path, tools):
         cmd = ClaudeCodeBrain._build_command(self._req(tmp_path, tools))
         assert self._disallowed(cmd) == ["Agent", "Workflow"]
+        assert "--tools" not in cmd
+        assert "--strict-mcp-config" not in cmd
 
     def test_no_tool_flags_when_text_only(self, tmp_path):
         # Empty allowed_tools => text-only invocation: no tool flags and no
