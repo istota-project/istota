@@ -1486,6 +1486,17 @@ def cmd_auth(args):
             owner = web_auth.get_identity_by_email(db_path, email)
             if owner and owner.user_id != user_id:
                 raise ValueError(f"That address is already a login for {owner.user_id}")
+            # Before `ensure_profile` below, so a refused --create-user leaves
+            # no profile behind; `upsert_identity` repeats it under its lock.
+            if identity is None or identity.email != web_auth.normalize_email(email):
+                with db.get_db(db_path) as conn:
+                    holder = user_profiles.find_identity_conflicts(
+                        conn, user_id, email_addresses=[web_auth.normalize_email(email)],
+                    )
+                if holder:
+                    raise ValueError(
+                        f"That address is already an email address of {next(iter(holder.values()))}"
+                    )
             wants_link = args.send_invite or args.print_link
             if wants_link:
                 _auth_link_origin(config, args.print_link)

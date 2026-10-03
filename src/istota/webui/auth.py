@@ -227,7 +227,11 @@ def _upsert_identity(
                             (email, user_id)).fetchone()
     if conflict and reject_case_collision:
         raise ValueError(f"That address is already a login for {conflict['user_id']}")
-    if reject_address_holders:
+    current = _get_identity(conn, user_id)
+    # Only a *new* login email is judged: resubmitting the one already held
+    # passes even beside a duplicate stored before the rule, the way
+    # `find_identity_conflicts` passes an address already on the user's list.
+    if reject_address_holders and (current is None or current.email != email):
         from istota.user_profiles import find_identity_conflicts
         holder = find_identity_conflicts(conn, user_id, email_addresses=[email]).get(email)
         if holder:

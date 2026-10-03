@@ -78,6 +78,15 @@ def test_duplicate_names_owner_without_creating_profile(config, identity, invoke
     assert user_profiles.get_profile(config.db_path, "bob") is None
 
 
+def test_another_users_routing_address_refused_without_creating_profile(config, invoke):
+    user_profiles.ensure_profile(config.db_path, "carol")
+    user_profiles.update_profile(config.db_path, "carol", email_addresses=["shared@example.com"])
+    code, out, err = invoke("add", "bob", "--email", "Shared@example.com", "--create-user")
+    assert code == 1 and "carol" in err
+    assert user_profiles.get_profile(config.db_path, "bob") is None
+    assert web_auth.get_identity(config.db_path, "bob") is None
+
+
 @pytest.mark.parametrize("verb,purpose", [("add", "enrol"), ("invite", "enrol"), ("reset", "reset")])
 def test_print_link_is_usable(config, identity, invoke, verb, purpose):
     args = [verb, "alice", "--print-link"]

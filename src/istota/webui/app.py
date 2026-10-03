@@ -2360,7 +2360,10 @@ def _write_admin_profile(config, admin: dict, user_id: str, updates: dict) -> tu
 
         binding = _db.get_whatsapp_binding(conn, user_id)
         stored_number = binding.bootstrap_phone_number if binding else ""
-        whatsapp_changed = whatsapp is not None and whatsapp != stored_number
+        # `""` on a row with no number (a BSUID-only enrollment) still clears it.
+        whatsapp_changed = whatsapp is not None and (
+            whatsapp != stored_number or (whatsapp == "" and binding is not None)
+        )
         _check_admin_conflicts(conn, admin_id, user_id, updates,
                                whatsapp if whatsapp_changed else None)
 
@@ -2424,10 +2427,12 @@ async def admin_user_update(
     for field, value in payload.items():
         try:
             if field == _ADMIN_WHATSAPP_FIELD:
-                if value is not None and not isinstance(value, str):
-                    raise ValueError(f"{field} must be a string")
+                # Not `null`: only `""` clears, since clearing discards the
+                # enrollment, the window and the opt-out.
+                if not isinstance(value, str):
+                    raise ValueError(f"{field} must be a string; send \"\" to clear")
                 updates[field] = user_profiles.normalize_whatsapp_phone_number(
-                    (value or "").strip(), allow_empty=True,
+                    value.strip(), allow_empty=True,
                 )
             else:
                 # No room-bearing field is admin-editable, so the target's
@@ -2501,6 +2506,9 @@ def _write_admin_identity(
                 reject_address_holders=True, conn=conn,
             )
         except ValueError as exc:
+            if "already" in str(exc):
+                logger.info("admin_user_conflict admin=%s user=%s kind=email",
+                            admin["username"], user_id)
             raise HTTPException(status_code=400, detail=str(exc))
         if previous is None:
             outcome = "attached"

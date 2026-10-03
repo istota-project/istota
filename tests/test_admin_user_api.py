@@ -300,6 +300,20 @@ class TestPatch:
         assert _binding(configured, "bob") is None
         assert response.json()["whatsapp"]["status"] == "unbound"
 
+    async def test_empty_whatsapp_clears_a_bsuid_only_binding(self, client, configured):
+        with db.get_db(configured._config.db_path) as conn:
+            db.set_whatsapp_binding(conn, "bob", bsuid="US.1")
+        response = await client.patch(URL + "/bob", json={"whatsapp_number": ""})
+        assert response.status_code == 200
+        assert _binding(configured, "bob") is None
+
+    async def test_null_whatsapp_is_refused_and_keeps_the_binding(self, client, configured):
+        with db.get_db(configured._config.db_path) as conn:
+            db.set_whatsapp_binding(conn, "bob", bootstrap_phone_number="+15550100007")
+        response = await client.patch(URL + "/bob", json={"whatsapp_number": None})
+        assert response.status_code == 400
+        assert _binding(configured, "bob").bootstrap_phone_number == "+15550100007"
+
     async def test_missing_profile_is_404(self, client):
         assert (await client.patch(URL + "/nobody", json={"display_name": "x"})).status_code == 404
 
@@ -429,6 +443,11 @@ class TestIdentityPut:
         assert response.status_code == 400
         assert "bob" in response.json()["detail"]
         assert web_auth.get_identity(configured._config.db_path, "carol") is None
+
+    async def test_unchanged_login_beside_a_stored_duplicate_passes(self, client, configured):
+        user_profiles.update_profile(configured._config.db_path, "carol", email_addresses=["bob@example.com"])
+        response = await client.put(URL + "/bob/identity", json={"email": "bob@example.com"})
+        assert response.status_code == 200
 
     async def test_invite_failure_is_502_with_the_identity_kept(self, client, configured, monkeypatch):
         monkeypatch.setattr(configured.web_auth_mail, "send_auth_email", lambda *args: False)

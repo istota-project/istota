@@ -4171,7 +4171,13 @@ const adminUserDetailHandler: MockHandler = ({ url, method, body }) => {
     return body?.add_to_addresses && managed ? { ...next, addresses_skipped: 'managed' } : next;
   }
   const patch = (body ?? {}) as Record<string, unknown>;
-  const refused = Object.keys(patch).filter((key) => detail.managed.includes(key));
+  const refused = Object.keys(patch).filter(
+    // The server passes a managed value resubmitted unchanged.
+    (key) =>
+      detail.managed.includes(key) &&
+      JSON.stringify(patch[key]) !==
+        JSON.stringify(detail.profile[key as keyof typeof detail.profile]),
+  );
   if (refused.length)
     return {
       __status: 409,
