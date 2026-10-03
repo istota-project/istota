@@ -53,12 +53,13 @@ import shutil
 import stat
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, get_args
 
 from istota.lib import audio_sniff
 from istota.lib import du
 from istota.lib import image_sniff
 from . import message_fingerprint
+from ._types import MediaKind
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import sqlite3
@@ -154,7 +155,7 @@ built, since the record knows what it holds. The image strings are the ones
 this surface shipped with, byte for byte, so existing log searches match.
 """
 
-MEDIA_KINDS: tuple[str, ...] = ("image", "audio")
+MEDIA_KINDS: tuple[str, ...] = get_args(MediaKind)
 REASON_KEYS: tuple[str, ...] = (
     "unattributed", "not_placed", "fetch_failed", "over_cap", "write_failed",
     "no_id", "fetch_unknown",
@@ -718,9 +719,12 @@ def stage_to_attachment(
         return None
     media_type = sniff_staged(staged, kind)
     if media_type is None:
+        # The image spelling is the one this surface shipped with, kept so an
+        # operator's log search still matches.
         logger.info(
-            "whatsapp.media.rejected reason=not_decodable kind=%s file=%s: "
-            "staged bytes matched no signature that kind's pipeline can open",
+            "whatsapp.media.rejected reason=%s kind=%s file=%s: staged bytes "
+            "matched no signature that kind's pipeline can open",
+            "not_a_decodable_image" if kind == "image" else "not_decodable",
             kind if kind in MEDIA_KINDS else "unknown", staged.stem,
         )
         discard_staged(staged)

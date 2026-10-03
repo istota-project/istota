@@ -722,6 +722,20 @@ class TestTheReasonTable:
             "the voice message could not be downloaded from WhatsApp"
         )
 
+    def test_the_kind_lists_and_the_table_cover_each_other(self):
+        """A kind added to `MediaKind` and missed elsewhere would be refused
+        in silence, so the copies are held equal here."""
+        from itertools import product
+        from typing import get_args
+
+        from istota.transport.whatsapp._types import MediaKind
+
+        assert set(media.MEDIA_KINDS) == set(get_args(MediaKind))
+        assert set(media._EXTENSION_BY_KIND) == set(media.MEDIA_KINDS)
+        assert set(media._REASONS) == set(
+            product(media.MEDIA_KINDS, media.REASON_KEYS)
+        )
+
     def test_an_unknown_pair_is_a_programming_error(self):
         with pytest.raises(KeyError):
             media.reason("video", "fetch_failed")
