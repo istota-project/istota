@@ -231,3 +231,22 @@ class TestLocalizeWorkspaceAttachments:
         assert got == [
             str(a.resolve()), "/Users/alice/inbox/missing.jpg", str(b.resolve()),
         ]
+
+    def test_a_host_path_under_a_users_shaped_workspace_passes_untouched(
+        self, tmp_path, caplog,
+    ):
+        # A macOS standalone install keeps its workspace under the OS user's
+        # home, so a web upload's real path also starts with /Users/<uid>/.
+        workspace = tmp_path / "Users" / "alice" / ".istota"
+        upload = workspace / "Users" / "alice" / "inbox" / "web-chat" / "x.png"
+        upload.parent.mkdir(parents=True)
+        upload.write_bytes(b"png")
+        config = Config(workspace_path=workspace, temp_dir=tmp_path / "temp")
+        entry = str(upload)
+
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler"), \
+                patch("istota.scheduler.BOT_USER_BASE", str(tmp_path / "Users")):
+            got = localize_workspace_attachments(config, "alice", [entry])
+
+        assert got == [entry]
+        assert "x.png" not in caplog.text

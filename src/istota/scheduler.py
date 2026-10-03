@@ -984,6 +984,15 @@ def localize_workspace_attachments(
     be a regular file that is not itself a symlink. Anything else, and every
     entry when there is no workspace, is passed through unchanged, which is
     what the executor saw before. A refusal logs the basename only.
+
+    An entry already naming a host path under the workspace or the temp dir
+    passes through untouched: on a macOS standalone install the workspace
+    itself sits under ``/Users/<user_id>/``, so the prefix test alone would
+    re-map a web upload's real path and warn about it.
+
+    Checked here and read later by name, as a web upload is: a task of the
+    same user can swap the leaf for a symlink in between. Closing that means
+    an fd walk and a copy, for both surfaces at once.
     """
     root = config.workspace_root(user_id) if user_id else None
     if root is None:
@@ -994,9 +1003,14 @@ def localize_workspace_attachments(
     except (OSError, ValueError):
         return list(attachments)
 
+    host_roots = [config.workspace_path, config.temp_dir]
     local_paths: list[str] = []
     for att in attachments:
-        if not isinstance(att, str) or not att.startswith(prefix):
+        if (
+            not isinstance(att, str)
+            or not att.startswith(prefix)
+            or any(root is not None and Path(att).is_relative_to(root) for root in host_roots)
+        ):
             local_paths.append(att)
             continue
         local = _localize_owner_file(root, resolved_root, att, user_id)

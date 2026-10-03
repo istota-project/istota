@@ -595,15 +595,19 @@ def task_deferred_dir(config: Config, task: "db.Task") -> Path:
 
 def stage_restricted_attachments(
     config: Config, attachments: "list[str] | None", dest_dir: Path,
+    *, user_id: str | None = None, files_withheld: bool = False,
 ) -> "list[str] | None":
     """Copy a restricted task's own Talk attachments into ``dest_dir``.
 
     The sandbox of a task its room restricts binds no ``{mount}/Talk``, since
     that directory is flat and holds the attachments of every conversation the
     bot is in. The files this task was sent are copied into ``dest_dir`` and
-    the list names the copies. Anything else is left as given: a path outside
-    ``Talk`` is bound, or withheld, by its own rule. A symlink, or a path
-    resolving outside ``Talk``, is not copied.
+    the list names the copies. With ``files_withheld`` the same goes for files
+    under ``{mount}/Users/{user_id}``: the scheduler maps an email or WhatsApp
+    inbox attachment there, and that tree is not bound once ``files`` is
+    withheld, so without the copy the prompt would name a path the sandbox
+    does not have. Anything else is left as given. A symlink, or a path
+    resolving outside those roots, is not copied.
 
     ``dest_dir`` is under the task's control directory, which no task can
     write: the daemon writes here, and a destination the model could reach
@@ -614,7 +618,11 @@ def stage_restricted_attachments(
     if not attachments or not mount:
         return attachments
     try:
-        talk = (Path(mount) / "Talk").resolve()
+        roots = [(Path(mount) / "Talk").resolve()]
+        if files_withheld:
+            own = scoped_user_dir(Path(mount) / "Users", user_id)
+            if own is not None:
+                roots.append(own.resolve())
     except OSError:
         return attachments
     staged: list[str] = []
@@ -623,7 +631,7 @@ def stage_restricted_attachments(
         source = Path(raw)
         try:
             resolved = source.resolve()
-            inside = resolved.is_relative_to(talk)
+            inside = any(resolved.is_relative_to(root) for root in roots)
             usable = inside and not source.is_symlink() and resolved.is_file()
         except (OSError, ValueError):
             usable = False
@@ -7669,6 +7677,7 @@ def execute_task(
     if _withheld:
         task.attachments = stage_restricted_attachments(
             config, task.attachments, control_dir / "room-attachments",
+            user_id=task.user_id, files_withheld="files" in _withheld,
         )
 
     # Pre-transcribe audio attachments so skill selection sees real text.
