@@ -2118,12 +2118,29 @@
 # preference owned by the web UI / Nextcloud, seeded into the DB on first login.
 # Passing --tz on every deploy did an unconditional partial UPDATE and clobbered
 # the user's web-set value, so the inventory no longer carries it.
+#
+# `istota_user_profile_mode` picks the flag: `enforce` passes `--managed`, which
+# records the fields each call writes so the web UI shows them locked instead of
+# letting an edit be reverted on the next deploy; `seed` passes `--seed`, which
+# writes only new users and empty SMS/WhatsApp identities and releases the
+# locks. A typo must not silently mean `enforce`, hence the assert.
+- name: Validate user profile mode
+  assert:
+    that:
+      - istota_user_profile_mode in ['enforce', 'seed']
+    fail_msg: >-
+      istota_user_profile_mode is {{ istota_user_profile_mode | to_json }},
+      which is not one of enforce / seed.
+    quiet: true
+  when: not istota_web_only
+
 - name: Ensure user_profiles rows
   command: >
     {{ istota_home }}/.venv/bin/{{ istota_package }}
     -c {{ istota_repo_dir }}/config/config.toml
     user ensure
     --name {{ user_id }}
+    {{ '--seed' if istota_user_profile_mode == 'seed' else '--managed' }}
     {% if (user_item.value.display_name | default('')) %}--display-name "{{ user_item.value.display_name }}"{% endif %}
     {% for email in user_item.value.email_addresses | default([]) %}--email "{{ email }}" {% endfor %}
     {% if user_item.value.sms_phone_number is defined and user_item.value.sms_phone_number is not none %}{{ '--sms-number "%s"' % user_item.value.sms_phone_number if user_item.value.sms_phone_number else '--clear-sms-number' }}{% endif %}
