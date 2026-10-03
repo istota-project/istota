@@ -106,6 +106,7 @@ src/istota/
 │   ├── git_hardening.py  # The `-c` overrides that stop a repository's own config running a program → sandbox.md
 │   ├── git_remote_scrub.py  # Strips credentials out of the git configs under `developer.repos_dir` → sandbox.md
 │   ├── user_scope.py     # Scoping a user id under a root, in one place → sandbox.md
+│   ├── attachment_source.py  # Where the daemon may read an inbound attachment from, opened with no link followed → sandbox.md
 │   ├── host_paths.py     # Host-path allowlist for the skill CLIs that take one → sandbox.md
 │   ├── cgroup.py         # A cgroup v2 group per task: memory.max, pids.max, cpu.max → sandbox.md
 │   ├── shell_exec.py     # How a command string becomes a shell argv, with `pipefail` on → sandbox.md

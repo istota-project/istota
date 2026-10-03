@@ -5,7 +5,6 @@ import errno
 import json
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -89,7 +88,8 @@ from .image_attachments import (
     render_ocr_context,
 )
 from istota.sandbox.shell_exec import pipefail_env
-from istota.sandbox.host_paths import path_under_roots, workspace_roots
+from istota.sandbox.attachment_source import copy_fd, open_attachment, write_copy
+from istota.sandbox.host_paths import workspace_roots
 from istota.sandbox.user_scope import is_within, paths_overlap, scoped_user_dir
 from .skills._group_access import GROUP_MEMORY_LABEL
 from istota.lib.untrusted import frame_untrusted
@@ -236,26 +236,32 @@ def _audio_in_reach(
     user_id: str | None,
     mount_path: "str | Path | None",
     deferred_dir: "str | Path | None",
+    temp_dir: "str | Path | None" = None,
+    control_dir: "str | Path | None" = None,
 ) -> str | None:
     """`audio_path`, or a copy of it the child will be allowed to open.
 
     The transcription child is a skill CLI and resolves its path argument
-    against the allowlist its own environment names (ISSUE-447). Three of the
-    four shapes a Talk attachment arrives in are outside that allowlist, and
-    all three are shipped: `download_talk_attachments` falls back to
+    against the allowlist its own environment names (ISSUE-447). Two of the
+    shapes a Talk attachment arrives in are outside that allowlist, and both
+    are shipped: `download_talk_attachments` falls back to
     `/mnt/nc-data/<user>/files/Talk/<name>` when the bot's own `Talk/` view
     does not hold the file (Nextcloud keeps a shared file in the *sender's*
-    data dir), it falls back again to the bare relative `Talk/<name>` when
-    neither resolves, and the rclone branch copies to `config.temp_dir`
-    rather than to the per-user directory below it. Only `{mount}/Talk/<name>`
-    is in reach as it stands.
+    data dir), and the rclone branch copies to `config.temp_dir` rather than
+    to the per-user directory below it. Those two, the WhatsApp and email
+    copies kept in `temp_dir` when an inbox upload fails, and a restricted
+    task's own `{control_dir}/room-attachments` copy are copied into the task's
+    own temp dir, which is a root because the caller passes it as
+    `ISTOTA_DEFERRED_DIR`. `cleanup_old_temp_files` owns the copy afterwards.
 
-    So the file is copied into the task's own temp dir, which is a root
-    because the caller passes it as `ISTOTA_DEFERRED_DIR` — the same answer
-    `prepare_image_attachments` already gives for an out-of-roots image, and
-    for the same reason: the daemon can read the bytes, and the boundary is
-    about what the *child* may name, not about what the daemon may hand it.
-    `cleanup_old_temp_files` owns the copy afterwards.
+    **Nothing else is copied, and no link is followed** (ISSUE-610). The
+    workspace and the temp dir are bound read-write into the user's sandbox,
+    so a task can turn an inbox file into a symlink, and this copy used to
+    deliver whatever it pointed at back into the sandbox.
+    `sandbox.attachment_source` decides where a source may be and opens it
+    with `O_NOFOLLOW` at every component; the copy is made from that fd, and
+    the landing directory is opened the same way since it is model-writable
+    too. A refusal is None, which the caller logs by basename.
 
     Containment is asked of `skill_host_paths`, never re-derived here: a
     second copy of that rule is the defect ISSUE-447 exists to remove.
@@ -265,11 +271,8 @@ def _audio_in_reach(
     this function was told nothing to scope against, so the judgement belongs
     to the child, which refuses and says why; deciding here would turn a
     caller's silence into a skip with no spawn and no message from the one
-    component that knows. None is reserved for the case where there *are*
-    roots, the path is outside them, and there is nowhere in reach to put a
-    copy.
+    component that knows.
     """
-    source = Path(audio_path)
     roots = workspace_roots(
         mount=mount_path,
         user_id=user_id or "",
@@ -278,26 +281,28 @@ def _audio_in_reach(
     )
     if not roots:
         return audio_path
-    try:
-        resolved = source.resolve()
-    except OSError:
+    opened = open_attachment(
+        audio_path, roots=roots, temp_dir=temp_dir,
+        extra=[control_dir] if control_dir else (),
+    )
+    if opened is None:
         return None
-    if path_under_roots(resolved, roots):
-        return audio_path
-    if not deferred_dir:
-        return None
+    fd, source = opened
     try:
-        landing = Path(deferred_dir) / "transcribe"
-        landing.mkdir(parents=True, exist_ok=True)
+        if source.in_roots:
+            return audio_path
+        if not deferred_dir:
+            return None
         # The leaf is the daemon's to choose, so a sender-supplied name cannot
         # traverse out of the directory; the task id is not in scope here, so
         # the source's own inode keeps two attachments of one name apart.
-        target = landing / f"{resolved.stat().st_ino}-{Path(audio_path).name}"
-        shutil.copyfile(resolved, target)
-    except OSError as e:
-        logger.warning(
-            "Could not stage %s for transcription: %s", Path(audio_path).name, e,
-        )
+        name = f"{os.fstat(fd).st_ino}-{source.parts[-1]}"
+        target = write_copy(fd, Path(deferred_dir), "transcribe", name)
+    except OSError:
+        target = None
+    finally:
+        os.close(fd)
+    if target is None:
         return None
     logger.debug("Staged %s for transcription at %s", audio_path, target)
     return str(target)
@@ -311,6 +316,8 @@ def _pre_transcribe_attachments(
     user_id: str | None = None,
     mount_path: "str | Path | None" = None,
     deferred_dir: "str | Path | None" = None,
+    temp_dir: "str | Path | None" = None,
+    control_dir: "str | Path | None" = None,
 ) -> str:
     """Pre-transcribe audio attachments so skill selection sees real text.
 
@@ -350,8 +357,8 @@ def _pre_transcribe_attachments(
     carries none of those variables, so the identity is passed explicitly, or
     the child refuses every path and the failure disappears into the debug
     line below. `_audio_in_reach` is the other half: the identity says who is
-    asking, and three of the four shapes a Talk attachment arrives in are
-    still outside every root it names.
+    asking, and two of the shapes a Talk attachment arrives in are still
+    outside every root it names.
     """
     if not attachments:
         return prompt
@@ -386,6 +393,8 @@ def _pre_transcribe_attachments(
                 user_id=user_id,
                 mount_path=mount_path,
                 deferred_dir=deferred_dir,
+                temp_dir=temp_dir,
+                control_dir=control_dir,
             )
             if in_reach is None:
                 # Above debug, deliberately: a refusal the child would report
@@ -394,7 +403,8 @@ def _pre_transcribe_attachments(
                 # merely shorter than it could have been.
                 logger.warning(
                     "Audio attachment %s is outside the roots the transcription "
-                    "child can open and could not be staged; skipping it",
+                    "child can open, is reached through a link, or could not be "
+                    "staged; skipping it",
                     Path(audio_path).name,
                 )
                 continue
@@ -479,13 +489,18 @@ def image_bind_roots(
     the roots here is what lets `prepare_image_attachments` copy such a file in
     even when it needs no resize and no conversion.
 
+    The list is also where a source may be read from at all
+    (`sandbox.attachment_source`, ISSUE-610): an image under one of these roots
+    is opened with no link followed below it, and one under none is accepted
+    only in a Talk fallback shape.
+
     `control_dir` is where the prepared renditions are *written*, and it is in
-    this list to keep an invariant rather than to decide a copy: `_within_binds`
-    tests the source, so nothing today reaches it. The output directory has
-    always been inside `bind_roots` — it used to be, via `user_temp_dir` — and a
-    destination outside the roots the same call is told about is the shape of a
-    later copy loop or a second-pass rendition landing somewhere unreadable.
-    `user_temp_dir` stays: source attachments still arrive there.
+    this list to keep an invariant rather than to decide a copy. The output
+    directory has always been inside `bind_roots` — it used to be, via
+    `user_temp_dir` — and a destination outside the roots the same call is told
+    about is the shape of a later copy loop or a second-pass rendition landing
+    somewhere unreadable. `user_temp_dir` stays: source attachments still
+    arrive there.
 
     Resolved, because `_bind` resolves its source and uses the *resolved* path
     as the in-namespace destination: on a deployment where `temp_dir` sits
@@ -606,8 +621,8 @@ def stage_restricted_attachments(
     under ``{mount}/Users/{user_id}``: the scheduler maps an email or WhatsApp
     inbox attachment there, and that tree is not bound once ``files`` is
     withheld, so without the copy the prompt would name a path the sandbox
-    does not have. Anything else is left as given. A symlink, or a path
-    resolving outside those roots, is not copied.
+    does not have. Anything else is left as given, and so is a path reached
+    through a link at any component (`sandbox.attachment_source`).
 
     ``dest_dir`` is under the task's control directory, which no task can
     write: the daemon writes here, and a destination the model could reach
@@ -617,29 +632,25 @@ def stage_restricted_attachments(
     mount = config.workspace_path
     if not attachments or not mount:
         return attachments
-    try:
-        roots = [(Path(mount) / "Talk").resolve()]
-        if files_withheld:
-            own = scoped_user_dir(Path(mount) / "Users", user_id)
-            if own is not None:
-                roots.append(own.resolve())
-    except OSError:
-        return attachments
+    roots = [Path(mount) / "Talk"]
+    if files_withheld:
+        own = scoped_user_dir(Path(mount) / "Users", user_id)
+        if own is not None:
+            roots.append(own)
     staged: list[str] = []
     used: set[str] = set()
     for raw in attachments:
-        source = Path(raw)
-        try:
-            resolved = source.resolve()
-            inside = any(resolved.is_relative_to(root) for root in roots)
-            usable = inside and not source.is_symlink() and resolved.is_file()
-        except (OSError, ValueError):
-            usable = False
-        if not usable:
+        # Opened with no link followed below the root, and copied from that
+        # fd: the user's other tasks write `{mount}/Users/{user_id}`, so a
+        # resolve-then-open is a race they can win (ISSUE-610).
+        opened = open_attachment(raw, roots=roots)
+        if opened is None:
             staged.append(raw)
             continue
-        name = resolved.name
-        stem, suffix, n = resolved.stem, resolved.suffix, 1
+        src_fd, source = opened
+        leaf = Path(source.parts[-1])
+        name = leaf.name
+        stem, suffix, n = leaf.stem, leaf.suffix, 1
         while name in used:
             n += 1
             name = f"{stem}-{n}{suffix}"
@@ -649,13 +660,17 @@ def stage_restricted_attachments(
             dest_dir.mkdir(mode=0o700, exist_ok=True)
             dest.unlink(missing_ok=True)  # a retry's own earlier copy
             fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(fd, "wb") as out, open(resolved, "rb") as src:
-                shutil.copyfileobj(src, out)
+            try:
+                copy_fd(src_fd, fd)
+            finally:
+                os.close(fd)
         except OSError as exc:
             logger.warning("could not stage attachment %s for a restricted task: %s",
-                           resolved.name, exc)
+                           leaf.name, exc)
             staged.append(raw)
             continue
+        finally:
+            os.close(src_fd)
         staged.append(str(dest))
     return staged
 
@@ -7702,6 +7717,8 @@ def execute_task(
         user_id=task.user_id,
         mount_path=config.workspace_path,
         deferred_dir=user_temp_dir,
+        temp_dir=config.temp_dir,
+        control_dir=control_dir,
     )
     if enriched_prompt != task.prompt:
         logger.info("Pre-transcribed audio for task %s, enriched prompt for skill selection", task.id)
@@ -7727,6 +7744,7 @@ def execute_task(
             if effective_sandboxing(config)
             else None
         ),
+        temp_dir=config.temp_dir,
     )
     if image_prep.attachments is not task.attachments:
         # In memory only. Nothing writes this back, so a retry regenerates the
