@@ -1004,6 +1004,10 @@ class DaemonSandbox(NamedTuple):
     wrap: Callable[[list[str]], list[str]] | None
     work_dir: Path
     refused: bool = False
+    #: ``work_dir`` is a directory made for this call alone (a sandbox with
+    #: scopes withheld), and the caller removes it with
+    #: :func:`release_daemon_sandbox` once the model call is over.
+    scratch: bool = False
 
 
 def daemon_work_dir(config: Config | None, user_id: str) -> Path:
@@ -1165,14 +1169,38 @@ def build_daemon_sandbox(
     resource mounts, without ``developer`` no repos subtree and no derived
     cache (``resolve_sandbox_cache_dir`` drops it on the same argument, so the
     two gates stay one), and with anything withheld no Talk bind and no
-    ``~/.claude`` session directories. It does **not** move the namespace to a
-    ``room-task-<id>`` directory: that choice is ``task_temp_dir``'s, made in
-    ``execute_task``, and this path binds its own ``work_dir`` either way.
+    ``~/.claude`` session directories.
+
+    **With anything withheld the work dir is a fresh one, not
+    ``{temp_dir}/{user_id}``.** That per-user directory is not a daemon-only
+    one: it is every task's temp dir, holding their downloads, staged
+    attachments and the deferred-op files the scheduler replays at the user's
+    full authority, so binding it read-write would undo the narrowing. The
+    fresh directory is ``{temp_dir}/.sandbox-work/{user_id}/work-<random>``,
+    ``0700``, a sibling of the per-user directories like ``.control`` and for
+    the same reason: the shared temp root is bound into no namespace, so no
+    task can plant a symlink at either level between the ``mkdir`` and the
+    bind. The result carries ``scratch=True`` and the caller removes it with
+    :func:`release_daemon_sandbox`; a daemon killed before that leaves it to
+    ``cleanup_old_temp_files``, which walks every directory under
+    ``temp_dir``, dotted ones included. Withholding scopes never moves the
+    namespace to a ``room-task-<id>`` directory: that choice is
+    ``task_temp_dir``'s, made only in ``execute_task``.
+
+    ``withheld_scopes`` as a bare ``str`` is refused: it would iterate to a
+    set of single characters, non-empty (so some binds drop) and missing
+    every real scope name (so the workspace stays bound).
 
     Never raises; a failure to read the user's resources costs the resource
     binds, not the wrap.
     """
     root, work_dir = _daemon_dirs(config, user_id)
+    if isinstance(withheld_scopes, str):
+        logger.error(
+            "daemon_sandbox_refused user_id=%r — withheld_scopes is a str, "
+            "not a set of scope names", user_id,
+        )
+        return DaemonSandbox(None, work_dir, refused=True)
     if not config.security.sandbox_enabled:
         return DaemonSandbox(None, work_dir)
     if work_dir == root or not work_dir.is_dir():
@@ -1183,6 +1211,18 @@ def build_daemon_sandbox(
             user_id, work_dir,
         )
         return DaemonSandbox(None, work_dir, refused=True)
+    withheld = frozenset(withheld_scopes)
+    scratch = False
+    if withheld:
+        try:
+            work_dir = _make_daemon_scratch_dir(root, user_id)
+        except (OSError, ValueError) as e:
+            logger.warning(
+                "daemon_sandbox_refused user_id=%r — no private work dir for "
+                "a namespace with scopes withheld: %s", user_id, e,
+            )
+            return DaemonSandbox(None, work_dir, refused=True)
+        scratch = True
 
     task = db.Task(
         id=0,
@@ -1203,7 +1243,6 @@ def build_daemon_sandbox(
         )
         user_resources = []
     is_admin = config.is_admin(user_id)
-    withheld = frozenset(withheld_scopes)
     binds: list[Path] = []
     for path in extra_ro_binds or []:
         try:
@@ -1218,7 +1257,54 @@ def build_daemon_sandbox(
             withheld_scopes=withheld,
         )
 
-    return DaemonSandbox(_wrap, work_dir)
+    return DaemonSandbox(_wrap, work_dir, scratch=scratch)
+
+
+#: The root of the private work dirs :func:`build_daemon_sandbox` makes for a
+#: namespace with scopes withheld. A sibling of the per-user temp dirs.
+DAEMON_SCRATCH_DIR_NAME = ".sandbox-work"
+
+
+def _make_daemon_scratch_dir(root: Path, user_id: str) -> Path:
+    """``{root}/.sandbox-work/{user_id}/work-<random>``, 0700 at every level.
+
+    ``root`` is the resolved shared temp root and ``user_id`` one that
+    :func:`_daemon_dirs` already scoped to a single child of it. Both upper
+    levels go through :func:`_ensure_control_level` (``O_NOFOLLOW``, owner
+    check, mode re-asserted), and the leaf is ``mkdtemp``'s, created
+    ``O_EXCL``-style at 0700. A user id that casefolds to the root's own name
+    is refused for the reason :func:`get_task_control_dir` gives: that user's
+    model-writable temp dir would be this root. Raises ``OSError`` or
+    ``ValueError``.
+    """
+    if user_id.casefold() == DAEMON_SCRATCH_DIR_NAME.casefold():
+        raise ValueError(f"user id {user_id!r} names the scratch root")
+    base = root / DAEMON_SCRATCH_DIR_NAME
+    user_level = base / user_id
+    if user_level.parent != base:
+        raise ValueError(f"user id {user_id!r} is not one path component")
+    _ensure_control_level(base, parents=False)
+    _ensure_control_level(user_level, parents=False)
+    return Path(tempfile.mkdtemp(prefix="work-", dir=user_level))
+
+
+def release_daemon_sandbox(sandbox: DaemonSandbox) -> None:
+    """Remove the private work dir of a ``scratch`` sandbox. Never raises.
+
+    A no-op for any other sandbox: their ``work_dir`` is the shared per-user
+    directory and is not this call's to remove.
+    """
+    if not sandbox.scratch:
+        return
+    import shutil
+
+    try:
+        shutil.rmtree(sandbox.work_dir)
+    except OSError as e:
+        logger.warning(
+            "daemon_sandbox_release_failed work_dir=%s error=%s",
+            sandbox.work_dir, e,
+        )
 
 
 def get_user_repos_dir(config: Config, user_id: str) -> Path | None:
