@@ -9339,8 +9339,11 @@ def check_email_address_uniqueness(config: "Config", probe: bool) -> CheckResult
         name, WARN,
         f"{len(items)} address(es) held by more than one user: {shown}",
         remedy=(
-            "Remove each address from all but one holder, in that user's "
-            "settings or with `istota user ensure --name <user> --email ...`. "
+            "Remove each address from all but one holder. A routing address "
+            "goes from that user's settings, or from their `istota_users` "
+            "inventory entry (`istota user ensure --email`), or the next "
+            "deploy restores it; a holder marked (login) changes or removes "
+            "the login on the admin Users page or with `istota auth remove`. "
             "Mail to a shared address routes to whichever holder is found first."
         ),
         scope=DEPLOYMENT,

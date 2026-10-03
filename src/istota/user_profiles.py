@@ -268,6 +268,27 @@ def _rows_or_none(
         return None
 
 
+def _email_holdings(conn: sqlite3.Connection) -> dict[str, dict[str, set[str]]]:
+    """Case-folded address -> holder -> how they hold it (``address``/``login``)."""
+    from istota.webui.auth import normalize_email
+
+    holdings: dict[str, dict[str, set[str]]] = {}
+    for row in _rows_or_none(
+        conn, "SELECT user_id, email_addresses FROM user_profiles",
+    ) or []:
+        for address in _parse_json_list(row[1]):
+            key = normalize_email(address)
+            if key:
+                holdings.setdefault(key, {}).setdefault(row[0], set()).add("address")
+    for row in _rows_or_none(
+        conn, "SELECT user_id, email FROM web_auth_identities",
+    ) or []:
+        key = normalize_email(row[1] or "")
+        if key:
+            holdings.setdefault(key, {}).setdefault(row[0], set()).add("login")
+    return holdings
+
+
 def email_address_holders(conn: sqlite3.Connection) -> dict[str, set[str]]:
     """Every case-folded address mapped to the users who hold it.
 
@@ -277,32 +298,28 @@ def email_address_holders(conn: sqlite3.Connection) -> dict[str, set[str]]:
     belongs to another is never intended, so a login email held by somebody
     else is a holder too.
     """
-    from istota.webui.auth import normalize_email
-
-    holders: dict[str, set[str]] = {}
-    for row in _rows_or_none(
-        conn, "SELECT user_id, email_addresses FROM user_profiles",
-    ) or []:
-        for address in _parse_json_list(row[1]):
-            key = normalize_email(address)
-            if key:
-                holders.setdefault(key, set()).add(row[0])
-    for row in _rows_or_none(
-        conn, "SELECT user_id, email FROM web_auth_identities",
-    ) or []:
-        key = normalize_email(row[1] or "")
-        if key:
-            holders.setdefault(key, set()).add(row[0])
-    return holders
+    return {
+        address: set(holders)
+        for address, holders in _email_holdings(conn).items()
+    }
 
 
 def duplicate_email_addresses(conn: sqlite3.Connection) -> dict[str, list[str]]:
-    """Addresses more than one user holds, each with its sorted holders."""
-    return {
-        address: sorted(users)
-        for address, users in sorted(email_address_holders(conn).items())
-        if len(users) > 1
-    }
+    """Addresses more than one user holds, each with its sorted holders.
+
+    A holder whose only claim is the login email is labelled ``<user> (login)``,
+    because the fix differs: a routing address is removed from the profile, a
+    login email through the admin Users page or `istota auth`.
+    """
+    out: dict[str, list[str]] = {}
+    for address, holders in sorted(_email_holdings(conn).items()):
+        if len(holders) < 2:
+            continue
+        out[address] = [
+            f"{user} (login)" if kinds == {"login"} else user
+            for user, kinds in sorted(holders.items())
+        ]
+    return out
 
 
 def find_identity_conflicts(

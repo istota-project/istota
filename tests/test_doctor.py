@@ -6234,6 +6234,22 @@ class TestEmailAddressUniqueness:
         assert "carol" not in result.detail
         assert result.remedy
 
+    def test_a_login_holder_is_labelled(self, make_config, tmp_path):
+        from istota import db as db_module, user_profiles
+        from istota.webui import auth as web_auth
+
+        db_path = tmp_path / "login.db"
+        db_module.init_db(db_path)
+        for user_id in ("alice", "carol"):
+            user_profiles.ensure_profile(db_path, user_id)
+        user_profiles.update_profile(
+            db_path, "alice", email_addresses=["x@example.com"],
+        )
+        web_auth.upsert_identity(db_path, "carol", "x@example.com")
+        [result] = self._run(make_config(db_path=db_path))
+        assert result.status == WARN
+        assert "x@example.com (alice, carol (login))" in result.detail
+
     def test_skips_without_a_database(self, make_config, tmp_path):
         [result] = self._run(make_config(db_path=tmp_path / "absent.db"))
         assert result.status == SKIP

@@ -176,5 +176,5 @@ class TestDuplicateAddresses:
         web_auth.upsert_identity(db_path, "carol", "shared@example.com")
         with db.get_db(db_path) as conn:
             assert duplicate_email_addresses(conn) == {
-                "shared@example.com": ["alice", "bob", "carol"],
+                "shared@example.com": ["alice", "bob", "carol (login)"],
             }
