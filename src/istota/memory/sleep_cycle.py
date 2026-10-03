@@ -213,12 +213,9 @@ def _run_sleep_cycle_brain(
         sandbox_wrap=None,
         result_file=None,
     )
-    # The call runs for up to minutes. A write the caller left pending (facts,
-    # chunks, state) would otherwise hold the database's write lock across it,
-    # and every other writer fails at its busy timeout. Each sleep-cycle step
-    # is best-effort on its own, so committing here splits no unit of work.
-    if conn is not None and conn.in_transaction:
-        conn.commit()
+    # The call runs for up to minutes; a pending write would hold the lock
+    # across it.
+    _release_write_lock(conn)
     try:
         primary_started_at = time.time()
         primary_started_monotonic = time.monotonic()
@@ -997,6 +994,9 @@ def process_user_sleep_cycle(
     # And it is before the early returns rather than at the end: a user with
     # no interactions in the window leaves this function within a few lines,
     # and that user's sidecars would never be reached.
+    # The previous user's pass can leave writes pending on this same `conn`,
+    # and the sidecar import opens a connection of its own.
+    _release_write_lock(conn)
     try:
         from .curation.audit import migrate_user_md_sidecars
         migrate_user_md_sidecars(config, user_id)
@@ -1486,6 +1486,19 @@ def _post_curation_summary(
         logger.debug("curation summary post failed for %s: %s", user_id, e)
 
 
+def _release_write_lock(conn: "db.sqlite3.Connection | None") -> None:
+    """Commit whatever the caller left pending on `conn`.
+
+    A sleep-cycle write left open holds the database's write lock, and every
+    other writer fails at its busy timeout: across a brain call that runs for
+    minutes, and against the curation audit helpers, which open a connection
+    of their own in this same process (ISSUE-603). Each sleep-cycle step is
+    best-effort on its own, so committing here splits no unit of work.
+    """
+    if conn is not None and conn.in_transaction:
+        conn.commit()
+
+
 def curate_user_memory(
     config: Config, user_id: str, conn: "db.sqlite3.Connection | None" = None
 ) -> bool:
@@ -1529,6 +1542,10 @@ def curate_user_memory(
     if not config.has_workspace:
         logger.warning("USER.md curation requires mount mode, skipping for %s", user_id)
         return False
+
+    # The audit, last-seen and lint-seen writes below each open their own
+    # connection, which waits on a lock `conn` holds.
+    _release_write_lock(conn)
 
     # `config/` is resolved **once**, here, and every later read and write in
     # this function goes through the path derived from it (ISSUE-339). Resolving
@@ -1804,6 +1821,8 @@ def curate_user_memory(
         except Exception as e:
             logger.debug("USER.md re-index failed for %s: %s", user_id, e)
 
+    # The summary's web-room mirror opens a writer connection of its own.
+    _release_write_lock(conn)
     if getattr(config.sleep_cycle, "curation_log_summary", True):
         _post_curation_summary(config, user_id, applied, rejected)
 
