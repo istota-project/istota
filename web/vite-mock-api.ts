@@ -4086,6 +4086,123 @@ const mockAdminUsers: AdminUsers = {
   orphans: [],
 };
 
+// One user's settings for the admin editor (`GET`/`PATCH /admin/users/{id}`,
+// `.../whatsapp/reset`, `PUT .../identity`). Carol's email addresses are
+// managed, so the editor's locked state can be seen.
+const mockAdminUserProfiles: Record<string, Record<string, unknown>> = {};
+const mockAdminUserWhatsApp: Record<string, { number: string; enrolled: boolean }> = {
+  bob: { number: '+15550100002', enrolled: true },
+};
+const mockAdminUserDetail = (userId: string) => {
+  const row = mockAdminUsers.users.find((row) => row.user_id === userId);
+  if (!row) return undefined;
+  const profile = (mockAdminUserProfiles[userId] ??= {
+    display_name: row.display_name,
+    timezone: 'Europe/Warsaw',
+    email_addresses: row.identity ? [row.identity.email] : [],
+    trusted_email_senders: [],
+    quiet_email_senders: [],
+    outbound_approval: '',
+    disabled_skills: [],
+    disabled_modules: [],
+    default_briefings: true,
+    max_foreground_workers: 0,
+    max_background_workers: 0,
+    sms_phone_number: userId === 'bob' ? '+15550100002' : '',
+  });
+  const whatsapp = mockAdminUserWhatsApp[userId];
+  return {
+    user_id: userId,
+    is_admin: row.is_admin,
+    identity: row.identity ? { ...row.identity, state: row.state } : null,
+    profile,
+    channels: { log_channel: userId === 'carol' ? 'logtoken' : '', alerts_channel: '' },
+    whatsapp: {
+      number: whatsapp?.number ?? '',
+      status: !whatsapp ? 'unbound' : whatsapp.enrolled ? 'enrolled' : 'awaiting_first_message',
+      identity: whatsapp?.enrolled ? '3f2a9c1b7d4e' : null,
+      provider: whatsapp?.enrolled ? 'baileys' : null,
+      last_seen_at: whatsapp?.enrolled ? new Date().toISOString() : null,
+    },
+    managed: userId === 'carol' ? ['email_addresses'] : [],
+    options: {
+      modules: ['briefings', 'feeds', 'health', 'location', 'money'],
+      skills: ['browse', 'calendar', 'developer', 'email', 'files', 'whisper'],
+      outbound_approval: ['', 'off', 'untrusted', 'all'],
+      outbound_approval_floor: 'untrusted',
+      email_enabled: true,
+      email_login_enabled: true,
+      sms_enabled: true,
+      whatsapp_enabled: true,
+    },
+  };
+};
+
+const adminUserDetailHandler: MockHandler = ({ url, method, body }) => {
+  const match = url.match(/^\/istota\/api\/admin\/users\/([^/]+)(\/identity|\/whatsapp\/reset)?$/);
+  if (!match) return undefined;
+  const userId = decodeURIComponent(match[1]);
+  const isDetail = !match[2] && (method === 'GET' || method === 'PATCH');
+  const isReset = match[2] === '/whatsapp/reset' && method === 'POST';
+  const isIdentity = match[2] === '/identity' && method === 'PUT';
+  if (!isDetail && !isReset && !isIdentity) return undefined;
+  const detail = mockAdminUserDetail(userId);
+  if (!detail) return { __status: 404, detail: 'No profile for this user.' };
+  if (method === 'GET') return detail;
+  if (isReset) {
+    const whatsapp = mockAdminUserWhatsApp[userId];
+    if (!whatsapp) return { __status: 400, detail: 'No WhatsApp binding for this user.' };
+    whatsapp.enrolled = false;
+    return mockAdminUserDetail(userId);
+  }
+  if (isIdentity) {
+    const email = String(body?.email ?? '')
+      .trim()
+      .toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+$/.test(email))
+      return { __status: 400, detail: 'Enter a valid email address.' };
+    const row = mockAdminUsers.users.find((row) => row.user_id === userId)!;
+    row.identity = { email, disabled: false, last_login_at: row.identity?.last_login_at ?? null };
+    if (row.state === 'nextcloud_only') row.state = 'passwordless';
+    const managed = detail.managed.includes('email_addresses');
+    const addresses = detail.profile.email_addresses as string[];
+    if (body?.add_to_addresses && !managed && !addresses.includes(email)) addresses.push(email);
+    const next = mockAdminUserDetail(userId)!;
+    return body?.add_to_addresses && managed ? { ...next, addresses_skipped: 'managed' } : next;
+  }
+  const patch = (body ?? {}) as Record<string, unknown>;
+  const refused = Object.keys(patch).filter((key) => detail.managed.includes(key));
+  if (refused.length)
+    return {
+      __status: 409,
+      error: 'managed_by_provisioning',
+      fields: refused,
+      detail: 'These fields are set by the deployment and would be overwritten on the next deploy.',
+    };
+  for (const [key, value] of Object.entries(patch)) {
+    if (
+      (key === 'sms_phone_number' || key === 'whatsapp_number') &&
+      value !== '' &&
+      !/^\+[1-9][0-9]{7,14}$/.test(String(value))
+    )
+      return {
+        __status: 400,
+        error: 'invalid_field',
+        fields: [key],
+        detail: 'Must be exact E.164.',
+      };
+  }
+  const { whatsapp_number: whatsappNumber, ...profileFields } = patch;
+  Object.assign(mockAdminUserProfiles[userId], profileFields);
+  if (typeof whatsappNumber === 'string') {
+    const current = mockAdminUserWhatsApp[userId];
+    if (!whatsappNumber) delete mockAdminUserWhatsApp[userId];
+    else if (current?.number !== whatsappNumber)
+      mockAdminUserWhatsApp[userId] = { number: whatsappNumber, enrolled: false };
+  }
+  return mockAdminUserDetail(userId);
+};
+
 const adminUsersHandler: MockHandler = ({ url, method, body }) => {
   if (url === '/istota/api/admin/users') {
     if (method === 'GET') return mockAdminUsers;
@@ -4143,6 +4260,7 @@ const handlers: MockHandler[] = [
   chatFilesHandler,
   chatHandler,
   notificationsHandler,
+  adminUserDetailHandler,
   adminUsersHandler,
 
   ({ url }) =>
