@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A shared room no longer presents itself as the host's bot.** The room's announcement now says the bot acts for each member when that member asks, and says what happens to anyone else's messages under the room's guest-reply setting. The opening is in the default persona's voice; a deployment with its own persona can replace it with `config/room-announcement.md` (`{BOT_NAME}`, `{BOT_DIR}`, `{HOST}`), and the guest and off-switch sentences always follow. Rooms already announced are not announced again (ISSUE-602).
+
 ### Fixed
 
+- **The bot no longer invents approval rules when asked how a shared room works.** The room card now states the room's rule on every turn: each member's turn runs as that member, a confirmation goes to the asker's own side room, and what happens to a guest's message under the room's guest-reply setting (ISSUE-602).
 - The nightly sleep cycle no longer locks the database for about 90 seconds. With `USER.md` curation on, it left its own cleanup writes uncommitted while the curation audit opened a second connection and waited on them, three times in a row, and every other writer in the deployment failed with `database is locked` in that window. Because those audit writes failed, the curator also never remembered which dated `USER.md` bullets it had already flagged, so the same ones came back every night.
 - A scheduled feeds poll no longer fails the task when every feed it polled errored. A run often polls just one due feed, so one dead feed failed the whole task, which was retried a minute later and found nothing due. The run now reports `partial_error` with each feed's error, as it already did when only some feeds failed, and the dead feed shows its error on the feed itself. A run in which every feed was rate-limited still fails.
 

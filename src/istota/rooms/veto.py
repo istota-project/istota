@@ -46,6 +46,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from pathlib import Path
 from dataclasses import dataclass
 
 from istota import db
@@ -354,26 +355,100 @@ def needs_announcement(conn, room_token: str) -> bool:
     return guest is not None and _host(conn, room_token) is not None
 
 
+ANNOUNCEMENT_FILE = "room-announcement.md"
+_ANNOUNCEMENT_OPENING_MAX = 800
+
+# In the default persona's voice (`config/persona.md`). An operator with a
+# different persona overrides it with `config/room-announcement.md`.
+DEFAULT_ANNOUNCEMENT_OPENING = (
+    "Hello. I'm {BOT_NAME}, this room's resident octopus. I work for the members "
+    "here: when one of you asks me something, I act for you, with your own access "
+    "and no one else's. I read along so I can help when asked."
+)
+
+
+def _announcement_opening(config) -> str:
+    """The operator's opening from `config/`, else the default.
+
+    Read from the deployment's config directory and never from a user's
+    workspace: a user's files are writable from their sandbox, and this is read
+    by everyone in a room that user may not host.
+    """
+    skills_dir = getattr(config, "skills_dir", None)
+    if skills_dir is not None:
+        try:
+            text = (Path(skills_dir).parent / ANNOUNCEMENT_FILE).read_text()
+        except (OSError, UnicodeDecodeError, ValueError):
+            text = ""
+        if text.strip():
+            return text
+    return DEFAULT_ANNOUNCEMENT_OPENING
+
+
+def _one_line(text: str, limit: int) -> str:
+    """Whitespace collapsed, every line break Python knows included, then capped
+    on a word boundary. Markup is kept: it is the operator's own text."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0] or text[:limit]
+    return f"{cut}…"
+
+
+def _guest_sentence(conn, room_token: str, who: str) -> str:
+    """What happens to a guest's message, from the room's `guest_reply`."""
+    policy = room_policy.get_policy(conn, room_token)
+    if policy is not None:
+        mode = policy.guest_reply
+    else:
+        room = db.get_room(conn, room_token)
+        mode = room_policy.default_guest_reply(room.origin if room else None)
+    if mode == room_policy.OFF:
+        return "Messages from anyone else I record but don't answer."
+    if mode == room_policy.DIRECT:
+        return (f"Anyone else I answer on {who}'s behalf, since it's their room, "
+                "and for them I'll do nothing beyond a reply.")
+    return (f"Anyone else I answer on {who}'s behalf, since it's their room: {who} "
+            "sees each of those replies before I post it, and I'll do nothing "
+            "beyond it.")
+
+
+def _announcement_closing(conn, config, room_token: str) -> str:
+    """The off switch and the way back. Fixed, so an opening cannot drop it, and
+    the stable part `note_email_notice_sent` recognises a sent notice by."""
+    word = command_word(config)
+    how = f"send `!{word} off`"
+    if db.get_room_binding(conn, room_token, "whatsapp") is not None:
+        how += " (or remove my number from the group)"
+    elif db.get_room_binding(conn, room_token, "email") is not None:
+        how = f"reply with `!{word} off` as the first line"
+    return (
+        f"If you'd rather I didn't, {how} and I'll record nothing here until a "
+        f"member sends `!{word} on` and everyone who switched me off agrees."
+    )
+
+
 def announcement_text(conn, config, room_token: str) -> str:
-    """The fixed announcement, from the room's tables and the deployment's names."""
+    """The announcement: an overridable opening, then two fixed sentences.
+
+    The opening says who the bot is; the guest sentence and the closing are
+    facts about the room (its `guest_reply`, its off switch) and always render.
+    The whole is one line, so an opening cannot forge a closing of its own.
+    """
     host = _host(conn, room_token)
     user = getattr(config, "users", {}).get(host) if host else None
     from istota.confirmations import flatten
 
     who = flatten(getattr(user, "display_name", None) or host or "") or "this room's host"
-    word = command_word(config)
-    how = f"sending `!{word} off`"
-    if db.get_room_binding(conn, room_token, "whatsapp") is not None:
-        how += " or removing my number from the group"
-    elif db.get_room_binding(conn, room_token, "email") is not None:
-        how = f"replying with `!{word} off` as the first line"
-    return (
-        f"Hello, I'm {_bot(config)}, an AI assistant working for {who}. I read this "
-        "conversation so I can help when I'm asked. Anyone here can switch me off "
-        f"for this room by {how}. I then record nothing here until a member "
-        f"switches me back on with `!{word} on` and everyone who switched me off "
-        "agrees."
+    opening = (
+        _announcement_opening(config)
+        .replace("{BOT_NAME}", _bot(config))
+        .replace("{BOT_DIR}", getattr(config, "bot_dir_name", "") or "")
+        .replace("{HOST}", who)
     )
+    opening = _one_line(opening, _ANNOUNCEMENT_OPENING_MAX)
+    guest = _guest_sentence(conn, room_token, who)
+    return f"{opening} {guest} {_announcement_closing(conn, config, room_token)}"
 
 
 def _claim_announcements(config, limit: int) -> list[dict]:
@@ -517,7 +592,7 @@ def _email_notice(conn, config, room_token: str) -> str | None:
 def with_email_notice(conn, config, room_token: str | None, body: str) -> str:
     """``body`` with the announcement after it, while the thread is owed it."""
     notice = _email_notice(conn, config, room_token) if room_token else None
-    if not notice or notice in body:
+    if not notice or _announcement_closing(conn, config, room_token) in body:
         return body
     return f"{body}\n\n--\n{notice}"
 
@@ -526,8 +601,12 @@ def note_email_notice_sent(conn, config, room_token: str | None, body: str) -> N
     """A mail carrying the announcement went out: the thread has been told."""
     if not room_token:
         return
-    notice = _email_notice(conn, config, room_token)
-    if notice and notice in body:
+    # Matched on the fixed closing rather than the whole notice: a held guest
+    # proposal carries text composed when it was proposed, and the opening, the
+    # host's name or `guest_reply` can change before it is sent.
+    if not needs_announcement(conn, room_token):
+        return
+    if _announcement_closing(conn, config, room_token) in body:
         room_policy.ensure_policy(conn, room_token)
         conn.execute(
             "UPDATE room_policy SET announced_at = datetime('now') "
