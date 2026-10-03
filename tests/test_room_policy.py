@@ -467,9 +467,11 @@ class TestGuestReplyThroughTheScheduler:
         assert row["state"] == "queued"
         asyncio.run(private_replies.deliver_request(config, row))
         with db.get_db(config.db_path) as conn:
-            posted = [r["body"] for r in conn.execute(
-                "SELECT body FROM messages WHERE room_token = 'grp' AND role = 'system'")]
-        assert posted == [REPLY]
+            posted = [(r["body"], r["task_id"]) for r in conn.execute(
+                "SELECT body, task_id FROM messages WHERE room_token = 'grp' "
+                "AND role = 'assistant'")]
+        # The bot's answer to the guest's turn (ISSUE-612), on the guest's task.
+        assert posted == [(REPLY, ident)]
 
     def test_the_room_keeps_no_ack_and_a_watching_client_still_finishes(
         self, tmp_path, monkeypatch, fake_talk,

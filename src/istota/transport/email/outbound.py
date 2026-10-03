@@ -471,11 +471,56 @@ def composed_email_body(config: "Config", task: db.Task, result: str) -> str:
     return result
 
 
+#: Display cap on a recorded subject: it comes from an inbound header.
+_MAIL_SUBJECT_MAX_CHARS = 200
+
+
+def _stamp_thread_mail(
+    config: "Config", message_id: int | None, plan: "email_threads.ReplyAll", *,
+    subject: str, body: str, state: str, draft_id: int | None = None,
+) -> None:
+    """Record on the room's row what became of the mail it sent (ISSUE-612).
+
+    Best-effort: the card is a view of the send, and failing the send because
+    the view could not be written would be the worse outcome.
+    """
+    if message_id is None:
+        return
+    mail = {"to": [plan.to], "cc": list(plan.cc),
+            "subject": (subject or "")[:_MAIL_SUBJECT_MAX_CHARS], "state": state}
+    if draft_id is not None:
+        mail["draft_id"] = draft_id
+    try:
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute("SELECT body FROM messages WHERE id = ?",
+                               (message_id,)).fetchone()
+            if row is None:
+                return
+            if db.mailed_body_differs(row["body"], body):
+                mail["body"] = body
+            db.set_outgoing_mail(conn, message_id, mail)
+    except Exception as e:  # noqa: BLE001 — see the docstring
+        logger.warning("Could not record the thread mail on message %s: %s", message_id, e)
+
+
+def record_unsent_post(config: "Config", message_id: int | None) -> None:
+    """Mark a room post's card as not sent, when the send stopped before it knew
+    its recipients. Never raises, like the stamp."""
+    if message_id is None:
+        return
+    try:
+        with db.get_db(config.db_path) as conn:
+            db.set_outgoing_mail(conn, message_id, {"to": [], "cc": [], "state": "failed"})
+    except Exception as e:  # noqa: BLE001 — the card is a view of the send
+        logger.warning("Could not record the unsent thread post %s: %s", message_id, e)
+
+
 async def _send_thread_reply(
     config: "Config", task: db.Task, plan: "email_threads.ReplyAll", *,
     subject: str, body: str, content_type: str = "plain",
     html_body: str | None = None, room_token: str | None = None,
     consume: bool = True, approved: bool = False,
+    message_id: int | None = None,
 ) -> bool:
     """Reply-all on an email thread room's thread, through the outbound gate.
 
@@ -484,11 +529,13 @@ async def _send_thread_reply(
     email output once accounted for; a room post carries its own body and
     leaves the task's file alone. ``approved`` is a send the user already
     approved, body and recipients both (D20), which the gate does not hold a
-    second time.
+    second time. ``message_id`` is the room's row for this mail, stamped with
+    its recipients and outcome so web chat shows it as a sent mail.
 
     The operator's disclosure footer, when turned on, goes on here so every
     mail into the thread carries it, a held draft included (ISSUE-605).
     """
+    mailed = body
     if content_type == "plain":
         try:
             with db.get_db(config.db_path) as conn:
@@ -508,9 +555,15 @@ async def _send_thread_reply(
             html=content_type == "html", in_reply_to=plan.in_reply_to,
             references=plan.references, room_token=room_token,
         )
+    def stamp(state: str, draft: int | None = None) -> None:
+        _stamp_thread_mail(config, message_id, plan, subject=held_subject,
+                           body=mailed, state=state, draft_id=draft)
+
     if not may_send:
         if draft_id is None:
+            stamp("failed")
             return False
+        stamp("held", draft_id)
         if consume:
             _consume_deferred_email_output(config, task)
         return True
@@ -525,7 +578,9 @@ async def _send_thread_reply(
         )
     except Exception as e:
         logger.error("Failed to send the thread reply-all (task %s): %s", task.id, e)
+        stamp("failed")
         return False
+    stamp("sent")
     # Every recipient, so a Cc'd correspondent's reply reads as one the bot
     # wrote to (`thread_reply_from_correspondent` parses this as an address list).
     _record_sent_email(
@@ -543,9 +598,11 @@ def recipients_of(plan: "email_threads.ReplyAll") -> dict:
 
 async def deliver_thread_post(
     config: "Config", *, task_id: int, room_token: str, body: str,
-    approved_recipients: dict | None = None,
+    approved_recipients: dict | None = None, message_id: int | None = None,
 ) -> bool:
     """An approved `room post` into an email thread room, as a reply-all.
+
+    ``message_id`` is the post's row in the room, which records the mail.
 
     The post's approval was for its text and its room; the recipients are the
     thread's latest people at send time, and the outbound gate decides whether
@@ -564,6 +621,7 @@ async def deliver_thread_post(
         logger.warning(
             "room post into email thread %s: nothing to reply to; not sent", room_token,
         )
+        record_unsent_post(config, message_id)
         return False
     approved = (
         approved_recipients is not None
@@ -573,7 +631,7 @@ async def deliver_thread_post(
     )
     return await _send_thread_reply(
         config, task, plan, subject=plan.subject, body=body, room_token=room_token,
-        consume=False, approved=approved,
+        consume=False, approved=approved, message_id=message_id,
     )
 
 
@@ -724,6 +782,13 @@ async def deliver_email_result(
         host_asked = thread_reply is not None and email_threads.host_asked(
             conn, config, thread_room, task, thread_reply,
         )
+        # The answer the scheduler already stored in the room, which the mail
+        # is recorded on. None where the room holds no copy of this exchange
+        # (ISSUE-255), and then no row is created for it here.
+        answer_row = conn.execute(
+            "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
+            "AND role = 'assistant'", (thread_room, task.id),
+        ).fetchone() if thread_reply is not None else None
 
     if thread_reply is not None:
         # An email thread room (multiplayer D6): a reply-all to the latest
@@ -732,6 +797,9 @@ async def deliver_email_result(
         return await _send_thread_reply(
             config, task, thread_reply, subject=subject, body=body_text,
             content_type=content_type, html_body=html_body, approved=host_asked,
+            # The thread's room, so a held draft is filed where its card is.
+            room_token=thread_room,
+            message_id=answer_row["id"] if answer_row is not None else None,
         )
 
     if processed_email:

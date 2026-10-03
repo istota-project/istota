@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Upgrade note:** on Baileys, voice notes need the new sidecar, so rebuild and redeploy it with the full Ansible play. Updating the daemon first is safe: until the sidecar is replaced, a voice note gets the unsupported reply as it does today. The Cloud adapter needs nothing beyond the daemon update.
 
+- **A mail the bot sends into an email thread room shows in web chat as the bot's message with an outgoing-mail card** (ISSUE-612): who it went to, the subject, and whether it was sent, held as a draft, not sent or discarded. It covers an ordinary answer, an approved `room post` and an approved guest reply, which now answers the guest's turn in the room's history; an approved post into a Talk room or WhatsApp group is the bot's message too. The card shows a later state, such as a held draft being released, after a reload.
+
 ### Changed
 
 - **Side rooms are gone; what a shared room has for you alone now goes to your own private chat with the bot.** Private answers, notes, confirmations and held guest replies land in the private room you already have on web, Talk or WhatsApp, or in the notification bell when you have none, and replying to or quoting one lets you post into the shared room after approving the exact text. Your private notes about a room are now "My notes", edited from the web room menu or your private chat and listed with `!room notes` (ISSUE-608).

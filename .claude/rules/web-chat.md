@@ -155,6 +155,10 @@ Console at `/chat`. Rooms are per-user channel tokens in `web_chat_rooms`, each 
 
 `_chat_room_messages` merges failed/cancelled `tasks` so error bubbles render, banded on `_AUX_TURN_TS` (user spine row's `created_at`, else the task's), since the task stamp can precede its row by a second. Sargable companions `_AUX_TS_ABOVE` / `_AUX_TS_BELOW` (one hour slack) keep the index. A turn tying the floor second can still split pages.
 
+### Outgoing mail (ISSUE-612)
+
+An assistant row carrying `messages.outgoing_mail` publishes `mail` (`to`, `cc`, `subject`, `state`, and `body` capped at `_MAIL_BODY_MAX_CHARS`) through `_assistant_message_dict`, which every producer shares; `Message.svelte` renders the answer as usual and an outgoing-mail card under it, the counterpart of the external treatment below. The state is written after the send and the room stream carries new rows only, so a card on screen shows a later state (a released draft) after a reload, and a live room post first arrives as a plain bot message. Moving the state live needs an update frame the stream does not have.
+
 ### External turns
 
 - `origin_surface` and `subject` are in both `db._CROSS_ROOM_COLUMNS` and `webui.app._SPINE_COLUMNS`, published by `_user_row_display`; subject capped by `_SUBJECT_MAX_CHARS`; an empty parsed body publishes empty `text`.

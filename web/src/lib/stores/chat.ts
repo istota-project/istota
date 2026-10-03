@@ -2707,6 +2707,16 @@ function createSession(): ChatSession {
       aboutRoom: m.about_room?.token
         ? { token: m.about_room.token, name: m.about_room.name ?? null }
         : undefined,
+      mail:
+        m.role === 'assistant' && m.mail
+          ? {
+              to: m.mail.to ?? [],
+              cc: m.mail.cc ?? [],
+              subject: m.mail.subject || undefined,
+              state: m.mail.state,
+              body: m.mail.body || undefined,
+            }
+          : undefined,
       // Persisted server-side, so the chip survives leaving the room and
       // coming back (the composer's names are long gone by then).
       attachments: m.attachments?.length ? m.attachments : undefined,
@@ -3103,8 +3113,10 @@ function createSession(): ChatSession {
       // rows. The band tiling already prevents overlap; this guards a
       // created_at tie straddling the page boundary.
       const haveTask = new Set<string>();
+      const haveMsg = new Set<number>();
       for (const m of get(messages)) {
         if (typeof m.taskId === 'number') haveTask.add(`${m.role}:${m.taskId}`);
+        if (typeof m.msgId === 'number') haveMsg.add(m.msgId);
       }
       const fresh = hist.messages.filter((m) => {
         if (typeof m.notif_id === 'number') {
@@ -3113,6 +3125,8 @@ function createSession(): ChatSession {
           return true;
         }
         if (typeof m.task_id === 'number') return !haveTask.has(`${m.role}:${m.task_id}`);
+        // A taskless bot row (an approved room post, ISSUE-612) has only its id.
+        if (typeof m.msg_id === 'number') return !haveMsg.has(m.msg_id);
         return true;
       });
       const page = fresh.map(buildHistoryMessage);

@@ -2973,6 +2973,20 @@ export interface ChatHistoryMessage {
   // private room. `name` is null when the viewer is no longer in that room,
   // and the chip then names nothing and opens nothing.
   about_room?: { token: string; name: string | null };
+  // Assistant rows only: the mail this answer sent into an email thread room
+  // (ISSUE-612). `body` is present only when the mailed text differs from
+  // `text`.
+  mail?: OutgoingMail;
+}
+
+export type OutgoingMailState = 'sent' | 'held' | 'failed' | 'discarded';
+
+export interface OutgoingMail {
+  to: string[];
+  cc: string[];
+  subject?: string;
+  state: OutgoingMailState;
+  body?: string;
 }
 
 /** Cross-room aggregate views (sidebar All / Unread / Starred). */
