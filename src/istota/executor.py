@@ -319,11 +319,14 @@ def _pre_transcribe_attachments(
     deferred_dir: "str | Path | None" = None,
     temp_dir: "str | Path | None" = None,
     control_dir: "str | Path | None" = None,
+    transcribed: list[str] | None = None,
 ) -> str:
     """Pre-transcribe audio attachments so skill selection sees real text.
 
     Returns an enriched prompt with transcribed text, or the original prompt
-    if no audio attachments or transcription fails.
+    if no audio attachments or transcription fails. Each attachment that
+    produced a non-empty transcript is appended to `transcribed`, as given,
+    so the scheduler can delete exactly those inbox copies (ISSUE-611).
 
     The transcript is *appended* to whatever the sender typed rather than
     replacing it: a voice memo can arrive alongside a written message ("have a
@@ -419,6 +422,8 @@ def _pre_transcribe_attachments(
             if result.get("status") == "ok" and result.get("text", "").strip():
                 text = result["text"].strip()
                 transcribed_parts.append(text)
+                if transcribed is not None:
+                    transcribed.append(audio_path)
                 logger.debug(
                     "Pre-transcribed %s: %s",
                     Path(audio_path).name,
@@ -7711,8 +7716,10 @@ def execute_task(
     # this function reads the mutated field any more — every consumer below
     # takes `effective_prompt` explicitly — so the implicit contract the
     # mutation used to carry is gone even though the assignment stays.
+    transcribed_audio: list[str] = []
     enriched_prompt = _pre_transcribe_attachments(
         task.attachments, task.prompt, cancel_check=_cancel_check,
+        transcribed=transcribed_audio,
         # The child is a skill CLI and scopes its path argument against these
         # (ISSUE-447). `config.workspace_path` is None on the mountless
         # shapes, where a web-chat upload lands under the per-user temp dir
@@ -7725,6 +7732,7 @@ def execute_task(
         temp_dir=config.temp_dir,
         control_dir=control_dir,
     )
+    task.transcribed_audio = tuple(transcribed_audio)
     if enriched_prompt != task.prompt:
         logger.info("Pre-transcribed audio for task %s, enriched prompt for skill selection", task.id)
         task.prompt = enriched_prompt

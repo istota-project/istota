@@ -2631,6 +2631,49 @@ class TestSchedulerDelivery:
         assert len(request.text) <= 1024
         assert request.text.endswith(f"Task #{task_id}. Reply YES or NO.")
 
+    @pytest.mark.parametrize("answer, status, kept", [
+        ("I need your confirmation before deleting the file.", "pending_confirmation", True),
+        ("Done.", "completed", False),
+    ], ids=["parked", "completed"])
+    def test_a_transcribed_voice_note_goes_only_when_the_task_completes(
+        self, tmp_path, monkeypatch, answer, status, kept,
+    ):
+        # ISSUE-611: a parked task's confirmed re-run transcribes from the file
+        # again, so only completion deletes it. The completed case is the
+        # control that this setup can delete at all.
+        from istota.scheduler import process_one_task
+
+        config = _config(tmp_path)
+        config.workspace_path = tmp_path / "mount"
+        note = config.workspace_path / "Users" / "alice" / "inbox" / "whatsapp_v.ogg"
+        note.parent.mkdir(parents=True)
+        note.write_bytes(b"OggS")
+        _bind(config)
+        client = _FakeClient()
+        monkeypatch.setattr(
+            "istota.transport.whatsapp.client.make_client", lambda _config: client,
+        )
+
+        def fake_exec(task, *_args, **_kwargs):
+            task.transcribed_audio = tuple(task.attachments or [])
+            return (True, answer, None, None)
+
+        monkeypatch.setattr("istota.scheduler.execute_task", fake_exec)
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Voice message (see attached audio).",
+                user_id="alice", source_type="whatsapp",
+                conversation_token=whatsapp_conversation_token("alice"),
+                output_target="whatsapp",
+                attachments=["/Users/alice/inbox/whatsapp_v.ogg"],
+            )
+
+        assert process_one_task(config) == (task_id, True)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == status
+        assert note.exists() is kept
+
     def test_a_confirmation_parks_and_carries_yes_and_no_buttons(
         self, tmp_path, monkeypatch,
     ):
