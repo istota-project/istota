@@ -7460,6 +7460,44 @@ def _assistant_message_dict(row, text: str, status: str, *, confirmation: bool =
     if msg_id is not None:
         out["msg_id"] = msg_id
         out["starred"] = bool(_row_get(row, "starred"))
+    mail = _outgoing_mail_field(_row_get(row, "outgoing_mail"))
+    if mail is not None:
+        out["mail"] = mail
+    return out
+
+
+_MAIL_STATES = frozenset({"sent", "held", "failed", "discarded"})
+# The mailed text is a second copy beside the answer on the byte-budgeted
+# room-event stream, the reason the reply excerpt is capped in SQL.
+_MAIL_BODY_MAX_CHARS = 4000
+
+
+def _outgoing_mail_field(raw) -> dict | None:
+    """A row's recorded thread mail as the card renders it (ISSUE-612).
+
+    Only the fields the card reads, so the draft id and anything a later writer
+    adds stay server-side. None for a row that sent no mail, or one whose
+    record cannot be read, which then renders as a plain answer.
+    """
+    if not raw:
+        return None
+    try:
+        mail = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(mail, dict) or mail.get("state") not in _MAIL_STATES:
+        return None
+    out = {
+        "to": [a for a in mail.get("to") or [] if isinstance(a, str) and a],
+        "cc": [a for a in mail.get("cc") or [] if isinstance(a, str) and a],
+        "state": mail["state"],
+    }
+    if isinstance(mail.get("subject"), str) and mail["subject"]:
+        out["subject"] = mail["subject"]
+    body = mail.get("body")
+    if isinstance(body, str) and body:
+        out["body"] = (body if len(body) <= _MAIL_BODY_MAX_CHARS
+                       else body[:_MAIL_BODY_MAX_CHARS].rstrip() + "…")
     return out
 
 
@@ -7517,7 +7555,7 @@ _SPINE_COLUMNS = (
     # pieces precisely so the room tail and the history query cannot disagree
     # about what a reader sees.
     "  m.origin_surface AS origin_surface, "
-    "  m.about_room_token AS about_room_token, "
+    "  m.about_room_token AS about_room_token, m.outgoing_mail AS outgoing_mail, "
     # Truncated here rather than in the dict builder, matching the cross-room
     # fragment: no read path needs more of the parent than the excerpt cap.
     # The literal must track `_REPLY_EXCERPT_CHARS` below.

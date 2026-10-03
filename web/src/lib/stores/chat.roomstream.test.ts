@@ -284,6 +284,28 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  // ISSUE-612: a bot answer that went out as a mail into an email thread room
+  // carries the mail, which the message renders as an outgoing-mail card.
+  it('carries the mail a streamed answer sent into a thread', async () => {
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    const mail = { to: ['carol@example.com'], cc: [], subject: 'Re: Plans', state: 'sent' };
+    queueEvents([row(10, 't1', { text: 'Thursday works', mail } as Partial<Row>)], 10);
+    await vi.advanceTimersByTimeAsync(2000);
+    const shown = get(s.messages).find((m) => m.text === 'Thursday works');
+    expect(shown?.mail).toEqual({
+      to: ['carol@example.com'],
+      cc: [],
+      subject: 'Re: Plans',
+      state: 'sent',
+      body: undefined,
+    });
+    s.teardown();
+  });
+
   it('claiming a hostless room takes the new policy into the room record', async () => {
     const policy = { host: null, is_host: false, guest_reply: 'direct', settings_refusal: 'x' };
     api.getChatRooms.mockResolvedValue({ rooms: [{ ...room(1), shared: true, policy }] });

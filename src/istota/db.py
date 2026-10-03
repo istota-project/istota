@@ -1164,6 +1164,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_email_thread_members(conn)
     _migrate_groups(conn)
     _migrate_room_group(conn)
+    # ISSUE-612. Nothing to backfill: no earlier row recorded its mail.
+    _add_columns(conn, "messages", {"outgoing_mail": "TEXT"})
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
@@ -5949,6 +5951,55 @@ def store_turn_message(
     )
 
 
+def mailed_body_differs(row_body: str | None, mailed: str | None) -> bool:
+    """Whether a mail's text says something the row that shows it does not.
+
+    Exact, apart from a trailing `--` footer block, so the disclosure footer a
+    send appends (ISSUE-605) does not make every post carry its body twice.
+    """
+    row = (row_body or "").strip()
+    sent = (mailed or "").strip()
+    if sent == row:
+        return False
+    head, sep, _footer = sent.rpartition("\n\n--\n")
+    return not (sep and head.strip() == row)
+
+
+def set_outgoing_mail(conn: sqlite3.Connection, message_id: int, mail: dict) -> None:
+    """Record the mail a row sent into an email thread room (ISSUE-612).
+
+    Replaces the whole record, since each writer knows the mail's full state.
+    """
+    conn.execute("UPDATE messages SET outgoing_mail = ? WHERE id = ?",
+                 (json.dumps(mail), message_id))
+
+
+def settle_draft_mail(
+    conn: sqlite3.Connection, room_token: str | None, draft_id: int, *,
+    state: str, body: str | None = None,
+) -> None:
+    """Move the card of a held draft to ``state`` once the draft is decided.
+
+    ``body`` is what was finally mailed, recorded when it differs from the row
+    (an edited draft). A draft held outside an email thread room has no card,
+    and this does nothing. Filtered on the room so the read uses its index; the
+    thread send files the draft under the room it stamps.
+    """
+    if not room_token:
+        return
+    rows = conn.execute(
+        "SELECT id, body, outgoing_mail FROM messages WHERE room_token = ? "
+        "AND outgoing_mail IS NOT NULL AND json_extract(outgoing_mail, '$.draft_id') = ?",
+        (room_token, draft_id),
+    ).fetchall()
+    for row in rows:
+        mail = json.loads(row["outgoing_mail"])
+        mail["state"] = state
+        if body is not None and mailed_body_differs(row["body"], body):
+            mail["body"] = body
+        set_outgoing_mail(conn, row["id"], mail)
+
+
 def get_message_room_for_task(conn: sqlite3.Connection, task_id: int) -> str | None:
     """The canonical room token for a task's stored turn, or None if absent.
 
@@ -6662,6 +6713,9 @@ _CROSS_ROOM_COLUMNS = (
     "  m.origin_surface AS origin_surface, "
     # The shared room a private reply is about (ISSUE-608), for the web chip.
     "  m.about_room_token AS about_room_token, "
+    # The mail an assistant row sent into an email thread room (ISSUE-612).
+    # Selected in the per-room spine too, so both views show the same card.
+    "  m.outgoing_mail AS outgoing_mail, "
     # Truncated in SQLite rather than in the dict builder: this fragment also
     # backs the live room-event stream, which is byte-budgeted, and a reply to
     # a long answer would otherwise carry that whole answer a second time.

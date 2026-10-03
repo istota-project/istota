@@ -479,6 +479,16 @@ def discard(conn: sqlite3.Connection, draft_id: int, *, by: str = "system") -> N
             f"draft {draft_id} is being sent and can no longer be discarded"
         )
     _close_notification(conn, user_id, draft_id, by)
+    # The card on the room's row for this mail (ISSUE-612). A view of the
+    # decision, so a failure here must not undo the discard.
+    from istota import db
+    try:
+        room = conn.execute("SELECT room_token FROM outbound_drafts WHERE id = ?",
+                            (draft_id,)).fetchone()
+        db.settle_draft_mail(conn, room["room_token"] if room else None, draft_id,
+                             state="discarded")
+    except (sqlite3.Error, ValueError) as e:
+        logger.warning("discarded draft %d but could not update its card: %s", draft_id, e)
 
 
 def _confined_attachment(config: "Config", draft: OutboundDraft, path: str) -> Path:
@@ -724,6 +734,14 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
                     "released draft %d but failed to record sent_emails: %s",
                     draft_id, e,
                 )
+            # The card on the room's row for this mail, if it has one
+            # (ISSUE-612). Swallowed for the same reason: a view of the send.
+            try:
+                db.settle_draft_mail(conn, draft.room_token, draft_id,
+                                     state="sent", body=draft.body)
+            except Exception as e:  # noqa: BLE001 — the card is not the send
+                logger.warning("released draft %d but could not update its card: %s",
+                               draft_id, e)
             # The mail has gone, so the inbox item is answered. On this
             # connection, which already holds the write lock the status update
             # took — and inside the same guarded block, so a failure here reads

@@ -315,6 +315,25 @@
       : chars.join('');
   });
 
+  // ---- Outgoing mail (ISSUE-612) ----------------------------------------------
+  // An answer that went out as a mail into an email thread room. The counterpart
+  // of the external treatment above: the answer renders as usual, and the card
+  // under it says who the mail went to and what became of it. It shows the
+  // mailed text only when that differs from the answer (the server sends `body`
+  // only then), so a post is not shown twice. The state is recorded after the
+  // send and the room stream carries new rows only, so a card already on
+  // screen shows a later state after a reload.
+  const outgoingMail = $derived(!isUser ? message.mail : undefined);
+  const MAIL_STATE_LABELS: Record<string, string> = {
+    sent: 'Sent by email',
+    held: 'Email held for approval',
+    failed: 'Email not sent',
+    discarded: 'Email discarded',
+  };
+  const mailStateLabel = $derived(
+    outgoingMail ? (MAIL_STATE_LABELS[outgoingMail.state] ?? 'Email') : '',
+  );
+
   // The turn's body is an ordered list of render groups (substantial prose +
   // activity chips), interleaved in the model's true block order. A substantial
   // intermediate text block — analysis the model wrote, then acted on — renders
@@ -1083,6 +1102,33 @@
             <span class="status-text">{message.progress || 'Thinking…'}</span>
           </div>
         {/if}
+
+        {#if outgoingMail}
+          <div class="external outgoing" data-testid="outgoing-mail">
+            <div class="external-head">
+              <span class="external-mark" aria-hidden="true"><Mail size={13} /></span>
+              <span
+                class="external-label"
+                class:mail-failed={outgoingMail.state === 'failed'}
+                class:mail-muted={outgoingMail.state === 'discarded'}>{mailStateLabel}</span
+              >
+              {#if outgoingMail.subject}
+                <span class="external-subject">{outgoingMail.subject}</span>
+              {/if}
+            </div>
+            {#if outgoingMail.to.length}
+              <div class="mail-recipients">To: {outgoingMail.to.join(', ')}</div>
+            {/if}
+            {#if outgoingMail.cc.length}
+              <div class="mail-recipients">Cc: {outgoingMail.cc.join(', ')}</div>
+            {/if}
+            {#if outgoingMail.body}
+              <div class="body user-body">
+                <span class="user-text">{outgoingMail.body}</span>
+              </div>
+            {/if}
+          </div>
+        {/if}
       {/if}
 
       {#if message.confirmation && message.taskId}
@@ -1736,6 +1782,24 @@
 	   there is nothing to separate it from. */
   .external .body {
     margin-top: var(--space-1);
+  }
+  /* The outgoing-mail card (ISSUE-612) reuses the external surface, set off
+	   from the answer above it. Recipients are addresses from the thread, so
+	   they wrap rather than clip: who a mail went to is the point of the card. */
+  .outgoing {
+    margin-top: var(--space-2);
+  }
+  .mail-recipients {
+    margin-top: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+  }
+  .mail-failed {
+    color: var(--status-danger-fg);
+  }
+  .mail-muted {
+    color: var(--text-muted);
   }
 
   /* Send lifecycle on the user's own row (ISSUE-200). Both marks sit under the

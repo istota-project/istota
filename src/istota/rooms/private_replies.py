@@ -1269,8 +1269,11 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                 # what makes them the ones approved.
                 email_recipients = destination.get("email_recipients")
                 reference = "room-post:" + request_id
-                message_id = db.add_message(conn, parent, role="system", body=body,
-                                            origin_surface="web", delivery_reference=reference)
+                message_id = db.add_message(
+                    conn, parent, role="assistant", body=body, origin_surface="web",
+                    delivery_reference=reference,
+                    task_id=_post_answers_task(conn, row["origin_task_id"], parent),
+                )
                 claim.update(message_id=message_id, talk_ref=current["talk_ref"], parent=parent,
                              reference=reference, whatsapp_group=whatsapp_group,
                              email_thread=email_thread, email_recipients=email_recipients)
@@ -1291,6 +1294,26 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
             conn.execute("UPDATE whatsapp_skill_requests SET state='sending',updated_at=datetime('now') "
                          "WHERE id=?", (request_id,))
             return claim
+
+
+def _post_answers_task(conn, task_id, parent: str) -> int | None:
+    """The task a post into ``parent`` is the answer to, or None.
+
+    Only a task that ran in that room: a guest proposal, whose guest turn the
+    post answers, so the pair enters the room's history like any turn. A
+    member's `room post` ran in their private room, and tying the shared row to
+    it would show that task's trace in the shared room (ISSUE-612).
+    """
+    if task_id is None:
+        return None
+    task = db.get_task(conn, int(task_id))
+    if task is None or canonical_token(conn, task.conversation_token) != parent:
+        return None
+    answered = conn.execute(
+        "SELECT 1 FROM messages WHERE room_token = ? AND role = 'assistant' AND task_id = ?",
+        (parent, task.id),
+    ).fetchone()
+    return None if answered else task.id
 
 
 def _mark_sent(conn, request_id: str) -> None:
@@ -1369,13 +1392,15 @@ async def deliver_request(config, row) -> None:
             # The thread itself, as a reply-all through the outbound gate. As
             # with the other halves, the canonical row is the post; a held or
             # failed mail is reported by the gate and the send log.
-            from istota.transport.email.outbound import deliver_thread_post
+            from istota.transport.email.outbound import deliver_thread_post, record_unsent_post
             try:
                 await deliver_thread_post(
                     config, task_id=int(claim["task_id"]), room_token=claim["parent"],
-                    body=claim["body"], approved_recipients=claim["email_recipients"])
+                    body=claim["body"], approved_recipients=claim["email_recipients"],
+                    message_id=claim["message_id"])
             except Exception as exc:
                 logger.warning("room post %s: email reply-all failed: %s", claim["request_id"], exc)
+                await asyncio.to_thread(record_unsent_post, config, claim["message_id"])
     else:
         # Never raises; a whisper that reached nobody becomes a bell row there.
         await send_private(config, claim["delivery"], body=claim["body"])
