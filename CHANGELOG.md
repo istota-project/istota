@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-10-02
+
 Rooms can now hold more than one person. Add other users to a web chat room, bring the bot into a WhatsApp group, or copy it on an email thread with two or more people, and it becomes a shared room alongside the Talk groups that already worked. Every message is recorded, and by default the bot answers only when someone addresses it. People who don't use your installation can take part as guests. The bot answers them on the host's behalf without touching the host's private data, and their replies can be held for your approval first. Each member gets a private side room next to the shared one, for confirmations, private answers and drafts the bot posts only after you approve them. Anyone can switch the bot off in a room with `!<bot name> off`. Households and teams can keep a shared group memory. You can also ask another user of your installation a question: it reaches them in their own room, on WhatsApp or by SMS, and their reply comes back to you word for word. Your SMS and WhatsApp conversations now each have a room in web chat too, including the history from before the room existed.
 
 The browser can now look at a page and click on it. Istota takes a screenshot, picks a point, and clicks, drags, scrolls or types there, which reaches canvases, maps, PDF viewers and chat panels that CSS selectors can't. It also presses Cloudflare's checkbox itself, so a briefing doesn't stall on a challenge, and each user now gets a separate browser profile whose logins persist between tasks. A new `wordpress` skill reads and edits posts, ACF fields, media and settings across several sites, and asks before anything goes live. The web UI accepts email and password or a 6-digit emailed code, so a Nextcloud login is no longer required. You can add a credential straight in Settings without a KeePassXC file, Labs (formerly Bloodwork) records urine and stool results, and a run from your Garmin watch shows up as its own entry in the location day summary. This release is 416 commits, against 205 in 0.42.0 and 985 in 0.41.0. Most of the rest is browser reliability and security hardening around credentials, shared rooms and the sandbox.
@@ -3135,7 +3137,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.42.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.43.0...main
+[0.43.0]: https://gitlab.com/cynium/istota/-/releases/v0.43.0
 [0.42.0]: https://gitlab.com/cynium/istota/-/releases/v0.42.0
 [0.41.1]: https://gitlab.com/cynium/istota/-/releases/v0.41.1
 [0.41.0]: https://gitlab.com/cynium/istota/-/releases/v0.41.0
