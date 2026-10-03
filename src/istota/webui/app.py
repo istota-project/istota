@@ -69,7 +69,7 @@ from istota.build_info import RUNNING_VERSION, build_description
 from istota.lib.filenames import filename_parts
 from istota.brain import make_brain
 from .chat_files import ChatFileError, resolve_chat_file
-from istota.config import load_config
+from istota.config import load_config, refresh_user_profiles_if_changed
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
 from istota.nextcloud.ocs import OcsError, ocs_data
 from istota.usage.telemetry import SYSTEM_USER_ID
@@ -426,6 +426,10 @@ def _require_api_auth(request: Request) -> dict:
     user — an early return before any session read, so it holds for every route
     without override wiring and survives a SIGHUP config reload.
     """
+    if _config is not None:
+        # A profile written since load (the settings page, `istota user
+        # ensure`) reaches this process here, at most once a second.
+        refresh_user_profiles_if_changed(_config, min_interval=1.0)
     if _no_auth_mode():
         return _local_user()
     user = _get_session_user(request)

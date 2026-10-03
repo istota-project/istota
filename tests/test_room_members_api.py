@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from istota import db
+from istota import db, user_profiles
 from istota.config import Config, SiteConfig, UserConfig, WebConfig
 from istota.transport.ingest import record_inbound
 
@@ -154,6 +154,10 @@ class TestIsGroupChatRecomputed:
 async def client(db_path, tmp_path):
     import istota.webui.app as mod
     config = _config(db_path, tmp_path)
+    # Seed the profile rows the scheduler imports at startup. The web process
+    # re-applies `user_profiles` when it changes, so without them the login's
+    # auto-seed (display name = the user id) would become the display name.
+    user_profiles.import_from_user_configs(db_path, config.users)
     mod._config = config
     mod.app.state.istota_config = config
     mod._oauth = MagicMock()

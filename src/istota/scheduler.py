@@ -118,7 +118,13 @@ from .skills.briefing import (
     strip_briefing_preamble,
 )
 from . import config as istota_config
-from .config import BriefingConfig, Config, SchedulerConfig, load_config
+from .config import (
+    BriefingConfig,
+    Config,
+    SchedulerConfig,
+    load_config,
+    refresh_user_profiles_if_changed,
+)
 from .brain.claude_code import is_api_error_banner, is_permanent_api_error
 from .executor import (
     detect_malformed_result,
@@ -10083,6 +10089,11 @@ def run_daemon(
     while not _shutdown_requested:
         # Mark the loop alive for the stall watchdog before doing any work.
         watchdog.tick()
+
+        # Pick up profile writes from other processes (settings page, `istota
+        # user ensure`) before anything below reads `config.users`. One
+        # single-row read when nothing changed; never raises.
+        refresh_user_profiles_if_changed(config)
 
         # Dispatch worker threads first — minimizes latency for pending tasks
         try:

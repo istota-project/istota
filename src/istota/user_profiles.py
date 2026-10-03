@@ -364,6 +364,18 @@ def get_profile(
     return _row_to_profile(row) if row else None
 
 
+def read_profile_generation(db_path: Path) -> int:
+    """The ``profile_generation`` counter, bumped by triggers on every write.
+
+    Raises when the table is missing; the caller decides what that means.
+    """
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT generation FROM profile_generation WHERE id = 1"
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def list_profiles(db_path: Path) -> dict[str, UserProfile]:
     """Return all stored profiles keyed by user_id."""
     out: dict[str, UserProfile] = {}

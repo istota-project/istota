@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import re
+import time
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -2170,6 +2171,11 @@ class Config:
     # already local. Set explicitly to override (guarded against the mount).
     module_data_dir: Path | None = None
     config_path: Path | None = None  # Set by load_config() to the file actually loaded
+    # `profile_generation.generation` as of the last `user_profiles` overlay
+    # applied to `users`, and when this process last asked. Process state for
+    # `refresh_user_profiles_if_changed`, not settings.
+    _profile_generation: int = field(default=-1, repr=False, compare=False)
+    _profile_checked_at: float = field(default=0.0, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.workspace_path is None:
@@ -3571,6 +3577,10 @@ _NOT_CONFIGURATION = frozenset({
     # never did anything. That makes it exactly the false negative the
     # unknown-key report exists to remove, on an authorization-shaped key.
     "admin_users",
+    # Process state for the live `user_profiles` refresh: the generation the
+    # overlay last applied and when it was last checked.
+    "_profile_generation",
+    "_profile_checked_at",
 })
 """Declared fields that are not settings, and must not be writable from TOML.
 
@@ -5576,12 +5586,75 @@ def _apply_user_profiles(config: "Config") -> None:
         )
         return
 
+    _merge_profile_rows(config, rows)
+
+
+def _merge_profile_rows(config: "Config", rows: dict) -> None:
+    """Overlay ``user_profiles`` rows onto ``config.users``.
+
+    Known users are updated in place, field by field. New users are built
+    first and published by replacing the dict rather than inserting into it:
+    this also runs on a live process (`refresh_user_profiles_if_changed`),
+    and inserting a key while another thread iterates `config.users` raises
+    `RuntimeError` in that thread.
+    """
+    from . import user_profiles as _up  # avoid import cycles at module load
+
+    current = config.users
+    added: dict[str, UserConfig] = {}
     for user_id, profile in rows.items():
-        existing = config.users.get(user_id)
+        existing = current.get(user_id)
         if existing is None:
             existing = UserConfig(display_name=profile.display_name or user_id)
-            config.users[user_id] = existing
+            added[user_id] = existing
         _up.merge_into_user_config(profile, existing)
+    if added:
+        config.users = {**current, **added}
+
+
+def refresh_user_profiles_if_changed(
+    config: "Config", *, min_interval: float = 0.0,
+) -> bool:
+    """Re-apply the ``user_profiles`` overlay when the table has changed.
+
+    ``config.users`` is a snapshot taken at load, so a profile written after
+    that (the settings page, ``istota user ensure``) reached no running
+    process until it restarted. Triggers on ``user_profiles`` bump the single
+    ``profile_generation`` row; this reads it and re-applies the overlay only
+    when it moved. True when the overlay was re-applied.
+
+    ``min_interval`` (seconds, monotonic) skips the read when this config was
+    checked more recently than that, for callers on a request path. Never
+    raises: a failure is logged and keeps the previous snapshot, and the
+    generation is not recorded, so the next call tries again. Deleted rows are
+    not removed from the snapshot.
+    """
+    now = time.monotonic()
+    if min_interval > 0 and now - config._profile_checked_at < min_interval:
+        return False
+    config._profile_checked_at = now
+
+    db_path = config.db_path
+    if db_path is None or not Path(db_path).exists():
+        return False
+    try:
+        from . import user_profiles as _up  # avoid import cycles at module load
+
+        # Generation before rows: a write landing between the two reads is
+        # applied now and re-applied next call, never missed.
+        generation = _up.read_profile_generation(Path(db_path))
+        if generation == config._profile_generation:
+            return False
+        rows = _up.list_profiles(Path(db_path))
+        _merge_profile_rows(config, rows)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "user_profiles refresh failed (%s); keeping the previous per-user "
+            "settings", e,
+        )
+        return False
+    config._profile_generation = generation
+    return True
 
 
 def _apply_user_resources(config: "Config") -> None:

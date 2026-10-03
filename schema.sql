@@ -893,6 +893,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profiles_sms_phone_number
 ON user_profiles(sms_phone_number)
 WHERE sms_phone_number <> '';
 
+-- One counter, bumped by triggers on every write to `user_profiles`. Each
+-- process holds `config.users` as a snapshot; `config.refresh_user_profiles_if_changed`
+-- reads this row and re-applies the overlay only when it moved, so a saved
+-- profile reaches the scheduler, web app and webhook receiver without a
+-- restart. Triggers rather than a bump in each writer, so a writer added later
+-- cannot forget it. `db._migrate_profile_generation` carries the same DDL.
+CREATE TABLE IF NOT EXISTS profile_generation (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    generation INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO profile_generation (id, generation) VALUES (1, 0);
+CREATE TRIGGER IF NOT EXISTS user_profiles_gen_ai AFTER INSERT ON user_profiles
+BEGIN UPDATE profile_generation SET generation = generation + 1 WHERE id = 1; END;
+CREATE TRIGGER IF NOT EXISTS user_profiles_gen_au AFTER UPDATE ON user_profiles
+BEGIN UPDATE profile_generation SET generation = generation + 1 WHERE id = 1; END;
+CREATE TRIGGER IF NOT EXISTS user_profiles_gen_ad AFTER DELETE ON user_profiles
+BEGIN UPDATE profile_generation SET generation = generation + 1 WHERE id = 1; END;
+
 -- Provider-neutral inbound SMS deduplication. The authenticated body remains
 -- on the task row when a request becomes a task; raw provider payloads are not
 -- retained here.
