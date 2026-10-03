@@ -124,7 +124,7 @@ Guardrails on this path: subtask creation is **admin-only**, prompt-only (never 
 | `executor.py` | Builds prompts, constructs the per-task environment, orchestrates a `Brain`, composes results |
 | `brain/` | Pluggable model-invocation backend: `Brain` Protocol + `make_brain` factory, `BrainRequest`/`BrainResult` types, stream events, `ClaudeCodeBrain` (subprocess + stream-json + transient-API retry), and `NativeBrain` (Istota's in-process agent loop). The native loop's machinery lives in `llm/` (provider abstraction), `agent/` (the loop + tool dispatch), and `session/` (turn state + compaction). |
 | `context.py` | Selects relevant conversation history using hybrid recent + LLM-triaged approach |
-| `rooms/` | The multi-user room model: speech gate, host and guest policy, what a task in a shared room may reach, side rooms, the veto |
+| `rooms/` | The multi-user room model: speech gate, host and guest policy, what a task in a shared room may reach, private replies, the veto |
 | `skills/_loader.py` | Loads skill documentation selectively: `always_include`, source types, file types, sticky skills, companions. Keyword and resource matching are deliberately *not* selectors |
 
 ### Storage and state

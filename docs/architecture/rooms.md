@@ -1,6 +1,6 @@
 # Rooms and multi-user chat
 
-This page covers how Istota models a conversation that more than one person can read, and how one inbound turn becomes a decision about who speaks, whose authority a task carries, who will read the answer, and what the task may reach. The user-facing behaviour is in [shared rooms](../features/shared-rooms.md), [side rooms](../features/side-rooms.md), [switching the bot off](../features/room-veto.md) and [groups](../features/groups.md). This page is the mechanism behind them.
+This page covers how Istota models a conversation that more than one person can read, and how one inbound turn becomes a decision about who speaks, whose authority a task carries, who will read the answer, and what the task may reach. The user-facing behaviour is in [shared rooms](../features/shared-rooms.md) (including its private replies and My notes), [switching the bot off](../features/room-veto.md) and [groups](../features/groups.md). This page is the mechanism behind them.
 
 Every rule here is a no-op in a room with one human in it. A private conversation goes through the same pipeline and comes out the way it always did.
 
@@ -82,11 +82,11 @@ The room's mode is its own `room_policy.speech_mode` if set, else the deployment
 A room that is shared, or that a guest writes in, gets one `room_policy` row, created the first time it is needed (`rooms.policy.ensure_policy`). It holds:
 
 - **`host_user_id`**: the creator if still present, else the first present member. The host is fixed at creation. If the host leaves, the field is cleared and the room records without answering until a member runs `!room host`. A returning host has to claim it like anyone else. On WhatsApp, a host who leaves makes the bot leave the group.
-- **`guest_reply`**: `direct` (answer in the room), `held` (propose the answer in the host's side room) or `off` (record only). It defaults by surface: `direct` on Talk and web, `held` on WhatsApp and email, `held` for anything else.
+- **`guest_reply`**: `direct` (answer in the room), `held` (propose the answer to the host privately) or `off` (record only). It defaults by surface: `direct` on Talk and web, `held` on WhatsApp and email, `held` for anything else.
 - **`max_bot_turns_without_human`** (default 3): the loop cap for guest turns.
 - The veto state and the one-time announcement (below).
 
-**A turn runs with its sender's reach.** A member's turn runs as that member. A guest's turn that the gate lets through runs as the room's host, in emissary mode: `tasks.guest_participant_id` is set, the guest's text is fenced in the prompt as `GUEST MESSAGE` (the transcript keeps it raw), every scope is withheld, the native brain's WebSearch and WebFetch are removed, deferred database operations are discarded, the task gets its own temp directory, nothing is extracted into memory, and any confirmation goes to the host's side room. With `guest_reply = held` the answer becomes a proposal the host approves (`rooms.side_rooms.propose_guest_reply`).
+**A turn runs with its sender's reach.** A member's turn runs as that member. A guest's turn that the gate lets through runs as the room's host, in emissary mode: `tasks.guest_participant_id` is set, the guest's text is fenced in the prompt as `GUEST MESSAGE` (the transcript keeps it raw), every scope is withheld, the native brain's WebSearch and WebFetch are removed, deferred database operations are discarded, the task gets its own temp directory, nothing is extracted into memory, and any confirmation goes to the host privately. With `guest_reply = held` the answer becomes a proposal the host approves (`rooms.private_replies.propose_guest_reply`).
 
 A guest's commands are ignored apart from the veto. A guest cannot stop, retry or steer a task or answer a confirmation.
 
@@ -100,7 +100,7 @@ A shared room is not bound to its host's bot. Every per-user input to a task is 
 | Per-skill overlays | that user's `{bot_dir}/config/skills/`; not loaded when `memory` is withheld (guest and unasked turns) | yes |
 | Reach (skills, files, credentials) | that user's, minus the withheld scopes above | yes |
 | `USER.md`, recall, knowledge facts, playbooks | not loaded in any shared room | no |
-| Backstage notes | the principal's side-room `CHANNEL.md` | yes |
+| My notes | the principal's `{bot_dir}/config/rooms/<token>.md` | yes |
 | Emissaries, guidelines, custom system prompt | `config/`, deployment-wide | no |
 | Model, effort, brain | the room's own settings (host-only to change), else the deployment's | no |
 | Transcript and `CHANNEL.md` | the room's, bounded by the latest audience epoch | no |
@@ -139,12 +139,12 @@ Without bubblewrap (the shipped Docker stack, macOS, the standalone install), wi
 The prompt has two halves (see [executor](executor.md)). In a shared room the system half carries a **room card** (`executor.room_card`) in place of the old one-line group notice. It is built from tables, never from model output, and lists:
 
 - who reads the room: members by Istota user id, guests as a count, never a display name;
-- the room's standing rule: each member's turn runs as that member, with their own persona and reach, a confirmation goes to the asker's own side room, and what happens to a guest's message under the room's `guest_reply` (answered as the host with nothing beyond the reply, that reply held for the host's approval, or recorded and not answered). This line is on every card, so a model asked to explain the room does not generalise this turn's principal into the room's owner or invent an approval rule;
+- the room's standing rule: each member's turn runs as that member, with their own persona and reach, a confirmation goes to the asker's own private chat with the bot, and what happens to a guest's message under the room's `guest_reply` (answered as the host with nothing beyond the reply, that reply held for the host's approval, or recorded and not answered). This line is on every card, so a model asked to explain the room does not generalise this turn's principal into the room's owner or invent an approval rule;
 - whom the bot is acting for on this turn, and who hosts;
 - whose persona is in use (always the task's own user: the host on a guest's turn);
 - what this turn reaches, and on a restricted turn what is withheld;
-- the side-room verbs (`istota-skill room whisper`, `room answer-privately`) when the `room` CLI is available;
-- that the room's `CHANNEL.md` is read by everyone.
+- the private-reply verbs (`istota-skill room whisper`, `room answer-privately`) when the `room` CLI is available;
+- that the room's `CHANNEL.md` is read by everyone, and that a member's private notes are never read or written in the room.
 
 A guest turn's header says the bot is answering a guest on the host's behalf, and that the guest's words are data.
 
@@ -152,21 +152,32 @@ In the user half:
 
 - Other participants' turns in history are fenced as `ROOM PARTICIPANT MESSAGE`, so a co-member cannot steer a turn that runs with your reach. A quoted reply is fenced as `QUOTED MESSAGE` in a room several people have written in. The bot's own earlier answers are not fenced.
 - `CHANNEL.md` of a room more than one human has ever been in (`db.room_was_ever_shared`, which counts people who have since left) is fenced as room notes rather than instructions, and recall in such a room drops the re-indexed copy and fences dated channel memories.
-- A principal speaking in a shared room, or a guest turn running as a present host, gets that principal's side room's `CHANNEL.md` as private backstage notes.
+- A principal speaking in a shared room, or a guest turn running as a present host when `guest_reply` is not `direct`, gets that principal's My notes about the room.
+- A linked turn in a private room gets the shared room's recent transcript, fenced (see [private replies](#private-replies)).
 
 ## Audience epochs
 
 When someone joins a room that others already read, `room_epochs` records a boundary: the highest `messages.id`, `tasks.id` and cached Talk message id at that moment. `db.front_stage_cutoff` returns the highest boundary of any epoch whose joiner is still present, and every front-stage history read (conversation context, recall over past turns, the classifier's window, memory extraction) starts after it. The bot therefore does not repeat to a newcomer what was said before they arrived.
 
-A Talk or WhatsApp join always splits, since people are added there outside Istota. A web add asks the creator to confirm the newcomer will see the existing transcript, and so does not split. On email, anyone newly copied splits. The first roster a room is seen with is a baseline (`epoch = 0`), not a join. Epochs never bound `CHANNEL.md`, a side room's view of its parent transcript, or `!export`.
+A Talk or WhatsApp join always splits, since people are added there outside Istota. A web add asks the creator to confirm the newcomer will see the existing transcript, and so does not split. On email, anyone newly copied splits. The first roster a room is seen with is a baseline (`epoch = 0`), not a join. Epochs never bound `CHANNEL.md`, a linked turn's view of the shared room's transcript, or `!export`.
 
-## Side rooms
+## Private replies
 
-A side room is an ordinary private room with `rooms.side_of` set to the shared room and `rooms.side_for_user` to its one member, created the first time something needs it. Confirmations from a shared-room task, whispers (`room whisper`), private answers (`room answer-privately`), guest proposals and the member's backstage notes all go there.
+What a shared room has for one member (a confirmation, a whisper, a held guest proposal, a private answer) goes to that member's own existing private room, in `rooms/private_replies.py`. Nothing creates a room for it.
 
-Nothing in a side room reaches the shared room on its own. A post back is a `room_post` request (`istota-skill room post`), held for the member's approval with the exact text shown, through the same request table and approval machinery relay questions use (`whatsapp_skill_requests`, see `.claude/rules/relay.md`). It skips approval only when the text is the member's own words from their message and posting was the task's first call. A side-room task sees the parent's last 40 messages (up to 12,000 characters), fenced as `PARENT ROOM TRANSCRIPT`, while the member is still in the parent.
+**The resolver.** `private_room_for(conn, config, user_id, about_token)` tries the private room on the shared room's own surface first: the member's private WhatsApp room for a WhatsApp group, the first private Talk room among the configured default and the default-room candidates for a Talk room, the default web room for a web-only room. An email thread room has no such room and starts at the fallback, which is web, Talk, WhatsApp in that order. Every candidate is re-checked by `db.is_private_room_of` (not archived, the user its only member, no phone binding except for the WhatsApp step), the predicate the relay's default-room destination uses too. SMS is never a destination. `None` means the bell.
 
-On surfaces without a web view of their own, the side room has a counterpart: the member's private Talk conversation, their own WhatsApp chat, or a private mail, each headed with the room's name.
+**Record, then send.** `deliver_private` runs in the caller's transaction and writes one `role='system'` row into the member's room, tagged `messages.about_room_token` and keyed `private-<kind>:<reference>`; the `delivery_reference` index is global, so a retry returns the first row. `send_private` runs after commit with its own connections and never raises: a Talk post after the live audience check, with the Talk id stamped on the row so a Talk reply resolves to it; a WhatsApp send keyed `private-reply:<messages.id>`; for an email-thread parent, a heads-up mail to the member's own address saying where to answer. Talk and WhatsApp bodies start `re: <room>`; web renders a chip from `about_room_token` instead.
+
+**No private room.** Nothing is written into any room. A confirmation or proposal is left to its `confirmation` bell row, which is then delivered rather than withheld, and a whisper becomes a `task_alert` bell row. The shared room gets one fixed line naming nobody. The scheduler marks every privately routed park, room or bell, with `tasks.private_park`, which is what keeps the park from holding the shared room's dispatch gate and from being cancelled by the asker's next message there.
+
+**Linking.** `tasks.about_room_token` is set by `transport.ingest.record_inbound` when the new turn replies to or quotes a tagged row in the same room, on every surface that supplies a parent: web's reply-to, Talk's parent message through the stamped external id, and a WhatsApp quote resolved back through the `private-reply:` ledger key, or through `task-result:` for a linked turn's answer, which the scheduler tags with the same link. `room answer-privately` sets it directly on the question it asks again. Nothing carries a link to the next turn. A linked task, while its user is still a current member of the room, gets one system line naming the room by token only and the room's last 40 messages (up to 12,000 characters) fenced as `PARENT ROOM TRANSCRIPT` in the user half; `pin_plan` drops any delivery leg into the linked room, so its answer stays private.
+
+**The verbs.** `room whisper` queues at once, since it reaches only the principal, and resolves the destination at claim time. `room answer-privately` records the principal's own message again as their turn in their private room, under that room's own model defaults, and refuses `no_private_room` when there is none. `room post` runs from a private room into the linked room or a `--room` named through `rooms.lookup.resolve_room`, held for approval of the exact text through the request table and approval machinery relay questions use (`whatsapp_skill_requests`, see `.claude/rules/relay.md`); it skips approval only when the text is the member's own words and posting was the task's first call, and a switched-off room refuses it.
+
+**Confirmations.** A bare answer in a private room, after nothing parked in that room itself, resolves the user's one task whose private question is in that room; with more than one it asks for `!confirm <id> yes|no`. A bare yes in a shared room resolves nothing.
+
+**My notes.** A member's private notes about a shared room are `{bot_dir}/config/rooms/<canonical token>.md` in their workspace, inside the memory refusals with no new entry (`storage.room_notes_path`, `read_room_notes`, which falls back to the room's live aliases, `write_room_notes`). `private_replies.my_notes_room` loads them into the user half on the member's own speaking turn in the room (Talk, web, WhatsApp, or email when the stored turn is theirs), and on a guest turn for the host unless `guest_reply` is `direct`. They are edited from the web pane, `memory --room` from a private room, and read with `!room notes`, which is refused in every shared room. Deleting a room deletes every member's notes for it.
 
 ## The veto
 
@@ -191,17 +202,18 @@ Two surfaces bring rooms that are not created by a member turn.
 
 | Table | Role here |
 |---|---|
-| `rooms` | One row per room; `side_of` / `side_for_user` for side rooms, `group_id` for a group link |
+| `rooms` | One row per room; `group_id` for a group link |
 | `room_bindings` | Which surfaces expose the room, and each surface's own ref |
 | `room_members` | Sidebar membership |
 | `room_participants` | Everyone seen in the room, with kind and join/leave history |
-| `messages` | The transcript, with author columns |
+| `messages` | The transcript, with author columns; `about_room_token` tags a private reply with the shared room it is about |
 | `room_policy` | Host, `guest_reply`, speech mode, loop cap, veto and announcement state |
 | `room_vetoes` | Who switched the bot off, and who has agreed to switch it back on |
 | `room_notices` | Replies owed to Talk or WhatsApp, posted by the scheduler |
 | `room_epochs` | Audience boundaries |
 | `speech_gate_decisions` | The gate's audit log |
 | `tasks.audience`, `tasks.guest_participant_id`, `tasks.is_group_chat` | Per-task record of who read the room and whose turn it answered |
+| `tasks.about_room_token`, `tasks.private_park` | A turn linked to a shared room; a park whose question was asked privately |
 
 Column-level detail is in [database](database.md) and `schema.sql`.
 
@@ -215,7 +227,8 @@ Column-level detail is in [database](database.md) and `schema.sql`.
 | `rooms/speech_gate.py` | The speech gate ladder and the classifier call |
 | `rooms/policy.py` | Host, `guest_reply`, audience class, room readers |
 | `rooms/scopes.py` | What a task withholds, ambient memory, a task's groups |
-| `rooms/side_rooms.py` | Side rooms, whispers, guest proposals, held posts |
+| `rooms/private_replies.py` | The private-room resolver, private delivery and the bell fallback, linking, whispers, private answers, guest proposals, held posts, My notes loading |
+| `rooms/lookup.py` | Resolving a room a person named |
 | `rooms/veto.py` | The veto, notices and the announcement |
 | `executor.py` | The room card, fencing, ambient memory in prompt assembly |
 | `transport/routing.py` | Refusing shared rooms as delivery destinations |

@@ -4,7 +4,7 @@ A room can hold more than one person: a Nextcloud Talk group conversation, a web
 
 A room with one person in it behaves exactly as it always did. Nothing on this page applies to a private conversation.
 
-Related pages: [side rooms](side-rooms.md) for the private channel each member has beside a shared room, [switching the bot off](room-veto.md) for the veto, [WhatsApp groups](whatsapp.md#groups), [email thread rooms](email.md#email-thread-rooms), and [groups](groups.md) for a group's shared memory. How it works underneath is in [rooms and multi-user chat](../architecture/rooms.md).
+Related pages: [switching the bot off](room-veto.md) for the veto, [WhatsApp groups](whatsapp.md#groups), [email thread rooms](email.md#email-thread-rooms), and [groups](groups.md) for a group's shared memory. How it works underneath is in [rooms and multi-user chat](../architecture/rooms.md).
 
 ## Who is in a room
 
@@ -37,7 +37,7 @@ Some things are the same whatever the turn:
 - **The room's settings**: its model, effort and brain apply to every turn in the room, and only the host can change them.
 - **The room's shared context**: the transcript (from the latest join onwards, see [newcomers and history](#newcomers-and-history)) and the room's `CHANNEL.md`, which everyone in the room can read and write.
 
-What is per person, beyond persona and reach: a member's per-skill instructions (`{bot_dir}/config/skills/<skill>.md`) load on their own turns and not on a guest's, and a member's [side room](side-rooms.md) notes are read on their own turns, and on a guest's turn when they are the host.
+What is per person, beyond persona and reach: a member's per-skill instructions (`{bot_dir}/config/skills/<skill>.md`) load on their own turns and not on a guest's, and a member's [My notes](#my-notes) about the room are read on their own turns, and on a guest's turn when they are the host and the room's guest setting is not `direct`.
 
 ## When the bot speaks
 
@@ -57,14 +57,14 @@ A guest's message never runs on the guest's authority. When the bot answers a gu
 
 - reads nothing private of the host's, whatever the host has shared in that room,
 - takes no action beyond its reply (no calendar write, no email, no web fetch on the native brain),
-- sends anything else, including any question that needs approval, to the host's [side room](side-rooms.md).
+- sends anything else, including any question that needs approval, to the host [privately](#private-replies).
 
 How a guest is answered is the room's `guest_reply` setting, which the host changes with `!room guests <off|held|direct>`:
 
 | Setting | What happens to a guest's message |
 |---|---|
 | `direct` | The bot answers in the room. Default on Talk and web. |
-| `held` | The answer goes to the host's side room as a proposal, with the guest's words and the exact reply. The host approves it, and only then is it posted. Default on WhatsApp and email. |
+| `held` | The answer goes to the host's private chat with the bot as a proposal, with the guest's words and the exact reply. The host approves it, and only then is it posted. Default on WhatsApp and email. |
 | `off` | The guest's message is recorded and not answered. |
 
 A guest's `!commands` are ignored, apart from switching the bot off. A guest cannot stop, retry or steer anyone's task, or answer a confirmation.
@@ -75,7 +75,7 @@ After three of its own replies in a row with no member speaking, the bot stops a
 
 ## What a task can reach
 
-A turn runs with its sender's reach. When you ask the bot something in a shared room, it can use everything it can use in your private room: your calendar, email, files, health data and the rest. Asking in a room you know others read is the decision that the answer can be read there, so there is nothing to switch on first. If the answer should stay private, ask in your private room, or ask the bot to answer you privately: it asks your question again in your side room (`istota-skill room answer-privately`) and tells the room it has answered you there.
+A turn runs with its sender's reach. When you ask the bot something in a shared room, it can use everything it can use in your private room: your calendar, email, files, health data and the rest. Asking in a room you know others read is the decision that the answer can be read there, so there is nothing to switch on first. If the answer should stay private, ask in your private room, or ask the bot to answer you privately: it asks your question again in your private chat with it and tells the room it has answered you privately. See [private replies](#private-replies).
 
 This holds with a guest in the room too. Having the guest there, and asking in front of them, is your choice. The room card tells the bot that a guest is reading.
 
@@ -94,7 +94,7 @@ On a deployment with no bubblewrap sandbox (the shipped Docker stack, macOS, the
 
 ## What the bot is told
 
-In a shared room the system prompt carries a short room card: who reads the room (members by user id, guests by count), the room's rule (each member's turn runs as that member, a confirmation goes to the asker's own side room, and what happens to a guest's message under the room's guest-reply setting), whom the bot is acting for on this turn and who hosts, whose persona is in use, what this turn can reach (and on a guest's turn, what is withheld), and that `CHANNEL.md` is read by everyone. It never contains anybody's display name, since that is text the person chose.
+In a shared room the system prompt carries a short room card: who reads the room (members by user id, guests by count), the room's rule (each member's turn runs as that member, a confirmation goes to the asker's own private chat with the bot, and what happens to a guest's message under the room's guest-reply setting), whom the bot is acting for on this turn and who hosts, whose persona is in use, what this turn can reach (and on a guest's turn, what is withheld), that `CHANNEL.md` is read by everyone, and that a member's private notes are never read or written in the room. It never contains anybody's display name, since that is text the person chose.
 
 The persona is always that of the person the task acts for: the host's on the host's turns and on guests' turns, each other member's own on theirs.
 
@@ -102,11 +102,43 @@ A shared room's `CHANNEL.md` is written by several people, so it is shown to the
 
 ## Newcomers and history
 
-When someone joins a room that others already read, the bot stops drawing on the conversation from before they joined. Its context, its search of past turns and the classifier's window all start at the join, so the bot does not repeat to a newcomer what was said before they arrived. A member's own side room still sees the whole history.
+When someone joins a room that others already read, the bot stops drawing on the conversation from before they joined. Its context, its search of past turns and the classifier's window all start at the join, so the bot does not repeat to a newcomer what was said before they arrived. A linked turn in a member's private chat (see [private replies](#private-replies)) still sees the whole history.
 
 On the web, adding a member asks you to confirm that they will see the existing transcript, so a web add does not narrow the bot's context. On Talk and WhatsApp a join always narrows it, since people are added there outside Istota. On email, anyone newly copied on a thread narrows it.
 
 This bounds the transcript, not the room's `CHANNEL.md`, which everyone in the room can read and edit. If a note should not reach a newcomer, edit the note.
+
+## Private replies
+
+Anything meant for one member and not the whole room goes to that member's own private chat with the bot: a private answer, a note, a question they need to approve, and, for the host, a guest's held reply. Nothing creates a chat for this; the bot uses one you already have.
+
+It picks the private chat on the shared room's own surface first: your own WhatsApp chat with the bot for a WhatsApp group, your private Talk conversation for a Talk room, your default web room for a web room. Without one there, it uses your private room on another surface, in the order web, Talk, WhatsApp. An email thread has no private chat of its own, so its notes go to one of those, and you also get a short mail at your own address saying where to answer. SMS is never used.
+
+Each message is recorded in that chat's transcript and tagged with the shared room it is about. On Talk and WhatsApp it starts with "re: <room>". On web it carries a "re: <room>" chip that opens the room, or reads "a room you left" once you have left it.
+
+### What to say
+
+- **For a private answer**, ask in the shared room and add "answer me privately", or ask something the room should not read, such as your calendar or your health. The bot asks your question again in your private chat, exactly as you wrote it, answers there with your personal memory available, and tells the room only that it answered you privately. The answer runs with your private chat's own model settings, not the shared room's.
+- **To post into the room from your private chat**, reply to or quote one of the bot's messages about that room and say what to post, for example "post in the group that Friday works". You can also name the room instead: "post in Family that I'll be late". The bot shows you the exact text, and nothing is posted until you approve it. If the text is your own words and posting is the first thing the bot does, it goes straight through. Asked from WhatsApp or SMS, the text has to fit in one message there, since you approve what you see; a longer post is refused.
+- **To answer a confirmation**, reply in the private chat where it was asked, or approve it from the notification bell. On web and Talk a plain "yes" answers it when it is the only question waiting in that chat; with more than one, use `!confirm <id> yes` or `no`. On WhatsApp use the `!confirm <id> yes|no` the message names. A "yes" typed in the shared room never answers it.
+
+A turn in your private chat is linked to a shared room only when it replies to or quotes one of these tagged messages, or one of the bot's answers in a linked turn, or is the question asked again for a private answer. Replies and quotes work on web, Talk and WhatsApp. A linked turn sees the room's last 40 messages (up to 12,000 characters), marked as the room's conversation rather than instructions, as long as you are still in the room. Its answer stays in your private chat. Any other turn there is an ordinary private turn, and a link never carries over to your next message: if you mean a room the turn is not linked to, the bot says it has no context for it and asks you to reply to one of its messages about the room or to name it.
+
+### With no private chat
+
+If you have no private chat with the bot on any surface, a confirmation or a guest proposal waits in the notification bell, where you can approve it, and a note arrives as a bell notification. A private answer is refused, and the bot asks you in the room to message it directly first. When something went to the bell, the shared room is told only "I've sent a private note to the person who asked. If you don't have a private chat with me yet, message me directly.", which names nobody.
+
+A WhatsApp private chat exists once you have messaged the bot's number yourself. Being in a group with it is not enough.
+
+### My notes
+
+Each member can keep private notes about a shared room ("don't bring up the move"). The bot reads them when it acts for you there: on your own turns on any surface, and on a guest's turn when you are the host and the room's guest setting is not `direct`, since a `direct` reply is posted without your review. The room never sees them, and they are never read or written from the room.
+
+- **On web**, a shared room's menu in the sidebar has two entries: Room notes, the room's `CHANNEL.md` that everyone in it reads and edits, and My notes, which only you see.
+- **In your private chat**, ask the bot to note something about the room by name ("add to my notes about Family that the party is a surprise"). Asked in the shared room, it tells you to use your private chat.
+- **`!room notes`**, in your private chat, lists your shared rooms numbered and marks the ones you have notes for; `!room notes <name or number>` shows your notes for one. In a shared room it answers only "Use your private chat with me for your notes."
+
+The notes are a file in your workspace, `{bot_dir}/config/rooms/<room token>.md`. Leaving a room keeps them, and `!room notes` still lists that room. Deleting a room deletes every member's notes for it.
 
 ## Where personal deliveries go
 
@@ -121,7 +153,7 @@ Personal memory is not extracted from shared rooms: what is said in front of mor
 - **Colour and hiding** stay per member.
 - **`CHANNEL.md`**: any member.
 - **Deleting a message**: only its author, in a shared room.
-- **Tasks**: you can stop, steer, retry and confirm only your own. A confirmation asked by a task in a shared room is sent to the asker's side room, and a plain "yes" typed in the shared room no longer answers it.
+- **Tasks**: you can stop, steer, retry and confirm only your own. A confirmation asked by a task in a shared room is sent to the asker privately, and a plain "yes" typed in the shared room no longer answers it.
 
 ## Commands
 
@@ -130,6 +162,7 @@ Personal memory is not extracted from shared rooms: what is said in front of mor
 | `!room host` | any member | Take over a room that has lost its host |
 | `!room guests [off\|held\|direct]` | host to change | Show or set how guests are answered |
 | `!room group [<id>\|none]` | host to change | Show or set the room's [group](groups.md#linking-a-room-to-a-group) link |
+| `!room notes [<room>]` | you, in your private chat | List the shared rooms you can keep [notes](#my-notes) about, or show your notes for one |
 | `!<bot name> off` / `on` | anyone | [Switch the bot off](room-veto.md) in this room, or ask for it back |
 
 The full list is in the [command reference](../reference/commands.md).

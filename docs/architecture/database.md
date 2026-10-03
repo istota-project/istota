@@ -8,7 +8,7 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 
 | Table | Purpose |
 |---|---|
-| `tasks` | Task queue with full lifecycle: id, status, source_type, user_id, prompt, conversation_token, talk_delivery_token, priority, attempts, `last_heartbeat` (worker-liveness ping for stuck-task reclaim, ISSUE-112), execution trace, model/effort overrides, plus `skill` / `skill_args` for skill-task dispatch. For a room turn, `audience` records who read the room (`private` \| `principals` \| `mixed`), `guest_participant_id` is set when the task answers a guest, and `is_group_chat` when the surface reported a group |
+| `tasks` | Task queue with full lifecycle: id, status, source_type, user_id, prompt, conversation_token, talk_delivery_token, priority, attempts, `last_heartbeat` (worker-liveness ping for stuck-task reclaim, ISSUE-112), execution trace, model/effort overrides, plus `skill` / `skill_args` for skill-task dispatch. For a room turn, `audience` records who read the room (`private` \| `principals` \| `mixed`), `guest_participant_id` is set when the task answers a guest, and `is_group_chat` when the surface reported a group. `about_room_token` names the shared room a turn in a private room is linked to, and `private_park` marks a park whose question was asked privately ([private replies](rooms.md#private-replies)) |
 | `user_resources` | Per-user folder mounts (`folder`) + internal `shared_file` organizer state |
 | `user_profiles` | Per-user profile fields (display_name, timezone, channels, worker overrides, disabled_skills, disabled_modules, email_addresses, trusted_email_senders) |
 | `briefing_configs` | Briefing schedule + delivery (cron, conversation_token, `output`, enabled flag). Content lives in the per-user briefings module DB, not here |
@@ -49,10 +49,10 @@ The room model (defined in `schema.sql`) supersedes the de-facto tasks-as-histor
 
 | Table | Purpose |
 |---|---|
-| `rooms` | Canonical room registry keyed on `conversation_token`; `origin` (the surface it was created on: talk, web, email, sms or whatsapp), display name, `archived` flag, the standing per-room `model` / `effort` / `brain` defaults applied by `record_inbound`, `side_of` / `side_for_user` for a member's [side room](../features/side-rooms.md), and `group_id` for a [group](../features/groups.md) link |
+| `rooms` | Canonical room registry keyed on `conversation_token`; `origin` (the surface it was created on: talk, web, email, sms or whatsapp), display name, `archived` flag, the standing per-room `model` / `effort` / `brain` defaults applied by `record_inbound`, and `group_id` for a [group](../features/groups.md) link |
 | `room_bindings` | One row per (room, surface) exposing a room; maps canonical token to each surface's ref. A ref is unique per surface |
 | `room_token_migration` | Permanent forwarding from an old token (a pre-migration token, a phone room's pre-mint hash) to its room. Survives room deletion as a tombstone |
-| `messages` | Canonical transcript (role user\|assistant\|system, `task_id`, `origin_surface`, `external_ids` mirror ledger). Who wrote a row is `author_user_id` for an Istota user, `author_label` for a sanitized outside sender, and `author_participant_id` for the `room_participants` row |
+| `messages` | Canonical transcript (role user\|assistant\|system, `task_id`, `origin_surface`, `external_ids` mirror ledger). Who wrote a row is `author_user_id` for an Istota user, `author_label` for a sanitized outside sender, and `author_participant_id` for the `room_participants` row. `about_room_token` tags a private reply with the shared room it is about |
 | `room_members` | Per-user sidebar membership; web visibility resolves through this, not the single-owner `rooms.user_id` |
 | `room_participants` | Everyone seen in a room, Istota user or not: `surface`, `surface_ref`, `user_id`, `kind` (`principal` \| `guest` \| `agent`), `display_name`, `joined_at`, `left_at`. A history: leaving stamps `left_at`, rejoining inserts a new row, and the partial unique index covers present rows only |
 | `room_policy` | Created when a room is first shared or a guest writes in it: `host_user_id`, `speech_mode`, `guest_reply` (`off` \| `held` \| `direct`), `max_bot_turns_without_human`, the veto state and `announced_at` |
