@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - The nightly sleep cycle no longer locks the database for about 90 seconds. With `USER.md` curation on, it left its own cleanup writes uncommitted while the curation audit opened a second connection and waited on them, three times in a row, and every other writer in the deployment failed with `database is locked` in that window. Because those audit writes failed, the curator also never remembered which dated `USER.md` bullets it had already flagged, so the same ones came back every night.
+- A scheduled feeds poll no longer fails the task when every feed it polled errored. A run often polls just one due feed, so one dead feed failed the whole task, which was retried a minute later and found nothing due. The run now reports `partial_error` with each feed's error, as it already did when only some feeds failed, and the dead feed shows its error on the feed itself. A run in which every feed was rate-limited still fails.
 
 ## [0.43.0] - 2026-10-02
 
