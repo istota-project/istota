@@ -1701,12 +1701,63 @@ def _whatsapp_binding_state(binding) -> tuple | None:
     )
 
 
+class _EnsureRefused(Exception):
+    """A `user ensure` refusal raised inside its transaction, so it rolls back."""
+
+    def __init__(self, lines: list[str]):
+        super().__init__("; ".join(lines))
+        self.lines = lines
+
+
+def _whatsapp_binding_on(conn, user_id: str):
+    """The binding on `conn`, or None, including on a database without the table.
+
+    `_whatsapp_binding_for_display`'s tolerance, on the caller's connection.
+    """
+    try:
+        return db.get_whatsapp_binding(conn, user_id)
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        return None
+
+
+def _seed_only_empty(updates: dict, whatsapp_op, existing, binding):
+    """`--seed` on an existing row: keep only writes into an empty identity.
+
+    Returns ``(updates, whatsapp_op, kept)``, ``kept`` naming what was left
+    as stored. The SMS number is written only while the stored one is empty and
+    the WhatsApp binding only while it is unbound (no number, BSUID or JID);
+    every other field belongs to the web UI once the row exists. A clear or an
+    identity reset is never a seed.
+    """
+    kept: list[str] = []
+    seeded: dict = {}
+    for field, value in updates.items():
+        if field == "sms_phone_number" and not existing.sms_phone_number:
+            seeded[field] = value
+        else:
+            kept.append(field)
+    unbound = binding is None or not (
+        binding.bootstrap_phone_number or binding.bsuid or binding.jid
+    )
+    if whatsapp_op is not None and not (whatsapp_op == "set" and unbound):
+        kept.append(user_profiles.WHATSAPP_NUMBER_FIELD)
+        whatsapp_op = None
+    return seeded, whatsapp_op, kept
+
+
 def cmd_user_ensure(args):
     """Create or update a user_profiles row (idempotent).
 
     Drop-in replacement for templating per-user TOML files via Ansible.
     Only the flags the operator passes are written; omitted flags leave
     the existing column value untouched (or use defaults on first insert).
+
+    ``--managed`` also records the fields this call asserted, which the web
+    then refuses to edit; ``--seed`` writes only into a new row or an empty
+    identity and releases every lock. Neither leaves the managed set alone, so
+    a hand-run ensure neither locks nor unlocks anything.
     """
     from . import user_profiles
 
@@ -1894,44 +1945,123 @@ def cmd_user_ensure(args):
     if getattr(args, "timezone_follow_location", None) is not None:
         updates["timezone_follow_location"] = args.timezone_follow_location
 
-    # Before anything is written, so an inventory collision fails the play
-    # rather than creating an ambiguous route. A value this user already holds
-    # passes even if somebody else holds it too: see `find_identity_conflicts`.
-    whatsapp_checked = None
-    if whatsapp_number is not None and not clear_whatsapp:
-        try:
-            whatsapp_checked = user_profiles.normalize_whatsapp_phone_number(
-                whatsapp_number, allow_empty=True,
+    managed_mode = bool(getattr(args, "managed", False))
+    seed_mode = bool(getattr(args, "seed", False))
+    if managed_mode and seed_mode:
+        # The parser refuses the pair; this is for a caller building `args`.
+        print("Error: --managed and --seed cannot be combined", file=sys.stderr)
+        sys.exit(2)
+
+    if clear_whatsapp:
+        whatsapp_op = "clear"
+    elif reset_whatsapp:
+        whatsapp_op = "reset"
+    elif whatsapp_number is not None or whatsapp_bsuid is not None:
+        whatsapp_op = "set"
+    else:
+        whatsapp_op = None
+    # What `--managed` records: every field this call asserts, a clear included
+    # (the inventory said "empty", and the web must not re-set it). A BSUID
+    # alone and an identity reset assert no number.
+    asserted = set(updates)
+    if clear_whatsapp or whatsapp_number is not None:
+        asserted.add(user_profiles.WHATSAPP_NUMBER_FIELD)
+
+    # The profile, the binding and the managed set in one transaction, so a
+    # refusal anywhere writes nothing and the web never reads a lock state that
+    # belongs to a different write than the profile beside it.
+    seed_kept: list[str] = []
+    try:
+        with db.get_db(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = user_profiles.get_profile(db_path, user_id, conn=conn)
+            before = _whatsapp_binding_on(conn, user_id)
+            if seed_mode and existing is not None:
+                updates, whatsapp_op, seed_kept = _seed_only_empty(
+                    updates, whatsapp_op, existing, before,
+                )
+
+            # Before anything is written, so an inventory collision fails the
+            # play rather than creating an ambiguous route. A value this user
+            # already holds passes even if somebody else holds it too: see
+            # `find_identity_conflicts`.
+            whatsapp_checked = None
+            if whatsapp_op == "set" and whatsapp_number is not None:
+                try:
+                    whatsapp_checked = user_profiles.normalize_whatsapp_phone_number(
+                        whatsapp_number, allow_empty=True,
+                    )
+                except ValueError:
+                    whatsapp_checked = None  # `set_whatsapp_binding` refuses it below
+            conflicts = user_profiles.find_identity_conflicts(
+                conn, user_id,
+                email_addresses=updates.get("email_addresses"),
+                sms=updates.get("sms_phone_number") or None,
+                whatsapp=whatsapp_checked or None,
             )
-        except ValueError:
-            whatsapp_checked = None  # `set_whatsapp_binding` refuses it below
-    with db.get_db(db_path) as conn:
-        conflicts = user_profiles.find_identity_conflicts(
-            conn, user_id,
-            email_addresses=updates.get("email_addresses"),
-            sms=updates.get("sms_phone_number") or None,
-            whatsapp=whatsapp_checked or None,
-        )
-    if conflicts:
-        phones = {updates.get("sms_phone_number"), whatsapp_checked} - {None, ""}
-        for value, holder in conflicts.items():
-            shown = (
-                user_profiles.mask_phone_number(value)
-                if value in phones else repr(value)
-            )
-            print(
-                f"Error: {shown} is already held by user {holder!r}",
-                file=sys.stderr,
-            )
+            if conflicts:
+                phones = {updates.get("sms_phone_number"), whatsapp_checked} - {None, ""}
+                raise _EnsureRefused([
+                    "{} is already held by user {!r}".format(
+                        user_profiles.mask_phone_number(value)
+                        if value in phones else repr(value),
+                        holder,
+                    )
+                    for value, holder in conflicts.items()
+                ])
+
+            try:
+                profile, state = user_profiles.update_profile_with_status(
+                    db_path, user_id, conn=conn, **updates
+                )
+                if whatsapp_op == "clear":
+                    db.clear_whatsapp_binding(conn, user_id)
+                elif whatsapp_op == "reset":
+                    db.reset_whatsapp_identity(conn, user_id)
+                elif whatsapp_op == "set":
+                    db.set_whatsapp_binding(
+                        conn, user_id,
+                        bootstrap_phone_number=whatsapp_number,
+                        bsuid=whatsapp_bsuid,
+                    )
+                if managed_mode:
+                    user_profiles.set_managed_fields(conn, user_id, asserted)
+                elif seed_mode:
+                    user_profiles.set_managed_fields(conn, user_id, ())
+            except ValueError as exc:
+                raise _EnsureRefused([str(exc)]) from None
+            except sqlite3.OperationalError as exc:
+                # The read above tolerates a missing table and this refuses
+                # one, and the difference is who asked. `user ensure` reads the
+                # binding on every invocation, so a deploy landing the code
+                # before the migration must not crash a call nobody pointed at
+                # WhatsApp; a call carrying `--whatsapp-number` (or `--managed`)
+                # did ask, and a missing table is a real error. What it must
+                # not be is a traceback.
+                if "no such table" not in str(exc):
+                    raise
+                raise _EnsureRefused([
+                    "a table this command writes is missing from this "
+                    "database. Run `istota init` to migrate it, then re-run "
+                    "this command. Nothing was written."
+                ]) from None
+            binding = _whatsapp_binding_on(conn, user_id)
+    except _EnsureRefused as refused:
+        for line in refused.lines:
+            print(f"Error: {line}", file=sys.stderr)
         sys.exit(1)
 
-    try:
-        profile, state = user_profiles.update_profile_with_status(
-            db_path, user_id, **updates
-        )
-    except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
+    if (
+        whatsapp_op is not None
+        and state == "noop"
+        and _whatsapp_binding_state(before) != _whatsapp_binding_state(binding)
+    ):
+        # `created` and `updated` already say the row moved, so only `noop`
+        # is escalated — a first-time user whose enrollment arrives in the
+        # same call must still read as `created`. The managed set does not
+        # move STATE: the role's restart handlers key off it, and the web reads
+        # the managed set live.
+        state = "updated"
 
     print(f"User {user_id!r} ensured.")
     print(f"  display_name: {profile.display_name}")
@@ -1943,6 +2073,8 @@ def cmd_user_ensure(args):
             "  sms_number:   "
             + user_profiles.mask_sms_phone_number(profile.sms_phone_number)
         )
+    if seed_kept:
+        print(f"  seed: kept the stored value of {', '.join(sorted(seed_kept))}")
 
     # What a user's vault selection *is* now is a filename out of their own
     # `{bot_dir}/vault/` folder, held in the reserved `_vault_file` KV
@@ -1960,60 +2092,6 @@ def cmd_user_ensure(args):
         else:
             print(f"{user_id} had no stored vault file.")
 
-    # The WhatsApp binding is its own table, written after the profile row so a
-    # rejected identity leaves the profile update the operator also asked for
-    # in place rather than half-applied in the other direction.
-    whatsapp_requested = (
-        whatsapp_number is not None
-        or whatsapp_bsuid is not None
-        or clear_whatsapp
-        or reset_whatsapp
-    )
-    before = _whatsapp_binding_for_display(db_path, user_id) if whatsapp_requested else None
-    if whatsapp_requested:
-        try:
-            with db.get_db(db_path) as conn:
-                if clear_whatsapp:
-                    db.clear_whatsapp_binding(conn, user_id)
-                elif reset_whatsapp:
-                    db.reset_whatsapp_identity(conn, user_id)
-                else:
-                    db.set_whatsapp_binding(
-                        conn, user_id,
-                        bootstrap_phone_number=whatsapp_number,
-                        bsuid=whatsapp_bsuid,
-                    )
-        except ValueError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            sys.exit(1)
-        except sqlite3.OperationalError as exc:
-            # The read above tolerates a missing table and this refuses one,
-            # and the difference is who asked. `user ensure` reads the binding
-            # on every invocation, so a deploy landing the code before the
-            # migration must not crash a call nobody pointed at WhatsApp; a
-            # call carrying `--whatsapp-number` did ask, and a missing table
-            # is a real error. What it must not be is a traceback out of a
-            # command that has already committed the profile row.
-            if "no such table" not in str(exc):
-                raise
-            print(
-                "Error: the WhatsApp tables are missing from this database. "
-                "Run `istota init` to migrate it, then re-run this command. "
-                "The profile row was written.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-    binding = _whatsapp_binding_for_display(db_path, user_id)
-    if (
-        whatsapp_requested
-        and state == "noop"
-        and _whatsapp_binding_state(before) != _whatsapp_binding_state(binding)
-    ):
-        # `created` and `updated` already say the row moved, so only `noop`
-        # is escalated — a first-time user whose enrollment arrives in the
-        # same call must still read as `created`.
-        state = "updated"
     if binding is not None:
         # Masked, always. `istota user show` is the private operator surface
         # that returns these in full.
@@ -5049,6 +5127,25 @@ def main():
         help="Create or update a user profile row (idempotent; for Ansible)",
     )
     user_ensure_parser.add_argument("--name", required=True, help="User ID (Nextcloud username)")
+    provisioning_mode = user_ensure_parser.add_mutually_exclusive_group()
+    provisioning_mode.add_argument(
+        "--managed",
+        action="store_true",
+        help=(
+            "Record the fields this call writes as set by provisioning. The web "
+            "UI then refuses to edit them, and a field left out of a later call "
+            "is released."
+        ),
+    )
+    provisioning_mode.add_argument(
+        "--seed",
+        action="store_true",
+        help=(
+            "Write a new user in full, but on an existing one only fill an "
+            "empty SMS number or an unbound WhatsApp binding. Releases every "
+            "field this user had managed, so the web UI owns them."
+        ),
+    )
     user_ensure_parser.add_argument("--display-name", help="Display name shown in prompts")
     user_ensure_parser.add_argument("--tz", "--timezone", dest="tz", help="IANA timezone (e.g. America/Los_Angeles)")
     user_ensure_parser.add_argument(

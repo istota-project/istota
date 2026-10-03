@@ -13593,7 +13593,12 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
             _config.db_path, user["username"],
             display_name=user.get("display_name") or user["username"],
         )
+    with _db.get_db(_config.db_path) as conn:
+        managed = sorted(user_profiles.managed_fields(conn, user["username"]))
     return {"profile": {
+        # Fields the deployment re-writes on every converge; the PUT refuses an
+        # edit to them, so the page renders them disabled.
+        "managed": managed,
         "user_id": profile.user_id,
         "display_name": profile.display_name,
         "timezone": profile.timezone,
@@ -13671,39 +13676,89 @@ async def settings_update_profile(
     if _config is None:
         raise HTTPException(status_code=503, detail="config not loaded")
 
-    # `find_user_by_email` routes an address to the first user holding it, so
-    # claiming another user's address would route their mail to this user's
-    # tasks. The refusal names nobody: a settings form must not tell a user who
-    # else is on the deployment.
-    if coerced.get("email_addresses"):
-        with _db.get_db(_config.db_path) as conn:
-            conflicts = user_profiles.find_identity_conflicts(
-                conn, user["username"],
-                email_addresses=coerced["email_addresses"],
-            )
-        if conflicts:
-            logger.info(
-                "profile_conflict user=%s kind=email count=%d",
-                user["username"], len(conflicts),
-            )
-            raise HTTPException(
-                status_code=409, detail="That address belongs to another user",
-            )
-
-    # Make sure the row exists; web UI auto-seed on login covers the
-    # happy path, but a hand-rolled API client could land here cold.
-    user_profiles.ensure_profile(
-        _config.db_path, user["username"],
-        display_name=user.get("display_name") or user["username"],
+    refusal = await asyncio.to_thread(
+        _write_self_profile,
+        user["username"],
+        user.get("display_name") or user["username"],
+        coerced,
     )
-    if coerced:
-        user_profiles.update_profile(_config.db_path, user["username"], **coerced)
-        # No in-memory sync needed: gates that depend on these fields
-        # (is_module_enabled, …) read user_profiles live, so the next call
-        # in this process — and in the scheduler — sees the new value.
+    if refusal is not None:
+        return refusal
 
     logger.info("profile updated user=%s fields=%s", user["username"], sorted(coerced))
     return {"ok": True, "fields": sorted(coerced)}
+
+
+MANAGED_FIELDS_DETAIL = (
+    "These fields are set by the deployment and would be overwritten on the next deploy."
+)
+
+
+def _managed_refusal(fields: list[str]) -> JSONResponse:
+    """The 409 both profile writers answer a managed-field edit with.
+
+    `detail` is a string at the top level, as an `HTTPException` would put it,
+    so a client reading `detail` shows the sentence; `fields` names what to mark.
+    """
+    return JSONResponse(
+        {
+            "error": "managed_by_provisioning",
+            "fields": fields,
+            "detail": MANAGED_FIELDS_DETAIL,
+        },
+        status_code=409,
+    )
+
+
+def _write_self_profile(
+    user_id: str, display_name: str, coerced: dict[str, object],
+) -> JSONResponse | None:
+    """The self PUT's checks and write, in one `BEGIN IMMEDIATE` transaction.
+
+    Returns the refusal response, or None once written. One transaction rather
+    than a check on one connection and a write on another, so a concurrent
+    claim of the same address, or a deploy locking a field in between, cannot
+    slip past the check.
+    """
+    from istota import user_profiles
+    from fastapi import HTTPException
+
+    with _db.get_db(_config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        refused = user_profiles.refused_managed_fields(conn, user_id, coerced)
+        if refused:
+            logger.info(
+                "profile_managed_refused user=%s fields=%s", user_id, refused,
+            )
+            return _managed_refusal(refused)
+
+        # `find_user_by_email` routes an address to the first user holding it,
+        # so claiming another user's address would route their mail to this
+        # user's tasks. The refusal names nobody: a settings form must not tell
+        # a user who else is on the deployment.
+        if coerced.get("email_addresses"):
+            conflicts = user_profiles.find_identity_conflicts(
+                conn, user_id, email_addresses=coerced["email_addresses"],
+            )
+            if conflicts:
+                logger.info(
+                    "profile_conflict user=%s kind=email count=%d",
+                    user_id, len(conflicts),
+                )
+                raise HTTPException(
+                    status_code=409, detail="That address belongs to another user",
+                )
+
+        # Make sure the row exists; web UI auto-seed on login covers the
+        # happy path, but a hand-rolled API client could land here cold.
+        user_profiles.ensure_profile(
+            _config.db_path, user_id, display_name=display_name, conn=conn,
+        )
+        if coerced:
+            user_profiles.update_profile(
+                _config.db_path, user_id, conn=conn, **coerced,
+            )
+    return None
 
 
 # ============================================================================

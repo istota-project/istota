@@ -123,3 +123,70 @@ async def test_the_profile_get_still_reports_worker_caps(client, seeded):  # noq
     cookies = await _login(client, "alice")
     resp = await client.get(URL, cookies=cookies)
     assert resp.json()["profile"]["max_foreground_workers"] == 3
+
+
+def _mark_managed(db_path, user_id, *fields):
+    from istota import db
+
+    with db.get_db(db_path) as conn:
+        user_profiles.set_managed_fields(conn, user_id, fields)
+
+
+async def test_a_managed_field_changed_is_refused_and_named(
+    client, seeded,  # noqa: F811
+):
+    """A field the deploy re-writes on every converge would be reverted
+    silently, so the edit is refused instead, and nothing in the body lands."""
+    user_profiles.update_profile(
+        seeded.db_path, "alice", email_addresses=["alice@example.com"],
+    )
+    _mark_managed(seeded.db_path, "alice", "email_addresses")
+    cookies = await _login(client, "alice")
+    resp = await client.put(
+        URL,
+        json={"email_addresses": ["other@example.com"], "display_name": "New"},
+        cookies=cookies, headers=ORIGIN,
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["error"] == "managed_by_provisioning"
+    assert body["fields"] == ["email_addresses"]
+    assert "next deploy" in body["detail"]
+    profile = user_profiles.get_profile(seeded.db_path, "alice")
+    assert profile.email_addresses == ["alice@example.com"]
+    assert profile.display_name != "New"
+
+
+async def test_a_managed_field_resubmitted_unchanged_passes(
+    client, seeded,  # noqa: F811
+):
+    user_profiles.update_profile(
+        seeded.db_path, "alice", email_addresses=["alice@example.com"],
+    )
+    _mark_managed(seeded.db_path, "alice", "email_addresses")
+    cookies = await _login(client, "alice")
+    resp = await client.put(
+        URL,
+        json={"email_addresses": ["alice@example.com"], "display_name": "New"},
+        cookies=cookies, headers=ORIGIN,
+    )
+    assert resp.status_code == 200
+    assert user_profiles.get_profile(seeded.db_path, "alice").display_name == "New"
+
+
+async def test_another_users_managed_field_does_not_lock_mine(
+    client, seeded,  # noqa: F811
+):
+    _mark_managed(seeded.db_path, "bob", "display_name")
+    cookies = await _login(client, "alice")
+    resp = await client.put(
+        URL, json={"display_name": "New"}, cookies=cookies, headers=ORIGIN,
+    )
+    assert resp.status_code == 200
+
+
+async def test_the_profile_get_reports_the_managed_set(client, seeded):  # noqa: F811
+    _mark_managed(seeded.db_path, "alice", "timezone", "email_addresses")
+    cookies = await _login(client, "alice")
+    resp = await client.get(URL, cookies=cookies)
+    assert resp.json()["profile"]["managed"] == ["email_addresses", "timezone"]
