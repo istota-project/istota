@@ -6419,8 +6419,8 @@ def room_card(
                 "in their private chat instead; post to the room only as your reply."
             )
     lines.append("Room notes (CHANNEL.md) are read by everyone in this room.")
-    lines.append("A member's private notes about this room are never read or written "
-                 "here; point them at their private chat with you.")
+    lines.append("A member's private notes about this room cannot be shown or edited "
+                 "from here; point them at their private chat with you.")
     return "".join(f"\n{line}" for line in lines)
 
 

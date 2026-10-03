@@ -2993,8 +2993,11 @@ def room_notes_tokens(config: "Config", user_id: str) -> set[str]:
     return found
 
 
-def delete_room_notes_for(config: "Config", user_ids, token: str) -> None:
+def delete_room_notes_for(config: "Config", user_ids, token: str, *, aliases=()) -> None:
     """Remove every listed user's notes about a deleted room. Best effort.
+
+    ``aliases`` are the room's earlier tokens, which ``read_room_notes`` falls
+    back to; the caller reads them before the room's rows go.
 
     The directory is opened component by component with ``O_NOFOLLOW`` and the
     leaf unlinked relative to that fd, because this runs once per member and a
@@ -3005,11 +3008,14 @@ def delete_room_notes_for(config: "Config", user_ids, token: str) -> None:
 
     if not config.has_workspace:
         return
-    try:
-        validate_conversation_token(token)
-    except ValueError:
-        return
-    leaf = f"{token}.md"
+    leaves = []
+    for name in [token, *aliases]:
+        try:
+            validate_conversation_token(name)
+        except ValueError:
+            continue
+        if f"{name}.md" not in leaves:
+            leaves.append(f"{name}.md")
     for user_id in user_ids:
         if not is_scopable_user_id(user_id):
             continue
@@ -3018,18 +3024,24 @@ def delete_room_notes_for(config: "Config", user_ids, token: str) -> None:
         if fd is None:
             continue
         try:
-            st = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
-            if not stat.S_ISREG(st.st_mode):
-                logger.warning("room_notes_delete_refused user=%s reason=not_a_regular_file",
-                               user_id)
-                continue
-            os.unlink(leaf, dir_fd=fd)
-        except FileNotFoundError:
-            continue
-        except OSError as e:
-            logger.warning("room_notes_delete_failed user=%s errno=%s", user_id, e.errno)
+            for leaf in leaves:
+                _unlink_regular_at(fd, leaf, user_id)
         finally:
             os.close(fd)
+
+
+def _unlink_regular_at(dir_fd: int, leaf: str, user_id: str) -> None:
+    try:
+        st = os.stat(leaf, dir_fd=dir_fd, follow_symlinks=False)
+        if not stat.S_ISREG(st.st_mode):
+            logger.warning("room_notes_delete_refused user=%s reason=not_a_regular_file",
+                           user_id)
+            return
+        os.unlink(leaf, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        logger.warning("room_notes_delete_failed user=%s errno=%s", user_id, e.errno)
 
 
 # =============================================================================

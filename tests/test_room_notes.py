@@ -148,6 +148,12 @@ class TestStorage:
             assert not _notes_file(config, user, "rm_gone").exists()
             assert _notes_file(config, user, "rm_kept").exists()
 
+    def test_delete_takes_alias_files_too(self, config):
+        _config_dir(config, "alice")
+        storage.write_room_notes(config, "alice", "old_tok", "before the rename")
+        storage.delete_room_notes_for(config, ["alice"], "rm_new", aliases=["old_tok"])
+        assert not _notes_file(config, "alice", "old_tok").exists()
+
     def test_delete_does_not_follow_a_symlinked_rooms_dir(self, config, tmp_path):
         outside = tmp_path / "elsewhere"
         outside.mkdir()
@@ -178,9 +184,25 @@ class TestResolveRoom:
             # Numbered from 1 by (created_at, token); both rooms share a second
             # here, so the token decides.
             first, second = sorted([fam, work])
-            assert resolve_room(conn, "alice", "1").room.token == first
-            assert resolve_room(conn, "alice", "2").room.token == second
-            assert isinstance(resolve_room(conn, "alice", "3"), NotFound)
+            assert resolve_room(conn, "alice", "1", by_number=True).room.token == first
+            assert resolve_room(conn, "alice", "2", by_number=True).room.token == second
+            assert isinstance(resolve_room(conn, "alice", "3", by_number=True), NotFound)
+
+    def test_numbers_are_only_taken_where_the_caller_showed_the_list(self, config):
+        """`!room notes` numbers rooms the user left; `room post --room 2` and
+        `memory --room 2` number a shorter list, so a number read off the
+        first must not pick a different room in the others."""
+        with db.get_db(config.db_path) as conn:
+            _shared_room(conn, "Family")
+            assert isinstance(resolve_room(conn, "alice", "1"), NotFound)
+
+    def test_a_planted_notes_file_does_not_name_a_room_never_joined(self, config):
+        with db.get_db(config.db_path) as conn:
+            theirs = db.create_web_chat_room(conn, "bob", "Bob only").token
+            match = resolve_room(conn, "alice", "Bob only",
+                                 include_left_with_notes={theirs})
+            assert isinstance(match, NotFound)
+            assert all(c.token != theirs for c in match.candidates)
 
     def test_ambiguous_and_unknown_return_the_numbered_list(self, config):
         with db.get_db(config.db_path) as conn:
@@ -298,6 +320,21 @@ class TestMemoryRoomFlag:
     def test_an_unknown_or_private_room_is_unavailable(self, config, cli, capsys):
         assert _refused(["show", "--room", "nowhere"], capsys)["error"] == "room_unavailable"
         assert _refused(["show", "--room", "mine"], capsys)["error"] == "room_unavailable"
+
+    def test_an_append_extends_notes_still_under_an_alias(self, config, cli, capsys):
+        """Writing a fresh canonical file would hide the alias notes from every
+        reader, since a canonical file wins."""
+        with db.get_db(config.db_path) as conn:
+            conn.execute("INSERT INTO room_token_migration VALUES (?, ?, ?)",
+                         ("old_fam", cli.fam, "2026-01-01T00:00:00Z"))
+        alias = _notes_file(config, "alice", "old_fam")
+        alias.parent.mkdir(parents=True, exist_ok=True)
+        alias.write_text("## Avoid\n\n- The house sale\n")
+        memory_main(["append", "--room", "family", "--heading", "Avoid",
+                     "--line", "Grandma's birthday"])
+        assert json.loads(capsys.readouterr().out)["status"] == "ok"
+        notes = storage.read_room_notes(config, "alice", cli.fam)
+        assert "The house sale" in notes and "Grandma's birthday" in notes
 
     def test_room_is_exclusive_with_channel_and_group(self, cli, capsys):
         out = _refused(["show", "--room", "family", "--group", "fam"], capsys)

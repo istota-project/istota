@@ -6091,11 +6091,12 @@ def _chat_delete_room(username: str, room_id: int) -> str:
         # Taken before the delete removes the member rows: every member's notes
         # about the room go with it.
         members = db.list_room_members(conn, room.token)
+        aliases = db._room_ref_tokens(conn, room.token, include_surface_refs=False)
         db.delete_web_chat_room(conn, room_id, username)
         token = room.token
     from istota import storage
     try:
-        storage.delete_room_notes_for(_config, members, token)
+        storage.delete_room_notes_for(_config, members, token, aliases=aliases)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("chat room delete: room notes cleanup failed: %s", exc)
     # Best-effort: drop the channel's CHANNEL.md directory. Outside the DB

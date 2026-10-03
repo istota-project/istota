@@ -14,7 +14,7 @@ You are acting for 'alice', this room's host.
 The persona in use is that of 'alice'.
 This turn runs with everything 'alice' can reach, and anything you reach may end up in front of everyone here. Their personal memory is not loaded into this room; read it with the memory skill only when they ask for it.
 Room notes (CHANNEL.md) are read by everyone in this room.
-A member's private notes about this room are never read or written here; point them at their private chat with you.
+A member's private notes about this room cannot be shown or edited from here; point them at their private chat with you.
 Source: web
 Output target: text
 Database: reachable only through skill CLIs (no file access)

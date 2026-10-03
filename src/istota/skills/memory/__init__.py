@@ -316,10 +316,15 @@ def _room_notes_path(query: str) -> tuple[Path, str]:
 
     db_path = os.environ.get("ISTOTA_DB_PATH", "")
     found = None
+    names: list[str] = []
     if db_path and Path(db_path).is_file():
         try:
             with db.get_db(Path(db_path)) as conn:
                 found = resolve_room(conn, _user_id(), query)
+                if isinstance(found, Found):
+                    names = db._room_ref_tokens(
+                        conn, found.room.token, include_surface_refs=False,
+                    )
         except Exception as exc:  # noqa: BLE001 — an unreadable registry refuses
             logger.warning("memory: room lookup failed: %s", exc)
     if not isinstance(found, Found):
@@ -334,6 +339,19 @@ def _room_notes_path(query: str) -> tuple[Path, str]:
     if rooms_dir is None:
         _err("room_notes_outside_user_tree", path=_mount_relative(config_dir / "rooms"))
         sys.exit(1)
+    # `storage.read_room_notes`' rule: the canonical file, else the first live
+    # alias that exists. Writing to the canonical name while an alias still
+    # held the notes would hide them from every reader behind the new file.
+    for name in [token, *(n for n in names if n != token)]:
+        if "/" in name or name.startswith("."):
+            continue
+        try:
+            (rooms_dir / f"{name}.md").lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            break
+        return rooms_dir / f"{name}.md", token
     return rooms_dir / f"{token}.md", token
 
 

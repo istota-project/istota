@@ -1583,7 +1583,8 @@ def _room_notes(ctx: CommandContext, room, query: str) -> str:
     if room is None or db.room_is_shared(conn, room.token):
         return ROOM_NOTES_REFUSAL
     noted = storage.room_notes_tokens(ctx.config, user_id)
-    match = resolve_room(conn, user_id, query, include_left_with_notes=noted)
+    match = resolve_room(conn, user_id, query, include_left_with_notes=noted,
+                         by_number=True)
     if not query or not isinstance(match, Found):
         candidates = match.candidates
         if not candidates:

@@ -147,8 +147,8 @@ class TestAPrincipalsTurn:
         with db.get_db(config.db_path) as conn:
             _shared(conn)
             pid = _guest(conn)
-        line = ("A member's private notes about this room are never read or written "
-                "here; point them at their private chat with you.")
+        line = ("A member's private notes about this room cannot be shown or edited "
+                "from here; point them at their private chat with you.")
         for task in (_task("bob"), _task("alice", guest_participant_id=pid),
                      _task("bob", source_type="scheduled")):
             assert line in _card(config, task)

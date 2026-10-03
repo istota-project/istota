@@ -6,10 +6,14 @@ One resolver for every place a user or a model names a room in words:
 none of them could say "two rooms go by that name".
 
 Rules, in order: a token (or a binding ref) matches its room exactly; then a
-case-insensitive exact name; then a number from the list; then a unique
-case-insensitive prefix. The candidate list is ordered by ``(created_at,
-token)`` and numbered from 1, so a number stays the same until the user's room
-list changes; nothing is remembered between calls.
+case-insensitive exact name; then a number from the list, for a caller that
+showed the list; then a unique case-insensitive prefix. The candidate list is
+ordered by ``(created_at, token)`` and numbered from 1, so a number stays the
+same until the user's room list changes; nothing is remembered between calls.
+
+Numbers are accepted only by `!room notes` (``by_number``), the one caller
+whose list carries rooms the user left: a number read off that list and typed
+into `room post --room` would otherwise pick another room from a shorter list.
 """
 
 from __future__ import annotations
@@ -57,6 +61,15 @@ class NotFound:
 RoomMatch = Union[Found, Ambiguous, NotFound]
 
 
+def _was_ever_in(conn, token: str, user_id: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM room_members WHERE room_token = ? AND user_id = ? "
+        "UNION ALL SELECT 1 FROM room_participants WHERE room_token = ? AND user_id = ? "
+        "LIMIT 1",
+        (token, user_id, token, user_id),
+    ).fetchone() is not None
+
+
 def room_candidates(
     conn, user_id: str, *, shared_only: bool = True,
     include_left_with_notes: Iterable[str] | None = None,
@@ -71,7 +84,11 @@ def room_candidates(
     """
     noted: set[str] = set()
     for token in include_left_with_notes or ():
-        noted.add(canonical_token(conn, token) or token)
+        token = canonical_token(conn, token) or token
+        # A file name in a sandbox-writable directory is not evidence of
+        # membership: only a room the user was once in is listed by name.
+        if _was_ever_in(conn, token, user_id):
+            noted.add(token)
     rooms: dict[str, db.Room] = {}
     for room in db.list_member_rooms(conn, user_id, include_dismissed=include_dismissed):
         if room.token in noted:
@@ -103,6 +120,7 @@ def resolve_room(
     conn, user_id: str, query: str, *, shared_only: bool = True,
     include_left_with_notes: Iterable[str] | None = None,
     include_dismissed: bool = False, names_only: bool = False,
+    by_number: bool = False,
 ) -> RoomMatch:
     """Which of the user's rooms ``query`` names.
 
@@ -131,7 +149,7 @@ def resolve_room(
         return Ambiguous(tuple(exact))
     if names_only:
         return NotFound(everything)
-    if query.isdigit():
+    if by_number and query.isdigit():
         number = int(query)
         if 1 <= number <= len(candidates):
             return Found(candidates[number - 1])
