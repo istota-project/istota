@@ -406,6 +406,7 @@ class TestTheSidecarsPayloadsAreReadable:
         "sender_jid": "",
         "sender_lid": "",
         "mentions_bot": False,
+        "mentions": [],
         "timestamp": 1757000000,
         "media_name": None,
         "media_mime": None,
@@ -454,6 +455,30 @@ class TestTheSidecarsPayloadsAreReadable:
         assert event.group.group_jid == "120363000000000001@g.us"
         assert event.group.mentions_bot is True
         assert event.from_user.jid == "15551234567@s.whatsapp.net"
+
+    def test_a_group_payload_carries_its_mention_list(self):
+        """ISSUE-601: the mention list crosses so the daemon can put names
+        where WhatsApp put a number or a LID."""
+        keys = _js_send_keys("MSG_INBOUND")
+        assert "mentions" in keys
+        payload = self._filled(keys, dict(
+            self._INBOUND_TEXT, jid="120363000000000001@g.us", group=True,
+            sender_jid="15551234567@s.whatsapp.net",
+            text="@100000000000042 hi @15557654321",
+            mentions=[
+                {"token": "@100000000000042", "jid": "", "lid": "", "bot": True},
+                {"token": "@15557654321", "jid": "15557654321@s.whatsapp.net",
+                 "lid": "", "bot": False},
+                {"token": "not a token", "jid": "", "lid": "", "bot": False},
+            ],
+        ))
+
+        event = proto.inbound_event(payload)
+
+        assert [(m.token, m.jid, m.bot) for m in event.group.mentions] == [
+            ("@100000000000042", "", True),
+            ("@15557654321", "15557654321@s.whatsapp.net", False),
+        ]
 
     def test_a_group_roster_payload_normalizes(self):
         keys = _js_send_keys("MSG_GROUP_ROSTER")
@@ -3339,7 +3364,7 @@ class TestTheChatAddressUnderLid:
         for the same correspondent, which in a LID-addressed chat is the phone
         JID."""
         key = self._key(
-            remoteJid="277009032835160@lid",
+            remoteJid="100000000000042@lid",
             remoteJidAlt="13105551234@s.whatsapp.net",
         )
         assert self._call(f"m.chatAddress({key})") == "13105551234@s.whatsapp.net"
@@ -3350,14 +3375,14 @@ class TestTheChatAddressUnderLid:
         is then a version change rather than a silent return to the bug this
         was written for."""
         key = self._key(
-            remoteJid="277009032835160@lid",
+            remoteJid="100000000000042@lid",
             senderPn="13105551234@s.whatsapp.net",
         )
         assert self._call(f"m.chatAddress({key})") == "13105551234@s.whatsapp.net"
 
     def test_the_v7_field_wins_when_both_are_present(self):
         key = self._key(
-            remoteJid="277009032835160@lid",
+            remoteJid="100000000000042@lid",
             remoteJidAlt="13105551234@s.whatsapp.net",
             senderPn="19995550000@s.whatsapp.net",
         )
@@ -3382,9 +3407,9 @@ class TestTheChatAddressUnderLid:
         whose number WhatsApp withholds cannot enroll and cannot resolve on
         this adapter, and the honest answer is a named drop rather than
         forwarding a LID the daemon would refuse one layer later."""
-        for pn in (None, "", "277009032835160@lid", "not-a-jid", 12345):
+        for pn in (None, "", "100000000000042@lid", "not-a-jid", 12345):
             key = self._key(
-                remoteJid="277009032835160@lid", remoteJidAlt=pn, senderPn=pn,
+                remoteJid="100000000000042@lid", remoteJidAlt=pn, senderPn=pn,
             )
             assert self._call(f"m.chatAddress({key})") == "", pn
 
@@ -3398,7 +3423,7 @@ class TestTheChatAddressUnderLid:
         daemon refuses at `normalize_jid`, which is the silent drop one layer
         down from the one being fixed."""
         key = self._key(
-            remoteJid="277009032835160@lid",
+            remoteJid="100000000000042@lid",
             remoteJidAlt="13105551234:7@s.whatsapp.net",
         )
         produced = self._call(f"m.chatAddress({key})")
@@ -3585,24 +3610,24 @@ class TestTheGroupFunctions:
         }
 
     def test_a_lid_sender_takes_its_number_from_the_key(self):
-        key = json.dumps({"participant": "277009032835160@lid",
+        key = json.dumps({"participant": "100000000000042@lid",
                           "participantAlt": "15551234567@s.whatsapp.net"})
         assert self._call(f"m.groupSender({key})") == {
-            "jid": "15551234567@s.whatsapp.net", "lid": "277009032835160@lid",
+            "jid": "15551234567@s.whatsapp.net", "lid": "100000000000042@lid",
         }
 
     def test_a_lid_sender_takes_its_number_from_the_roster(self):
-        key = json.dumps({"participant": "277009032835160:3@lid"})
-        roster = 'new Map([["277009032835160@lid", "15551234567@s.whatsapp.net"]])'
+        key = json.dumps({"participant": "100000000000042:3@lid"})
+        roster = 'new Map([["100000000000042@lid", "15551234567@s.whatsapp.net"]])'
         assert self._call(f"m.groupSender({key}, {roster})") == {
-            "jid": "15551234567@s.whatsapp.net", "lid": "277009032835160:3@lid",
+            "jid": "15551234567@s.whatsapp.net", "lid": "100000000000042:3@lid",
         }
 
     def test_a_withheld_number_crosses_as_the_lid_alone(self):
         """D1: a guest. Never a guessed phone JID."""
-        key = json.dumps({"participant": "277009032835160@lid"})
+        key = json.dumps({"participant": "100000000000042@lid"})
         assert self._call(f"m.groupSender({key}, new Map())") == {
-            "jid": "", "lid": "277009032835160@lid",
+            "jid": "", "lid": "100000000000042@lid",
         }
 
     def test_a_mention_of_the_paired_account_is_seen_through_its_device_suffix(self):
@@ -3621,16 +3646,42 @@ class TestTheGroupFunctions:
         bot = '["15550000000:12@s.whatsapp.net"]'
         assert self._call(f"m.mentionsBot({message}, {bot})") is False
 
+    def test_the_mention_list_names_each_token_in_the_body(self):
+        """ISSUE-601: a LID mention, a phone mention, the bot's own LID, and a
+        mention whose token the body does not carry."""
+        message = json.dumps({"message": {"extendedTextMessage": {
+            "text": "@99900000000 hi @100000000000042 and @15557654321",
+            "contextInfo": {"mentionedJid": [
+                "99900000000@lid",
+                "100000000000042@lid",
+                "15557654321@s.whatsapp.net",
+                "388000000000000@lid",
+            ]},
+        }}})
+        bot = '["15550000000:12@s.whatsapp.net", "99900000000:12@lid"]'
+        roster = 'new Map([["100000000000042@lid", "15551234567@s.whatsapp.net"]])'
+        assert self._call(f"m.groupMentions({message}, {bot}, {roster})") == [
+            {"token": "@99900000000", "jid": "", "lid": "", "bot": True},
+            {"token": "@100000000000042", "jid": "15551234567@s.whatsapp.net",
+             "lid": "100000000000042@lid", "bot": False},
+            {"token": "@15557654321", "jid": "15557654321@s.whatsapp.net",
+             "lid": "", "bot": False},
+        ]
+
+    def test_a_message_with_no_mentions_has_an_empty_list(self):
+        message = json.dumps({"message": {"conversation": "@123 hi"}})
+        assert self._call(f"m.groupMentions({message}, [], new Map())") == []
+
     def test_a_roster_leaves_the_bot_out_and_keeps_both_spellings(self):
         participants = json.dumps([
-            {"id": "277009032835160@lid", "phoneNumber": "15551234567@s.whatsapp.net"},
+            {"id": "100000000000042@lid", "phoneNumber": "15551234567@s.whatsapp.net"},
             {"id": "15550000000@s.whatsapp.net"},
             {"id": "388000000000000@lid"},
             {"id": "not-a-jid"},
         ])
         bot = '["15550000000:12@s.whatsapp.net"]'
         assert self._call(f"m.rosterParticipants({participants}, {bot})") == [
-            {"jid": "15551234567@s.whatsapp.net", "lid": "277009032835160@lid"},
+            {"jid": "15551234567@s.whatsapp.net", "lid": "100000000000042@lid"},
             {"jid": "", "lid": "388000000000000@lid"},
         ]
 
