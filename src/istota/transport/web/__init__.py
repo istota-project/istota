@@ -38,7 +38,9 @@ logger = logging.getLogger("istota.transport.web")
 __all__ = ["WebTransport", "addressed_to_bot_in_text", "default_web_room_token"]
 
 
-def addressed_to_bot_in_text(text: str, bot_names: Iterable[str]) -> bool:
+def addressed_to_bot_in_text(
+    text: str, bot_names: Iterable[str], *, any_line: bool = False,
+) -> bool:
     """Whether a web message explicitly addresses the bot.
 
     Web has no structured mention, so this is the text test: ``@<name>``
@@ -46,14 +48,18 @@ def addressed_to_bot_in_text(text: str, bot_names: Iterable[str]) -> bool:
     ``bot_names`` (the bot's display name and its Talk account name). "Ask zorg
     about it" is a message *about* the bot and does not count. Blank names are
     skipped, since an empty pattern would match every message.
+
+    ``any_line`` takes the name as the first word of any line rather than only
+    of the message, for email, where a mail opens with a greeting.
     """
+    flags = re.IGNORECASE | (re.MULTILINE if any_line else 0)
     for name in bot_names:
         name = (name or "").strip()
         if not name:
             continue
         escaped = re.escape(name)
         pattern = rf"(?<![\w@])@{escaped}(?![\w-])|^\s*{escaped}(?![\w])"
-        if re.search(pattern, text or "", re.IGNORECASE):
+        if re.search(pattern, text or "", flags):
             return True
     return False
 

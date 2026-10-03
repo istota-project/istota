@@ -268,6 +268,7 @@ CREATE TABLE IF NOT EXISTS processed_emails (
     routing_method TEXT,  -- plus_address, signup, sender_match, thread_match, thread_room, discarded, quiet, read_error, throttled
     processed_at TEXT DEFAULT (datetime('now')),
     recipients TEXT,  -- the message's To + Cc, JSON; an email thread room replies to the latest
+    host_asked INTEGER NOT NULL DEFAULT 0,  -- the host's authenticated, addressed question on a thread room (ISSUE-607)
     UNIQUE (uidvalidity, email_id),
     FOREIGN KEY (task_id) REFERENCES tasks(id)
 );

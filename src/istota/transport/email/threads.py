@@ -26,12 +26,17 @@ the existing routing.
   the thread. The first message's people are the epoch baseline; anyone new on
   a later message always splits (D3), since email has no history
   acknowledgment.
-- **Membership** is the host alone at minting. An address matching another
-  istota user is a participant with that user id and a guest until the host
-  adds them on web: an email From is a claim, not an identity, so mail cannot
-  make anyone a member of somebody else's room.
+- **Membership** is the host alone, for good (ISSUE-606). The thread is the
+  host's correspondence: another istota user on it is a correspondent like
+  anyone else, a guest whose turn runs as the host with every scope withheld,
+  and the web refuses to add them as a member.
+- **Addressed** is the bot in To, or the bot named in the new text while in
+  Cc (`addressed_in_new_text`, ISSUE-607). In Cc and not named, it listens.
 - **The reply** is a reply-all to the latest message's participants, not the
-  union, so somebody removed from Cc is respected (`reply_all`).
+  union, so somebody removed from Cc is respected (`reply_all`). The host's
+  own addressed question, from a mail that authenticated, is answered with no
+  outbound hold while those people are the ones it was asked in front of
+  (`host_asked`).
 """
 
 from __future__ import annotations
@@ -133,9 +138,8 @@ def find_thread_room(conn, config: "Config", email) -> ThreadRoom | None:
         binding = db.get_room_binding(conn, token, SURFACE) if room else None
         if binding is None:
             continue
-        policy = room_policy.get_policy(conn, token)
-        host = policy.host_user_id if policy and policy.host_user_id else room.user_id
-        return ThreadRoom(token=token, ref=binding.surface_ref, host=host)
+        return ThreadRoom(token=token, ref=binding.surface_ref,
+                          host=find_host(conn, token))
     return None
 
 
@@ -250,6 +254,88 @@ def recipients_json(email) -> str:
     )
 
 
+# An attribution line, in the forms the common clients write: English
+# ("On … wrote:"), German ("Am … schrieb …:") and French ("Le … a écrit :").
+_ATTRIBUTION = re.compile(
+    r"^\s*(On\b.*\bwrote:|Am\b.*\bschrieb\b.*:|Le\b.*\ba\s+écrit\s*:)\s*$",
+    re.IGNORECASE,
+)
+# The tail of one a client wrapped, whose opening is up to two lines above.
+_ATTRIBUTION_TAIL = re.compile(r"(\bwrote:|\bschrieb\b.*:|\ba\s+écrit\s*:)\s*$",
+                               re.IGNORECASE)
+_ATTRIBUTION_HEAD = re.compile(r"^\s*(On|Am|Le)\b", re.IGNORECASE)
+_FORWARD = re.compile(
+    r"^\s*(-{2,}\s*(Original Message|Forwarded message)\s*-{2,}"
+    r"|Begin forwarded message:|_{8,}\s*$)",
+    re.IGNORECASE,
+)
+# Outlook's quoted header block: a From: line followed by Sent: or Date:.
+_HEADER_FROM = re.compile(r"^\s*From:\s", re.IGNORECASE)
+_HEADER_NEXT = re.compile(r"^\s*(Sent|Date):\s", re.IGNORECASE)
+
+
+def new_text(body: str | None) -> str:
+    """The part of a mail its sender wrote now, above the quoted history.
+
+    Cut at an attribution line (wrapped over up to three lines included), a
+    forwarded or original-message marker, Outlook's underscore rule or its
+    ``From:``/``Sent:`` header block, with every ``>``-quoted line dropped.
+    Otherwise every later reply quoting a question to the bot would ask it
+    again. A client quoting in some other form is read as new text.
+    """
+    lines = (body or "").splitlines()
+    kept: list[str] = []
+    for index, line in enumerate(lines):
+        if _ATTRIBUTION.match(line) or _FORWARD.match(line):
+            break
+        if _HEADER_FROM.match(line) and any(
+            _HEADER_NEXT.match(following) for following in lines[index + 1:index + 4]
+        ):
+            break
+        if _ATTRIBUTION_TAIL.search(line):
+            head = next(
+                (back for back in (1, 2) if index - back >= 0
+                 and _ATTRIBUTION_HEAD.match(lines[index - back])
+                 and len(kept) >= back and kept[-back] == lines[index - back]),
+                None,
+            )
+            if head is not None:
+                del kept[-head:]
+                break
+        if line.lstrip().startswith(">"):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def addressed_in_new_text(config: "Config", body: str | None) -> bool:
+    """Whether the mail's new text names the bot, by the web rule.
+
+    ``@<name>`` anywhere, or the name as the first word of any line, since a
+    mail opens with a greeting. "Ask zorg about it" is about the bot, not to it.
+    """
+    from ..web import addressed_to_bot_in_text
+
+    return addressed_to_bot_in_text(
+        new_text(body), (getattr(config, "bot_name", "") or "",), any_line=True,
+    )
+
+
+def asked_by_name(config: "Config", body: str | None) -> bool:
+    """Whether the new text puts a question to the bot by name, not merely
+    mentions it: ``@<name>`` anywhere, or the name followed by a comma or a
+    colon at the start of a line ("Zorg, when …"). Stricter than
+    `addressed_in_new_text`, which also takes "Zorg booked the table": this one
+    decides whether the host's question goes out without an outbound hold.
+    """
+    name = (getattr(config, "bot_name", "") or "").strip()
+    if not name:
+        return False
+    escaped = re.escape(name)
+    pattern = rf"(?<![\w@])@{escaped}(?![\w-])|^\s*{escaped}\s*[,:]"
+    return re.search(pattern, new_text(body), re.IGNORECASE | re.MULTILINE) is not None
+
+
 def thread_room_for_task(conn, task) -> str | None:
     """The thread room an email task belongs to, or None."""
     if getattr(task, "source_type", None) != SURFACE or not task.conversation_token:
@@ -257,6 +343,63 @@ def thread_room_for_task(conn, task) -> str | None:
     if db.get_room_binding(conn, task.conversation_token, SURFACE) is None:
         return None
     return task.conversation_token
+
+
+def _reply_recipients(config: "Config", row) -> tuple[str, list[str]] | None:
+    """A stored message's reply-all: its sender in To, its other recipients in
+    Cc, the bot's addresses dropped. None without a usable sender."""
+    to = fold(parseaddr(row["sender_email"] or "")[1])
+    if "@" not in to:
+        return None
+    try:
+        listed = json.loads(row["recipients"] or "[]")
+    except ValueError:
+        listed = []
+    cc: list[str] = []
+    for _, address in getaddresses([str(a) for a in listed if a]):
+        address = fold(address)
+        if ("@" not in address or address == to or address in cc
+                or is_bot_address(config, address)):
+            continue
+        cc.append(address)
+    return to, cc
+
+
+def host_asked(conn, config: "Config", room_token: str | None, task, plan) -> bool:
+    """Whether ``task`` answers the host's own authenticated, addressed
+    question on this thread, to the people it was asked in front of.
+
+    The release from the outbound hold (ISSUE-607) needs all of it: the task
+    was created by a mail the poller marked `host_asked` (the host's own
+    address, a DMARC pass, the bot addressed), it is no guest's turn and runs
+    as the room's host, and ``plan``'s recipients are exactly that mail's
+    reply-all. Anything else (a forged or unauthenticated mail, a scheduled
+    job, a subtask, a thread that gained a recipient since) is gated as usual.
+    """
+    if not room_token or task is None or getattr(task, "guest_participant_id", None):
+        return False
+    host = find_host(conn, room_token)
+    if host is None or host != getattr(task, "user_id", None):
+        return False
+    row = conn.execute(
+        'SELECT sender_email, recipients FROM processed_emails '
+        "WHERE task_id = ? AND thread_id = ? AND host_asked = 1 "
+        "ORDER BY id LIMIT 1",
+        (task.id, room_token),
+    ).fetchone()
+    if row is None:
+        return False
+    people = _reply_recipients(config, row)
+    return people is not None and people == (plan.to, list(plan.cc))
+
+
+def find_host(conn, room_token: str) -> str | None:
+    """The room's host: the policy's, else its creator, as `find_thread_room`."""
+    room = db.get_room(conn, room_token)
+    if room is None:
+        return None
+    policy = room_policy.get_policy(conn, room_token)
+    return policy.host_user_id if policy and policy.host_user_id else room.user_id
 
 
 def reply_all(
@@ -280,20 +423,10 @@ def reply_all(
     ).fetchone()
     if row is None:
         return None
-    to = fold(parseaddr(row["sender_email"] or "")[1])
-    if "@" not in to:
+    people = _reply_recipients(config, row)
+    if people is None:
         return None
-    try:
-        listed = json.loads(row["recipients"] or "[]")
-    except ValueError:
-        listed = []
-    cc: list[str] = []
-    for _, address in getaddresses([str(a) for a in listed if a]):
-        address = fold(address)
-        if ("@" not in address or address == to or address in cc
-                or is_bot_address(config, address)):
-            continue
-        cc.append(address)
+    to, cc = people
     message_id = row["message_id"]
     references = row["references"]
     subject = row["subject"] or ""
@@ -322,10 +455,15 @@ __all__ = [
     "ReplyAll",
     "SURFACE",
     "ThreadRoom",
+    "addressed_in_new_text",
+    "asked_by_name",
     "author_ref",
+    "find_host",
     "find_thread_room",
     "fold",
+    "host_asked",
     "is_present",
+    "new_text",
     "recipients_json",
     "reply_all",
     "resolve_thread",

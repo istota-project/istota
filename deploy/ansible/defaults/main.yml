@@ -462,6 +462,9 @@ istota_email_confirm_sender_match: "off"
 # what catches a move to a provider that does not evaluate DMARC.
 istota_email_dmarc_canary: true
 istota_email_dmarc_canary_warn_on_missing: false
+# A disclosure line ("Written by <bot>, an AI assistant, for <host>") on every
+# mail the bot sends into a multi-person email thread. Off by default.
+istota_email_thread_disclosure_footer: false
 # Your receiving MTA's authserv-id — the first field of the
 # Authentication-Results header it stamps. Blank trusts the topmost header,
 # which is the sender's own if your MTA stops stamping. Set it and headers from
