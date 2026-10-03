@@ -528,3 +528,94 @@ class TestUserEnsureClearVaultConfig:
         )
 
         assert storage.stored_vault_file(config, "alice") == "work.kdbx"
+
+
+class TestUserEnsureIdentityUniqueness:
+    """An inventory collision fails the play rather than creating an ambiguous
+    route: `find_user_by_email` returns the first holder of an address."""
+
+    def _seed_bob(self, db_path):
+        user_profiles.ensure_profile(db_path, "bob")
+        user_profiles.update_profile(
+            db_path, "bob",
+            email_addresses=["bob@example.com"],
+            sms_phone_number="+15550100001",
+        )
+        with db.get_db(db_path) as conn:
+            db.set_whatsapp_binding(
+                conn, "bob", bootstrap_phone_number="+15550100002",
+            )
+
+    def test_another_users_address_exits_1_naming_the_holder(
+        self, cfg_with_db, capsys
+    ):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        self._seed_bob(db_path)
+        with pytest.raises(SystemExit) as excinfo:
+            cmd_user_ensure(_FakeArgs(
+                config=str(cfg), name="alice",
+                email=["alice@example.com", "Bob@Example.com"],
+            ))
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "Bob@Example.com" in err
+        assert "'bob'" in err
+        # Nothing was written: the check runs before the profile row moves.
+        assert user_profiles.get_profile(db_path, "alice") is None
+
+    def test_another_users_sms_number_exits_1_masked(self, cfg_with_db, capsys):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        self._seed_bob(db_path)
+        with pytest.raises(SystemExit) as excinfo:
+            cmd_user_ensure(_FakeArgs(
+                config=str(cfg), name="alice", sms_number="+15550100001",
+            ))
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "'bob'" in err
+        assert "+15550100001" not in err
+
+    def test_another_users_whatsapp_number_exits_1(self, cfg_with_db, capsys):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        self._seed_bob(db_path)
+        user_profiles.ensure_profile(db_path, "alice")
+        with pytest.raises(SystemExit) as excinfo:
+            cmd_user_ensure(_FakeArgs(
+                config=str(cfg), name="alice", display_name="Alice K",
+                whatsapp_number="+15550100002",
+            ))
+        assert excinfo.value.code == 1
+        assert "'bob'" in capsys.readouterr().err
+        # Refused before the profile write, so the display name is untouched.
+        assert user_profiles.get_profile(db_path, "alice").display_name != "Alice K"
+
+    def test_an_already_stored_duplicate_is_reasserted(self, cfg_with_db):
+        # Every deploy re-runs `user ensure` with the same inventory, so a
+        # duplicate stored before the rule must not start failing the play.
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        self._seed_bob(db_path)
+        user_profiles.ensure_profile(db_path, "alice")
+        user_profiles.update_profile(
+            db_path, "alice", email_addresses=["bob@example.com"],
+        )
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice", email=["bob@example.com"],
+        ))
+
+    def test_the_holder_reasserting_their_own_values_passes(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        self._seed_bob(db_path)
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="bob", email=["bob@example.com"],
+            sms_number="+15550100001", whatsapp_number="+15550100002",
+        ))

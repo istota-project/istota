@@ -12776,10 +12776,12 @@ async def settings_delete_secret(
 # Phase 6 — User profile (user_profiles table)
 # ============================================================================
 
-# Editable scalar/list fields on the profile card. Each entry maps a JSON
-# key (sent by the frontend) to a column in user_profiles, plus a coercion
-# hook so PUT bodies can be validated without a separate Pydantic model.
-_PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
+# How each profile column a web writer may set is validated, keyed by the JSON
+# key (sent by the frontend), which is also the user_profiles column. A coercion
+# hook so PUT bodies can be validated without a separate Pydantic model. Which
+# writer may set which field is not decided here: that is
+# `user_profiles.SELF_EDITABLE_FIELDS` / `ADMIN_EDITABLE_FIELDS`.
+_PROFILE_FIELD_SPECS: dict[str, dict] = {
     "display_name":           {"type": "str"},
     "timezone":               {"type": "str"},
     # `talk_channel`, not `str`: both are delivery targets the runtime config
@@ -12807,6 +12809,14 @@ _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
     "relay_delivery":         {
         "type": "enum", "values": user_profiles.RELAY_DELIVERY_VALUES,
     },
+}
+
+# The fields the self PUT accepts. Worker caps are in the specs above and not
+# here: a user raising their own cap was accepted until the authority table
+# existed, and now gets 400 `unknown field`.
+_PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
+    field: _PROFILE_FIELD_SPECS[field]
+    for field in user_profiles.SELF_EDITABLE_FIELDS
 }
 
 
@@ -13418,7 +13428,7 @@ def _coerce_profile_value(
     operator-set log route would then 400 the user's own edit, on a row the
     settings page offers no way to correct.
     """
-    spec = _PROFILE_EDITABLE_FIELDS.get(field)
+    spec = _PROFILE_FIELD_SPECS.get(field)
     if spec is None:
         raise ValueError(f"unknown profile field: {field}")
     t = spec["type"]
@@ -13660,6 +13670,25 @@ async def settings_update_profile(
 
     if _config is None:
         raise HTTPException(status_code=503, detail="config not loaded")
+
+    # `find_user_by_email` routes an address to the first user holding it, so
+    # claiming another user's address would route their mail to this user's
+    # tasks. The refusal names nobody: a settings form must not tell a user who
+    # else is on the deployment.
+    if coerced.get("email_addresses"):
+        with _db.get_db(_config.db_path) as conn:
+            conflicts = user_profiles.find_identity_conflicts(
+                conn, user["username"],
+                email_addresses=coerced["email_addresses"],
+            )
+        if conflicts:
+            logger.info(
+                "profile_conflict user=%s kind=email count=%d",
+                user["username"], len(conflicts),
+            )
+            raise HTTPException(
+                status_code=409, detail="That address belongs to another user",
+            )
 
     # Make sure the row exists; web UI auto-seed on login covers the
     # happy path, but a hand-rolled API client could land here cold.

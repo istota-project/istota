@@ -1894,6 +1894,37 @@ def cmd_user_ensure(args):
     if getattr(args, "timezone_follow_location", None) is not None:
         updates["timezone_follow_location"] = args.timezone_follow_location
 
+    # Before anything is written, so an inventory collision fails the play
+    # rather than creating an ambiguous route. A value this user already holds
+    # passes even if somebody else holds it too: see `find_identity_conflicts`.
+    whatsapp_checked = None
+    if whatsapp_number is not None and not clear_whatsapp:
+        try:
+            whatsapp_checked = user_profiles.normalize_whatsapp_phone_number(
+                whatsapp_number, allow_empty=True,
+            )
+        except ValueError:
+            whatsapp_checked = None  # `set_whatsapp_binding` refuses it below
+    with db.get_db(db_path) as conn:
+        conflicts = user_profiles.find_identity_conflicts(
+            conn, user_id,
+            email_addresses=updates.get("email_addresses"),
+            sms=updates.get("sms_phone_number") or None,
+            whatsapp=whatsapp_checked or None,
+        )
+    if conflicts:
+        phones = {updates.get("sms_phone_number"), whatsapp_checked} - {None, ""}
+        for value, holder in conflicts.items():
+            shown = (
+                user_profiles.mask_phone_number(value)
+                if value in phones else repr(value)
+            )
+            print(
+                f"Error: {shown} is already held by user {holder!r}",
+                file=sys.stderr,
+            )
+        sys.exit(1)
+
     try:
         profile, state = user_profiles.update_profile_with_status(
             db_path, user_id, **updates

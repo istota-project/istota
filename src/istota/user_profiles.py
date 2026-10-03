@@ -141,6 +141,28 @@ _BOOL_COLUMN_DEFAULTS = {
 _BOOL_COLUMNS = frozenset(_BOOL_COLUMN_DEFAULTS)
 _E164_PATTERN = re.compile(r"^\+[1-9][0-9]{7,14}$")
 
+# Who may write which profile column: the one list the self PUT
+# (`web_app._PROFILE_EDITABLE_FIELDS` is derived from it), the admin PATCH and
+# `istota user ensure` check against, so the three cannot drift apart. Worker
+# caps are a resource limit and are admin-only: a user raising their own cap is
+# the wrong direction. The SMS number is an operator-bound identity. The
+# WhatsApp number and the login email are not profile columns and are handled
+# beside these tuples, not in them.
+SELF_EDITABLE_FIELDS = (
+    "display_name", "timezone", "log_channel", "alerts_channel",
+    "email_addresses", "trusted_email_senders", "quiet_email_senders",
+    "disabled_skills", "disabled_modules",
+    "default_destination", "default_room", "routing",
+    "briefing_email_html", "timezone_follow_location",
+    "external_turn_display", "relay_delivery",
+)
+ADMIN_EDITABLE_FIELDS = (
+    "display_name", "timezone", "email_addresses",
+    "trusted_email_senders", "quiet_email_senders", "outbound_approval",
+    "disabled_skills", "disabled_modules", "default_briefings",
+    "max_foreground_workers", "max_background_workers", "sms_phone_number",
+)
+
 
 def is_e164(value: object) -> bool:
     """Whether ``value`` is an exact E.164 number.
@@ -228,6 +250,123 @@ def _raise_phone_conflict(exc: sqlite3.IntegrityError) -> None:
     if "sms_phone_number" in str(exc):
         raise ValueError("SMS phone number is already assigned to another user") from None
     raise exc
+
+
+def _rows_or_none(
+    conn: sqlite3.Connection, sql: str, params: tuple = (),
+) -> list | None:
+    """``fetchall``, or None when the table is not there yet.
+
+    `istota user ensure` runs against databases a deploy has not migrated, and
+    a table that does not exist holds no identity.
+    """
+    try:
+        return conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        return None
+
+
+def email_address_holders(conn: sqlite3.Connection) -> dict[str, set[str]]:
+    """Every case-folded address mapped to the users who hold it.
+
+    Both kinds of holder count. An inbound-routing address in
+    ``email_addresses`` routes mail; a login email in ``web_auth_identities``
+    names who the address belongs to. Mail routing to one user while the login
+    belongs to another is never intended, so a login email held by somebody
+    else is a holder too.
+    """
+    from istota.webui.auth import normalize_email
+
+    holders: dict[str, set[str]] = {}
+    for row in _rows_or_none(
+        conn, "SELECT user_id, email_addresses FROM user_profiles",
+    ) or []:
+        for address in _parse_json_list(row[1]):
+            key = normalize_email(address)
+            if key:
+                holders.setdefault(key, set()).add(row[0])
+    for row in _rows_or_none(
+        conn, "SELECT user_id, email FROM web_auth_identities",
+    ) or []:
+        key = normalize_email(row[1] or "")
+        if key:
+            holders.setdefault(key, set()).add(row[0])
+    return holders
+
+
+def duplicate_email_addresses(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """Addresses more than one user holds, each with its sorted holders."""
+    return {
+        address: sorted(users)
+        for address, users in sorted(email_address_holders(conn).items())
+        if len(users) > 1
+    }
+
+
+def find_identity_conflicts(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    email_addresses: "list[str] | None" = None,
+    sms: str | None = None,
+    whatsapp: str | None = None,
+) -> dict[str, str]:
+    """``{value: holder_user_id}`` for each value another user already holds.
+
+    The uniqueness rule the self PUT, the admin PATCH and `istota user ensure`
+    apply before writing. Only *adding* a held value is a conflict: an address
+    already on ``user_id``'s own stored list passes even when somebody else
+    holds it too, because a deployment may carry a duplicate from before this
+    rule and refusing the resubmit would fail every unrelated save by either
+    holder (and every deploy re-asserting the inventory). Doctor's
+    ``users.email_address_uniqueness`` is where those are surfaced.
+
+    The SMS and WhatsApp numbers have unique indexes already; this pre-check
+    exists so the refusal can name the holder instead of surfacing an
+    ``IntegrityError``. Keys are the values as submitted.
+    """
+    from istota.webui.auth import normalize_email
+
+    conflicts: dict[str, str] = {}
+    if email_addresses:
+        holders = email_address_holders(conn)
+        stored = _rows_or_none(
+            conn,
+            "SELECT email_addresses FROM user_profiles WHERE user_id = ?",
+            (user_id,),
+        ) or []
+        own = {
+            normalize_email(a)
+            for row in stored for a in _parse_json_list(row[0])
+        }
+        for address in email_addresses:
+            key = normalize_email(address or "")
+            if not key or key in own:
+                continue
+            others = sorted(holders.get(key, set()) - {user_id})
+            if others:
+                conflicts[address] = others[0]
+    if sms:
+        rows = _rows_or_none(
+            conn,
+            "SELECT user_id FROM user_profiles "
+            "WHERE sms_phone_number = ? AND user_id <> ? ORDER BY user_id",
+            (sms, user_id),
+        )
+        if rows:
+            conflicts[sms] = rows[0][0]
+    if whatsapp:
+        rows = _rows_or_none(
+            conn,
+            "SELECT user_id FROM whatsapp_user_bindings "
+            "WHERE bootstrap_phone_number = ? AND user_id <> ? ORDER BY user_id",
+            (whatsapp, user_id),
+        )
+        if rows:
+            conflicts[whatsapp] = rows[0][0]
+    return conflicts
 
 
 def _coerce_bool(value: object, default: bool = True) -> bool:
