@@ -1922,3 +1922,32 @@ class TestNoWriteLockAcrossTheBrainCall:
                 mock_make_brain.return_value.execute.side_effect = execute
                 process_user_sleep_cycle(mount_config, conn, "alice")
         assert seen[:2] == ["extraction", "acquired"]
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_curation_audit_writes_land_despite_a_pending_caller_write(
+        self, mock_run, mount_config, db_path, monkeypatch
+    ):
+        """ISSUE-603: the audit helpers open their own connection, so a write
+        the caller left pending on `conn` locked them out before the brain
+        call, and the lint-seen set was never persisted."""
+        from istota.memory.curation.audit import read_lint_seen
+
+        mount_config.sleep_cycle.curate_user_memory = True
+        _setup_curation_fixture(
+            mount_config,
+            existing_user_md="## Notes\n- Bought a road bike on 2026-01-05\n",
+        )
+        mock_run.return_value = (True, '{"ops": []}')
+        real_get_db = db.get_db
+        with db.get_db(db_path) as conn:
+            db.kv_set(conn, "alice", "probe", "k", "v")
+            assert conn.in_transaction
+            # The production busy timeout is 30s; a short one turns a lock
+            # wait into a fast, swallowed failure with the same outcome.
+            monkeypatch.setattr(
+                db, "get_db",
+                lambda path, **kw: real_get_db(path, busy_timeout_ms=100),
+            )
+            sleep_cycle_module.curate_user_memory(mount_config, "alice", conn=conn)
+        monkeypatch.setattr(db, "get_db", real_get_db)
+        assert read_lint_seen(mount_config, "alice") != {}
