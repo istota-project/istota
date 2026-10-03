@@ -231,6 +231,11 @@ def _pre_removal_db(tmp_path):
                      "VALUES (7,'alice','web','post it','side1')")
         conn.execute("INSERT INTO tasks (id,user_id,source_type,prompt,conversation_token) "
                      "VALUES (8,'alice','web','hi','grp')")
+        # A question parked in the shared room and asked in the side room.
+        conn.execute("INSERT INTO tasks (id,user_id,source_type,prompt,conversation_token,status) "
+                     "VALUES (9,'alice','web','book it','grp','pending_confirmation')")
+        conn.execute("INSERT INTO messages (room_token,role,body,origin_surface,delivery_reference) "
+                     "VALUES ('side1','system','Book it?','web','side-confirmation:9:abc')")
         _skill_request(conn, "old-whisper", kind="side_whisper",
                        destination={"kind": "side_room", "room_token": "side1", "parent": "grp"})
         _skill_request(conn, "new-whisper", kind="side_whisper",
@@ -272,6 +277,8 @@ class TestTheSideRoomRemoval:
             assert "side_for_user" not in _columns(conn, "rooms")
             assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='idx_rooms_side'").fetchone() is None
             assert "private_park" in _columns(conn, "tasks")
+            parks = dict(conn.execute("SELECT id, private_park FROM tasks WHERE id IN (8, 9)"))
+            assert parks == {8: 0, 9: 1}
             assert conn.execute("SELECT 1 FROM _migration_state "
                                 "WHERE name='private_replies_v1'").fetchone()
 
@@ -299,6 +306,22 @@ class TestTheSideRoomRemoval:
                 indexes = "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=? ORDER BY name"
                 assert ([r[0] for r in fresh.execute(indexes, (table,))]
                         == [r[0] for r in upgraded.execute(indexes, (table,))])
+
+    def test_a_request_table_from_before_the_room_kinds_upgrades_in_one_boot(self, tmp_path):
+        path = _pre_removal_db(tmp_path)
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("DELETE FROM whatsapp_skill_requests")
+            conn.execute("ALTER TABLE whatsapp_skill_requests DROP COLUMN origin")
+            conn.execute("ALTER TABLE whatsapp_skill_requests DROP COLUMN destination")
+            conn.commit()
+        finally:
+            conn.close()
+        db.init_db(path)
+        with db.get_db(path) as conn:
+            assert conn.execute("SELECT 1 FROM _migration_state "
+                                "WHERE name='private_replies_v1'").fetchone()
+            assert "side_of" not in _columns(conn, "rooms")
 
     def test_a_fresh_database_never_had_side_rooms(self, config):
         with db.get_db(config.db_path) as conn:
@@ -1696,7 +1719,26 @@ class TestMyNotesOnEverySurface:
             thread = _email_thread(conn)
             ident = db.create_task(conn, prompt="hi", user_id="alice", source_type="email",
                                    conversation_token=thread)
+            db.add_message(conn, thread, role="user", body="hi", origin_surface="email",
+                           task_id=ident, author_user_id="alice")
             assert private_replies.my_notes_room(conn, db.get_task(conn, ident)) == thread
+
+    def test_an_outsiders_mail_in_a_thread_room_reads_none(self, config):
+        """It runs as the host with no guest id; the stored turn says whose it is."""
+        with db.get_db(config.db_path) as conn:
+            thread = _email_thread(conn)
+            ident = db.create_task(conn, prompt="hi", user_id="alice", source_type="email",
+                                   conversation_token=thread)
+            db.add_message(conn, thread, role="user", body="hi", origin_surface="email",
+                           task_id=ident, author_label="mallory@example.com")
+            assert private_replies.my_notes_room(conn, db.get_task(conn, ident)) is None
+
+    def test_an_email_turn_with_no_stored_row_reads_none(self, config):
+        with db.get_db(config.db_path) as conn:
+            thread = _email_thread(conn)
+            ident = db.create_task(conn, prompt="hi", user_id="alice", source_type="email",
+                                   conversation_token=thread)
+            assert private_replies.my_notes_room(conn, db.get_task(conn, ident)) is None
 
     def test_an_sms_turn_still_reads_none(self, config):
         with db.get_db(config.db_path) as conn:

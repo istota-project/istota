@@ -7933,11 +7933,24 @@ def _migrate_private_replies(conn: sqlite3.Connection) -> None:
         conn.commit()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        has_requests = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
-            "AND name = 'whatsapp_skill_requests'"
-        ).fetchone()
+        request_columns = {
+            row[1] for row in conn.execute(
+                "PRAGMA table_info(whatsapp_skill_requests)"
+            ).fetchall()
+        }
+        # A request table from before the room kinds has neither column, and
+        # no side-room request either; `_migrate_skill_request_room_kinds`
+        # adds them later in this boot.
+        has_requests = {"origin", "destination"} <= request_columns
         if "side_of" in room_columns:
+            # A question still parked in a side room was asked privately, so
+            # it keeps not holding the shared room once its row is gone.
+            conn.execute(
+                "UPDATE tasks SET private_park = 1 "
+                "WHERE status = 'pending_confirmation' AND EXISTS ("
+                "SELECT 1 FROM messages m WHERE m.delivery_reference "
+                "LIKE 'side-confirmation:' || tasks.id || ':%')"
+            )
             sides = [
                 row[0] for row in conn.execute(
                     "SELECT token FROM rooms WHERE side_of IS NOT NULL"
