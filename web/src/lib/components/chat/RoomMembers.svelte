@@ -41,7 +41,7 @@
       const members = await getRoomMembers(forRoom);
       if (forRoom !== roomId) return;
       data = members;
-      if (members.can_manage && !phoneLabel) {
+      if (members.can_manage && !phoneLabel && !members.email_thread) {
         const { users } = await getChatUsers();
         if (forRoom === roomId) directory = users;
       }
@@ -134,6 +134,11 @@
     {:else if phoneLabel}
       <p class="caption">
         This {phoneLabel} transcript has one reader, so no one else can be added.
+      </p>
+    {:else if data.email_thread}
+      <p class="caption">
+        This is an email thread and belongs to its host. Others on the thread take part as
+        correspondents, so no one can be added.
       </p>
     {:else if data.can_manage}
       <div class="add-row">

@@ -34,11 +34,14 @@ from the process that read the command. The web app cannot reach a WhatsApp
 group (the bridge is the scheduler's), so it queues them (`queue_notice`).
 The announcement: the first time a guest is in a room with a host, the bot
 says once what it is, who it works for and how to switch it off.
-`drain_room_notices`, a scheduler gate, posts both into Talk and WhatsApp; an
-email thread room cannot be posted into except by a mail the outbound gate
-governs, so there the announcement rides the bot's first reply-all on the
-thread (`with_email_notice`), and a held draft carrying it does not count as
-the thread being told.
+`drain_room_notices`, a scheduler gate, posts both into Talk and WhatsApp.
+
+An email thread room is never announced (ISSUE-605). Mail from the bot's
+address is from the bot, and a thread gains people on later messages who would
+never see a notice sent once. What it carries instead, only when the operator
+turns `[email] thread_disclosure_footer` on, is a plain line on every mail the
+bot sends into the thread (`with_email_footer`), so nothing tracks whether the
+thread was told.
 """
 
 from __future__ import annotations
@@ -340,9 +343,15 @@ def _host(conn, room_token: str) -> str | None:
 
 
 def needs_announcement(conn, room_token: str) -> bool:
-    """A guest is in the room, it has a host, and nobody has been told yet."""
+    """A guest is in the room, it has a host, and nobody has been told yet.
+
+    Never for an email thread room (ISSUE-605): its disclosure, when the
+    operator wants one, is the footer on every mail.
+    """
     room = db.get_room(conn, room_token)
     if room is None or room.archived or room.side_of:
+        return False
+    if db.get_room_binding(conn, room_token, "email") is not None:
         return False
     policy = room_policy.get_policy(conn, room_token)
     if policy is not None and (policy.announced_at or policy.vetoed_at):
@@ -414,14 +423,11 @@ def _guest_sentence(conn, room_token: str, who: str) -> str:
 
 
 def _announcement_closing(conn, config, room_token: str) -> str:
-    """The off switch and the way back. Fixed, so an opening cannot drop it, and
-    the stable part `note_email_notice_sent` recognises a sent notice by."""
+    """The off switch and the way back. Fixed, so an opening cannot drop it."""
     word = command_word(config)
     how = f"send `!{word} off`"
     if db.get_room_binding(conn, room_token, "whatsapp") is not None:
         how += " (or remove my number from the group)"
-    elif db.get_room_binding(conn, room_token, "email") is not None:
-        how = f"reply with `!{word} off` as the first line"
     return (
         f"If you'd rather I didn't, {how} and I'll record nothing here until a "
         f"member sends `!{word} on` and everyone who switched me off agrees."
@@ -583,36 +589,50 @@ async def drain_room_notices(config, *, limit: int = 20) -> int:
     return len(claims)
 
 
-def _email_notice(conn, config, room_token: str) -> str | None:
-    if not room_token or not needs_announcement(conn, room_token):
+def _host_name(conn, config, room_token: str) -> str:
+    from istota.confirmations import flatten
+
+    host = _host(conn, room_token)
+    user = getattr(config, "users", {}).get(host) if host else None
+    return flatten(getattr(user, "display_name", None) or host or "") or "this thread's host"
+
+
+def email_footer(conn, config, room_token: str | None) -> str | None:
+    """The disclosure line for a mail into an email thread room, or None.
+
+    None unless the operator turned `[email] thread_disclosure_footer` on and
+    the room is bound to an email thread. No persona voice: a fact about who
+    wrote the mail and how to stop it.
+    """
+    email_config = getattr(config, "email", None)
+    if not room_token or not getattr(email_config, "thread_disclosure_footer", False):
         return None
-    return announcement_text(conn, config, room_token)
+    if db.get_room_binding(conn, room_token, "email") is None:
+        return None
+    return (
+        f"Written by {_bot(config)}, an AI assistant, for "
+        f"{_host_name(conn, config, room_token)}. {_footer_switch(config)}"
+    )
 
 
-def with_email_notice(conn, config, room_token: str | None, body: str) -> str:
-    """``body`` with the announcement after it, while the thread is owed it."""
-    notice = _email_notice(conn, config, room_token) if room_token else None
-    if not notice or _announcement_closing(conn, config, room_token) in body:
+def _footer_switch(config) -> str:
+    return (f"To stop it replying on this thread, reply with "
+            f"`!{command_word(config)} off` as the first line.")
+
+
+def with_email_footer(conn, config, room_token: str | None, body: str) -> str:
+    """``body`` with the disclosure footer after it, when one is due.
+
+    Recognised by its fixed second sentence at the end of the body, so a held
+    proposal whose preview already carries it is not footed twice when it is
+    sent, even if the host's display name changed in between. The end, not
+    anywhere: a sentence a guest steered into the answer must not stand in for
+    the real footer.
+    """
+    footer = email_footer(conn, config, room_token)
+    if not footer or body.rstrip().endswith(_footer_switch(config)):
         return body
-    return f"{body}\n\n--\n{notice}"
-
-
-def note_email_notice_sent(conn, config, room_token: str | None, body: str) -> None:
-    """A mail carrying the announcement went out: the thread has been told."""
-    if not room_token:
-        return
-    # Matched on the fixed closing rather than the whole notice: a held guest
-    # proposal carries text composed when it was proposed, and the opening, the
-    # host's name or `guest_reply` can change before it is sent.
-    if not needs_announcement(conn, room_token):
-        return
-    if _announcement_closing(conn, config, room_token) in body:
-        room_policy.ensure_policy(conn, room_token)
-        conn.execute(
-            "UPDATE room_policy SET announced_at = datetime('now') "
-            "WHERE room_token = ? AND announced_at IS NULL",
-            (room_token,),
-        )
+    return f"{body}\n\n--\n{footer}"
 
 
 __all__ = [
@@ -623,12 +643,12 @@ __all__ = [
     "drain_room_notices",
     "is_vetoed",
     "is_vetoed_ref",
+    "email_footer",
     "needs_announcement",
-    "note_email_notice_sent",
     "parse_command",
     "push_to_room",
     "queue_notice",
     "switch_off_by_removal",
     "task_room_vetoed",
-    "with_email_notice",
+    "with_email_footer",
 ]

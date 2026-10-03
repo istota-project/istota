@@ -475,7 +475,7 @@ async def _send_thread_reply(
     config: "Config", task: db.Task, plan: "email_threads.ReplyAll", *,
     subject: str, body: str, content_type: str = "plain",
     html_body: str | None = None, room_token: str | None = None,
-    consume: bool = True, approved: bool = False, notice_room: str | None = None,
+    consume: bool = True, approved: bool = False,
 ) -> bool:
     """Reply-all on an email thread room's thread, through the outbound gate.
 
@@ -484,9 +484,18 @@ async def _send_thread_reply(
     email output once accounted for; a room post carries its own body and
     leaves the task's file alone. ``approved`` is a send the user already
     approved, body and recipients both (D20), which the gate does not hold a
-    second time. ``notice_room`` is the thread room whose announcement the
-    body may carry; a sent body that does is the thread being told.
+    second time.
+
+    The operator's disclosure footer, when turned on, goes on here so every
+    mail into the thread carries it, a held draft included (ISSUE-605).
     """
+    if content_type == "plain":
+        try:
+            with db.get_db(config.db_path) as conn:
+                thread_room = room_token or email_threads.thread_room_for_task(conn, task)
+                body = room_veto.with_email_footer(conn, config, thread_room, body)
+        except Exception as e:  # noqa: BLE001 — the footer is a disclosure, not a gate
+            logger.warning("Could not add the thread's disclosure footer: %s", e)
     held_subject = subject
     if held_subject and not held_subject.lower().startswith("re:"):
         held_subject = f"Re: {held_subject}"
@@ -523,12 +532,6 @@ async def _send_thread_reply(
         config, task, sent_message_id, to_addr=", ".join([plan.to, *plan.cc]),
         subject=subject, in_reply_to=plan.in_reply_to, references=plan.references,
     )
-    if notice_room:
-        try:
-            with db.get_db(config.db_path) as conn:
-                room_veto.note_email_notice_sent(conn, config, notice_room, body)
-        except Exception as e:  # noqa: BLE001 — the mail has gone; a repeat notice is the cost
-            logger.warning("Could not record the thread's announcement: %s", e)
     return True
 
 
@@ -570,7 +573,7 @@ async def deliver_thread_post(
     )
     return await _send_thread_reply(
         config, task, plan, subject=plan.subject, body=body, room_token=room_token,
-        consume=False, approved=approved, notice_room=room_token,
+        consume=False, approved=approved,
     )
 
 
@@ -715,11 +718,12 @@ async def deliver_email_result(
             email_threads.reply_all(conn, config, thread_room, task_id=task.id)
             if thread_room else None
         )
-        if thread_reply is not None and content_type == "plain":
-            # The bot's first mail on a thread with guests carries its
-            # announcement (multiplayer D8): on email there is no other way to
-            # tell the thread's people what it is and how to switch it off.
-            body_text = room_veto.with_email_notice(conn, config, thread_room, body_text)
+        # The host asked this, in front of everyone on the thread, from a mail
+        # that authenticated: that is their consent for the answer to reach
+        # those people, so the outbound gate does not hold it (ISSUE-607).
+        host_asked = thread_reply is not None and email_threads.host_asked(
+            conn, config, thread_room, task, thread_reply,
+        )
 
     if thread_reply is not None:
         # An email thread room (multiplayer D6): a reply-all to the latest
@@ -727,7 +731,7 @@ async def deliver_email_result(
         subject = parsed["subject"] or thread_reply.subject
         return await _send_thread_reply(
             config, task, thread_reply, subject=subject, body=body_text,
-            content_type=content_type, html_body=html_body, notice_room=thread_room,
+            content_type=content_type, html_body=html_body, approved=host_asked,
         )
 
     if processed_email:

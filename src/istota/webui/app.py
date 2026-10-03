@@ -6188,8 +6188,11 @@ def _chat_list_members(username: str, room_id: int) -> dict | None:
         # What an add discloses, for the add dialog to state before the
         # creator sends `acknowledge_history`.
         message_count = db.count_room_messages(conn, handle.token)
+        # The add route refuses one (ISSUE-606); the pane says so instead.
+        email_thread = db.get_room_binding(conn, reg.token, "email") is not None
     members.sort(key=lambda m: (not m["is_owner"], m["user_id"]))
-    return {"members": members, "can_manage": can_manage, "message_count": message_count}
+    return {"members": members, "can_manage": can_manage, "message_count": message_count,
+            "email_thread": email_thread}
 
 
 def _chat_add_member(
@@ -6224,6 +6227,17 @@ def _chat_add_member(
             return 409, {
                 "error": f"This room is the transcript of a {label} "
                          "conversation and has one reader; members cannot be added.",
+                "read_only": True,
+            }
+        # An email thread is its host's correspondence (ISSUE-606): another
+        # istota user on it is a correspondent, whose turn runs as the host
+        # with every scope withheld. As a member they would speak at their own
+        # reach and could make the bot mail the host's correspondents.
+        if db.get_room_binding(conn, reg.token, "email") is not None:
+            return 409, {
+                "error": "This room is an email thread and belongs to its host. "
+                         "Others on the thread take part as correspondents; "
+                         "members cannot be added.",
                 "read_only": True,
             }
         if reg.user_id != username:
