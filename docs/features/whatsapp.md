@@ -286,7 +286,7 @@ Nothing is downloaded for a sender Istota does not recognise, for a message it h
 
 ## Sending a voice note
 
-Record a voice note, or forward an audio file, and Istota answers what was said. The file is copied into `inbox/` like a photograph, and the task is the same one a voice memo recorded in web chat produces: its text is "Voice message (see attached audio).", and the recording is transcribed before the model sees the request, so the model, memory and conversation search all work from the words.
+Record a voice note, or forward an audio file, and Istota answers what was said. The file is copied into `inbox/` like a photograph, and the task is the same one a voice memo recorded in web chat produces: its text is "Voice message (see attached audio).", and the recording is transcribed before the model sees the request, so the model, memory and conversation search all work from the words. Once the task completes, the file leaves `inbox/` and the WhatsApp room in web chat shows the transcript, in italics, where the placeholder and the attachment were. A note that could not be transcribed keeps both.
 
 The spoken words are never read as a keyword, a command or a confirmation answer. Saying "stop" does not opt you out and saying "yes" does not approve a waiting question; type those. A voice note does count as a new message, so it cancels a question that was waiting on you, as any other message would.
 

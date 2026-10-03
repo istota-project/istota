@@ -7128,8 +7128,9 @@ _SPINE_COLUMNS = (
     "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body "
     "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
     "LEFT JOIN message_stars s ON s.message_id = m.id AND s.user_id = ? "
-    # The cited parent, joined live rather than snapshotted: nothing in the
-    # stack edits `messages.body`, so the join can't drift. A primary-key
+    # The cited parent, joined live rather than snapshotted. The one edit to a
+    # stored body is a voice note's stand-in becoming its transcript
+    # (ISSUE-613), which a citation should show anyway. A primary-key
     # lookup, and a NULL result against a non-NULL id is the deleted case.
     "LEFT JOIN messages p ON p.id = m.reply_to_message_id "
 )
@@ -7256,7 +7257,9 @@ def _row_attachment_names(row, *, message_column: bool = True) -> list[str] | No
     Prefers the display names stored on the canonical `messages` row (what the
     user actually picked). Falls back to basenames of the joined `tasks` paths,
     which covers turns predating the message-side column — and only those, since
-    retention deletes the task row not long after.
+    retention deletes the task row not long after. A stored empty list is an
+    answer, not a gap: a transcribed voice note's chip is removed that way
+    (ISSUE-613), and falling back would bring back the deleted file.
     """
     keys = row.keys()
     if message_column and "attachments" in keys and row["attachments"]:
@@ -7264,8 +7267,8 @@ def _row_attachment_names(row, *, message_column: bool = True) -> list[str] | No
             names = json.loads(row["attachments"])
         except (TypeError, ValueError):
             names = None
-        if isinstance(names, list) and names:
-            return [str(n) for n in names]
+        if isinstance(names, list):
+            return [str(n) for n in names] or None
     raw_paths = None
     if not message_column and "attachments" in keys:
         raw_paths = row["attachments"]

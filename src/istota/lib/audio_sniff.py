@@ -39,6 +39,7 @@ __all__ = [
     "AUDIO_EXTENSIONS",
     "EXTENSION_BY_MEDIA_TYPE",
     "SNIFF_BYTES",
+    "VOICE_TRANSCRIPT_LABEL",
     "sniff_audio",
 ]
 
@@ -47,6 +48,11 @@ AUDIO_EXTENSIONS: frozenset[str] = frozenset(
     {"mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"}
 )
 """Suffixes the executor pre-transcribes. Equal to whisper's `file_types`."""
+
+VOICE_TRANSCRIPT_LABEL = "Transcribed voice message: "
+"""Precedes a transcript in the task prompt and in a WhatsApp room's rewritten
+turn (ISSUE-613). `Message.svelte` keys its italics on the same string, held
+equal by `tests/test_scheduler_attachments.py`."""
 
 EXTENSION_BY_MEDIA_TYPE: dict[str, str] = {
     "audio/ogg": "ogg",

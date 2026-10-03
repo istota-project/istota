@@ -89,6 +89,7 @@ Which bytes are audio the transcription pipeline decodes, asked of the bytes and
 - **The sniff confirms, the message type chooses.** An `isom` file is as much video as audio, so the surface's declared type decides which pipeline a file may enter and this module only says whether the bytes match it. The `ftyp` arm reads the major brand alone for the same reason.
 - **MP3 and ADTS share the `0xFFF` prefix** and are told apart by the layer bits (`01` layer III, `00` ADTS). MPEG 2.5 has eleven sync bits, so the MP3 test reads three ones, not four. Layers I and II are not admitted.
 - **AMR is not admitted**: it is in neither `AUDIO_EXTENSIONS` nor whisper's `file_types`, and the deployed decoder is unverified.
+- **`VOICE_TRANSCRIPT_LABEL` lives here too** (ISSUE-613), for the same import reason: the executor writes it into the prompt, the scheduler into the WhatsApp room's rewritten turn, and `transport` must not import `executor`. `Message.svelte` keys its italics on a copy, held equal by `tests/test_scheduler_attachments.py`.
 - **`AUDIO_EXTENSIONS` lives here**, re-exported as `executor._AUDIO_EXTENSIONS` (which `webui/app.py` imports), because `transport` needs the set and must not import `executor`. `tests/test_audio_sniff.py` holds it equal to the whisper skill's `file_types` and every `EXTENSION_BY_MEDIA_TYPE` value inside it, since this module imports nothing to say so itself.
 
 No decode. stdlib-only leaf, imports nothing, never raises.

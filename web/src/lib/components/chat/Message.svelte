@@ -193,21 +193,62 @@
   // is shown verbatim and the assistant body is rendered below.
   const bodyHtml = $derived(isSystem ? renderMarkdown(message.text, mentions) : '');
 
+  // A WhatsApp voice note's stored turn carries its transcript after this label,
+  // at the start of a line, once the task completes (ISSUE-613). The words are
+  // set in italics so they read as machine transcription rather than typed text.
+  const TRANSCRIPT_LABEL = 'Transcribed voice message: ';
+
+  function transcriptPieces(text: string): { text: string; transcript: boolean }[] {
+    const out: { text: string; transcript: boolean }[] = [];
+    let at = 0;
+    let from = 0;
+    while (from <= text.length) {
+      const found = text.indexOf(TRANSCRIPT_LABEL, from);
+      if (found === -1) break;
+      if (found > 0 && text[found - 1] !== '\n') {
+        from = found + 1;
+        continue;
+      }
+      const start = found + TRANSCRIPT_LABEL.length;
+      const newline = text.indexOf('\n', start);
+      const end = newline === -1 ? text.length : newline;
+      out.push({ text: text.slice(at, start), transcript: false });
+      out.push({ text: text.slice(start, end), transcript: true });
+      at = end;
+      from = end;
+    }
+    out.push({ text: text.slice(at), transcript: false });
+    return out.filter((piece) => piece.text !== '');
+  }
+
   // A user row is shown verbatim, so mentions are split out as text segments
   // rather than through the markdown renderer. Not applied to an external
   // turn: a stranger's mail styled with a member's name would read as that
   // member being addressed in the room.
   const userSegments = $derived.by(() => {
     const text = message.text ?? '';
-    const spans = isUser && !message.origin ? findPlainMentions(text, mentions) : [];
-    const out: { text: string; mention?: boolean; self?: boolean }[] = [];
-    let at = 0;
-    for (const span of spans) {
-      if (span.start > at) out.push({ text: text.slice(at, span.start) });
-      out.push({ text: text.slice(span.start, span.end), mention: true, self: span.target.self });
-      at = span.end;
+    const pieces =
+      isUser && message.via === 'whatsapp' ? transcriptPieces(text) : [{ text, transcript: false }];
+    const out: { text: string; mention?: boolean; self?: boolean; transcript?: boolean }[] = [];
+    for (const piece of pieces) {
+      if (piece.transcript) {
+        out.push({ text: piece.text, transcript: true });
+        continue;
+      }
+      const spans = isUser && !message.origin ? findPlainMentions(piece.text, mentions) : [];
+      let at = 0;
+      for (const span of spans) {
+        if (span.start > at) out.push({ text: piece.text.slice(at, span.start) });
+        out.push({
+          text: piece.text.slice(span.start, span.end),
+          mention: true,
+          self: span.target.self,
+        });
+        at = span.end;
+      }
+      if (at < piece.text.length) out.push({ text: piece.text.slice(at) });
     }
-    if (at < text.length || out.length === 0) out.push({ text: text.slice(at) });
+    if (out.length === 0) out.push({ text: '' });
     return out;
   });
 
@@ -880,6 +921,7 @@
               >{#each userSegments as seg, i (i)}{#if seg.mention}<span
                     class="mention"
                     class:mention-self={seg.self}>{seg.text}</span
+                  >{:else if seg.transcript}<em class="transcript">{seg.text}</em
                   >{:else}{seg.text}{/if}{/each}</span
             >
           </div>

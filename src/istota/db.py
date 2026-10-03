@@ -181,10 +181,11 @@ class Task:
     # scheduler writes into the `result` column; there is no column here.
     partial_result: str | None = None
     # The audio attachments that produced a non-empty transcript this attempt,
-    # as the executor was handed them (ISSUE-611). The same kind of hand-off as
-    # `partial_result`: the scheduler deletes these WhatsApp inbox copies once
-    # the task completes. Never loaded from a row.
-    transcribed_audio: tuple[str, ...] = ()
+    # as the executor was handed them, each with its own text (ISSUE-611,
+    # ISSUE-613). The same kind of hand-off as `partial_result`: the scheduler
+    # deletes these WhatsApp inbox copies once the task completes and puts the
+    # text into the room's user row. Never loaded from a row.
+    transcribed_audio: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -1955,6 +1956,68 @@ def get_subtask_depth(conn: sqlite3.Connection, task_id: int) -> int:
 def update_task_prompt(conn: sqlite3.Connection, task_id: int, prompt: str) -> None:
     """Replace a task's stored prompt, for the voice-note transcript (ISSUE-611)."""
     conn.execute("UPDATE tasks SET prompt = ? WHERE id = ?", (prompt, task_id))
+
+
+def replace_voice_notes_in_turn(
+    conn: sqlite3.Connection,
+    task_id: int,
+    *,
+    stand_in: str,
+    transcript: str,
+    drop_indexes: "set[int]",
+    attachment_count: int,
+) -> int | None:
+    """Put a voice note's transcript into its task's stored user turn (ISSUE-613).
+
+    The one place a stored user row is edited after the fact. The body becomes
+    `transcript` when it is still the transport's `stand_in`, and gains it on a
+    line of its own otherwise, so typed text is kept; a body already holding
+    it is left alone, so a second completion does not repeat it. `drop_indexes` are
+    positions in the task's attachment list, which the row's `attachments` and
+    `attachment_paths` mirror; a row whose list is not that length is left
+    with its chips rather than losing the wrong one. Both columns are written
+    as lists, `[]` included, because the history reader falls back to the task
+    row's paths for a NULL column and would bring the chip back. Returns the
+    row id, or None when the task stored no user row.
+    """
+    row = conn.execute(
+        "SELECT id, body, attachments, attachment_paths FROM messages "
+        "WHERE task_id = ? AND role = 'user' ORDER BY id LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    body = row["body"] or ""
+    if transcript in body:
+        new_body = body
+    elif body.strip() == stand_in.strip():
+        new_body = transcript
+    else:
+        new_body = f"{body}\n\n{transcript}"
+
+    def _items(raw: str | None) -> list | None:
+        try:
+            items = json.loads(raw) if raw else None
+        except (TypeError, ValueError):
+            return None
+        return items if isinstance(items, list) else None
+
+    names = _items(row["attachments"])
+    paths = _items(row["attachment_paths"])
+    attachments, attachment_paths = row["attachments"], row["attachment_paths"]
+    if names is not None and len(names) == attachment_count:
+        if paths is None or len(paths) != attachment_count:
+            paths = [None] * attachment_count
+        keep = [i for i in range(attachment_count) if i not in drop_indexes]
+        attachments = json.dumps([names[i] for i in keep])
+        attachment_paths = json.dumps([paths[i] for i in keep])
+
+    conn.execute(
+        "UPDATE messages SET body = ?, attachments = ?, attachment_paths = ? "
+        "WHERE id = ?",
+        (new_body, attachments, attachment_paths, row["id"]),
+    )
+    return row["id"]
 
 
 def update_task_status(
