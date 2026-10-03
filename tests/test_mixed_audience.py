@@ -1,4 +1,4 @@
-"""A guest in the room: who reaches what, and the side-room answer.
+"""A guest in the room: who reaches what, and the private answer.
 
 Multiplayer Stage 13 (D3 `mixed`, D4 item 1), as ISSUE-576 left it:
 
@@ -6,8 +6,9 @@ Multiplayer Stage 13 (D3 `mixed`, D4 item 1), as ISSUE-576 left it:
    is the member's own choices: having the guest there, and asking in front of
    them. What it loses is ambient memory, which no shared room loads.
 2. **A guest's turn reaches nothing of the host's**, at every seam.
-3. **The side-room answer.** A member's question can be asked again in their
-   side room, where it runs as a private task with their memory loaded.
+3. **The private answer.** A member's question can be asked again in their
+   own private room (ISSUE-608), where it runs as a private task with their
+   memory loaded, linked to the shared room.
 4. **A guest's turn gets its own directories.** It binds neither the per-user
    temp dir, which every task of the host shares, nor the flat Talk
    attachments dir, which holds every conversation's attachments.
@@ -128,34 +129,52 @@ def _running(conn, user, token, *, prompt="what's on my calendar tomorrow?", **k
     return ident
 
 
-class TestTheSideRoomAnswer:
-    def test_the_principals_own_question_runs_in_their_side_room(self, config):
+class TestThePrivateAnswer:
+    def test_the_principals_own_question_runs_in_their_private_room(self, config):
         token = _room(config, shared=True)
+        private = _room(config, shared=False)
         with db.get_db(config.db_path) as conn:
             origin = _running(conn, "alice", token)
-            result = side_rooms.queue_side_answer(
+            rooms_before = conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
+            result = side_rooms.queue_private_answer(
                 conn, config, actor_user_id="alice", task_id=origin)
-            again = side_rooms.queue_side_answer(
+            again = side_rooms.queue_private_answer(
                 conn, config, actor_user_id="alice", task_id=origin)
-            side = db.get_side_room(conn, token, "alice")
             task = db.get_task(conn, result["task_id"])
             rows = conn.execute(
-                "SELECT role, body, author_user_id, task_id FROM messages "
-                "WHERE room_token = ?", (side.token,)).fetchall()
+                "SELECT role, body, author_user_id, task_id, delivery_reference FROM messages "
+                "WHERE room_token = ?", (private,)).fetchall()
+            rooms_after = conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
         assert result["status"] == "queued" and again["task_id"] == result["task_id"]
-        assert task.conversation_token == side.token
+        assert rooms_after == rooms_before
+        assert task.conversation_token == private
+        assert task.about_room_token == token
+        assert task.source_type == "web"
         assert task.user_id == "alice" and task.status == "pending"
         assert task.prompt == "what's on my calendar tomorrow?"
         assert task.parent_task_id is None and task.guest_participant_id is None
-        assert [(r["role"], r["body"], r["author_user_id"], r["task_id"]) for r in rows] == [
-            ("user", "what's on my calendar tomorrow?", "alice", task.id)]
+        assert [(r["role"], r["body"], r["author_user_id"], r["task_id"],
+                 r["delivery_reference"]) for r in rows] == [
+            ("user", "what's on my calendar tomorrow?", "alice", task.id,
+             f"private-answer:{origin}")]
 
-    def test_the_side_room_task_loads_the_principals_memory(self, config):
+    def test_refused_when_the_principal_has_no_private_room(self, config):
         token = _room(config, shared=True)
+        with db.get_db(config.db_path) as conn:
+            origin = _running(conn, "alice", token)
+            tasks_before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+            with pytest.raises(RequestError, match="no_private_room"):
+                side_rooms.queue_private_answer(
+                    conn, config, actor_user_id="alice", task_id=origin)
+            assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == tasks_before
+
+    def test_the_private_task_loads_the_principals_memory(self, config):
+        token = _room(config, shared=True)
+        _room(config, shared=False)
         _guest(config, token)
         with db.get_db(config.db_path) as conn:
             origin = _running(conn, "alice", token)
-            new = side_rooms.queue_side_answer(
+            new = side_rooms.queue_private_answer(
                 conn, config, actor_user_id="alice", task_id=origin)["task_id"]
             conn.execute("UPDATE tasks SET status='pending'")
         from istota.executor import _ambient_memory_off
@@ -172,7 +191,7 @@ class TestTheSideRoomAnswer:
         with db.get_db(config.db_path) as conn:
             origin = _running(conn, "alice", token, guest_participant_id=pid)
             with pytest.raises(RequestError, match="guest_turn"):
-                side_rooms.queue_side_answer(
+                side_rooms.queue_private_answer(
                     conn, config, actor_user_id="alice", task_id=origin)
 
     def test_refused_outside_a_shared_room_and_from_a_background_task(self, config):
@@ -181,22 +200,43 @@ class TestTheSideRoomAnswer:
         with db.get_db(config.db_path) as conn:
             ident = _running(conn, "alice", private)
             with pytest.raises(RequestError, match="not_a_shared_room"):
-                side_rooms.queue_side_answer(conn, config, actor_user_id="alice", task_id=ident)
+                side_rooms.queue_private_answer(conn, config, actor_user_id="alice", task_id=ident)
             ident = _running(conn, "alice", shared, source_type="scheduled")
             with pytest.raises(RequestError, match="unsupported_origin"):
-                side_rooms.queue_side_answer(conn, config, actor_user_id="alice", task_id=ident)
+                side_rooms.queue_private_answer(conn, config, actor_user_id="alice", task_id=ident)
             ident = _running(conn, "bob", shared)
             with pytest.raises(RequestError, match="task_unavailable"):
-                side_rooms.queue_side_answer(conn, config, actor_user_id="alice", task_id=ident)
+                side_rooms.queue_private_answer(conn, config, actor_user_id="alice", task_id=ident)
 
-    def test_its_answer_is_pinned_and_marked_for_the_talk_view(self, config):
+    def test_a_talk_departure_refuses_though_the_member_row_stays(self, config):
         token = _room(config, shared=True)
+        _room(config, shared=False)
+        with db.get_db(config.db_path) as conn:
+            db.upsert_room_participant(conn, room_token=token, surface="talk",
+                                       surface_ref="alice", kind="principal", user_id="alice")
+            conn.execute("UPDATE room_participants SET left_at = datetime('now') "
+                         "WHERE room_token = ? AND user_id = 'alice'", (token,))
+            origin = _running(conn, "alice", token)
+            assert db.is_room_member(conn, token, "alice")
+            with pytest.raises(RequestError, match="not_a_shared_room"):
+                side_rooms.queue_private_answer(
+                    conn, config, actor_user_id="alice", task_id=origin)
+
+    def test_its_answer_never_reaches_the_shared_room(self, config):
+        from istota.transport.registry import make_registry
+        from istota.transport.routing import resolve_delivery_plan
+
+        token = _room(config, shared=True)
+        private = _room(config, shared=False)
         with db.get_db(config.db_path) as conn:
             origin = _running(conn, "alice", token)
-            new = side_rooms.queue_side_answer(
+            new = side_rooms.queue_private_answer(
                 conn, config, actor_user_id="alice", task_id=origin)["task_id"]
-            assert side_rooms.side_answer_parent(conn, db.get_task(conn, new)) == token
-            assert side_rooms.side_answer_parent(conn, db.get_task(conn, origin)) is None
+            task = db.get_task(conn, new)
+        plan = resolve_delivery_plan(config, task, make_registry(config))
+        assert plan
+        assert all(d.channel != token for d in plan)
+        assert task.conversation_token == private
 
 
 # ---------------------------------------------------------------------------

@@ -961,3 +961,508 @@ class TestThePin:
             task = db.get_task(conn, ident)
         plan = [Destination("web", web, "push")]
         assert pin_plan(config, task, plan, fallback=lambda: []) == plan
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: the verbs and confirmations, retargeted
+# ---------------------------------------------------------------------------
+
+
+def _running(conn, user, token, *, prompt="hello", source_type="web", **kw):
+    ident = db.create_task(conn, user_id=user, source_type=source_type,
+                           prompt=prompt, conversation_token=token, **kw)
+    conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
+    return ident
+
+
+def _room_count(config):
+    with db.get_db(config.db_path) as conn:
+        return conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
+
+
+def _drain(config):
+    from istota.relay import requests
+
+    asyncio.run(requests.drain_requests(config))
+
+
+def _whisper(config, ident, *, user="alice", key="w1", text="Your calendar is free Thursday."):
+    from istota.rooms import side_rooms
+
+    with db.get_db(config.db_path) as conn:
+        return side_rooms.enqueue_whisper(conn, config, actor_user_id=user, task_id=ident,
+                                          request_key=key, text=text)
+
+
+class TestWhisper:
+    def test_it_lands_in_the_principals_own_room_tagged_with_the_shared_room(self, config):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            web = _web_room(conn)
+            ident = _running(conn, "alice", parent)
+        before = _room_count(config)
+        result = _whisper(config, ident)
+        again = _whisper(config, ident)
+        assert result["status"] == "queued" and again["request_id"] == result["request_id"]
+        assert "delivered_to" not in result
+        _drain(config)
+        _drain(config)
+        (row,) = _rows(config, "SELECT * FROM messages WHERE body LIKE '%free Thursday%'")
+        assert row["room_token"] == web and row["about_room_token"] == parent
+        assert row["delivery_reference"] == f"private-whisper:room-whisper:{result['request_id']}"
+        assert _rows(config, "SELECT state FROM whatsapp_skill_requests")[0]["state"] == "sent"
+        assert _room_count(config) == before
+
+    def test_a_talk_parent_reaches_the_users_private_talk_room(self, config, talk):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_talk(conn)
+            parent_ref = db.get_room_binding(conn, parent, "talk").surface_ref
+            mine = plain_talk_room(conn, "alice", name="talk")
+            ident = _running(conn, "alice", parent, source_type="talk")
+        _whisper(config, ident, text="Only for you.")
+        _drain(config)
+        (send,) = talk["client"].calls_to(mine.talk_ref, method="send_message")
+        assert send.args["message"].startswith("re: Family")
+        assert "Only for you." in send.args["message"]
+        assert talk["client"].calls_to(parent_ref, method="send_message") == []
+        assert talk["client"].refusals == []
+        (row,) = _rows(config, "SELECT external_ids FROM messages WHERE body = 'Only for you.'")
+        assert '"talk"' in row["external_ids"]
+
+    def test_with_no_private_room_it_is_a_bell_note_and_the_room_is_to_be_told(self, config):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            ident = _running(conn, "alice", parent)
+        mark = _max_message_id(config)
+        result = _whisper(config, ident, text="Only for you.")
+        assert result["delivered_to"] == "notifications"
+        assert result["room_notice"] == private_replies.SHARED_ROOM_NOTICE
+        _drain(config)
+        assert _rows(config, "SELECT id FROM messages WHERE id > ? AND body = 'Only for you.'",
+                     (mark,)) == []
+        (bell,) = _rows(config, "SELECT title, body FROM notifications WHERE source = 'task_alert'")
+        assert bell["title"] == "Private note about Family"
+        assert bell["body"] == "Only for you."
+
+    def test_the_room_is_chosen_at_delivery_not_when_queued(self, config):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            ident = _running(conn, "alice", parent)
+        assert _whisper(config, ident)["delivered_to"] == "notifications"
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+        _drain(config)
+        (row,) = _rows(config, "SELECT room_token FROM messages WHERE body LIKE '%free Thursday%'")
+        assert row["room_token"] == web
+
+    def test_refused_outside_a_shared_room_and_after_a_talk_departure(self, config):
+        from istota.relay.requests import RequestError
+
+        with db.get_db(config.db_path) as conn:
+            private = _web_room(conn)
+            mine = _running(conn, "alice", private)
+            parent = _shared_talk(conn)
+            db.upsert_room_participant(conn, room_token=parent, surface="talk",
+                                       surface_ref="alice", kind="principal", user_id="alice")
+            conn.execute("UPDATE room_participants SET left_at = datetime('now') "
+                         "WHERE room_token = ? AND user_id = 'alice'", (parent,))
+            gone = _running(conn, "alice", parent, source_type="talk")
+        for ident in (mine, gone):
+            with pytest.raises(RequestError, match="not_a_shared_room"):
+                _whisper(config, ident)
+
+
+class TestThePrivateAnswerOnEachSurface:
+    def test_a_whatsapp_group_member_is_asked_again_in_their_whatsapp_room(self, config):
+        """The phone room's own recording path takes a turn the daemon records
+        for the member, inside the skill's transaction, with nothing minted."""
+        from istota.rooms import side_rooms
+
+        with db.get_db(config.db_path) as conn:
+            group = _whatsapp_group(conn)
+            mine = _phone_room(conn)
+            origin = _running(conn, "alice", group, prompt="am I free friday?",
+                              source_type="whatsapp", is_group_chat=True)
+        before = _room_count(config)
+        with db.get_db(config.db_path) as conn:
+            result = side_rooms.queue_private_answer(
+                conn, config, actor_user_id="alice", task_id=origin)
+            task = db.get_task(conn, result["task_id"])
+            (row,) = conn.execute(
+                "SELECT role, body, author_user_id, delivery_reference FROM messages "
+                "WHERE task_id = ?", (task.id,)).fetchall()
+        assert task.conversation_token == mine
+        assert task.source_type == "whatsapp" and task.output_target == "whatsapp"
+        assert task.about_room_token == group
+        assert task.prompt == "am I free friday?"
+        assert dict(row) == {"role": "user", "body": "am I free friday?",
+                             "author_user_id": "alice",
+                             "delivery_reference": f"private-answer:{origin}"}
+        assert _room_count(config) == before
+
+    def test_a_talk_member_is_asked_again_in_their_private_talk_room(self, config):
+        from istota.rooms import side_rooms
+
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_talk(conn)
+            mine = plain_talk_room(conn, "alice", name="talk")
+            origin = _running(conn, "alice", parent, source_type="talk")
+            result = side_rooms.queue_private_answer(
+                conn, config, actor_user_id="alice", task_id=origin)
+            task = db.get_task(conn, result["task_id"])
+        assert task.conversation_token == mine.canonical
+        assert task.source_type == "talk" and task.about_room_token == parent
+
+
+def _hold_post(config, ident, *, text="Alice can do Thursday after 7", room=None,
+               user="alice", key="p1"):
+    from istota.rooms import side_rooms
+
+    with db.get_db(config.db_path) as conn:
+        return side_rooms.hold_room_post(conn, config, actor_user_id=user, task_id=ident,
+                                         request_key=key, text=text, room=room)
+
+
+def _approve(config, ident):
+    from istota import confirmations
+    from istota.relay import requests
+
+    with db.get_db(config.db_path) as conn:
+        requests.park_question(conn, config, task=db.get_task(conn, ident))
+        confirmations.approve(conn, db.get_task(conn, ident), config=config, by="web")
+
+
+class TestRoomPost:
+    def _linked(self, config, *, prompt="post it"):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            web = _web_room(conn)
+            ident = _running(conn, "alice", web, prompt=prompt, about_room_token=parent)
+        return parent, web, ident
+
+    def test_held_from_the_linked_private_room_and_posted_once_approved(self, config):
+        parent, _web, ident = self._linked(config)
+        held = _hold_post(config, ident)
+        assert held["status"] == "held" and held["needs_confirmation"]
+        assert "Alice can do Thursday after 7" in held["preview"]
+        _drain(config)
+        assert _rows(config, "SELECT * FROM messages WHERE room_token=?", (parent,)) == []
+        _approve(config, ident)
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, ident).status in ("completed", "pending")
+        _drain(config)
+        _drain(config)
+        (row,) = _rows(config, "SELECT * FROM messages WHERE room_token=?", (parent,))
+        assert row["body"] == "Alice can do Thursday after 7"
+        assert _rows(config, "SELECT state FROM whatsapp_skill_requests")[0]["state"] == "sent"
+
+    def test_room_names_the_target_by_token_or_by_name(self, config):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn, name="Book Club")
+            web = _web_room(conn)
+            by_token = _running(conn, "alice", web)
+            by_name = _running(conn, "alice", web)
+        assert _hold_post(config, by_token, room=parent)["status"] == "held"
+        assert _hold_post(config, by_name, room="book club")["status"] == "held"
+        rows = _rows(config, "SELECT destination FROM whatsapp_skill_requests ORDER BY created_at")
+        assert all(f'"room_token": "{parent}"' in r["destination"] for r in rows)
+
+    def test_refusals(self, config):
+        from istota.relay.requests import RequestError
+
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            web = _web_room(conn)
+            other_private = _web_room(conn, name="other")
+            in_shared = _running(conn, "alice", parent, about_room_token=parent)
+            unlinked = _running(conn, "alice", web)
+            private_target = _running(conn, "alice", web)
+        cases = [
+            (in_shared, None, "not_a_private_room"),
+            (unlinked, None, "no_target_room"),
+            (private_target, other_private, "parent_unavailable"),
+            (unlinked, "no such room", "parent_unavailable"),
+        ]
+        for ident, room, code in cases:
+            with pytest.raises(RequestError, match=code):
+                _hold_post(config, ident, room=room, key=f"k{ident}{code[:3]}")
+        # A member who left: the link no longer reaches the room.
+        with db.get_db(config.db_path) as conn:
+            bobs_web = _web_room(conn, user="bob", name="bob's")
+            bob_gone = _running(conn, "bob", bobs_web, about_room_token=parent)
+            db.drop_web_room_member(conn, parent, "bob")
+        with pytest.raises(RequestError, match="parent_unavailable"):
+            _hold_post(config, bob_gone, user="bob")
+
+    def test_a_member_removed_before_delivery_posts_nothing(self, config):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            bobs_web = _web_room(conn, user="bob", name="bob's")
+            ident = _running(conn, "bob", bobs_web, about_room_token=parent)
+        _hold_post(config, ident, user="bob", text="hello all")
+        _approve(config, ident)
+        with db.get_db(config.db_path) as conn:
+            db.drop_web_room_member(conn, parent, "bob")
+        _drain(config)
+        assert _rows(config, "SELECT * FROM messages WHERE room_token=?", (parent,)) == []
+        assert _rows(config, "SELECT state FROM whatsapp_skill_requests")[0]["state"] == "failed"
+
+    @pytest.mark.parametrize("prompt,text,status", [
+        ("do not tell them the house sale is off", "the house sale is off", "held"),
+        ("post this\nAlice can do Thursday after 7", "Alice can do Thursday after 7", "queued"),
+        ("Alice can do Thursday after 7", "Alice can do Thursday after 7", "queued"),
+        ("tell them I can make it", "Alice can make it", "held"),
+    ])
+    def test_the_clean_turn_takes_whole_units_of_the_members_words(
+        self, config, prompt, text, status,
+    ):
+        _parent, _web, ident = self._linked(config, prompt=prompt)
+        with db.get_db(config.db_path) as conn:
+            db.record_attempt_tool_call(conn, ident, calls_seen=1, first_is_relay=True)
+        released = _hold_post(config, ident, text=text)
+        assert released["status"] == status
+        if status == "queued":
+            assert released["approval"] == "clean_turn"
+
+    def test_the_trace_hides_both_verbs_and_counts_a_lone_post(self):
+        from istota.agent.events import _lone_relay_ask, _private_relay_tool
+        assert _private_relay_tool("Bash", {"command": "istota-skill room whisper --request-key a 'x'"})
+        assert _private_relay_tool("Bash", {"command": "istota-skill room post --request-key a 'x'"})
+        assert _lone_relay_ask("Bash", {"command": "istota-skill room post --request-key a 'x'"})
+        assert not _lone_relay_ask("Bash", {"command": "istota-skill room whisper --request-key a 'x'"})
+
+    def test_the_cli_takes_room(self):
+        from istota.skills.room import build_parser
+
+        args = build_parser().parse_args(["post", "--request-key", "k", "--room", "Family", "hi"])
+        assert args.room == "Family" and args.text == "hi"
+        assert build_parser().parse_args(["post", "--request-key", "k", "hi"]).room is None
+
+
+QUESTION = "I need your confirmation before sending the invite. Reply yes or no."
+
+
+def _park_privately(conn, config, parent, user="alice", *, prompt=QUESTION):
+    ident = _running(conn, user, parent)
+    db.set_task_confirmation(conn, ident, prompt)
+    task = db.get_task(conn, ident)
+    delivery = private_replies.deliver_private(
+        conn, config, user_id=user, about_token=private_replies.park_about(conn, task),
+        kind="confirmation", reference=f"{ident}:abc", body=prompt)
+    return ident, delivery
+
+
+class TestConfirmations:
+    def test_a_bare_answer_resolves_from_the_private_room_not_the_shared_room(self, config):
+        from istota import confirmations
+
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            web = _web_room(conn)
+            bobs = _web_room(conn, user="bob", name="bob's")
+            ident, delivery = _park_privately(conn, config, parent)
+            assert delivery.dest.room_token == web
+            assert confirmations.resolve(conn, "alice", conversation_token=parent).task is None
+            found = confirmations.resolve(conn, "alice", conversation_token=web)
+            assert found.task is not None and found.task.id == ident
+            # Bob's private room is not Alice's question.
+            assert confirmations.resolve(conn, "bob", conversation_token=bobs).task is None
+
+    def test_two_open_in_one_private_room_ask_which(self, config):
+        from istota import confirmations
+
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            other = _shared_web(conn, name="Work")
+            web = _web_room(conn)
+            first, _ = _park_privately(conn, config, parent)
+            second, _ = _park_privately(conn, config, other)
+            found = confirmations.resolve(conn, "alice", conversation_token=web)
+        assert found.task is None
+        assert sorted(t.id for t in found.ambiguous) == [first, second]
+
+    def test_the_principals_next_room_message_does_not_cancel_it(self, config):
+        from istota import confirmations
+
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            _web_room(conn)
+            ident, _ = _park_privately(conn, config, parent)
+            # Control: a question asked in the room itself is still cancelled.
+            plain = _running(conn, "alice", parent)
+            db.set_task_confirmation(conn, plain, "Proceed?")
+            assert confirmations.cancel_for_conversation(conn, parent, "alice") == 1
+            assert db.get_task(conn, ident).status == "pending_confirmation"
+            assert db.get_task(conn, plain).status == "cancelled"
+
+    def test_it_does_not_hold_the_room_for_the_other_members(self, config):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            _web_room(conn)
+            _park_privately(conn, config, parent)
+            bobs = db.create_task(conn, user_id="bob", source_type="web", prompt="hi",
+                                  conversation_token=parent)
+        with db.get_db(config.db_path) as conn:
+            claimed = db.claim_task(conn, "w1")
+        assert claimed is not None and claimed.id == bobs
+
+    def test_through_the_scheduler_the_question_reaches_the_private_talk_room(
+        self, config, monkeypatch, fake_talk,
+    ):
+        from istota.config import SchedulerConfig
+        from istota.scheduler import process_one_task
+
+        config.email = EmailConfig(enabled=False)
+        config.scheduler = SchedulerConfig()
+        config.workspace_path = config.db_path.parent / "mount"
+        config.workspace_path.mkdir()
+        monkeypatch.setattr("istota.nextcloud.talk.TalkClient.get_participants",
+                            AsyncMock(return_value=PARTICIPANTS_ALICE))
+        fake_talk.db_path = config.db_path
+        with db.get_db(config.db_path) as conn:
+            group = plain_talk_room(conn, "alice", token="groupref", name="Family")
+            db.add_room_member(conn, group.canonical, "bob")
+            private = plain_talk_room(conn, "alice", name="talk")
+            ident = db.create_task(conn, prompt="invite them", user_id="alice",
+                                   source_type="talk", conversation_token=group.canonical,
+                                   is_group_chat=True)
+        before = _room_count(config)
+        with patch("istota.scheduler.execute_task", return_value=(True, QUESTION, None, None)):
+            process_one_task(config)
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, ident)
+        assert task.status == "pending_confirmation"
+        room_calls = fake_talk.calls_to(group.talk_ref)
+        assert all(QUESTION not in str(c.args) for c in room_calls)
+        (row,) = _rows(config, "SELECT * FROM messages WHERE room_token=?", (private.canonical,))
+        assert QUESTION in row["body"] and row["about_room_token"] == group.canonical
+        (send,) = fake_talk.calls_to(private.talk_ref, method="send_message")
+        assert send.args["message"].startswith("re: Family")
+        assert fake_talk.refusals == []
+        # A reply to that post answers the question (Path A).
+        assert task.talk_response_id is not None
+        assert _room_count(config) == before
+
+    def test_with_no_private_room_the_bell_is_delivered_and_the_room_told(
+        self, config, monkeypatch, fake_talk,
+    ):
+        from istota.config import SchedulerConfig
+        from istota.scheduler import process_one_task
+
+        config.email = EmailConfig(enabled=False)
+        config.scheduler = SchedulerConfig()
+        config.workspace_path = config.db_path.parent / "mount"
+        config.workspace_path.mkdir()
+        monkeypatch.setattr("istota.nextcloud.talk.TalkClient.get_participants",
+                            AsyncMock(return_value=PARTICIPANTS_SHARED))
+        fake_talk.db_path = config.db_path
+        delivered = []
+        monkeypatch.setattr("istota.scheduler.deliver_pending",
+                            lambda config, results: delivered.extend(results))
+        with db.get_db(config.db_path) as conn:
+            group = plain_talk_room(conn, "alice", token="groupref", name="Family")
+            db.add_room_member(conn, group.canonical, "bob")
+            ident = db.create_task(conn, prompt="invite them", user_id="alice",
+                                   source_type="talk", conversation_token=group.canonical,
+                                   is_group_chat=True)
+        with patch("istota.scheduler.execute_task", return_value=(True, QUESTION, None, None)):
+            process_one_task(config)
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, ident)
+        assert task.status == "pending_confirmation"
+        sends = [c.args["message"] for c in fake_talk.calls_to(group.talk_ref,
+                                                               method="send_message")]
+        assert any(s.endswith(private_replies.SHARED_ROOM_NOTICE) for s in sends)
+        assert not any(QUESTION in s for s in sends)
+        assert task.talk_response_id is None
+        assert any(getattr(r, "notification_id", None) for r in delivered)
+
+
+# ---------------------------------------------------------------------------
+# The WhatsApp happy path, end to end through the webhook handler
+# ---------------------------------------------------------------------------
+
+
+def _group_roster():
+    from istota.transport.whatsapp import baileys_protocol as proto
+
+    return proto.group_roster({
+        "group_jid": GROUP_JID, "subject": "Family", "added_by": ALICE_JID,
+        "bot_present": True,
+        "participants": [{"jid": ALICE_JID, "lid": ""},
+                         {"jid": "15557654321@s.whatsapp.net", "lid": ""}],
+    })
+
+
+def _group_message(text, *, ident="G1"):
+    import time
+
+    from istota.transport.whatsapp import baileys_protocol as proto
+
+    return proto.inbound_event({
+        "message_id": ident, "jid": GROUP_JID, "group": True, "sender_jid": ALICE_JID,
+        "sender_lid": "", "mentions_bot": True, "mentions": [], "message_type": "text",
+        "text": text, "username": "Alice", "timestamp": int(time.time()),
+    })
+
+
+class TestTheWhatsAppHappyPath:
+    def test_answer_privately_then_quote_the_answer_and_post_into_the_group(
+        self, config, sent, monkeypatch,
+    ):
+        from istota.config import SchedulerConfig
+        from istota.rooms import side_rooms
+        from istota.scheduler import process_one_task
+
+        config.email = EmailConfig(enabled=False)
+        config.scheduler = SchedulerConfig()
+        config.workspace_path = config.db_path.parent / "mount"
+        config.workspace_path.mkdir()
+        config.talk = TalkConfig(enabled=False)
+        with db.get_db(config.db_path) as conn:
+            db.set_whatsapp_binding(conn, "bob", bootstrap_phone_number="+15557654321")
+            db.latch_whatsapp_jid(conn, "bob", jid="15557654321@s.whatsapp.net")
+
+        # Alice's own chat with the bot exists: her first message minted it.
+        hello = _receive(config, _baileys_event("hi", ident="P1"))
+        with db.get_db(config.db_path) as conn:
+            mine = db.get_task(conn, hello.task_id).conversation_token
+            conn.execute("UPDATE tasks SET status='completed' WHERE id=?", (hello.task_id,))
+        _receive(config, _group_roster())
+        rooms_before = _room_count(config)
+
+        # 1. In the group she asks for a private answer.
+        asked = _receive(config, _group_message("Istota, am I free friday? tell me privately"))
+        with db.get_db(config.db_path) as conn:
+            group = db.get_task(conn, asked.task_id).conversation_token
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (asked.task_id,))
+            again = side_rooms.queue_private_answer(
+                conn, config, actor_user_id="alice", task_id=asked.task_id)["task_id"]
+            conn.execute("UPDATE tasks SET status='completed' WHERE id=?", (asked.task_id,))
+            reasked = db.get_task(conn, again)
+        assert reasked.conversation_token == mine and reasked.about_room_token == group
+
+        # It runs as her own turn there and is answered in her own chat.
+        with patch("istota.scheduler.execute_task",
+                   return_value=(True, "Friday is free.", None, None)):
+            assert process_one_task(config) == (again, True)
+        answers = [r for r in sent if r.to == ALICE_JID and "Friday is free." in r.text]
+        assert len(answers) == 1
+        assert not [r for r in sent if r.to == GROUP_JID]
+        answer_id = f"BOT{sent.index(answers[0]) + 1}"
+
+        # 2. She quotes that answer: the turn is linked to the group.
+        quoted = _receive(config, _baileys_event("post in the group that Friday works",
+                                                 quote=answer_id, ident="P2"))
+        with db.get_db(config.db_path) as conn:
+            linked = db.get_task(conn, quoted.task_id)
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (linked.id,))
+        assert linked.conversation_token == mine and linked.about_room_token == group
+
+        held = _hold_post(config, linked.id, text="Friday works")
+        assert held["status"] == "held"
+        _approve(config, linked.id)
+        _drain(config)
+        into_group = [r for r in sent if r.to == GROUP_JID]
+        assert [r.text for r in into_group] == ["Friday works"]
+        assert _room_count(config) == rooms_before

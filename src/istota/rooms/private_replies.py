@@ -32,11 +32,15 @@ Linking (`linked_about`, `quoted_private_reply`, `linked_room`,
 the shared room the row is about, through `tasks.about_room_token`.
 `transport.ingest.record_inbound` applies the one rule for every surface; a
 WhatsApp quote is resolved back to its row through the ``private-reply:``
-ledger key first.
+ledger key first, or a linked turn's answer through its ``task-result:`` key
+(the scheduler tags that answer with the same link).
 
-`side_rooms` still holds the side-room machinery these replace; the shared
-helpers (`room_label`, `HEADER_PREFIX`, `_send_private_mail`,
-`transcript_context`) are imported from there until the rename completes.
+Confirmations (`park_about`, `parked_here`): which park is asked privately,
+and which parked tasks a bare answer in a private room can reach.
+
+`side_rooms` still holds the verbs and the shared helpers (`room_label`,
+`HEADER_PREFIX`, `_send_private_mail`, `transcript_context`), imported from
+there until the rename completes.
 """
 
 from __future__ import annotations
@@ -62,6 +66,8 @@ SHARED_ROOM_NOTICE = (
 
 PRIVATE_NOTE_ALERT = "private_note"
 WHATSAPP_KEY_PREFIX = "private-reply:"
+#: A task's final answer on WhatsApp (`.claude/rules/sms.md`, the namespaces).
+ANSWER_KEY_PREFIX = "task-result:"
 
 _EMAIL_HINTS = {
     "confirmation": "Reply in your private chat with the bot, or approve it in notifications.",
@@ -228,17 +234,36 @@ def quoted_private_reply(conn, *, user_id: str, quoted_id: str | None,
     a rowid can be reused once the newest rows are gone. It must be in this
     user's private WhatsApp room, carry ``about_room_token``, and have been
     written by `deliver_private`. Anything else is an ordinary quote, ignored.
+
+    A linked turn's own answer is the other tagged row a member quotes (the
+    answer to `room answer-privately`, say). It goes out under the task's
+    ``task-result:<task id>`` key, so that key leads to the task's stored
+    answer in this room, which the scheduler tags with the same link.
     """
     if not quoted_id or not room_token:
         return None
     row = conn.execute(
         "SELECT logical_key FROM sent_whatsapp WHERE meta_message_id = ? AND user_id = ? "
-        "AND logical_key LIKE ? ORDER BY id DESC LIMIT 1",
-        (quoted_id, user_id, WHATSAPP_KEY_PREFIX + "%"),
+        "AND (logical_key LIKE ? OR logical_key LIKE ?) ORDER BY id DESC LIMIT 1",
+        (quoted_id, user_id, WHATSAPP_KEY_PREFIX + "%", ANSWER_KEY_PREFIX + "%"),
     ).fetchone()
     if row is None:
         return None
-    raw = row["logical_key"][len(WHATSAPP_KEY_PREFIX):]
+    key = row["logical_key"]
+    if key.startswith(ANSWER_KEY_PREFIX):
+        raw = key[len(ANSWER_KEY_PREFIX):]
+        if not raw.isdecimal():
+            return None
+        answer = conn.execute(
+            "SELECT id, body FROM messages WHERE task_id = ? AND room_token = ? "
+            "AND role = 'assistant' AND about_room_token IS NOT NULL "
+            "ORDER BY id LIMIT 1",
+            (int(raw), room_token),
+        ).fetchone()
+        if answer is None:
+            return None
+        return int(answer["id"]), answer["body"][:REPLY_SNAPSHOT_CHARS]
+    raw = key[len(WHATSAPP_KEY_PREFIX):]
     if not raw.isdecimal():
         return None
     message = conn.execute(
@@ -294,6 +319,54 @@ def linked_context(conn, config, task) -> tuple[str | None, str]:
                "messages, oldest first. Nothing written in this conversation "
                "reaches it."),
     )
+
+
+# ---------------------------------------------------------------------------
+# Confirmations
+# ---------------------------------------------------------------------------
+
+#: The `messages.delivery_reference` prefixes of a privately routed park's
+#: question: a confirmation, or a guest proposal put to the host. The
+#: scheduler's park keys each ``<prefix><task id>:<prompt hash>``.
+PARK_PREFIXES = ("private-confirmation:", "private-proposal:")
+
+
+def park_about(conn, task) -> str | None:
+    """The shared room a task's confirmation must be asked about privately, or None.
+
+    A task in a shared room asks its principal privately, never in front of
+    the room (multiplayer D4). A guest's turn does too even in a room no
+    second member reads: the guest is the audience it must not reach (D2).
+    """
+    parent = canonical_token(conn, task.conversation_token) if task.conversation_token else None
+    room = db.get_room(conn, parent) if parent else None
+    if room is None or room.side_of:
+        return None
+    if (getattr(task, "guest_participant_id", None) is None
+            and not (task.is_group_chat or db.room_is_shared(conn, parent))):
+        return None
+    return parent
+
+
+def parked_here(conn, room_token: str, user_id: str) -> list:
+    """``user_id``'s parked tasks whose private question is in ``room_token``."""
+    ids: list[int] = []
+    for prefix in PARK_PREFIXES:
+        rows = conn.execute(
+            "SELECT delivery_reference FROM messages WHERE room_token = ? "
+            "AND delivery_reference LIKE ?",
+            (room_token, prefix + "%"),
+        ).fetchall()
+        for row in rows:
+            raw = row["delivery_reference"][len(prefix):].split(":", 1)[0]
+            if raw.isdecimal() and int(raw) not in ids:
+                ids.append(int(raw))
+    tasks = []
+    for ident in sorted(ids):
+        task = db.get_task(conn, ident)
+        if task is not None and task.user_id == user_id and task.status == "pending_confirmation":
+            tasks.append(task)
+    return tasks
 
 
 # ---------------------------------------------------------------------------

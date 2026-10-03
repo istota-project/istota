@@ -3,9 +3,9 @@
 A shared room is read by several people, so anything meant for one of them
 alone needs somewhere else to go. A side room is that place. It is an ordinary
 private web room with one member, linked to its parent by `rooms.side_of` and
-`rooms.side_for_user`, and created by the system the first time the parent has
-something for that member alone. `db.ensure_side_room` records why the system
-may create this one room when rooms are otherwise user-created.
+`rooms.side_for_user`. Since ISSUE-608 nothing creates one: what was meant
+for one member goes to that member's own private room instead
+(`rooms.private_replies`), and side rooms are on their way out.
 
 What this module holds, and what it deliberately does not:
 
@@ -14,33 +14,24 @@ What this module holds, and what it deliberately does not:
   only while its member is still in the parent.
 - **Pinned delivery.** Nothing a side-room task outputs reaches the parent:
   `pin_plan` drops every delivery destination that lands there.
-- **Two verbs**, on the relay request table rather than a second hold table
-  (D16). `room whisper` (`enqueue_whisper`) is a task in a shared room writing
-  to its principal's side room, queued at once because it reaches only them.
-  `room post` (`hold_room_post`) is a side-room task's post into the parent,
-  held for the member's approval of the exact text through the relay's
-  preview-digest machinery, and released without approval only when the text
-  is the member's own words on a clean turn (ISSUE-565's rule).
-- **Confirmations.** A confirmation a task in a shared room raises goes to the
-  principal's side room, never into the room (`confirmation_route`).
-- **External views.** On web the side room is itself. On Talk it is the
-  member's own private conversation with the bot, each message headed
-  ``re: <room>`` (`push_to_talk_view`), and only when the parent is on Talk.
-  On WhatsApp it is the member's own chat with the bot's number, headed the
-  same way (`push_to_whatsapp_view`), when the parent is a WhatsApp group. On
-  email it is a private mail to the member's own address, never a reply on the
-  thread (`push_to_email_view`), when the parent is an email thread room.
-  Nothing binds the side room to either: it is its own room.
+- **Three verbs** (ISSUE-608), the first and last on the relay request table
+  rather than a second hold table (D16). `room whisper` (`enqueue_whisper`)
+  is a task in a shared room writing to its principal privately, queued at
+  once because it reaches only them, and delivered through
+  `private_replies.deliver_private` to their own private room (or the bell).
+  `room answer-privately` (`queue_private_answer`) asks the principal's own
+  question again in their private room, as a turn of theirs linked to the
+  shared room. `room post` (`hold_room_post`) is a private-room task's post
+  into a shared room, held for the member's approval of the exact text
+  through the relay's preview-digest machinery, and released without
+  approval only when the text is the member's own words on a clean turn
+  (ISSUE-565's rule).
+- **Guest proposals** (`propose_guest_reply`), put to the host through the
+  scheduler's privately routed confirmation path.
 
-- **Side-room answers** (D4 item 1). A task in a shared room whose answer
-  should not be read there asks for it privately (`queue_side_answer`): the
-  principal's own question is put in their side room as a turn of theirs, and
-  runs there as an ordinary private task, with their personal memory loaded.
-  The side-room task's answer reaches the room only through a held
-  `room post`. Since ISSUE-576 nothing forces this; it is a verb a member, or
-  the model on their behalf, chooses.
-
-Not here: the nested and ephemeral web rendering (Stage 17).
+Nothing here creates a side room any more; the side-room parts that remain
+(`task_side_room`, `parent_context`, `backstage_room`, `pin_plan`'s side arm)
+go with the side-room schema, and this module becomes `private_replies`.
 """
 
 from __future__ import annotations
@@ -52,7 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from istota import db
-from istota.rooms.scopes import canonical_token  # noqa: F401 — re-exported; one copy
+from istota.rooms.scopes import canonical_token, is_current_member  # noqa: F401 — canonical_token re-exported; one copy
 from istota.lib.untrusted import frame_untrusted
 from istota.relay.requests import (
     CLAIM_RECOVERY_SECONDS,
@@ -234,116 +225,6 @@ def _pinned_parent(conn, task):
     return room.side_of, room
 
 
-# ---------------------------------------------------------------------------
-# The Talk view
-# ---------------------------------------------------------------------------
-
-
-def _private_talk_ref(conn, room_token: str, user_id: str) -> str | None:
-    room = db.get_room(conn, room_token)
-    if room is None or room.archived or room.side_of:
-        return None
-    if db.list_room_members(conn, room_token) != [user_id]:
-        return None
-    binding = db.get_room_binding(conn, room_token, "talk")
-    return binding.surface_ref if binding else None
-
-
-def talk_view(conn, config, user_id: str) -> str | None:
-    """The Talk conversation a user's side rooms are shown in, or None.
-
-    Their own private conversation with the bot: the configured default room
-    when it is a private Talk room, else the oldest private Talk room that
-    could be their default, else the 1:1 the poller detected. A live
-    participant check runs before anything is posted to it.
-    """
-    configured = db.configured_default_room(conn, user_id)
-    if configured:
-        ref = _private_talk_ref(conn, configured, user_id)
-        if ref:
-            return ref
-    for room in db._default_room_candidates(conn, user_id):
-        ref = _private_talk_ref(conn, room.token, user_id)
-        if ref:
-            return ref
-    try:
-        from istota.transport.talk import get_dm_token
-    except ImportError:
-        return None
-    return get_dm_token(user_id)
-
-
-async def push_to_talk_view(
-    config, *, user_id: str, parent_token: str, body: str, reference_id: str,
-) -> int | None:
-    """Post ``body`` to the user's Talk view, headed ``re: <room>``.
-
-    Only for a parent on Talk: a member reading the room on web reads its side
-    room on web. Returns the Talk message id, or None when nothing was posted.
-    """
-    def _resolve():
-        with db.get_db(config.db_path) as conn:
-            parent = db.get_room(conn, parent_token)
-            if parent is None or db.get_room_binding(conn, parent_token, "talk") is None:
-                return None, None
-            return talk_view(conn, config, user_id), HEADER_PREFIX + room_label(parent)
-
-    ref, header = await asyncio.to_thread(_resolve)
-    if not ref:
-        return None
-    from istota.relay import relays as message_relays
-
-    try:
-        await message_relays.verify_private_audience(
-            config, actor_user_id=user_id, origin={"talk_ref": ref})
-    except RequestError:
-        logger.warning("side room Talk view for %s is not private; not posted", user_id)
-        return None
-    from istota.transport.talk import TalkTransport
-
-    try:
-        return await TalkTransport(config).deliver(ref, f"{header}\n\n{body}", reference_id=reference_id)
-    except Exception as exc:
-        logger.warning("side room Talk view post failed for %s: %s", user_id, exc)
-        return None
-
-
-async def push_to_whatsapp_view(
-    config, *, user_id: str, parent_token: str, body: str, reference_id: str,
-) -> bool:
-    """Send ``body`` to the user's own WhatsApp chat with the bot, headed ``re: <room>``.
-
-    The side room's external view on WhatsApp (D4), and only for a parent
-    bound to a WhatsApp group: a member reading the room elsewhere reads its
-    side room there. The chat is the user's own binding, so it is private by
-    construction. True when the message reached WhatsApp.
-    """
-    def _resolve():
-        with db.get_db(config.db_path) as conn:
-            parent = db.get_room(conn, parent_token)
-            if parent is None or db.get_room_binding(conn, parent_token, "whatsapp") is None:
-                return None
-            return HEADER_PREFIX + room_label(parent)
-
-    header = await asyncio.to_thread(_resolve)
-    if header is None:
-        return False
-    from istota.transport.whatsapp import REACHED_META
-    from istota.transport.whatsapp.outbound import current_destination, deliver_whatsapp
-
-    if not await asyncio.to_thread(current_destination, config, user_id):
-        return False
-    try:
-        record = await deliver_whatsapp(
-            config, logical_key=f"side-view:{reference_id}", user_id=user_id,
-            text=f"{header}\n\n{body}",
-        )
-    except Exception as exc:
-        logger.warning("side room WhatsApp view send failed for %s: %s", user_id, exc)
-        return False
-    return record.status in REACHED_META
-
-
 def _send_private_mail(config, *, to: str, subject: str, body: str) -> None:
     from istota.mail.support import get_email_config
     from istota.skills.email import send_email
@@ -352,55 +233,14 @@ def _send_private_mail(config, *, to: str, subject: str, body: str) -> None:
                from_addr=config.email.bot_email)
 
 
-async def push_to_email_view(
-    config, *, user_id: str, parent_token: str, body: str, reference_id: str,
-) -> bool:
-    """Mail ``body`` to the user's own address, headed ``re: <room>`` (D4).
-
-    The side room's external view on email, and only for a parent bound to an
-    email thread: a fresh mail with no threading headers, so it can never
-    land on the thread itself. The address is the user's own configured one,
-    which no outbound policy holds. True when the mail was handed to SMTP.
-    """
-    def _resolve():
-        with db.get_db(config.db_path) as conn:
-            parent = db.get_room(conn, parent_token)
-            if parent is None or db.get_room_binding(conn, parent_token, "email") is None:
-                return None
-            return HEADER_PREFIX + room_label(parent)
-
-    if not getattr(config.email, "enabled", False):
-        return False
-    user = config.users.get(user_id)
-    address = user.email_addresses[0] if user and user.email_addresses else None
-    subject = await asyncio.to_thread(_resolve)
-    if subject is None or not address:
-        return False
-    try:
-        await asyncio.to_thread(
-            _send_private_mail, config, to=address, subject=subject, body=body,
-        )
-    except Exception as exc:
-        logger.warning("side room email view send failed for %s (%s): %s",
-                       user_id, reference_id, exc)
-        return False
-    return True
-
-
-def email_confirmation_body(prompt: str, task_id: int) -> str:
-    """A side-routed question as its email view carries it: a reply to that
-    private mail is a new message, not an answer, so it names the command."""
-    return (f"{prompt}\n\nTask #{task_id}. Answer in the side room, or send "
-            f"!confirm {task_id} yes or !confirm {task_id} no on any surface.")
-
-
 def whatsapp_confirmation_body(prompt: str, task_id: int) -> str:
-    """A side-routed question as its WhatsApp view carries it.
+    """A privately routed question as the member's WhatsApp chat carries it.
 
-    A bare YES in that chat answers only a question parked there, and this one
-    is parked in the group's room, so the message names the command that
-    answers it by id. The question is trimmed rather than the instruction,
-    leaving room for the ``re: <room>`` header the view puts in front.
+    The question is parked against the shared room's task, so the message
+    names the command that answers it by id as well; a bare YES in that chat
+    answers it too when it is the only one open there. The question is
+    trimmed rather than the instruction, leaving room for the ``re: <room>``
+    header `private_replies.send_private` puts in front.
     """
     from istota.transport.whatsapp.outbound import WHATSAPP_TEXT_LIMIT, render_whatsapp
 
@@ -408,68 +248,6 @@ def whatsapp_confirmation_body(prompt: str, task_id: int) -> str:
               f"or `!confirm {task_id} no`.")
     budget = WHATSAPP_TEXT_LIMIT - len(suffix) - len(HEADER_PREFIX) - _LABEL_MAX - 2
     return render_whatsapp(prompt, limit=budget) + suffix
-
-
-# ---------------------------------------------------------------------------
-# Confirmations raised in a shared room
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ConfirmationRoute:
-    """Where a shared-room task's confirmation goes instead of the room."""
-
-    parent_token: str
-    side_token: str | None
-    talk_bound: bool
-    # The parent is a WhatsApp group: the question also goes to the
-    # principal's own WhatsApp chat (`push_to_whatsapp_view`).
-    whatsapp_bound: bool = False
-    # The parent is an email thread: the question also goes to the
-    # principal's own address (`push_to_email_view`).
-    email_bound: bool = False
-
-    @property
-    def externally_viewed(self) -> bool:
-        return self.talk_bound or self.whatsapp_bound or self.email_bound
-
-
-def confirmation_route(conn, task) -> ConfirmationRoute | None:
-    """None for a task not in a shared room; the side room to use otherwise.
-
-    ``side_token`` is None when no side room could be made (the principal is
-    not a member). The question still stays out of the room; the confirmation
-    notification is then the only place it is pushed.
-    """
-    parent_token = canonical_token(conn, task.conversation_token)
-    parent = db.get_room(conn, parent_token) if parent_token else None
-    if parent is None or parent.side_of:
-        return None
-    # A guest's turn asks its host privately even in a room no second member
-    # reads: the guest is the audience it must not reach (multiplayer D2).
-    if (getattr(task, "guest_participant_id", None) is None
-            and not is_shared_room(conn, parent_token, is_group_chat=task.is_group_chat)):
-        return None
-    talk_bound = db.get_room_binding(conn, parent_token, "talk") is not None
-    whatsapp_bound = db.get_room_binding(conn, parent_token, "whatsapp") is not None
-    email_bound = db.get_room_binding(conn, parent_token, "email") is not None
-    try:
-        side = db.ensure_side_room(conn, parent_token, task.user_id)
-    except ValueError:
-        return ConfirmationRoute(parent_token=parent_token, side_token=None, talk_bound=False)
-    return ConfirmationRoute(parent_token=parent_token, side_token=side.token,
-                             talk_bound=talk_bound, whatsapp_bound=whatsapp_bound,
-                             email_bound=email_bound)
-
-
-def write_confirmation(conn, route: ConfirmationRoute, task, prompt: str) -> None:
-    """The question as a row in the side room, keyed so a re-park adds a row."""
-    if route.side_token is None:
-        return
-    db.add_message(
-        conn, route.side_token, role="system", body=prompt, origin_surface="web",
-        delivery_reference=f"side-confirmation:{task.id}:{text_hash(prompt)[:16]}",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -508,7 +286,9 @@ def guest_reply_mode(conn, task) -> str | None:
 
 @dataclass(frozen=True)
 class GuestProposal:
-    route: ConfirmationRoute
+    #: The shared room the proposal is about, which the scheduler routes the
+    #: park's question to the host privately for.
+    parent_token: str
     preview: str
 
 
@@ -532,11 +312,13 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
 
     The relay hold machinery carries it (D16): a held `room_post` request whose
     preview is the exact approval document, the task parked on that preview's
-    digest, and the preview written to the host's side room by the caller's
-    ordinary side-routed confirmation path. None when it cannot be proposed —
-    no side room, a parent the host no longer reads, or an answer the post
-    path would refuse — and the caller then cancels rather than posting.
+    digest, and the preview delivered to the host privately by the caller's
+    ordinary privately routed confirmation path (ISSUE-608): their own private
+    room, or the bell when they have none. None when it cannot be proposed —
+    a parent the host no longer reads, or an answer the post path would
+    refuse — and the caller then cancels rather than posting.
     """
+    from istota.rooms.private_replies import private_room_for
     from istota.confirmations import flatten
     from istota.relay.requests import associate_confirmation
 
@@ -544,7 +326,6 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
     if not parent:
         return None
     try:
-        side = db.ensure_side_room(conn, parent, task.user_id)
         destination = _post_destination(conn, parent, task.user_id)
         if destination["talk_ref"]:
             from istota.transport.talk import TalkTransport
@@ -584,13 +365,18 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
         if email_recipients is not None:
             stored_destination["email_recipients"] = email_recipients
         with write_transaction(conn):
+            # The host's own room, where the preview lands; with none, the
+            # bell carries it and the origin names no room.
+            private = private_room_for(conn, config, task.user_id, parent)
+            origin = ({"surface": private.surface, "room_token": private.room_token}
+                      if private is not None else {"surface": "notifications"})
             row = _store_request(
                 conn, actor_user_id=task.user_id, task_id=task.id,
                 request_key=f"guest-reply-{task.id}", kind="room_post",
                 recipient_user_id=task.user_id, text=reply, service_body=reply,
                 template_body=None, provider="room",
                 binding_fingerprint=destination["fingerprint"], preview=preview,
-                origin={"surface": "web", "room_token": side.token, "channel": side.token},
+                origin=origin,
                 destination=stored_destination,
             )
             db.set_task_confirmation(conn, task.id, row["preview"])
@@ -599,15 +385,7 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
     except (ValueError, RequestError) as exc:
         logger.info("task %s: guest reply not proposed: %s", task.id, exc)
         return None
-    talk_bound = db.get_room_binding(conn, parent, "talk") is not None
-    whatsapp_bound = db.get_room_binding(conn, parent, "whatsapp") is not None
-    email_bound = db.get_room_binding(conn, parent, "email") is not None
-    return GuestProposal(
-        route=ConfirmationRoute(parent_token=parent, side_token=side.token,
-                                talk_bound=talk_bound, whatsapp_bound=whatsapp_bound,
-                                email_bound=email_bound),
-        preview=row["preview"],
-    )
+    return GuestProposal(parent_token=parent, preview=row["preview"])
 
 
 _SPEAKER_SURFACES = ("talk", "web")
@@ -668,15 +446,35 @@ def _fingerprint(*parts) -> str:
     return text_hash(json.dumps(list(parts), ensure_ascii=True, separators=(",", ":")))
 
 
+def _live_shared_room(conn, task, actor_user_id: str) -> str:
+    """The shared room a task runs in, which ``actor_user_id`` is in now.
+
+    `not_a_shared_room` otherwise. Membership is current membership, since a
+    Talk departure keeps the member row (`rooms.scopes.is_current_member`).
+    """
+    parent = canonical_token(conn, task.conversation_token)
+    room = db.get_room(conn, parent) if parent else None
+    if (room is None or room.side_of or room.archived
+            or not is_current_member(conn, parent, actor_user_id)
+            or not is_shared_room(conn, parent, is_group_chat=task.is_group_chat)):
+        raise RequestError("not_a_shared_room")
+    return parent
+
+
 def enqueue_whisper(conn, config, *, actor_user_id: str, task_id: int,
                     request_key: str, text: str) -> dict:
-    """A shared-room task writes to its principal's side room.
+    """A shared-room task writes to its principal privately.
 
     Queued at once: the text reaches the principal alone, which is the audience
     of the task's own private reach, so there is nothing to approve. Refused
     from anywhere but a shared room the principal is in, since elsewhere the
-    task's own answer already reaches only them.
+    task's own answer already reaches only them. Where the note lands is
+    decided when it is delivered (`_claim`), so a private room the principal
+    opens in between is used; the answer here only predicts it, and says when
+    the bell is all there is, so the model can tell the room.
     """
+    from istota.rooms.private_replies import SHARED_ROOM_NOTICE, private_room_for
+
     _validate_input(request_key, text)
     _owned_running_task(conn, actor_user_id=actor_user_id, task_id=task_id)
     replay = _replay(conn, actor_user_id=actor_user_id, task_id=task_id,
@@ -685,57 +483,62 @@ def enqueue_whisper(conn, config, *, actor_user_id: str, task_id: int,
         return replay
     task = db.get_task(conn, task_id)
     with write_transaction(conn):
-        parent = canonical_token(conn, task.conversation_token)
-        room = db.get_room(conn, parent) if parent else None
-        if (room is None or room.side_of or room.archived
-                or not db.is_room_member(conn, parent, actor_user_id)
-                or not is_shared_room(conn, parent, is_group_chat=task.is_group_chat)):
-            raise RequestError("not_a_shared_room")
-        try:
-            side = db.ensure_side_room(conn, parent, actor_user_id)
-        except ValueError:
-            raise RequestError("side_room_unavailable") from None
+        parent = _live_shared_room(conn, task, actor_user_id)
+        # `side_whisper` is the kind's stored name, kept to avoid a CHECK
+        # rebuild; the destination is the principal's own private room.
         row = _store_request(
             conn, actor_user_id=actor_user_id, task_id=task_id, request_key=request_key,
             kind="side_whisper", recipient_user_id=actor_user_id, text=text,
             service_body=text, template_body=None, provider="room",
-            binding_fingerprint=_fingerprint(side.token, parent),
-            destination={"kind": "side_room", "room_token": side.token, "parent": parent},
+            binding_fingerprint=_fingerprint(actor_user_id, parent),
+            destination={"kind": "private_reply", "about": parent, "user": actor_user_id},
         )
-        return _question_response(conn, row)
+        response = _question_response(conn, row)
+        if private_room_for(conn, config, actor_user_id, parent) is None:
+            response["delivered_to"] = "notifications"
+            response["room_notice"] = SHARED_ROOM_NOTICE
+        return response
 
 
-SIDE_ANSWER_REFERENCE = "side-answer:"
+PRIVATE_ANSWER_REFERENCE = "private-answer:"
+#: Where a member's own turn can be asked again privately: the surfaces whose
+#: `tasks.prompt` is the member's own words in the room.
+_ANSWER_SURFACES = ("talk", "web", "whatsapp")
 
 
-def queue_side_answer(conn, config, *, actor_user_id: str, task_id: int) -> dict:
-    """Ask a shared-room task's question again, privately, in the side room.
+def queue_private_answer(conn, config, *, actor_user_id: str, task_id: int) -> dict:
+    """Ask a shared-room task's question again, in its principal's private room.
 
     For a question whose answer should not be read in the room (multiplayer
-    D4 item 1). What goes to the side room is the principal's own turn, as stored with
-    the task, never text the model wrote: the side-room task runs at the
-    principal's full reach, so a question composed by a model that has been
-    reading guests' words would be an injection route to that reach. It is
-    recorded as the principal's turn in their side room and runs there as an
-    ordinary private task (source ``web``), which is what the principal would
-    have got by asking there, and its answer is pinned to the side room like
-    every side-room task's.
+    D4 item 1, ISSUE-608). What is asked again is the principal's own turn, as
+    stored with the task, never text the model wrote: the new turn runs at the
+    principal's full reach with their personal memory, so a question composed
+    by a model that has been reading guests' words would be an injection route
+    to that reach. It is recorded as the principal's turn in their private room
+    through `transport.ingest.record_inbound`, on that room's surface, tagged
+    with the shared room (``about_room_token``), and its answer is delivered
+    there the ordinary way. The tag gives it the room's transcript as context
+    and keeps its delivery out of the room (`pin_plan`).
 
     Not the deferred-subtask op: a subtask is pinned to its parent's
-    conversation, so it would run in the same shared room at the same
-    restricted reach, and it is admin-only and rate-limited besides.
+    conversation, so it would run in the same shared room, and it is
+    admin-only and rate-limited besides.
 
     Refused for a guest's turn (the question is not the host's), for anything
-    but the principal's own turn in a shared room they are in, and from a side
-    room. Idempotent per task: a second call returns the first side-room task.
+    but the principal's own turn in a shared room they are in, and when the
+    principal has no private room (`no_private_room`): nothing creates one.
+    Idempotent per task: a second call returns the first re-asked task.
     """
+    from istota.rooms.private_replies import private_room_for
+    from istota.transport.ingest import record_inbound, record_phone_turn
+
     task = _owned_running_task(conn, actor_user_id=actor_user_id, task_id=task_id)
     if getattr(task, "guest_participant_id", None) is not None:
         raise RequestError("guest_turn")
-    if (task.source_type not in _SPEAKER_SURFACES or task.parent_task_id
+    if (task.source_type not in _ANSWER_SURFACES or task.parent_task_id
             or task.command or task.skill or task.scheduled_job_id):
         raise RequestError("unsupported_origin")
-    reference = f"{SIDE_ANSWER_REFERENCE}{task.id}"
+    reference = f"{PRIVATE_ANSWER_REFERENCE}{task.id}"
     with write_transaction(conn):
         existing = conn.execute(
             "SELECT task_id FROM messages WHERE delivery_reference = ?", (reference,),
@@ -744,53 +547,39 @@ def queue_side_answer(conn, config, *, actor_user_id: str, task_id: int) -> dict
             if existing["task_id"] is None:
                 raise RequestError("request_conflict")
             return {"status": "queued", "task_id": int(existing["task_id"])}
-        parent = canonical_token(conn, task.conversation_token)
-        room = db.get_room(conn, parent) if parent else None
-        if (room is None or room.side_of or room.archived
-                or not db.is_room_member(conn, parent, actor_user_id)
-                or not is_shared_room(conn, parent, is_group_chat=task.is_group_chat)):
-            raise RequestError("not_a_shared_room")
-        try:
-            side = db.ensure_side_room(conn, parent, actor_user_id)
-        except ValueError:
-            raise RequestError("side_room_unavailable") from None
-        new_id = db.create_task(
-            conn, prompt=task.prompt, user_id=actor_user_id, source_type="web",
-            conversation_token=side.token, attachments=task.attachments or None,
-            model=task.model, effort=task.effort, brain=task.brain,
-            model_namespace=task.model_namespace,
+        parent = _live_shared_room(conn, task, actor_user_id)
+        dest = private_room_for(conn, config, actor_user_id, parent)
+        if dest is None:
+            raise RequestError("no_private_room")
+        binding = db.get_room_binding(conn, dest.room_token, dest.surface)
+        surface_ref = binding.surface_ref if binding is not None else dest.room_token
+        common = dict(
+            surface=dest.surface, surface_ref=surface_ref, user_id=actor_user_id,
+            text=task.prompt, attachments=task.attachments or None,
+            about_room_token=parent, delivery_reference=reference,
         )
-        db.add_message(
-            conn, side.token, role="user", body=task.prompt, origin_surface="web",
-            task_id=new_id, author_user_id=actor_user_id, delivery_reference=reference,
-        )
-    return {"status": "queued", "task_id": new_id}
-
-
-def side_answer_parent(conn, task) -> str | None:
-    """The parent room of a side-room answer task, or None for any other task.
-
-    Its answer goes to the side room like any side-room task's; the parent is
-    what `push_to_talk_view` needs to show it in the principal's Talk view as
-    well, since the question was asked where they read on Talk.
-    """
-    row = conn.execute(
-        "SELECT 1 FROM messages WHERE task_id = ? AND delivery_reference LIKE ?",
-        (task.id, SIDE_ANSWER_REFERENCE + "%"),
-    ).fetchone()
-    if row is None:
-        return None
-    side = task_side_room(conn, task)
-    return side.side_of if side is not None else None
+        if dest.whatsapp:
+            # The phone room's own recording path, so nothing about a phone
+            # turn is written twice (`.claude/rules/transport.md`, "Phone rooms").
+            result = record_phone_turn(conn, config, channel_name=None, **common)
+        else:
+            result = record_inbound(
+                conn, config, source_type=dest.surface,
+                output_target="room" if dest.surface == "web" else None,
+                model=task.model, effort=task.effort, **common,
+            )
+    if result.task_id is None:
+        raise RequestError("no_private_room")
+    return {"status": "queued", "task_id": int(result.task_id)}
 
 
 def _post_destination(conn, parent_token: str, user_id: str) -> dict:
-    """The parent a post goes to, re-resolved the same way at hold and delivery."""
+    """The room a post goes to, re-resolved the same way at hold and delivery."""
     from istota.relay.destinations import destination_fingerprint
 
     room = db.get_room(conn, parent_token)
     if (room is None or room.archived or room.side_of
-            or not db.is_room_member(conn, parent_token, user_id)):
+            or not is_current_member(conn, parent_token, user_id)):
         raise RequestError("parent_unavailable")
     from istota.rooms.veto import is_vetoed
 
@@ -811,15 +600,57 @@ def _post_destination(conn, parent_token: str, user_id: str) -> dict:
     return destination
 
 
-def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
-                   request_key: str, text: str) -> dict:
-    """A side-room task asks to post ``text`` into the parent, as the bot.
+def _named_room(conn, user_id: str, query: str) -> str | None:
+    """A room ``query`` names among ``user_id``'s rooms: its token, a binding
+    ref, or its exact name (case-insensitive) when exactly one room has it.
 
-    Held for the member's approval of the exact preview, the relay's rule: the
-    preview is stored with its digest, the task parks on it, and only an
-    approval of that digest releases the post. The one exception is ISSUE-565's
-    clean turn, with the recipient test swapped for "the text is the member's
-    own words, verbatim in their prompt".
+    A stand-in until `rooms.lookup.resolve_room` (ISSUE-608 Stage 4), which
+    adds prefixes and numbered candidates.
+    """
+    query = (query or "").strip()
+    if not query:
+        return None
+    token = canonical_token(conn, query)
+    if token and db.get_room(conn, token) is not None:
+        return token
+    wanted = query.casefold()
+    named = [room.token for room in db.list_member_rooms(conn, user_id)
+             if room.name and room.name.strip().casefold() == wanted]
+    return named[0] if len(named) == 1 else None
+
+
+def _post_target(conn, task, user_id: str, room: str | None) -> str:
+    """The shared room a `room post` goes to: ``--room``, else the turn's link."""
+    from istota.rooms.private_replies import linked_room
+
+    if room:
+        target = _named_room(conn, user_id, room)
+        if target is None:
+            raise RequestError("parent_unavailable")
+    else:
+        about = getattr(task, "about_room_token", None)
+        if not about:
+            raise RequestError("no_target_room")
+        target = linked_room(conn, task)
+        if target is None:
+            raise RequestError("parent_unavailable")
+    if not db.room_is_shared(conn, target) or not is_current_member(conn, target, user_id):
+        raise RequestError("parent_unavailable")
+    return target
+
+
+def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
+                   request_key: str, text: str, room: str | None = None) -> dict:
+    """A private-room task asks to post ``text`` into a shared room, as the bot.
+
+    From the member's own private room only, never from a shared room
+    (`not_a_private_room`): the room is ``room`` when given (a token or a
+    name), else the shared room the turn is linked to (ISSUE-608). Held for
+    the member's approval of the exact preview, the relay's rule: the preview
+    is stored with its digest, the task parks on it, and only an approval of
+    that digest releases the post. The one exception is ISSUE-565's clean
+    turn, with the recipient test swapped for "the text is the member's own
+    words, verbatim in their prompt".
     """
     from istota.relay import relays as message_relays
 
@@ -831,15 +662,17 @@ def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
         return replay
     if task.parent_task_id or task.command or task.skill or task.scheduled_job_id:
         raise RequestError("unsupported_origin")
-    side = task_side_room(conn, task)
-    if side is None:
-        raise RequestError("not_a_side_room")
+    own = canonical_token(conn, task.conversation_token) if task.conversation_token else None
+    if (not own or getattr(task, "guest_participant_id", None) is not None
+            or is_shared_room(conn, own, is_group_chat=task.is_group_chat)):
+        raise RequestError("not_a_private_room")
     origin = message_relays.private_origin(conn, config, actor_user_id=actor_user_id,
                                            surface=task.source_type,
                                            conversation_token=task.conversation_token)
     with write_transaction(conn):
         message_relays.validate_origin(conn, config, actor_user_id=actor_user_id, origin=origin)
-        destination = _post_destination(conn, side.side_of, actor_user_id)
+        target = _post_target(conn, task, actor_user_id, room)
+        destination = _post_destination(conn, target, actor_user_id)
         if destination["talk_ref"]:
             from istota.transport.talk import TalkTransport
             if len(text) > TalkTransport.capabilities.max_message_length:
@@ -878,6 +711,8 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
     A stale `sending` claim is recovered by marking it sent: its canonical row
     was written with the claim, and the Talk half is never posted twice.
     """
+    from istota.rooms.private_replies import deliver_private
+
     with db.get_db(config.db_path) as conn:
         with write_transaction(conn):
             row = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=?", (request_id,)).fetchone()
@@ -903,7 +738,8 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
             if not body or text_hash(body) != row["service_hash"]:
                 raise RequestError("invalid_rendering")
             destination = json.loads(row["destination"] or "{}")
-            talk_ref = None
+            claim = {"request_id": request_id, "kind": row["kind"], "user_id": user, "body": body,
+                     "task_id": row["origin_task_id"]}
             if row["kind"] == "room_post":
                 if (not row["approved_at"] or row["approved_digest"] != row["preview_digest"]
                         or text_hash(row["preview"] or "") != row["approved_digest"]):
@@ -911,7 +747,7 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                 current = _post_destination(conn, destination.get("room_token") or "", user)
                 if current["fingerprint"] != row["binding_fingerprint"]:
                     raise RequestError("destination_changed")
-                target, talk_ref, parent = current["room_token"], current["talk_ref"], current["room_token"]
+                parent = current["room_token"]
                 whatsapp_group = bool(current.get("whatsapp_ref"))
                 email_thread = bool(current.get("email_ref"))
                 # Only a preview that showed them carries them (a guest
@@ -919,26 +755,28 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                 # what makes them the ones approved.
                 email_recipients = destination.get("email_recipients")
                 reference = "room-post:" + request_id
+                message_id = db.add_message(conn, parent, role="system", body=body,
+                                            origin_surface="web", delivery_reference=reference)
+                claim.update(message_id=message_id, talk_ref=current["talk_ref"], parent=parent,
+                             reference=reference, whatsapp_group=whatsapp_group,
+                             email_thread=email_thread, email_recipients=email_recipients)
             else:
-                parent = destination.get("parent") or ""
-                side = db.get_side_room(conn, parent, user)
-                if (side is None or side.token != destination.get("room_token")
-                        or _fingerprint(side.token, parent) != row["binding_fingerprint"]
-                        or db.list_room_members(conn, side.token) != [user]):
+                # A whisper (stored kind `side_whisper`): the principal's own
+                # private room, resolved now rather than at enqueue.
+                parent = destination.get("about") or ""
+                if (destination.get("kind") != "private_reply" or destination.get("user") != user
+                        or _fingerprint(user, parent) != row["binding_fingerprint"]):
                     raise RequestError("destination_changed")
-                if not db.is_room_member(conn, parent, user):
+                if not is_current_member(conn, parent, user):
                     raise RequestError("parent_unavailable")
-                target = side.token
-                reference = "room-whisper:" + request_id
-            message_id = db.add_message(conn, target, role="system", body=body,
-                                        origin_surface="web", delivery_reference=reference)
+                claim["delivery"] = deliver_private(
+                    conn, config, user_id=user, about_token=parent, kind="whisper",
+                    reference=f"room-whisper:{request_id}", body=body,
+                    task_id=row["origin_task_id"],
+                )
             conn.execute("UPDATE whatsapp_skill_requests SET state='sending',updated_at=datetime('now') "
                          "WHERE id=?", (request_id,))
-            return {"request_id": request_id, "kind": row["kind"], "user_id": user, "body": body,
-                    "message_id": message_id, "talk_ref": talk_ref, "parent": parent,
-                    "reference": reference, "whatsapp_group": whatsapp_group,
-                    "email_thread": email_thread, "task_id": row["origin_task_id"],
-                    "email_recipients": email_recipients}
+            return claim
 
 
 def _mark_sent(conn, request_id: str) -> None:
@@ -971,9 +809,9 @@ def _finish(config, request_id: str, reason: str) -> None:
                 (state, reason, request_id),
             ).rowcount
             if changed and row is not None:
-                what = "Room post" if row["kind"] == "room_post" else "Side-room note"
+                what = "Room post" if row["kind"] == "room_post" else "Private note"
                 notice = task_alert.write(
-                    conn, row["requester_user_id"], dedup_key=f"side-room-request:{request_id}",
+                    conn, row["requester_user_id"], dedup_key=f"private-reply-request:{request_id}",
                     title=f"{what} not delivered",
                     body=f"{what} {request_id} was not delivered ({reason}).",
                     params={"request_id": request_id, "status": state},
@@ -983,7 +821,9 @@ def _finish(config, request_id: str, reason: str) -> None:
 
 
 async def deliver_request(config, row) -> None:
-    """Deliver one queued `side_whisper` or `room_post`, or recover a stale claim."""
+    """Deliver one queued whisper or `room_post`, or recover a stale claim."""
+    from istota.rooms.private_replies import send_private
+
     fresh = row["state"] == "queued"
     try:
         claim = await asyncio.to_thread(_claim, config, row["id"], fresh)
@@ -1024,13 +864,6 @@ async def deliver_request(config, row) -> None:
             except Exception as exc:
                 logger.warning("room post %s: email reply-all failed: %s", claim["request_id"], exc)
     else:
-        talk_id = await push_to_talk_view(
-            config, user_id=claim["user_id"], parent_token=claim["parent"],
-            body=claim["body"], reference_id=claim["reference"])
-        await push_to_whatsapp_view(
-            config, user_id=claim["user_id"], parent_token=claim["parent"],
-            body=claim["body"], reference_id=claim["reference"])
-        await push_to_email_view(
-            config, user_id=claim["user_id"], parent_token=claim["parent"],
-            body=claim["body"], reference_id=claim["reference"])
+        # Never raises; a whisper that reached nobody becomes a bell row there.
+        await send_private(config, claim["delivery"], body=claim["body"])
     await asyncio.to_thread(_settle, config, claim, talk_id)

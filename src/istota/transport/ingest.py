@@ -513,6 +513,12 @@ def record_inbound(
     room_container: bool = False,
     # Commands and consumed confirmation answers are turns without new tasks.
     record_only: bool = False,
+    # A turn the daemon records for the member (ISSUE-608's `room
+    # answer-privately`): the shared room it is linked to, set directly rather
+    # than derived from a reply parent, and the stored row's unique key, which
+    # is what makes a retry return this turn.
+    about_room_token: str | None = None,
+    delivery_reference: str | None = None,
 ) -> InboundResult:
     """Resolve → echo-check → store user message → ask the gate → create task.
 
@@ -786,7 +792,8 @@ def record_inbound(
     #     supplied a parent above. The parent must be in this turn's own room.
     from istota.rooms.private_replies import linked_about
 
-    about_room_token = linked_about(conn, reply_to_canonical_id, transcript_token)
+    if about_room_token is None:
+        about_room_token = linked_about(conn, reply_to_canonical_id, transcript_token)
 
     stores_row = room_surface or mirror_only
     if stores_row or platform_message_id is not None:
@@ -847,6 +854,7 @@ def record_inbound(
             client_msg_id=client_msg_id,
             reply_to_message_id=reply_to_canonical_id,
             author_participant_id=participant_id,
+            delivery_reference=delivery_reference,
         )
 
     # 4. Ask the speech gate about a stored turn. Whether more than one human
@@ -937,9 +945,15 @@ def record_inbound(
 def record_phone_turn(
     conn, config, *, surface, surface_ref, user_id, text, channel_name,
     record_only=False, external_id=None, reply_to_content=None, attachments=None,
-    reply_to_canonical_id=None,
+    reply_to_canonical_id=None, about_room_token=None, delivery_reference=None,
 ):
-    """Record an accepted private phone turn and its permanent pre-room alias."""
+    """Record an accepted private phone turn and its permanent pre-room alias.
+
+    Also the path for a turn the daemon records for the member in their
+    private phone room (`room answer-privately`, which passes
+    ``about_room_token`` and ``delivery_reference``): the room already exists,
+    so nothing is minted, and the caller's transaction holds it.
+    """
     result = record_inbound(
         conn, config, surface=surface, surface_ref=surface_ref, user_id=user_id,
         text=text, source_type=surface, channel_name=channel_name,
@@ -947,6 +961,7 @@ def record_phone_turn(
         external_id=external_id, reply_to_content=reply_to_content,
         reply_to_canonical_id=reply_to_canonical_id,
         attachments=attachments, is_command=text.startswith("!"), record_only=record_only,
+        about_room_token=about_room_token, delivery_reference=delivery_reference,
     )
     if result.message_id is not None:
         # Reusing a deleted room's binding must never retarget its history.

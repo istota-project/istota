@@ -1,10 +1,10 @@
 """Side rooms (multiplayer D4, umbrella Stage 10).
 
-A side room is one member's private companion of a shared room. These pin the
-schema and its migration, lazy creation, pinned delivery, the parent transcript
-as untrusted context, the `room whisper` and held `room post` verbs on the relay
-request table, and the routing of a shared-room confirmation to the principal's
-side room.
+A side room is one member's private companion of a shared room. These pin what
+is left of it until the side-room schema goes (ISSUE-608 Stage 5): the schema
+and its migration, creation, pinned delivery and the parent transcript. The
+verbs and confirmations moved onto the member's own private room and are
+pinned in `tests/test_private_replies.py`.
 """
 import asyncio
 import sqlite3
@@ -12,13 +12,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from istota import confirmations, db
-from istota.rooms import side_rooms
-from istota.relay import requests
+from istota import db
 from istota.config import Config, NextcloudConfig, TalkConfig, UserConfig
-from istota.relay.requests import RequestError
 
-from .support.rooms import plain_talk_room
 from .support.talk_double import FakeTalkClient, talk_bot_client
 
 PARTICIPANTS_ALICE = [{"actorType": "users", "actorId": "alice"},
@@ -51,24 +47,6 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr("istota.nextcloud.talk.TalkClient.get_participants", participants)
     with patch("istota.transport.talk.get_talk_client", talk_bot_client(talk)):
         yield dict(config=config, shared=shared, talk=talk, participants=participants)
-
-
-def _running_task(conn, user, token, *, prompt="hello", source_type="web"):
-    ident = db.create_task(conn, user_id=user, source_type=source_type,
-                           prompt=prompt, conversation_token=token)
-    conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
-    return ident
-
-
-def _rows(config, sql, params=()):
-    with db.get_db(config.db_path) as conn:
-        return [dict(r) for r in conn.execute(sql, params).fetchall()]
-
-
-def _private_talk_room(conn, user):
-    """The user's own Talk conversation with the bot, as the registry knows it."""
-    shape = plain_talk_room(conn, user, name="Talk")
-    return shape.talk_ref
 
 
 # ---------------------------------------------------------------------------
@@ -314,271 +292,6 @@ class TestTheParentTranscript:
         assert "Side room: this is" not in composed.system
 
 
-# ---------------------------------------------------------------------------
-# room whisper
-# ---------------------------------------------------------------------------
-
-
-class TestWhisper:
-    def test_a_shared_room_task_whispers_into_the_principals_side_room(self, env):
-        config, shared = env["config"], env["shared"]
-        with db.get_db(config.db_path) as conn:
-            ident = _running_task(conn, "alice", shared)
-            result = side_rooms.enqueue_whisper(conn, config, actor_user_id="alice", task_id=ident,
-                                                request_key="w1", text="Your calendar is free Thursday.")
-            again = side_rooms.enqueue_whisper(conn, config, actor_user_id="alice", task_id=ident,
-                                               request_key="w1", text="Your calendar is free Thursday.")
-        assert result["status"] == "queued" and again["request_id"] == result["request_id"]
-        asyncio.run(requests.drain_requests(config))
-        asyncio.run(requests.drain_requests(config))
-        with db.get_db(config.db_path) as conn:
-            side = db.get_side_room(conn, shared, "alice")
-        (row,) = _rows(config, "SELECT * FROM messages WHERE body LIKE '%free Thursday%'")
-        assert row["room_token"] == side.token
-        assert _rows(config, "SELECT state FROM whatsapp_skill_requests")[0]["state"] == "sent"
-        # A web-only parent has no Talk view to push to.
-        assert env["talk"].calls == []
-
-    def test_a_talk_bound_parent_also_reaches_the_users_talk_conversation(self, env):
-        config, shared = env["config"], env["shared"]
-        with db.get_db(config.db_path) as conn:
-            db.add_room_binding(conn, shared, "talk", "family-talk")
-            private = _private_talk_room(conn, "alice")
-            ident = _running_task(conn, "alice", shared)
-            side_rooms.enqueue_whisper(conn, config, actor_user_id="alice", task_id=ident,
-                                       request_key="w1", text="Only for you.")
-        asyncio.run(requests.drain_requests(config))
-        sends = env["talk"].calls_to(private, method="send_message")
-        assert len(sends) == 1
-        assert sends[0].args["message"].startswith("re: Family")
-        assert "Only for you." in sends[0].args["message"]
-        assert env["talk"].calls_to("family-talk", method="send_message") == []
-        assert env["talk"].refusals == []
-
-    def test_refused_outside_a_shared_room(self, env):
-        config, shared = env["config"], env["shared"]
-        with db.get_db(config.db_path) as conn:
-            private = db.create_web_chat_room(conn, "alice", "Mine").token
-            ident = _running_task(conn, "alice", private)
-            with pytest.raises(RequestError, match="not_a_shared_room"):
-                side_rooms.enqueue_whisper(conn, config, actor_user_id="alice", task_id=ident,
-                                           request_key="w1", text="hi")
-            side = db.ensure_side_room(conn, shared, "alice")
-            ident = _running_task(conn, "alice", side.token)
-            with pytest.raises(RequestError, match="not_a_shared_room"):
-                side_rooms.enqueue_whisper(conn, config, actor_user_id="alice", task_id=ident,
-                                           request_key="w2", text="hi")
-
-
-# ---------------------------------------------------------------------------
-# room post
-# ---------------------------------------------------------------------------
-
-
-def _side_task(config, shared, *, prompt="post it"):
-    with db.get_db(config.db_path) as conn:
-        side = db.ensure_side_room(conn, shared, "alice")
-        return side.token, _running_task(conn, "alice", side.token, prompt=prompt)
-
-
-def _hold_post(config, ident, text="Alice can do Thursday after 7"):
-    with db.get_db(config.db_path) as conn:
-        return side_rooms.hold_room_post(conn, config, actor_user_id="alice", task_id=ident,
-                                         request_key="p1", text=text)
-
-
-class TestRoomPost:
-    def test_held_with_the_exact_text_and_posts_nothing_until_approved(self, env):
-        config, shared = env["config"], env["shared"]
-        _, ident = _side_task(config, shared)
-        held = _hold_post(config, ident)
-        assert held["status"] == "held" and held["needs_confirmation"]
-        assert "Alice can do Thursday after 7" in held["preview"]
-        asyncio.run(requests.drain_requests(config))
-        assert _rows(config, "SELECT * FROM messages WHERE room_token=?", (shared,)) == []
-        with db.get_db(config.db_path) as conn:
-            parked = requests.park_question(conn, config, task=db.get_task(conn, ident))
-            assert parked["preview"] == held["preview"]
-            assert db.get_task(conn, ident).status == "pending_confirmation"
-            confirmations.approve(conn, db.get_task(conn, ident), config=config, by="web")
-        asyncio.run(requests.drain_requests(config))
-        asyncio.run(requests.drain_requests(config))
-        (row,) = _rows(config, "SELECT * FROM messages WHERE room_token=?", (shared,))
-        assert row["body"] == "Alice can do Thursday after 7"
-        assert _rows(config, "SELECT state FROM whatsapp_skill_requests")[0]["state"] == "sent"
-
-    def test_a_talk_bound_parent_gets_the_post_on_talk_too(self, env):
-        config, shared = env["config"], env["shared"]
-        with db.get_db(config.db_path) as conn:
-            db.add_room_binding(conn, shared, "talk", "family-talk")
-        _, ident = _side_task(config, shared)
-        _hold_post(config, ident)
-        with db.get_db(config.db_path) as conn:
-            requests.park_question(conn, config, task=db.get_task(conn, ident))
-            confirmations.approve(conn, db.get_task(conn, ident), config=config, by="web")
-        asyncio.run(requests.drain_requests(config))
-        (send,) = env["talk"].calls_to("family-talk", method="send_message")
-        assert send.args["message"] == "Alice can do Thursday after 7"
-
-    def test_a_member_removed_before_delivery_posts_nothing(self, env):
-        config, shared = env["config"], env["shared"]
-        with db.get_db(config.db_path) as conn:
-            side = db.ensure_side_room(conn, shared, "bob")
-            ident = _running_task(conn, "bob", side.token)
-            side_rooms.hold_room_post(conn, config, actor_user_id="bob", task_id=ident,
-                                      request_key="p1", text="hello all")
-            requests.park_question(conn, config, task=db.get_task(conn, ident))
-            confirmations.approve(conn, db.get_task(conn, ident), config=config, by="web")
-            db.drop_web_room_member(conn, shared, "bob")
-        asyncio.run(requests.drain_requests(config))
-        assert _rows(config, "SELECT * FROM messages WHERE room_token=?", (shared,)) == []
-        assert _rows(config, "SELECT state FROM whatsapp_skill_requests")[0]["state"] == "failed"
-
-    def test_refused_outside_a_side_room(self, env):
-        config, shared = env["config"], env["shared"]
-        with db.get_db(config.db_path) as conn:
-            ident = _running_task(conn, "alice", shared)
-            with pytest.raises(RequestError, match="not_a_side_room"):
-                side_rooms.hold_room_post(conn, config, actor_user_id="alice", task_id=ident,
-                                          request_key="p1", text="hi")
-
-    def test_the_members_own_words_on_a_clean_turn_skip_approval(self, env):
-        config, shared = env["config"], env["shared"]
-        _, ident = _side_task(config, shared, prompt='post "Alice can do Thursday after 7" please')
-        with db.get_db(config.db_path) as conn:
-            db.record_attempt_tool_call(conn, ident, calls_seen=1, first_is_relay=True)
-        released = _hold_post(config, ident)
-        assert released["status"] == "queued" and released["approval"] == "clean_turn"
-        asyncio.run(requests.drain_requests(config))
-        (row,) = _rows(config, "SELECT * FROM messages WHERE room_token=?", (shared,))
-        assert row["body"] == "Alice can do Thursday after 7"
-
-    def test_words_the_member_did_not_write_are_held(self, env):
-        config, shared = env["config"], env["shared"]
-        _, ident = _side_task(config, shared, prompt="tell them I can make it")
-        with db.get_db(config.db_path) as conn:
-            db.record_attempt_tool_call(conn, ident, calls_seen=1, first_is_relay=True)
-        assert _hold_post(config, ident)["status"] == "held"
-
-    def test_the_trace_hides_both_verbs_and_counts_a_lone_post(self):
-        from istota.agent.events import _lone_relay_ask, _private_relay_tool
-        assert _private_relay_tool("Bash", {"command": "istota-skill room whisper --request-key a 'x'"})
-        assert _private_relay_tool("Bash", {"command": "istota-skill room post --request-key a 'x'"})
-        assert _lone_relay_ask("Bash", {"command": "istota-skill room post --request-key a 'x'"})
-        assert not _lone_relay_ask("Bash", {"command": "istota-skill room whisper --request-key a 'x'"})
-
-
-# ---------------------------------------------------------------------------
-# Confirmations from a shared room
-# ---------------------------------------------------------------------------
-
-
-class TestSharedRoomConfirmations:
-    QUESTION = "I need your confirmation before sending the invite. Reply yes or no."
-
-    def test_the_question_goes_to_the_side_room_never_the_room(self, tmp_path, monkeypatch, fake_talk):
-        from istota.config import EmailConfig, SchedulerConfig
-        from istota.scheduler import process_one_task
-        config = _config(tmp_path)
-        config.email = EmailConfig(enabled=False)
-        config.scheduler = SchedulerConfig()
-        config.workspace_path = tmp_path / "mount"
-        config.workspace_path.mkdir()
-        monkeypatch.setattr("istota.nextcloud.talk.TalkClient.get_participants",
-                            AsyncMock(return_value=PARTICIPANTS_ALICE))
-        fake_talk.db_path = config.db_path
-        with db.get_db(config.db_path) as conn:
-            group = plain_talk_room(conn, "alice", token="groupref", name="Family")
-            db.add_room_member(conn, group.canonical, "bob")
-            private = _private_talk_room(conn, "alice")
-            ident = db.create_task(conn, prompt="invite them", user_id="alice",
-                                   source_type="talk", conversation_token=group.canonical,
-                                   is_group_chat=True)
-        with patch("istota.scheduler.execute_task", return_value=(True, self.QUESTION, None, None)):
-            process_one_task(config)
-        with db.get_db(config.db_path) as conn:
-            task = db.get_task(conn, ident)
-            side = db.get_side_room(conn, group.canonical, "alice")
-        assert task.status == "pending_confirmation"
-        # The room sees the progress ack and nothing of the question.
-        room_calls = fake_talk.calls_to(group.talk_ref)
-        assert all(self.QUESTION not in str(c.args) for c in room_calls)
-        assert [c.args.get("reference_id") for c in room_calls
-                if c.method == "send_message"] == [f"istota:task:{ident}:ack"]
-        assert side is not None
-        (row,) = _rows(config, "SELECT * FROM messages WHERE room_token=?", (side.token,))
-        assert self.QUESTION in row["body"]
-        (send,) = fake_talk.calls_to(private, method="send_message")
-        assert send.args["message"].startswith("re: Family")
-        assert fake_talk.refusals == []
-        assert _rows(config, "SELECT * FROM messages WHERE room_token=? AND body LIKE ?",
-                     (group.canonical, f"%{self.QUESTION}%")) == []
-
-    def test_a_bare_answer_resolves_from_the_side_room_not_the_shared_room(self, env):
-        config, shared = env["config"], env["shared"]
-        with db.get_db(config.db_path) as conn:
-            ident = _running_task(conn, "alice", shared)
-            db.set_task_confirmation(conn, ident, self.QUESTION)
-            side = db.ensure_side_room(conn, shared, "alice")
-            assert confirmations.resolve(conn, "alice", conversation_token=shared).task is None
-            found = confirmations.resolve(conn, "alice", conversation_token=side.token)
-            assert found.task is not None and found.task.id == ident
-            # Bob's side room is not Alice's.
-            bobs = db.ensure_side_room(conn, shared, "bob")
-            assert confirmations.resolve(conn, "bob", conversation_token=bobs.token).task is None
-
-
-# ---------------------------------------------------------------------------
-# Review fixes: what the room's own conversation may do to a side-routed park
-# ---------------------------------------------------------------------------
-
-
-def _park_in_side_room(conn, shared, user="alice"):
-    ident = _running_task(conn, user, shared)
-    db.set_task_confirmation(conn, ident, "Shall I send it? Reply yes or no.")
-    task = db.get_task(conn, ident)
-    route = side_rooms.confirmation_route(conn, task)
-    side_rooms.write_confirmation(conn, route, task, task.confirmation_prompt)
-    return ident
-
-
-class TestASideRoutedPark:
-    def test_the_principals_next_room_message_does_not_cancel_it(self, env):
-        config, shared = env["config"], env["shared"]
-        with db.get_db(config.db_path) as conn:
-            ident = _park_in_side_room(conn, shared)
-            # Control: a question asked in the room itself is still cancelled.
-            plain = _running_task(conn, "alice", shared)
-            db.set_task_confirmation(conn, plain, "Proceed?")
-            assert confirmations.cancel_for_conversation(conn, shared, "alice") == 1
-            assert db.get_task(conn, ident).status == "pending_confirmation"
-            assert db.get_task(conn, plain).status == "cancelled"
-
-    def test_it_does_not_hold_the_room_for_the_other_members(self, env):
-        config, shared = env["config"], env["shared"]
-        with db.get_db(config.db_path) as conn:
-            _park_in_side_room(conn, shared)
-            bobs = db.create_task(conn, user_id="bob", source_type="web", prompt="hi",
-                                  conversation_token=shared)
-        with db.get_db(config.db_path) as conn:
-            claimed = db.claim_task(conn, "w1")
-        assert claimed is not None and claimed.id == bobs
-
-
-class TestTheCleanTurnTakesWholeUnits:
-    @pytest.mark.parametrize("prompt,text,status", [
-        ("do not tell them the house sale is off", "the house sale is off", "held"),
-        ("post this\nAlice can do Thursday after 7", "Alice can do Thursday after 7", "queued"),
-        ("Alice can do Thursday after 7", "Alice can do Thursday after 7", "queued"),
-    ])
-    def test_a_fragment_is_held(self, env, prompt, text, status):
-        config, shared = env["config"], env["shared"]
-        _, ident = _side_task(config, shared, prompt=prompt)
-        with db.get_db(config.db_path) as conn:
-            db.record_attempt_tool_call(conn, ident, calls_seen=1, first_is_relay=True)
-        assert _hold_post(config, ident, text=text)["status"] == status
-
-
 class TestTheSideRoomStaysPrivate:
     def test_a_second_member_makes_it_unusable_rather_than_shared(self, env):
         config, shared = env["config"], env["shared"]
@@ -588,10 +301,6 @@ class TestTheSideRoomStaysPrivate:
             with pytest.raises(ValueError):
                 db.ensure_side_room(conn, shared, "alice")
             assert db.side_room_parent(conn, side.token) is None
-            ident = _running_task(conn, "alice", shared)
-            with pytest.raises(RequestError, match="side_room_unavailable"):
-                side_rooms.enqueue_whisper(conn, config, actor_user_id="alice", task_id=ident,
-                                           request_key="w1", text="hi")
 
     def test_it_is_never_promoted_to_talk(self, env, monkeypatch):
         from istota.webui import app as web_app

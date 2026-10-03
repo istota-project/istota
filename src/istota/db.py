@@ -1634,20 +1634,23 @@ _CLAIM_CHANNEL_GATE_SQL = """
                     AND t2.id != tasks.id
                     AND NOT (t2.status = 'pending_confirmation' AND """ + (
     "EXISTS (SELECT 1 FROM messages sm WHERE sm.delivery_reference "
-    "LIKE 'side-confirmation:' || t2.id || ':%')") + """)
+    "LIKE 'private-confirmation:' || t2.id || ':%' OR sm.delivery_reference "
+    "LIKE 'private-proposal:' || t2.id || ':%')") + """)
                 )
             )
             """
 
-# A shared-room task parked on a question it asked in its principal's side
-# room (multiplayer D4). Such a park neither holds the room's channel gate
-# (above) nor is cancelled by the principal's next message in the room
+# A shared-room task parked on a question it asked its principal privately
+# (multiplayer D4, ISSUE-608). Such a park neither holds the room's channel
+# gate (above) nor is cancelled by the principal's next message in the room
 # (`cancel_pending_confirmations`): the room never saw the question, so its
-# conversation is not an answer to it and must not be held behind it. The
-# side-room row `side_rooms.write_confirmation` writes is the record.
+# conversation is not an answer to it and must not be held behind it. The row
+# `private_replies.deliver_private` writes into the principal's private room
+# is the record (`private_replies.PARK_PREFIXES`).
 SIDE_ROUTED_PARK_SQL = (
     "EXISTS (SELECT 1 FROM messages sm WHERE sm.delivery_reference "
-    "LIKE 'side-confirmation:' || tasks.id || ':%')"
+    "LIKE 'private-confirmation:' || tasks.id || ':%' OR sm.delivery_reference "
+    "LIKE 'private-proposal:' || tasks.id || ':%')"
 )
 
 
@@ -5927,6 +5930,7 @@ def store_turn_message(
     body: str,
     task_id: int,
     origin_surface: str,
+    about_room_token: str | None = None,
 ) -> int | None:
     """Idempotently store a turn's user/assistant message. Returns the new id,
     or None if a row for (room_token, role, task_id) already exists — so a retry
@@ -5941,6 +5945,7 @@ def store_turn_message(
     return add_message(
         conn, room_token, role=role, body=body,
         origin_surface=origin_surface, task_id=task_id,
+        about_room_token=about_room_token,
     )
 
 

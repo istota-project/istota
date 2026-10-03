@@ -20,10 +20,11 @@ CONTENT_RETENTION_DAYS = 30
 REQUEST_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 
 
-#: Every request kind. The two side-room kinds (multiplayer D4, D16) ride this
+#: Every request kind. The two room kinds (multiplayer D4, D16) ride this
 #: table rather than a second hold table: `side_whisper` is a task in a shared
-#: room writing to its principal's side room, `room_post` a side-room task's
-#: post into the parent room, held for the member's approval.
+#: room writing to its principal privately (the name predates ISSUE-608 and is
+#: kept to avoid a CHECK rebuild), `room_post` a private-room task's post into
+#: a shared room, held for the member's approval.
 KINDS = ("self_send", "relay_question", "side_whisper", "room_post")
 ROOM_KINDS = ("side_whisper", "room_post")
 _SELF_KINDS = ("self_send", "side_whisper", "room_post")
@@ -824,7 +825,8 @@ async def present_question(config, *, task, success: bool) -> bool:
                 return True
             confirmation.write(conn, task.user_id, task_id=task.id,
                                title=title,
-                               body=("Open the side room to review this post." if post else
+                               body=("Reply YES or NO in your private chat with the bot, "
+                                     "or approve it in notifications." if post else
                                      "Open the private conversation to review this relay question."),
                                room_token=origin.get("room_token"))
             db.drop_pending_steers(conn, task.id)
