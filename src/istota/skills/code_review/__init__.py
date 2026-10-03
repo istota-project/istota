@@ -31,12 +31,6 @@ Four things gate a run before a single token is spent, and all four are in
   from the sandbox, so a loop that reached a file-backed cap could delete the
   counter and carry on spending.
 
-The budget also decides one thing that is not a gate. A reviewer may ask to see
-files it was not given, which costs a second model round, so the offer is made
-only when the remaining budget can pay for one — otherwise the reviewer spends
-its answer on a request the CLI would refuse. See `engine.collect_needed_files`
-for what may be served and `engine._round_trip` for why there is exactly one.
-
 Heavy imports (`config`, `brain`, `db`) are function-local so the module stays
 cheap to import and so tests can patch them at their real home.
 """
@@ -75,14 +69,16 @@ logger = logging.getLogger(__name__)
 # number blind.
 ASSEMBLY_ALLOWANCE_SECONDS = 20
 
-# What the clamp must keep clear of the proxy ceiling. The join slack is in it
-# because `_run_agents` really does wait that long past an agent's own budget
-# before abandoning it, so the command's true wall bound is
-# `agent_timeout + JOIN_SLACK_SECONDS + assembly`. Reserving only the assembly
-# allowance modelled a bound ten seconds shorter than the one the command
-# obeys, which meant a budget clamped to "just fit" still overran (ISSUE-448;
-# ISSUE-265 named the gap and deferred it).
-RESERVED_SECONDS = ASSEMBLY_ALLOWANCE_SECONDS + engine.JOIN_SLACK_SECONDS
+# Headroom above the reviewer's own timeout, which is enforced inside the brain;
+# this is the margin for a brain that overruns it. It used to be the slack on
+# the two-agent thread join, and the clamp kept reserving it when the join went
+# (ISSUE-448 found a budget clamped to "just fit" overrunning by exactly this).
+JOIN_SLACK_SECONDS = 10
+
+# What the clamp must keep clear of the proxy ceiling: the command's wall bound
+# is `agent_timeout + JOIN_SLACK_SECONDS + assembly` (ISSUE-448; ISSUE-265 named
+# the gap and deferred it).
+RESERVED_SECONDS = ASSEMBLY_ALLOWANCE_SECONDS + JOIN_SLACK_SECONDS
 
 # Floor for the clamp above. A proxy ceiling tighter than the assembly allowance
 # would otherwise hand an agent zero or negative seconds, which is not a shorter
@@ -323,8 +319,7 @@ def cmd_run(args):
     cap = review_cfg.max_calls_per_task
     calls_used = None
     # Distinct from `calls_used is not None`: this says a budget *applies*, not
-    # that reading it worked. The two come apart on a database error and the
-    # round-trip decision below turns on the difference.
+    # that reading it worked. The two come apart on a database error.
     has_task_budget = task_id is not None and bool(db_path)
     if has_task_budget:
         # A read that fails must not sink a review. Losing the budget check is a
@@ -369,24 +364,6 @@ def cmd_run(args):
             bool(db_path),
         )
 
-    # The `need_files` round trip spends a second model round, so it is only
-    # offered when the budget can pay for one. Advertising it otherwise leaves
-    # two bad outcomes and no good one: overshoot the operator's cap, or refuse
-    # a request the prompt had just invited after the reviewer spent its answer
-    # making it. When there is no task budget at all there is nothing to
-    # overshoot, so the offer stands.
-    # Three states, not two, and the middle one is why this is not a single
-    # `calls_used is not None` test. No task budget at all (an operator-driven
-    # run) has nothing to overshoot, so the offer stands. A budget that was read
-    # gates on the arithmetic. A budget whose *read failed* leaves `calls_used`
-    # None with a real cap still in force — the review proceeds uncapped rather
-    # than being sunk by a transient lock, but it does not also get to spend the
-    # optional extra round on a budget nobody could check.
-    if not has_task_budget:
-        allow_need_files = True
-    else:
-        allow_need_files = calls_used is not None and calls_used + 2 <= cap
-
     available, breaker_reason = primary_brain_unavailable(config.brain)
     if not available:
         _skip(
@@ -399,12 +376,25 @@ def cmd_run(args):
 
     cwd = Path(config.temp_dir) if config.temp_dir else Path("/tmp")
 
-    def invoke(agent: str, prompt: str, timeout: int):
-        raw_model = (
-            review_cfg.conformance_model
-            if agent == engine.CONFORMANCE
-            else review_cfg.bughunt_model
+    # Stage 4 of the single-reviewer spec: the engine runs one reviewer and
+    # asks for a snapshot and a namespace through these two callables. Until
+    # the CLI wires the real ones (Stage 5), every run is text-only, and the
+    # engine reports it as `reviewer.tools: false`.
+    def build_snapshot(worktree_path, bundle):
+        raise engine.ReviewError(
+            "the review snapshot is not wired into the CLI yet",
+            reason="snapshot_failed",
         )
+
+    def build_sandbox(snapshot):
+        raise RuntimeError("the reviewer namespace is not wired into the CLI yet")
+
+    agent = "reviewer"
+
+    def invoke(prompt: str, timeout: int, *, tools: bool):
+        # `tools` is never true while `build_snapshot` above always fails; the
+        # tool-granting request arrives with the snapshot wiring.
+        raw_model = review_cfg.bughunt_model
         # Split here, not in the brain. `resolve_model_name` strips a `:effort`
         # tail and keeps only the base, so a configured "smart:high" handed to
         # it whole runs at default effort and silently drops the operator's
@@ -465,8 +455,8 @@ def cmd_run(args):
         # risks closing a cycle back through it.
         from istota.executor import persist_brain_usage
 
-        # One call per review agent, with no task row behind it. The review runs
-        # up to four model invocations per round, so this is real spend.
+        # One row per model call, with no task row behind it. A round is up to
+        # two invocations (the review and its reformat), so this is real spend.
         persist_brain_usage(
             config, None, usage=result.usage, origin="code_review",
             user_id=user_id, brain_kind=result.brain_kind,
@@ -501,11 +491,12 @@ def cmd_run(args):
                     agent, len(result.partial_text), _ERROR_TEXT_CHARS,
                     " ".join(result.partial_text.split())[-_ERROR_TEXT_CHARS:],
                 )
-            return engine.AgentReply(
+            return engine.ReviewerReply(
                 ok=False,
                 error=_failure_error(agent, result.stop_reason, result.result_text),
+                model=req.model,
             )
-        return engine.AgentReply(ok=True, text=result.result_text or "")
+        return engine.ReviewerReply(ok=True, text=result.result_text or "", model=req.model)
 
     try:
         envelope = engine.run_review(
@@ -513,19 +504,11 @@ def cmd_run(args):
             intent=args.intent or "",
             base=args.base,
             explicit_range=getattr(args, "range", None),
-            forced_agents=args.agents,
-            cfg=engine.ReviewConfig(
-                both_agents_threshold_lines=review_cfg.both_agents_threshold_lines,
-                boundary_patterns=tuple(review_cfg.boundary_patterns),
-                max_diff_chars=review_cfg.max_diff_chars,
-                max_context_chars=review_cfg.max_context_chars,
-                max_file_chars=review_cfg.max_file_chars,
-                max_callers_per_symbol=review_cfg.max_callers_per_symbol,
-                max_need_files=review_cfg.max_need_files,
-            ),
+            cfg=engine.ReviewConfig(max_diff_chars=review_cfg.max_diff_chars),
             invoke=invoke,
             timeout_seconds=agent_timeout,
-            allow_need_files=allow_need_files,
+            build_snapshot=build_snapshot,
+            build_sandbox=build_sandbox,
         )
     except engine.ReviewError as exc:
         _fail(exc.reason, str(exc))
