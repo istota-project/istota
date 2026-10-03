@@ -166,6 +166,10 @@ class DiffBundle:
     lines: int
     truncated: bool
     truncated_files: list[str]
+    # The whole `git diff` output for the range, binaries and all, before
+    # `body` was cut to `max_diff_chars`. The snapshot writes it to
+    # `meta/diff.patch` rather than running the same command a second time.
+    raw_body: str = ""
 
 
 @dataclass
@@ -318,19 +322,75 @@ def _git(
     Both are about the same thing: a pipe that nobody drains blocks the child,
     and a child that nobody bounds fills the daemon.
     """
+    out = _run_git(worktree, args, reason=reason, allow_codes=allow_codes)
+    return out.decode("utf-8", "replace")
+
+
+def _git_batch(
+    worktree: Path,
+    args: list[str],
+    stdin_bytes: bytes,
+    *,
+    reason: str = "git_failed",
+) -> bytes:
+    """`_git` for the commands that read their requests from stdin.
+
+    `cat-file --batch` takes object ids on stdin, which `_git` closes by
+    design. Same argv prefix, same environment, same output and time bounds;
+    the output comes back as bytes because a blob is not text. Without
+    `--filters`, `cat-file --batch` applies no textconv, no attributes and no
+    smudge filter, so what comes back is the object as stored.
+    """
+    return _run_git(worktree, args, reason=reason, stdin_bytes=stdin_bytes)
+
+
+def _feed_stdin(stream, data: bytes) -> None:
+    """Write a child's stdin from its own thread, then close it.
+
+    From a thread because the child writes as it reads: with the request and
+    the answer both larger than a pipe buffer, a writer on the reading thread
+    blocks on a full stdin while the child blocks on a full stdout. A child
+    that exits early closes the pipe, which is its answer, not an error here.
+    """
+    try:
+        stream.write(data)
+    except OSError:
+        pass
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _run_git(
+    worktree: Path,
+    args: list[str],
+    *,
+    reason: str,
+    allow_codes: tuple[int, ...] = (0,),
+    stdin_bytes: bytes | None = None,
+) -> bytes:
+    """The one runner behind `_git` and `_git_batch`."""
     root = _repos_root()
     argv = ["git", *GIT_HARDENING, *args]
+    writer: threading.Thread | None = None
     with tempfile.TemporaryFile() as errfile:
         proc = subprocess.Popen(
             argv,
             cwd=str(worktree),
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if stdin_bytes is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=errfile,
             env=_git_env(root),
         )
+        if stdin_bytes is not None:
+            writer = threading.Thread(
+                target=_feed_stdin, args=(proc.stdin, stdin_bytes), daemon=True
+            )
+            writer.start()
         try:
-            out, over_limit = _read_bounded(proc, MAX_GIT_OUTPUT_BYTES)
+            out, over_limit = _read_bounded_bytes(proc, MAX_GIT_OUTPUT_BYTES)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
@@ -338,6 +398,11 @@ def _git(
                 f"git {' '.join(args)}: timed out after {GIT_TIMEOUT_SECONDS}s",
                 reason="git_timeout",
             ) from None
+        finally:
+            if writer is not None:
+                # The child has exited or been killed by now, so its end of
+                # the pipe is closed and the pending write has returned.
+                writer.join(timeout=GIT_TIMEOUT_SECONDS)
         errfile.seek(0)
         stderr = errfile.read(8192).decode("utf-8", "replace").strip()
 
@@ -358,6 +423,12 @@ def _git(
 
 
 def _read_bounded(proc: subprocess.Popen, max_bytes: int) -> tuple[str, bool]:
+    """`_read_bounded_bytes`, decoded as UTF-8 with replacement."""
+    out, over_limit = _read_bounded_bytes(proc, max_bytes)
+    return out.decode("utf-8", "replace"), over_limit
+
+
+def _read_bounded_bytes(proc: subprocess.Popen, max_bytes: int) -> tuple[bytes, bool]:
     """Drain a child's stdout up to `max_bytes`, then stop it.
 
     Returns the output and whether the bound was hit.
@@ -388,7 +459,7 @@ def _read_bounded(proc: subprocess.Popen, max_bytes: int) -> tuple[str, bool]:
         proc.kill()
     proc.stdout.close()
     proc.wait(timeout=GIT_TIMEOUT_SECONDS)
-    return b"".join(chunks).decode("utf-8", "replace"), over_limit
+    return b"".join(chunks), over_limit
 
 
 def git_dir(worktree: Path) -> Path:
@@ -760,6 +831,7 @@ def collect_diff(worktree: Path, rng: str, max_chars: int) -> DiffBundle:
         lines=lines,
         truncated=bool(truncated_files),
         truncated_files=truncated_files,
+        raw_body=raw_body,
     )
 
 
