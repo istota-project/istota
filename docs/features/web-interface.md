@@ -41,13 +41,40 @@ The login page has password and email-code forms whenever email is enabled. Aski
 
 Both link commands accept `--send` or `--print-link`; omitted means send. `auth add` has `--send-invite` and `--print-link`. Successful commands end with `state=created`, `state=updated` or `state=unchanged`; list always reports unchanged, and issued links and credential operations report updated. Identity changes are separate from inbound routing addresses.
 
-The admin Users pane can attach email to an existing profile, create a profile, send invitation and reset links, disable login and remove an identity. It has no action that sends a sign-in code, because a code only works in the browser that asked for it. It refuses disabling or removing the last enabled administrator identity, even with Nextcloud also enabled. The operator CLI remains the recovery authority and can override that protection. Disable blocks both email and Nextcloud login for that identity. Removing an identity blocks email login and revokes its sessions, but leaves Nextcloud login possible if that method is enabled. Nextcloud-only profiles have no per-user revoke or disable control until an email identity is attached. New users can sign in immediately; their background work starts after the scheduler reloads or restarts.
+The admin Users pane can create a profile, attach or change a login email (in the per-user editor described under [User settings editor](#user-settings-editor)), send invitation and reset links, disable login and remove an identity. It has no action that sends a sign-in code, because a code only works in the browser that asked for it. It refuses disabling or removing the last enabled administrator identity, even with Nextcloud also enabled. The operator CLI remains the recovery authority and can override that protection. Disable blocks both email and Nextcloud login for that identity. Removing an identity blocks email login and revokes its sessions, but leaves Nextcloud login possible if that method is enabled. Nextcloud-only profiles have no per-user revoke or disable control until an email identity is attached. New users can sign in immediately, and the scheduler picks them up within one tick.
 
 Settings has a Security card for email sessions. Password users supply their current password to change it; the change signs out every tab and device, including the caller. Passwordless users see a set-password link. Attaching an identity, changing its email or password, disabling it, and signing out everywhere revoke the user's existing sessions, including Nextcloud sessions. Epochs start with a random generation and then increase, so deleting and recreating an identity cannot revive old cookies. Removing an identity retains a session generation in `web_auth_retired_epochs`, so earlier Nextcloud and legacy cookies stay revoked; a fresh Nextcloud login uses that retained generation. Database read errors fail closed. Removing an authentication method rejects sessions minted by that method. Active streams repeat the checks and close after revocation.
 
 Run `istota doctor --only web.auth` for method source, hostname, mail configuration, identity counts, admin allowlist, proxy IP throttle and session-secret checks. Mail configuration checks do not send a probe. The IP verification budget is inactive while `web.trusted_proxy_hops` is zero. A positive value selects the client address from the forwarded chain; only enable it when the backend cannot be reached around those proxies.
 
 The shipped proxies suppress access logs for `/istota/auth/set-password`; both web launchers disable uvicorn access logs. An outer proxy must do the same or omit query strings, since the token grants access. Authentication pages are not cached and send no referrer. `["none"]` is reserved for the direct `istota serve` loopback launcher without a public reverse proxy; Docker, Ansible and direct uvicorn refuse it.
+
+## User settings editor
+
+Admin → Users opens a settings editor for one user: click the user's row, or pick "Edit settings" from its menu. A user you add from the same page opens in the editor once it is created. The editor sets the per-user fields that otherwise come from `istota user ensure` or the Ansible `istota_users` inventory, so a new person can be set up without a deploy. It does not edit the admin list (the admins file), resources, secrets, or the preferences a user owns on their own `/settings` page, such as routing and default rooms.
+
+The sections are:
+
+- **Identity**: display name and timezone. The admin badge is shown read-only.
+- **Login**: the current login email, its sign-in state and the last login, and a field to attach or change it. "Also add to email addresses" also lists the address for inbound mail, and "Send invitation" mails an enrolment link. The Login section saves with its own button, never with the footer Save. Invitations, password resets, signing out, disabling and removing the login stay in the row menu.
+- **Email**: inbound email addresses, trusted senders, quiet senders, and outbound approval. A value below the deployment's `outbound_approval_floor` is refused unless it is already stored.
+- **Phone**: the SMS number and the WhatsApp number, in E.164 form. "Same as SMS" copies the SMS number into the WhatsApp field. Below it are the WhatsApp enrollment state (Unbound, Waiting for first message, Enrolled, Opted out), the masked identity and when it was last seen. "Reset identity" keeps the number and forgets the enrolled phone, so the next message from that number enrolls again; use it when someone moves the number to a new phone. Changing an enrolled number discards the enrollment, the open service window and any opt-out. Each phone field is hidden when its surface is off, unless a value is already stored.
+- **Access and limits**: disabled modules and skills, the foreground and background worker limits (empty means the deployment default), and whether the default briefings are seeded. The last only matters when the user's briefings are first created.
+- **Channels**: the log and alerts channel tokens, read-only.
+
+The footer Save sends only the fields you changed, and either all of them are written or none are. A refused field is marked with the server's reason.
+
+**Fields set by the deployment are locked.** With `istota_user_profile_mode: enforce` (the default), every field the inventory names for a user shows "Set by deployment", cannot be edited, and is refused with 409 by the API. The hint names the inventory key to change instead. The user's own `/settings` page shows the same fields as "Set by your administrator". Set the mode to `seed` to hand these fields to the web UI; see [Ansible: who owns a profile field](../deployment/ansible.md#who-owns-a-profile-field-istota_user_profile_mode).
+
+**Addresses and numbers belong to one user.** An email address, SMS number or WhatsApp number that another user already holds is refused, and the refusal names that user. An address counts as held when it is in another user's email addresses or is their login email. A duplicate stored before this check is not refused on resubmit, and `istota doctor --only users.email_address_uniqueness` lists any that remain. A user editing their own addresses on `/settings` gets the same refusal without the holder's name.
+
+**Changing the login email signs the user out.** It ends every session the user has, including Nextcloud sessions, and voids any invitation or reset link already sent. The editor says so before you save. If sending the invitation fails, the new login email is still saved.
+
+**Saves take effect without a restart.** The scheduler, the web app and the SMS webhook re-read user profiles within a few seconds of a change, so a new address or number routes mail and texts on the next scheduler tick.
+
+**The user is told.** When an admin changes another user's email addresses, SMS number, WhatsApp number or login email, that user gets a notification, "An administrator changed your contact details", naming the fields and the admin but not the values. It goes through the user's normal alert delivery and closes once seen. Editing your own row raises nothing, and neither do changes to other fields.
+
+Every admin save logs one `admin_user_update` line with the admin, the user and the field names, never the values. A refused collision logs `admin_user_conflict` with its kind (email, SMS or WhatsApp) and no value or holder.
 
 ## Nextcloud OAuth2 setup
 
@@ -225,7 +252,9 @@ A **Browsers** page lists each live browser instance (user, slot, idle time) and
 | `/istota/auth/set-password` | Enrolment or reset form (GET/POST) |
 | `/istota/api/account/password` | Change password and end every session (POST) |
 | `/istota/api/admin/users` | List or create profiles and email identities |
-| `/istota/api/admin/users/{user_id}` | Remove an email identity (DELETE); action suffixes: invite, reset, disable, logout-all (POST) |
+| `/istota/api/admin/users/{user_id}` | One user's settings (GET, PATCH); remove an email identity (DELETE); action suffixes: invite, reset, disable, logout-all (POST) |
+| `/istota/api/admin/users/{user_id}/identity` | Attach or change the login email (PUT) |
+| `/istota/api/admin/users/{user_id}/whatsapp/reset` | Forget the enrolled WhatsApp identity, keeping the number (POST) |
 | `/istota/callback` | Token exchange + identity resolution |
 | `/istota/logout` | Session clear |
 | `/istota/api/me` | User info + features |

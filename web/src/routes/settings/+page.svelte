@@ -1,6 +1,6 @@
 <script lang="ts">
   import { uploadAvatar, deleteAvatar, AVATAR_ACCEPT, AuthError } from '$lib/api';
-  import { Avatar, AvatarPicker, Select, type SelectOption } from '$lib/components/ui';
+  import { Avatar, AvatarPicker, Select } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import {
     SecurityCard,
@@ -10,25 +10,14 @@
   } from '$lib/components/settings';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
   import { parseListInput, profileListString } from '$lib/settings/listInput';
+  import { isManaged, managedBadge } from '$lib/settings/managed';
+  import { timezoneOptions } from '$lib/settings/timezones';
 
   const settings = getUserSettings();
   const identity = getCurrentUser();
   const profile = $derived(settings.profile);
 
-  // Full IANA timezone list from the browser (no hardcoded list / extra dep).
-  // Older engines may not implement supportedValuesOf — fall back to UTC.
-  const timezoneOptions: SelectOption[] = (() => {
-    let zones: string[];
-    try {
-      zones = (Intl as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.(
-        'timeZone',
-      ) ?? ['UTC'];
-    } catch {
-      zones = ['UTC'];
-    }
-    if (!zones.includes('UTC')) zones = ['UTC', ...zones];
-    return zones.map((z) => ({ value: z, label: z }));
-  })();
+  const zoneOptions = timezoneOptions();
 
   /* The profile picture is deliberately outside `profile` and outside the
      profile's dirty check. It commits on pick through its own multipart call,
@@ -166,12 +155,20 @@
           one. Changing it here does not change the picture Nextcloud shows.
         </p>
       </SettingsField>
-      <SettingsField label="Display name">
-        <input type="text" bind:value={profile.display_name} />
-      </SettingsField>
-      <SettingsField label="Email addresses (comma-separated)">
+      <SettingsField label="Display name" badge={managedBadge(profile, 'display_name')}>
         <input
           type="text"
+          bind:value={profile.display_name}
+          disabled={isManaged(profile, 'display_name')}
+        />
+      </SettingsField>
+      <SettingsField
+        label="Email addresses (comma-separated)"
+        badge={managedBadge(profile, 'email_addresses')}
+      >
+        <input
+          type="text"
+          disabled={isManaged(profile, 'email_addresses')}
           value={profileListString(profile.email_addresses)}
           oninput={(e) => {
             if (profile)
@@ -181,13 +178,15 @@
       </SettingsField>
       <SettingsField
         label="Timezone (IANA)"
+        badge={managedBadge(profile, 'timezone')}
         hint="Setting a timezone here overrides your Nextcloud timezone and is kept across restarts."
       >
         <Select
           value={profile.timezone || 'UTC'}
-          options={timezoneOptions}
+          options={zoneOptions}
           ariaLabel="Timezone"
           fullWidth
+          disabled={isManaged(profile, 'timezone')}
           onValueChange={(v) => {
             if (profile) profile.timezone = v;
           }}
@@ -196,9 +195,14 @@
       <SettingsField
         label="Update timezone when I travel"
         checkbox
+        badge={managedBadge(profile, 'timezone_follow_location')}
         hint="Needs the location module. Once you have settled in a new timezone for about an hour, the field above is set to it and you get a message saying so. Off by default, because it overwrites the timezone you chose. A journey in progress does not count — it waits until you have stayed somewhere."
       >
-        <input type="checkbox" bind:checked={profile.timezone_follow_location} />
+        <input
+          type="checkbox"
+          bind:checked={profile.timezone_follow_location}
+          disabled={isManaged(profile, 'timezone_follow_location')}
+        />
       </SettingsField>
     </SettingsCard>
   {/if}

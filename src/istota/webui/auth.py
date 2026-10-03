@@ -193,39 +193,68 @@ def _invalidate_tokens(conn: sqlite3.Connection, user_id: str, purpose: str | No
 def upsert_identity(
     db_path: Path, user_id: str, email: str, *, create_profile: bool = False,
     display_name: str = "", reject_case_collision: bool = False,
+    reject_address_holders: bool = False, conn: sqlite3.Connection | None = None,
 ) -> Identity:
+    """Attach or change ``user_id``'s login email.
+
+    ``reject_address_holders`` also refuses an address another user holds in
+    their ``email_addresses``: mail to it would route to that user while the
+    login belongs to this one. Pass ``conn`` to run inside the caller's
+    transaction, uncommitted; otherwise this opens its own `BEGIN IMMEDIATE`.
+    """
     email = normalize_email(email)
     if not email:
         raise ValueError("Email must not be empty")
-    with get_db(db_path) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        if reject_case_collision:
-            for row in conn.execute("SELECT user_id FROM user_profiles UNION SELECT user_id FROM web_auth_identities"):
-                if row["user_id"] != user_id and row["user_id"].casefold() == user_id.casefold():
-                    raise ValueError(f"User ID differs only in case from {row['user_id']}")
-        conflict = conn.execute("SELECT user_id FROM web_auth_identities WHERE email = ? AND user_id != ?",
-                                (email, user_id)).fetchone()
-        if conflict and reject_case_collision:
-            raise ValueError(f"That address is already a login for {conflict['user_id']}")
-        if not _has_profile(conn, user_id):
-            if not create_profile:
-                raise ValueError("No user profile for this identity")
-            if not valid_new_user_id(user_id):
-                raise ValueError("New user IDs must be 1–32 lowercase letters, digits, dots, underscores or hyphens, starting with a letter or digit; they become directory names.")
-            from istota.user_profiles import UserProfile, insert_profile
-            insert_profile(conn, UserProfile(user_id=user_id, display_name=display_name or user_id))
-        identity = _get_identity(conn, user_id)
-        if identity is None:
-            # A fixed epoch would revive old cookies after remove/re-add.
-            # Leave half the integer range available for monotonic increments.
-            epoch = max(secrets.randbelow(2**62 - 1) + 1, _retired_epoch(conn, user_id) + 1)
-            conn.execute("INSERT INTO web_auth_identities (user_id, email, credential_epoch) VALUES (?, ?, ?)",
-                         (user_id, email, epoch))
-        elif identity.email != email:
-            conn.execute("UPDATE web_auth_identities SET email = ?, credential_epoch = credential_epoch + 1, updated_at = ? WHERE user_id = ?",
-                         (email, _timestamp(), user_id))
-            _invalidate_tokens(conn, user_id)
-        return _require_identity(conn, user_id)
+    kwargs = dict(create_profile=create_profile, display_name=display_name,
+                  reject_case_collision=reject_case_collision,
+                  reject_address_holders=reject_address_holders)
+    if conn is not None:
+        return _upsert_identity(conn, user_id, email, **kwargs)
+    with get_db(db_path) as own:
+        own.execute("BEGIN IMMEDIATE")
+        return _upsert_identity(own, user_id, email, **kwargs)
+
+
+def _upsert_identity(
+    conn: sqlite3.Connection, user_id: str, email: str, *, create_profile: bool,
+    display_name: str, reject_case_collision: bool, reject_address_holders: bool,
+) -> Identity:
+    if reject_case_collision:
+        for row in conn.execute("SELECT user_id FROM user_profiles UNION SELECT user_id FROM web_auth_identities"):
+            if row["user_id"] != user_id and row["user_id"].casefold() == user_id.casefold():
+                raise ValueError(f"User ID differs only in case from {row['user_id']}")
+    conflict = conn.execute("SELECT user_id FROM web_auth_identities WHERE email = ? AND user_id != ?",
+                            (email, user_id)).fetchone()
+    if conflict and reject_case_collision:
+        raise ValueError(f"That address is already a login for {conflict['user_id']}")
+    current = _get_identity(conn, user_id)
+    # Only a *new* login email is judged: resubmitting the one already held
+    # passes even beside a duplicate stored before the rule, the way
+    # `find_identity_conflicts` passes an address already on the user's list.
+    if reject_address_holders and (current is None or current.email != email):
+        from istota.user_profiles import find_identity_conflicts
+        holder = find_identity_conflicts(conn, user_id, email_addresses=[email]).get(email)
+        if holder:
+            raise ValueError(f"That address is already an email address of {holder}")
+    if not _has_profile(conn, user_id):
+        if not create_profile:
+            raise ValueError("No user profile for this identity")
+        if not valid_new_user_id(user_id):
+            raise ValueError("New user IDs must be 1–32 lowercase letters, digits, dots, underscores or hyphens, starting with a letter or digit; they become directory names.")
+        from istota.user_profiles import UserProfile, insert_profile
+        insert_profile(conn, UserProfile(user_id=user_id, display_name=display_name or user_id))
+    identity = _get_identity(conn, user_id)
+    if identity is None:
+        # A fixed epoch would revive old cookies after remove/re-add.
+        # Leave half the integer range available for monotonic increments.
+        epoch = max(secrets.randbelow(2**62 - 1) + 1, _retired_epoch(conn, user_id) + 1)
+        conn.execute("INSERT INTO web_auth_identities (user_id, email, credential_epoch) VALUES (?, ?, ?)",
+                     (user_id, email, epoch))
+    elif identity.email != email:
+        conn.execute("UPDATE web_auth_identities SET email = ?, credential_epoch = credential_epoch + 1, updated_at = ? WHERE user_id = ?",
+                     (email, _timestamp(), user_id))
+        _invalidate_tokens(conn, user_id)
+    return _require_identity(conn, user_id)
 
 
 def _change_credential(db_path: Path, user_id: str, *, password_hash: str | None = None, disabled: bool | None = None, protected_admins: set[str] | None = None) -> int:

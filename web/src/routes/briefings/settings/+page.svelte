@@ -46,6 +46,7 @@
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import { getCurrentUser } from '$lib/userContext';
   import { formatDateTime } from '$lib/dateFormat';
+  import { MANAGED_BADGE, isManaged } from '$lib/settings/managed';
 
   let loading = $state(true);
   let error = $state('');
@@ -65,6 +66,8 @@
   let emailHtmlSaved = $state(true);
   let emailHtmlSaving = $state(false);
   let emailHtmlError = $state('');
+  // Set by the deployment: the profile PUT refuses an edit, so the toggle is locked.
+  let emailHtmlManaged = $state(false);
 
   async function saveEmailHtml() {
     emailHtmlSaving = true;
@@ -481,6 +484,7 @@
           .then((r) => {
             emailHtml = r.profile?.briefing_email_html !== false;
             emailHtmlSaved = emailHtml;
+            emailHtmlManaged = isManaged(r.profile, 'briefing_email_html');
           })
           .catch(() => {}),
       ]);
@@ -1062,10 +1066,11 @@
       <SettingsField
         label="Send as HTML"
         checkbox
+        badge={emailHtmlManaged ? MANAGED_BADGE : undefined}
         hint="Renders the briefing as formatted mail, so a news source that supplied an article URL becomes a clickable link. A plain-text copy is always sent alongside it for clients that prefer one. Untick for plain text only."
         error={emailHtmlError}
       >
-        <input type="checkbox" bind:checked={emailHtml} />
+        <input type="checkbox" bind:checked={emailHtml} disabled={emailHtmlManaged} />
       </SettingsField>
     </SettingsCard>
 

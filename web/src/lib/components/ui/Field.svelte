@@ -1,9 +1,13 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import Badge from './Badge.svelte';
   import HintPopover from './HintPopover.svelte';
 
   interface Props {
     label: string;
+    /** A short state beside the label, as a compact `Badge` — "Set by your
+     *  administrator" on a field the deployment owns. Visible, unlike `hint`. */
+    badge?: string;
     /** Guidance shown in a popover behind a "?" beside the label. Optional
      *  reading — anything the user must see belongs in `warning` or `error`. */
     hint?: string;
@@ -46,6 +50,7 @@
 
   let {
     label,
+    badge,
     hint,
     warning,
     error,
@@ -56,6 +61,15 @@
     children,
   }: Props = $props();
 </script>
+
+{#snippet fieldLabel()}
+  <span class="field-label"
+    >{label}{#if badge}<Badge size="sm">{badge}</Badge>{/if}<HintPopover
+      text={hint}
+      label="About {label}"
+    /></span
+  >
+{/snippet}
 
 <!--
   Label + control + supplementary text, extracted from SettingsField so it is
@@ -82,9 +96,9 @@
 >
   {#if checkbox}
     {@render children()}
-    <span class="field-label">{label}<HintPopover text={hint} label="About {label}" /></span>
+    {@render fieldLabel()}
   {:else}
-    <span class="field-label">{label}<HintPopover text={hint} label="About {label}" /></span>
+    {@render fieldLabel()}
     {@render children()}
   {/if}
   {#if warning}<small class="field-warning">{warning}</small>{/if}

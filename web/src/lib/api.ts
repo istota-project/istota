@@ -557,6 +557,142 @@ export function adminUserAction(userId: string, action: AdminUserAction) {
   });
 }
 
+/** The profile fields an admin may set (`user_profiles.ADMIN_EDITABLE_FIELDS`). */
+export interface AdminUserProfile {
+  display_name: string;
+  timezone: string;
+  email_addresses: string[];
+  trusted_email_senders: string[];
+  quiet_email_senders: string[];
+  outbound_approval: '' | 'off' | 'untrusted' | 'all';
+  disabled_skills: string[];
+  disabled_modules: string[];
+  default_briefings: boolean;
+  /** `0` is the deployment default. */
+  max_foreground_workers: number;
+  max_background_workers: number;
+  sms_phone_number: string;
+}
+
+export type AdminWhatsAppStatus = 'unbound' | 'awaiting_first_message' | 'enrolled' | 'opted_out';
+
+/** One user's settings, as `GET /admin/users/{id}` returns them. */
+export interface AdminUserDetail {
+  user_id: string;
+  is_admin: boolean;
+  identity: {
+    email: string;
+    disabled: boolean;
+    last_login_at: string | null;
+    state: 'passwordless' | 'password_set';
+  } | null;
+  profile: AdminUserProfile;
+  channels: { log_channel: string; alerts_channel: string };
+  whatsapp: {
+    /** In full: the admin set it and needs to see what they set. */
+    number: string;
+    status: AdminWhatsAppStatus;
+    /** Masked server-side, or null when nothing has enrolled. */
+    identity: string | null;
+    provider: string | null;
+    last_seen_at: string | null;
+  };
+  /** Fields the deployment writes on every converge; the PATCH refuses them. */
+  managed: string[];
+  options: {
+    modules: string[];
+    skills: string[];
+    outbound_approval: AdminUserProfile['outbound_approval'][];
+    outbound_approval_floor: 'off' | 'untrusted' | 'all';
+    /** The `[email]` transport. */
+    email_enabled: boolean;
+    /** Email sign-in for the web UI — what the Login section needs. */
+    email_login_enabled: boolean;
+    sms_enabled: boolean;
+    whatsapp_enabled: boolean;
+  };
+  /** On an identity PUT whose address append was skipped. */
+  addresses_skipped?: 'managed';
+}
+
+/** A partial update: any profile field, plus the WhatsApp number (`""` clears it). */
+export type AdminUserPatch = Partial<AdminUserProfile> & { whatsapp_number?: string };
+
+/** A refused admin PATCH. `fields` names the inputs it is about (a managed
+ *  field, a malformed value, a value another user holds); empty for a refusal
+ *  of the whole request. */
+export class AdminUserWriteError extends Error {
+  readonly fields: string[];
+  constructor(message: string, fields: string[]) {
+    super(message);
+    this.name = 'AdminUserWriteError';
+    this.fields = fields;
+  }
+}
+
+export function getAdminUser(userId: string) {
+  return apiFetch<AdminUserDetail>(`/admin/users/${encodeURIComponent(userId)}`);
+}
+
+/** Outside `apiFetch` for the reason `credentialWrite` is: a refusal's
+ *  `fields` has to reach the form, and `apiFetch` keeps only the message. */
+export async function updateAdminUser(
+  userId: string,
+  patch: AdminUserPatch,
+): Promise<AdminUserDetail> {
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}/api/admin/users/${encodeURIComponent(userId)}`, {
+      method: 'PATCH',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+  } catch {
+    noteTransport(false, 'unreachable');
+    throw new AdminUserWriteError('Istota could not be reached. Nothing was saved.', []);
+  }
+  noteTransport(true);
+  if (resp.status === 401) throw new AuthError();
+  let payload: unknown = null;
+  try {
+    payload = await resp.json();
+  } catch {
+    payload = null;
+  }
+  if (!resp.ok) {
+    const raw = (payload ?? {}) as { detail?: unknown; fields?: unknown };
+    const message =
+      typeof raw.detail === 'string' && raw.detail.trim()
+        ? raw.detail
+        : `API error: ${resp.status}`;
+    const fields = Array.isArray(raw.fields)
+      ? raw.fields.filter((f): f is string => typeof f === 'string')
+      : [];
+    throw new AdminUserWriteError(message, fields);
+  }
+  return payload as AdminUserDetail;
+}
+
+/** Keep the number; forget the latched identity, the window and the opt-out. */
+export function resetAdminUserWhatsApp(userId: string) {
+  return apiFetch<AdminUserDetail>(`/admin/users/${encodeURIComponent(userId)}/whatsapp/reset`, {
+    method: 'POST',
+  });
+}
+
+/** Attach or change the login email. A change signs the user out everywhere. */
+export function setAdminUserIdentity(
+  userId: string,
+  body: { email: string; invite: boolean; add_to_addresses: boolean },
+) {
+  return apiFetch<AdminUserDetail>(`/admin/users/${encodeURIComponent(userId)}/identity`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 export async function getAdminConfig(): Promise<AdminConfigView> {
   return apiFetch<AdminConfigView>('/admin/config');
 }
@@ -1652,6 +1788,10 @@ export async function monarchLogin(
 // --- Phase 6: profile + resources ---
 
 export interface UserProfile {
+  // Read-only: fields the deployment re-writes on every converge. The PUT
+  // refuses an edit to one (409 `managed_by_provisioning`), so the settings
+  // page renders them disabled.
+  managed?: string[];
   user_id: string;
   display_name: string;
   timezone: string;

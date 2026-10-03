@@ -7,8 +7,6 @@
 // tab saving an unrelated preference would silently revert the travel update
 // and trigger another one on the next check.
 
-import type { UserProfile } from './api';
-
 /**
  * The subset of `edited` that differs from the snapshot the page loaded.
  *
@@ -17,11 +15,14 @@ import type { UserProfile } from './api';
  * what "changed" means. An unparseable or empty snapshot yields the full set:
  * without a baseline the safe answer is the caller's explicit intent, not
  * silently dropping their edits.
+ *
+ * Generic over the record so the admin user editor diffs its own form (the
+ * admin-editable fields plus the WhatsApp number) with the same rule.
  */
-export function changedProfileFields(
-  edited: Partial<UserProfile>,
+export function changedProfileFields<T extends object>(
+  edited: T,
   snapshotJson: string,
-): Partial<UserProfile> {
+): Partial<T> {
   let snapshot: Record<string, unknown> | null = null;
   try {
     const parsed = snapshotJson ? JSON.parse(snapshotJson) : null;
@@ -39,5 +40,5 @@ export function changedProfileFields(
       patch[key] = value;
     }
   }
-  return patch as Partial<UserProfile>;
+  return patch as Partial<T>;
 }
