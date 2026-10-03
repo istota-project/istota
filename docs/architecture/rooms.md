@@ -90,6 +90,23 @@ A room that is shared, or that a guest writes in, gets one `room_policy` row, cr
 
 A guest's commands are ignored apart from the veto. A guest cannot stop, retry or steer a task or answer a confirmation.
 
+## Whose assistant answers
+
+A shared room is not bound to its host's bot. Every per-user input to a task is read for `task.user_id`, and `task.user_id` is the turn's author on a member's turn and the host only on a guest's turn.
+
+| Input | Source | Varies per turn? |
+|---|---|---|
+| Persona | `load_persona(config, user_id=task.user_id)`: that user's `PERSONA.md`, else `config/persona.md` | yes |
+| Per-skill overlays | that user's `{bot_dir}/config/skills/`; not loaded when `memory` is withheld (guest and unasked turns) | yes |
+| Reach (skills, files, credentials) | that user's, minus the withheld scopes above | yes |
+| `USER.md`, recall, knowledge facts, playbooks | not loaded in any shared room | no |
+| Backstage notes | the principal's side-room `CHANNEL.md` | yes |
+| Emissaries, guidelines, custom system prompt | `config/`, deployment-wide | no |
+| Model, effort, brain | the room's own settings (host-only to change), else the deployment's | no |
+| Transcript and `CHANNEL.md` | the room's, bounded by the latest audience epoch | no |
+
+The room card names whose persona is in use, so the model knows which person it is speaking as. Loading the host's persona into another member's turn was rejected: a member's `PERSONA.md` is writable from that member's sandbox, so it would let one user, or an injection in one user's task, give standing instructions to a task running with another user's credentials.
+
 ## Audience
 
 Every room turn records who read the room when it was written, in `tasks.audience` (`rooms.policy.audience_class`):
