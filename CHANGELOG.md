@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Rooms can now hold more than one person. Add other users to a web chat room, bring the bot into a WhatsApp group, or copy it on an email thread with two or more people, and it becomes a shared room alongside the Talk groups that already worked. Every message is recorded, and by default the bot answers only when someone addresses it. People who don't use your installation can take part as guests. The bot answers them on the host's behalf without touching the host's private data, and their replies can be held for your approval first. Each member gets a private side room next to the shared one, for confirmations, private answers and drafts the bot posts only after you approve them. Anyone can switch the bot off in a room with `!<bot name> off`. Households and teams can keep a shared group memory. You can also ask another user of your installation a question: it reaches them in their own room, on WhatsApp or by SMS, and their reply comes back to you word for word. Your SMS and WhatsApp conversations now each have a room in web chat too, including the history from before the room existed.
+
+The browser can now look at a page and click on it. Istota takes a screenshot, picks a point, and clicks, drags, scrolls or types there, which reaches canvases, maps, PDF viewers and chat panels that CSS selectors can't. It also presses Cloudflare's checkbox itself, so a briefing doesn't stall on a challenge, and each user now gets a separate browser profile whose logins persist between tasks. A new `wordpress` skill reads and edits posts, ACF fields, media and settings across several sites, and asks before anything goes live. The web UI accepts email and password or a 6-digit emailed code, so a Nextcloud login is no longer required. You can add a credential straight in Settings without a KeePassXC file, Labs (formerly Bloodwork) records urine and stool results, and a run from your Garmin watch shows up as its own entry in the location day summary. This release is 416 commits, against 205 in 0.42.0 and 985 in 0.41.0. Most of the rest is browser reliability and security hardening around credentials, shared rooms and the sandbox.
+
+**Before you upgrade.**
+
+- Plan for a short offline window. The first deploy migrates room identities with every service stopped. Standalone installs must stop the local server before `istota update`, and Docker has an explicit offline migration step. If two rooms already share one binding, startup refuses with `ambiguous room bindings` until you fix the duplicate rows by hand.
+- Run the full Ansible play once rather than updating only the code. The web, webhooks and devbox-proxy units now start modules at new paths, and the browser image has to be rebuilt.
+- Expect every user to sign in to websites in the browser again. The old shared browser profile is moved to `legacy-profile/` and nobody inherits it.
+- Update log filters. About a hundred modules moved into subsystem packages, so logger names changed (`istota.web_app` is now `istota.webui.app`, for example). The changeset has the full list.
+- Move personal deliveries off shared rooms. A pin, route, `alerts_channel`, `log_channel` or briefing target that names a room more than one person reads gets nothing after the upgrade.
+- If you set `istota_web_auth_login_link_ttl_minutes`, rename it to `istota_web_auth_sign_in_code_ttl_minutes`. Ansible now turns on email login alongside Nextcloud login by default.
+- Check any CRON.md `prompt_file` that points outside its owner's own folder. Those jobs are removed from the schedule until the path is fixed, and a non-admin's HEARTBEAT.md `url-health` check no longer runs.
+- On a multi-user deployment without bubblewrap, credential vaults stop syncing until you either enable isolation or set `[security] allow_unsandboxed_multi_user_vaults = true`.
+- Re-pick `opus` for rooms that were pinned through the `opus` or `smart` alias. Those rooms still run the previous Opus.
+- Replace `--scroll-amount` with `--scroll-clicks` in any `browse` scripts.
+- Restart the Baileys sidecar together with the daemon, or WhatsApp groups won't work.
+- After the upgrade, each existing room with a guest in it gets one short introduction from the bot.
+
 ### Added
 
 - A lab panel now records what the sample was: blood, urine, stool, saliva or other. Report reading fills it in when the report says, you can set or change it on the upload and panel pages, and the Labs page filters by it. The `health` skill takes `--specimen` on `panels` and `add-panel`. Panels from before this have no specimen; nothing guesses one for them.
