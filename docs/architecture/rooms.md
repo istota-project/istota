@@ -139,7 +139,8 @@ Without bubblewrap (the shipped Docker stack, macOS, the standalone install), wi
 The prompt has two halves (see [executor](executor.md)). In a shared room the system half carries a **room card** (`executor.room_card`) in place of the old one-line group notice. It is built from tables, never from model output, and lists:
 
 - who reads the room: members by Istota user id, guests as a count, never a display name;
-- whom the bot is acting for, and who hosts;
+- the room's standing rule: each member's turn runs as that member, with their own persona and reach, a confirmation goes to the asker's own side room, and what happens to a guest's message under the room's `guest_reply` (answered as the host with nothing beyond the reply, that reply held for the host's approval, or recorded and not answered). This line is on every card, so a model asked to explain the room does not generalise this turn's principal into the room's owner or invent an approval rule;
+- whom the bot is acting for on this turn, and who hosts;
 - whose persona is in use (always the task's own user: the host on a guest's turn);
 - what this turn reaches, and on a restricted turn what is withheld;
 - the side-room verbs (`istota-skill room whisper`, `room answer-privately`) when the `room` CLI is available;
@@ -171,7 +172,7 @@ On surfaces without a web view of their own, the side room has a counterpart: th
 
 `rooms/veto.py` handles `!<bot name> off` and `on`. Any participant can switch the bot off; it then records nothing in the room, cancels queued tasks there and drops a running task's answer. It comes back on when a member has sent `on` and every person who switched it off has agreed or left. Each vetoer is a row in `room_vetoes`. Removing the bot from a WhatsApp group is a veto with no named vetoer.
 
-The web process cannot post into Talk or a WhatsApp group itself, so it writes owed replies to `room_notices`, and the scheduler's `room-notices` gate posts them, along with the one-time announcement made the first time a guest is present in a room with a host. On an email thread the announcement rides on the bot's first reply-all instead.
+The web process cannot post into Talk or a WhatsApp group itself, so it writes owed replies to `room_notices`, and the scheduler's `room-notices` gate posts them, along with the one-time announcement made the first time a guest is present in a room with a host. The announcement is a persona-voiced opening, overridable by the operator with `config/room-announcement.md`, followed by two fixed sentences that always render: what happens to a guest's message under the room's `guest_reply`, and the off switch with the way back. A sent email notice is recognised by its fixed closing, so a held proposal whose opening or host name changed before it was sent still counts. On an email thread the announcement rides on the bot's first reply-all instead.
 
 ## Delivery never targets a shared room
 

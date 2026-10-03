@@ -6207,6 +6207,30 @@ def room_identity_line(
 _ROOM_CARD_MAX_MEMBERS = 12
 
 
+def _room_rule_line(guest_reply: str | None, *, registered: bool) -> str:
+    """The room's standing rule, the same on every turn of a shared-room task.
+
+    Without it a model asked to explain the room generalises this turn's "You
+    are acting for X" into "I work for X here" and invents an approval rule
+    (ISSUE-602). The guest clause follows the room's `guest_reply`, since a
+    held room does put a guest's answer to the host first. An unregistered
+    group has no side room yet, so nothing is said about where a confirmation
+    goes.
+    """
+    member = "In this room each member's turn runs as that member, with their own persona and reach"
+    member += (", and a confirmation goes to the asker's own side room." if registered else ".")
+    if guest_reply == "off":
+        guest = "A guest's message is recorded and not answered."
+    elif guest_reply == "held":
+        guest = ("A guest's turn runs as the host and can do nothing beyond the "
+                 "reply, which goes to the host's side room for approval before "
+                 "it is posted.")
+    else:
+        guest = "A guest's turn runs as the host and can do nothing beyond the reply."
+    return (f"{member} {guest} Describe the room this way if asked; do not add "
+            "approval rules it does not have.")
+
+
 def room_card(
     config: Config,
     task: "db.Task",
@@ -6255,17 +6279,20 @@ def room_card(
                 # A surface roster that says "group" before any room is
                 # registered: shared, with nobody recorded yet.
                 if guest_turn or task.is_group_chat:
-                    return room_policy.RoomReaders((), 0, None)
+                    return room_policy.RoomReaders((), 0, None), None
                 return None
             if not (guest_turn or task.is_group_chat or db.room_is_shared(c, token)):
                 return None
-            return room_policy.room_readers(c, token)
+            policy = room_policy.get_policy(c, token)
+            return (room_policy.room_readers(c, token),
+                    policy.guest_reply if policy is not None else None)
 
         with db.get_db_if_present(config.db_path, conn) as c:
-            readers = _read(c) if c is not None else None
+            read = _read(c) if c is not None else None
+        readers, guest_reply = read if read is not None else (None, None)
     except Exception as exc:
         logger.warning("room card for task %s failed: %s", task.id, exc)
-        readers = None
+        readers, guest_reply = None, None
     principal = _header_scalar(task.user_id)
     emissary = (
         "This turn was written by a guest, not by a member. You are acting "
@@ -6287,7 +6314,10 @@ def room_card(
     if readers.guests:
         parts.append(f"{readers.guests} guest{'s' if readers.guests != 1 else ''}")
     who = f" — {'; '.join(parts)}" if parts else ""
-    lines = [f"Shared room: everything you post here is read by everyone in it{who}."]
+    lines = [
+        f"Shared room: everything you post here is read by everyone in it{who}.",
+        _room_rule_line(guest_reply, registered=bool(readers.members)),
+    ]
 
     if guest_turn:
         lines.append(emissary)

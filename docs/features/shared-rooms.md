@@ -94,7 +94,7 @@ On a deployment with no bubblewrap sandbox (the shipped Docker stack, macOS, the
 
 ## What the bot is told
 
-In a shared room the system prompt carries a short room card: who reads the room (members by user id, guests by count), whom the bot is acting for and who hosts, whose persona is in use, what this turn can reach (and on a guest's turn, what is withheld), and that `CHANNEL.md` is read by everyone. It never contains anybody's display name, since that is text the person chose.
+In a shared room the system prompt carries a short room card: who reads the room (members by user id, guests by count), the room's rule (each member's turn runs as that member, a confirmation goes to the asker's own side room, and what happens to a guest's message under the room's guest-reply setting), whom the bot is acting for on this turn and who hosts, whose persona is in use, what this turn can reach (and on a guest's turn, what is withheld), and that `CHANNEL.md` is read by everyone. It never contains anybody's display name, since that is text the person chose.
 
 The persona is always that of the person the task acts for: the host's on the host's turns and on guests' turns, each other member's own on theirs.
 
