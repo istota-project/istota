@@ -507,24 +507,17 @@ def _poll_due(ctx: FeedsContext, limit) -> None:
             "retry_after_seconds": result.retry_after_seconds,
         })
 
-    # Roll up per-source errors to the outer envelope so the scheduler's
-    # JSON-error detector and any alerting layer can see them. All-errors →
-    # hard failure (likely network outage or config breakage); some errors →
-    # partial_error, surfaced in logs but not treated as a task failure.
+    # Roll up per-source errors to the outer envelope as `partial_error`, which
+    # the scheduler stores as the task's result but does not fail. That holds when every polled feed
+    # errored too: a run often polls one due feed, so "all failed" usually means
+    # one dead feed, and failing the task only bought a retry that found nothing
+    # due (ISSUE-604). A dead feed surfaces on the feed itself, through
+    # `last_error` and its backoff.
     polled = len(outcomes)
-    if polled and error_total == polled:
-        _output(_err(
-            f"all {polled} feed poll(s) failed",
-            polled=polled,
-            new_entries=new_total,
-            errors=error_total,
-            throttled=throttled_total,
-            feeds=summary,
-        ))
-        return
-    # A wholly throttled run is a hard failure too. It is not a *feed* failure,
-    # so it does not go through `error_total`, but reporting it as a success
-    # that found nothing is the silence this counter exists to break.
+    # A wholly throttled run is still a hard failure (ISSUE-347). It is not a
+    # *feed* failure, so it does not go through `error_total`, but reporting it
+    # as a success that found nothing is the silence this counter exists to
+    # break.
     if polled and throttled_total == polled:
         _output(_err(
             f"all {polled} feed poll(s) were rate-limited",

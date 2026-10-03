@@ -109,7 +109,10 @@ class TestTheCard:
             task = db.get_task(conn, _running(conn, "alice", token))
         card = room_card(config, task, withheld_scopes=frozenset(),
                          room_cli_available=True)
-        assert "guest" not in card
+        # The room's standing rule describes guests on every card (ISSUE-602);
+        # what a guest-free room must not carry is the claim that one reads it.
+        assert "A guest reads this room." not in card
+        assert "A guest's turn" in card
         assert "personal memory is not loaded" in card
 
 

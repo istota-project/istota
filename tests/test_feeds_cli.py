@@ -410,7 +410,11 @@ class TestPoll:
         assert out["feeds"][0]["rate_limited"] is True
         assert out["feeds"][0]["retry_after_seconds"] == 120
 
-    def test_error_when_all_feeds_fail(self, ctx, monkeypatch):
+    def test_a_run_whose_only_due_feed_fails_is_not_a_task_failure(
+        self, ctx, monkeypatch,
+    ):
+        """ISSUE-604: one dead feed among one due feed failed the whole
+        scheduled task, which was retried a minute later to an empty run."""
         _seed_db(ctx, feeds=[{"url": "https://bad.test/feed"}])
 
         import httpx
@@ -421,13 +425,16 @@ class TestPoll:
         monkeypatch.setattr(httpx, "get", stub_get)
 
         runner = CliRunner()
-        r = runner.invoke(cli, ["poll"], obj=ctx, standalone_mode=False)
-        assert r.exit_code == 1
+        r = runner.invoke(cli, ["run-scheduled"], obj=ctx, standalone_mode=False)
+        assert r.exit_code == 0
         out = json.loads(r.output)
-        assert out["status"] == "error"
+        assert out["status"] == "partial_error"
         assert out["polled"] == 1
         assert out["errors"] == 1
-        assert "all 1 feed poll(s) failed" in out["error"]
+        assert out["feeds"][0]["error"]
+        with feeds_db.connect(ctx.db_path) as conn:
+            feed = feeds_db.get_feed_by_url(conn, "https://bad.test/feed")
+        assert feed.last_error
 
 
 class TestStar:

@@ -179,6 +179,58 @@ class TestAGuestsTurn:
         assert "guest" in first
 
 
+class TestTheRoomsStandingRule:
+    """ISSUE-602: the card states how every turn here runs, not only this one.
+
+    Asked to explain the room, a model holding only "You are acting for the
+    host" generalised it into "I act for the host here" and invented an
+    approval rule. The standing line is what stops that, on every kind of turn.
+    """
+
+    RULE = "each member's turn runs as that member"
+
+    def test_it_is_on_the_hosts_a_members_and_a_guests_turn(self, config):
+        with db.get_db(config.db_path) as conn:
+            _shared(conn)
+            pid = _guest(conn)
+        for task in (_task("alice"), _task("bob"),
+                     _task("alice", guest_participant_id=pid),
+                     _task("bob", source_type="scheduled")):
+            text = _card(config, task)
+            assert self.RULE in text
+            assert "goes to the asker's own side room" in text
+            assert "do not add approval rules" in text
+
+    @pytest.mark.parametrize("mode, says, not_says", [
+        ("direct", "can do nothing beyond the reply.", "for approval"),
+        ("held", "goes to the host's side room for approval", "not answered"),
+        ("off", "A guest's message is recorded and not answered.", "for approval"),
+    ])
+    def test_the_guest_clause_follows_guest_reply(self, config, mode, says, not_says):
+        with db.get_db(config.db_path) as conn:
+            _shared(conn)
+            room_policy.set_guest_reply(conn, "grp", mode)
+        text = _card(config, _task("bob"))
+        assert says in text and not_says not in text
+
+    def test_an_unregistered_group_names_no_side_room(self, config):
+        text = _card(config, _task("bob", "talk-ref-not-a-room"))
+        assert self.RULE in text
+        assert "side room" not in text.split("\n")[2]
+
+    def test_it_follows_the_shared_room_line(self, config):
+        with db.get_db(config.db_path) as conn:
+            _shared(conn)
+        lines = _card(config, _task("bob")).strip().split("\n")
+        assert lines[0].startswith("Shared room:")
+        assert self.RULE in lines[1]
+
+    def test_it_is_absent_where_there_is_no_card(self, config):
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "solo", "alice", origin="web", name="Mine")
+        assert _card(config, _task("alice", "solo", is_group_chat=False)) == ""
+
+
 class TestWithoutARoomRow:
     def test_a_guest_turn_is_told_what_it_is_when_the_room_cannot_be_read(self, config):
         config.db_path = config.db_path.parent / "missing.db"

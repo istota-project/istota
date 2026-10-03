@@ -36,9 +36,11 @@ On email, a member can switch the room back on only from the web view. A guest's
 
 ## The announcement
 
-The first time a guest is present in a room with a host, the bot introduces itself once: who it is, whom it works for, and how anyone there can switch it off. On Talk, web and WhatsApp it is posted to the room by the scheduler. On an email thread there is no way to post except a mail, so the announcement is added to the bot's first reply-all on the thread and shown inside any guest proposal's preview; it counts as made only once such a mail is sent.
+The first time a guest is present in a room with a host, the bot introduces itself once: who it is, that it acts for each member when that member asks, what happens to anyone else's messages (answered on the host's behalf, answered once the host approves, or recorded and not answered, following the room's guest-reply setting), and how anyone there can switch it off. On Talk, web and WhatsApp it is posted to the room by the scheduler. On an email thread there is no way to post except a mail, so the announcement is added to the bot's first reply-all on the thread and shown inside any guest proposal's preview; it counts as made only once such a mail is sent.
 
-Existing rooms that already have a guest get their announcement once after upgrading.
+The announcement has three parts. The opening says who the bot is and that it works for the members, and by default is written in the voice of the default persona, the octopus in `config/persona.md`. If your deployment uses its own persona, replace the opening with `config/room-announcement.md`, which takes the `{BOT_NAME}`, `{BOT_DIR}` and `{HOST}` placeholders (`{HOST}` is the host's display name). The two sentences after it, what happens to a guest's message and how to switch the bot off and back on, are fixed and always follow the opening, so an override cannot leave them out. Line breaks in the file are collapsed and the whole text is posted as one line, with an opening over 800 characters cut at a word. The override is read from the deployment's `config/` directory, never from a user's `PERSONA.md`, since everyone in the room reads it.
+
+Existing rooms that already have a guest get their announcement once after upgrading. Rooms already announced keep the announcement they were given; a changed text is not posted again.
 
 ## Limits
 

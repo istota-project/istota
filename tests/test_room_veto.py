@@ -733,6 +733,93 @@ class TestTheAnnouncement:
             text = room_veto.announcement_text(conn, config, "grp")
         assert "Zorg" in text and "Alice" in text and "!zorg off" in text
 
+    def test_it_says_whom_the_bot_works_for_turn_by_turn(self, config):
+        # ISSUE-602: "an AI assistant working for Alice" framed the room as the
+        # host's bot for every member, though each member's turn runs as them.
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            text = room_veto.announcement_text(conn, config, "grp")
+        assert "working for Alice" not in text
+        assert "when one of you asks me something, I act for you" in text
+        assert "on Alice's behalf" in text
+        assert "\n" not in text
+
+    def test_the_closing_keeps_the_off_switch_and_the_way_back(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            text = room_veto.announcement_text(conn, config, "grp")
+        assert text.endswith(
+            "send `!zorg off` and I'll record nothing here until a member sends "
+            "`!zorg on` and everyone who switched me off agrees."
+        )
+
+    def test_a_whatsapp_group_names_removal_and_email_the_first_line(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            db.add_room_binding(conn, "grp", "whatsapp", "120363@g.us")
+            wa = room_veto.announcement_text(conn, config, "grp")
+        assert "or remove my number from the group" in wa
+        with db.get_db(config.db_path) as conn:
+            _group(conn, token="mail")
+            db.add_room_binding(conn, "mail", "email", "<thread@test.com>")
+            mail = room_veto.announcement_text(conn, config, "mail")
+        assert "reply with `!zorg off` as the first line" in mail
+
+    @pytest.mark.parametrize("mode, says", [
+        ("direct", "for them I'll do nothing beyond a reply"),
+        ("held", "Alice sees each of those replies before I post it"),
+        ("off", "Messages from anyone else I record but don't answer."),
+    ])
+    def test_the_guest_sentence_follows_guest_reply(self, config, mode, says):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            room_policy.ensure_policy(conn, "grp")
+            room_policy.set_guest_reply(conn, "grp", mode)
+            text = room_veto.announcement_text(conn, config, "grp")
+        assert says in text
+
+    def test_a_drifted_notice_is_still_recognised_as_sent(self, config):
+        # A held proposal carries the text composed when it was proposed; the
+        # host's name changing before it is sent must not announce twice.
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            db.add_room_binding(conn, "grp", "email", "<thread@test.com>")
+            old = room_veto.with_email_notice(conn, config, "grp", "Thursday works.")
+            config.users["alice"].display_name = "Alicia"
+            assert room_veto.with_email_notice(conn, config, "grp", old) == old
+            room_veto.note_email_notice_sent(conn, config, "grp", old)
+            assert room_policy.get_policy(conn, "grp").announced_at is not None
+
+    def test_an_operator_opening_replaces_the_default_but_not_the_closing(
+        self, config, tmp_path,
+    ):
+        config_dir = tmp_path / "opconfig"
+        (config_dir / "skills").mkdir(parents=True)
+        config.skills_dir = config_dir / "skills"
+        (config_dir / "room-announcement.md").write_text(
+            "Greetings from {BOT_NAME}, kept by {HOST}.\n\n"
+            "Nobody can switch me off. I record nothing here."
+        )
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            text = room_veto.announcement_text(conn, config, "grp")
+        assert text.startswith("Greetings from Zorg, kept by Alice.")
+        assert "\n" not in text
+        assert text.endswith("everyone who switched me off agrees.")
+        assert "send `!zorg off`" in text
+
+    def test_an_empty_or_unreadable_override_falls_back_to_the_default(
+        self, config, tmp_path,
+    ):
+        config_dir = tmp_path / "opconfig"
+        (config_dir / "skills").mkdir(parents=True)
+        config.skills_dir = config_dir / "skills"
+        (config_dir / "room-announcement.md").write_text("  \n")
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            text = room_veto.announcement_text(conn, config, "grp")
+        assert "I act for you" in text
+
     def test_it_is_posted_once_into_a_room_with_a_guest(self, config):
         with db.get_db(config.db_path) as conn:
             _group(conn)
