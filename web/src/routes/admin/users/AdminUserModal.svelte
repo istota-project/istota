@@ -89,6 +89,16 @@
   function adopt(next: AdminUserDetail, keepEdits: boolean) {
     const pending = keepEdits && form ? changedProfileFields(form, snapshot) : {};
     const stored = formFrom(next);
+    // An address the server added (the login save's append) joins an unsaved
+    // edit of the list rather than being overwritten by it.
+    if (pending.email_addresses && detail) {
+      const before = new Set(detail.profile.email_addresses.map((a) => a.toLowerCase()));
+      const mine = new Set(pending.email_addresses.map((a) => a.toLowerCase()));
+      const added = stored.email_addresses.filter(
+        (a) => !before.has(a.toLowerCase()) && !mine.has(a.toLowerCase()),
+      );
+      pending.email_addresses = [...pending.email_addresses, ...added];
+    }
     detail = next;
     snapshot = JSON.stringify(stored);
     form = { ...stored, ...pending };
@@ -184,6 +194,15 @@
     return { label: 'Unbound', variant: 'neutral' as const };
   });
 
+  /** Whether a field's `error` slot is on screen to report a refusal. */
+  function showsError(field: string): boolean {
+    if (field === 'sms_phone_number') return showSms;
+    if (field === 'whatsapp_number') return showWhatsApp;
+    if (field === 'disabled_modules') return !!detail?.options.modules.length;
+    if (field === 'disabled_skills') return !!detail?.options.skills.length;
+    return !!form && field in form;
+  }
+
   function toggle(list: string[], name: string): string[] {
     return list.includes(name) ? list.filter((n) => n !== name) : [...list, name];
   }
@@ -219,14 +238,22 @@
     if (typeof body.whatsapp_number === 'string')
       body.whatsapp_number = body.whatsapp_number.trim();
     try {
-      await updateAdminUser(userId, body);
+      const next = await updateAdminUser(userId, body);
       notifySuccess(`Saved settings for ${detail?.profile.display_name || userId}.`);
       onChanged();
+      if (loginDirty) {
+        // The typed login email is not part of this save; closing here would
+        // drop it without the discard question.
+        adopt(next, false);
+        return;
+      }
       open = false;
       onClose();
     } catch (e) {
       if (e instanceof AdminUserWriteError && e.fields.length) {
         errors = Object.fromEntries(e.fields.map((f) => [f, e.message]));
+        // A field with no error slot on screen would otherwise report nothing.
+        if (!e.fields.some(showsError)) banner = e.message;
       } else {
         banner = failed(e, 'The settings could not be saved.');
       }
@@ -324,7 +351,10 @@
             label="Timezone (IANA)"
             labelled={false}
             badge={badge('timezone')}
-            hint={hint('timezone', 'Used until the user sets their own.')}
+            hint={hint(
+              'timezone',
+              'The same setting the user changes on their own settings page; the last save wins.',
+            )}
             error={errors.timezone}
           >
             <Select
@@ -643,6 +673,7 @@
             checkbox
             badge={badge('default_briefings')}
             hint={hint('default_briefings', 'Applies when the user’s briefings are first seeded.')}
+            error={errors.default_briefings}
           >
             <input
               type="checkbox"

@@ -107,6 +107,8 @@ it('opens the settings editor from a row click and from the menu', async () => {
 
   await fireEvent.click(screen.getByRole('button', { name: 'Actions for Alice' }));
   const items = await screen.findAllByRole('menuitem');
+  // Opening the menu is not a row click: the trigger stops propagation.
+  expect(screen.queryByRole('dialog')).toBeNull();
   expect(items[0]).toHaveTextContent('Edit settings');
   await fireEvent.click(items[0]);
   expect(await screen.findByRole('dialog', { name: 'Settings for Alice' })).toBeTruthy();

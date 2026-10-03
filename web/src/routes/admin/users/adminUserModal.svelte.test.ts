@@ -161,6 +161,72 @@ describe('the admin user editor', () => {
     expect(await within(dialog).findByRole('status')).toHaveTextContent('Login email saved');
   });
 
+  it('keeps the address a login save appended when the list has unsaved edits', async () => {
+    api.setAdminUserIdentity.mockResolvedValue(
+      detail({
+        identity: {
+          email: 'robert@example.com',
+          disabled: false,
+          last_login_at: null,
+          state: 'passwordless',
+        },
+        profile: {
+          ...detail().profile,
+          email_addresses: ['bob@example.com', 'robert@example.com'],
+        },
+      }),
+    );
+    const { dialog } = await open();
+    await fireEvent.input(within(dialog).getByRole('textbox', { name: /Email addresses/ }), {
+      target: { value: 'bob@example.com, b2@example.com' },
+    });
+    await fireEvent.input(within(dialog).getByRole('textbox', { name: /Login email/ }), {
+      target: { value: 'robert@example.com' },
+    });
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Change login email' }));
+    await within(dialog).findByRole('status');
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(api.updateAdminUser).toHaveBeenCalledWith('bob', {
+        email_addresses: ['bob@example.com', 'b2@example.com', 'robert@example.com'],
+      }),
+    );
+  });
+
+  it('stays open after a field save when a typed login email is not saved yet', async () => {
+    const { dialog, onClose } = await open();
+    await fireEvent.input(within(dialog).getByRole('textbox', { name: /Display name/ }), {
+      target: { value: 'Robert' },
+    });
+    await fireEvent.input(within(dialog).getByRole('textbox', { name: /Login email/ }), {
+      target: { value: 'robert@example.com' },
+    });
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.updateAdminUser).toHaveBeenCalled());
+    expect(onClose).not.toHaveBeenCalled();
+    expect(within(dialog).getByRole('textbox', { name: /Login email/ })).toHaveValue(
+      'robert@example.com',
+    );
+    expect(api.setAdminUserIdentity).not.toHaveBeenCalled();
+  });
+
+  it('reports a refusal of a field with no error slot on screen in the banner', async () => {
+    api.updateAdminUser.mockRejectedValueOnce(
+      new api.AdminUserWriteError('Must be exact E.164.', ['sms_phone_number']),
+    );
+    const { dialog } = await open(
+      detail({
+        options: { ...detail().options, sms_enabled: false },
+        profile: { ...detail().profile, sms_phone_number: '' },
+      }),
+    );
+    await fireEvent.input(within(dialog).getByRole('textbox', { name: /Display name/ }), {
+      target: { value: 'Robert' },
+    });
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Must be exact E.164.');
+  });
+
   it('copies the SMS number into the WhatsApp field', async () => {
     const { dialog } = await open(
       detail({
