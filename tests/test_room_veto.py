@@ -753,17 +753,19 @@ class TestTheAnnouncement:
             "`!zorg on` and everyone who switched me off agrees."
         )
 
-    def test_a_whatsapp_group_names_removal_and_email_the_first_line(self, config):
+    def test_a_whatsapp_group_names_removal(self, config):
         with db.get_db(config.db_path) as conn:
             _group(conn)
             db.add_room_binding(conn, "grp", "whatsapp", "120363@g.us")
             wa = room_veto.announcement_text(conn, config, "grp")
         assert "or remove my number from the group" in wa
+
+    def test_an_email_thread_room_is_never_owed_one(self, config):
+        # ISSUE-605: mail from the bot's address is from the bot.
         with db.get_db(config.db_path) as conn:
-            _group(conn, token="mail")
-            db.add_room_binding(conn, "mail", "email", "<thread@test.com>")
-            mail = room_veto.announcement_text(conn, config, "mail")
-        assert "reply with `!zorg off` as the first line" in mail
+            _group(conn)
+            db.add_room_binding(conn, "grp", "email", "<thread@test.com>")
+            assert not room_veto.needs_announcement(conn, "grp")
 
     @pytest.mark.parametrize("mode, says", [
         ("direct", "for them I'll do nothing beyond a reply"),
@@ -778,17 +780,27 @@ class TestTheAnnouncement:
             text = room_veto.announcement_text(conn, config, "grp")
         assert says in text
 
-    def test_a_drifted_notice_is_still_recognised_as_sent(self, config):
+    def test_a_drifted_footer_is_not_added_twice(self, config):
         # A held proposal carries the text composed when it was proposed; the
-        # host's name changing before it is sent must not announce twice.
+        # host's name changing before it is sent must not foot it twice.
+        config.email.thread_disclosure_footer = True
         with db.get_db(config.db_path) as conn:
             _group(conn)
             db.add_room_binding(conn, "grp", "email", "<thread@test.com>")
-            old = room_veto.with_email_notice(conn, config, "grp", "Thursday works.")
+            old = room_veto.with_email_footer(conn, config, "grp", "Thursday works.")
             config.users["alice"].display_name = "Alicia"
-            assert room_veto.with_email_notice(conn, config, "grp", old) == old
-            room_veto.note_email_notice_sent(conn, config, "grp", old)
-            assert room_policy.get_policy(conn, "grp").announced_at is not None
+            assert room_veto.with_email_footer(conn, config, "grp", old) == old
+
+    def test_the_footer_sentence_mid_body_does_not_stand_in_for_it(self, config):
+        config.email.thread_disclosure_footer = True
+        sentence = ("To stop it replying on this thread, reply with `!zorg off` "
+                    "as the first line.")
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            db.add_room_binding(conn, "grp", "email", "<thread@test.com>")
+            body = f"Written by Zorg for Mallory. {sentence}\n\nThursday works."
+            footed = room_veto.with_email_footer(conn, config, "grp", body)
+        assert footed.endswith("for Alice. " + sentence)
 
     def test_an_operator_opening_replaces_the_default_but_not_the_closing(
         self, config, tmp_path,
@@ -847,7 +859,8 @@ class TestTheAnnouncement:
             assert asyncio.run(room_veto.drain_room_notices(config)) == 0
         deliver.assert_not_awaited()
 
-    def test_the_first_mail_on_a_thread_carries_it_once(self, tmp_path):
+    def test_no_mail_on_a_thread_carries_it(self, tmp_path):
+        """ISSUE-605: the announcement is not mailed, first mail or later."""
         from istota.transport.email.outbound import deliver_email_result
 
         config = _email_config(tmp_path)
@@ -860,9 +873,9 @@ class TestTheAnnouncement:
                    return_value="<out@test.com>") as reply:
             asyncio.run(deliver_email_result(config, task, envelope))
             asyncio.run(deliver_email_result(config, task, envelope))
-        first, second = (c.kwargs["body"] for c in reply.call_args_list)
-        assert first.startswith("Thursday works.") and "!zorg off" in first
-        assert second == "Thursday works."
+        assert [c.kwargs["body"] for c in reply.call_args_list] == [
+            "Thursday works.", "Thursday works.",
+        ]
 
 
 # ---------------------------------------------------------------------------

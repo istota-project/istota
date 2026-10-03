@@ -18,6 +18,8 @@ from datetime import datetime
 from typing import Literal, TypeAlias
 
 WhatsAppMessageKind = Literal["service", "template"]
+MediaKind = Literal["image", "audio"]
+"""Which pipeline an inbound file may enter, decided by the declared message type."""
 WhatsAppDeliveryStatus = Literal[
     "accepted", "sent", "delivered", "read", "failed",
 ]
@@ -133,6 +135,13 @@ class WhatsAppInboundMedia:
     reach it, because a Cloud normalizer that failed to set it produces a
     record nothing can stage, which `webhook._media_for_user` answers with
     `media_failed` — loud, and in front of the user.
+
+    **`kind` is what WhatsApp said the message was** (`imageMessage` or
+    `audioMessage`, Cloud's `type`), never what the sniff found: bytes can
+    satisfy more than one sniffer, so the declared type decides which pipeline
+    the file may enter and `media.stage_to_attachment` only confirms the bytes
+    match it. Defaulted to `"image"`, the only kind before audio arrived, so
+    every existing construction keeps its meaning.
     """
     staged_path: str
     mime_type: str
@@ -140,6 +149,7 @@ class WhatsAppInboundMedia:
     attached_for_user: str
     error: str | None
     remote_id: str = ""
+    kind: MediaKind = "image"
 
 
 @dataclass(frozen=True)

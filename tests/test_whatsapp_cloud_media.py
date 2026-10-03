@@ -42,6 +42,7 @@ from istota.transport.whatsapp.client import (
 )
 from istota.transport.whatsapp.providers.whatsapp_cloud import stage_cloud_media
 from istota.transport.whatsapp.webhook import (
+    MEDIA_FAILED_AUDIO_REPLY,
     MEDIA_FAILED_REPLY,
     handle_whatsapp_batch,
     normalize_payload,
@@ -492,7 +493,8 @@ class TestTheGraphFetch:
             _media_failed as cloud,
         )
 
-        assert cloud(media.MEDIA_NOT_PLACED) == baileys(media.MEDIA_NOT_PLACED)
+        for kind in media.MEDIA_KINDS:
+            assert cloud(kind, "not_placed") == baileys(kind, "not_placed")
         # And the prose is the common module's, not each adapter's own.
         from istota.transport.whatsapp import baileys_protocol
 
@@ -815,3 +817,119 @@ class TestTheSignedRouteStagesAndAnswers:
         assert len(rows) == 1
         assert rows[0][0] == "what is this?"
         assert "/Users/alice/inbox/" in rows[0][1]
+
+
+# ---------------------------------------------------------------------------
+# A voice note, on the same three calls
+# ---------------------------------------------------------------------------
+
+VOICE = (Path(__file__).parent / "fixtures" / "audio" / "voice.ogg").read_bytes()
+
+
+def _audio_message(*, message_id="wamid.voice", media_id=MEDIA_ID, voice=True):
+    audio: dict = {"mime_type": "audio/ogg; codecs=opus", "voice": voice}
+    if media_id is not None:
+        audio["id"] = media_id
+    return {
+        "id": message_id,
+        "from": USER_BSUID,
+        "timestamp": str(int(datetime.now(timezone.utc).timestamp())),
+        "type": "audio",
+        "audio": audio,
+    }
+
+
+class TestACloudVoiceNote:
+    """Meta types it `audio`; `voice` is logged and decides nothing."""
+
+    @pytest.mark.parametrize("voice", [True, False])
+    def test_it_normalizes_to_a_pending_audio_record(self, tmp_path, voice):
+        config = _config(tmp_path)
+
+        (event,) = _events(config, _audio_message(voice=voice))
+
+        assert event.message_type == "audio"
+        assert event.text is None
+        assert event.media.kind == "audio"
+        assert event.media.remote_id == MEDIA_ID
+        assert event.media.error is None
+        assert event.media.mime_type == "audio/ogg; codecs=opus"
+
+    def test_a_missing_media_id_is_the_voice_message_no_id_reason(
+        self, tmp_path,
+    ):
+        config = _config(tmp_path)
+
+        (event,) = _events(config, _audio_message(media_id=None))
+
+        assert event.media.kind == "audio"
+        assert event.media.error == media.reason("audio", "no_id")
+
+    def test_a_fetched_voice_note_becomes_a_task_carrying_the_ogg(
+        self, tmp_path, monkeypatch,
+    ):
+        config = _config(tmp_path)
+        _bind(config)
+        _install_client(monkeypatch, config,
+                        Graph(body=VOICE, mime="audio/ogg"))
+
+        events = _staged(config, _events(config, _audio_message()))
+        assert events[0].media.staged_path.endswith(".ogg")
+        with db.get_db(config.db_path) as conn:
+            results = handle_whatsapp_batch(
+                conn, config, events, provider=db.WHATSAPP_LEGACY_PROVIDER,
+            )
+
+        assert [result.disposition for result in results] == ["task"]
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, results[0].task_id)
+        assert task.prompt == "Voice message (see attached audio)."
+        assert task.attachments == [events[0].media.staged_path]
+        assert task.attachments[0].startswith("/Users/alice/inbox/whatsapp_")
+        assert (config.workspace_path / task.attachments[0].lstrip("/")).exists()
+        assert list(_media_dir(config).iterdir()) == []
+
+    def test_a_failed_fetch_is_said_about_a_voice_message(
+        self, tmp_path, monkeypatch,
+    ):
+        config = _config(tmp_path)
+        _bind(config)
+        _install_client(monkeypatch, config, Graph(download_status=500))
+
+        events = _staged(config, _events(config, _audio_message()))
+
+        assert events[0].media.error == media.reason("audio", "fetch_failed")
+        with db.get_db(config.db_path) as conn:
+            results = handle_whatsapp_batch(
+                conn, config, events, provider=db.WHATSAPP_LEGACY_PROVIDER,
+            )
+        assert [result.disposition for result in results] == ["media_failed"]
+        assert results[0].response_text == MEDIA_FAILED_AUDIO_REPLY
+
+    def test_bytes_that_are_not_audio_drop_the_record(
+        self, tmp_path, monkeypatch,
+    ):
+        config = _config(tmp_path)
+        _bind(config)
+        _install_client(monkeypatch, config, Graph(body=PNG))
+
+        events = _staged(config, _events(config, _audio_message()))
+
+        assert events[0].media is None
+        assert list(_media_dir(config).iterdir()) == []
+
+    def test_a_group_voice_note_gets_no_record_and_no_fetch(
+        self, tmp_path, monkeypatch,
+    ):
+        config = _config(tmp_path)
+        _bind(config)
+        graph = Graph(body=VOICE)
+        _install_client(monkeypatch, config, graph)
+        message = _audio_message()
+        message["group_id"] = "120363000000000000@g.us"
+
+        events = _staged(config, _events(config, message))
+
+        assert events[0].message_type == "group"
+        assert events[0].media is None
+        assert graph.requests == []

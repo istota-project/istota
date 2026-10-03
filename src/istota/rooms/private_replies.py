@@ -901,7 +901,7 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
             # On an email thread the post is a mail to these exact people, and
             # the host approving this preview approves that mail (D20): the
             # outbound gate does not hold a send that matches it.
-            from istota.rooms.veto import with_email_notice
+            from istota.rooms.veto import with_email_footer
             from istota.transport.email import threads as email_threads
             from istota.transport.email.outbound import recipients_of
 
@@ -909,7 +909,7 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
             if plan is None:
                 raise RequestError("parent_unavailable")
             email_recipients = recipients_of(plan)
-            reply = with_email_notice(conn, config, parent, reply)
+            reply = with_email_footer(conn, config, parent, reply)
             recipients = (
                 f"To: {email_recipients['to']}\n"
                 f"Cc: {', '.join(email_recipients['cc']) or '(nobody)'}\n\n"

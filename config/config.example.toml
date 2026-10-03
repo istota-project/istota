@@ -727,6 +727,11 @@ bot_email = "istota@example.com"  # bot's email address (to skip own messages)
 # your MTA stamps — it is the only way "the mailbox moved to a provider that does
 # not evaluate DMARC" ever surfaces.
 # dmarc_canary_warn_on_missing = false
+# A disclosure line on every mail the bot sends into a multi-person thread:
+# "Written by <bot>, an AI assistant, for <host>", plus how to stop it replying
+# there. Off by default, since mail from the bot's address is already from the
+# bot.
+# thread_disclosure_footer = false
 # Your receiving MTA's own authserv-id — the first field of the
 # Authentication-Results header it stamps, before the semicolon. It is what tells
 # your MTA's stamp from one the sender wrote. Blank (the default) reads the

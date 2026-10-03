@@ -167,14 +167,31 @@ _MENTION_TOKEN = re.compile(r"@[0-9]{1,32}")
 #: **The prose itself lives in `media.py`**, because the Cloud adapter says the
 #: same three things about its own fetch — there the daemon *is* the fetcher,
 #: so `client.fetch_media` raises them directly with no wire to cross. What a
-#: user is told is exactly what two copies would drift on. The keys stay here,
-#: since they are this adapter's wire vocabulary and the sidecar's own.
-_MEDIA_ERRORS: dict[str, str] = {
-    "download_failed": media_rules.MEDIA_FETCH_FAILED,
-    "over_the_cap": media_rules.MEDIA_OVER_CAP,
-    "write_failed": media_rules.MEDIA_WRITE_FAILED,
+#: user is told is exactly what two copies would drift on. The wire keys stay
+#: here, since they are this adapter's vocabulary and the sidecar's own, and
+#: each maps onto a kind-free `media.reason` key: the sidecar's key says what
+#: went wrong, and the record's kind says what it went wrong with.
+_MEDIA_ERROR_KEYS: dict[str, str] = {
+    "download_failed": "fetch_failed",
+    "over_the_cap": "over_cap",
+    "write_failed": "write_failed",
 }
-_UNKNOWN_MEDIA_ERROR = "the image could not be fetched"
+_UNKNOWN_MEDIA_ERROR_KEY = "fetch_unknown"
+#: The image sentences, which `_media_error` answers for an `image` record.
+_MEDIA_ERRORS: dict[str, str] = {
+    wire: media_rules.reason("image", key)
+    for wire, key in _MEDIA_ERROR_KEYS.items()
+}
+_UNKNOWN_MEDIA_ERROR = media_rules.reason("image", _UNKNOWN_MEDIA_ERROR_KEY)
+
+
+def _media_error(kind: str, wire: str | None) -> str:
+    """The sentence a record of *kind* carries for the sidecar's *wire* key.
+
+    `None` and any key outside `_MEDIA_ERROR_KEYS` are the unknown failure.
+    """
+    key = _MEDIA_ERROR_KEYS.get(wire or "", _UNKNOWN_MEDIA_ERROR_KEY)
+    return media_rules.reason(kind, key)
 
 #: Baileys' receipt vocabulary mapped onto the ledger's. A status this surface
 #: does not model yields `None` and the caller drops the receipt — inventing a
@@ -380,7 +397,7 @@ def _event_time(values: dict[str, Any]) -> datetime:
         raise BaileysProtocolError("invalid event timestamp") from None
 
 
-def _dropped_media(field: str) -> WhatsAppInboundMedia:
+def _dropped_media(field: str, kind: str = "image") -> WhatsAppInboundMedia:
     """Say a media field was refused, by field name and never by value.
 
     The value is a string a sidecar chose and this side just decided it could
@@ -402,13 +419,13 @@ def _dropped_media(field: str) -> WhatsAppInboundMedia:
     is exactly what could not be read. The sweep takes it.
     """
     logger.warning(
-        "whatsapp.baileys.media_dropped field=%s: the message is kept and its "
-        "image is not",
-        field,
+        "whatsapp.baileys.media_dropped field=%s kind=%s: the message is kept "
+        "and its media is not",
+        field, kind,
     )
     return WhatsAppInboundMedia(
         staged_path="", mime_type="", byte_count=0,
-        attached_for_user="", error=_UNKNOWN_MEDIA_ERROR,
+        attached_for_user="", error=_media_error(kind, None), kind=kind,
     )
 
 
@@ -444,25 +461,40 @@ def _inbound_media(payload: dict[str, Any]) -> WhatsAppInboundMedia | None:
     An `error` outranks a name. The two never arrive together from our own
     sidecar, and reading the name first would put a path on a record whose
     contract says `staged_path` is `""` when `error` is set.
+
+    **The kind is `message_type`**, `image` or `audio`, never the sniff. Media
+    fields on any other type are dropped, and the error sentence is the
+    kind's: the sidecar's `media_error` key is kind-free.
     """
     error_raw = payload.get("media_error")
+    name = payload.get("media_name")
+    if error_raw is None and name is None:
+        return None
+
+    # The kind is what the sidecar said the message was, and a media field on
+    # any other type is a combination our own sidecar never sends. It is
+    # refused like every other unreadable field: the record carries a failure,
+    # so STOP, commands and answers still work and a request takes the
+    # media-failed reply rather than running without the file.
+    declared = payload.get("message_type")
+    if declared not in media_rules.MEDIA_KINDS:
+        return _dropped_media("message_type")
+    kind = declared
+
     if error_raw is not None:
         if not isinstance(error_raw, str) or not error_raw:
-            return _dropped_media("media_error")
+            return _dropped_media("media_error", kind)
         return WhatsAppInboundMedia(
             staged_path="",
             mime_type="",
             byte_count=0,
             attached_for_user="",
-            error=_MEDIA_ERRORS.get(error_raw.strip().lower(),
-                                    _UNKNOWN_MEDIA_ERROR),
+            error=_media_error(kind, error_raw.strip().lower()),
+            kind=kind,
         )
 
-    name = payload.get("media_name")
-    if name is None:
-        return None
     if not media_rules.is_staged_name(name):
-        return _dropped_media("media_name")
+        return _dropped_media("media_name", kind)
 
     mime_raw = payload.get("media_mime")
     if mime_raw is None:
@@ -474,7 +506,7 @@ def _inbound_media(payload: dict[str, Any]) -> WhatsAppInboundMedia | None:
     ):
         mime = mime_raw
     else:
-        return _dropped_media("media_mime")
+        return _dropped_media("media_mime", kind)
 
     # Absent reads as nought, matching the mime arm above: both are advisory,
     # so losing an image over a missing log label would be the strictness
@@ -484,9 +516,9 @@ def _inbound_media(payload: dict[str, Any]) -> WhatsAppInboundMedia | None:
     if byte_count is None:
         byte_count = 0
     if isinstance(byte_count, bool) or not isinstance(byte_count, int):
-        return _dropped_media("media_bytes")
+        return _dropped_media("media_bytes", kind)
     if byte_count < 0:
-        return _dropped_media("media_bytes")
+        return _dropped_media("media_bytes", kind)
 
     return WhatsAppInboundMedia(
         staged_path=name,
@@ -494,6 +526,7 @@ def _inbound_media(payload: dict[str, Any]) -> WhatsAppInboundMedia | None:
         byte_count=byte_count,
         attached_for_user="",
         error=None,
+        kind=kind,
     )
 
 
@@ -560,6 +593,11 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
         payload.get("callback_data"), "callback_data", MAX_MESSAGE_ID_CHARS,
     )
     inbound_media = _inbound_media(payload)
+    if message_type == "audio":
+        # Audio carries no caption, and the daemon holds that rather than the
+        # sidecar: text on a voice note would reach STOP, the confirmation
+        # parse and `!` dispatch, and spoken words never drive those gates.
+        text = None
     sender = _text(payload, "jid")
     group = None
     if payload.get("group") is True:

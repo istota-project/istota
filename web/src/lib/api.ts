@@ -3305,6 +3305,8 @@ export interface RoomMembers {
   can_manage: boolean;
   /** Transcript rows an add discloses to the new member. */
   message_count: number;
+  /** An email thread room belongs to its host and takes no members. */
+  email_thread?: boolean;
 }
 
 export function getRoomMembers(id: number): Promise<RoomMembers> {

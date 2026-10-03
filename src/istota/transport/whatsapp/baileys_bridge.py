@@ -1283,8 +1283,11 @@ class BridgeStatus:
 # ---------------------------------------------------------------------------
 
 
-def _media_failed(reason: str) -> WhatsAppInboundMedia:
+def _media_failed(kind: str, key: str) -> WhatsAppInboundMedia:
     """The record a message whose file went nowhere carries into the batch.
+
+    *key* is a `media.reason` key and the sentence is *kind*'s, so a voice
+    note's failure is said about a voice message rather than an image.
 
     A record with an `error` rather than no record at all, and the difference
     is not cosmetic: `_dispatch_inbound`'s narrowed gate reads "a type this
@@ -1295,7 +1298,7 @@ def _media_failed(reason: str) -> WhatsAppInboundMedia:
     """
     return WhatsAppInboundMedia(
         staged_path="", mime_type="", byte_count=0,
-        attached_for_user="", error=reason,
+        attached_for_user="", error=media_rules.reason(kind, key), kind=kind,
     )
 
 
@@ -1349,10 +1352,11 @@ def stage_inbound_media(
        opted out, or a read that could not be answered.
     2. **Sniff, then consume.** The sniff is asked here rather than left to
        `stage_to_attachment` because that function answers `None` for two
-       situations the surface owes different replies for: a file that is not a
-       decodable image is not an image at all and takes the `unsupported_type`
-       reply the surface already had, while an image that could not be placed
-       is istota's own failure and says so. One extra 32-byte read buys the
+       situations the surface owes different replies for: a file that does not
+       sniff as the record's kind (a decodable image, or audio the
+       transcription pass reads) takes the `unsupported_type` reply the
+       surface already had, while one that could not be placed is istota's
+       own failure and says so, in the kind's words. One extra read buys the
        distinction — and the file's own existence is asked first, because
        `sniff_staged` answers `None` for a file it could not open just as it
        does for one whose bytes match nothing, and only the second of those
@@ -1384,6 +1388,7 @@ def stage_inbound_media(
     incoming = event.media
     if incoming is None or incoming.error is not None:
         return event
+    kind = incoming.kind
     try:
         if not media_rules.is_staged_name(incoming.staged_path):
             # The decoder validated it and this joins it, and the two are
@@ -1395,7 +1400,7 @@ def stage_inbound_media(
                 message_fingerprint(event.message_id),
             )
             return dataclasses.replace(
-                event, media=_media_failed(media_rules.MEDIA_UNATTRIBUTED),
+                event, media=_media_failed(kind, "unattributed"),
             )
         staged = Path(media_dir) / incoming.staged_path
         user_id = media_rules.precheck(
@@ -1412,7 +1417,7 @@ def stage_inbound_media(
             )
             media_rules.discard_staged(staged)
             return dataclasses.replace(
-                event, media=_media_failed(media_rules.MEDIA_UNATTRIBUTED),
+                event, media=_media_failed(kind, "unattributed"),
             )
         if not _staged_file_is_readable(staged):
             # **Not the same answer as "this is not an image", and the
@@ -1429,15 +1434,17 @@ def stage_inbound_media(
                 message_fingerprint(event.message_id),
             )
             return dataclasses.replace(
-                event, media=_media_failed(media_rules.MEDIA_NOT_PLACED),
+                event, media=_media_failed(kind, "not_placed"),
             )
-        if media_rules.sniff_staged(staged) is None:
+        if media_rules.sniff_staged(staged, kind) is None:
             media_rules.discard_staged(staged)
             return dataclasses.replace(event, media=None)
-        attachment = media_rules.stage_to_attachment(config, user_id, staged)
+        attachment = media_rules.stage_to_attachment(
+            config, user_id, staged, kind,
+        )
         if attachment is None:
             return dataclasses.replace(
-                event, media=_media_failed(media_rules.MEDIA_NOT_PLACED),
+                event, media=_media_failed(kind, "not_placed"),
             )
         return dataclasses.replace(
             event,
@@ -1453,7 +1460,7 @@ def stage_inbound_media(
             message_fingerprint(event.message_id),
         )
         return dataclasses.replace(
-            event, media=_media_failed(media_rules.MEDIA_NOT_PLACED),
+            event, media=_media_failed(kind, "not_placed"),
         )
     finally:
         # After the consume, never before it — see step 3. `prune_media_dir`

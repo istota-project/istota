@@ -69,6 +69,9 @@ class CommandContext:
     # handler ignores it; `!confirm` reads it because `!yes` and `!no` are two
     # answers to one question and the alias table maps both onto one handler.
     invoked_as: str = ""
+    # The surface's own reading of its roster, for a room the registry may not
+    # yet know is shared (a Talk group whose roster has not been recorded).
+    is_group_chat: bool = False
     # Output slot: a handler that returns plain text but also has a structured
     # payload (e.g. !search's result cards) sets this; ``dispatch`` threads it
     # onto the returned ``CommandResult.data`` for rich stream surfaces. Most
@@ -401,6 +404,7 @@ async def dispatch(
     surface: str = "talk",
     conn: sqlite3.Connection | None = None,
     registry: "TransportRegistry | None" = None,
+    is_group_chat: bool = False,
 ) -> CommandResult:
     """Dispatch ``content`` as a ``!command``, surface-agnostically.
 
@@ -443,6 +447,7 @@ async def dispatch(
             surface=surface,
             registry=registry,
             invoked_as=invoked_as,
+            is_group_chat=is_group_chat,
         )
         result = await handler(ctx)
         # A handler returns plain text (and may set ``ctx.result_data`` for a
@@ -779,6 +784,13 @@ async def cmd_confirm(ctx: CommandContext):
     to prevent.
     """
     from . import confirmations
+
+    # Every answer names the held mail's sender and subject, and the open set
+    # spans the user's rooms. A shared room's own questions are asked in the
+    # asker's own private chat.
+    refusal = _private_only(ctx, "your held questions")
+    if refusal is not None:
+        return refusal
 
     conn, user_id = ctx.conn, ctx.user_id
     words = ctx.args.split()
@@ -1117,6 +1129,53 @@ def _room_token(ctx: CommandContext) -> str:
         db.resolve_room_token(ctx.conn, ctx.surface, ctx.conversation_token)
         or ctx.conversation_token
     )
+
+
+def _in_shared_room(ctx: CommandContext) -> bool:
+    """Whether more than one person reads this command's reply.
+
+    An unreadable roster reads as shared.
+    """
+    from istota.rooms.private_replies import is_shared_room
+
+    if ctx.conn is None:
+        # A context built without a connection (CLI, REPL) names no room.
+        return ctx.is_group_chat
+    try:
+        return is_shared_room(ctx.conn, _room_token(ctx), is_group_chat=ctx.is_group_chat)
+    except Exception:  # noqa: BLE001 — fail toward the refusal
+        logger.warning("could not read the audience of %s", ctx.conversation_token, exc_info=True)
+        return True
+
+
+def _private_only(ctx: CommandContext, what: str) -> str | None:
+    """The refusal for a personal reply asked for in a shared room, else None.
+
+    On Talk a command's reply is posted into the conversation, so in a group
+    everyone reads it (ISSUE-609). The refusal holds on every surface, since the
+    request itself was seen.
+    """
+    if _in_shared_room(ctx):
+        return f"Use your private chat with me to see {what}."
+    return None
+
+
+def _task_refusal(ctx: CommandContext, task: "db.Task") -> str | None:
+    """The refusal for showing ``task`` here, else None.
+
+    A shared room may see its own turns from the epoch its present audience
+    shares; a task from another room, or from before someone joined, is the
+    user's own.
+    """
+    conn = ctx.conn
+    here = db._canonical_room_token(conn, _room_token(ctx))
+    task_room = (
+        db._canonical_room_token(conn, task.conversation_token)
+        if task.conversation_token else None
+    )
+    if task_room == here and task.id > db.front_stage_cutoff(conn, here).task_id:
+        return None
+    return _private_only(ctx, "that task")
 
 
 def _ctx_brain(ctx: CommandContext):
@@ -1580,7 +1639,7 @@ def _room_notes(ctx: CommandContext, room, query: str) -> str:
     from istota.rooms.lookup import Ambiguous, Found, numbered_list, resolve_room
 
     conn, user_id = ctx.conn, ctx.user_id
-    if room is None or db.room_is_shared(conn, room.token):
+    if room is None or _in_shared_room(ctx):
         return ROOM_NOTES_REFUSAL
     noted = storage.room_notes_tokens(ctx.config, user_id)
     match = resolve_room(conn, user_id, query, include_left_with_notes=noted,
@@ -1675,6 +1734,9 @@ def _room_guests(conn, token: str, user_id: str, value: str) -> str:
 @command("status", "Show your running/pending tasks and system status")
 async def cmd_status(ctx: CommandContext):
     config, conn, user_id = ctx.config, ctx.conn, ctx.user_id
+    refusal = _private_only(ctx, "your tasks")
+    if refusal is not None:
+        return refusal
     rows = conn.execute(
         """
         SELECT id, status, prompt, created_at, source_type FROM tasks
@@ -1807,6 +1869,9 @@ async def cmd_usage(ctx: CommandContext):
     import asyncio
 
     config, user_id = ctx.config, ctx.user_id
+    refusal = _private_only(ctx, "your usage")
+    if refusal is not None:
+        return refusal
     is_admin = config.is_admin(user_id)
 
     # Commit the caller's transaction before blocking, the same way `cmd_drafts`
@@ -2186,30 +2251,30 @@ def _usage_age(seconds: float) -> str:
 async def cmd_memory(ctx: CommandContext):
     config, conn = ctx.config, ctx.conn
     user_id, args = ctx.user_id, ctx.args
-    mount = config.workspace_path
     target = args.strip().lower()
 
+    # The room's own notes are read by everyone in it already; the user's
+    # memory and facts are theirs alone.
+    if target == "user" or target == "facts" or target.startswith("facts "):
+        refusal = _private_only(ctx, "your memory")
+        if refusal is not None:
+            return refusal
+
+    if target in ("user", "channel") and not config.has_workspace:
+        return "Nextcloud mount not configured -- cannot read memory files."
+
     if target == "user":
-        if mount is None:
-            return "Nextcloud mount not configured -- cannot read memory files."
-        mem_path = mount / "Users" / user_id / config.bot_dir_name / "config" / "USER.md"
-        if mem_path.exists():
-            content = mem_path.read_text()
-            if content.strip():
-                return f"**User memory** ({len(content)} chars):\n\n{content}"
+        from .storage import read_user_memory_v2
+        content = read_user_memory_v2(config, user_id)
+        if content:
+            return f"**User memory** ({len(content)} chars):\n\n{content}"
         return "**User memory:** (empty)"
 
     if target == "channel":
-        if mount is None:
-            return "Nextcloud mount not configured -- cannot read memory files."
-        from .storage import validate_conversation_token
-        room_token = _room_token(ctx)
-        validate_conversation_token(room_token)
-        mem_path = mount / "Channels" / room_token / "CHANNEL.md"
-        if mem_path.exists():
-            content = mem_path.read_text()
-            if content.strip():
-                return f"**Channel memory** ({len(content)} chars):\n\n{content}"
+        from .storage import read_channel_memory
+        content = read_channel_memory(config, _room_token(ctx))
+        if content:
+            return f"**Channel memory** ({len(content)} chars):\n\n{content}"
         return "**Channel memory:** (empty)"
 
     if target == "facts":
@@ -2339,6 +2404,9 @@ async def cmd_cron(ctx: CommandContext):
         return f"Disabled scheduled job '{job_name}'. Note: CRON.md was not updated (no file, no such job in it, or the write was refused) — change is DB-only and may not persist."
 
     # Default: list all jobs
+    refusal = _private_only(ctx, "your scheduled jobs")
+    if refusal is not None:
+        return refusal
     jobs = db.get_user_scheduled_jobs(conn, user_id)
     if not jobs:
         return "No scheduled jobs configured."
@@ -2558,7 +2626,9 @@ async def cmd_check(ctx: CommandContext):
 
     config = ctx.config
 
-    if not config.is_admin(ctx.user_id):
+    # The registry names users and the plan's usage, which `!usage` withholds
+    # from a shared room too.
+    if not config.is_admin(ctx.user_id) or _in_shared_room(ctx):
         results = await asyncio.to_thread(doctor.run_checks, config)
         healthy, summary = doctor.verdict(results)
         return f"**Health Check**\n\n{'OK' if healthy else 'PROBLEMS'} — {summary}"
@@ -2817,6 +2887,10 @@ async def cmd_more(ctx: CommandContext):
     if task.user_id != user_id and not config.is_admin(user_id):
         return f"Task #{task_id} belongs to another user."
 
+    refusal = _task_refusal(ctx, task)
+    if refusal is not None:
+        return refusal
+
     if not task.execution_trace:
         if task.status in ("pending", "locked", "running"):
             return f"Task #{task_id} is still {task.status} — trace available after completion."
@@ -2897,6 +2971,10 @@ async def _resolve_retry_target(ctx: CommandContext) -> "tuple[db.Task | None, s
             return None, f"Task #{target_id} not found."
         if task.user_id != user_id and not config.is_admin(user_id):
             return None, f"Task #{task.id} belongs to another user."
+        # The reply quotes the task's prompt.
+        refusal = _task_refusal(ctx, task)
+        if refusal is not None:
+            return None, refusal
         if task.source_type not in _RETRYABLE_SOURCE_TYPES:
             return None, (
                 f"Task #{task.id} is a `{task.source_type}` task — only "
@@ -2935,6 +3013,9 @@ async def _resolve_retry_target(ctx: CommandContext) -> "tuple[db.Task | None, s
     task = db.get_task(conn, row["id"])
     if task is None:
         return None, "No failed or cancelled task in this room to retry."
+    refusal = _task_refusal(ctx, task)
+    if refusal is not None:
+        return None, refusal
     return task, ""
 
 
@@ -3484,6 +3565,10 @@ def _build_search_data(
 async def cmd_search(ctx: CommandContext):
     config, conn = ctx.config, ctx.conn
     user_id, conversation_token, args = ctx.user_id, _room_token(ctx), ctx.args
+    # Results include the user's memories and, with `--all`, their other rooms.
+    refusal = _private_only(ctx, "search results")
+    if refusal is not None:
+        return refusal
     parsed = _parse_search_args(args)
     if not parsed.query:
         return (
@@ -3600,7 +3685,9 @@ async def cmd_trust(ctx: CommandContext):
     config, conn, user_id, args = ctx.config, ctx.conn, ctx.user_id, ctx.args
     email = args.strip().lower()
     if not email:
-        # List trusted senders
+        refusal = _private_only(ctx, "your trusted senders")
+        if refusal is not None:
+            return refusal
         db_senders = db.list_trusted_senders(conn, user_id)
         user_config = config.users.get(user_id)
         config_patterns = user_config.trusted_email_senders if user_config else []
@@ -3642,10 +3729,10 @@ async def cmd_trust(ctx: CommandContext):
 def _visible_recipients(draft) -> str:
     """To + Cc by address, Bcc by count.
 
-    `!drafts` is surface-agnostic and works in a multi-user Talk room, so
-    anything this returns may be posted where every participant reads it.
-    Printing the blind-carbon list there would defeat the one property Bcc has.
-    The count is enough for the user to recognise their own message.
+    `!drafts` is refused in a shared room (ISSUE-609), but a private room's
+    transcript can still be forwarded or exported, and printing the blind-carbon
+    list would defeat the one property Bcc has. The count is enough for the
+    user to recognise their own message.
     """
     shown = [*draft.to_addrs, *draft.cc_addrs]
     text = ", ".join(shown) or "(no recipients)"
@@ -3693,6 +3780,11 @@ async def cmd_drafts(ctx: CommandContext):
     import asyncio
 
     from istota.mail import drafts
+
+    # Each line names a held message's recipients and subject, from any room.
+    refusal = _private_only(ctx, "your held mail")
+    if refusal is not None:
+        return refusal
 
     conn, user_id = ctx.conn, ctx.user_id
     words = ctx.args.split()

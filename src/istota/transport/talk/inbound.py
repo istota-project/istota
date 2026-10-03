@@ -1881,6 +1881,11 @@ async def _process_poll_results(
                         dispatch_command(
                             config, actor_id, conversation_token, content,
                             surface="talk", conn=conn,
+                            # A group whose roster could not be fetched has
+                            # recorded nobody, so it must not read as private.
+                            is_group_chat=is_multi_user or (
+                                conv_type != 1 and not participants
+                            ),
                         ),
                     )
                     if result.handled:

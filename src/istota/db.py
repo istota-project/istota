@@ -513,6 +513,11 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # The message's To and Cc, so an email thread room's reply-all goes to the
     # latest message's people (multiplayer D6).
     _add_columns(conn, "processed_emails", {"recipients": "TEXT"})
+    # The host's own authenticated, addressed question on an email thread
+    # room, whose answer is not held by the outbound gate (ISSUE-607).
+    _add_columns(conn, "processed_emails", {
+        "host_asked": "INTEGER NOT NULL DEFAULT 0",
+    })
 
     # WhatsApp bindings: the adapter split (whatsapp-baileys-adapter spec).
     # `jid` is the Baileys-native identity and `provider` says which adapter
@@ -1150,6 +1155,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_room_policy(conn)
     _migrate_room_veto(conn)
     _migrate_room_epochs(conn)
+    _migrate_email_thread_members(conn)
     _migrate_groups(conn)
     _migrate_room_group(conn)
 
@@ -6923,6 +6929,7 @@ def _migrate_processed_emails_uidvalidity(conn: sqlite3.Connection) -> None:
                 routing_method TEXT,
                 processed_at TEXT DEFAULT (datetime('now')),
                 recipients TEXT,
+                host_asked INTEGER NOT NULL DEFAULT 0,
                 UNIQUE (uidvalidity, email_id),
                 FOREIGN KEY (task_id) REFERENCES tasks(id)
             )
@@ -8187,6 +8194,61 @@ _GROUPS_DDL = (
 )
 
 
+def _migrate_email_thread_members(conn: sqlite3.Connection) -> None:
+    """An email thread room has one member, its host (ISSUE-606).
+
+    The web used to let the host add another istota user, whose turns on the
+    thread then ran as them, at their own reach, and could make the bot mail
+    the host's correspondents under the member's own trust list. Every other
+    membership of an email-bound room is dropped the way the web's remove does
+    (`drop_web_room_member`: membership, web presence and handle), and their
+    email participant rows become guests, which is what the next mail would
+    classify them as. They lose nothing they cannot already read: every
+    message on the thread reached their own inbox.
+
+    Markered (`email_thread_members_v1`); a re-run finds nothing to drop.
+    """
+    try:
+        already = conn.execute(
+            "SELECT 1 FROM _migration_state WHERE name = 'email_thread_members_v1'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+    if already:
+        return
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT m.room_token, m.user_id, "
+            "COALESCE(p.host_user_id, r.user_id) AS host "
+            "FROM room_members m "
+            "JOIN rooms r ON r.token = m.room_token "
+            "JOIN room_bindings b ON b.room_token = m.room_token AND b.surface = 'email' "
+            "LEFT JOIN room_policy p ON p.room_token = m.room_token"
+        ).fetchall()
+    except sqlite3.OperationalError as e:
+        if "no such" in str(e).lower():
+            return  # fresh install, room tables not created yet
+        raise
+    for row in rows:
+        if row["host"] is None or row["user_id"] == row["host"]:
+            continue
+        drop_web_room_member(conn, row["room_token"], row["user_id"])
+        conn.execute(
+            "UPDATE room_participants SET kind = 'guest' "
+            "WHERE room_token = ? AND user_id = ? AND kind = 'principal' "
+            "AND surface = 'email' AND left_at IS NULL",
+            (row["room_token"], row["user_id"]),
+        )
+        logger.info(
+            "email thread room %s: removed member %s (ISSUE-606)",
+            row["room_token"], row["user_id"],
+        )
+    conn.execute(
+        "INSERT OR IGNORE INTO _migration_state (name) "
+        "VALUES ('email_thread_members_v1')"
+    )
+
+
 def _migrate_groups(conn: sqlite3.Connection) -> None:
     """Create `groups`, `group_members` and `group_kv`, empty (groups Stage 1).
 
@@ -8838,19 +8900,21 @@ def mark_email_processed(
     routing_method: str | None = None,
     uidvalidity: int = 0,
     recipients: str | None = None,
+    host_asked: bool = False,
 ) -> int:
     """Record a processed email, keyed by (uidvalidity, email_id).
 
     ``recipients`` is the message's To and Cc as a JSON list; ``thread_id`` is
-    the room token for a message on an email thread room.
+    the room token for a message on an email thread room. ``host_asked`` marks
+    the host's own authenticated, addressed question there (ISSUE-607).
     """
     cursor = conn.execute(
         """
-        INSERT INTO processed_emails (uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method, recipients)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO processed_emails (uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method, recipients, host_asked)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
-        (uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method, recipients),
+        (uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method, recipients, int(bool(host_asked))),
     )
     return cursor.fetchone()[0]
 

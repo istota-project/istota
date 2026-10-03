@@ -11,7 +11,7 @@ Related pages: [switching the bot off](room-veto.md) for the veto, [WhatsApp gro
 Everyone who writes in a room, or appears on its roster, is a **participant**. There are three kinds:
 
 - **Members** are Istota users who belong to the room and see it in their web sidebar. A member speaking is a *principal*: the bot works for them, with their data and their permissions.
-- **Guests** are everyone else: a Talk guest, a Nextcloud user who is not an Istota user, a phone number in a WhatsApp group, a correspondent on an email thread. An Istota user who has not been added to the room is a guest there too.
+- **Guests** are everyone else: a Talk guest, a Nextcloud user who is not an Istota user, a phone number in a WhatsApp group, a correspondent on an email thread. An Istota user who has not been added to the room is a guest there too, and on an email thread every Istota user but the host is one, since a thread takes no members.
 - **Agents** are bots, including Istota itself. Their turns are recorded and never answered, which stops two bots answering each other in a loop.
 
 Every turn is stored in the room's transcript with its author, guests' turns included. Before this, an unmentioned message in a Talk group was never stored, and a non-user's message was dropped.
@@ -43,7 +43,7 @@ What is per person, beyond persona and reach: a member's per-skill instructions 
 
 In a shared room the bot does not answer every message. The **speech gate** decides, using `[speech_gate] mode`:
 
-- `mention` (the default): the bot answers a turn that addresses it and records the rest. On Talk that is an @mention; on web it is `@name` anywhere or the bot's name as the first word; on WhatsApp it is a mention, a reply to one of the bot's messages, or the name as the first word; on email it is the bot's address in To. Cc means the bot is listening and does not reply.
+- `mention` (the default): the bot answers a turn that addresses it and records the rest. On Talk that is an @mention; on web it is `@name` anywhere or the bot's name as the first word; on WhatsApp it is a mention, a reply to one of the bot's messages, or the name as the first word; on email it is the bot's address in To, or the bot's name in the new part of the message (`@name` anywhere, or the name first on a line). Cc without the name means the bot is listening and does not reply.
 - `classifier`: a small, cheap model reads the last few turns and decides whether the latest one is meant for the bot. If the model fails or times out, the bot stays quiet. A turn that addresses the bot is always answered, whatever the model says. An email thread room stays on `mention` even then, because speaking there is a reply-all.
 - `off`: the bot answers every turn.
 

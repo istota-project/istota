@@ -287,6 +287,33 @@ class TestAGuestsTurnHasItsOwnDirectories:
         assert staged.read_bytes() == b"%PDF-1.4 ticket"
         assert str(staged.resolve()) in seen["prompt"]
 
+    def test_an_inbox_attachment_is_copied_in_when_files_are_withheld(self, config):
+        # The scheduler maps an email or WhatsApp inbox attachment onto the
+        # host's workspace, which a guest's turn does not bind.
+        inbox = config.workspace_path / "Users" / "alice" / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        own = inbox / "7_invoice.pdf"
+        own.write_bytes(b"%PDF-1.4 invoice")
+        token = _room(config, shared=True)
+        _guest(config, token)
+        seen = _run(config, token, guest=True, attachments=[str(own)])
+        assert _user_dir(config) not in _binds(seen["argv"])
+        assert str(own) not in seen["prompt"]
+        staged = (config.temp_dir / ".control" / "alice" / "task_1"
+                  / "room-attachments" / "7_invoice.pdf")
+        assert staged.read_bytes() == b"%PDF-1.4 invoice"
+        assert str(staged.resolve()) in seen["prompt"]
+
+    def test_control_a_members_turn_keeps_its_inbox_attachment_in_place(self, config):
+        inbox = config.workspace_path / "Users" / "alice" / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        own = inbox / "7_invoice.pdf"
+        own.write_bytes(b"%PDF-1.4 invoice")
+        seen = _run(config, _room(config, shared=True), attachments=[str(own)])
+        assert not (config.temp_dir / ".control" / "alice" / "task_1"
+                    / "room-attachments").exists()
+        assert str(own) in seen["prompt"]
+
     def test_a_retry_of_a_task_an_earlier_release_restricted_writes_where_it_did(
         self, config,
     ):

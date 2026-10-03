@@ -183,6 +183,10 @@ class EmailConfig:
     # when the MTA is known to stamp — that is the only way the "mailbox moved to
     # a provider that does not evaluate DMARC" drift case is visible.
     dmarc_canary_warn_on_missing: bool = False
+    # A plain disclosure line on every mail the bot sends into an email thread
+    # room (ISSUE-605): who wrote it, for whom, and the `!<bot> off` switch.
+    # Off by default: mail from the bot's address is from the bot.
+    thread_disclosure_footer: bool = False
     # The receiving MTA's own authserv-id — the first field of an RFC 8601
     # Authentication-Results header, before the semicolon. It is what separates
     # our MTA's stamp from one the sender wrote (ISSUE-249). Blank, the default,

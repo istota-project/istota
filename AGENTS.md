@@ -107,6 +107,7 @@ src/istota/
 │   ├── git_hardening.py  # The `-c` overrides that stop a repository's own config running a program → sandbox.md
 │   ├── git_remote_scrub.py  # Strips credentials out of the git configs under `developer.repos_dir` → sandbox.md
 │   ├── user_scope.py     # Scoping a user id under a root, in one place → sandbox.md
+│   ├── attachment_source.py  # Where the daemon may read an inbound attachment from, opened with no link followed → sandbox.md
 │   ├── host_paths.py     # Host-path allowlist for the skill CLIs that take one → sandbox.md
 │   ├── cgroup.py         # A cgroup v2 group per task: memory.max, pids.max, cpu.max → sandbox.md
 │   ├── shell_exec.py     # How a command string becomes a shell argv, with `pipefail` on → sandbox.md
@@ -167,6 +168,7 @@ src/istota/
 │   ├── du.py             # Du-style tree measurement and the first-level directory scan → leaf-modules.md
 │   ├── rclone_client.py  # The rclone API `storage` and the files skill each had a copy of → leaf-modules.md
 │   ├── image_sniff.py    # Which bytes `/chat/files` will serve `inline` on the app's own origin → leaf-modules.md
+│   ├── audio_sniff.py    # Which bytes are audio the transcription pipeline decodes, and `AUDIO_EXTENSIONS` → leaf-modules.md
 │   ├── untrusted.py      # One fence around content somebody else wrote, markers redacted from the content → leaf-modules.md
 │   ├── toml_fence.py     # Where a TOML fence starts and ends, for the four markdown-config parsers → leaf-modules.md
 │   ├── llm_json.py       # The same, for a fence in *model* output; anchored closer, linear walk → leaf-modules.md

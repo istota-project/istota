@@ -31,7 +31,7 @@ from istota.executor import (
     API_RETRY_DELAY_SECONDS,
     TRANSIENT_STATUS_CODES,
 )
-from istota.sandbox import credential_shim
+from istota.sandbox import attachment_source, credential_shim
 from istota import db as _db
 from istota import executor
 from istota.skills import developer as developer_skill
@@ -1663,7 +1663,7 @@ class TestPreTranscribeAttachments:
         assert mock_transcribe.call_args[0][0] == "/tmp/voice.mp3"
 
     @patch(_TRANSCRIBE_PATCH)
-    def test_the_task_identity_is_handed_to_the_runner(self, mock_transcribe):
+    def test_the_task_identity_is_handed_to_the_runner(self, mock_transcribe, tmp_path):
         """The child is a skill CLI and its path argument is scoped.
 
         `whisper transcribe` resolves `audio_path` against the allowlist the
@@ -1674,16 +1674,20 @@ class TestPreTranscribeAttachments:
         leaving to the runner's own tests.
         """
         mock_transcribe.return_value = {"status": "ok", "text": "call the plumber"}
+        mount = tmp_path / "shared"
+        (mount / "Users" / "alice").mkdir(parents=True)
+        (mount / "Users" / "alice" / "voice.mp3").write_bytes(b"not really audio")
+        deferred = tmp_path / "istota" / "alice"
         _pre_transcribe_attachments(
-            ["/mnt/shared/Users/alice/voice.mp3"], "",
+            [str(mount / "Users" / "alice" / "voice.mp3")], "",
             user_id="alice",
-            mount_path="/mnt/shared",
-            deferred_dir="/tmp/istota/alice",
+            mount_path=str(mount),
+            deferred_dir=str(deferred),
         )
         kwargs = mock_transcribe.call_args.kwargs
         assert kwargs["user_id"] == "alice"
-        assert kwargs["mount_path"] == "/mnt/shared"
-        assert kwargs["deferred_dir"] == "/tmp/istota/alice"
+        assert kwargs["mount_path"] == str(mount)
+        assert kwargs["deferred_dir"] == str(deferred)
 
     @patch(_TRANSCRIBE_PATCH)
     def test_empty_prompt_becomes_the_transcript(self, mock_transcribe):
@@ -1837,6 +1841,7 @@ class TestTheAudioTheChildIsActuallyHandedIsInReach:
         """
         identity = self._identity(tmp_path)
         seen = self._spawn(monkeypatch)
+        monkeypatch.setattr(attachment_source, "NC_DATA_ROOT", tmp_path / "nc-data")
         if shape == "nc_data":
             source = tmp_path / "nc-data" / "bob" / "files" / "Talk" / "memo.m4a"
         else:
@@ -1844,7 +1849,9 @@ class TestTheAudioTheChildIsActuallyHandedIsInReach:
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_bytes(b"not really audio")
 
-        out = executor._pre_transcribe_attachments([str(source)], "", **identity)
+        out = executor._pre_transcribe_attachments(
+            [str(source)], "", temp_dir=tmp_path / "temp", **identity,
+        )
 
         assert "buy milk" in out
         handed = Path(seen["argv"][-1])
@@ -1903,6 +1910,177 @@ class TestTheAudioTheChildIsActuallyHandedIsInReach:
         executor._pre_transcribe_attachments([str(source)], "")
 
         assert seen["argv"][-1] == str(source)
+
+
+class TestStagingNeverFollowsALink:
+    """ISSUE-610: a link in the workspace is not a way to read a daemon file.
+
+    The inbox is bound read-write into the user's sandbox, so a task can turn
+    an attachment into a symlink. Staging used to resolve the path, find it
+    outside the roots, and copy whatever it pointed at into the task's temp
+    dir. The target here stands in for anything the daemon can read and no
+    sandbox can see.
+    """
+
+    @staticmethod
+    def _setup(tmp_path, monkeypatch):
+        identity = TestTheAudioTheChildIsActuallyHandedIsInReach._identity(tmp_path)
+        seen = TestTheAudioTheChildIsActuallyHandedIsInReach._spawn(monkeypatch)
+        secret = tmp_path / "private" / "istota.db"
+        secret.parent.mkdir()
+        secret.write_bytes(b"SECRET-BYTES")
+        inbox = identity["mount_path"] / "Users" / "alice" / "inbox"
+        inbox.mkdir()
+        return identity, seen, secret, inbox
+
+    @staticmethod
+    def _staged(deferred_dir):
+        landing = Path(deferred_dir) / "transcribe"
+        return sorted(landing.iterdir()) if landing.is_dir() else []
+
+    def test_a_symlinked_leaf_is_skipped_and_nothing_is_copied(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        identity, seen, secret, inbox = self._setup(tmp_path, monkeypatch)
+        (inbox / "x.ogg").symlink_to(secret)
+
+        with caplog.at_level(logging.WARNING, logger="istota.executor"):
+            out = executor._pre_transcribe_attachments(
+                [str(inbox / "x.ogg")], "typed", temp_dir=tmp_path / "temp", **identity,
+            )
+
+        assert out == "typed"
+        assert "argv" not in seen
+        assert self._staged(identity["deferred_dir"]) == []
+        assert any("x.ogg" in r.getMessage() for r in caplog.records)
+
+    def test_a_symlinked_directory_component_is_skipped(
+        self, tmp_path, monkeypatch,
+    ):
+        identity, seen, secret, inbox = self._setup(tmp_path, monkeypatch)
+        (secret.parent / "x.ogg").write_bytes(b"SECRET-BYTES")
+        (inbox / "web-chat").symlink_to(secret.parent)
+
+        out = executor._pre_transcribe_attachments(
+            [str(inbox / "web-chat" / "x.ogg")], "typed",
+            temp_dir=tmp_path / "temp", **identity,
+        )
+
+        assert out == "typed"
+        assert "argv" not in seen
+        assert self._staged(identity["deferred_dir"]) == []
+
+    def test_a_link_into_the_roots_is_still_refused(self, tmp_path, monkeypatch):
+        """Refused whatever it points at: a comparison is a race the model wins."""
+        identity, seen, _secret, inbox = self._setup(tmp_path, monkeypatch)
+        real = inbox / "real.ogg"
+        real.write_bytes(b"not really audio")
+        (inbox / "x.ogg").symlink_to(real)
+
+        executor._pre_transcribe_attachments(
+            [str(inbox / "x.ogg")], "", temp_dir=tmp_path / "temp", **identity,
+        )
+
+        assert "argv" not in seen
+
+    def test_an_unexpected_location_outside_the_roots_is_not_staged(
+        self, tmp_path, monkeypatch,
+    ):
+        """Only the Talk fallback shapes are copied in; anything else is refused."""
+        identity, seen, secret, _inbox = self._setup(tmp_path, monkeypatch)
+        stray = secret.parent / "memo.ogg"
+        stray.write_bytes(b"SECRET-BYTES")
+
+        executor._pre_transcribe_attachments(
+            [str(stray)], "", temp_dir=tmp_path / "temp", **identity,
+        )
+
+        assert "argv" not in seen
+        assert self._staged(identity["deferred_dir"]) == []
+
+    @pytest.mark.parametrize("shape", ["whatsapp", "email", "restricted"])
+    def test_the_daemons_own_fallback_copies_are_still_staged(
+        self, tmp_path, monkeypatch, shape,
+    ):
+        """WhatsApp's and email's upload-failure copies, and a restricted
+        task's own `room-attachments` copy, are daemon-written and outside
+        every root the child derives."""
+        identity, seen, _secret, _inbox = self._setup(tmp_path, monkeypatch)
+        temp = tmp_path / "temp"
+        control = temp / ".control" / "alice" / "task_7"
+        if shape == "whatsapp":
+            source = temp / "whatsapp-media" / "memo.ogg"
+        elif shape == "email":
+            source = temp / "attachments_ab12cd" / "memo.ogg"
+        else:
+            source = control / "room-attachments" / "memo.ogg"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"not really audio")
+
+        out = executor._pre_transcribe_attachments(
+            [str(source)], "", temp_dir=temp, control_dir=control, **identity,
+        )
+
+        assert "buy milk" in out
+        handed = Path(seen["argv"][-1])
+        assert handed.is_relative_to(identity["deferred_dir"])
+        assert handed.read_bytes() == b"not really audio"
+
+    def test_a_planted_landing_link_is_not_written_through(
+        self, tmp_path, monkeypatch,
+    ):
+        """`transcribe/` sits in the task's own temp dir, which the model writes."""
+        identity, seen, _secret, _inbox = self._setup(tmp_path, monkeypatch)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (identity["deferred_dir"] / "transcribe").symlink_to(elsewhere)
+        source = tmp_path / "temp" / "memo.m4a"
+        source.write_bytes(b"not really audio")
+
+        executor._pre_transcribe_attachments(
+            [str(source)], "", temp_dir=tmp_path / "temp", **identity,
+        )
+
+        assert list(elsewhere.iterdir()) == []
+        assert "argv" not in seen
+
+
+class TestAWhatsAppVoiceNoteIsTranscribed:
+    """The WhatsApp half end to end, from the task row to the transcript.
+
+    The staging step names the inbox copy `/Users/<uid>/inbox/...`, the
+    scheduler maps it onto the mount, and the pass this file covers takes it
+    from there. Only the child is stubbed.
+    """
+
+    @patch(_TRANSCRIBE_PATCH)
+    def test_a_localized_ogg_is_transcribed_into_the_prompt(
+        self, mock_transcribe, tmp_path,
+    ):
+        from istota.scheduler import localize_workspace_attachments
+        from istota.transport.ingest import describe_attachment_only_message
+
+        mount = tmp_path / "mount"
+        inbox = mount / "Users" / "alice" / "inbox"
+        inbox.mkdir(parents=True)
+        fixture = Path(__file__).parent / "fixtures" / "audio" / "voice.ogg"
+        (inbox / "whatsapp_ab12-cd34.ogg").write_bytes(fixture.read_bytes())
+        deferred = tmp_path / "temp" / "alice"
+        deferred.mkdir(parents=True)
+        config = Config(workspace_path=mount, temp_dir=tmp_path / "temp")
+        row = ["/Users/alice/inbox/whatsapp_ab12-cd34.ogg"]
+        mock_transcribe.return_value = {"status": "ok", "text": "buy milk"}
+
+        attachments = localize_workspace_attachments(config, "alice", row)
+        out = _pre_transcribe_attachments(
+            attachments, describe_attachment_only_message(row),
+            user_id="alice", mount_path=mount, deferred_dir=deferred,
+        )
+
+        assert mock_transcribe.call_count == 1
+        assert os.path.isfile(mock_transcribe.call_args[0][0])
+        assert out.startswith("Voice message (see attached audio).")
+        assert "Transcribed voice message: buy milk" in out
 
 
 class TestPreTranscriptionStaysOutOfTheDaemon:
@@ -3646,3 +3824,45 @@ class TestAnOptionalReadNeverCreatesTheDatabase:
         assert success, result
         assert not (tmp_path / "data" / "istota.db").exists()
         assert list((tmp_path / "data").iterdir()) == []
+
+
+class TestRestrictedStagingNeverFollowsALink:
+    """`stage_restricted_attachments` copies into a guest-facing sandbox, so
+    it takes the same rule as audio and images (ISSUE-610)."""
+
+    def test_a_symlinked_directory_in_the_inbox_is_not_copied(self, tmp_path):
+        mount = tmp_path / "mount"
+        inbox = mount / "Users" / "alice" / "inbox"
+        inbox.mkdir(parents=True)
+        (mount / "Talk").mkdir()
+        private = tmp_path / "private"
+        private.mkdir()
+        (private / "x.pdf").write_bytes(b"SECRET-BYTES")
+        (inbox / "web-chat").symlink_to(private)
+        dest = tmp_path / "control" / "room-attachments"
+        dest.parent.mkdir()
+        config = Config(workspace_path=mount, temp_dir=tmp_path / "temp")
+        named = str(inbox / "web-chat" / "x.pdf")
+
+        out = executor.stage_restricted_attachments(
+            config, [named], dest, user_id="alice", files_withheld=True,
+        )
+
+        assert out == [named]
+        assert not dest.exists() or list(dest.iterdir()) == []
+
+    def test_an_own_inbox_file_is_copied(self, tmp_path):
+        mount = tmp_path / "mount"
+        inbox = mount / "Users" / "alice" / "inbox"
+        inbox.mkdir(parents=True)
+        (inbox / "x.pdf").write_bytes(b"%PDF-1.4")
+        dest = tmp_path / "control" / "room-attachments"
+        dest.parent.mkdir()
+        config = Config(workspace_path=mount, temp_dir=tmp_path / "temp")
+
+        out = executor.stage_restricted_attachments(
+            config, [str(inbox / "x.pdf")], dest, user_id="alice", files_withheld=True,
+        )
+
+        assert out == [str((dest / "x.pdf").resolve())]
+        assert (dest / "x.pdf").read_bytes() == b"%PDF-1.4"
