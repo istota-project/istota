@@ -441,6 +441,15 @@ def _read_bounded_bytes(proc: subprocess.Popen, max_bytes: int) -> tuple[bytes, 
     return b"".join(chunks), over_limit
 
 
+#: Refusals that say the repository reaches outside the task's own subtree, or
+#: that there is no subtree to confine it to. A step that would otherwise
+#: degrade on failure (the snapshot) passes these through unchanged: they are
+#: request faults, and a degraded review would land the branch anyway.
+CONTAINMENT_REASONS = frozenset({
+    "repos_dir_unset", "git_dir_not_allowed", "common_dir_not_allowed",
+})
+
+
 def git_dir(worktree: Path) -> Path:
     """The worktree's resolved git directory, confined to `DEVELOPER_REPOS_DIR`.
 
@@ -1617,10 +1626,11 @@ def run_review(
         else:
             tools = True
 
-    # Again, after the snapshot and before `git log`: the snapshot swallows
-    # its own refusals into `snapshot_failed`, and the worktree is writable
-    # throughout, so a `.git` redirected since `collect_diff` must stop the
-    # run here rather than feed another repository's history to the reviewer.
+    # Again, after the snapshot and before `git log`: the worktree is writable
+    # throughout, and a snapshot that failed for another reason (or a fake one)
+    # may never have reached its own check, so a `.git` redirected since
+    # `collect_diff` must stop the run here rather than feed another
+    # repository's history to the reviewer.
     git_dir(worktree)
 
     envelope["snapshot"] = _snapshot_dict(snapshot)

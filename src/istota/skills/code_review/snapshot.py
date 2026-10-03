@@ -117,13 +117,17 @@ def build_snapshot(
 
     `root` is the shared temp root (`config.temp_dir`). Raises `ReviewError`
     with reason `snapshot_failed` on any failure, after removing whatever run
-    directory it had made.
+    directory it had made, except a containment refusal
+    (`engine.CONTAINMENT_REASONS`), which keeps its own reason so the caller
+    treats it as the request fault it is rather than degrading the review.
     """
     try:
         head = engine._require_object_id(bundle.head, "head")
         engine.git_dir(worktree)
         user_level = _ensure_user_level(Path(root), user_id)
     except (OSError, ValueError, ReviewError) as e:
+        if _is_containment_refusal(e):
+            raise
         raise ReviewError(
             f"Could not prepare a snapshot directory: {e}", reason="snapshot_failed"
         ) from e
@@ -145,11 +149,15 @@ def build_snapshot(
         return _fill(worktree, bundle, head, run_dir, max_bytes, max_file_bytes)
     except BaseException as e:
         shutil.rmtree(run_dir, ignore_errors=True)
-        if isinstance(e, Exception):
+        if isinstance(e, Exception) and not _is_containment_refusal(e):
             raise ReviewError(
                 f"Snapshot of {bundle.rng} failed: {e}", reason="snapshot_failed"
             ) from e
         raise
+
+
+def _is_containment_refusal(exc: BaseException) -> bool:
+    return isinstance(exc, ReviewError) and exc.reason in engine.CONTAINMENT_REASONS
 
 
 def remove_snapshot(snapshot: Snapshot | None) -> None:

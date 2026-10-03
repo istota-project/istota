@@ -322,6 +322,32 @@ class TestTheRunDirectory:
 
         assert list(elsewhere.iterdir()) == []
 
+    def test_a_containment_refusal_keeps_its_own_reason(
+        self, repo, temp_root, tmp_path
+    ):
+        """A `.git` pointed outside the repos root after the diff was taken is
+        a request fault. Rewrapped as `snapshot_failed`, the engine would read
+        it as a degraded review and carry on text-only."""
+        change(repo)
+        bundle = bundle_for(repo)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        run_git(outside, "init", "-q", "-b", "main", ".")
+        (outside / "f.txt").write_text("x\n")
+        commit(outside, "outside")
+        (repo / ".git").rename(repo.parent / "proj-git-moved")
+        (repo / ".git").write_text(f"gitdir: {outside / '.git'}\n")
+
+        with pytest.raises(ReviewError) as excinfo:
+            build_snapshot(
+                repo, bundle, root=temp_root, user_id="alice",
+                max_bytes=BIG, max_file_bytes=BIG,
+            )
+
+        assert excinfo.value.reason == "git_dir_not_allowed"
+        review_root = temp_root / ".review"
+        assert not review_root.exists() or not any(review_root.rglob("run-*"))
+
     def test_an_unresolved_head_is_refused(self, repo, temp_root):
         bundle = bundle_for(repo)
         bundle.head = "HEAD"
