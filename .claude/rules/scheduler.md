@@ -13,7 +13,7 @@ paths:
 `run_daemon(config, *, install_signal_handlers=True, ready_event=None)`. `istota serve` runs it on a thread with `install_signal_handlers=False` (main-thread-only) and stops it via `scheduler.request_shutdown()`. `ready_event` is set before the loop; flock contention on `DAEMON_LOCK_PATH` raises `_DaemonAlreadyRunning`.
 
 1. flock; 2. signal handlers; 3. hydrate user configs; 4. user dirs; 4a. `recover_orphaned_tasks_on_startup`; 4b. start `AsyncRuntime`; 5. Talk poll thread; 6. `WorkerPool`.
-7. Loop: `pool.dispatch()`, `_tick_interval_gates(...)`, `_dispatch_sleep`. No check is written into the loop: `build_interval_gates` is the authoritative list, pinned by `tests/test_scheduler_interval_gates.py::EXPECTED_BINDINGS`. Notes:
+7. Loop: `refresh_user_profiles_if_changed(config)` (one single-row read unless a profile changed), `pool.dispatch()`, `_tick_interval_gates(...)`, `_dispatch_sleep`. No check is written into the loop: `build_interval_gates` is the authoritative list, pinned by `tests/test_scheduler_interval_gates.py::EXPECTED_BINDINGS`. Notes:
    - DB health and the `host_pressure` breadcrumb run on the first tick. The backup clock is seeded from the persisted stamp, never reset at boot (a host deploying daily otherwise never backed up).
    - `_check_host_pressure` feeds `pool.update_pressure()`; on a `snapshot_trigger` crossing it writes one `host_pressure_snapshot` plus one alert per cooldown.
 8. `pool.shutdown()`, `runtime.stop(timeout=10)`, release lock.

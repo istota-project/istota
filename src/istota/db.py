@@ -180,6 +180,12 @@ class Task:
     # halves of one attempt, not task state. The durable copy is what the
     # scheduler writes into the `result` column; there is no column here.
     partial_result: str | None = None
+    # The audio attachments that produced a non-empty transcript this attempt,
+    # as the executor was handed them, each with its own text (ISSUE-611,
+    # ISSUE-613). The same kind of hand-off as `partial_result`: the scheduler
+    # deletes these WhatsApp inbox copies once the task completes and puts the
+    # text into the room's user row. Never loaded from a row.
+    transcribed_audio: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -1221,6 +1227,10 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     # Pure DDL with no marker — see the docstring. Last because it depends on
     # nothing above it.
     _migrate_notifications(conn)
+    # Same shape: pure DDL, no marker, no transaction of its own.
+    _migrate_profile_generation(conn)
+    # Same shape again.
+    _migrate_user_profile_managed_fields(conn)
     # After the schema-creating migrations and before `executescript`, which is
     # what makes it one-way: `schema.sql` no longer declares the table, so
     # nothing recreates what this drops.
@@ -1947,6 +1957,73 @@ def get_subtask_depth(conn: sqlite3.Connection, task_id: int) -> int:
         current = row["parent_task_id"]
         depth += 1
     return depth
+
+
+def update_task_prompt(conn: sqlite3.Connection, task_id: int, prompt: str) -> None:
+    """Replace a task's stored prompt, for the voice-note transcript (ISSUE-611)."""
+    conn.execute("UPDATE tasks SET prompt = ? WHERE id = ?", (prompt, task_id))
+
+
+def replace_voice_notes_in_turn(
+    conn: sqlite3.Connection,
+    task_id: int,
+    *,
+    stand_in: str,
+    transcript: str,
+    drop_indexes: "set[int]",
+    attachment_count: int,
+) -> int | None:
+    """Put a voice note's transcript into its task's stored user turn (ISSUE-613).
+
+    The one place a stored user row is edited after the fact. The body becomes
+    `transcript` when it is still the transport's `stand_in`, and gains it on a
+    line of its own otherwise, so typed text is kept; a body already holding
+    it is left alone, so a second completion does not repeat it. `drop_indexes` are
+    positions in the task's attachment list, which the row's `attachments` and
+    `attachment_paths` mirror; a row whose list is not that length is left
+    with its chips rather than losing the wrong one. Both columns are written
+    as lists, `[]` included, because the history reader falls back to the task
+    row's paths for a NULL column and would bring the chip back. Returns the
+    row id, or None when the task stored no user row.
+    """
+    row = conn.execute(
+        "SELECT id, body, attachments, attachment_paths FROM messages "
+        "WHERE task_id = ? AND role = 'user' ORDER BY id LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    body = row["body"] or ""
+    if transcript in body:
+        new_body = body
+    elif body.strip() == stand_in.strip():
+        new_body = transcript
+    else:
+        new_body = f"{body}\n\n{transcript}"
+
+    def _items(raw: str | None) -> list | None:
+        try:
+            items = json.loads(raw) if raw else None
+        except (TypeError, ValueError):
+            return None
+        return items if isinstance(items, list) else None
+
+    names = _items(row["attachments"])
+    paths = _items(row["attachment_paths"])
+    attachments, attachment_paths = row["attachments"], row["attachment_paths"]
+    if names is not None and len(names) == attachment_count:
+        if paths is None or len(paths) != attachment_count:
+            paths = [None] * attachment_count
+        keep = [i for i in range(attachment_count) if i not in drop_indexes]
+        attachments = json.dumps([names[i] for i in keep])
+        attachment_paths = json.dumps([paths[i] for i in keep])
+
+    conn.execute(
+        "UPDATE messages SET body = ?, attachments = ?, attachment_paths = ? "
+        "WHERE id = ?",
+        (new_body, attachments, attachment_paths, row["id"]),
+    )
+    return row["id"]
 
 
 def update_task_status(
@@ -8319,6 +8396,70 @@ def _migrate_groups(conn: sqlite3.Connection) -> None:
         )
     except sqlite3.OperationalError:
         return  # marker table not created yet (very early fresh install)
+
+
+_PROFILE_GENERATION_TABLE_DDL = (
+    """CREATE TABLE IF NOT EXISTS profile_generation (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    generation INTEGER NOT NULL DEFAULT 0
+)""",
+    "INSERT OR IGNORE INTO profile_generation (id, generation) VALUES (1, 0)",
+)
+
+_PROFILE_GENERATION_TRIGGER_DDL = tuple(
+    f"CREATE TRIGGER IF NOT EXISTS user_profiles_gen_{suffix} "
+    f"AFTER {event} ON user_profiles\n"
+    "BEGIN UPDATE profile_generation SET generation = generation + 1 "
+    "WHERE id = 1; END"
+    for suffix, event in (("ai", "INSERT"), ("au", "UPDATE"), ("ad", "DELETE"))
+)
+
+
+def _migrate_profile_generation(conn: sqlite3.Connection) -> None:
+    """Create `profile_generation` and the `user_profiles` triggers that bump it.
+
+    Pure DDL plus an `INSERT OR IGNORE`, so idempotent with no marker row, and
+    safe inside whatever transaction the migrations before it left open (the
+    `_migrate_notifications` reasoning). The triggers need `user_profiles`,
+    which a fresh database does not have yet at this point; there `schema.sql`
+    creates all of it a moment later, so they are skipped rather than failed.
+    Kept equal to the block beside `user_profiles` in `schema.sql`.
+    """
+    try:
+        for statement in _PROFILE_GENERATION_TABLE_DDL:
+            conn.execute(statement)
+        has_profiles = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user_profiles'"
+        ).fetchone()
+        if has_profiles:
+            for statement in _PROFILE_GENERATION_TRIGGER_DDL:
+                conn.execute(statement)
+    except sqlite3.OperationalError as e:
+        # The next boot retries; until then profile edits reach a running
+        # process only on restart, which is the behaviour before this table.
+        logger.warning("profile_generation migration failed: %s", e)
+
+
+_USER_PROFILE_MANAGED_FIELDS_DDL = """CREATE TABLE IF NOT EXISTS user_profile_managed_fields (
+    user_id TEXT NOT NULL,
+    field TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, field)
+)"""
+
+
+def _migrate_user_profile_managed_fields(conn: sqlite3.Connection) -> None:
+    """Create `user_profile_managed_fields` on an existing database.
+
+    Pure DDL, idempotent with no marker, the `_migrate_profile_generation`
+    shape. Kept equal to the table in `schema.sql`. Until it exists every
+    reader treats a user as having no managed fields, which is the behaviour
+    before the table.
+    """
+    try:
+        conn.execute(_USER_PROFILE_MANAGED_FIELDS_DDL)
+    except sqlite3.OperationalError as e:
+        logger.warning("user_profile_managed_fields migration failed: %s", e)
 
 
 def _migrate_notifications(conn: sqlite3.Connection) -> None:

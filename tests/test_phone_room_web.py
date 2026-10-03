@@ -340,6 +340,35 @@ class TestTheTextedTurn:
             ("texted in", "sms", None),
         ]
 
+    async def test_a_transcribed_voice_note_shows_its_words_and_no_chip(
+        self, client, db_path, tmp_path,
+    ):
+        # ISSUE-613: the scheduler's rewrite, read back through the history
+        # endpoint the web view of the WhatsApp room uses.
+        config = _config(db_path, tmp_path)
+        note = "/Users/alice/inbox/whatsapp_abc.ogg"
+        stand_in = "Voice message (see attached audio)."
+        with db.get_db(db_path) as conn:
+            turn = record_phone_turn(
+                conn, config, surface="whatsapp",
+                surface_ref=whatsapp_conversation_token("alice"), user_id="alice",
+                text=stand_in, channel_name="WhatsApp", attachments=[note],
+            )
+            db.replace_voice_notes_in_turn(
+                conn, turn.task_id, stand_in=stand_in,
+                transcript="Transcribed voice message: call the plumber",
+                drop_indexes={0}, attachment_count=1,
+            )
+        cookies = await _login(client)
+        room_id = (await _rooms(client, cookies))[turn.room_token]["id"]
+        resp = await client.get(
+            f"/istota/api/chat/rooms/{room_id}/messages", cookies=cookies,
+        )
+        rows = [m for m in resp.json()["messages"] if m["role"] == "user"]
+        assert [(m["text"], m.get("via"), m.get("attachments")) for m in rows] == [
+            ("Transcribed voice message: call the plumber", "whatsapp", None),
+        ]
+
 
 class TestThePinnedDefaultAndRelays:
     def test_a_relay_never_lands_in_a_pinned_phone_room(self, db_path, tmp_path):

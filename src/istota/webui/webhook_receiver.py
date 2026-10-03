@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse, Response
 
 from istota import location
 from istota.build_info import build_description
-from istota.config import load_config
+from istota.config import load_config, refresh_user_profiles_if_changed
 from istota.location.models import LocationContext
 from istota.lib.timestamps import iso_now
 
@@ -360,6 +360,9 @@ async def _receive_sms(provider: str, request: Request, background: BackgroundTa
             media_type=parsed.response_content_type,
         )
 
+    # The sender is matched against `config.users`, a snapshot; pick up an
+    # SMS number saved since load. At most one check a second.
+    refresh_user_profiles_if_changed(config, min_interval=1.0)
     try:
         with db.get_db(config.db_path) as conn:
             result = handle_provider_event(

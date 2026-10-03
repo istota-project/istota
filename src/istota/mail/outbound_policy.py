@@ -61,6 +61,17 @@ HOLD_UNTRUSTED = "untrusted_recipient"
 HOLD_ALL_MODE = "all_mode"
 
 
+def below_floor(value: str, floor: str) -> bool:
+    """Whether a user's ``outbound_approval`` would loosen the operator floor.
+
+    ``""`` follows the floor and is never below it. A value the code does not
+    know is not "below" anything: callers validate membership first.
+    """
+    if not value or value not in _ORDER or floor not in _ORDER:
+        return False
+    return _ORDER[value] < _ORDER[floor]
+
+
 def effective_policy(config: "Config", user_id: str) -> str:
     """``max(operator floor, user setting)`` on the ``off < untrusted < all``
     ordering.
