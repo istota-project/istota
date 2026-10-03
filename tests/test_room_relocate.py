@@ -91,6 +91,30 @@ def test_migrate_preserves_multiplayer_state_and_native_refs(database):
     assert snapshot(database) == after
 
 
+def test_migrate_rewrites_private_reply_tags(database):
+    """`messages.about_room_token` and `tasks.about_room_token` name a shared
+    room canonically, so a relocation carries them to the minted token."""
+    with db.get_db(database) as conn:
+        old = legacy(conn)
+        private = db.create_web_chat_room(conn, "alice", "general").token
+        tagged = db.add_message(conn, private, role="system", body="note",
+                                origin_surface="web", about_room_token=old)
+        untagged = db.add_message(conn, private, role="system", body="other",
+                                  origin_surface="web", about_room_token="unrelated")
+        task = db.create_task(conn, user_id="alice", source_type="web", prompt="hi",
+                              conversation_token=private)
+        conn.execute("UPDATE tasks SET about_room_token=?, status='completed' WHERE id=?",
+                     (old, task))
+    assert room_relocate.migrate_database(database) == 0
+    with db.get_db(database) as conn:
+        new = dict(conn.execute("SELECT old_token,new_token FROM room_token_migration"))[old]
+        tags = dict(conn.execute("SELECT id, about_room_token FROM messages WHERE id IN (?, ?)",
+                                 (tagged, untagged)))
+        assert tags == {tagged: new, untagged: "unrelated"}
+        assert conn.execute("SELECT about_room_token FROM tasks WHERE id=?",
+                            (task,)).fetchone()[0] == new
+
+
 @pytest.mark.parametrize("status", ["locked", "running", "pending_confirmation"])
 def test_refuses_active_tasks_without_any_write(database, status, capsys):
     with db.get_db(database) as conn:

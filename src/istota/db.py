@@ -1143,6 +1143,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_room_participants(conn)
     _migrate_drop_room_data_grants(conn)
     _migrate_side_rooms(conn)
+    _migrate_private_replies(conn)
     _migrate_room_policy(conn)
     _migrate_room_veto(conn)
     _migrate_room_epochs(conn)
@@ -4496,6 +4497,8 @@ class Message:
     #: most one is set by convention; a reader that finds both prefers the label.
     author_user_id: str | None = None
     author_label: str | None = None
+    #: Canonical token of the shared room a private reply is about, or None.
+    about_room_token: str | None = None
 
 
 def _row_to_room(row: sqlite3.Row) -> Room:
@@ -4544,6 +4547,7 @@ def _row_to_message(row: sqlite3.Row) -> Message:
         ),
         author_user_id=row["author_user_id"] if "author_user_id" in keys else None,
         author_label=row["author_label"] if "author_label" in keys else None,
+        about_room_token=row["about_room_token"] if "about_room_token" in keys else None,
         id=row["id"],
         room_token=row["room_token"],
         role=row["role"],
@@ -5673,6 +5677,25 @@ def room_has_phone_binding(conn: sqlite3.Connection, room_token: str) -> bool:
     ).fetchone() is not None
 
 
+
+def is_private_room_of(
+    conn: sqlite3.Connection, token: str | None, user_id: str, *, allow_phone: bool = False,
+) -> bool:
+    """Whether ``token`` is a live room whose only member is ``user_id``.
+
+    The one test for "a room only this user reads", shared by the relay's
+    default-room destination and the private-reply resolver. Not archived,
+    members exactly ``[user_id]``, and no SMS or WhatsApp binding unless
+    ``allow_phone``: a phone room is a read-only transcript in web, so only a
+    caller that sends on the phone surface itself may choose one.
+    """
+    room = get_room(conn, token) if token else None
+    if room is None or room.archived:
+        return False
+    if list_room_members(conn, room.token) != [user_id]:
+        return False
+    return allow_phone or not room_has_phone_binding(conn, room.token)
+
 def resolve_room_token(
     conn: sqlite3.Connection, surface: str, surface_ref: str,
 ) -> str | None:
@@ -5729,6 +5752,7 @@ def add_message(
     author_label: str | None = None,
     delivery_reference: str | None = None,
     author_participant_id: int | None = None,
+    about_room_token: str | None = None,
 ) -> int:
     """Append a message to a room's canonical transcript. Returns the new id.
 
@@ -5750,8 +5774,9 @@ def add_message(
         "INSERT INTO messages "
         "(room_token, role, body, title, task_id, origin_surface, external_ids, "
         " attachments, attachment_paths, client_msg_id, reply_to_message_id, "
-        " author_user_id, author_label, delivery_reference, author_participant_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        " author_user_id, author_label, delivery_reference, author_participant_id, "
+        " about_room_token) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         (
             room_token,
             role,
@@ -5771,6 +5796,7 @@ def add_message(
             author_label or None,
             delivery_reference or None,
             author_participant_id,
+            about_room_token or None,
         ),
     ).fetchone()
     return int(row["id"])
@@ -7954,6 +7980,19 @@ def _migrate_side_rooms(conn: sqlite3.Connection) -> None:
         )
     except sqlite3.OperationalError:
         return  # rooms or the marker table not created yet
+
+
+def _migrate_private_replies(conn: sqlite3.Connection) -> None:
+    """Add `messages.about_room_token` and `tasks.about_room_token` (ISSUE-608).
+
+    The shared room a private reply is about, and the shared room a linked turn
+    replies about. Nothing is backfilled: no row was tagged before this.
+    Deliberately writes no marker yet: `private_replies_v1` is the gate for
+    the side-room removal that joins this migration later, and setting it now
+    would let a database that booted this half skip that one.
+    """
+    _add_columns(conn, "messages", {"about_room_token": "TEXT"})
+    _add_columns(conn, "tasks", {"about_room_token": "TEXT"})
 
 
 def _migrate_room_group(conn: sqlite3.Connection) -> None:

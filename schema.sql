@@ -83,6 +83,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Multiplayer D3: who read the room when the turn was written, `private`,
     -- `principals` or `mixed`. NULL for a task that is not a room turn.
     audience TEXT,
+    -- A linked turn (ISSUE-608): the canonical token of the shared room this
+    -- private-room turn replies about, copied off the tagged message it
+    -- quotes. NULL for every unlinked turn; nothing carries it forward.
+    about_room_token TEXT,
 
     -- Silent mode (for scheduled jobs with silent_unless_action)
     heartbeat_silent INTEGER DEFAULT 0,  -- Whether to suppress output on no-action
@@ -1448,7 +1452,12 @@ CREATE TABLE IF NOT EXISTS messages (
     -- joining the room), and for rows older than the table the backfill could
     -- not attribute. A guest turn has this and no `author_user_id`.
     author_participant_id INTEGER,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    -- A private reply: the canonical token of the shared room this row in a
+    -- member's own private room is about (ISSUE-608). NULL on every other row.
+    -- A reply to a tagged row is linked to that room (`tasks.about_room_token`).
+    -- No index: read by primary key.
+    about_room_token TEXT
 );
 -- No index on either author column: they are projected, never filtered.
 CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id);

@@ -48,10 +48,9 @@ def _room(conn, config, recipient_user_id: str) -> dict:
     room = db.get_room(conn, handle.token) if handle is not None else None
     # A phone room is a read-only transcript in web: a question delivered there
     # could only be answered by a web send, which the server refuses. A pinned
-    # default can still name one, so the default-room exclusion is not enough.
-    if (room is None or room.archived
-            or db.list_room_members(conn, room.token) != [recipient_user_id]
-            or db.room_has_phone_binding(conn, room.token)):
+    # default can still name one, so the default-room exclusion is not enough;
+    # the predicate refuses it.
+    if room is None or not db.is_private_room_of(conn, room.token, recipient_user_id):
         raise RequestError("recipient_has_no_private_room")
     talk = db.get_room_binding(conn, room.token, "talk")
     name = label_text(handle.name or room.name or "")
