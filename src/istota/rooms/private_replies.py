@@ -430,13 +430,19 @@ def park_about(conn, task) -> str | None:
     A task in a shared room asks its principal privately, never in front of
     the room (multiplayer D4). A guest's turn does too even in a room no
     second member reads: the guest is the audience it must not reach (D2).
+    An email thread room does too with one correspondent and the host as its
+    only member, which `room_is_shared` reads as unshared: the thread's only
+    leg is the reply-all, and the correspondent reads it.
     """
+    from istota.rooms.scopes import is_email_thread_room
+
     parent = canonical_token(conn, task.conversation_token) if task.conversation_token else None
     room = db.get_room(conn, parent) if parent else None
     if room is None:
         return None
     if (getattr(task, "guest_participant_id", None) is None
-            and not (task.is_group_chat or db.room_is_shared(conn, parent))):
+            and not (task.is_group_chat or db.room_is_shared(conn, parent)
+                     or is_email_thread_room(conn, parent))):
         return None
     return parent
 

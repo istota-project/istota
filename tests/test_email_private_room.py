@@ -349,6 +349,28 @@ class TestTheOfficeRegression:
         assert _private_items(db_path) == {
             "private_rows": [], "requests": [], "drafts": [], "notifications": []}
 
+    def test_a_question_to_one_correspondent_parks_privately(self, config, db_path):
+        """A thread room with one correspondent and the host as its only
+        member reads unshared, and its reply-all still reaches the
+        correspondent: the question parks and goes to the host's own room."""
+        _office(config)
+        with db.get_db(db_path) as conn:
+            private = db.create_web_chat_room(conn, HOST, "Mine").token
+        (task_id,) = _poll(config, sender=STRANGER, to=(PLUS,),
+                           message_id="<s1@elsewhere.example>", body="Please delete my booking.")
+        token = _room_for(db_path, "<s1@elsewhere.example>")
+        with db.get_db(db_path) as conn:
+            assert not db.room_is_shared(conn, token)
+
+        mail = _answer(config, "I can cancel the booking. Please confirm you want me to proceed.")
+
+        mail.assert_not_called()
+        assert _task(db_path, task_id).status == "pending_confirmation"
+        (row,) = _rows(db_path, "SELECT about_room_token, delivery_reference FROM messages "
+                       "WHERE room_token = ?", (private,))
+        assert row["about_room_token"] == token
+        assert row["delivery_reference"].startswith(f"private-confirmation:{task_id}:")
+
     def test_every_message_of_a_long_exchange_gets_a_task(self, config, db_path):
         """No loop cap on email (D9 exempted): today's path answered every
         message, and the inbound volume budget is what bounds a mail loop."""

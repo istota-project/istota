@@ -3420,18 +3420,18 @@ def process_one_task(
         from .transport.whatsapp.outbound import is_group_task
         _whatsapp_group_turn = is_group_task(config, task)
     # An email thread room's own task (multiplayer D6): its only leg is the
-    # reply-all, which must never carry the question, and the room is shared,
-    # so the question parks and goes to the principal's private room
-    # (ISSUE-608), never by mail.
+    # reply-all, which must never carry the question, so the question parks
+    # and goes to the principal's private room (ISSUE-608), never by mail.
+    # Keyed on the room being a thread, not on `room_is_shared`: a thread with
+    # one correspondent and the host as sole member reads unshared, and its
+    # reply-all still reaches the correspondent.
     _own_email_thread_room = False
     _thread_token = None
     if task.source_type == "email" and not dry_run:
         from .transport.email.threads import thread_room_for_task
         with db.get_db(config.db_path) as conn:
             _thread_token = thread_room_for_task(conn, task)
-            _own_email_thread_room = bool(
-                _thread_token and db.room_is_shared(conn, _thread_token)
-            )
+            _own_email_thread_room = _thread_token is not None
     # A thread-room turn whose host was not on the message, with nothing to
     # reply (email on rooms, section 2): `NO_ACTION:` passes the message on to
     # the host privately and sends nothing. The note is built from the stored
