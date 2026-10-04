@@ -141,7 +141,7 @@ Istota does not hand the model a pile of unrelated integrations. A task receives
 
 - **Pluggable brains.** Use the Claude Code CLI, Istota's in-process agent loop with any OpenAI-compatible API, or the Claude terminal UI. Choose a default, route certain source types to another brain, or pin an allowed brain to a room or scheduled job.
 
-- **Curated standard library.** Istota ships with 36 skills for calendar, email, files, web browsing, Google Workspace, GitHub and GitLab work, bookmarks, transcription, OCR, reminders, schedules, health, money, location, feeds, briefings, and more. This is a maintained skillset with common conventions and security rules, not an open-ended marketplace installed into every task.
+- **Curated standard library.** Istota ships with 41 skills for calendar, email, files, web browsing, Google Workspace, GitHub and GitLab work, WordPress, bookmarks, transcription, OCR, reminders, schedules, health, money, location, feeds, briefings, and more. This is a maintained skillset with common conventions and security rules, not an open-ended marketplace installed into every task.
 
 - **Unified CLI.** Skills with executable operations share the `istota-skill <skill> <command>` interface and return structured output. The credential proxy, user scope, path checks, and audit behavior sit behind that interface, so callers do not need to reproduce them. The same commands can power an agent turn, a scheduled job, or an operator script:
 
