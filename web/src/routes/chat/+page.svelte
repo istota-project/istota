@@ -187,7 +187,7 @@
   // the gate. A WhatsApp group's parked questions are still answered here, so
   // only a private thread's card says to answer by text.
   const readOnlyPhone = $derived(
-    activeRoom?.read_only
+    activeRoom?.read_only && !activeRoom.email_thread
       ? activeRoom.phone_surface === 'whatsapp'
         ? 'WhatsApp'
         : activeRoom.phone_surface === 'email'
@@ -196,6 +196,10 @@
       : null,
   );
   const readOnlyGroup = $derived(!!readOnlyPhone && !!activeRoom?.phone_group);
+  // An email thread is a view of the mail: no composer and no reply-to, but a
+  // parked question, a held draft and a failed task's retry are acted on here,
+  // since none of them is a web turn.
+  const readOnlyThread = $derived(!!activeRoom?.read_only && !!activeRoom.email_thread);
   const isTalkRoom = (room: { origin?: string | null; talk_token?: string | null }) =>
     room.origin === 'talk' || !!room.talk_token;
   // One wording for the sidebar row and the header, so the two never disagree
@@ -1392,7 +1396,7 @@
                 onQueueSend={inViewMode ? undefined : releaseQueuedSend}
                 onQueueEdit={inViewMode ? undefined : session.editQueued}
                 onQueueRemove={inViewMode ? undefined : session.removeQueued}
-                onReply={inViewMode || readOnlyPhone ? undefined : stageReply}
+                onReply={inViewMode || readOnlyPhone || readOnlyThread ? undefined : stageReply}
                 onJumpToMessage={inViewMode ? undefined : jumpToCitedMessage}
                 onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
                 onJump={(token, taskId) => session.jumpToTask(token, taskId)}
@@ -1467,7 +1471,12 @@
            view that has no composer at all; it is the shell's `extras` band
            now, so this condition is back to the one thing the dock is for. -->
       <div class="composer-dock" bind:this={dockEl}>
-        {#if readOnlyPhone}
+        {#if readOnlyThread}
+          <!-- The server's 409 says the same thing (`EMAIL_THREAD_READ_ONLY`). -->
+          <p class="readonly-notice" role="note">
+            This is an email thread. Ask from your private chat and the bot will draft the reply.
+          </p>
+        {:else if readOnlyPhone}
           <!-- A phone room is read-only here (decided 2026-10-01): the turn
                belongs on the phone, and a web send would answer in web while
                the thread it started in heard nothing. A group too (ISSUE-585):

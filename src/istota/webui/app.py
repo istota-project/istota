@@ -4364,6 +4364,7 @@ def _room_snapshot(username: str) -> dict[str, dict]:
         # poll settles it (ISSUE-342).
         talk_refs = db.talk_refs_for_member(conn, username)
         phone_bindings = db.phone_bindings_for_member(conn, username)
+        email_threads = db.email_thread_tokens_for_member(conn, username)
         out: dict[str, dict] = {}
         for r in db.list_member_rooms(conn, username, include_archived=False):
             handle = handles.get(r.token)
@@ -4375,7 +4376,10 @@ def _room_snapshot(username: str) -> dict[str, dict]:
                 "name": db.room_display_name(r, handle),
                 "origin": r.origin,
                 "talk_token": talk_refs.get(r.token),
-                **_room_phone_fields(r, phone_bindings.get(r.token)),
+                **_room_phone_fields(
+                    r, phone_bindings.get(r.token),
+                    email_thread=r.token in email_threads,
+                ),
                 "model": r.model,
                 "effort": r.effort,
                 # The room's standing brain pin, beside the model and effort it
@@ -5821,24 +5825,33 @@ def _render_pairing_qr() -> tuple[bytes, int] | None:
 # the task_events table the existing /chat/tasks/{id}/stream SSE endpoint tails.
 
 
-def _room_phone_fields(reg, binding) -> dict:
-    """``phone_surface``, ``read_only`` and ``phone_group`` for one listed room.
+def _room_phone_fields(reg, binding, *, email_thread: bool = False) -> dict:
+    """``phone_surface``, ``read_only``, ``phone_group`` and ``email_thread``
+    for one listed room.
 
     Any room bound to SMS or WhatsApp is read-only, a WhatsApp group included
     (ISSUE-585), the same test the send route refuses on (`routing.phone_room`),
     answered here from the binding already in hand rather than per room.
     ``phone_group`` tells the client which wording to use, and that a group's
-    parked questions and members are still managed from web.
+    parked questions and members are still managed from web. An email thread
+    room is read-only too (`routing.email_thread_room`); the caller answers
+    that from `db.email_thread_tokens_for_member`, since the phone binding
+    listing leaves thread bindings out.
     """
     from istota.transport.routing import private_phone_ref
 
+    if email_thread:
+        return {"phone_surface": None, "read_only": True, "phone_group": False,
+                "email_thread": True}
     if binding is None:
-        return {"phone_surface": None, "read_only": False, "phone_group": False}
+        return {"phone_surface": None, "read_only": False, "phone_group": False,
+                "email_thread": False}
     private = binding.surface_ref == private_phone_ref(binding.surface, reg.user_id)
     if binding.surface == "email" and not private:
-        # An email thread room, which the listing does not badge.
-        return {"phone_surface": None, "read_only": False, "phone_group": False}
-    return {"phone_surface": binding.surface, "read_only": True, "phone_group": not private}
+        return {"phone_surface": None, "read_only": True, "phone_group": False,
+                "email_thread": True}
+    return {"phone_surface": binding.surface, "read_only": True,
+            "phone_group": not private, "email_thread": False}
 
 
 def _room_to_dict(room) -> dict:
@@ -5967,6 +5980,7 @@ def _chat_list_rooms(username: str) -> list[dict]:
         # (ISSUE-342).
         talk_refs = db.talk_refs_for_member(conn, username)
         phone_bindings = db.phone_bindings_for_member(conn, username)
+        email_threads = db.email_thread_tokens_for_member(conn, username)
         noted = _noted_room_tokens(conn, username)
         out: list[dict] = []
         for r in registry:
@@ -5984,7 +5998,9 @@ def _chat_list_rooms(username: str) -> list[dict]:
             d["name"] = db.room_display_name(r, handle)
             d["origin"] = r.origin
             d["talk_token"] = talk_refs.get(r.token)
-            d.update(_room_phone_fields(r, phone_bindings.get(r.token)))
+            d.update(_room_phone_fields(
+                r, phone_bindings.get(r.token), email_thread=r.token in email_threads,
+            ))
             d.update(_room_sharing(conn, r, username))
             # The kebab offers "My notes" for a shared room and for any room
             # the user already has notes about (one they have since left alone).
@@ -6065,6 +6081,23 @@ def _phone_room(room_token: str):
 
     with db.get_db(_config.db_path) as conn:
         return phone_room(conn, room_token)
+
+
+#: The send route's refusal for an email thread room. The client's read-only
+#: notice in `routes/chat/+page.svelte` carries the same sentence.
+EMAIL_THREAD_READ_ONLY = (
+    "This is an email thread. Ask from your private chat and the bot will "
+    "draft the reply."
+)
+
+
+def _email_thread_room(room_token: str) -> bool:
+    """`routing.email_thread_room` over its own connection."""
+    from istota import db
+    from istota.transport.routing import email_thread_room
+
+    with db.get_db(_config.db_path) as conn:
+        return email_thread_room(conn, room_token)
 
 
 def _task_phone_transcript_surface(task_id: int) -> str | None:
@@ -6448,6 +6481,13 @@ def _chat_update_room(
             d["origin"] = reg.origin
         binding = db.get_room_binding(conn, updated.token, "talk")
         d["talk_token"] = binding.surface_ref if binding else None
+        if reg is not None:
+            from istota.transport.routing import email_thread_room
+
+            d.update(_room_phone_fields(
+                reg, db.phone_bindings_for_member(conn, username).get(reg.token),
+                email_thread=email_thread_room(conn, reg.token),
+            ))
         d.update(_room_sharing(conn, reg, username))
     return d
 
@@ -10248,6 +10288,13 @@ async def chat_send_message(
     phone = await asyncio.to_thread(_phone_room, room.token)
     if phone is not None:
         return _read_only_refusal(phone.surface, group=phone.group)
+    # An email thread room is the mail thread itself: a web turn there would be
+    # answered in web and mailed to nobody. Covers a `!command` and a reply-to
+    # send too, since both arrive here.
+    if await asyncio.to_thread(_email_thread_room, room.token):
+        return JSONResponse(
+            {"error": EMAIL_THREAD_READ_ONLY, "read_only": True}, status_code=409,
+        )
 
     data = await request.json()
     raw_text = data.get("text") if isinstance(data.get("text"), str) else ""

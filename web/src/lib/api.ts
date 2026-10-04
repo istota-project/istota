@@ -2955,14 +2955,17 @@ export interface ChatRoom {
    * read. */
   phone_surface?: 'sms' | 'whatsapp' | 'email' | null;
   /** The room is bound to SMS or WhatsApp, a WhatsApp group included, or is
-   * the user's private email room: web reads it and the server refuses a send
-   * into it, so no composer. True for every member, since adding a reader does
+   * the user's private email room or an email thread: web reads it and the
+   * server refuses a send into it, so no composer. True for every member, since adding a reader does
    * not make the thread writable. */
   read_only?: boolean;
   /** The phone binding is a WhatsApp group, not the creator's private thread.
    * Its parked questions are answered from web and it takes members; only the
    * composer is gone (ISSUE-585). */
   phone_group?: boolean;
+  /** The room is an email thread: a view of the mail, read-only here with
+   * `read_only` set. The reply is drafted from the user's private chat. */
+  email_thread?: boolean;
   /** More than one human reads this room, a Talk guest included. */
   shared?: boolean;
   /** The caller keeps private notes about this room ("My notes"). With

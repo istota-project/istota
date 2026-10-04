@@ -1651,6 +1651,7 @@ function createSession(): ChatSession {
           phone_surface: fresh.phone_surface ?? null,
           read_only: fresh.read_only ?? false,
           phone_group: fresh.phone_group ?? false,
+          email_thread: fresh.email_thread ?? false,
           shared: fresh.shared,
           policy: fresh.policy ?? null,
           off: fresh.off ?? null,
@@ -2201,6 +2202,7 @@ function createSession(): ChatSession {
         phone_surface: fresh.phone_surface ?? null,
         read_only: fresh.read_only ?? false,
         phone_group: fresh.phone_group ?? false,
+        email_thread: fresh.email_thread ?? false,
       };
       // Same invalidation the local save does, for a brain changed on another
       // surface: `!brain` on Talk, or this user's other device. The frame is

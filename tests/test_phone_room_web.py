@@ -582,7 +582,8 @@ def _email_thread_room(conn, host="alice", root="<root@example.com>"):
 
 class TestThePrivateEmailRoom:
     """Read-only in web like a phone thread: a web send would not go by mail.
-    An email thread room is not this, and is not badged."""
+    An email thread room is not this and is not badged, though it is read-only
+    for its own reason (`tests/test_email_thread_read_only.py`)."""
 
     def test_the_predicates(self, db_path, tmp_path):
         config = _config(db_path, tmp_path)
@@ -611,7 +612,10 @@ class TestThePrivateEmailRoom:
         rooms = await _rooms(client, await _login(client))
         assert (rooms[private]["phone_surface"], rooms[private]["read_only"],
                 rooms[private]["phone_group"]) == ("email", True, False)
-        assert (rooms[thread]["phone_surface"], rooms[thread]["read_only"]) == (None, False)
+        # A thread room is read-only too (hidden-email-threads, stage 1), but
+        # is not badged as a phone transcript: `email_thread` says which it is.
+        assert (rooms[thread]["phone_surface"], rooms[thread]["read_only"],
+                rooms[thread]["email_thread"]) == (None, True, True)
 
     @web_only
     async def test_a_web_send_is_refused(self, client, db_path, tmp_path):

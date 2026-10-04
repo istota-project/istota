@@ -5701,6 +5701,30 @@ def phone_bindings_for_member(
     return out
 
 
+def email_thread_tokens_for_member(
+    conn: sqlite3.Connection, user_id: str,
+) -> set[str]:
+    """Canonical tokens of the email thread rooms among one user's rooms.
+
+    The listing's batch form of `rooms.scopes.is_email_thread_room`, with the
+    same rule: an email binding whose ref is not the room creator's private
+    email room. One query, for the reason `talk_refs_for_member` gives.
+    """
+    from istota.transport.email.private_room import is_private_email_ref
+
+    rows = conn.execute(
+        "SELECT b.room_token, b.surface_ref, r.user_id AS owner FROM room_bindings b "
+        "JOIN room_members m ON m.room_token = b.room_token "
+        "JOIN rooms r ON r.token = b.room_token "
+        "WHERE b.surface = 'email' AND m.user_id = ?",
+        (user_id,),
+    ).fetchall()
+    return {
+        row["room_token"] for row in rows
+        if not is_private_email_ref(row["surface_ref"], row["owner"])
+    }
+
+
 def room_has_phone_binding(conn: sqlite3.Connection, room_token: str) -> bool:
     """Whether the room is bound to SMS or WhatsApp at all, or is a user's
     private email room: each is a read-only transcript in web."""

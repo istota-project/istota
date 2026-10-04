@@ -55,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An email thread room is read-only in web chat** (#636). A message typed there used to become an ordinary web turn: the bot answered in the room and nothing was mailed. The room now has no composer and says to ask from your private chat, where the bot drafts the reply; the server refuses a send, a `!command` or a reply in the room. A parked question and a held draft on the thread are still answered from web.
 - **An answer that mentions a confirmation is no longer parked as one** (#625). Only the answer's last paragraph is read as a request for approval, and quoted lines, code blocks and inline code in it are skipped, so a reply explaining the confirmation card or quoting "Please confirm" from a mail completes normally.
 - Deleting a room from its settings no longer stacks the confirmation on top of the settings dialog in web chat. The settings dialog steps aside while the confirmation is up, and Cancel brings it back with any unsaved edits.
 - The package-cache sweep now reaches non-admin caches on a developer deployment (ISSUE-630). With `developer.enabled`, a `repos_dir` and an admins file, a non-admin's cache lives under `security.sandbox_cache_dir`, but the sweep walked `repos_dir` alone, so those caches grew past `sandbox_cache_max_gb` unchecked. Each user's layout is now decided by the resolver's own predicate, and both roots are swept when both are in use.
