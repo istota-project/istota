@@ -114,7 +114,7 @@ In `brain/claude_code.py`; `parse_api_error`, `is_transient_api_error`, `is_usag
 
 ## Per-room brain selection
 
-`rooms.brain` and `tasks.brain`, nullable. `record_inbound` copies room to task beside `model`/`effort` under the `room_surface` guard (Talk, web; not email). A task column so resolution is a pure function of the row, room edits do not change running tasks, and retries/subtasks inherit it (`_create_retry_task`, deferred subtask writer).
+`rooms.brain` and `tasks.brain`, nullable. `record_inbound` copies room to task beside `model`/`effort` under the `room_surface` guard (Talk, web and the SMS and WhatsApp phone rooms; not email). A task column so resolution is a pure function of the row, room edits do not change running tasks, and retries/subtasks inherit it (`_create_retry_task`, deferred subtask writer).
 
 **A model pin records its namespace** (ISSUE-420): `rooms.model_namespace` -> `tasks.model_namespace`, preferred by `executor._pin_origin_namespace`, because inferring from `tasks.brain` or the lane is wrong in different cases (ISSUE-421(c)). NULL = old row, old inference. Subtasks carry a model pin only where lanes share a vocabulary (`_inherited_model`, ISSUE-421).
 

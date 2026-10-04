@@ -8948,7 +8948,7 @@ def build_interval_gates(
     the poller walks them; the backup staleness alert reads the persisted clock
     immediately after the snapshot gate that would have advanced it; the
     heartbeat sweep is last. ``run_scheduler`` iterates the same list and so
-    inherits the same relative order for the nine gates it runs.
+    inherits the same relative order for the ten gates it runs.
 
     ``pool``, ``doctor_state``, ``pressure_state`` and ``backup_state`` are the
     loop-local state the daemon owns. ``run_scheduler`` passes none of them: no

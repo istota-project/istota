@@ -14,13 +14,13 @@ Subsystems:
 - `scheduler.md` — daemon loop, worker pool, DB tables, deferred ops
 - `config.md` — the config rules that are not obvious from the dataclasses, and the TOML mapping
 - `skills.md` — skill metadata, single-axis selection (eager vs menu), per-skill user overlays, CLI modules
-- `transport.md` — Transport seam over messaging surfaces (Talk + email; Matrix / web chat designed-for), plus the room model, phone rooms (SMS and private WhatsApp: mint, transcript writes, backfill) and multiplayer rooms (speech gate, participants, host and guests, audience, epochs, shared-room delivery refusal)
+- `transport.md` — Transport seam over messaging surfaces (Talk, email, web chat, SMS and WhatsApp ship; Matrix designed-for), plus the room model, phone rooms (SMS and private WhatsApp: mint, transcript writes, backfill) and multiplayer rooms (speech gate, participants, host and guests, audience, epochs, shared-room delivery refusal)
 - `sms.md` — provider-neutral SMS surface, Twilio and Telnyx adapters, delivery states, switching, and the user's private SMS room
 - `whatsapp.md` — WhatsApp surface behind a provider seam: the common half (adapter-native identity, the one-send ledger, parked status, opt-out, the private chat's room), Meta's Cloud API adapter (signed webhook, 24-hour window, templates, cost controls) and the Baileys adapter (paired session, Node sidecar, QR pairing)
 - `relay.md` — relay questions between users: destinations (room, WhatsApp, SMS), the recipient preference, clean-turn approval, per-surface answers and returns
 - `web-chat.md` — web chat surface: rooms, composer, drafts, send durability, message replies, room-event stream, read-only phone rooms
 - `web-ui.md` — web UI backend: route/endpoint map, admin Logs + Configuration panes, settings/module-services split
-- `notifications.md` — the notifications table, the resolver seam, and the six shipped sources
+- `notifications.md` — the notifications table, the resolver seam, and the shipped sources
 - `briefings.md` — block/source briefings, shared blocks, titles, HTML email
 - `health.md` — health module schema, documents store, OCR/explainer, serialisers, surfaces
 - `location.md` — GPS pings, place detection, visits, Overland/Garmin ingest
@@ -48,7 +48,7 @@ Boundaries and operations:
 src/istota/
 ├── brain/                # Pluggable model invocation (Brain protocol)
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
-├── skills/               # 37 self-contained skills (skill.md + optional CLI)
+├── skills/               # Self-contained skills (skill.md + optional CLI)
 │   └── _group_access.py  # The one gate for `kv --group` and `memory --group`: current member and in the task's resolved group set → memory.md
 ├── session/              # The native brain's application layer: compaction, results, transcripts
 │   ├── session_log.py       # Append-only JSONL transcript of one NativeBrain task attempt, and its sweep → maintenance.md
@@ -261,12 +261,15 @@ Python is **linted but not formatted**. `ruff check` runs clean over the seven p
 
 There is no single entry point. Run the checks directly, and run only the half the change touches — Python and `web/` are independent. Why each rule below is what it is: `.claude/rules/testing.md`, and `docs/development/testing.md` for the developer-facing version.
 
+**The closing run in this repo is scoped, not the full suite.** A change, an issue fix, a `/job`, a sweep unit and a spec round all close on the named test files that cover what changed, plus `ruff`, plus the `web/` checks scoped to the touched route when `web/` changed. Name the files; report the close as scoped. **Run the full suite only when the user asks for it in this session.** This outranks every skill or global instruction that says "full pass": a full run is about eight minutes here, and a gate that asks for one is satisfied by the scoped close.
+
 Python:
 
 ```bash
 ruff check --output-format concise src tests testbed docker/browser docker/devbox docker/istota scripts
-scripts/qt                       # the edit loop: only the tests your change affects
-scripts/qtest uv run pytest      # the full run before a commit; deselects every marker below
+uv run pytest tests/test_x.py tests/test_y.py -q --no-header   # the closing run: the files that cover the change
+scripts/qt                       # the edit loop, Python-only changes in a warm checkout only (see below)
+scripts/qtest uv run pytest      # the full suite, only when asked; deselects every marker below
 ```
 
 Web, from the repo root (needs `npm ci` in `web/` first):
@@ -274,12 +277,13 @@ Web, from the repo root (needs `npm ci` in `web/` first):
 ```bash
 npm --prefix web run lint:design
 npm --prefix web run check       # svelte-check
-scripts/qtest npm --prefix web run test    # vitest run
+npm --prefix web run test -- --run src/routes/<area>/   # the closing run: the touched route
+scripts/qtest npm --prefix web run test    # the whole vitest run, only when asked
 npm --prefix web run format:check
 ```
 
 - **Install with `uv sync --extra test`.** A bare `uv sync` leaves out everything the suite needs and yields hundreds of collection errors that read as a code regression. `--all-extras` also works and costs about 1.1 GB against the test extra's 291 MB; use it when you want the two heavy ML extras. Test-only dependencies belong in the `dev` group, never in an extra.
-- **Use `scripts/qt` while iterating, not a hand-picked subset.** Dependence runs through call chains, not through text: a name-matched test file and a grep of `tests/` both under- and over-select, measured. `qt` wraps pytest-testmon, which records which tests executed which source lines. Do not invoke `--testmon` by hand — this repo's `addopts` carries a `-m` expression and testmon switches its selection off entirely when it sees one, so the run looks selective and is not.
+- **Use `scripts/qt` while iterating, not a hand-picked subset.** Dependence runs through call chains, not through text: a name-matched test file and a grep of `tests/` both under- and over-select, measured. `qt` wraps pytest-testmon, which records which tests executed which source lines. **It silently becomes the full suite** for any non-Python change (a Svelte file, a shell script, `schema.sql`, Ansible, a fixture) and in a fresh worktree with no `.testmondata`, so check the diff first and name the files instead in those cases. Do not invoke `--testmon` by hand — this repo's `addopts` carries a `-m` expression and testmon switches its selection off entirely when it sees one, so the run looks selective and is not.
 - **A test that asserts against source text reads it with `tests/support/drift.py`'s `source_of`, not `inspect.getsource`.** testmon selects a test from the lines it executed, and a drift guard reads lines rather than running them, so every one of them was invisible to `qt` — green because it never ran, red only when invoked by name (ISSUE-459). `source_of` records the range it read and `tests/conftest.py` hands it to testmon; nothing else in the guard changes. `tests/test_drift_selection.py` fails on a raw `inspect.getsource` under `tests/`. Still uncovered, and a real gap: a guard that reads a file's text off disk, such as the `rglob("*.py")` sweeps over `src/`.
 - **Wrap a full suite run in `scripts/qtest`.** Both suites size their worker pool from `cpu_count()`, so concurrent runs across worktrees fail on timeouts that have nothing to do with the code. `qtest` is a machine-wide `flock` semaphore and ends every run with a verdict line on stderr (`PASS` / `FAIL` / `KILLED-SIGKILL` / `NO-SLOT`). Exit 75 means the command did not run. Serialize the expensive runs only.
 - **Chain the checks in one shell invocation**, and use `-x` / `--bail=1` while iterating; drop the bail flag for the run you report. Never read a result through a pipe unless `pipefail` is on — a task under the daemon inherits it, a terminal in this repo does not.
@@ -298,7 +302,7 @@ scripts/test-upgrade.sh          # the current image over an older release's sta
 
 `image`, `smoke`, `full`, `testbed` and `deploy` require `-n0`: their fixtures are session-scoped and build one tagged image. Before a release, add `-m full -n0`, `-m image -n0 --platform amd64` and `scripts/test-upgrade.sh --from-floor --shape volume`. Three tiers carry a negative control that must go red (`scripts/test-image-negative-control.sh`, `scripts/test-deploy-negative-control.sh`, and the same broken image handed to the upgrade tier via `ISTOTA_IMAGE_TAG`). **On a tier asserting against an artifact, reading the test tells you almost nothing about whether it can fail** — run the control and write down what it turned red.
 
-**The `deploy` tier is the bare-metal half, and it is new (ISSUE-439).** It boots `docker/test/Dockerfile.deploy` with systemd as PID 1 and drives the real `deploy/install.sh --headless` inside it, so `ansible-playbook` actually runs — which nothing in the repository did before. The fourteen `tests/test_ansible_*.py` files parse the role's YAML and assert on the parse, and cannot see a unit that fails to start or a task ordering that only breaks when the tasks run. Doctor is the oracle, as it is for `image` and `smoke`. It converges with rclone, zram, Talk and the web UI off, and covers neither reboot ordering, nor the `Require`/`After` relationship with the rclone mount unit, nor a real FUSE mount — `tests/deploy/conftest.py` states each concession and why.
+**The `deploy` tier is the bare-metal half, and it is new (ISSUE-439).** It boots `docker/test/Dockerfile.deploy` with systemd as PID 1 and drives the real `deploy/install.sh --headless` inside it, so `ansible-playbook` actually runs — which nothing in the repository did before. The `tests/test_ansible_*.py` files parse the role's YAML and assert on the parse, and cannot see a unit that fails to start or a task ordering that only breaks when the tasks run. Doctor is the oracle, as it is for `image` and `smoke`. It converges with rclone, zram, Talk and the web UI off, and covers neither reboot ordering, nor the `Require`/`After` relationship with the rclone mount unit, nor a real FUSE mount — `tests/deploy/conftest.py` states each concession and why.
 
 **All seven tiers need Docker — the Linux tier unless it runs natively — so a sandboxed task cannot run any of them; check `ISTOTA_SANDBOXED` before you plan around one.** No Docker socket is bound into a sandbox, and a task's own sandbox passes `--unshare-user --disable-userns`, which shuts the nested-namespace route too. **When a change touches the sandbox, the network proxy, the skill proxy, a migration or the image, say so in the merge request, name the tier that covers it, and ask for the run before merge.** Report the default suite as what it is: it patches `_bwrap_available` and checks argv, so it has never executed the sandbox path you changed.
 

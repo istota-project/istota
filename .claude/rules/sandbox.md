@@ -76,7 +76,7 @@ A name list, not a `CLAUDE_*` prefix (would eat `passthrough_env_vars`), guarded
 
 ## sandbox/tool_server.py
 
-`python -m istota.sandbox.tool_server --fd N`, one per **task attempt**, via `build_bwrap_cmd(..., profile=NATIVE)`, placed in the cgroup from `preexec_fn`. Builds one `ToolEnv` from `hello` and binds the six core tools (`build_default_tools`) (ISSUE-389). Holds no image library (see `lib/image_sniff.py`) and must not import `istota.skills` (`tests/test_tool_server_env.py::TestTheServerDoesNotImportTheSkillsPackage`; why `sandbox/git_hardening.py`, `sandbox/forge_bin.py`, `lib/untrusted.py` sit at the package root).
+`python -m istota.sandbox.tool_server --fd N`, one per **task attempt**, via `build_bwrap_cmd(..., profile=NATIVE)`, placed in the cgroup from `preexec_fn`. Builds one `ToolEnv` from `hello` and binds the six core tools (`build_default_tools`) (ISSUE-389). Holds no image library (see `lib/image_sniff.py`) and must not import `istota.skills` (`tests/test_tool_server_env.py::TestTheServerDoesNotImportTheSkillsPackage`; why `sandbox/git_hardening.py`, `sandbox/forge_bin.py`, `lib/untrusted.py` live outside `skills/`).
 
 - **Wraps nothing**: nested bwrap under `--unshare-user --disable-userns` fails, so `ToolEnv` lost the field.
 - **Places nothing**: membership is inherited at fork; `cgroup.procs` is unbound.
