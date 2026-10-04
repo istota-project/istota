@@ -10894,6 +10894,61 @@ async def chat_confirm_task(
     return {"status": "ok"}
 
 
+def _chat_retry_task(task_id: int, username: str, resume: bool):
+    """Queue a re-run of ``task_id`` through `!retry`'s own path.
+
+    Returns ``commands.RetryOutcome`` or the refusal string. No `!retry` row is
+    written to the transcript: the click is not a message (ISSUE-631).
+    """
+    from istota import commands, db
+
+    with db.get_db(_config.db_path) as conn:
+        task = db.get_task(conn, task_id)
+        if task is None:
+            return f"Task #{task_id} not found."
+        return commands.retry_task(
+            conn, _config, username, task, resume=resume, surface="web",
+        )
+
+
+@api_router.post("/chat/tasks/{task_id}/retry")
+async def chat_retry_task(
+    task_id: int,
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Re-run a failed or cancelled task: `{"mode": "retry" | "resume"}`.
+
+    An interactive task is re-run as a new linked task; a scheduled job or a
+    briefing runs its current definition (ISSUE-632). A refusal is a 409 with
+    the same message `!retry` would give. The body is optional, so the bell's
+    Run-now action can POST with none.
+    """
+    await _authorize_task_access(task_id, user)
+    mode = "retry"
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if isinstance(body, dict) and body.get("mode") is not None:
+        mode = body.get("mode")
+    if mode not in ("retry", "resume"):
+        return JSONResponse({"error": "mode must be retry or resume"}, status_code=400)
+    outcome = await asyncio.to_thread(
+        _chat_retry_task, task_id, user["username"], mode == "resume",
+    )
+    if isinstance(outcome, str):
+        return JSONResponse({"error": outcome}, status_code=409)
+    return {
+        "status": "queued",
+        "task_id": outcome.new_task_id,
+        "retried_task_id": task_id,
+        "run_now": outcome.run_now,
+        "message": outcome.message,
+    }
+
+
 @api_router.post("/chat/tasks/{task_id}/cancel")
 async def chat_cancel_task(
     task_id: int,

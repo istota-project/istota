@@ -1,5 +1,6 @@
 """Tests for the web chat surface (Phase 1 backend)."""
 
+import json
 import os
 from unittest.mock import AsyncMock, MagicMock
 
@@ -2061,6 +2062,136 @@ class TestChatTaskActions:
             ).fetchone()[0]
             assert approvals == 0
             assert len(db.get_task_events(c, tid)) == 1
+
+
+@_needs_web_deps
+class TestChatTaskRetry:
+    """ISSUE-631: `POST /chat/tasks/{id}/retry`, the web chat's Retry button."""
+
+    def _seed(self, username, status="failed", trace=None, source_type="web"):
+        import istota.webui.app as mod
+        with db.get_db(mod._config.db_path) as c:
+            room = db.ensure_default_web_chat_room(c, username)
+            tid = db.create_task(
+                c, prompt="do a thing", user_id=username, source_type=source_type,
+                conversation_token=room.token, output_target="web",
+            )
+            db.update_task_status(c, tid, status, error="boom")
+            # Retries spent: an exhausted task is still retryable.
+            c.execute("UPDATE tasks SET attempt_count = 2 WHERE id = ?", (tid,))
+            if trace is not None:
+                c.execute(
+                    "UPDATE tasks SET execution_trace = ? WHERE id = ?",
+                    (json.dumps(trace), tid),
+                )
+        return tid, room.token
+
+    async def _post(self, client, cookies, tid, body=None):
+        return await client.post(
+            f"/istota/api/chat/tasks/{tid}/retry", cookies=cookies,
+            headers={"origin": "https://example.com"},
+            **({"json": body} if body is not None else {}),
+        )
+
+    async def test_retry_creates_a_linked_task_and_records_the_turn(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        tid, token = self._seed("alice")
+        resp = await self._post(chat_client, cookies, tid, {"mode": "retry"})
+        assert resp.status_code == 200, resp.text
+        new_id = resp.json()["task_id"]
+        assert resp.json()["retried_task_id"] == tid
+        import istota.webui.app as mod
+        with db.get_db(mod._config.db_path) as c:
+            new = db.get_task(c, new_id)
+            old = db.get_task(c, tid)
+            rows = c.execute(
+                "SELECT role, body, task_id FROM messages WHERE room_token = ?",
+                (token,),
+            ).fetchall()
+        assert new.parent_task_id == tid
+        assert new.prompt == "do a thing"
+        assert new.status == "pending"
+        assert old.status == "failed"
+        # The clean prompt as a user turn, and no `!retry` command row.
+        assert [(r["role"], r["body"], r["task_id"]) for r in rows] == [
+            ("user", "do a thing", new_id),
+        ]
+
+    async def test_no_body_means_retry(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        tid, _ = self._seed("alice", status="cancelled")
+        resp = await self._post(chat_client, cookies, tid)
+        assert resp.status_code == 200, resp.text
+
+    async def test_resume_injects_the_trace(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        tid, _ = self._seed(
+            "alice", trace=[{"type": "tool", "text": "Ran ls", "raw": "ls -la"}],
+        )
+        resp = await self._post(chat_client, cookies, tid, {"mode": "resume"})
+        assert resp.status_code == 200, resp.text
+        import istota.webui.app as mod
+        with db.get_db(mod._config.db_path) as c:
+            new = db.get_task(c, resp.json()["task_id"])
+        assert "ran: ls -la" in new.prompt
+        assert new.prompt.endswith("do a thing")
+
+    @pytest.mark.parametrize("status", ["completed", "running", "pending_confirmation"])
+    async def test_refusals_are_409(self, chat_client, status):
+        cookies = await _login(chat_client, "alice")
+        tid, _ = self._seed("alice", status=status)
+        resp = await self._post(chat_client, cookies, tid)
+        assert resp.status_code == 409
+        assert f"Task #{tid}" in resp.json()["error"]
+
+    async def test_another_users_task_is_refused(self, chat_client):
+        import istota.webui.app as mod
+        mod._config.admin_users = {"bob"}
+        cookies = await _login(chat_client, "alice")
+        tid, _ = self._seed("bob")
+        resp = await self._post(chat_client, cookies, tid)
+        assert resp.status_code == 403
+
+    async def test_bad_mode_is_400(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        tid, _ = self._seed("alice")
+        resp = await self._post(chat_client, cookies, tid, {"mode": "regenerate"})
+        assert resp.status_code == 400
+
+    async def test_requires_csrf(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        tid, _ = self._seed("alice")
+        resp = await chat_client.post(
+            f"/istota/api/chat/tasks/{tid}/retry", cookies=cookies,
+        )
+        assert resp.status_code == 403
+
+    async def test_a_failed_job_runs_now(self, chat_client):
+        """The same endpoint is the bell's Run-now action (ISSUE-632)."""
+        import istota.webui.app as mod
+        cookies = await _login(chat_client, "alice")
+        with db.get_db(mod._config.db_path) as c:
+            job_id = c.execute(
+                "INSERT INTO scheduled_jobs (user_id, name, cron_expression, "
+                "prompt, enabled) VALUES ('alice', 'digest', '0 7 * * *', "
+                "'Write the digest', 1)",
+            ).lastrowid
+            tid = db.create_task(
+                c, prompt="Write the digest", user_id="alice",
+                source_type="scheduled", scheduled_job_id=job_id,
+            )
+            db.update_task_status(c, tid, "failed")
+            c.execute(
+                "UPDATE tasks SET created_at = datetime('now', '-1 hour') "
+                "WHERE id = ?", (tid,),
+            )
+        resp = await self._post(chat_client, cookies, tid)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["run_now"] is True
+        with db.get_db(mod._config.db_path) as c:
+            new = db.get_task(c, resp.json()["task_id"])
+        assert new.scheduled_job_id == job_id
+        assert new.source_type == "scheduled"
 
 
 @_needs_web_deps

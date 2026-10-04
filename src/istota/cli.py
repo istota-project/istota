@@ -920,6 +920,33 @@ def cmd_briefing(args):
     )
 
 
+def cmd_job_run(args):
+    """Queue a user's scheduled job, or with ``--briefing`` a briefing, now.
+
+    The same path as `!retry` on a failed occurrence and the bell's Run-now
+    action (ISSUE-632), with the same guards: nothing while an occurrence is in
+    flight, one manual run per cooldown, no `_module.*` job. The daemon runs the
+    queued task; this only creates it.
+    """
+    from .scheduler import run_briefing_now, run_scheduled_job_now
+
+    config = load_config(Path(args.config) if args.config else None)
+    with db.get_db(config.db_path) as conn:
+        if args.briefing:
+            task_id, refusal = run_briefing_now(conn, config, args.user, args.name)
+        else:
+            job = db.get_scheduled_job_by_name(conn, args.user, args.name)
+            if job is None:
+                print(f"No scheduled job {args.name!r} for user {args.user!r}.",
+                      file=sys.stderr)
+                sys.exit(1)
+            task_id, refusal = run_scheduled_job_now(conn, config, job)
+    if task_id is None:
+        print(refusal, file=sys.stderr)
+        sys.exit(1)
+    print(f"Queued as task #{task_id}.")
+
+
 def cmd_secret(args):
     """Manage per-user encrypted secrets.
 
@@ -5433,6 +5460,17 @@ def main():
     group_kv_list_parser.add_argument("group_id")
     group_kv_list_parser.add_argument("namespace")
 
+    job_parser = subparsers.add_parser("job", help="Scheduled jobs and briefings")
+    job_subparsers = job_parser.add_subparsers(dest="job_action", required=True)
+    job_run_parser = job_subparsers.add_parser(
+        "run", help="Run a user's scheduled job (or --briefing) now",
+    )
+    job_run_parser.add_argument("user", help="User id")
+    job_run_parser.add_argument("name", help="Job name, or briefing name with --briefing")
+    job_run_parser.add_argument(
+        "--briefing", action="store_true", help="NAME is a briefing, not a CRON.md job",
+    )
+
     # calendar (with subparsers)
     calendar_parser = subparsers.add_parser("calendar", help="Calendar management")
     calendar_subparsers = calendar_parser.add_subparsers(dest="calendar_action", required=True)
@@ -5783,6 +5821,8 @@ def main():
             "kv-list": cmd_group_kv_list,
         }
         group_commands[args.group_action](args)
+    elif args.command == "job":
+        {"run": cmd_job_run}[args.job_action](args)
     elif args.command == "calendar":
         calendar_commands = {
             "discover": cmd_calendar_discover,
