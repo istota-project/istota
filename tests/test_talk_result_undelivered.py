@@ -502,6 +502,66 @@ class TestAConfirmationPromptThatNeverLanded:
         # not send the user back to where its delivery just failed (#638).
         assert "delete the archive" not in send.call_args.args[2]
         assert confirmation_source.PARK_UNDELIVERED_BODY in send.call_args.args[2]
+        # No user row stored in the room, so the web view does not show the
+        # question either: the push is not confined to ntfy and email (#635).
+        assert send.call_args.kwargs.get("only_surfaces") is None
+
+    def test_an_unregistered_talk_conversation_pushes_to_talk_alerts(
+        self, mock_run, config, fake_talk,
+    ):
+        """#635. A Talk conversation with no room behind it shows the question
+        nowhere once its post fails, so the owed push takes the user's whole
+        alert routing. Cut to ntfy and email it reached nobody here, since
+        this user routes alerts to Talk."""
+        fake_talk.known_channels.update({"rawconv", "alerts"})
+        _timeout(fake_talk, "rawconv")
+        _queue(config, "rawconv")
+        _run(config, result=self.QUESTION)
+
+        sent = [c for c in fake_talk.calls_to("alerts", method="send_message")
+                if c.sent_id is not None]
+        assert sent and "delete the archive" not in sent[-1].args["message"]
+        assert confirmation_source.PARK_UNDELIVERED_BODY in sent[-1].args["message"]
+
+    def test_a_registered_room_keeps_the_push_out_of_talk(
+        self, mock_run, config, fake_talk, plain,
+    ):
+        """The control: the web view renders a parked task in its registered
+        room, so the question is still in a room and the push stays room-free."""
+        fake_talk.known_channels.add("alerts")
+        _timeout(fake_talk, plain.talk_ref)
+        _queue(config, plain.canonical)
+        with patch(
+            "istota.notifications.delivery.send_notification", return_value=True,
+        ) as send:
+            _run(config, result=self.QUESTION)
+
+        assert send.call_count == 1
+        assert send.call_args.kwargs.get("only_surfaces") == ("ntfy", "email")
+
+    def test_an_email_mirror_with_its_turn_stored_stays_room_free(
+        self, mock_run, config, fake_talk, promoted,
+    ):
+        """The scope's email arm: with the user turn stored in the room, the web
+        view renders the parked task there, so the push stays room-free."""
+        _timeout(fake_talk, promoted.talk_ref)
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="delete it?", user_id=USER, source_type="email",
+                conversation_token=promoted.canonical,
+                output_target=f"room:{promoted.canonical}",
+            )
+            db.store_turn_message(
+                conn, promoted.canonical, role="user", body="delete it?",
+                task_id=task_id, origin_surface="email",
+            )
+        with patch(
+            "istota.notifications.delivery.send_notification", return_value=True,
+        ) as send:
+            _run(config, result=self.QUESTION)
+
+        assert send.call_count == 1
+        assert send.call_args.kwargs.get("only_surfaces") == ("ntfy", "email")
 
     def test_a_landed_confirmation_post_delivers_nothing_extra(
         self, mock_run, config, fake_talk, plain,

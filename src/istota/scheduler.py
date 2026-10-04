@@ -4817,10 +4817,44 @@ def process_one_task(
     # the task parked until `expire_stale_confirmations` kills it. The
     # `whatsapp-failure` task alert `deliver_whatsapp` raises says only that a
     # message failed, and carries neither the question nor its `!confirm` verbs.
+    #
+    # The row was written `room_free` as though the question were in a room,
+    # and in this arm the post that was going to put it there failed (#635). A
+    # private park's question has its own row in the private room. Anything
+    # else is on screen only where the web view renders the parked task from
+    # its row (`db.task_shown_in_room`): an unregistered Talk conversation, an
+    # SMS or WhatsApp thread, or an email mirror with no stored turn shows it
+    # nowhere, and a push cut to ntfy and email then reaches nobody who routes
+    # alerts to Talk.
     if held_notification is not None and (
         talk_undelivered or sms_undelivered or whatsapp_undelivered
         or private_undelivered
     ):
+        if held_notification.room_free and not private_undelivered:
+            try:
+                with db.get_db(config.db_path) as conn:
+                    _shown = db.task_shown_in_room(
+                        conn, task_id, task.user_id, transcript_token,
+                    )
+            except Exception:
+                logger.warning(
+                    "Could not tell whether task %s's question is in a room",
+                    task_id, exc_info=True,
+                )
+                _shown = False
+            if not _shown:
+                held_notification = replace(
+                    held_notification, room_free=False,
+                )
+        # A phone leg that failed or came back unknown is not tried again under
+        # the push's own key: a ledger never resends an ambiguous send.
+        _skip = tuple(
+            name for name, failed in (
+                ("sms", sms_undelivered), ("whatsapp", whatsapp_undelivered),
+            ) if failed
+        )
+        if _skip:
+            held_notification = replace(held_notification, skip_surfaces=_skip)
         deliver_pending(config, [confirmation_source.owed_push(held_notification)])
 
     # A Talk leg that carried the message and posted nothing (ISSUE-404). Last,

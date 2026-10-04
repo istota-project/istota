@@ -2796,6 +2796,10 @@ class TestSchedulerDelivery:
             ]
         assert "confirmation" in sources
         assert pushed, "the withheld confirmation was never owed back"
+        # No room shows a WhatsApp question (#635), so the push is not
+        # confined to ntfy and email.
+        assert [r.room_free for r in pushed] == [False]
+        assert [r.skip_surfaces for r in pushed] == [("whatsapp",)]
         # The blocked prompt is recorded, so a retry cannot send it twice.
         assert [row["status"] for row in _rows(config)] == ["window_closed"]
 

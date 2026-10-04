@@ -100,6 +100,11 @@ class RaiseResult:
     `room_free` marks a push that must not land in any room: the question is
     already in one, and a second copy in the alerts room is the duplicate
     #625 recorded. Set by the confirmation source; in memory only.
+
+    `skip_surfaces` drops surfaces from the push whatever the routing says. The
+    scheduler sets it when an owed confirmation's SMS or WhatsApp send failed
+    or came back unknown, since a ledger never resends an ambiguous send and a
+    push on that surface would be one under a new key (#635).
     """
 
     notification_id: int
@@ -109,6 +114,7 @@ class RaiseResult:
     title: str
     purpose: str
     room_free: bool = False
+    skip_surfaces: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -440,6 +446,7 @@ def deliver_pending(config: "Config", results: Iterable[RaiseResult | None]) -> 
                         title=result.title,
                         reference_id=f"notification:{result.notification_id}",
                         only_surfaces=ROOM_FREE_SURFACES if result.room_free else None,
+                        skip_surfaces=result.skip_surfaces,
                     )
                 except Exception:
                     logger.warning(
