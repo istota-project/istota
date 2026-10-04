@@ -6,10 +6,19 @@ from dataclasses import dataclass
 from . import db
 from .config import Config
 from istota.nextcloud.compat import webdav_get_owner
+from istota.prompts.persona import PERSONA_FILENAME, SHIPPED_SUFFIX
 from .skills.files import list_files, path_exists, move_file
 from .storage import get_user_shared_path, ensure_user_directories_v2
 
 logger = logging.getLogger("istota.shared_file_organizer")
+
+# Bot-managed names at the root. The operator persona is owned by the bot
+# account today, but that skip holds only while the bot is not a configured user.
+_ROOT_SKIP = frozenset({
+    "users",
+    PERSONA_FILENAME.lower(),
+    (PERSONA_FILENAME + SHIPPED_SUFFIX).lower(),
+})
 
 
 @dataclass
@@ -53,8 +62,7 @@ def discover_and_organize_shared_files(config: Config) -> list[OrganizedFile]:
         item_name = item["name"]
         is_dir = item["is_dir"]
 
-        # Skip items already in /Users/ path (bot-managed files)
-        if item_name.lower() == "users":
+        if item_name.lower() in _ROOT_SKIP:
             continue
 
         # Get owner for this item (always via WebDAV - can't get owner from filesystem)

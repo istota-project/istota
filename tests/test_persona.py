@@ -321,3 +321,54 @@ def test_the_namespace_is_reserved():
     from istota.sandbox.kv_namespaces import is_reserved_namespace
 
     assert is_reserved_namespace(KV_NAMESPACE)
+
+
+class TestInit:
+    """`istota init` runs the sync on every invocation and keeps its exit code."""
+
+    @pytest.mark.parametrize("relocate_rooms", [False, True])
+    def test_init_writes_the_root_persona(self, setup, monkeypatch, relocate_rooms):
+        from types import SimpleNamespace
+
+        from istota import cli
+
+        config, root = setup
+        monkeypatch.setattr(cli, "load_config", lambda path: config)
+        assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=relocate_rooms)) in (None, 0)
+        assert (root / "PERSONA.md").read_text() == SHIPPED
+        assert _state(config)["last_good_text"] == SHIPPED
+
+    def test_a_refused_sync_is_reported_and_does_not_change_the_exit_code(
+        self, setup, monkeypatch, capsys,
+    ):
+        from types import SimpleNamespace
+
+        from istota import cli
+
+        config, root = setup
+        target = root / "elsewhere.md"
+        target.write_text("not the persona")
+        (root / "PERSONA.md").symlink_to(target)
+        monkeypatch.setattr(cli, "load_config", lambda path: config)
+
+        assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=False)) is None
+        assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=True)) == 0
+
+        err = capsys.readouterr().err
+        assert err.count("operator persona: refused") == 2
+        assert target.read_text() == "not the persona"
+
+    def test_a_sync_that_raises_does_not_fail_init(self, setup, monkeypatch, capsys):
+        from types import SimpleNamespace
+
+        from istota import cli
+
+        config, _root = setup
+        monkeypatch.setattr(cli, "load_config", lambda path: config)
+
+        def _boom(_config):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(persona, "sync_operator_persona", _boom)
+        assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=True)) == 0
+        assert "operator persona: sync failed (RuntimeError)" in capsys.readouterr().err

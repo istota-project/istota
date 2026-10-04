@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from pathlib import Path
 from dataclasses import replace
 
 import pytest
@@ -79,6 +80,7 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     ("whatsapp-pairing", None),
     ("skill-overlay-reindex", "skill_overlay_reindex_interval"),
     ("vault-sync", "vault_sync_interval"),
+    ("operator-persona", None),
     ("db-backup", "db_backup_interval"),
     ("backup-stale-alert", None),
     ("scheduler-stats", "scheduler_stats_interval"),
@@ -114,6 +116,7 @@ EXPECTED_BACKGROUND = {
     "avatar-import",
     "skill-overlay-reindex",
     "vault-sync",
+    "operator-persona",
     "db-backup",
     "heartbeats",
 }
@@ -136,6 +139,7 @@ EXPECTED_ONE_SHOT = [
     "shared-files",
     "tasks-file-poll",
     "vault-sync",
+    "operator-persona",
     "heartbeats",
 ]
 
@@ -197,6 +201,18 @@ class TestTheFieldBindings:
 
     def test_the_status_file_keeps_its_literal_sixty_seconds(self):
         assert _by_name()["status-write"].interval(Config()) == 60
+
+    def test_the_operator_persona_gate_runs_every_five_minutes_in_the_background(self):
+        gate = _by_name()["operator-persona"]
+        assert gate.interval(Config()) == 300
+        assert gate.background
+        assert not gate.overlap_expected
+        assert gate.one_shot
+
+    def test_the_operator_persona_gate_needs_a_file_root(self, tmp_path):
+        gate = _by_name()["operator-persona"]
+        assert not gate.enabled(Config())
+        assert gate.enabled(Config(workspace_path=tmp_path))
 
 
 class TestTheDispatchShape:
@@ -752,6 +768,7 @@ class TestTheOneShotRunner:
         config.location.enabled = True
         config.email.enabled = True
         config.users = {"alice": UserConfig(vault_path="vault.kdbx")}
+        config.workspace_path = Path("/srv/files")
         _run_interval_gates_once(_recorded_table(config, order), config)
         assert order == EXPECTED_ONE_SHOT
 
@@ -764,7 +781,7 @@ class TestTheOneShotRunner:
         assert order == [
             n
             for n in EXPECTED_ONE_SHOT
-            if n not in {"travel-timezone", "email-poll", "vault-sync"}
+            if n not in {"travel-timezone", "email-poll", "vault-sync", "operator-persona"}
         ]
 
     def test_it_never_backgrounds(self, monkeypatch):

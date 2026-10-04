@@ -72,6 +72,7 @@ def cmd_init(args):
     config.db_path.parent.mkdir(parents=True, exist_ok=True)
     db.init_db(config.db_path)
     print(f"Database initialized at {config.db_path}")
+    _init_sync_operator_persona(config)
     if getattr(args, "relocate_rooms", False):
         from istota.maintenance.room_relocate import migrate_database, reconcile_mount, record_outcome
         problems: list[str] = []
@@ -85,6 +86,29 @@ def cmd_init(args):
                 result = reconcile_mount(config, problems=problems)
         record_outcome(config, result, problems)
         return result
+
+
+# Outcomes an operator needs to hear about at deploy; the rest are routine.
+_PERSONA_SYNC_REPORTED = frozenset({"root_unavailable", "refused", "wrote_shipped_beside"})
+
+
+def _init_sync_operator_persona(config) -> None:
+    """Run the operator persona sync from ``init``; never changes its exit code.
+
+    ``init`` runs at every deploy and start on every shape, before the
+    scheduler, so a new shipped persona lands here first. The scheduler's
+    ``operator-persona`` gate retries what a down mount skipped.
+    """
+    try:
+        from istota.prompts.persona import sync_operator_persona
+
+        result = sync_operator_persona(config)
+    except Exception as exc:  # noqa: BLE001 - a deploy must not fail on this
+        print(f"operator persona: sync failed ({type(exc).__name__})", file=sys.stderr)
+        return
+    if result.action in _PERSONA_SYNC_REPORTED:
+        detail = f": {result.detail}" if result.detail else ""
+        print(f"operator persona: {result.action}{detail}", file=sys.stderr)
 
 
 def cmd_doctor(args):
