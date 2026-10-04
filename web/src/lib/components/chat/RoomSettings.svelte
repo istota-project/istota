@@ -228,6 +228,9 @@
   // touch away from writing over a value with no path back to it.
   const paletteValue = (c: string | null | undefined) => (roomColorVar(c) ? c! : '');
   let colorValue = $state(untrack(() => paletteValue(room.color)));
+  // An email thread sits in the sidebar's "Email threads" group unless this
+  // is set. Per member, like the colour, so the host lock does not apply.
+  let listedValue = $state(untrack(() => !!room.listed));
   let showDeleteConfirm = $state(false);
   let copied = $state(false);
   let copyError = $state('');
@@ -238,6 +241,7 @@
       lastRoomId = room.id;
       name = room.name;
       colorValue = paletteValue(room.color);
+      listedValue = !!room.listed;
       modelValue = room.model ?? '';
       effortValue = room.effort ?? '';
       brainValue = room.brain ?? '';
@@ -261,10 +265,13 @@
   // the stored value as a side effect. The row already renders untinted, so
   // the picker showing "no colour" is honest; picking one writes over it.
   const colorChanged = $derived(colorValue !== paletteValue(room.color));
+  // Gated on `email_thread`: the server refuses `listed` on any other room.
+  const listedChanged = $derived(!!room.email_thread && listedValue !== !!room.listed);
   // Saveable when anything changed, and the name is never blanked.
   const canSave = $derived(
     trimmed.length > 0 &&
       (colorChanged ||
+        listedChanged ||
         guestReplyChanged ||
         (!locked && (nameChanged || modelChanged || effortChanged || brainChanged))),
   );
@@ -296,6 +303,7 @@
       if (brainChanged) patch.brain = brainValue || null;
     }
     if (colorChanged) patch.color = colorValue || null;
+    if (listedChanged) patch.listed = listedValue;
     if (guestReplyChanged) patch.guest_reply = guestReplyValue;
     onSave(patch);
   }
@@ -368,6 +376,19 @@
     </div>
     <p class="caption">Tints this room's row in the sidebar. Only you see it.</p>
   </fieldset>
+
+  {#if room.email_thread}
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" bind:checked={listedValue} />
+        <span>Show in room list</span>
+      </label>
+      <p class="caption">
+        Email threads sit in the collapsed Email threads group, and their unread messages are not
+        counted. Only you see this.
+      </p>
+    </div>
+  {/if}
 
   {#if showBrain}
     <div class="field">
@@ -561,6 +582,15 @@
   .field > span {
     font-size: var(--text-xs);
     color: var(--text-muted);
+  }
+
+  .check {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+    cursor: pointer;
   }
 
   /* The palette row. A <fieldset> so the group has a real legend, styled back

@@ -2966,6 +2966,10 @@ export interface ChatRoom {
   /** The room is an email thread: a view of the mail, read-only here with
    * `read_only` set. The reply is drafted from the user's private chat. */
   email_thread?: boolean;
+  /** The viewer chose to show this email thread in the main room list. An
+   * email thread without it sits in the collapsed "Email threads" group
+   * (`isHiddenRoom`). Per user, like `color`; false for every other room. */
+  listed?: boolean;
   /** More than one human reads this room, a Talk guest included. */
   shared?: boolean;
   /** The caller keeps private notes about this room ("My notes"). With
@@ -3419,6 +3423,9 @@ export interface RoomPatch {
   color?: string | null;
   /** Host only, like the other room-wide settings. */
   guest_reply?: GuestReply;
+  /** Show an email thread in the main room list. The server refuses it (400)
+   * on any other room. */
+  listed?: boolean;
 }
 
 /** The PATCH response is the room, plus one field that is not room state:

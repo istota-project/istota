@@ -727,3 +727,43 @@ describe('RoomSettings — delete', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 });
+
+describe('RoomSettings — show in room list', () => {
+  afterEach(() => cleanup());
+
+  const thread = (over: Partial<ChatRoom> = {}) =>
+    room({ origin: 'email', read_only: true, email_thread: true, listed: false, ...over });
+  const box = () => screen.queryByRole('checkbox', { name: 'Show in room list' });
+
+  it('is offered for an email thread only', () => {
+    mount(thread());
+    expect(box()).toBeTruthy();
+    cleanup();
+    mount(room());
+    expect(box()).toBeNull();
+    cleanup();
+    mount(room({ origin: 'email', phone_surface: 'email', read_only: true }));
+    expect(box()).toBeNull();
+  });
+
+  it('starts from the room and saves listed alone', async () => {
+    const onSave = vi.fn();
+    mount(thread(), onSave);
+    expect((box() as HTMLInputElement).checked).toBe(false);
+    const save = screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    await fireEvent.click(box()!);
+    expect(save.disabled).toBe(false);
+    await fireEvent.click(save);
+    expect(onSave).toHaveBeenCalledWith({ listed: true } satisfies RoomPatch);
+  });
+
+  it('unlists a listed thread', async () => {
+    const onSave = vi.fn();
+    mount(thread({ listed: true }), onSave);
+    expect((box() as HTMLInputElement).checked).toBe(true);
+    await fireEvent.click(box()!);
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(onSave).toHaveBeenCalledWith({ listed: false });
+  });
+});

@@ -13,6 +13,14 @@ import type { ChatRoom } from '$lib/api';
  * be written straight onto the room.
  */
 
+/** An email thread the viewer has not listed: it sits in the sidebar's
+ * collapsed "Email threads" group, its unread count stays out of the Unread
+ * total, and its rows stay out of the aggregate panes. The server applies the
+ * same rule to those panes (`db.hidden_room_tokens_for_member`). */
+export function isHiddenRoom(room: Pick<ChatRoom, 'email_thread' | 'listed'>): boolean {
+  return !!room.email_thread && !room.listed;
+}
+
 /** Descending by `last_activity`, in a new array. Stable, so rooms sharing a
  * stamp — and rooms carrying none at all, which an older backend produces —
  * keep the relative order they arrived in rather than being reversed by a

@@ -25,7 +25,9 @@
     CountPill,
     NoticeBanner,
     Button,
+    CategoryGroup,
   } from '$lib/components/ui';
+  import { isHiddenRoom } from '$lib/stores/roomOrder';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import { roomColorVar } from '$lib/roomColors';
   import Message from '$lib/components/chat/Message.svelte';
@@ -83,9 +85,22 @@
     unread: 'Unread',
     starred: 'Starred',
   };
+  // An email thread the user has not listed goes in the collapsed "Email
+  // threads" group rather than the main list. Both keep the store's activity
+  // order. The listing still carries every room, since a deep link, the
+  // note's `re:` chip and the room stream open a room by finding it there.
+  const mainRooms = $derived($rooms.filter((r) => !isHiddenRoom(r)));
+  const hiddenRooms = $derived($rooms.filter(isHiddenRoom));
+  // Opened by the user, or by a hidden room becoming the one on screen.
+  let threadsOpen = $state(false);
+  $effect(() => {
+    if (hiddenRooms.some((r) => r.id === $activeRoomId)) threadsOpen = true;
+  });
+
   // Client-side total for the sidebar Unread badge (sum of per-room counts;
-  // the active room is already held at 0 by the store).
-  const unreadTotal = $derived($rooms.reduce((n, r) => n + (r.unread_count ?? 0), 0));
+  // the active room is already held at 0 by the store). A hidden thread is
+  // left out: the note in the private room is what tells the user about it.
+  const unreadTotal = $derived(mainRooms.reduce((n, r) => n + (r.unread_count ?? 0), 0));
 
   // Where each held draft's card goes. A draft belongs to the turn that
   // composed it, so it renders under that turn when the turn is on screen —
@@ -906,7 +921,18 @@
       settings: () => (settingsRoom = room),
       memory: () => (memoryRoom = room),
       notes: () => (notesRoom = room),
+      toggleListed: () => void toggleListed(room),
     });
+  }
+
+  async function toggleListed(room: ChatRoom) {
+    try {
+      await session.updateRoomSettings(room.id, { listed: !room.listed });
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : 'Couldn’t move the room.', {
+        key: 'chat:room-listed',
+      });
+    }
   }
 
   function selectView(v: ChatView) {
@@ -1152,9 +1178,90 @@
   {/snippet}
 
   {#snippet sidebar()}
+    {#snippet roomRow(room: ChatRoom)}
+      {@const isTalk = isTalkRoom(room)}
+      {@const unreadCount = room.unread_count ?? 0}
+      {@const unread = unreadCount > 0 && room.id !== $activeRoomId}
+      {@const waiting = room.id === $activeRoomId ? 0 : ($queuedCounts[room.token] ?? 0)}
+      {@const tint = roomColorVar(room.color)}
+      <!-- The tint goes on the row box, not on `.room-btn`, so it covers the
+			     kebab too. It layers over `.sidebar .list-row`'s shared hover/active
+			     background rather than editing it — that rule is shared with the
+			     briefings archive row (ISSUE-433). -->
+      <div
+        class="list-row room-row"
+        class:active={room.id === $activeRoomId}
+        class:tinted={!!tint}
+        style:--room-tint={tint}
+      >
+        <button class="room-btn" onclick={() => selectRoom(room.id)} type="button">
+          {#if room.shared && room.phone_surface !== 'whatsapp'}
+            <!-- More than one human reads this room, so it outranks the
+							     origin glyph: who will see a message matters more than which
+							     surface mirrors it. The Talk fact moves into the title. -->
+            <span
+              class="room-origin shared"
+              role="img"
+              title={sharedRoomTitle(room)}
+              aria-label={sharedRoomTitle(room)}
+            >
+              <Users size={13} />
+            </span>
+          {:else if room.phone_surface}
+            <!-- A room bound to a phone thread: an SMS conversation, or a
+							     WhatsApp chat or group. A WhatsApp group keeps its surface
+							     glyph over the shared one, in outline where the private chat's
+							     is filled, and says it is shared in the title (ISSUE-584). -->
+            <span
+              class="room-origin phone"
+              role="img"
+              title={phoneRoomTitle(room)}
+              aria-label={phoneRoomTitle(room)}
+            >
+              <PhoneSurfaceIcon surface={room.phone_surface} group={isWhatsAppGroup(room)} />
+            </span>
+          {:else if isTalk}
+            <!-- Leading origin glyph: a tinted cloud marks a room mirrored
+							     to Nextcloud Talk. Sits in its own flex slot before the
+							     title so it never eats name width or gets clipped by the
+							     title's ellipsis (ISSUE-129). -->
+            <span class="room-origin talk" title="Also on Nextcloud Talk">
+              <Cloud size={13} />
+            </span>
+          {:else}
+            <span class="room-origin" title="Web room">
+              <MessageSquare size={13} />
+            </span>
+          {/if}
+          <span class="room-text">
+            <span class="room-line">
+              <span class="room-name" class:unread>{room.name}</span>
+              {#if unread}
+                <CountPill count={unreadCount} title={`${unreadCount} unread`} />
+              {/if}
+              <!-- What has not gone out of this room yet (ISSUE-202). The
+								     drain runs for the room on screen only, so for every other
+								     room this badge is the whole of the affordance: it says
+								     which one to open for what is in it to go. Not drawn for
+								     the open room, like the unread pill above it, where the
+								     rows themselves are the count. Held entries are in it —
+								     they also need this room opened — which is why the title
+								     says "not sent yet" rather than promising they will send
+								     on their own. Muted, because nothing has arrived and
+								     nothing has gone wrong: it is a state the user put there. -->
+              {#if waiting > 0}
+                <CountPill count={waiting} tone="muted" title={`${waiting} not sent yet`} />
+              {/if}
+            </span>
+          </span>
+        </button>
+        <KebabMenu ariaLabel="Room actions" items={roomMenu(room)} />
+      </div>
+    {/snippet}
+
     <Sidebar
       title="Rooms"
-      count={$rooms.length}
+      count={mainRooms.length}
       open={sidebarOpen}
       onClose={() => (sidebarOpen = false)}
     >
@@ -1220,86 +1327,29 @@
         {/if}
       </div>
 
-      {#each $rooms as room (room.id)}
-        {@const isTalk = isTalkRoom(room)}
-        {@const unreadCount = room.unread_count ?? 0}
-        {@const unread = unreadCount > 0 && room.id !== $activeRoomId}
-        {@const waiting = room.id === $activeRoomId ? 0 : ($queuedCounts[room.token] ?? 0)}
-        {@const tint = roomColorVar(room.color)}
-        <!-- The tint goes on the row box, not on `.room-btn`, so it covers the
-			     kebab too. It layers over `.sidebar .list-row`'s shared hover/active
-			     background rather than editing it — that rule is shared with the
-			     briefings archive row (ISSUE-433). -->
-        <div
-          class="list-row room-row"
-          class:active={room.id === $activeRoomId}
-          class:tinted={!!tint}
-          style:--room-tint={tint}
-        >
-          <button class="room-btn" onclick={() => selectRoom(room.id)} type="button">
-            {#if room.shared && room.phone_surface !== 'whatsapp'}
-              <!-- More than one human reads this room, so it outranks the
-							     origin glyph: who will see a message matters more than which
-							     surface mirrors it. The Talk fact moves into the title. -->
-              <span
-                class="room-origin shared"
-                role="img"
-                title={sharedRoomTitle(room)}
-                aria-label={sharedRoomTitle(room)}
-              >
-                <Users size={13} />
-              </span>
-            {:else if room.phone_surface}
-              <!-- A room bound to a phone thread: an SMS conversation, or a
-							     WhatsApp chat or group. A WhatsApp group keeps its surface
-							     glyph over the shared one, in outline where the private chat's
-							     is filled, and says it is shared in the title (ISSUE-584). -->
-              <span
-                class="room-origin phone"
-                role="img"
-                title={phoneRoomTitle(room)}
-                aria-label={phoneRoomTitle(room)}
-              >
-                <PhoneSurfaceIcon surface={room.phone_surface} group={isWhatsAppGroup(room)} />
-              </span>
-            {:else if isTalk}
-              <!-- Leading origin glyph: a tinted cloud marks a room mirrored
-							     to Nextcloud Talk. Sits in its own flex slot before the
-							     title so it never eats name width or gets clipped by the
-							     title's ellipsis (ISSUE-129). -->
-              <span class="room-origin talk" title="Also on Nextcloud Talk">
-                <Cloud size={13} />
-              </span>
-            {:else}
-              <span class="room-origin" title="Web room">
-                <MessageSquare size={13} />
-              </span>
-            {/if}
-            <span class="room-text">
-              <span class="room-line">
-                <span class="room-name" class:unread>{room.name}</span>
-                {#if unread}
-                  <CountPill count={unreadCount} title={`${unreadCount} unread`} />
-                {/if}
-                <!-- What has not gone out of this room yet (ISSUE-202). The
-								     drain runs for the room on screen only, so for every other
-								     room this badge is the whole of the affordance: it says
-								     which one to open for what is in it to go. Not drawn for
-								     the open room, like the unread pill above it, where the
-								     rows themselves are the count. Held entries are in it —
-								     they also need this room opened — which is why the title
-								     says "not sent yet" rather than promising they will send
-								     on their own. Muted, because nothing has arrived and
-								     nothing has gone wrong: it is a state the user put there. -->
-                {#if waiting > 0}
-                  <CountPill count={waiting} tone="muted" title={`${waiting} not sent yet`} />
-                {/if}
-              </span>
-            </span>
-          </button>
-          <KebabMenu ariaLabel="Room actions" items={roomMenu(room)} />
+      <div class="room-list-main">
+        {#each mainRooms as room (room.id)}
+          {@render roomRow(room)}
+        {/each}
+      </div>
+
+      <!-- Email threads the user has not listed. Collapsed, with a count and
+			     no unread pill: the note in the private room is the signal. -->
+      {#if hiddenRooms.length > 0}
+        <div class="room-list-threads">
+          <CategoryGroup
+            label="Email threads"
+            count={hiddenRooms.length}
+            collapsible
+            defaultOpen={false}
+            bind:open={threadsOpen}
+          >
+            {#each hiddenRooms as room (room.id)}
+              {@render roomRow(room)}
+            {/each}
+          </CategoryGroup>
         </div>
-      {/each}
+      {/if}
     </Sidebar>
   {/snippet}
 

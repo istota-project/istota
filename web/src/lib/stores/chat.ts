@@ -81,7 +81,7 @@ import {
 } from '$lib/offline/db';
 import { rememberLastUserId, seedUserId } from '$lib/offline/lastUser';
 import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
-import { sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
+import { isHiddenRoom, sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
 import { applyNotificationCounts } from '$lib/stores/notifications';
 import {
   isKnownCommand,
@@ -1652,6 +1652,9 @@ function createSession(): ChatSession {
           read_only: fresh.read_only ?? false,
           phone_group: fresh.phone_group ?? false,
           email_thread: fresh.email_thread ?? false,
+          // Per user like the tint, and for the same reason: a thread listed
+          // or hidden on another device reaches this tab here.
+          listed: fresh.listed ?? false,
           shared: fresh.shared,
           policy: fresh.policy ?? null,
           off: fresh.off ?? null,
@@ -2047,6 +2050,9 @@ function createSession(): ChatSession {
     const v = get(view);
     if (v === 'room' || v === 'starred') return;
     if (v === 'unread' && row.role === 'user') return;
+    // The panes cover the main room list, as the server's page does.
+    const source = get(rooms).find((r) => r.token === row.room_token);
+    if (source && isHiddenRoom(source)) return;
     if (typeof row.msg_id === 'number' && get(messages).some((m) => m.msgId === row.msg_id)) return;
     // The All view carries no queued rows (`carryClientOnlyRows` drops them in
     // the `token === null` branch) but it does carry stranded failed ones, and
@@ -2203,6 +2209,7 @@ function createSession(): ChatSession {
         read_only: fresh.read_only ?? false,
         phone_group: fresh.phone_group ?? false,
         email_thread: fresh.email_thread ?? false,
+        listed: fresh.listed ?? false,
       };
       // Same invalidation the local save does, for a brain changed on another
       // surface: `!brain` on Talk, or this user's other device. The frame is
