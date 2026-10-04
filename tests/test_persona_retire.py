@@ -340,6 +340,23 @@ class TestInit:
         assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=True)) == 0
         assert "user persona alice: refused" in capsys.readouterr().err
 
+    def test_a_notice_that_cannot_be_written_is_reported(self, setup, monkeypatch, capsys):
+        from istota import cli
+        from istota.notifications.resolvers import task_alert as alerts
+
+        config, root = setup
+        edited = _plant(config, root, "alice", EDITED)
+        monkeypatch.setattr(cli, "load_config", lambda path: config)
+
+        def _boom(*a, **k):
+            raise RuntimeError("database locked")
+
+        monkeypatch.setattr(alerts, "write", _boom)
+        assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=False)) is None
+        assert edited.with_name("PERSONA.md.retired").read_text() == EDITED
+        err = capsys.readouterr().err
+        assert "user persona alice: retired: PERSONA.md.retired; the notice could not be written" in err
+
     def test_a_retirement_that_raises_does_not_fail_init(self, setup, monkeypatch, capsys):
         from istota import cli
 

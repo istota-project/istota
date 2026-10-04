@@ -77,6 +77,9 @@ class RetireOutcome:
     user_id: str
     action: str
     detail: str = ""
+    #: A retirement whose notice could not be written. The rename stands, and
+    #: no later run will see the file again, so the caller has to say so.
+    notice_failed: bool = False
 
 
 def _utc_stamp() -> str:
@@ -211,10 +214,12 @@ def _retire_one(
             return RetireOutcome(user_id, ACTION_REFUSED, f"{name} appeared")
         os.rename(leaf, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         logger.info("persona_retire user=%s action=retired", user_id)
-        detail = name
         if not _write_notice(config, user_id, name):
-            detail = f"{name}; the notice could not be written"
-        return RetireOutcome(user_id, ACTION_RETIRED, detail)
+            return RetireOutcome(
+                user_id, ACTION_RETIRED, f"{name}; the notice could not be written",
+                notice_failed=True,
+            )
+        return RetireOutcome(user_id, ACTION_RETIRED, name)
     except OSError as exc:
         logger.warning("persona_retire user=%s action=refused errno=%s", user_id, exc.errno)
         return RetireOutcome(

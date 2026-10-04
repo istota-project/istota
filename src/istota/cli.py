@@ -127,9 +127,9 @@ def _init_retire_user_personas(config) -> None:
         print(f"user personas: retirement failed ({type(exc).__name__})", file=sys.stderr)
         return
     for outcome in outcomes:
-        if outcome.action == persona_retire.ACTION_REFUSED:
+        if outcome.action == persona_retire.ACTION_REFUSED or outcome.notice_failed:
             detail = f": {outcome.detail}" if outcome.detail else ""
-            print(f"user persona {outcome.user_id}: refused{detail}", file=sys.stderr)
+            print(f"user persona {outcome.user_id}: {outcome.action}{detail}", file=sys.stderr)
 
 
 def cmd_doctor(args):
