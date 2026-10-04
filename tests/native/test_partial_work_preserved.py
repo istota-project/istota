@@ -180,16 +180,16 @@ class TestSoftDeadline:
     """ISSUE-373: a run about to be killed by the clock stops itself first."""
 
     def test_soft_deadline_stops_with_the_work_intact(self, tmp_path):
-        # Healthy tool-calling turns at 0.4s each. The soft deadline is 1.0s of
+        # Healthy tool-calling turns at 0.1s each. The soft deadline is 0.2s of
         # a 10s budget, so it is crossed after two or three turns while the hard
-        # clock stays nine seconds away — the margins are one-sided on purpose,
+        # clock stays nearly ten seconds away — the margins are one-sided on purpose,
         # since the suite runs `-n auto` and a tight window in both directions
         # is a flake. The run must end on the stop that delivers the narration
         # under a marker, not on the one that replaces it with "timed out".
-        provider = _SlowProvider(_narrating_turns(40, "still looking at step"), 0.4)
+        provider = _SlowProvider(_narrating_turns(40, "still looking at step"), 0.1)
         req = _req("investigate", tmp_path)
         req.timeout_seconds = 10
-        result = _brain(provider, soft_deadline_percent=10).execute(req)
+        result = _brain(provider, soft_deadline_percent=2).execute(req)
 
         assert result.stop_reason == "soft_timeout"
         assert result.success is True
@@ -197,12 +197,12 @@ class TestSoftDeadline:
         assert "ran out of time" in result.result_text
 
     def test_soft_deadline_off_leaves_the_hard_clock_alone(self, tmp_path):
-        # 40 scripted turns at 0.4s is 16 seconds of work against a 2s clock, so
+        # 40 scripted turns at 0.4s is 16 seconds of work against a 1s clock, so
         # the hard deadline fires whatever the host is doing — a sleep does not
         # get shorter under load.
         provider = _SlowProvider(_narrating_turns(40, "still looking at step"), 0.4)
         req = _req("investigate", tmp_path)
-        req.timeout_seconds = 2
+        req.timeout_seconds = 1
         result = _brain(provider, soft_deadline_percent=0).execute(req)
 
         assert result.stop_reason == "timeout"
@@ -217,7 +217,7 @@ class TestSoftDeadline:
         time — the opposite of what happened — and there is nothing to rescue,
         because the run already delivered.
         """
-        # One turn, which is the answer, taking 0.4s against a 0.1s soft
+        # One turn, which is the answer, taking 0.2s against a 0.1s soft
         # deadline. The deadline is therefore crossed by the time the condition
         # runs, and the only thing stopping it firing is that the turn called no
         # tools. A preceding tool-calling turn would be stopped here, correctly,
@@ -230,7 +230,7 @@ class TestSoftDeadline:
                     usage=Usage(input_tokens=10, output_tokens=5),
                 )
             ],
-            0.4,
+            0.2,
         )
         req = _req("investigate", tmp_path)
         req.timeout_seconds = 10
@@ -255,7 +255,7 @@ class TestSoftDeadline:
                     usage=Usage(input_tokens=10, output_tokens=5),
                 )
             ],
-            0.4,
+            0.2,
         )
         req = _req("extract", tmp_path, tools=[])
         req.timeout_seconds = 10
@@ -383,10 +383,10 @@ class TestASoftStopWithNothingToSave:
             )
             for i in range(40)
         ]
-        provider = _SlowProvider(tool_only, 0.4)
+        provider = _SlowProvider(tool_only, 0.1)
         req = _req("investigate", tmp_path)
         req.timeout_seconds = 10
-        result = _brain(provider, soft_deadline_percent=10).execute(req)
+        result = _brain(provider, soft_deadline_percent=2).execute(req)
 
         assert result.success is False
         assert result.stop_reason == "timeout"

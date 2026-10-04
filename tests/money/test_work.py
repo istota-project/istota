@@ -362,14 +362,14 @@ class TestConcurrencySafety:
         # out — proving two writers can't interleave.
         with _work_lock(data_dir):
             with pytest.raises(WorkStoreLocked):
-                with _work_lock(data_dir, timeout_seconds=0.2):
+                with _work_lock(data_dir, timeout_seconds=0.05):
                     pass
 
     def test_lock_released_after_context(self, data_dir):
         with _work_lock(data_dir):
             pass
         # Re-acquire immediately; should not raise.
-        with _work_lock(data_dir, timeout_seconds=0.2):
+        with _work_lock(data_dir, timeout_seconds=0.05):
             pass
 
     def test_save_leaves_no_temp_files(self, data_dir):

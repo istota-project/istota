@@ -17,11 +17,23 @@ construction, because those are the properties that make a re-run safe.
 
 from __future__ import annotations
 
+import copy
+import functools
 import configparser
 from pathlib import Path
 
 import yaml
 from jinja2 import Environment
+
+
+@functools.cache
+def _parsed_yaml(path: Path):
+    return yaml.safe_load(path.read_text())
+
+
+def _load_yaml(path: Path):
+    return copy.deepcopy(_parsed_yaml(path))
+
 
 REPO = Path(__file__).resolve().parent.parent
 ANSIBLE = REPO / "deploy" / "ansible"
@@ -58,11 +70,11 @@ BASE_VARS = {
 
 
 def defaults() -> dict:
-    return yaml.safe_load(DEFAULTS_FILE.read_text())
+    return _load_yaml(DEFAULTS_FILE)
 
 
 def tasks() -> list:
-    return yaml.safe_load(TASKS_FILE.read_text())
+    return _load_yaml(TASKS_FILE)
 
 
 def find_task(name: str) -> dict:

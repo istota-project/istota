@@ -29,6 +29,8 @@ all — is not asserted here; that was verified by hand against
 
 from __future__ import annotations
 
+import copy
+import functools
 import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -36,6 +38,16 @@ from urllib.parse import urlsplit
 import pytest
 import yaml
 from jinja2 import Environment
+
+
+@functools.cache
+def _parsed_yaml(path: Path):
+    return yaml.safe_load(path.read_text())
+
+
+def _load_yaml(path: Path):
+    return copy.deepcopy(_parsed_yaml(path))
+
 
 REPO = Path(__file__).resolve().parent.parent
 ANSIBLE = REPO / "deploy" / "ansible"
@@ -62,7 +74,7 @@ ASSERT_TASK = "Assert the repository remote carries no embedded credential"
 
 
 def tasks() -> list:
-    return yaml.safe_load(TASKS_FILE.read_text())
+    return _load_yaml(TASKS_FILE)
 
 
 def find_task(name: str) -> dict:

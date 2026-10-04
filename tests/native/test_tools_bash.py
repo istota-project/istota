@@ -246,7 +246,7 @@ class TestBashProcessHandling:
         # would hang on the open pipe. The whole group must die on timeout.
         marker = tmp_path / "alive.txt"
         cmd = (
-            f"(while true; do echo tick > {marker}; sleep 0.1; done) & "
+            f"(while true; do echo tick > {marker}; sleep 0.05; done) & "
             "echo started; sleep 30"
         )
         result = await _run(
@@ -255,9 +255,9 @@ class TestBashProcessHandling:
         )
         assert "timed out" in _text(result).lower()
         # Give any surviving grandchild a moment to prove it's still writing.
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.25)
         mtime1 = marker.stat().st_mtime if marker.exists() else 0
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.25)
         mtime2 = marker.stat().st_mtime if marker.exists() else 0
         assert mtime1 == mtime2, "grandchild survived the timeout (process group not killed)"
 
@@ -265,16 +265,16 @@ class TestBashProcessHandling:
         # A hard task cancellation (CancelledError) landing inside _execute must
         # not leak the subprocess — the finally block kills the group.
         marker = tmp_path / "alive.txt"
-        cmd = f"while true; do echo tick > {marker}; sleep 0.1; done"
+        cmd = f"while true; do echo tick > {marker}; sleep 0.05; done"
         tool = make_bash_tool(_env(tmp_path))
         task = asyncio.ensure_future(_run(tool, {"command": cmd}))
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.2)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.25)
         mtime1 = marker.stat().st_mtime if marker.exists() else 0
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.25)
         mtime2 = marker.stat().st_mtime if marker.exists() else 0
         assert mtime1 == mtime2, "subprocess survived cancellation"
 

@@ -25,12 +25,24 @@ in use.
 
 from __future__ import annotations
 
+import copy
+import functools
 import configparser
 import os
 from pathlib import Path
 
 import yaml
 from jinja2 import Environment
+
+
+@functools.cache
+def _parsed_yaml(path: Path):
+    return yaml.safe_load(path.read_text())
+
+
+def _load_yaml(path: Path):
+    return copy.deepcopy(_parsed_yaml(path))
+
 
 REPO = Path(__file__).resolve().parent.parent
 ANSIBLE = REPO / "deploy" / "ansible"
@@ -56,11 +68,11 @@ BASE_VARS = {
 
 
 def defaults() -> dict:
-    return yaml.safe_load(DEFAULTS_FILE.read_text())
+    return _load_yaml(DEFAULTS_FILE)
 
 
 def tasks() -> list:
-    return yaml.safe_load(TASKS_FILE.read_text())
+    return _load_yaml(TASKS_FILE)
 
 
 def find_task(name: str) -> dict:
@@ -178,7 +190,7 @@ class TestJournald:
         assert any("journald" in n for n in notify), "a cap that needs a reboot is not a cap"
 
     def test_handler_exists(self):
-        handlers = yaml.safe_load((ANSIBLE / "handlers" / "main.yml").read_text())
+        handlers = _load_yaml((ANSIBLE / "handlers" / "main.yml"))
         names = {h.get("name") for h in handlers if isinstance(h, dict)}
         task = find_task("Cap the systemd journal")
         notify = task.get("notify")
@@ -244,7 +256,7 @@ class TestAuditd:
         rotation policy — the config is on disk but unread until a reboot. The
         role already learned this on the zram track: a change whose only
         evidence is a green play is not a change."""
-        handlers = yaml.safe_load((ANSIBLE / "handlers" / "main.yml").read_text())
+        handlers = _load_yaml((ANSIBLE / "handlers" / "main.yml"))
         handler = next(h for h in handlers if h.get("name") == "restart auditd")
         assert "failed_when" not in handler or handler["failed_when"] is not False
 

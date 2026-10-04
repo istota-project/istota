@@ -58,6 +58,8 @@ a script appending its four perfect rules to a chain nothing references.
 
 from __future__ import annotations
 
+import copy
+import functools
 import ipaddress
 import re
 from pathlib import Path
@@ -65,6 +67,16 @@ from pathlib import Path
 import pytest
 import yaml
 from jinja2 import Environment, StrictUndefined
+
+
+@functools.cache
+def _parsed_yaml(path: Path):
+    return yaml.safe_load(path.read_text())
+
+
+def _load_yaml(path: Path):
+    return copy.deepcopy(_parsed_yaml(path))
+
 
 REPO = Path(__file__).resolve().parent.parent
 ANSIBLE = REPO / "deploy" / "ansible"
@@ -130,7 +142,7 @@ assert not (set(RETIRED_RULES) & EXPECTED_DESTINATIONS), (
 
 
 def _defaults() -> dict:
-    return yaml.safe_load(DEFAULTS_FILE.read_text())
+    return _load_yaml(DEFAULTS_FILE)
 
 
 def _render(template: Path, **overrides) -> str:
@@ -334,7 +346,7 @@ def script() -> str:
 
 @pytest.fixture(scope="module")
 def tasks() -> list[dict]:
-    return yaml.safe_load(TASKS_FILE.read_text())
+    return _load_yaml(TASKS_FILE)
 
 
 class TestTheBootScriptAsksForTheRightRules:

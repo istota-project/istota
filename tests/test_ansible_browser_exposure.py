@@ -31,6 +31,8 @@ makes the answer not depend on them.
 
 from __future__ import annotations
 
+import copy
+import functools
 import ipaddress
 import pathlib
 import re
@@ -38,6 +40,16 @@ from pathlib import Path
 
 import pytest
 import yaml
+
+
+@functools.cache
+def _parsed_yaml(path: Path):
+    return yaml.safe_load(path.read_text())
+
+
+def _load_yaml(path: Path):
+    return copy.deepcopy(_parsed_yaml(path))
+
 
 REPO = Path(__file__).resolve().parent.parent
 ANSIBLE = REPO / "deploy" / "ansible"
@@ -87,11 +99,11 @@ def _split_port_spec(spec: str) -> list[str]:
 
 
 def _defaults() -> dict:
-    return yaml.safe_load(DEFAULTS_FILE.read_text())
+    return _load_yaml(DEFAULTS_FILE)
 
 
 def _tasks() -> list[dict]:
-    return yaml.safe_load(TASKS_FILE.read_text())
+    return _load_yaml(TASKS_FILE)
 
 
 def published_ports(text: str) -> dict[str, str]:

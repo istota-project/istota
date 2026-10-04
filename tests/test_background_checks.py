@@ -295,6 +295,8 @@ def _daemon_config(tmp_path):
             db_health_check_interval=1,
             db_backup_enabled=False,
             loop_stall_alert_seconds=0,
+            # The dispatch slice, so the four ticks each test counts take 0.2s.
+            dispatch_interval=0.05,
             # This file drives a real run_daemon loop, and the host-pressure
             # breadcrumb fires on the first tick — so leaving it on would have
             # these tests read the real /proc and statvfs every tmpfs on the CI

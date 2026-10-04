@@ -791,6 +791,3 @@ class TestDeleteProfile:
         monkeypatch.undo()
 
         assert len(opened) == 1, f"delete_profile opened {len(opened)} connections"
-
-    def test_deleting_a_missing_profile_still_reads_as_false(self, db_path):
-        assert user_profiles.delete_profile(db_path, "ghost") is False

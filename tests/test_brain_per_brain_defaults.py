@@ -85,6 +85,8 @@ def _config(tmp_path, **overrides):
         skills_dir=skills_dir,
         bundled_skills_dir=tmp_path / "_empty_bundled",
         temp_dir=tmp_path / "temp",
+        # A local workspace, or each run spawns rclone two dozen times.
+        workspace_path=tmp_path / "workspace",
         security=SecurityConfig(skill_proxy_enabled=False),
     )
     kwargs.update(overrides)

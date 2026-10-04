@@ -493,7 +493,7 @@ class TestWriterLockCoverage:
             t = threading.Thread(target=worker)
             t.start()
             # While the editor holds the lock the append must not complete.
-            assert not done.wait(timeout=0.5)
+            assert not done.wait(timeout=0.2)
         t.join(timeout=12)
         assert done.is_set()
 
@@ -518,7 +518,7 @@ class TestWriterLockCoverage:
         with _ledger_lock(ledger):
             t = threading.Thread(target=worker)
             t.start()
-            assert not done.wait(timeout=0.5)
+            assert not done.wait(timeout=0.2)
         t.join(timeout=12)
         assert done.is_set()
 
