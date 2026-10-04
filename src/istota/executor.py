@@ -5687,7 +5687,8 @@ def load_persona(config: Config) -> str | None:
         elif refusal is None and present:
             text = ""  # empty on purpose: the shipped persona, not the last good
         elif refusal is not None:
-            logger.warning("operator persona unreadable (%s); falling back", refusal)
+            # Debug, not warning: this runs per task; the sync and doctor report it.
+            logger.debug("operator persona unreadable (%s); falling back", refusal)
     if text is None:
         try:
             text = operator_persona.read_last_good(config)
