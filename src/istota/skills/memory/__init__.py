@@ -590,7 +590,11 @@ def _do_op(args, op_dict: dict, *, verb: str) -> int:
         with memory_md_lock(path, timeout_seconds=5.0, lock_dir=_lock_dir(target)):
             current = _read_text(path, _read_cap(target))
             doc = parse_sectioned_doc(current)
-            new_doc, applied, rejected = apply_ops(doc, [op_dict])
+            # A pinned section is closed to the nightly curator only; this
+            # CLI runs on the user's own request and may edit it.
+            new_doc, applied, rejected = apply_ops(
+                doc, [op_dict], allow_pinned=True,
+            )
             if rejected:
                 reason = rejected[0].get("reason", "rejected")
                 # For heading-related rejects, surface the existing

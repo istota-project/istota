@@ -19,7 +19,6 @@ from istota.storage import (
     get_user_shared_path,
     get_user_scripts_path,
     get_user_briefings_path,
-    get_user_persona_path,
     get_user_inbox_path,
     get_channel_base_path,
     get_channel_memory_path,
@@ -93,9 +92,6 @@ class TestPathHelpers:
 
     def test_user_briefings_path(self):
         assert get_user_briefings_path("alice", "istota") == "/Users/alice/istota/config/BRIEFINGS.md"
-
-    def test_user_persona_path(self):
-        assert get_user_persona_path("alice", "istota") == "/Users/alice/istota/config/PERSONA.md"
 
     def test_user_inbox_path(self):
         assert get_user_inbox_path("alice") == "/Users/alice/inbox"
@@ -311,7 +307,8 @@ class TestMountOperations:
         readme = mount_config.workspace_path / "Users" / "alice" / "istota" / "README.md"
         assert "examples/" in readme.read_text()
 
-    def test_persona_seeded_from_global(self, tmp_path):
+    def test_no_persona_is_seeded(self, tmp_path):
+        """The persona is the operator's `{root}/PERSONA.md`; a user gets no copy."""
         mount = tmp_path / "mount"
         mount.mkdir()
         skills_dir = tmp_path / "config" / "skills"
@@ -319,34 +316,23 @@ class TestMountOperations:
         (tmp_path / "config" / "persona.md").write_text("You are {BOT_NAME}, a helpful bot.")
         config = Config(workspace_path=mount, skills_dir=skills_dir)
         ensure_user_directories_v2(config, "alice")
-        persona = mount / "Users" / "alice" / "istota" / "config" / "PERSONA.md"
-        assert persona.exists()
-        assert persona.read_text() == "You are {BOT_NAME}, a helpful bot."
+        config_dir = mount / "Users" / "alice" / "istota" / "config"
+        assert (config_dir / "TASKS.md").exists()
+        assert not (config_dir / "PERSONA.md").exists()
+        assert not (mount / "PERSONA.md").exists()
 
-    def test_persona_not_overwritten_if_exists(self, tmp_path):
+    def test_an_existing_user_persona_is_left_for_the_retirement(self, tmp_path):
         mount = tmp_path / "mount"
         mount.mkdir()
         skills_dir = tmp_path / "config" / "skills"
         skills_dir.mkdir(parents=True)
         (tmp_path / "config" / "persona.md").write_text("Global persona")
         config = Config(workspace_path=mount, skills_dir=skills_dir)
-        # Pre-create user persona
         persona_dir = mount / "Users" / "alice" / "istota" / "config"
         persona_dir.mkdir(parents=True)
         (persona_dir / "PERSONA.md").write_text("Custom persona")
         ensure_user_directories_v2(config, "alice")
         assert (persona_dir / "PERSONA.md").read_text() == "Custom persona"
-
-    def test_persona_not_seeded_when_global_missing(self, tmp_path):
-        mount = tmp_path / "mount"
-        mount.mkdir()
-        skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
-        # No istota.md created in tmp_path/config/
-        config = Config(workspace_path=mount, skills_dir=skills_dir)
-        ensure_user_directories_v2(config, "alice")
-        persona = mount / "Users" / "alice" / "istota" / "config" / "PERSONA.md"
-        assert not persona.exists()
 
     def test_notes_migrated_to_istota(self, mount_config):
         """Old notes/ directory is renamed to workspace/ then to istota/."""
@@ -1315,8 +1301,8 @@ class TestSeedingContainment:
         return Config(workspace_path=mount)
 
     def test_a_symlinked_config_dir_redirects_nothing(self, mount_config, tmp_path):
-        # Measured before the fix: CRON.md, HEARTBEAT.md, PERSONA.md and
-        # TASKS.md were all written into the far end, as the daemon user.
+        # Measured before the fix: CRON.md, HEARTBEAT.md, PERSONA.md (since
+        # retired) and TASKS.md were all written into the far end, as the daemon user.
         # `mkdir(exist_ok=True)` follows the link, and the leaf-level
         # O_NOFOLLOW never sees an ancestor.
         outside = tmp_path / "outside"

@@ -22,22 +22,22 @@ A room is **shared** when more than one human is present. One person reading the
 
 A shared room has no single owner's bot. Each turn is answered by the assistant of the person the turn runs as, which is the person who wrote it, except on a guest's turn:
 
-| Who wrote the turn | Runs as | Persona | Reach | Personal memory in the prompt |
-|---|---|---|---|---|
-| A member | that member | theirs (`PERSONA.md`) | everything they can reach in their private room | none |
-| A guest | the host | the host's | nothing of the host's | none |
-| Nobody in the room (a subtask, someone else's scheduled job) | the task's user | that user's | nothing | none |
-| A member's own scheduled job or briefing posting here | that member | theirs | everything they can reach | none |
+| Who wrote the turn | Runs as | Reach | Personal memory in the prompt |
+|---|---|---|---|
+| A member | that member | everything they can reach in their private room | none |
+| A guest | the host | nothing of the host's | none |
+| Nobody in the room (a subtask, someone else's scheduled job) | the task's user | nothing | none |
+| A member's own scheduled job or briefing posting here | that member | everything they can reach | none |
 
-So if Alice and Bob share a room and each has their own `PERSONA.md`, Alice's questions are answered in Alice's persona with Alice's calendar, and Bob's in Bob's with his. Neither sees the other's data unless it was written into the room.
+So if Alice and Bob share a room, Alice's questions are answered with Alice's calendar and Bob's with his. Neither sees the other's data unless it was written into the room. The bot's character does not change between them: there is one persona per installation, set by the operator (see [Persona](../configuration/persona.md)).
 
 Some things are the same whatever the turn:
 
-- **The deployment's own rules**: the emissary principles, the response guidelines and any custom system prompt are set by the operator for everyone.
+- **The deployment's own rules**: the persona, the emissary principles, the response guidelines and any custom system prompt are set by the operator for everyone.
 - **The room's settings**: its model, effort and brain apply to every turn in the room, and only the host can change them.
 - **The room's shared context**: the transcript (from the latest join onwards, see [newcomers and history](#newcomers-and-history)) and the room's `CHANNEL.md`, which everyone in the room can read and write.
 
-What is per person, beyond persona and reach: a member's per-skill instructions (`{bot_dir}/config/skills/<skill>.md`) load on their own turns and not on a guest's, and a member's [My notes](#my-notes) about the room are read on their own turns, and on a guest's turn when they are the host and the room's guest setting is not `direct`.
+What is per person, beyond reach: a member's per-skill instructions (`{bot_dir}/config/skills/<skill>.md`) load on their own turns and not on a guest's, and a member's [My notes](#my-notes) about the room are read on their own turns, and on a guest's turn when they are the host and the room's guest setting is not `direct`.
 
 ## When the bot speaks
 
@@ -94,9 +94,9 @@ On a deployment with no bubblewrap sandbox (the shipped Docker stack, macOS, the
 
 ## What the bot is told
 
-In a shared room the system prompt carries a short room card: who reads the room (members by user id, guests by count), the room's rule (each member's turn runs as that member, a confirmation goes to the asker's own private chat with the bot, and what happens to a guest's message under the room's guest-reply setting), whom the bot is acting for on this turn and who hosts, whose persona is in use, what this turn can reach (and on a guest's turn, what is withheld), that `CHANNEL.md` is read by everyone, and that a member's private notes are never read or written in the room. It never contains anybody's display name, since that is text the person chose.
+In a shared room the system prompt carries a short room card: who reads the room (members by user id, guests by count), the room's rule (each member's turn runs as that member, a confirmation goes to the asker's own private chat with the bot, and what happens to a guest's message under the room's guest-reply setting), whom the bot is acting for on this turn and who hosts, what this turn can reach (and on a guest's turn, what is withheld), that `CHANNEL.md` is read by everyone, and that a member's private notes are never read or written in the room. It never contains anybody's display name, since that is text the person chose.
 
-The persona is always that of the person the task acts for: the host's on the host's turns and on guests' turns, each other member's own on theirs.
+The persona is the operator's on every turn, whoever the task acts for. Only reach follows the person.
 
 A shared room's `CHANNEL.md` is written by several people, so it is shown to the model marked as notes from the room rather than as instructions. That stays true after the room becomes private again.
 

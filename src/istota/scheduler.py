@@ -9142,6 +9142,11 @@ def build_interval_gates(
 
         secrets_vault.sync_all(config)
 
+    def _operator_persona(now: float) -> None:
+        from istota.prompts.persona import sync_operator_persona
+
+        sync_operator_persona(config)
+
     def _heartbeats(now: float) -> None:
         _run_heartbeat_checks(config)
 
@@ -9436,6 +9441,22 @@ def build_interval_gates(
             one_shot=True,
             on_error="Vault sync failed: %s",
             one_shot_on_error="Vault sync failed: %s",
+        ),
+        # `{root}/PERSONA.md` under the conffile rule, and the last good copy
+        # the prompt path falls back to during a mount outage. `istota init`
+        # runs the same sync at deploy; this keeps the last good copy current
+        # after an operator edit and retries a sync `init` skipped because the
+        # mount was down. Background because it reads the FUSE mount (#387).
+        IntervalGate(
+            name="operator-persona",
+            run=_operator_persona,
+            fixed_interval=300,
+            enabled=lambda c: c.has_workspace,
+            background=True,
+            overlap_expected=False,
+            on_error="Error syncing the operator persona: %s",
+            one_shot=True,
+            one_shot_on_error="Error syncing the operator persona: %s",
         ),
         # Off-host durability for the local DBs. Off the loop thread because
         # this one writes to the rclone FUSE mount, where a degraded mount makes

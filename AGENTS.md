@@ -94,6 +94,8 @@ src/istota/
 │   ├── lookup.py         # Finding a room a person named, among their own rooms → transport.md
 │   ├── surfaces.py       # What role each surface plays in the room model, in one table → leaf-modules.md
 │   └── provision.py      # Default Talk rooms (general/logs/alerts) for a user → leaf-modules.md
+├── prompts/              # Loaders for the system half's standing instructions
+│   └── persona.py        # The operator persona at `{root}/PERSONA.md`: shipped digests, the conffile sync, the last good copy → prompts.md
 ├── relay/                # Relay questions between users: relays, destinations, requests (the `whatsapp_skill_requests` table) → relay.md
 ├── sandbox/              # A task's runtime and its boundaries → sandbox.md
 │   ├── task_env.py       # `build_task_runtime`: one task's env, the credential split, the proxies, the bind list → sandbox.md
@@ -154,6 +156,7 @@ src/istota/
 │   ├── db_restore.py     # Restore a cold snapshot back to local disk (newest good, or `--date`); refuses an empty snapshot without `--force` → maintenance.md
 │   ├── repos_relocate.py # One-shot migrator: `developer.repos_dir` → per-user subtrees
 │   ├── room_relocate.py, room_mount_reconcile.py  # The room-identity migration and its mount sweep
+│   ├── persona_retire.py # Deletes or retires the old per-user PERSONA.md copies, from `istota init` → maintenance.md
 │   ├── worktree_reaper.py   # Removes a developer worktree once its work has landed → maintenance.md
 │   ├── sandbox_cache_sweeper.py  # Bounds the on-disk package caches the sandbox keeps per user → maintenance.md
 │   └── host_pressure.py  # Host memory instrumentation: PSI/meminfo/tmpfs, shmem attribution → maintenance.md
@@ -196,7 +199,7 @@ Alongside `src/`: `config/` (config.toml, persona.md, emissaries.md, system-prom
 ### Prompt Layers
 
 1. **Emissaries** (`config/emissaries.md`) — constitutional principles, global only.
-2. **Persona** (`config/persona.md` or user `PERSONA.md`) — character.
+2. **Persona** (the operator's `PERSONA.md` at the file root, synced from `config/persona.md` unless edited) — character, one for every user and every room. Per-user preferences go in `USER.md`.
 3. **Custom system prompt** (`config/system-prompt.md`, opt-in) — replaces CC default.
 
 **A task prompt is two halves, split by authority** (`executor.ComposedPrompt`). Standing instructions — identity, execution constraints, emissaries, persona, workspace layout, tool descriptions, rules, response guidelines, skills changelog, eager skill bodies — are the `system` half. Retrieved memory, knowledge facts, playbooks, conversation and confirmation history, the request and its attachments are the `user` half, which is what a compaction summary carries forward. The handoff is a file in `{temp_dir}/.control/{user_id}/task_{id}/`, a directory no task can write and only this task can read. Two rules are held by tests: no line in the system half may point at material in the user half, and every scalar interpolated into a system header goes through `_one_line()`. Full rules in `.claude/rules/prompts.md`.

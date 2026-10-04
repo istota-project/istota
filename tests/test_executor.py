@@ -1390,123 +1390,161 @@ class TestUserIdSubstitution:
 
 
 class TestLoadPersona:
+    """One persona per installation (#629): the operator's ``{root}/PERSONA.md``,
+    then the last good copy the sync recorded, then the shipped file. No
+    user's ``PERSONA.md`` is read, whoever the task runs as."""
+
     def _make_config(self, tmp_path, has_workspace=True):
         config_dir = tmp_path / "config"
         skills_dir = config_dir / "skills"
         skills_dir.mkdir(parents=True)
-        kwargs = dict(skills_dir=skills_dir, bundled_skills_dir=tmp_path / "_empty_bundled")
+        db_path = tmp_path / "state.db"
+        db.init_db(db_path)
+        kwargs = dict(
+            skills_dir=skills_dir, bundled_skills_dir=tmp_path / "_empty_bundled",
+            db_path=db_path,
+        )
         if has_workspace:
             mount = tmp_path / "mount"
             mount.mkdir()
             kwargs["workspace_path"] = mount
         return Config(**kwargs)
 
-    def _plant_global(self, tmp_path, text="Global persona"):
+    def _plant_shipped(self, tmp_path, text="Shipped persona"):
         (tmp_path / "config" / "persona.md").write_text(text)
 
-    def _user_config_dir(self, config, bot_dir="istota"):
-        user_dir = config.workspace_path / "Users" / "alice" / bot_dir / "config"
+    def _operator_file(self, config):
+        return config.workspace_path / "PERSONA.md"
+
+    def _record_last_good(self, config, text):
+        from istota.prompts import persona as operator_persona
+
+        self._operator_file(config).write_text(text)
+        operator_persona.sync_operator_persona(config)
+        assert operator_persona.read_last_good(config) == text
+
+    def test_the_operator_copy_wins_over_the_shipped_one(self, tmp_path):
+        config = self._make_config(tmp_path)
+        self._plant_shipped(tmp_path)
+        self._operator_file(config).write_text("Operator persona\n")
+
+        assert load_persona(config) == "Operator persona"
+
+    def test_a_users_persona_is_never_read(self, tmp_path):
+        config = self._make_config(tmp_path)
+        self._plant_shipped(tmp_path)
+        self._operator_file(config).write_text("Operator persona")
+        user_dir = config.workspace_path / "Users" / "alice" / "istota" / "config"
         user_dir.mkdir(parents=True)
-        return user_dir
+        (user_dir / "PERSONA.md").write_text("Custom persona for Alice")
 
-    def test_user_persona_overrides_global(self, tmp_path):
+        assert load_persona(config) == "Operator persona"
+        self._operator_file(config).unlink()
+        assert load_persona(config) == "Shipped persona"
+
+    def test_an_empty_operator_file_means_the_shipped_persona(self, tmp_path):
         config = self._make_config(tmp_path)
-        self._plant_global(tmp_path)
-        (self._user_config_dir(config) / "PERSONA.md").write_text("Custom persona for Alice")
+        self._plant_shipped(tmp_path)
+        self._record_last_good(config, "Operator persona")
+        self._operator_file(config).write_text("  \n")
 
-        assert load_persona(config, user_id="alice") == "Custom persona for Alice"
+        assert load_persona(config) == "Shipped persona"
 
-    def test_empty_user_persona_falls_back_to_global(self, tmp_path):
+    def test_a_missing_operator_file_falls_to_the_last_good_copy(self, tmp_path):
         config = self._make_config(tmp_path)
-        self._plant_global(tmp_path)
-        (self._user_config_dir(config) / "PERSONA.md").write_text("   ")
+        self._plant_shipped(tmp_path)
+        self._record_last_good(config, "Operator persona")
+        self._operator_file(config).unlink()
 
-        assert load_persona(config, user_id="alice") == "Global persona"
+        assert load_persona(config) == "Operator persona"
 
-    @pytest.mark.parametrize("has_workspace, user_id", [
-        (True, "alice"), (False, "alice"), (True, None),
-    ], ids=["missing_user_persona", "no_mount", "no_user_id"])
-    def test_falls_back_to_global(self, tmp_path, has_workspace, user_id):
-        config = self._make_config(tmp_path, has_workspace=has_workspace)
-        self._plant_global(tmp_path)
-
-        assert load_persona(config, user_id=user_id) == "Global persona"
-
-    def test_bot_name_substituted_in_user_persona(self, tmp_path):
+    def test_a_down_mount_falls_to_the_last_good_copy(self, tmp_path):
         config = self._make_config(tmp_path)
-        config.bot_name = "Jarvis"
-        (self._user_config_dir(config, "jarvis") / "PERSONA.md").write_text(
-            "You are {BOT_NAME}, a helpful bot."
-        )
+        self._plant_shipped(tmp_path)
+        self._record_last_good(config, "Operator persona")
+        import shutil
 
-        assert load_persona(config, user_id="alice") == "You are Jarvis, a helpful bot."
+        shutil.rmtree(config.workspace_path)
 
+        assert load_persona(config) == "Operator persona"
 
-class TestLoadPersonaPlantedPaths(TestLoadPersona):
-    """PERSONA.md sits in a directory bound read-write into the user's own
-    sandbox, and `load_persona` reads it host-side, in the daemon's filesystem
-    view. Whatever it returns becomes prompt text on the next task (ISSUE-339).
-
-    Subclasses `TestLoadPersona` so the cases above run again against the
-    hardened reader: the refusals below are only worth anything if the ordinary
-    paths still work, and a guard that rejects everything would otherwise pass
-    every test in this class.
-    """
-
-    def test_a_symlink_at_persona_is_not_followed(self, tmp_path):
+    def test_no_last_good_copy_falls_to_the_shipped_one(self, tmp_path):
         config = self._make_config(tmp_path)
-        self._plant_global(tmp_path)
-        secret = tmp_path / "credentials.json"
-        secret.write_text("TOP SECRET TOKEN")
-        (self._user_config_dir(config) / "PERSONA.md").symlink_to(secret)
+        self._plant_shipped(tmp_path)
 
-        assert load_persona(config, user_id="alice") == "Global persona"
+        assert load_persona(config) == "Shipped persona"
 
-    def test_a_fifo_at_persona_is_refused_without_blocking(self, tmp_path):
-        # Prompt assembly runs before the BrainRequest exists, so nothing
-        # times this out: one mkfifo wedges every later task for this user.
-        from .support.blocking import fails_if_it_blocks
+    def test_no_workspace_gives_the_shipped_persona(self, tmp_path):
+        config = self._make_config(tmp_path, has_workspace=False)
+        self._plant_shipped(tmp_path)
 
-        config = self._make_config(tmp_path)
-        self._plant_global(tmp_path)
-        os.mkfifo(self._user_config_dir(config) / "PERSONA.md")
+        assert load_persona(config) == "Shipped persona"
 
-        with fails_if_it_blocks(what="load_persona"):
-            assert load_persona(config, user_id="alice") == "Global persona"
-
-    def test_a_symlinked_config_dir_cannot_redirect_persona(self, tmp_path):
-        config = self._make_config(tmp_path)
-        self._plant_global(tmp_path)
-        elsewhere = tmp_path / "elsewhere"
-        elsewhere.mkdir()
-        (elsewhere / "PERSONA.md").write_text("TOP SECRET TOKEN")
-        bot_dir = config.workspace_path / "Users" / "alice" / "istota"
-        bot_dir.mkdir(parents=True)
-        (bot_dir / "config").symlink_to(elsewhere, target_is_directory=True)
-
-        assert load_persona(config, user_id="alice") == "Global persona"
-
-    def test_an_ancestor_symlink_inside_the_users_own_tree_is_allowed(self, tmp_path):
-        config = self._make_config(tmp_path)
-        self._plant_global(tmp_path)
-        base = config.workspace_path / "Users" / "alice"
-        real = base / "istota" / "real_config"
-        real.mkdir(parents=True)
-        (real / "PERSONA.md").write_text("Custom persona for Alice")
-        (base / "istota" / "config").symlink_to(real, target_is_directory=True)
-
-        assert load_persona(config, user_id="alice") == "Custom persona for Alice"
-
-    def test_bot_name_substituted_in_global_persona(self, tmp_path):
+    def test_bot_name_substituted_in_the_operator_copy(self, tmp_path):
         config = self._make_config(tmp_path)
         config.bot_name = "Jarvis"
-        self._plant_global(tmp_path, "You are {BOT_NAME}.")
+        self._operator_file(config).write_text("You are {BOT_NAME}, in {BOT_DIR}.")
+
+        assert load_persona(config) == "You are Jarvis, in jarvis."
+
+    def test_bot_name_substituted_in_the_shipped_persona(self, tmp_path):
+        config = self._make_config(tmp_path)
+        config.bot_name = "Jarvis"
+        self._plant_shipped(tmp_path, "You are {BOT_NAME}.")
 
         assert load_persona(config) == "You are Jarvis."
 
-    def test_no_persona_files_returns_none(self, tmp_path):
+    def test_no_persona_anywhere_returns_none(self, tmp_path):
         config = self._make_config(tmp_path)
-        assert load_persona(config, user_id="alice") is None
+        assert load_persona(config) is None
+
+
+class TestLoadPersonaRefusedOperatorFile(TestLoadPersona):
+    """The root is bound into no sandbox, but it is a FUSE mount, and an
+    operator's symlink or FIFO there must neither leak a file nor wedge every
+    task. Subclasses `TestLoadPersona` so the ordinary paths run again beside
+    the refusals: a reader that refused everything would pass these alone."""
+
+    def test_a_symlink_falls_through_to_the_last_good_copy(self, tmp_path):
+        config = self._make_config(tmp_path)
+        self._plant_shipped(tmp_path)
+        self._record_last_good(config, "Operator persona")
+        secret = tmp_path / "credentials.json"
+        secret.write_text("TOP SECRET TOKEN")
+        self._operator_file(config).unlink()
+        self._operator_file(config).symlink_to(secret)
+
+        assert load_persona(config) == "Operator persona"
+
+    def test_a_symlink_with_no_last_good_copy_gives_the_shipped_one(self, tmp_path):
+        config = self._make_config(tmp_path)
+        self._plant_shipped(tmp_path)
+        secret = tmp_path / "credentials.json"
+        secret.write_text("TOP SECRET TOKEN")
+        self._operator_file(config).symlink_to(secret)
+
+        assert load_persona(config) == "Shipped persona"
+
+    def test_a_fifo_is_refused_without_blocking(self, tmp_path):
+        # Prompt assembly runs before the BrainRequest exists, so nothing
+        # times this out: one mkfifo would wedge every later task.
+        from .support.blocking import fails_if_it_blocks
+
+        config = self._make_config(tmp_path)
+        self._plant_shipped(tmp_path)
+        os.mkfifo(self._operator_file(config))
+
+        with fails_if_it_blocks(what="load_persona"):
+            assert load_persona(config) == "Shipped persona"
+
+    def test_an_over_cap_file_is_refused(self, tmp_path):
+        from istota.prompts.persona import PERSONA_MAX_BYTES
+
+        config = self._make_config(tmp_path)
+        self._plant_shipped(tmp_path)
+        self._operator_file(config).write_text("x" * (PERSONA_MAX_BYTES + 1))
+
+        assert load_persona(config) == "Shipped persona"
 
 
 # ---------------------------------------------------------------------------

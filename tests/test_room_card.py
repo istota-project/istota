@@ -20,7 +20,7 @@ the request already fences their words.
 
 import pytest
 
-from istota import db, executor
+from istota import db
 from istota.rooms import policy as room_policy
 from istota.config import Config, NextcloudConfig, UserConfig
 from istota.executor import build_prompt, room_card
@@ -154,15 +154,17 @@ class TestAPrincipalsTurn:
             assert line in _card(config, task)
             assert line in _card(config, task, room_cli=False)
 
-    def test_the_card_names_whose_persona_is_in_use(self, config):
+    def test_the_card_says_nothing_about_whose_persona(self, config):
+        """The persona is the operator's on every turn (#629), so there is no
+        principal to name; reach is what still follows the speaker."""
         with db.get_db(config.db_path) as conn:
             _shared(conn)
             pid = _guest(conn)
-        assert "The persona in use is that of 'bob'." in _card(config, _task("bob"))
-        assert "The persona in use is that of 'alice'." in _card(config, _task("alice"))
-        # A guest's turn runs as the host, so it speaks with the host's persona.
-        guest = _card(config, _task("alice", guest_participant_id=pid))
-        assert "The persona in use is that of 'alice'." in guest
+        for task in (_task("bob"), _task("alice"),
+                     _task("alice", guest_participant_id=pid)):
+            card = _card(config, task)
+            assert "persona" not in card.lower(), card
+            assert "with their own reach" in card
 
     def test_a_card_built_with_no_withheld_answer_says_nothing_about_scopes(self, config):
         with db.get_db(config.db_path) as conn:
@@ -297,17 +299,16 @@ class TestThePromptUsesTheCard:
         assert "@mentioned" not in system
         assert "Shared room:" in system
 
-    def test_the_hosts_persona_never_reaches_another_principals_system_half(
-        self, config, monkeypatch,
-    ):
-        """D13 as amended: a member's PERSONA.md is writable from that member's
-        own sandbox, so it must not become standing instruction in a task that
-        runs with another member's identity. The control is the host's own turn
-        and a guest's turn, which run as the host and do carry it."""
-        monkeypatch.setattr(
-            executor, "read_user_config_file",
-            lambda cfg, uid, name: f"PERSONA OF {uid}" if name == "PERSONA.md" else None,
-        )
+    def test_one_operator_persona_reaches_every_turn_and_no_users_does(self, config):
+        """#629: the bot speaks with the operator's persona in every turn of a
+        shared room. A user's PERSONA.md, planted for each member, reaches no
+        system half, the host's own turn and a guest's (which run as the host)
+        included."""
+        for uid in ("alice", "bob"):
+            user_config = config.workspace_path / "Users" / uid / config.bot_dir_name / "config"
+            user_config.mkdir(parents=True)
+            (user_config / "PERSONA.md").write_text(f"PERSONA OF {uid}")
+        (config.workspace_path / "PERSONA.md").write_text("OPERATOR PERSONA\n")
         with db.get_db(config.db_path) as conn:
             _shared(conn)
             pid = _guest(conn)
@@ -315,10 +316,9 @@ class TestThePromptUsesTheCard:
         def system(task):
             return build_prompt(task, [], config, withheld_scopes=frozenset()).system
 
-        bobs = system(_task("bob"))
-        assert "PERSONA OF alice" not in bobs
-        assert "PERSONA OF bob" in bobs
-        # Control: the host's persona is reachable, and is used where the host
-        # is the principal.
-        assert "PERSONA OF alice" in system(_task("alice"))
-        assert "PERSONA OF alice" in system(_task("alice", guest_participant_id=pid))
+        for task in (_task("bob"), _task("alice"),
+                     _task("alice", guest_participant_id=pid)):
+            text = system(task)
+            assert "OPERATOR PERSONA" in text
+            assert "PERSONA OF" not in text
+            assert "GLOBAL PERSONA" not in text

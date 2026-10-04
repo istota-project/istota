@@ -67,6 +67,18 @@ class TestBuildPrompt:
         assert "remove_heading" in prompt
         assert "subheading" in prompt
 
+    def test_says_pinned_sections_are_off_limits(self):
+        # A doc with no pinned section, so the marker can only come from the rule.
+        doc = parse_sectioned_doc("## A\n- a\n")
+        prompt = build_op_curation_prompt("alice", doc, "dated", None)
+        rules = prompt.split("## Rules", 1)[1].split("## Output format", 1)[0]
+        assert "<!-- pinned -->" in rules
+        assert "Never emit `remove`, `replace` or `remove_heading`" in rules
+        # Append stays allowed, but the curator is not invited to stack bullets
+        # it can never correct.
+        assert "may still `append`" not in rules
+        assert "only what the user" in rules
+
     def test_does_not_claim_subsections_are_opaque(self):
         # remove/replace now reach into subsections; a stale "opaque" /
         # "top region only" instruction would mislead the model.
@@ -259,7 +271,7 @@ class TestOverlayInventoryFromDisk:
 
     def test_no_mount_means_no_inventory(self, tmp_path):
         """Overlays are filesystem reads, so an rclone-remote deployment has
-        none — the condition `load_persona` already applies to `PERSONA.md`."""
+        none."""
         config = self._config(tmp_path)
         (self._overlays(config) / "developer.md").write_text("- a rule\n")
         remote = self._config(tmp_path, workspace_path=None)

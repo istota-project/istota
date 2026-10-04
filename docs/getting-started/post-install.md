@@ -66,7 +66,6 @@ After the bot runs for the first time for a user, it creates a directory structu
 │   ├── config/
 │   │   ├── USER.md          # Persistent memory
 │   │   ├── TASKS.md         # File-based task queue
-│   │   ├── PERSONA.md       # Personality customization
 │   │   ├── CRON.md          # Scheduled jobs
 │   │   └── HEARTBEAT.md     # Health monitoring config
 │   ├── exports/             # Bot-generated files
@@ -82,7 +81,7 @@ Users can edit these files through the Nextcloud web UI, desktop client, or any 
 ## What to try next
 
 - Send a message in Talk and watch the bot respond
-- Edit `PERSONA.md` to customize the bot's personality
+- Edit `PERSONA.md` at the root of the bot's files (beside `Users/`) to change the bot's personality for everyone; see [Persona](../configuration/persona.md)
 - Set up a [briefing](../features/briefings.md) for morning summaries
 - Configure [scheduled jobs](../features/scheduling.md) via CRON.md
 - Check out the [skills index](../reference/skills-index.md) to see what the bot can do
