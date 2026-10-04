@@ -224,6 +224,9 @@ export interface ChatMessage {
   msgId?: number;
   // Whether the current user has starred this message.
   starred?: boolean;
+  // The task a Retry or Continue on this failed turn queued (ISSUE-631). The
+  // failed turn stays where it is, and this is what says where it went.
+  retriedAs?: number;
   // Set on aggregate-view (All / Unread / Starred) rows so the transcript can
   // label each message with its room and jump to it.
   roomToken?: string;
@@ -327,6 +330,24 @@ export const isStranded = (m: ChatMessage) => m.sendState === 'failed' && m.msgI
 
 /** A message typed into a busy room: written, committed to, never POSTed. */
 export const isQueued = (m: ChatMessage) => m.sendState === 'queued';
+
+/**
+ * A finished assistant turn whose task failed or was cancelled, which the
+ * Retry control can re-run (ISSUE-631). Not gated on attempts or the failure
+ * reason: a task that exhausted its automatic retries is the commonest case,
+ * and the server holds the refusal rules. `error` marks a live failure;
+ * `status` is what a turn rebuilt from history carries.
+ */
+export const isRetryableTurn = (m: ChatMessage) =>
+  m.role === 'assistant' &&
+  typeof m.taskId === 'number' &&
+  !m.streaming &&
+  !m.confirmation &&
+  (m.error === true || m.status === 'failed' || m.status === 'cancelled');
+
+/** Whether a failed turn got far enough to have steps a Continue can pick up
+ * from. The server falls back to a plain retry when it has none either. */
+export const hasPriorProgress = (m: ChatMessage) => m.segments.some((s) => s.kind === 'tool');
 
 /**
  * A row the server has no copy of, and so one a rebuild has to carry rather
@@ -759,6 +780,7 @@ export function applyEvent(m: ChatMessage, kind: string, payload: Record<string,
       setTrailingText(m, msg);
       m.text = msg;
       m.error = true;
+      m.status = 'failed';
       m.progress = undefined;
       m.streaming = false;
       finalizeTools(m);
@@ -772,6 +794,7 @@ export function applyEvent(m: ChatMessage, kind: string, payload: Record<string,
         m.segments.push({ kind: 'text', id: nextTextId(), text: '_(cancelled)_', settled: false });
       }
       m.text = answerText(m);
+      m.status = 'cancelled';
       m.progress = undefined;
       m.streaming = false;
       finalizeTools(m);
