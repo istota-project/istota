@@ -135,6 +135,7 @@ from .executor import (
     is_signal_termination,
     is_transient_api_error,
     parse_api_error,
+    sandbox_cache_is_derived,
 )
 from .async_runtime import reset_async_runtime, run_coro
 from .nextcloud import avatars as nc_avatars
@@ -5914,69 +5915,92 @@ def check_worktree_reap(config: Config) -> list:
         return []
 
 
-def sandbox_cache_sweep_root(config: Config) -> tuple[Path, list[str] | None] | None:
-    """Where the per-user package caches are, and whose they are. None if nowhere.
+def sandbox_cache_sweep_targets(
+    config: Config,
+) -> list[tuple[Path, list[str] | None]]:
+    """Where the per-user package caches are, and whose they are. Empty if nowhere.
 
     The two shapes `executor.resolve_sandbox_cache_dir` produces, asked the
-    other way round. **It reproduces that function's branch selection, not its
-    refusals**, and the difference is worth being exact about rather than
-    claiming an agreement that does not hold. The branch gate is the same pair,
-    `enabled and repos_dir`, and that is the part the sweep's worth rests on: a
-    root the resolver does not write into is a sweep that finds nothing while
-    the real caches grow, silently and in the direction of the disk leak
-    ISSUE-317 exists to close.
+    other way round, and **both at once** where the deployment has users on
+    each side (ISSUE-630). Which shape a user's *task* cache takes is
+    `executor.sandbox_cache_is_derived`, asked per user here rather than
+    restated: it carries an `is_admin` term, so on a developer deployment with
+    an admins file a non-admin's cache is at `{sandbox_cache_dir}/{user_id}`.
+    Picking one root from `enabled and repos_dir` alone left those unswept.
 
-    The resolver then refuses five further things (a relative root, one the
-    daemon cannot write, one at or above a sandbox mount, one under a database
-    directory, and `_validate_workspace_dir`'s blocklist) and this does not
-    re-derive them — duplicating that chain is the drift the whole finding
-    would be about. Only the one refusal that changes *where this walks* is
-    repeated: an absolute root. A relative `developer.repos_dir` makes the
-    resolver return None while this would hand `sweep_and_report` a path
-    resolved against the daemon's working directory, so the sweep would run
-    package-manager reclaim verbs somewhere no cache was ever created. The
-    others all leave the sweep walking a directory the resolver simply declined
-    to populate, which finds nothing and costs a log line.
+    **It reproduces the resolver's branch selection, not its refusals.** The
+    resolver refuses a relative root, one the daemon cannot write, one at or
+    above a sandbox mount, one under a database directory, and
+    `_validate_workspace_dir`'s blocklist. Two of those change *what the walk
+    finds* and are repeated: a relative root would resolve against the daemon's
+    working directory, and a `sandbox_cache_dir` at or above `repos_dir` would
+    enumerate each user's repos subtree as their cache and run reclaim verbs
+    inside it. The rest leave the sweep walking a directory the resolver
+    declined to populate, which finds nothing and costs a log line.
 
-    * developer skill on with a repos dir — the caches are derived per user at
-      `{repos_dir}/{user_id}/.package-caches`, so the root is `repos_dir` and
-      the user list is the daemon's own (`config.users`, which the config
-      loader has already overlaid `user_profiles` onto). **The list is passed
-      rather than enumerated**, because `repos_dir` is bound read-write into
-      every admin developer task and a directory name found there is not
-      evidence of a user — see `sandbox_cache_sweeper._candidates_for_users`.
-      A cache belonging to nobody on that list is reported by
-      `report_orphan_caches` and acted on by nothing.
-    * otherwise, `security.sandbox_cache_dir` and its one-level layout, which
-      the sweeper enumerates itself. Unchanged.
+    * `(repos_dir, every user in config.users)`, whenever the developer branch
+      is on. **Every user, not only the derived ones**: the devbox sets
+      `UV_CACHE_DIR` to `{repos_dir}/{user}/.package-caches` for each user in
+      `istota_devbox_users`, with no admin gate, so a non-admin can have a
+      cache there that no task wrote. **The list is passed rather than
+      enumerated**, because `repos_dir` is bound read-write into every admin
+      developer task and a directory name found there is not evidence of a user
+      — see `sandbox_cache_sweeper._candidates_for_users`.
+    * `(sandbox_cache_dir, None)`, when the key is set and the developer branch
+      is off or some user's task cache is not derived, with the one-level
+      layout the sweeper enumerates itself. A key set where every user derives
+      is not walked: no task writes into it.
 
-    Returning `None` rather than a root with nothing at it keeps "there is no
-    cache to bound" distinguishable from "the cache is empty", which is what the
-    caller's own gate needs.
-
+    `config.users` is what the config loader has already overlaid
+    `user_profiles` onto.
     """
     dev, sec = config.developer, config.security
-    if dev.enabled and dev.repos_dir:
+    users = sorted(config.users)
+    developer_branch = bool(dev.enabled and dev.repos_dir)
+
+    targets: list[tuple[Path, list[str] | None]] = []
+    repos_root: Path | None = None
+    if developer_branch:
         root = Path(dev.repos_dir)
-        if not root.is_absolute():
+        if root.is_absolute():
+            repos_root = root
+            targets.append((root, users))
+        else:
             logger.warning(
                 "sandbox_cache_sweep_skipped reason=repos_dir_not_absolute path=%r "
                 "— it would resolve against the daemon's working directory, and "
                 "the resolver refuses it too, so no cache was ever created there.",
                 dev.repos_dir,
             )
-            return None
-        return root, sorted(config.users)
-    if sec.sandbox_cache_dir:
+
+    needs_fallback = not developer_branch or any(
+        not sandbox_cache_is_derived(config, u) for u in users
+    )
+    if sec.sandbox_cache_dir and needs_fallback:
         root = Path(sec.sandbox_cache_dir)
         if not root.is_absolute():
             logger.warning(
                 "sandbox_cache_sweep_skipped reason=sandbox_cache_dir_not_absolute "
                 "path=%r — same reason.", sec.sandbox_cache_dir,
             )
-            return None
-        return root, None
-    return None
+        elif repos_root is not None and _at_or_above(root, repos_root):
+            logger.warning(
+                "sandbox_cache_sweep_skipped reason=sandbox_cache_dir_covers_repos_dir "
+                "path=%r — the resolver refuses it, and a one-level walk there "
+                "would take each user's repos subtree for their cache.",
+                sec.sandbox_cache_dir,
+            )
+        else:
+            targets.append((root, None))
+    return targets
+
+
+def _at_or_above(candidate: Path, other: Path) -> bool:
+    """Whether *other* is *candidate* or beneath it, resolved. True on error."""
+    try:
+        return other.resolve().is_relative_to(candidate.resolve())
+    except (OSError, ValueError, RuntimeError):
+        return True
 
 
 def check_skill_overlay_reindex(config: Config) -> list:
@@ -6077,10 +6101,9 @@ def check_sandbox_cache_sweep(config: Config) -> list:
     sec = config.security
     if not sec.sandbox_cache_sweep_enabled:
         return []
-    target = sandbox_cache_sweep_root(config)
-    if target is None:
+    targets = sandbox_cache_sweep_targets(config)
+    if not targets:
         return []
-    root, user_ids = target
 
     try:
         with db.get_db(config.db_path) as conn:
@@ -6093,16 +6116,19 @@ def check_sandbox_cache_sweep(config: Config) -> list:
         )
         return []
 
-    try:
-        return sweep_and_report(
-            root,
-            max_bytes=int(sec.sandbox_cache_max_gb * 1024 ** 3),
-            busy_users=busy_users,
-            user_ids=user_ids,
-        )
-    except Exception as exc:  # noqa: BLE001 - a periodic sweep must not kill the loop
-        logger.error("sandbox_cache_sweep_failed err=%s", exc, exc_info=True)
-        return []
+    outcomes: list = []
+    for root, user_ids in targets:
+        try:
+            outcomes.extend(sweep_and_report(
+                root,
+                max_bytes=int(sec.sandbox_cache_max_gb * 1024 ** 3),
+                busy_users=busy_users,
+                user_ids=user_ids,
+            ))
+        except Exception as exc:  # noqa: BLE001 - a periodic sweep must not kill the loop
+            logger.error("sandbox_cache_sweep_failed root=%s err=%s", root, exc,
+                         exc_info=True)
+    return outcomes
 
 
 AVATAR_IMPORT_IMPORTED = "imported"
@@ -9285,7 +9311,7 @@ def build_interval_gates(
             field="sandbox_cache_sweep_interval",
             enabled=lambda c: bool(
                 c.security.sandbox_cache_sweep_enabled
-                and sandbox_cache_sweep_root(c) is not None
+                and sandbox_cache_sweep_targets(c)
                 and c.scheduler.sandbox_cache_sweep_interval
             ),
             background=True,

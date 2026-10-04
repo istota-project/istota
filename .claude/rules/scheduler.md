@@ -147,7 +147,7 @@ Below `min_available_memory_mb` of `MemAvailable` or above `host_pressure_psi_th
 
 Each poller runs on its same-named interval key: `_talk_poll_loop()`, `poll_emails()`, `poll_all_tasks_files()`, `check_heartbeats()`, `check_db_health()`, `discover_and_organize_shared_files()`, `check_skill_overlay_reindex()`, `check_doctor()` (3600s); briefings, jobs and sleep cycles on `briefing_check_interval`; `check_travel_timezone()` (900s, `location.enabled`).
 - `check_worktree_reap()`: gated on `developer.enabled`, `repos_dir`, `worktree_reap_enabled`.
-- `check_sandbox_cache_sweep()`: gated on `sandbox_cache_sweep_enabled` and `sandbox_cache_sweep_root(config)`; skips users with a live task.
+- `check_sandbox_cache_sweep()`: gated on `sandbox_cache_sweep_enabled` and `sandbox_cache_sweep_targets(config)`, which may name both layouts at once; skips users with a live task.
 - `check_avatar_import()`: gated on `storage_is_nextcloud` and `web.avatar_import_from_nextcloud`. Users from `config.users`, never `user_avatars`; no transaction across a fetch; a generated avatar writes a NULL-image probe row with the ETag; stamps `shared_kv` `_avatar_import`/`last_tick` for doctor.
 
 **Learned playbooks** (`playbooks.enabled`, ISSUE-174): sleep-cycle extraction gains a `PLAYBOOKS:` section (gated on `min_tool_calls`) copying commands verbatim from the `Tools (N):` line into a thin router; `_process_extracted_playbooks` writes `playbooks/<slug>.md` indexed as `source_type="playbook"`. `pinned: true` files are re-indexed from their content, never overwritten or pruned. `cleanup_old_playbooks` prunes on last-use mtime (stamped by `_recall_playbooks`) and deletes the chunks; grandfathered once (`.retention_initialized`). See `memory.md` for the full lifecycle.
