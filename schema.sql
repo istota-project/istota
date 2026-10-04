@@ -1270,6 +1270,10 @@ CREATE TABLE IF NOT EXISTS web_chat_rooms (
     -- user's choice on all of them. Nothing outside the web sidebar can render
     -- a colour at all (ISSUE-433).
     color       TEXT NOT NULL DEFAULT '',
+    -- 1 = show this room in the viewer's main room list although it would be
+    -- hidden. Only an email thread room reads it: those sit in a collapsed
+    -- "Email threads" group until listed. Per viewer, like `color`.
+    listed      INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (user_id, token)

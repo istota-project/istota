@@ -4407,6 +4407,9 @@ def _room_snapshot(username: str) -> dict[str, dict]:
                 # that never reaches the user's other tab, and the client
                 # merges field by field so it would also be erased there.
                 "color": handle.color,
+                # Per-user like `color`, and carried for the same reason: a
+                # thread listed or hidden in one tab has to reach the other.
+                "listed": handle.listed,
             }
     return out
 
@@ -5876,6 +5879,9 @@ def _room_to_dict(room) -> dict:
         # a shared room has one registry row and one handle per member, and the
         # colour is the member's rather than the room's.
         "color": room.color,
+        # Per-user too: an email thread room the viewer chose to show in the
+        # main list. The client hides a thread with this false.
+        "listed": room.listed,
         "created_at": room.created_at,
         "updated_at": room.updated_at,
     }
@@ -6291,9 +6297,18 @@ class _RoomSettingsRefused(Exception):
     """A shared room's setting changed by someone who is not its host (403)."""
 
 
+class _RoomNotListable(Exception):
+    """`listed` sent for a room that is not an email thread (400)."""
+
+
+#: The PATCH's refusal for `listed` on any room but an email thread.
+ROOM_NOT_LISTABLE = "only an email thread can be listed"
+
+
 def _chat_update_room(
     username: str, room_id: int, name: str | None, archived: bool | None,
     model=_UNSET, effort=_UNSET, brain=_UNSET, color=_UNSET, guest_reply=_UNSET,
+    listed=_UNSET,
 ) -> dict | None:
     """Apply a room PATCH. `_UNSET` on a field means its key was absent.
 
@@ -6345,14 +6360,23 @@ def _chat_update_room(
             refusal = room_policy.guest_reply_refusal(conn, room.token, username)
             if refusal:
                 raise _RoomSettingsRefused(refusal)
+        # Only an email thread room is hidden, so only one can be listed.
+        # Per member, like colour, so no host check.
+        if listed is not _UNSET:
+            from istota.transport.routing import email_thread_room
+
+            if not email_thread_room(conn, room.token):
+                raise _RoomNotListable(ROOM_NOT_LISTABLE)
         # `_UNSET` → leave the column alone; `None` (an explicit null or "" in
         # the body) → clear it, which the store spells as the empty string.
-        # This is the one field written straight to the handle: `model`,
-        # `effort` and `brain` below all land on the canonical registry row
-        # instead, because they are room-global and this is not (ISSUE-433).
+        # Colour and `listed` are the fields written straight to the handle:
+        # `model`, `effort` and `brain` below all land on the canonical
+        # registry row instead, because they are room-global and these are
+        # not (ISSUE-433).
         updated = db.update_web_chat_room(
             conn, room_id, name=name, archived=archived,
             color=("" if color is None else color) if color is not _UNSET else None,
+            listed=listed if listed is not _UNSET else None,
         )
         cleared: list[str] = []
         # Keep the unified room registry in sync (the cross-surface room list /
@@ -9573,6 +9597,14 @@ async def chat_update_room(
         color = str(data["color"] or "").strip().lower() or None
         if color is not None and not is_room_color(color):
             return JSONResponse({"error": "unknown color"}, status_code=400)
+    # Show a hidden email thread room in the main list. Per user like `color`;
+    # `_chat_update_room` refuses it on a room that is not an email thread.
+    # A strict bool, since `bool("no")` is True.
+    listed = _UNSET
+    if "listed" in data:
+        if not isinstance(data["listed"], bool):
+            return JSONResponse({"error": "invalid listed"}, status_code=400)
+        listed = data["listed"]
     # How a guest's turn is answered (multiplayer D11). Host only, which
     # `_chat_update_room` checks with the rule `!room guests` uses.
     guest_reply = _UNSET
@@ -9650,10 +9682,12 @@ async def chat_update_room(
     try:
         updated = await asyncio.to_thread(
             _chat_update_room, user["username"], room_id, name, archived, model,
-            effort, brain, color, guest_reply,
+            effort, brain, color, guest_reply, listed,
         )
     except _RoomSettingsRefused as refused:
         return JSONResponse({"error": str(refused)}, status_code=403)
+    except _RoomNotListable as refused:
+        return JSONResponse({"error": str(refused)}, status_code=400)
     if updated is None:
         return JSONResponse({"error": "room not found"}, status_code=404)
     # Propagate a rename to the bound Talk conversation, if any (best-effort).
@@ -10413,10 +10447,12 @@ def _chat_aggregate_messages(
     from istota import db
     before_ts, before_id = before if before is not None else (None, None)
     with db.get_db(_config.db_path) as conn:
-        # limit+1 → the extra row is the has_more probe.
+        # limit+1 → the extra row is the has_more probe. The panes cover the
+        # main room list only, so a hidden email thread stays out of them.
         rows = db.list_messages_across_rooms(
             conn, username, view=view, limit=limit + 1,
             before_ts=before_ts, before_id=before_id,
+            exclude_tokens=db.hidden_room_tokens_for_member(conn, username),
         )
         undeletable = _undeletable_message_ids(
             conn, username, [(r["msg_id"], r["room_token"]) for r in rows[:limit]],
