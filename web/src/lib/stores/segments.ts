@@ -13,6 +13,8 @@
  * types and calls `applyEvent` inside its `updateMsg` mutation.
  */
 
+import type { ReceivedMail } from '../api';
+
 export interface ToolEntry {
   id: string; // tool_call_id (or synthesized t<n> / h<n>)
   name: string;
@@ -273,7 +275,12 @@ export interface ChatMessage {
     subject?: string;
     state: 'sent' | 'held' | 'failed' | 'discarded';
     body?: string;
+    labels?: Record<string, string>;
+    notePath?: string;
   };
+  // User rows in a mail room: the incoming mail, rendered as a mail card.
+  // The server's `received_mail`, as sent.
+  receivedMail?: ReceivedMail;
 
   // ---- Send lifecycle (ISSUE-200) -------------------------------------------
   // User rows this client originated, only. Absent means settled — which every

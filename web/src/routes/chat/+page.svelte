@@ -113,7 +113,11 @@
   // sharing one task id, so keying on the id without the role renders every
   // card twice — and the card belongs under the answer, not under the question
   // that started the task.
+  //
+  // None in an email thread room: the thread is a view of the mail, so a held
+  // mail shows its card and a link to the private chat, where it is acted on.
   function draftsForRow(message: { role: string; taskId?: number | null }) {
+    if (readOnlyThread) return [];
     if (message.role !== 'assistant' || message.taskId == null) return [];
     return draftsByTask.get(message.taskId) ?? [];
   }

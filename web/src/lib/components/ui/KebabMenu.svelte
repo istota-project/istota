@@ -10,6 +10,9 @@
     // open-in-new-tab and the status-bar URL preview. A menu item that only
     // navigates should use this rather than an onSelect + goto().
     href?: string;
+    // An href the server answers rather than a page (a `/chat/r/...` deep
+    // link), so the client does a full navigation instead of routing it.
+    reload?: boolean;
     danger?: boolean;
     disabled?: boolean;
   }
@@ -37,7 +40,9 @@
         {#if item.href}
           <DropdownMenu.Item class={cls} disabled={item.disabled}>
             {#snippet child({ props })}
-              <a {...props} href={item.href}>{item.label}</a>
+              <a {...props} href={item.href} data-sveltekit-reload={item.reload ? '' : undefined}
+                >{item.label}</a
+              >
             {/snippet}
           </DropdownMenu.Item>
         {:else}

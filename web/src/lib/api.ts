@@ -3126,6 +3126,9 @@ export interface ChatHistoryMessage {
   // (ISSUE-612). `body` is present only when the mailed text differs from
   // `text`.
   mail?: OutgoingMail;
+  // User rows in a mail room (an email thread room or the private email
+  // room) only: the mail as the incoming-mail card renders it.
+  received_mail?: ReceivedMail;
 }
 
 export type OutgoingMailState = 'sent' | 'held' | 'failed' | 'discarded';
@@ -3136,6 +3139,47 @@ export interface OutgoingMail {
   subject?: string;
   state: OutgoingMailState;
   body?: string;
+  // In a mail room: how to name an address other than by itself ("you" for
+  // the viewer's own, the bot's name for the bot's), keyed lowercased.
+  labels?: Record<string, string>;
+  // In a mail room: the viewer's private room at this turn's task, where a
+  // held mail is approved and the mail is discussed.
+  note_path?: string;
+}
+
+export interface MailAddress {
+  name: string;
+  address: string;
+}
+
+export interface MailAttachment {
+  filename: string;
+  size?: number;
+  // A workspace path `chatFileUrl` serves, present only for a copy in the
+  // viewer's own workspace.
+  path?: string;
+}
+
+/** A mail that came into a mail room, from stored metadata only. */
+export interface ReceivedMail {
+  from: MailAddress;
+  to: MailAddress[];
+  cc: MailAddress[];
+  date: string;
+  subject: string;
+  attachments: MailAttachment[];
+  // The text the sender wrote now, and the rest (signature, quoted history).
+  new_text: string;
+  rest: string;
+  labels: Record<string, string>;
+  note_path?: string;
+  // A row from before the metadata was stored: From, Subject and Date from
+  // the prompt wrapper alone, and none of the fields below.
+  fallback?: boolean;
+  message_id?: string;
+  in_reply_to?: string;
+  sender_check?: 'verified' | 'failed' | 'none';
+  trusted?: boolean;
 }
 
 /** Cross-room aggregate views (sidebar All / Unread / Starred). */

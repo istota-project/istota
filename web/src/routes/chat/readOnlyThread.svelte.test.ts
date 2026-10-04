@@ -127,6 +127,46 @@ describe('the composer in an email thread room', () => {
     expect(notice()!.textContent).not.toContain('email thread');
   });
 
+  it('renders no draft card under a thread row (stage 3)', async () => {
+    // The thread is a mail view: a held mail shows its card and a link to
+    // the private chat, and the draft is acted on there, not here.
+    const session = getChatSession() as unknown as Record<string, { set: (v: unknown) => void }>;
+    const held = {
+      cid: 1,
+      role: 'assistant',
+      text: 'Thursday works.',
+      taskId: 9,
+      segments: [{ kind: 'text', text: 'Thursday works.' }],
+      streaming: false,
+      mail: { to: ['alice@example.com'], cc: [], state: 'held' },
+    };
+    const draft = {
+      id: 4,
+      status: 'pending',
+      task_id: 9,
+      to: ['alice@example.com'],
+      subject: 'Re: Dinner',
+      body: 'Thursday works.',
+    };
+    session.messages.set([held]);
+    session.outboundDrafts.set([draft]);
+    try {
+      setRooms([{ name: 'Book club', origin: 'email', read_only: true, email_thread: true }]);
+      renderPage();
+      await waitFor(() => expect(document.querySelector('[data-testid="mail-card"]')).toBeTruthy());
+      expect(document.querySelector('.draft-card')).toBeNull();
+      cleanup();
+
+      // The control: the same row in an ordinary room carries its draft.
+      setRooms([{ name: 'Testing' }]);
+      renderPage();
+      await waitFor(() => expect(document.querySelector('.draft-card')).toBeTruthy());
+    } finally {
+      session.messages.set([]);
+      session.outboundDrafts.set([]);
+    }
+  });
+
   it('keeps the composer in an ordinary web room', async () => {
     setRooms([{ name: 'Testing' }]);
     renderPage();

@@ -2723,8 +2723,11 @@ function createSession(): ChatSession {
               subject: m.mail.subject || undefined,
               state: m.mail.state,
               body: m.mail.body || undefined,
+              labels: m.mail.labels ?? undefined,
+              notePath: m.mail.note_path || undefined,
             }
           : undefined,
+      receivedMail: m.role === 'user' && m.received_mail ? m.received_mail : undefined,
       // Persisted server-side, so the chip survives leaving the room and
       // coming back (the composer's names are long gone by then).
       attachments: m.attachments?.length ? m.attachments : undefined,

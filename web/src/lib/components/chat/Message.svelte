@@ -18,6 +18,8 @@
   import ActivityTrace from './ActivityTrace.svelte';
   import ConfirmationCard from './ConfirmationCard.svelte';
   import DraftCard from './DraftCard.svelte';
+  import MailCard from './MailCard.svelte';
+  import { receivedCard, sentCard } from './mailCard';
   import SearchResults from './SearchResults.svelte';
 
   /** One line's worth of a collapsed external turn, in characters. */
@@ -337,15 +339,19 @@
   // only then), so a post is not shown twice. The state is recorded after the
   // send and the room stream carries new rows only, so a card already on
   // screen shows a later state after a reload.
+  //
+  // In a mail room the row is the mailed body (hidden email threads, stage 2),
+  // so the card stands alone with the body inside it: an answer above it would
+  // say the same thing twice. `mail.body` is sent only where the mailed text
+  // differs from the row (an edited draft), and then it is what the card shows.
   const outgoingMail = $derived(!isUser ? message.mail : undefined);
-  const MAIL_STATE_LABELS: Record<string, string> = {
-    sent: 'Sent by email',
-    held: 'Email held for approval',
-    failed: 'Email not sent',
-    discarded: 'Email discarded',
-  };
-  const mailStateLabel = $derived(
-    outgoingMail ? (MAIL_STATE_LABELS[outgoingMail.state] ?? 'Email') : '',
+  const outgoingCard = $derived(
+    outgoingMail ? sentCard(outgoingMail, message.text, message.createdAt ?? '') : null,
+  );
+  // A mail that came into a mail room renders as the incoming card, in place
+  // of both the bubble and the external treatment.
+  const incomingCard = $derived(
+    isUser && message.receivedMail ? receivedCard(message.receivedMail) : null,
   );
 
   // The turn's body is an ordered list of render groups (substantial prose +
@@ -917,7 +923,9 @@
       {@render replyQuote()}
 
       {#if isUser}
-        {#if isExternal}
+        {#if incomingCard}
+          <MailCard card={incomingCard} />
+        {:else if isExternal}
           <!-- Provenance first, body second. The header renders at every
                setting: it is what says a message arrived from outside and who
                sent it, and withholding that is what made a stranger's mail read
@@ -981,7 +989,7 @@
             >
           </div>
         {/if}
-        {#if message.attachments?.length}
+        {#if message.attachments?.length && !incomingCard}
           <div class="attachments">
             {#each message.attachments as name, i}
               {@const href = message.attachmentPaths?.[i]}
@@ -1072,7 +1080,10 @@
 				     (prominent markdown) interleaved with activity chips (tool runs
 				     fold into one chip each). Short lead-in narration and reasoning
 				     are dropped — the pre-tool work phase is the cue below. -->
-        {#each groups as g, gi (g.id)}
+        {#if outgoingCard}
+          <MailCard card={outgoingCard} />
+        {/if}
+        {#each outgoingCard ? [] : groups as g, gi (g.id)}
           {#if g.kind === 'activity'}
             <!-- A chip sandwiched between paragraphs needs room to breathe;
 						     the first group sits tight under the meta, like a no-tool
@@ -1136,33 +1147,6 @@
           <div class="progress">
             <span class="dot"></span>
             <span class="status-text">{message.progress || 'Thinking…'}</span>
-          </div>
-        {/if}
-
-        {#if outgoingMail}
-          <div class="external outgoing" data-testid="outgoing-mail">
-            <div class="external-head">
-              <span class="external-mark" aria-hidden="true"><Mail size={13} /></span>
-              <span
-                class="external-label"
-                class:mail-failed={outgoingMail.state === 'failed'}
-                class:mail-muted={outgoingMail.state === 'discarded'}>{mailStateLabel}</span
-              >
-              {#if outgoingMail.subject}
-                <span class="external-subject">{outgoingMail.subject}</span>
-              {/if}
-            </div>
-            {#if outgoingMail.to.length}
-              <div class="mail-recipients">To: {outgoingMail.to.join(', ')}</div>
-            {/if}
-            {#if outgoingMail.cc.length}
-              <div class="mail-recipients">Cc: {outgoingMail.cc.join(', ')}</div>
-            {/if}
-            {#if outgoingMail.body}
-              <div class="body user-body">
-                <span class="user-text">{outgoingMail.body}</span>
-              </div>
-            {/if}
           </div>
         {/if}
 
@@ -1851,25 +1835,6 @@
   .external .body {
     margin-top: var(--space-1);
   }
-  /* The outgoing-mail card (ISSUE-612) reuses the external surface, set off
-	   from the answer above it. Recipients are addresses from the thread, so
-	   they wrap rather than clip: who a mail went to is the point of the card. */
-  .outgoing {
-    margin-top: var(--space-2);
-  }
-  .mail-recipients {
-    margin-top: var(--space-1);
-    font-size: var(--text-xs);
-    color: var(--text-secondary);
-    overflow-wrap: anywhere;
-  }
-  .mail-failed {
-    color: var(--status-danger-fg);
-  }
-  .mail-muted {
-    color: var(--text-muted);
-  }
-
   /* Send lifecycle on the user's own row (ISSUE-200). Both marks sit under the
 	   message body, where the turn-action row would be — the send has to settle
 	   before that row has anything to act on. */
