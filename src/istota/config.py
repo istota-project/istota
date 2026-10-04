@@ -388,9 +388,9 @@ class SchedulerConfig:
     # well under the default 24-hour retention window, so nothing waits long
     # after becoming eligible, and well over the cost of a sweep.
     worktree_reap_interval: int = 21600
-    # Seconds between package-cache sweeps (ISSUE-317, 0 = off). Inert unless
-    # `security.sandbox_cache_dir` is set, since with no configured root there
-    # is no cache on disk to bound. Six hours, matching the worktree reap beside
+    # Seconds between package-cache sweeps (ISSUE-317, 0 = off). Inert when
+    # there is no cache root: neither a developer `repos_dir` nor
+    # `security.sandbox_cache_dir`. Six hours, matching the worktree reap beside
     # it: the two answer the same disk, and a cache that went over its ceiling
     # is not urgent — it is over budget, not broken.
     sandbox_cache_sweep_interval: int = 21600
