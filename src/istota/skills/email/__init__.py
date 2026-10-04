@@ -2108,7 +2108,10 @@ def cmd_output(args):
 
 
 def _record_sent_email_direct(
-    task_id: str, message_id: str, to_addr: str, subject: str,
+    task_id: str, message_id: str, to_addr: str, subject: str, *,
+    to: list[str] | None = None, cc: list[str] | None = None,
+    in_reply_to: str | None = None, references: str | None = None,
+    body: str | None = None,
 ) -> None:
     """Record the sent email straight into the framework DB.
 
@@ -2133,7 +2136,9 @@ def _record_sent_email_direct(
 
     try:
         from ... import db
+        from ...config import load_config
         from ...transport import routing
+        from ...transport.email import threads
 
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, int(task_id))
@@ -2161,16 +2166,38 @@ def _record_sent_email_direct(
                 to_addr=to_addr,
                 subject=subject,
                 task_id=task.id,
+                in_reply_to=in_reply_to,
+                references=references,
                 conversation_token=task.conversation_token,
                 talk_delivery_token=task.talk_delivery_token,
                 origin_target=routing.origin_descriptor(task, conn),
+            )
+            try:
+                app_config = load_config()
+            except Exception as e:  # noqa: BLE001 — the row above is kept
+                logger.warning("sent-email tracking: no config for the thread room: %s", e)
+                return
+            threads.register_sent_thread(
+                conn, app_config, user_id=task.user_id, message_id=message_id,
+                in_reply_to=in_reply_to, references=references,
+                to=to if to is not None else [to_addr], cc=cc or [],
+                subject=subject, body=body, task_id=task.id,
             )
     except Exception as e:  # noqa: BLE001 — the send already happened
         logger.warning("sent-email tracking: direct write failed: %s", e)
 
 
-def _write_deferred_sent_email(message_id: str, to_addr: str, subject: str) -> None:
-    """Record a sent email so a reply can be threaded back to its task.
+def _write_deferred_sent_email(
+    message_id: str, to_addr: str, subject: str, *,
+    cc: list[str] | None = None, in_reply_to: str | None = None,
+    references: str | None = None, body: str | None = None,
+) -> None:
+    """Record a sent email so a reply can be threaded back to its task, and
+    the mail lands in its thread's room.
+
+    ``to_addr`` is the To address; the stored ``to_addr`` joins it with ``cc``,
+    the form a thread reply records and `ownership.thread_reply_from_correspondent`
+    parses. Bcc is never passed and never recorded.
 
     Prefers the deferred file (the only route out of the sandbox, where the
     framework DB is read-only) and falls back to a direct DB write when no
@@ -2180,8 +2207,13 @@ def _write_deferred_sent_email(message_id: str, to_addr: str, subject: str) -> N
     deferred_dir = os.environ.get("ISTOTA_DEFERRED_DIR", "")
     if not task_id:
         return  # Not running inside a task — nothing to attribute the row to
+    cc = list(cc or [])
+    recipients = ", ".join([to_addr, *cc])
     if not deferred_dir:
-        _record_sent_email_direct(task_id, message_id, to_addr, subject)
+        _record_sent_email_direct(
+            task_id, message_id, recipients, subject, to=[to_addr], cc=cc,
+            in_reply_to=in_reply_to, references=references, body=body,
+        )
         return
 
     conversation_token = os.environ.get("ISTOTA_CONVERSATION_TOKEN", "") or None
@@ -2189,8 +2221,13 @@ def _write_deferred_sent_email(message_id: str, to_addr: str, subject: str) -> N
 
     entry = {
         "message_id": message_id,
-        "to_addr": to_addr,
+        "to_addr": recipients,
+        "to": [to_addr],
+        "cc": cc,
         "subject": subject,
+        "in_reply_to": in_reply_to,
+        "references": references,
+        "body": body,
         "conversation_token": conversation_token,
         "user_id": user_id,
     }
@@ -2581,7 +2618,7 @@ def cmd_send(args):
         reply_to=getattr(args, "reply_to", None),
     )
 
-    _write_deferred_sent_email(message_id, args.to, args.subject)
+    _write_deferred_sent_email(message_id, args.to, args.subject, cc=cc, body=body)
 
     return {
         "status": "ok",
@@ -2669,7 +2706,10 @@ def cmd_reply(args):
         in_reply_to=orig.message_id,
         references=references or None,
     )
-    _write_deferred_sent_email(message_id, to_addr, subject)
+    _write_deferred_sent_email(
+        message_id, to_addr, subject, cc=cc, in_reply_to=orig.message_id,
+        references=references or None, body=body,
+    )
     return {
         "status": "ok",
         "message_id": message_id,

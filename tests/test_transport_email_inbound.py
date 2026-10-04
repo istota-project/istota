@@ -1799,67 +1799,52 @@ class TestEmissaryLifecycle:
             references=f"<{message_id}>",
         ))
 
-    def test_talk_task_sends_email_reply_routes_to_original_room(
-        self, db_path, tmp_path, mail_config,
+    @staticmethod
+    def _talk_task(conn):
+        return db.create_task(
+            conn, prompt="send email", user_id="alice",
+            source_type="talk", conversation_token="talkroom_42",
+        )
+
+    @staticmethod
+    def _email_task(conn):
+        return db.create_task(
+            conn, prompt="reply", user_id="alice", source_type="email",
+            conversation_token="0123456789abcdef", talk_delivery_token="alerts_room",
+        )
+
+    @staticmethod
+    def _subtask(conn):
+        parent_id = db.create_task(
+            conn, prompt="parent", user_id="alice",
+            source_type="talk", conversation_token="parent_room",
+        )
+        return db.create_task(
+            conn, prompt="child", user_id="alice",
+            source_type="subtask", parent_task_id=parent_id,
+            conversation_token="parent_room", talk_delivery_token="parent_room",
+        )
+
+    @pytest.mark.parametrize("make_task", ["_talk_task", "_email_task", "_subtask"])
+    def test_the_reply_lands_in_the_room_the_send_minted(
+        self, db_path, tmp_path, mail_config, make_task,
     ):
-        """Full loop: talk task sends, external replies, routes to original room."""
+        """Whatever the originator, the send mints the thread's room, and the
+        first reply is a turn in it rather than a routed notice (stage 1 of
+        email-on-rooms): reply-all by mail, nothing mirrored into the origin."""
         with db.get_db(db_path) as conn:
-            tid = db.create_task(
-                conn, prompt="send email", user_id="alice",
-                source_type="talk", conversation_token="talkroom_42",
-            )
-            task = db.get_task(conn, tid)
+            task = db.get_task(conn, getattr(self, make_task)(conn))
 
-        new_task = self._round_trip(db_path, tmp_path, mail_config, task, "m_talk@bot.com")
+        new_task = self._round_trip(db_path, tmp_path, mail_config, task, "m_out@bot.com")
 
+        with db.get_db(db_path) as conn:
+            room = db.resolve_room_token(conn, "email", "<m_out@bot.com>")
+        assert room is not None
         assert new_task.user_id == "alice"
-        assert new_task.conversation_token == "talkroom_42"
-        # The reply routes back to the origin Talk room via the stored origin
-        # descriptor (talk:<token>) rather than the talk_delivery_token ladder.
-        assert new_task.output_target == "talk:talkroom_42,email"
-
-    def test_email_task_sends_email_reply_routes_via_alerts(
-        self, db_path, tmp_path, mail_config,
-    ):
-        """Email-source originator: reply routes via the recorded delivery token."""
-        synthetic = "0123456789abcdef"
-
-        with db.get_db(db_path) as conn:
-            tid = db.create_task(
-                conn, prompt="reply", user_id="alice",
-                source_type="email", conversation_token=synthetic,
-                talk_delivery_token="alerts_room",
-            )
-            task = db.get_task(conn, tid)
-
-        new_task = self._round_trip(db_path, tmp_path, mail_config, task, "m_email@bot.com")
-
-        assert new_task.talk_delivery_token == "alerts_room"
-        # conversation_token still preserves the original synthetic email-thread key
-        assert new_task.conversation_token == synthetic
-
-    def test_subtask_sends_email_reply_routes_to_parent_room(
-        self, db_path, tmp_path, mail_config,
-    ):
-        """Subtask of a talk task sends an email — reply must reach parent's room."""
-        with db.get_db(db_path) as conn:
-            parent_id = db.create_task(
-                conn, prompt="parent", user_id="alice",
-                source_type="talk", conversation_token="parent_room",
-            )
-            sub_id = db.create_task(
-                conn, prompt="child", user_id="alice",
-                source_type="subtask", parent_task_id=parent_id,
-                conversation_token="parent_room",
-                talk_delivery_token="parent_room",
-            )
-            sub = db.get_task(conn, sub_id)
-
-        new_task = self._round_trip(db_path, tmp_path, mail_config, sub, "m_sub@bot.com")
-
-        # Reply reaches the parent's room via the origin descriptor (talk:<token>).
-        assert new_task.conversation_token == "parent_room"
-        assert new_task.output_target == "talk:parent_room,email"
+        assert new_task.conversation_token == room
+        assert new_task.output_target == "email"
+        assert new_task.talk_delivery_token is None
+        assert "Notify the user" not in new_task.prompt
 
 
 # =============================================================================

@@ -433,8 +433,15 @@ def _record_sent_email(
     subject: str | None = None,
     in_reply_to: str | None = None,
     references: str | None = None,
+    *,
+    to: list[str] | None = None,
+    cc: list[str] | None = None,
+    body: str | None = None,
 ) -> None:
-    """Record an outbound email for emissary thread matching (non-critical)."""
+    """Record an outbound email for thread matching, and put it in its
+    thread's room (non-critical). ``to`` and ``cc`` are the recipients
+    ``to_addr`` joins (``to`` defaults to ``to_addr`` itself); ``body`` is
+    what was mailed."""
     from .. import routing
 
     try:
@@ -451,6 +458,12 @@ def _record_sent_email(
                 conversation_token=task.conversation_token,
                 talk_delivery_token=task.talk_delivery_token,
                 origin_target=routing.origin_descriptor(task, conn),
+            )
+            email_threads.register_sent_thread(
+                conn, config, user_id=task.user_id, message_id=message_id,
+                in_reply_to=in_reply_to, references=references,
+                to=to if to is not None else [to_addr], cc=cc or [],
+                subject=subject, body=body, task_id=task.id,
             )
     except Exception as e:
         logger.warning("Failed to record sent email for task %d: %s", task.id, e)
@@ -586,6 +599,7 @@ async def _send_thread_reply(
     _record_sent_email(
         config, task, sent_message_id, to_addr=", ".join([plan.to, *plan.cc]),
         subject=subject, in_reply_to=plan.in_reply_to, references=plan.references,
+        to=[plan.to], cc=list(plan.cc), body=mailed,
     )
     return True
 
@@ -870,6 +884,7 @@ async def deliver_email_result(
                 subject=subject,
                 in_reply_to=processed_email.message_id,
                 references=references,
+                to=[processed_email.sender_email], body=body_text,
             )
             return True
         except Exception as e:
@@ -917,6 +932,7 @@ async def deliver_email_result(
                 config, task, sent_message_id,
                 to_addr=user_config.email_addresses[0],
                 subject=subject,
+                to=[user_config.email_addresses[0]], body=body_text,
             )
             return True
         except Exception as e:

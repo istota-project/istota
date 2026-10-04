@@ -15,6 +15,9 @@ the existing routing.
   the sender, so every correspondent's reply on one thread hashes differently.
 - **Minting** happens only on evidence that the thread is the host's: their
   own address is on it, or it threads onto a mail the bot sent for them. A
+  thread the bot starts is minted at the send (`register_sent_thread`), with
+  the sent mail as its first row, so the first reply finds it like any other.
+  A reply on a thread sent before that existed mints at the reply. A
   stranger copying people on a mail to ``bot+<user>@`` mints nothing, which
   keeps "existence, never creation" for unsolicited mail. A mail held by the
   untrusted-sender gate mints nothing either. Rooms are otherwise
@@ -43,8 +46,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+import uuid
 from dataclasses import dataclass
+from types import SimpleNamespace
 from email.utils import getaddresses, parseaddr
 from typing import TYPE_CHECKING
 
@@ -57,11 +63,16 @@ from .._types import ParticipantRef
 if TYPE_CHECKING:
     from ...config import Config
 
+logger = logging.getLogger(__name__)
+
 SURFACE = "email"
-#: Humans besides the bot a thread needs before it is a room.
+#: Humans besides the bot a received thread needs before it is a room. A
+#: thread the bot starts needs one besides the user (`register_sent_thread`).
 MIN_HUMANS = 2
 
 _NAME_MAX = 80
+#: Display cap on a recorded subject, as `outbound._MAIL_SUBJECT_MAX_CHARS`.
+_MAIL_SUBJECT_MAX = 200
 _REPLY_PREFIX = re.compile(r"^\s*((re|fwd?)\s*:\s*)+", re.IGNORECASE)
 _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
@@ -228,14 +239,22 @@ def resolve_thread(
     owned = {fold(a) for a in (owner.email_addresses if owner else [])}
     if not (ours or any(address in owned for address, _ in people)):
         return None
-    root = ids[0]
     if find_thread_room(conn, config, email) is not None:
         # The thread's room exists but the caller could not use it (its host is
         # no longer configured): never re-found it with this message's people.
         return None
+    return _mint(conn, config, owner_user_id=owner_user_id, root=ids[0],
+                 subject=getattr(email, "subject", None), people=people)
+
+
+def _mint(
+    conn, config: "Config", *, owner_user_id: str, root: str,
+    subject: str | None, people,
+) -> ThreadRoom | None:
+    """Mint the thread's room, bound to its root id, with ``people`` as the
+    baseline. The one copy, for a mail received and a mail sent alike."""
     room = db.register_bound_room(
-        conn, owner_user_id, origin=SURFACE,
-        name=_room_name(getattr(email, "subject", None)),
+        conn, owner_user_id, origin=SURFACE, name=_room_name(subject),
         surface=SURFACE, surface_ref=root,
     )
     if room is None:
@@ -245,6 +264,118 @@ def resolve_thread(
     _sync(conn, config, token, people, acknowledged=True)
     db.mark_audience_baseline(conn, token, SURFACE)
     return ThreadRoom(token=token, ref=root, host=owner_user_id)
+
+
+def _addresses(values) -> list[tuple[str, str]]:
+    """``(folded address, display name)`` for each address in ``values``,
+    in order, once each."""
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name, address in getaddresses([str(v) for v in (values or ()) if v]):
+        address = fold(address)
+        if "@" not in address or address in seen:
+            continue
+        seen.add(address)
+        out.append((address, " ".join((name or "").split())))
+    return out
+
+
+def record_sent_mail(
+    conn, room_token: str, *, to, cc=(), subject: str | None, body: str | None,
+) -> int:
+    """The bot's mail as a row of its thread's room, with its outgoing-mail
+    card (ISSUE-612's shape), so the transcript starts with what was sent.
+
+    Not tied to the task that sent it: that task ran in another room, and
+    tying the row to it would pair its turn into this room's history and show
+    its trace here (the rule `private_replies._post_answers_task` states).
+    """
+    message_id = db.add_message(
+        conn, room_token, role="assistant", body=body or "", origin_surface=SURFACE,
+    )
+    db.set_outgoing_mail(conn, message_id, {
+        "to": [address for address, _ in _addresses(to)],
+        "cc": [address for address, _ in _addresses(cc)],
+        "subject": (subject or "")[:_MAIL_SUBJECT_MAX],
+        "state": "sent",
+    })
+    return message_id
+
+
+def register_sent_thread(
+    conn, config: "Config", *, user_id: str, message_id: str | None,
+    in_reply_to: str | None = None, references: str | None = None,
+    to=(), cc=(), subject: str | None = None, body: str | None = None,
+    task_id: int | None = None,
+) -> ThreadRoom | None:
+    """Put a mail the bot sent for ``user_id`` into its thread's room.
+
+    Called after each send is recorded in `sent_emails`, so a reply finds its
+    room from the first one on. The root is worked out as for inbound mail
+    (`thread_message_ids`). A thread that already has a room records the
+    recipients as its people, only when ``user_id`` hosts it, since the ids
+    can come from a deferred file the model writes. A thread with none is
+    minted when anyone besides the user and the bot is on it, with the sent
+    mail as its first row; mail to the user's own addresses mints nothing.
+    Bcc is never passed in and never becomes a person.
+
+    Best-effort and never raises: its writes go in a savepoint, so a failure
+    rolls back only this and leaves the send recorded. A reply then mints at
+    the reply, through `ownership.match_thread`.
+    """
+    savepoint = f"sent_thread_{uuid.uuid4().hex[:12]}"
+    try:
+        conn.execute(f"SAVEPOINT {savepoint}")
+    except Exception as e:  # noqa: BLE001 — see the docstring
+        logger.warning("Could not register the thread of sent mail %s (task %s): %s",
+                       message_id, task_id, e)
+        return None
+    try:
+        room = _register_sent_thread(
+            conn, config, user_id=user_id,
+            ids=SimpleNamespace(message_id=message_id, in_reply_to=in_reply_to,
+                                references=references),
+            to=to, cc=cc, subject=subject, body=body,
+        )
+        conn.execute(f"RELEASE {savepoint}")
+        return room
+    except Exception as e:  # noqa: BLE001 — see the docstring
+        try:
+            conn.execute(f"ROLLBACK TO {savepoint}")
+            conn.execute(f"RELEASE {savepoint}")
+        except Exception:  # noqa: BLE001 — the warning below is the report
+            pass
+        logger.warning("Could not register the thread of sent mail %s (task %s): %s",
+                       message_id, task_id, e)
+        return None
+
+
+def _register_sent_thread(
+    conn, config: "Config", *, user_id: str, ids, to, cc,
+    subject: str | None, body: str | None,
+) -> ThreadRoom | None:
+    root_ids = thread_message_ids(ids)
+    if not root_ids:
+        return None
+    people = [(address, name) for address, name in _addresses([*to, *cc])
+              if not is_bot_address(config, address)]
+    existing = find_thread_room(conn, config, ids)
+    if existing is not None:
+        if existing.host != user_id:
+            logger.warning("Sent mail for %s threads onto a room they do not host; "
+                           "not recorded there", user_id)
+            return None
+        _sync(conn, config, existing.token, people, acknowledged=False)
+        return existing
+    owner = config.users.get(user_id)
+    owned = {fold(a) for a in (owner.email_addresses if owner else [])}
+    if not any(address not in owned for address, _ in people):
+        return None
+    room = _mint(conn, config, owner_user_id=user_id, root=root_ids[0],
+                 subject=subject, people=people)
+    if room is not None:
+        record_sent_mail(conn, room.token, to=to, cc=cc, subject=subject, body=body)
+    return room
 
 
 def recipients_json(email) -> str:
@@ -465,6 +596,8 @@ __all__ = [
     "is_present",
     "new_text",
     "recipients_json",
+    "record_sent_mail",
+    "register_sent_thread",
     "reply_all",
     "resolve_thread",
     "speaking_user",

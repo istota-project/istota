@@ -544,11 +544,27 @@ class TestWriteDeferredSentEmail:
             {
                 "message_id": "<msg-1@test.com>",
                 "to_addr": "bob@example.com",
+                "to": ["bob@example.com"],
+                "cc": [],
                 "subject": "Hello",
+                "in_reply_to": None,
+                "references": None,
+                "body": None,
                 "conversation_token": "tok123",
                 "user_id": "alice",
             }
         ]
+
+    def test_cc_is_recorded_with_to(self, tmp_path):
+        env = {"ISTOTA_TASK_ID": "42", "ISTOTA_DEFERRED_DIR": str(tmp_path)}
+        with patch.dict("os.environ", env, clear=True):
+            _write_deferred_sent_email("<m@x>", "bob@example.com", "Hi",
+                                       cc=["cy@example.com"], body="text")
+
+        entry = json.loads((tmp_path / "task_42_sent_emails.json").read_text())[0]
+        assert entry["to_addr"] == "bob@example.com, cy@example.com"
+        assert (entry["to"], entry["cc"], entry["body"]) == (
+            ["bob@example.com"], ["cy@example.com"], "text")
 
     def test_appends_multiple_entries(self, tmp_path):
         env = {

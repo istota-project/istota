@@ -451,6 +451,7 @@ def _process_deferred_sent_emails(
     Returns count of sent emails recorded.
     """
     from .transport import routing
+    from .transport.email import threads as email_threads
 
     loaded = _load_deferred_json(user_temp_dir, task.id, "sent_emails")
     if loaded is None:
@@ -472,6 +473,11 @@ def _process_deferred_sent_emails(
             to_addr = entry.get("to_addr", "")
             if not message_id or not to_addr:
                 continue
+            # Everything but the identity comes off the file, which the task
+            # wrote: each field is taken only in the type the skill writes it.
+            to = _str_list(entry.get("to")) or [to_addr]
+            in_reply_to = _str_or_none(entry.get("in_reply_to"))
+            references = _str_or_none(entry.get("references"))
             try:
                 db.record_sent_email(
                     conn,
@@ -480,11 +486,20 @@ def _process_deferred_sent_emails(
                     to_addr=to_addr,
                     subject=entry.get("subject"),
                     task_id=task.id,
+                    in_reply_to=in_reply_to,
+                    references=references,
                     conversation_token=task.conversation_token,
                     talk_delivery_token=task.talk_delivery_token,
                     origin_target=routing.origin_descriptor(task, conn),
                 )
                 count += 1
+                email_threads.register_sent_thread(
+                    conn, config, user_id=task.user_id, message_id=message_id,
+                    in_reply_to=in_reply_to, references=references,
+                    to=to, cc=_str_list(entry.get("cc")),
+                    subject=_str_or_none(entry.get("subject")),
+                    body=_str_or_none(entry.get("body")), task_id=task.id,
+                )
             except Exception as e:
                 logger.warning(
                     "Failed to record sent email for task %d: %s", task.id, e,
@@ -494,6 +509,16 @@ def _process_deferred_sent_emails(
         logger.info("Recorded %d deferred sent emails for task %d", count, task.id)
     path.unlink(missing_ok=True)
     return count
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _str_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
 
 
 _GROUP_SCOPE_PREFIX = "group:"
