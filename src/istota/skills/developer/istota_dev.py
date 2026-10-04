@@ -402,7 +402,6 @@ def cmd_clone(args: argparse.Namespace, cfg: HelperConfig) -> dict:
         bare.parent.mkdir(parents=True, exist_ok=True)
         url = f"{cfg.forges[repo.forge]}/{repo.path}.git"
         git(None, "clone", "--bare", url, str(bare), timeout=NETWORK_TIMEOUT)
-        git(bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
         fresh = True
     else:
         # Read-only and local, so it costs nothing ahead of the fetch: a planted
@@ -410,6 +409,14 @@ def cmd_clone(args: argparse.Namespace, cfg: HelperConfig) -> dict:
         # send the model to `git config --list` to find out why.
         _stop_on_credentials(bare)
 
+    # ISSUE-623: every run, not only on clone day. `clone --bare` writes no
+    # refspec, so a clone interrupted before this line fetches no
+    # refs/remotes/origin/* and every later run stopped at exit 4.
+    # The value pattern replaces only this line, or adds it: a plain set
+    # refuses (exit 5) on a clone carrying a second refspec, such as one for
+    # merge-request heads.
+    git(bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*",
+        r"^\+refs/heads/\*:refs/remotes/origin/\*$")
     git(bare, "fetch", "origin", "--prune", timeout=NETWORK_TIMEOUT)
     # ISSUE-291: core.hooksPath is per-clone config; without it a repository's
     # committed hooks never run in the worktrees cut from this clone.
@@ -558,20 +565,24 @@ def _parse_remote(url: str) -> tuple[str, str, str] | None:
     return match.group(2).lower(), "/" + match.group(3), match.group(1) or ""
 
 
-def cmd_verify_remote(args: argparse.Namespace, cfg: HelperConfig) -> tuple[int, dict]:
-    expected = _validate_repo_path(args.expected)
-    url = git(Path.cwd(), "remote", "get-url", "origin").strip()
+def _parse_origin_url(url: str, label: str = "origin URL") -> tuple[str, str]:
+    """``(host, path)`` of an origin URL, stopping on a credential in it."""
     parsed = _parse_remote(url)
     if parsed is None and "@" in url:
         raise Stop(EXIT_CREDENTIAL, {"error": "origin URL holds userinfo in an unrecognised "
                                               "form; treat it as a credential to rotate"})
     if parsed is None:
-        raise Stop(EXIT_GIT, {"error": "could not parse the origin URL"})
+        raise Stop(EXIT_GIT, {"error": f"could not parse the {label}"})
     host, path, userinfo = parsed
     if userinfo and _userinfo_is_credential(userinfo):
         raise Stop(EXIT_CREDENTIAL, {"error": "credential embedded in the origin URL; "
                                               "report it as a credential to rotate"})
+    return host, path
 
+
+def _match_remote(host: str, path: str, cfg: HelperConfig) -> tuple[str | None, str]:
+    """``(forge, "host/path")`` for a parsed remote; forge is ``None`` when no
+    configured forge serves it."""
     forge = None
     for name, base in cfg.forges.items():
         try:
@@ -590,15 +601,50 @@ def cmd_verify_remote(args: argparse.Namespace, cfg: HelperConfig) -> tuple[int,
     path = path.strip("/")
     if path.endswith(".git"):
         path = path[: -len(".git")]
+    return forge, path
+
+
+def cmd_verify_remote(args: argparse.Namespace, cfg: HelperConfig) -> tuple[int, dict]:
+    expected = _validate_repo_path(args.expected)
+    cwd = Path.cwd()
+    fetch_url = git(cwd, "remote", "get-url", "origin").strip()
+    # ISSUE-622: `git push` goes to `remote.origin.pushurl` (and through
+    # `pushInsteadOf`) when set; with neither this returns the fetch URL.
+    push_urls = git(cwd, "remote", "get-url", "--push", "--all", "origin").splitlines()
+    # Every URL is parsed before any is compared, and a credential in any of
+    # them outranks both a mismatch and an unparseable URL in another.
+    labelled = [(fetch_url, "origin URL")] + [(u, "origin push URL") for u in push_urls]
+    parsed = []
+    failures = []
+    for url, label in labelled:
+        try:
+            parsed.append(_parse_origin_url(url, label))
+        except Stop as stop:
+            failures.append(stop)
+    if failures:
+        raise next((s for s in failures if s.code == EXIT_CREDENTIAL), failures[0])
+
+    host, path = parsed[0]
+    forge, path = _match_remote(host, path, cfg)
     remote = f"{host}/{path}"
-    if forge is not None and path == expected:
-        return EXIT_OK, {"remote": remote, "forge": forge}
-    return EXIT_MISMATCH, {
-        "error": "origin does not match the expected repository",
-        "remote": remote,
-        "expected": expected,
-        "forge": forge,
-    }
+    if forge is None or path != expected:
+        return EXIT_MISMATCH, {
+            "error": "origin does not match the expected repository",
+            "remote": remote,
+            "expected": expected,
+            "forge": forge,
+        }
+    for push_host, push_path in parsed[1:]:
+        push_forge, push_path = _match_remote(push_host, push_path, cfg)
+        if push_forge is None or push_path != expected:
+            return EXIT_MISMATCH, {
+                "error": "origin's push URL does not match the expected repository",
+                "remote": remote,
+                "push_remote": f"{push_host}/{push_path}",
+                "expected": expected,
+                "forge": push_forge,
+            }
+    return EXIT_OK, {"remote": remote, "forge": forge}
 
 
 # --------------------------------------------------------------------------
