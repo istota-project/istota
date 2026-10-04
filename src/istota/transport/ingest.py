@@ -24,6 +24,7 @@ from istota import db
 from istota.rooms import policy as room_policy
 from istota.rooms import veto as room_veto
 from istota.rooms import speech_gate
+from istota.rooms.scopes import is_email_thread_room
 from istota.rooms.surfaces import is_room_member_for
 from istota.lib.audio_sniff import AUDIO_EXTENSIONS
 from istota.lib.untrusted import frame_untrusted
@@ -296,12 +297,15 @@ class _PolicyAnswer:
 
 def _ask_policy(
     conn, room_token: str, *, author_kind: str, multi_human: bool, is_command: bool,
+    email_thread: bool = False,
 ) -> _PolicyAnswer | None:
     """The room policy's answer for a turn, or None where no policy applies.
 
     Only a turn in front of more than one human, or a guest's, consults it, so
     a private room never gets a row. Host loss makes the whole room
-    record-only (D14); the other three rungs are about guests.
+    record-only (D14); the other three rungs are about guests. On an email
+    thread room ``guest_reply`` is not read: a correspondent's turn runs as the
+    host, and its reply takes the outbound gate (`guest_reply_mode`).
     """
     guest = author_kind == participants.GUEST
     if not (multi_human or guest):
@@ -316,7 +320,10 @@ def _ask_policy(
     return _PolicyAnswer(
         host=host,
         host_lost=host is None,
-        guest_reply=policy.guest_reply if policy else room_policy.OFF,
+        guest_reply=(
+            room_policy.DIRECT if email_thread
+            else policy.guest_reply if policy else room_policy.OFF
+        ),
         guest_command=guest and is_command,
         loop_capped=loop_capped,
     )
@@ -546,6 +553,10 @@ def record_inbound(
     # is what makes a retry return this turn.
     about_room_token: str | None = None,
     delivery_reference: str | None = None,
+    # An email thread room's mail from someone else, with the host on neither
+    # To nor Cc: the task may pass it on to the host privately rather than
+    # reply (`tasks.host_absent`). Set only by the email poller.
+    host_absent: bool = False,
 ) -> InboundResult:
     """Resolve → echo-check → store user message → ask the gate → create task.
 
@@ -898,10 +909,17 @@ def record_inbound(
     #     a mirror-only email turn is not a participant in the room.
     policy = None
     audience = None
+    # The host's correspondence: a correspondent's turn is recorded as theirs
+    # but runs as the host, with no guest mode (`is_email_thread_room`).
+    email_thread = (
+        room_surface and message_id is not None
+        and is_email_thread_room(conn, transcript_token)
+    )
     if room_surface and message_id is not None:
         policy = _ask_policy(
             conn, transcript_token, author_kind=author_kind,
             multi_human=multi_human, is_command=is_command,
+            email_thread=email_thread,
         )
         audience = room_policy.audience_class(
             conn, transcript_token, is_group_chat=multi_human,
@@ -927,8 +945,9 @@ def record_inbound(
         if author_kind != participants.GUEST or policy is None or policy.host is None:
             return InboundResult(room_token, None, message_id, "recorded")
         task_user = policy.host
-        guest_participant_id = participant_id
-        task_prompt = guest_prompt(participants.guest_label(author), task_user, text)
+        if not email_thread:
+            guest_participant_id = participant_id
+            task_prompt = guest_prompt(participants.guest_label(author), task_user, text)
 
     if record_only:
         return InboundResult(room_token, None, message_id, "recorded")
@@ -953,6 +972,7 @@ def record_inbound(
         guest_participant_id=guest_participant_id,
         audience=audience,
         about_room_token=about_room_token,
+        host_absent=host_absent,
         output_target=output_target,
         talk_delivery_token=delivery_token,
         model=model,
@@ -1041,5 +1061,6 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         author=msg.author,
         is_command=msg.is_command,
         room_container=msg.room_container,
+        host_absent=msg.host_absent,
     )
     return result.task_id

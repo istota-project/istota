@@ -2990,6 +2990,9 @@ export interface RoomPolicyView {
   host: string | null;
   is_host: boolean;
   guest_reply: GuestReply;
+  /** An email thread room: no guest mode, so the guest reply setting is
+   * not shown. */
+  email_thread?: boolean;
   /** Why the caller may not change the room-wide settings, or null when they
    * may. The server's own refusal text, so it is shown verbatim. */
   settings_refusal: string | null;

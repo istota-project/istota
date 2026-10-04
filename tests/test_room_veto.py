@@ -884,13 +884,21 @@ class TestTheAnnouncement:
 
 
 def _email_proposal(config, reply="Thursday at 7 suits Carol."):
-    """A guest's addressed mail runs as the host; its answer held as a proposal."""
+    """A guest's addressed mail runs as the host; its answer held as a proposal.
+
+    A guest turn from before email on rooms, still in flight: no new email
+    turn has a guest id, and section 8.6 of that spec removes this path.
+    """
     _start_thread(config)
     (task_id,) = _mail(config, sender=ALICE_ADDR, cc=(HOST_ADDR, BOB_ADDR),
                        message_id="<a2@ext.example>", references=ROOT,
-                       body="Can Carol do Thursday?")
+                       body="Zorg, can Carol do Thursday?")
     with db.get_db(config.db_path) as conn:
-        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
+        conn.execute(
+            "UPDATE tasks SET status='running', guest_participant_id = ("
+            "SELECT id FROM room_participants WHERE surface_ref = ?) WHERE id=?",
+            (ALICE_ADDR, task_id),
+        )
         task = db.get_task(conn, task_id)
         proposal = private_replies.propose_guest_reply(conn, config, task, reply)
     return task_id, proposal

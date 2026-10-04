@@ -138,6 +138,10 @@ class Task:
     #: replies to or quotes a message tagged with that room, in the private
     #: room it was written in. Canonical token; None for an unlinked turn.
     about_room_token: str | None = None
+    #: An email thread room's turn from someone other than the host, with the
+    #: host on neither To nor Cc. A `NO_ACTION:` answer then becomes a pass-on
+    #: note to the host instead of a reply.
+    host_absent: bool = False
     heartbeat_silent: bool = False
     skip_log_channel: bool = False
     scheduled_job_id: int | None = None
@@ -1166,6 +1170,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_room_group(conn)
     # ISSUE-612. Nothing to backfill: no earlier row recorded its mail.
     _add_columns(conn, "messages", {"outgoing_mail": "TEXT"})
+    # Email on rooms, stage 2. Nothing to backfill: no earlier task was asked
+    # whether its host was on the message.
+    _add_columns(conn, "tasks", {"host_absent": "INTEGER NOT NULL DEFAULT 0"})
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
@@ -1422,6 +1429,9 @@ def create_task(
     # The shared room a reply to a tagged message is linked to (ISSUE-608).
     # Written only by `record_inbound`, from the parent row.
     about_room_token: str | None = None,
+    # An email thread room's turn the host is not on (`Task.host_absent`).
+    # Written only by `record_inbound`, from the email poller's intake facts.
+    host_absent: bool = False,
     heartbeat_silent: bool = False,
     skip_log_channel: bool = False,
     scheduled_job_id: int | None = None,
@@ -1475,11 +1485,11 @@ def create_task(
             parent_task_id, is_group_chat, attachments, priority, scheduled_for,
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
             reply_to_message_id, withheld_from_room, guest_participant_id, audience,
-            about_room_token,
+            about_room_token, host_absent,
             heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
             queue, model, effort, brain, model_namespace,
             talk_delivery_token, skill, skill_args
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -1502,6 +1512,7 @@ def create_task(
             guest_participant_id,
             audience,
             about_room_token or None,
+            1 if host_absent else 0,
             1 if heartbeat_silent else 0,
             1 if skip_log_channel else 0,
             scheduled_job_id,
@@ -1534,7 +1545,7 @@ _TASK_COLUMNS = (
     "priority, attempt_count, max_attempts, created_at, scheduled_for, "
     "output_target, talk_message_id, talk_response_id, reply_to_talk_id, "
     "reply_to_content, reply_to_message_id, withheld_from_room, "
-    "guest_participant_id, audience, about_room_token, heartbeat_silent, skip_log_channel, scheduled_job_id, "
+    "guest_participant_id, audience, about_room_token, host_absent, heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
     "brain, model_namespace, talk_delivery_token, skill, skill_args, whatsapp_confirmation_request_id"
 )
@@ -1580,6 +1591,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         guest_participant_id=row["guest_participant_id"],
         audience=row["audience"],
         about_room_token=row["about_room_token"],
+        host_absent=bool(row["host_absent"]),
         heartbeat_silent=bool(row["heartbeat_silent"]),
         skip_log_channel=bool(row["skip_log_channel"]),
         scheduled_job_id=row["scheduled_job_id"],

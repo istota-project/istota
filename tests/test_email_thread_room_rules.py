@@ -215,7 +215,7 @@ class TestNoMembersOnAThread:
                 (token,),
             ).fetchone()[0] == 0
 
-    def test_after_it_their_mail_is_a_guest_turn_under_the_host(self, config):
+    def test_after_it_their_mail_runs_as_the_host(self, config):
         self._with_dan(config)
         _start_thread(config)
         token = _room(config)
@@ -228,7 +228,8 @@ class TestNoMembersOnAThread:
                            message_id="<d2@test.com>", body="Zorg, Thursday?")
         task = _task(config, task_id)
         assert task.user_id == HOST
-        assert task.guest_participant_id is not None
+        # A correspondent, with no guest mode on email (email on rooms, 2a).
+        assert task.guest_participant_id is None
 
     def test_a_trusted_senders_mail_needs_no_confirmation(self, config):
         _start_thread(config)
@@ -361,14 +362,15 @@ class TestTheHostsOwnQuestion:
         reply.assert_not_called()
         assert _drafts(strict) == 1
 
-    def test_a_guests_question_is_still_held_for_the_host(self, strict):
+    def test_a_correspondents_question_is_still_held_for_the_host(self, strict):
         strict.users[HOST].trusted_email_senders = ["*@ext.example"]
         self._seed(strict)
         (task_id,) = _poll(strict, sender=ALICE, to=(BOT,), cc=(HOST_ADDR, BOB),
                            message_id="<a2@ext.example>", body="Zorg, Thursday?",
                            auth=PASS)
         strict.users[HOST].trusted_email_senders = []
-        assert _task(strict, task_id).guest_participant_id is not None
+        # It runs as the host at full reach; the outbound gate still holds it.
+        assert _task(strict, task_id).guest_participant_id is None
         reply = _deliver(strict, task_id)
         reply.assert_not_called()
         assert _drafts(strict) == 1

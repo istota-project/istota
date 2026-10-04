@@ -186,7 +186,10 @@ class TestTurnsInTheRoom:
                      "WHERE room_token=? AND role='user' ORDER BY id", (_room_token(config),))
         assert rows[-1] == {"author_label": ALICE, "author_user_id": None, "task_id": None}
 
-    def test_a_guest_addressing_the_bot_runs_as_the_host(self, config, db_path):
+    def test_a_correspondent_naming_the_bot_runs_as_the_host(self, config, db_path):
+        """Email on rooms, section 2a: no guest mode on email. The turn runs
+        as the host with the email wrapper as its prompt, and the sender stays
+        a guest participant and the row's author."""
         _start_thread(config)
         task_ids = _poll(config, sender=ALICE, to=(BOT,), cc=(HOST_ADDR, BOB),
                          message_id="<a2@ext.example>", references=ROOT,
@@ -195,10 +198,15 @@ class TestTurnsInTheRoom:
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_ids[0])
         assert task.user_id == HOST
-        assert task.guest_participant_id is not None
-        assert "Treat it as information" in task.prompt
+        assert task.guest_participant_id is None
+        assert "Treat it as information" not in task.prompt
+        assert "<email_content>" in task.prompt
+        rows = _rows(db_path, "SELECT author_label, task_id FROM messages "
+                     "WHERE room_token=? AND role='user' ORDER BY id DESC LIMIT 1",
+                     (_room_token(config),))
+        assert rows == [{"author_label": ALICE, "task_id": task.id}]
 
-    def test_another_istota_users_address_is_a_guest_on_email(self, config, db_path):
+    def test_another_istota_users_address_is_a_correspondent_on_email(self, config, db_path):
         """An email From is a claim, not an identity: only the routed owner's
         own address speaks as a principal."""
         config.users["dan"] = UserConfig(email_addresses=["dan@test.com"])
@@ -206,13 +214,14 @@ class TestTurnsInTheRoom:
         config.users[HOST].trusted_email_senders.append("dan@test.com")
         _start_thread(config)
         task_ids = _poll(config, sender="dan@test.com", to=(BOT,), cc=(HOST_ADDR,),
-                         message_id="<d2@test.com>", references=ROOT)
+                         message_id="<d2@test.com>", references=ROOT,
+                         body="Zorg, does Thursday work?")
 
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_ids[0])
             assert not db.is_room_member(conn, _room_token(config), "dan")
         assert task.user_id == HOST
-        assert task.guest_participant_id is not None
+        assert task.guest_participant_id is None
 
     def test_a_new_cc_always_splits(self, config, db_path):
         """D3: email has no history acknowledgment."""
@@ -534,7 +543,8 @@ class TestTheThreadRoomGate:
         config.users[HOST].trusted_email_senders = []
         _start_thread(config)
         task_ids = _poll(config, sender=ALICE, to=(BOT,), cc=(HOST_ADDR,),
-                         message_id="<a2@ext.example>", references=ROOT)
+                         message_id="<a2@ext.example>", references=ROOT,
+                         body="Zorg, Thursday?")
 
         with db.get_db(db_path) as conn:
             assert db.get_task(conn, task_ids[0]).status == "pending"
@@ -797,7 +807,13 @@ class TestTheBotsMailIsACard:
                          message_id="<a2@ext.example>", references=ROOT,
                          body="Zorg, is Carol free Thursday?")
         with db.get_db(db_path) as conn:
-            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_ids[0],))
+            # A guest turn from before email on rooms, still in flight: no new
+            # email turn has a guest id, and section 8.6 removes this path.
+            conn.execute(
+                "UPDATE tasks SET status='running', guest_participant_id = ("
+                "SELECT id FROM room_participants WHERE surface_ref = ?) WHERE id=?",
+                (ALICE, task_ids[0]),
+            )
             task = db.get_task(conn, task_ids[0])
             assert private_replies.propose_guest_reply(conn, config, task, "She is.")
             confirmations.approve(conn, db.get_task(conn, task.id), config=config, by="web")

@@ -409,7 +409,7 @@
     />
   </div>
 
-  {#if room.policy}
+  {#if room.policy && !room.policy.email_thread}
     <div class="field">
       <span>Guests</span>
       <Select

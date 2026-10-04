@@ -3421,6 +3421,7 @@ def process_one_task(
     # so the question parks and goes to the principal privately, with a
     # heads-up mail to their own address (D4 item 3, ISSUE-608).
     _own_email_thread_room = False
+    _thread_token = None
     if task.source_type == "email" and not dry_run:
         from .transport.email.threads import thread_room_for_task
         with db.get_db(config.db_path) as conn:
@@ -3428,6 +3429,15 @@ def process_one_task(
             _own_email_thread_room = bool(
                 _thread_token and db.room_is_shared(conn, _thread_token)
             )
+    # A thread-room turn whose host was not on the message, with nothing to
+    # reply (email on rooms, section 2): `NO_ACTION:` passes the message on to
+    # the host privately and sends nothing. The note is built from the stored
+    # turn, never from the model's text.
+    _pass_on = bool(
+        success and task.host_absent and _thread_token
+        and task.guest_participant_id is None
+        and not _strip_action_prefix(result)[0]
+    )
     _confirmable_surface = (
         (plan_talk and talk_token and not plan_ntfy)
         or _own_origin_web
@@ -3442,6 +3452,7 @@ def process_one_task(
     is_confirmation_request = bool(
         success
         and _confirmable_surface
+        and not _pass_on
         and not is_no_final_answer(result)
         and CONFIRMATION_PATTERN.search(result)
     )
@@ -3519,6 +3530,10 @@ def process_one_task(
     from istota.rooms import private_replies
     from istota.relay.requests import text_hash
     private_park: "private_replies.PrivateDelivery | None" = None
+    # The pass-on note a host-absent thread turn wrote instead of a reply,
+    # pushed to the host's private room at the tail.
+    pass_on_note: "private_replies.PrivateDelivery | None" = None
+    pass_on_body = ""
     # The shared room was told only that a private note went out, because its
     # principal has no private room: that post answers nothing.
     shared_room_notice = False
@@ -3822,7 +3837,14 @@ def process_one_task(
                     except Exception as e:
                         logger.debug("Memory search indexing failed for task %s: %s", task_id, e)
 
-                if task.heartbeat_silent:
+                if _pass_on:
+                    pass_on_note, pass_on_body = private_replies.deliver_pass_on(
+                        conn, config, task,
+                    )
+                    db.log_task(conn, task_id, "info",
+                                "Nothing to reply, and the host was not on the "
+                                "message: passed on to them privately")
+                elif task.heartbeat_silent:
                     # Silent scheduled job — ACTION/NO_ACTION logic
                     should_post, result_to_post = _strip_action_prefix(result)
                     if should_post:
@@ -4499,6 +4521,11 @@ def process_one_task(
                         db.update_talk_response_id(conn, task_id, int(_private_talk_id))
             except Exception as e:
                 logger.debug("Failed to store talk_response_id for task %d: %s", task_id, e)
+
+    if pass_on_note is not None:
+        run_coro(private_replies.send_private(
+            config, pass_on_note, body=pass_on_body,
+        ))
 
     # Store bot's response message ID for reply tracking. Not the shared-room
     # notice's: a reply to it in the room must not reach the question.

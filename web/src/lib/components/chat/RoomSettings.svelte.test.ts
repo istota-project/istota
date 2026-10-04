@@ -647,6 +647,24 @@ describe('RoomSettings — a shared room another member hosts', () => {
     await mountSettled(room());
     expect(screen.queryByRole('button', { name: 'How guests are answered' })).toBeNull();
   });
+
+  // Email on rooms: a correspondent's mail runs as the host, so an email
+  // thread room has no guest reply setting to show.
+  it('hides the guest setting in an email thread room', async () => {
+    await mountSettled(
+      room({
+        shared: true,
+        policy: {
+          host: 'alice',
+          is_host: true,
+          guest_reply: 'held',
+          email_thread: true,
+          settings_refusal: null,
+        },
+      }),
+    );
+    expect(screen.queryByRole('button', { name: 'How guests are answered' })).toBeNull();
+  });
 });
 
 describe('a phone room (room-surface-model Stage 24)', () => {

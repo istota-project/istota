@@ -45,3 +45,12 @@ def test_an_unestablished_answer_says_so(monkeypatch):
     assert result.status == doctor.WARN
     assert "cold memo" in result.detail
 
+
+
+def test_every_arm_says_email_thread_rooms_withhold_nothing(monkeypatch):
+    """Email on rooms, stage 2: a correspondent's mail is no guest turn, so
+    the detail names the two gates that bound it instead."""
+    for sandboxed in (True, False, None):
+        detail = _check(monkeypatch, sandboxed=sandboxed).detail
+        assert "Email thread rooms withhold nothing" in detail
+        assert "outbound approval gate" in detail

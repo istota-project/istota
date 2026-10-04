@@ -92,6 +92,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- the bell when they have none. Such a park neither holds the shared
     -- room's channel gate nor is cancelled by the next message there.
     private_park INTEGER NOT NULL DEFAULT 0,
+    -- 1 for an email thread room's mail from someone other than the host,
+    -- with the host on neither To nor Cc. A `NO_ACTION:` answer then becomes
+    -- a pass-on note in the host's private room instead of a reply.
+    host_absent INTEGER NOT NULL DEFAULT 0,
 
     -- Silent mode (for scheduled jobs with silent_unless_action)
     heartbeat_silent INTEGER DEFAULT 0,  -- Whether to suppress output on no-action

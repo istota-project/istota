@@ -443,6 +443,11 @@ class Case:
     #: second group the user is *not* in with a sentinel that must never
     #: render (groups spec D6, multiplayer D21).
     group: bool = False
+    #: Binds that room to an email thread (email on rooms, stage 2) with one
+    #: correspondent on it, and makes the task that correspondent's turn with
+    #: the host not on the message: it runs as the host at full reach, so the
+    #: card is the email one and the host's memory loads.
+    email_thread: bool = False
 
 
 CASES: tuple[Case, ...] = (
@@ -582,6 +587,18 @@ CASES: tuple[Case, ...] = (
         shared=True,
         memory=True,
     ),
+    # A correspondent's mail on an email thread room the host is not on (email
+    # on rooms, stage 2): the email room card, nothing withheld, and the host's
+    # memory loaded, against `shared_room_notes`, where a shared room leaves it
+    # out. The room notes stay fenced, since a thread is read by others.
+    Case(
+        "email_thread",
+        source_type="email",
+        conversation_token="rm_email_thread_fixture",
+        room=("Dinner plans", "email"),
+        memory=True,
+        email_thread=True,
+    ),
 )
 
 CASES_BY_NAME = {c.name: c for c in CASES}
@@ -669,7 +686,8 @@ def _build_task(case: Case) -> db.Task:
         prompt="Summarize what changed in my notes this week.",
         conversation_token=case.conversation_token,
         brain=case.brain,
-        is_group_chat=case.shared,
+        is_group_chat=case.shared or case.email_thread,
+        host_absent=case.email_thread,
     )
     if case.confirmed:
         fields["confirmed_at"] = "2026-01-01T00:00:00Z"
@@ -846,6 +864,21 @@ def _seed_room(config: Config, case: Case) -> None:
                 surface_ref="guests/max", kind="guest",
                 display_name="Max GUEST_DISPLAY_NAME",
             )
+        if case.email_thread:
+            # What `threads._mint` and `record_inbound` leave: the binding on
+            # the root id, the correspondent as a guest participant, and their
+            # turn stored under their label for the task.
+            db.add_room_binding(conn, case.conversation_token, "email",
+                                "<root@example.test>")
+            participant = db.upsert_room_participant(
+                conn, room_token=case.conversation_token, surface="email",
+                surface_ref="ana@ext.example", kind="guest",
+                display_name="Ana GUEST_DISPLAY_NAME",
+            )
+            db.add_message(conn, case.conversation_token, role="user",
+                           body="Can we move dinner to Friday?", origin_surface="email",
+                           task_id=1, author_label="ana@ext.example",
+                           author_participant_id=participant)
         conn.commit()
 
 

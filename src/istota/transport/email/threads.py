@@ -32,10 +32,15 @@ the existing routing.
   acknowledgment.
 - **Membership** is the host alone, for good (ISSUE-606). The thread is the
   host's correspondence: another istota user on it is a correspondent like
-  anyone else, a guest whose turn runs as the host with every scope withheld,
-  and the web refuses to add them as a member.
-- **Addressed** is the bot in To, or the bot named in the new text while in
-  Cc (`addressed_in_new_text`, ISSUE-607). In Cc and not named, it listens.
+  anyone else, and the web refuses to add them as a member. Every admitted
+  turn runs as the host at the host's full reach, with no guest mode
+  (`rooms.scopes.is_email_thread_room`); the admit gate and the outbound gate
+  are what bound it.
+- **Addressed** is decided in code from the message's own headers
+  (`intake_facts`, `thread_addressed`). The host's mail: the bot in To, or
+  named in the new text (ISSUE-607). Anyone else's: named, or the host not on
+  the message, which also marks the task `host_absent`. A correspondent's
+  reply-all the host is on and that does not name the bot is recorded only.
 - **The reply** is a reply-all to the latest message's participants, not the
   union, so somebody removed from Cc is respected (`reply_all`). The host's
   own addressed question, from a mail that authenticated, is answered with no
@@ -57,7 +62,7 @@ from typing import TYPE_CHECKING
 
 from istota import db
 from istota.rooms import policy as room_policy
-from istota.mail.ownership import is_bot_address, parse_message_ids
+from istota.mail.ownership import bot_addressed_in_to, is_bot_address, parse_message_ids
 from .. import participants
 from .._types import ParticipantRef
 
@@ -505,6 +510,57 @@ def asked_by_name(config: "Config", body: str | None) -> bool:
     return re.search(pattern, new_text(body), re.IGNORECASE | re.MULTILINE) is not None
 
 
+@dataclass(frozen=True)
+class IntakeFacts:
+    """What one message's own headers say about its host and the bot."""
+
+    #: The sender claims to be the host. A claim, as `sender_claims_to_be_user`
+    #: says; authentication is `host_asked`'s question, not this one.
+    author_is_host: bool
+    #: One of the host's own addresses is in this message's To or Cc.
+    host_on_message: bool
+    #: The new text names the bot (`addressed_in_new_text`).
+    named: bool
+
+    @property
+    def host_absent(self) -> bool:
+        """Somebody else wrote it, and the host is not on it."""
+        return not self.author_is_host and not self.host_on_message
+
+
+def intake_facts(config: "Config", email, host_user_id: str) -> IntakeFacts:
+    """The three facts the intake decision on a thread room is made from.
+
+    Read from this message's headers alone. Missing To and Cc mean the host is
+    not on the message, which fails toward telling them.
+    """
+    from istota.mail.support import own_addresses, sender_claims_to_be_user
+
+    own = {fold(a) for a in own_addresses(config, host_user_id)}
+    listed = list(getattr(email, "to", ()) or ()) + list(getattr(email, "cc", ()) or ())
+    return IntakeFacts(
+        author_is_host=sender_claims_to_be_user(
+            config, host_user_id, getattr(email, "sender", None)),
+        host_on_message=any(
+            fold(address) in own for _, address in getaddresses([str(v) for v in listed if v])
+        ),
+        named=addressed_in_new_text(config, getattr(email, "body", None)),
+    )
+
+
+def thread_addressed(config: "Config", email, facts: IntakeFacts) -> bool:
+    """Whether a thread room's admitted mail asks the bot, by the intake table.
+
+    The host's own mail keeps ISSUE-607's rule: the bot in To, or named. For
+    anyone else the bot in To says nothing, since every reply-all on a thread
+    the bot started has it there: a mail is asked when it names the bot, or
+    when the host is not on it, since then nobody else will tell them.
+    """
+    if facts.author_is_host:
+        return bot_addressed_in_to(config, email) or facts.named
+    return facts.named or not facts.host_on_message
+
+
 def thread_room_for_task(conn, task) -> str | None:
     """The thread room an email task belongs to, or None."""
     if getattr(task, "source_type", None) != SURFACE or not task.conversation_token:
@@ -620,6 +676,7 @@ def reply_all(
 
 
 __all__ = [
+    "IntakeFacts",
     "MIN_HUMANS",
     "ReplyAll",
     "SURFACE",
@@ -631,6 +688,7 @@ __all__ = [
     "find_thread_room",
     "fold",
     "host_asked",
+    "intake_facts",
     "is_present",
     "new_text",
     "recipients_json",
@@ -640,6 +698,7 @@ __all__ = [
     "resolve_thread",
     "speaking_user",
     "thread_message_ids",
+    "thread_addressed",
     "thread_people",
     "thread_room_for_task",
     "thread_room_token",

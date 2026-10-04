@@ -105,7 +105,10 @@ def room_label(room: db.Room | None) -> str:
 
 
 
-KINDS = ("whisper", "confirmation", "proposal", "answer_notice")
+KINDS = ("whisper", "confirmation", "proposal", "answer_notice", "pass_on")
+#: The kinds with no park behind them: no bell row is owed by anyone else, so
+#: one that reaches nobody becomes its own `private_note` bell row.
+_UNPARKED_KINDS = ("whisper", "pass_on")
 
 #: What the shared room is told when a member's note could not stay out of
 #: sight any other way. Names nobody and carries nothing of the note.
@@ -525,7 +528,7 @@ def deliver_private(conn, config, *, user_id: str, about_token: str, kind: str,
                   delivery_reference=delivery_reference)
     if dest is None:
         notice = None
-        if kind == "whisper":
+        if kind in _UNPARKED_KINDS:
             notice = _bell_note(conn, user_id=user_id, about=about, reference=reference,
                                 body=body, task_id=task_id)
         return PrivateDelivery(None, None, notice=notice, **common)
@@ -654,11 +657,13 @@ async def _send(config, delivery: PrivateDelivery, *, header_room_label, body: s
         if dest.whatsapp:
             pushed = True
             delivered = await _send_whatsapp(config, delivery, text) or delivered
-    if email_parent and await _send_heads_up(config, delivery, label, body):
+    # Not for a pass-on, which is the one item the host gets for its mail.
+    if (email_parent and delivery.kind in _EMAIL_HINTS
+            and await _send_heads_up(config, delivery, label, body)):
         delivered = True
-    if delivery.kind == "whisper" and pushed and not delivered:
-        # A whisper has no park bell behind it: one routed to a surface that
-        # reached nobody there would sit unannounced in a transcript.
+    if delivery.kind in _UNPARKED_KINDS and pushed and not delivered:
+        # A whisper or a pass-on has no park bell behind it: one routed to a
+        # surface that reached nobody there would sit unannounced in a transcript.
         notice = await asyncio.to_thread(_late_bell_note, config, delivery, body)
         await asyncio.to_thread(deliver_pending, config, [notice])
     return delivered
@@ -835,12 +840,19 @@ def guest_reply_mode(conn, task) -> str | None:
     ``off`` included: the turn already ran, and the host is the one to decide
     about its answer. None when the task's principal is no longer the room's
     host, and the answer then goes to nobody.
+
+    ``direct`` on an email thread room, whatever its ``guest_reply`` says: it
+    has no guest mode, and its reply is held, when it is, by the outbound gate
+    as a draft (`rooms.scopes.is_email_thread_room`).
     """
     from istota.rooms import policy as room_policy
+    from istota.rooms.scopes import is_email_thread_room
 
     token = canonical_token(conn, task.conversation_token)
     if not token or _host_of(conn, token) != task.user_id:
         return None
+    if is_email_thread_room(conn, token):
+        return "direct"
     policy = room_policy.get_policy(conn, token)
     return "direct" if policy.guest_reply == room_policy.DIRECT else "held"
 
@@ -851,6 +863,44 @@ class GuestProposal:
     #: park's question to the host privately for.
     parent_token: str
     preview: str
+
+
+def pass_on_body(conn, task) -> str:
+    """The pass-on note for a thread turn the host was not on, from the
+    stored turn: who wrote, on which room, and their new text quoted.
+
+    Built from the transcript row, never from the model's text, and through
+    the email wrapper's parser and `threads.new_text`, so neither the wrapper
+    nor the quoted history reaches the host.
+    """
+    from istota.mail.support import parse_email_prompt
+    from istota.transport.email.threads import new_text
+
+    row = conn.execute(
+        "SELECT body, author_label FROM messages WHERE task_id = ? "
+        "AND role = 'user' ORDER BY id LIMIT 1",
+        (task.id,),
+    ).fetchone()
+    body = (row["body"] if row else None) or task.prompt or ""
+    parsed = parse_email_prompt(body)
+    text = new_text(parsed[1] if parsed is not None else body).strip()
+    label = (row["author_label"] if row else None) or "Someone"
+    room = room_label(db.get_room(conn, canonical_token(conn, task.conversation_token) or ""))
+    quoted = "\n".join(f"> {line}" if line else ">" for line in text.splitlines()) or ">"
+    return f"{label} wrote on {room}, without you on the message:\n\n{quoted}"
+
+
+def deliver_pass_on(conn, config, task) -> tuple[PrivateDelivery, str]:
+    """Record the pass-on note for ``task`` in its host's private room, inside
+    the caller's transaction, and return it with its body for `send_private`.
+    With no private room it is a `private_note` bell row, as a whisper is.
+    """
+    body = pass_on_body(conn, task)
+    delivery = deliver_private(
+        conn, config, user_id=task.user_id, about_token=task.conversation_token,
+        kind="pass_on", reference=f"{task.id}:pass-on", body=body, task_id=task.id,
+    )
+    return delivery, body
 
 
 def _guest_words(conn, task) -> tuple[str, str]:

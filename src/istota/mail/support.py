@@ -200,6 +200,15 @@ def sender_claims_to_be_user(
     return sender.lower() in own
 
 
+def own_addresses(config: Config, user_id: str) -> set[str]:
+    """``user_id``'s own addresses, stripped and lowercased. The one set the
+    outbound gate and the thread room's intake both compare against."""
+    user = config.users.get(user_id)
+    if not user:
+        return set()
+    return {a.strip().lower() for a in (user.email_addresses or []) if a}
+
+
 def normalize_subject(subject: str) -> str:
     """Normalize subject for thread grouping (remove Re:, Fwd:, etc.)."""
     normalized = subject

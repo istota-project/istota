@@ -6552,6 +6552,9 @@ def _room_sharing(conn, reg, username: str) -> dict:
             "host": policy.host_user_id,
             "is_host": policy.host_user_id == username,
             "guest_reply": policy.guest_reply,
+            # An email thread room has no guest mode, so the modal hides the
+            # guest reply setting (`private_replies.guest_reply_mode`).
+            "email_thread": db.get_room_binding(conn, reg.token, "email") is not None,
             "settings_refusal": refusal,
         },
     }

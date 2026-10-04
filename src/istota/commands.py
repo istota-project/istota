@@ -3041,7 +3041,8 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
 
     ``guest_participant_id`` and ``audience`` go with it (multiplayer D2/D3):
     the prompt is a guest's fenced words, and without the guest a retry would
-    run them as the host's own turn, at the host's grants.
+    run them as the host's own turn, at the host's grants. ``host_absent`` too,
+    so a retried pass-on still passes on rather than replying.
     """
     return db.create_task(
         conn,
@@ -3054,6 +3055,7 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
         withheld_from_room=original.withheld_from_room,
         guest_participant_id=original.guest_participant_id,
         audience=original.audience,
+        host_absent=original.host_absent,
         output_target=original.output_target,
         talk_delivery_token=original.talk_delivery_token,
         model=original.model,

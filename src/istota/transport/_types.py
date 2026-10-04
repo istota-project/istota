@@ -100,6 +100,9 @@ class IncomingMessage:
     # general: an email thread room (multiplayer D6, D10). The transport has
     # already registered it; see `record_inbound`'s parameter of the same name.
     room_container: bool = False
+    # An email thread room's mail from someone other than the host, with the
+    # host on neither To nor Cc (`threads.IntakeFacts.host_absent`).
+    host_absent: bool = False
     output_target: str | None = None  # "talk"|"email"|"ntfy"|comma list|None
     model: str | None = None          # !model override (canonical id)
     effort: str | None = None
