@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -113,7 +114,7 @@ class TestSync:
         assert result.action == "empty"
         assert (root / "PERSONA.md").read_text() == "  \n"
         assert not (root / "PERSONA.md.shipped").exists()
-        assert "last_good_text" not in (_state(config) or {})
+        assert read_last_good(config) is None
 
     def test_an_unedited_older_version_is_upgraded(self, setup):
         config, root = setup
@@ -294,6 +295,23 @@ class TestLastGood:
         (root / "PERSONA.md").symlink_to(root / "nowhere")
         assert sync_operator_persona(config).action == "refused"
         assert read_last_good(config) == "Edited."
+
+    def test_emptying_the_file_clears_it_so_an_outage_cannot_restore_the_edit(
+        self, setup,
+    ):
+        config, root = setup
+        (root / "PERSONA.md").write_text("Edited.")
+        sync_operator_persona(config)
+        assert read_last_good(config) == "Edited."
+
+        (root / "PERSONA.md").write_text("")
+        assert sync_operator_persona(config).action == "empty"
+        assert read_last_good(config) is None
+
+        shutil.rmtree(root)  # the mount goes down
+        from istota.executor import load_persona
+
+        assert load_persona(config) == SHIPPED.strip().replace("{BOT_NAME}", config.bot_name)
 
     def test_the_written_shipped_text_becomes_last_good(self, setup):
         config, _root = setup

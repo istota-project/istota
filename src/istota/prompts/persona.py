@@ -252,6 +252,7 @@ def sync_operator_persona(config: "Config", *, dry_run: bool = False) -> SyncRes
     # A failed write must not advance the recorded shipped digest, or the
     # next sync would read "nothing moved" and never retry it.
     file_step_done = True
+    clear_last_good = False
 
     if not present:
         action = ACTION_WROTE
@@ -262,6 +263,9 @@ def sync_operator_persona(config: "Config", *, dry_run: bool = False) -> SyncRes
                 file_step_done = False
     elif not text.strip():
         action = ACTION_EMPTY
+        # The operator chose the shipped persona, so an outage must not bring
+        # back the edit this replaced: the last good copy is cleared.
+        clear_last_good = True
     elif is_shipped(text):
         action = ACTION_UPGRADED if persona_digest(text) != shipped_digest else ACTION_UNCHANGED
         if not dry_run:
@@ -315,7 +319,10 @@ def sync_operator_persona(config: "Config", *, dry_run: bool = False) -> SyncRes
     if state is not None:
         new_state = dict(state)
         new_state["shipped_digest"] = shipped_digest
-        if good_text is not None and good_text.strip():
+        if clear_last_good:
+            new_state["last_good_text"] = ""
+            new_state["last_good_digest"] = None
+        elif good_text is not None and good_text.strip():
             digest = persona_digest(good_text)
             if new_state.get("last_good_digest") != digest:
                 new_state["last_good_text"] = good_text
