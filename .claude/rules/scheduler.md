@@ -54,7 +54,7 @@ One loop thread, one pooled `httpx.AsyncClient` for all Talk I/O.
 ### `process_one_task()`
 `process_one_task(config, dry_run=False, user_id=None) -> tuple[int, bool] | None`: claim, `running`, resources/ack/attachments, `execute_task()`.
 
-**Success:** `detect_malformed_result()` can reclassify as failure; `CONFIRMATION_PATTERN`; `completed`; index; deliver; reset job failures and close the `cron_job` row.
+**Success:** `detect_malformed_result()` can reclassify as failure; `asks_for_confirmation` (`CONFIRMATION_PATTERN` against the final paragraph only, quoted, fenced and inline-code text skipped, #625); `completed`; index; deliver; reset job failures and close the `cron_job` row.
 - `once = true`: row deleted, CRON.md removal buffered (ISSUE-387; the FUSE write held the lock). `_remove_once_job_from_cron_md` runs after `deliver_pending`, never raises (post-commit), and re-deletes the row after writing, since `_sync_cron_files` could re-insert it in between.
 
 **Failure:** the row branch and the terminal-event block classify through one pair, `retry_flags(task, result, *, success)` and `decide_retry(...)` (F4); `retry_flags` returns `decide_retry`'s keyword names so no site can disagree on one flag (the event block once omitted `is_sigpipe`, latent). `RetryDecision.reason` is diagnostic only; do not refactor sites onto it (reasons collapse onto one else-arm; the event block tests `is_requeued` before `is_cancelled`). `decide_retry` owns the `1 << (attempt_count * 2)` backoff and `attempt_count < max_attempts - 1` budget; `tests/test_scheduler_retry_decision.py` enumerates all 64 combinations and greps for a copy. `run_task_inline` keeps its own `is_cancelled`.

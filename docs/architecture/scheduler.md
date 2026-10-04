@@ -167,7 +167,7 @@ Auto-seeded `_module.*` rows dispatch as skill-tasks — `feeds.run_scheduled` a
 4. Call `execute_task()` -> `(success, result, actions_taken, execution_trace)`
 5. On success:
     - Check for malformed output (leaked tool-call XML) -> reclassify as failure
-    - Check for confirmation request (regex pattern)
+    - Check for confirmation request (regex pattern, final paragraph only)
     - Update to `completed`
     - Index conversation for memory search
     - Deliver results

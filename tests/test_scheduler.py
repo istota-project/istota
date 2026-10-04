@@ -283,6 +283,53 @@ class TestConfirmationPattern:
         assert is_no_final_answer("Should I proceed with the deletion?") is False
 
 
+class TestAsksForConfirmation:
+    """#625: only the answer's own final paragraph can ask."""
+
+    def test_a_final_question_parks(self):
+        from istota.scheduler import asks_for_confirmation
+
+        assert asks_for_confirmation(
+            "I drafted the reply to Ana.\n\nShould I proceed?")
+
+    def test_an_explanation_of_the_card_does_not(self):
+        """#625: a web answer explaining the confirmation card."""
+        from istota.scheduler import asks_for_confirmation
+
+        assert not asks_for_confirmation(
+            "That card is a confirmation. The bot asks \"Should I proceed?\" "
+            "or \"Please confirm\" when it needs approval.\n\n"
+            "Click Confirm to run it, or Discard to drop it."
+        )
+
+    def test_a_quoted_line_does_not(self):
+        from istota.scheduler import asks_for_confirmation
+
+        assert not asks_for_confirmation("Ana wrote:\n\n> Please confirm")
+        assert not asks_for_confirmation("Ana wrote:\n> Please confirm\n> by Friday")
+
+    def test_fenced_and_inline_code_do_not(self):
+        from istota.scheduler import asks_for_confirmation
+
+        assert not asks_for_confirmation(
+            "The template reads:\n\n```\nShould I proceed?\n```")
+        assert not asks_for_confirmation(
+            "The prompt string is `Please confirm`, set in the config.")
+
+    def test_the_question_before_a_trailing_code_block_still_parks(self):
+        from istota.scheduler import asks_for_confirmation
+
+        assert asks_for_confirmation(
+            "I will run this. Should I proceed?\n\n```\nrm old.log\n```")
+
+    def test_final_paragraph_drops_quotes_and_fences(self):
+        from istota.scheduler import final_paragraph
+
+        assert final_paragraph("one\n\ntwo\nlines\n\n> quoted") == "two\nlines"
+        assert final_paragraph("a\n~~~\nb\n~~~") == "a"
+        assert final_paragraph("") == ""
+
+
 # ---------------------------------------------------------------------------
 # TestCleanupOldTempFiles
 # ---------------------------------------------------------------------------

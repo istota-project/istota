@@ -268,7 +268,8 @@ def request_shutdown() -> None:
     global _shutdown_requested
     _shutdown_requested = True
 
-# Pattern to detect confirmation requests in Claude's output
+# Pattern to detect confirmation requests in Claude's output. Matched only
+# against the final paragraph, through `asks_for_confirmation`.
 CONFIRMATION_PATTERN = re.compile(
     r'(?:'
     r'I need your confirmation|'
@@ -281,6 +282,52 @@ CONFIRMATION_PATTERN = re.compile(
     r')',
     re.IGNORECASE
 )
+
+_FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+_INLINE_CODE_RE = re.compile(r"(`+)[^`]*?\1")
+
+
+def final_paragraph(text: str) -> str:
+    """The last paragraph of ``text`` that is the model's own prose.
+
+    Fenced blocks and ``>`` quoted lines are dropped, each acting as a
+    paragraph break, so neither a quoted message nor a code sample can be the
+    final paragraph. An unclosed fence runs to the end.
+    """
+    kept: list[str] = []
+    fence: str | None = None
+    for line in (text or "").splitlines():
+        opener = _FENCE_OPEN_RE.match(line)
+        if fence is not None:
+            if (opener and opener.group(1)[0] == fence[0]
+                    and len(opener.group(1)) >= len(fence)
+                    and not line.strip().strip(fence[0])):
+                fence = None
+            kept.append("")
+            continue
+        if opener:
+            fence = opener.group(1)
+            kept.append("")
+            continue
+        if line.lstrip().startswith(">"):
+            kept.append("")
+            continue
+        kept.append(line)
+    paragraphs = [p for p in re.split(r"\n[ \t]*\n", "\n".join(kept)) if p.strip()]
+    return paragraphs[-1].strip() if paragraphs else ""
+
+
+def asks_for_confirmation(result: str) -> bool:
+    """Whether an answer ends by asking the user to approve something.
+
+    Only the final paragraph counts, with inline code removed: an answer that
+    explains the confirmation card, or quotes "Please confirm" from somewhere,
+    is not itself a question (#625, a web answer about confirmations that was
+    parked as one).
+    """
+    tail = _INLINE_CODE_RE.sub(" ", final_paragraph(result))
+    return CONFIRMATION_PATTERN.search(tail) is not None
+
 
 _POLICY_REFUSAL_KEYWORDS = ("safety", "policy", "content", "refused", "harm", "blocked")
 
@@ -3374,8 +3421,8 @@ def process_one_task(
         _whatsapp_group_turn = is_group_task(config, task)
     # An email thread room's own task (multiplayer D6): its only leg is the
     # reply-all, which must never carry the question, and the room is shared,
-    # so the question parks and goes to the principal privately, with a
-    # heads-up mail to their own address (D4 item 3, ISSUE-608).
+    # so the question parks and goes to the principal's private room
+    # (ISSUE-608), never by mail.
     _own_email_thread_room = False
     _thread_token = None
     if task.source_type == "email" and not dry_run:
@@ -3410,7 +3457,7 @@ def process_one_task(
         and _confirmable_surface
         and not _pass_on
         and not is_no_final_answer(result)
-        and CONFIRMATION_PATTERN.search(result)
+        and asks_for_confirmation(result)
     )
 
     # The room was switched off while this task ran (multiplayer D12): its
