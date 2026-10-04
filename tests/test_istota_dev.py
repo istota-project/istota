@@ -299,6 +299,7 @@ class TestClone:
     @pytest.mark.parametrize("repo", [
         "widget", "acme/../widget", "acme/./widget", "-acme/widget", "acme/-x",
         "acme//widget", "acme/wid get", "acme/widget.git", "/acme/widget",
+        "acme.git/widget", "acme/widget\n",
     ])
     def test_a_bad_repository_path_is_a_usage_error(self, env, repo):
         code, out = env.run("clone", repo)
@@ -325,6 +326,7 @@ CREDENTIAL_CASES = [
     ("remote.user.url", "https://oauth2@gitlab.example.com/ns/p.git", False),
     ("remote.port.url", "https://gitlab.example.com:8443/ns/p.git", False),
     ("remote.empty.url", "https://user:@gitlab.example.com/ns/p.git", False),
+    ("remote.query.url", "https://gitlab.example.com/ns/p.git?x=a:b@c", False),
 ]
 _IDS = [f"{'flag' if f else 'clean'}-{i}" for i, (_, _, f) in enumerate(CREDENTIAL_CASES)]
 
@@ -430,6 +432,15 @@ class TestWorktree:
         assert code == 0
         assert out["existing"] is True
 
+    def test_an_existing_worktree_reports_no_base(self, env):
+        """The second call's base is not the one the worktree was cut from, and
+        `glab mr create --target-branch` is where a wrong one would land."""
+        upstream = env.upstream()
+        _git(upstream, "branch", "release")
+        env.clone()
+        env.run("worktree", "acme/widget", "fix", "--base", "origin/release")
+        assert env.run("worktree", "acme/widget", "fix")[1]["base"] is None
+
     @pytest.mark.parametrize("name", ["AGENTS.md", "CLAUDE.md"])
     def test_the_instruction_file_is_named(self, env, name):
         env.upstream(files={name: "conventions\n"})
@@ -466,7 +477,7 @@ class TestWorktree:
         assert code == istota_dev.EXIT_MISSING
         assert out["hint"] == "run istota-dev clone first"
 
-    @pytest.mark.parametrize("slug", ["Fix", "-fix", "fix-", "fix_it", "", "a" * 49, "fix/it"])
+    @pytest.mark.parametrize("slug", ["Fix", "-fix", "fix-", "fix_it", "", "a" * 49, "fix/it", "fix\n"])
     def test_a_bad_slug_is_a_usage_error(self, env, slug):
         env.upstream()
         env.clone()
@@ -507,6 +518,19 @@ class TestWorktree:
         else:
             env.monkeypatch.setenv("ISTOTA_TASK_ID", value)
         assert env.run("worktree", "acme/widget", "fix")[0] == istota_dev.EXIT_USAGE
+
+    def test_a_credential_that_breaks_the_fetch_is_still_a_stop(self, env):
+        """A planted credential is a likely reason a fetch fails; exit 4 there
+        would send the model to `git config --list` to see why."""
+        env.upstream()
+        env.clone()
+        _git(env.bare(), "remote", "set-url", "origin",
+             f"https://oauth2:{SECRET}@gitlab.invalid/acme/widget.git")
+
+        for argv in (("clone", "acme/widget"), ("worktree", "acme/widget", "fix")):
+            code, out, err = env.run(*argv, raw=True)
+            assert code == istota_dev.EXIT_CREDENTIAL, (argv, out)
+            assert SECRET not in out + err
 
     def test_a_credential_stops_it_before_anything_is_created(self, env):
         env.upstream()
@@ -557,7 +581,7 @@ class TestShow:
         assert code == 0
         assert out == "print('v1')\n"
 
-    @pytest.mark.parametrize("ref", ["main", "HEAD", "refs/heads/main", "origin/../x", "abc"])
+    @pytest.mark.parametrize("ref", ["main", "HEAD", "refs/heads/main", "origin/../x", "abc", "origin/main\n"])
     def test_a_local_ref_is_refused(self, env, ref):
         env.upstream()
         env.clone()
@@ -643,6 +667,12 @@ class TestVerifyRemote:
         assert code == istota_dev.EXIT_CREDENTIAL
         assert SECRET not in out + err
         assert "gitlab.example.com" not in out
+
+    def test_an_scp_shaped_credential_is_never_echoed(self, env, checkout):
+        checkout(f"user:{SECRET}@gitlab.example.com:acme/widget.git")
+        code, out, err = env.run("verify-remote", "acme/other", raw=True)
+        assert code == istota_dev.EXIT_CREDENTIAL
+        assert SECRET not in out + err
 
     def test_a_bare_username_is_not_a_credential(self, env, checkout):
         checkout("https://oauth2@gitlab.example.com/acme/widget.git")

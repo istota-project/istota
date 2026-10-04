@@ -84,7 +84,7 @@ _GIT_ENV_DROP = (
     "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
 )
 
-_USERINFO_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)([^/@\s]*)@")
+_USERINFO_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)([^/?#@\s]*)@")
 _COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$")
 _BOT_DIR_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -311,7 +311,7 @@ def load_config(path: Path) -> HelperConfig:
     if not isinstance(repos_dir, str) or not os.path.isabs(repos_dir):
         raise usage("config file has no absolute repos_dir")
     bot_dir = raw.get("bot_dir")
-    if not isinstance(bot_dir, str) or not _BOT_DIR_RE.match(bot_dir):
+    if not isinstance(bot_dir, str) or not _BOT_DIR_RE.fullmatch(bot_dir):
         raise usage("config file has no valid bot_dir")
 
     forges: dict = {}
@@ -343,10 +343,12 @@ def _validate_repo_path(path: str) -> str:
         raise usage(f"repository must be <namespace>/<project>, got {path!r}")
     for part in components:
         if (not part or part in (".", "..") or part.startswith("-")
-                or not _COMPONENT_RE.match(part)):
+                or not _COMPONENT_RE.fullmatch(part)):
             raise usage(f"invalid repository path component {part!r} in {path!r}")
-    if components[-1].endswith(".git"):
-        raise usage(f"name the project without .git, got {path!r}")
+    # Any component, not only the last: `group/sub.git/x` would nest a clone
+    # inside another bare clone, where the reaper and the scrub stop walking.
+    if any(part.endswith(".git") for part in components):
+        raise usage(f"no path component may end in .git, got {path!r}")
     return path
 
 
@@ -402,6 +404,11 @@ def cmd_clone(args: argparse.Namespace, cfg: HelperConfig) -> dict:
         git(None, "clone", "--bare", url, str(bare), timeout=NETWORK_TIMEOUT)
         git(bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
         fresh = True
+    else:
+        # Read-only and local, so it costs nothing ahead of the fetch: a planted
+        # credential is a common reason a fetch fails, and exit 4 there would
+        # send the model to `git config --list` to find out why.
+        _stop_on_credentials(bare)
 
     git(bare, "fetch", "origin", "--prune", timeout=NETWORK_TIMEOUT)
     # ISSUE-291: core.hooksPath is per-clone config; without it a repository's
@@ -451,11 +458,11 @@ def cmd_worktree(args: argparse.Namespace, cfg: HelperConfig) -> dict:
     repo = parse_repo(args.repo, args.forge, cfg, need_forge=False)
     tid = task_id()
     slug = args.slug
-    if not _SLUG_RE.match(slug):
+    if not _SLUG_RE.fullmatch(slug):
         raise usage("slug must be lowercase [a-z0-9-], 1 to 48 characters, "
                     "no leading or trailing '-'", slug=slug)
     base = args.base
-    if base is not None and (not _ORIGIN_REF_RE.match(base) or ".." in base):
+    if base is not None and (not _ORIGIN_REF_RE.fullmatch(base) or ".." in base):
         raise usage("--base must be origin/<branch>; a bare clone has no "
                     "maintained local branches", base=base)
 
@@ -464,14 +471,13 @@ def cmd_worktree(args: argparse.Namespace, cfg: HelperConfig) -> dict:
         raise Stop(EXIT_MISSING, {"error": f"no bare clone at {bare}",
                                   "hint": "run istota-dev clone first"})
 
+    _stop_on_credentials(bare)
     git(bare, "fetch", "origin", "--prune", timeout=NETWORK_TIMEOUT)
     _stop_on_credentials(bare)
 
     branch = f"{cfg.bot_dir}/{tid}-{slug}"
     namespace, _, project = repo.path.rpartition("/")
     work_dir = cfg.repos_dir / namespace / f"{project}--{cfg.bot_dir}-{tid}-{slug}"
-    if base is None:
-        base = f"origin/{default_branch(bare)}"
 
     existing = False
     if os.path.lexists(work_dir):
@@ -485,7 +491,12 @@ def cmd_worktree(args: argparse.Namespace, cfg: HelperConfig) -> dict:
                 "work_dir": str(work_dir),
             })
         existing = True
+        # This call's base says nothing about the one the worktree was cut
+        # from, so an existing worktree reports none.
+        base = None
     else:
+        if base is None:
+            base = f"origin/{default_branch(bare)}"
         git(bare, "worktree", "add", "-b", branch, str(work_dir), base)
 
     agents_file = None
@@ -505,7 +516,7 @@ def cmd_worktree(args: argparse.Namespace, cfg: HelperConfig) -> dict:
 def cmd_show(args: argparse.Namespace, cfg: HelperConfig) -> None:
     repo = parse_repo(args.repo, args.forge, cfg, need_forge=False)
     ref = args.ref
-    if not ((_ORIGIN_REF_RE.match(ref) and ".." not in ref) or _OBJECT_ID_RE.match(ref)):
+    if not ((_ORIGIN_REF_RE.fullmatch(ref) and ".." not in ref) or _OBJECT_ID_RE.fullmatch(ref)):
         raise usage("--ref must be origin/<branch> or an object id; a local "
                     "branch name in a bare clone is a stale clone-day copy", ref=ref)
     if not args.path or args.path.startswith("/"):
@@ -539,7 +550,9 @@ def _parse_remote(url: str) -> tuple[str, str, str] | None:
             return None
         userinfo = parts.netloc.rpartition("@")[0] if "@" in parts.netloc else ""
         return host, parts.path, userinfo
-    match = re.match(r"^(?:([^@/:]+)@)?([^:/]+):(.+)$", url)
+    # No `@` past the user part: `user:secret@host:path` must not parse with
+    # the secret inside a path that a mismatch would then print.
+    match = re.fullmatch(r"(?:([^@/:]+)@)?([^:/@]+):([^@]+)", url)
     if not match:
         return None
     return match.group(2).lower(), "/" + match.group(3), match.group(1) or ""
@@ -549,6 +562,9 @@ def cmd_verify_remote(args: argparse.Namespace, cfg: HelperConfig) -> tuple[int,
     expected = _validate_repo_path(args.expected)
     url = git(Path.cwd(), "remote", "get-url", "origin").strip()
     parsed = _parse_remote(url)
+    if parsed is None and "@" in url:
+        raise Stop(EXIT_CREDENTIAL, {"error": "origin URL holds userinfo in an unrecognised "
+                                              "form; treat it as a credential to rotate"})
     if parsed is None:
         raise Stop(EXIT_GIT, {"error": "could not parse the origin URL"})
     host, path, userinfo = parsed
