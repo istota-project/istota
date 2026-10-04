@@ -253,10 +253,12 @@ REPLY_SNAPSHOT_CHARS = 1000
 def linked_about(conn, parent_message_id: int | None, room_token: str | None) -> str | None:
     """The shared room a reply to ``parent_message_id`` is linked to, or None.
 
-    The one linking rule, applied by `transport.ingest.record_inbound` for
+    The first linking rule, applied by `transport.ingest.record_inbound` for
     every surface that supplies a parent: the parent row is in the same room
-    as the new turn and is tagged with ``about_room_token``. Nothing else
-    links a turn, and nothing carries a link forward to the next one.
+    as the new turn and is tagged with ``about_room_token``. The one other is
+    `about_room_link`, a web send naming an email thread room with no row to
+    reply to; the web route checks it and passes ``about_room_token`` in,
+    which skips this. Nothing carries a link forward to the next turn.
     """
     if parent_message_id is None or not room_token:
         return None
@@ -267,6 +269,35 @@ def linked_about(conn, parent_message_id: int | None, room_token: str | None) ->
     if row is None or row["room_token"] != room_token:
         return None
     return row["about_room_token"] or None
+
+
+def about_room_link(conn, config, *, user_id: str, room_token: str | None,
+                    about_token: str | None) -> str | None:
+    """The thread a web send naming ``about_token`` links to, or None to refuse.
+
+    The second linking rule ("Discuss in private chat" on a mail card with no
+    note, hidden email threads section 0c), and narrower than the first: the
+    token names an email thread room, ``user_id`` is a current member of it,
+    and ``room_token`` is that user's private room for it as
+    `private_room_for` resolves it. Returns the thread's canonical token.
+    Raises what the reads raise; the route refuses on that too.
+    """
+    from istota.rooms.scopes import is_email_thread_room
+
+    if not about_token or not room_token:
+        return None
+    thread = canonical_token(conn, about_token)
+    if thread is None or not is_email_thread_room(conn, thread):
+        return None
+    if not is_current_member(conn, thread, user_id):
+        return None
+    dest = private_room_for(conn, config, user_id, thread)
+    own = canonical_token(conn, room_token)
+    if dest is None or own is None or own == thread:
+        return None
+    if canonical_token(conn, dest.room_token) != own:
+        return None
+    return thread
 
 
 def quoted_private_reply(conn, *, user_id: str, quoted_id: str | None,

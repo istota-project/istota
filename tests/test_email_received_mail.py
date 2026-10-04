@@ -411,3 +411,49 @@ class TestTheWebRead:
         (row,) = [m for m in _page(config, _thread_token(config))["messages"]
                   if m["role"] == "user"]
         assert "note_path" not in row["received_mail"]
+
+
+class TestTheDiscussTarget:
+    """Section 0c: with no note, "Discuss in private chat" opens the viewer's
+    private room with the composer linked to the thread, so the card names
+    both rooms. A note outranks it; a non-thread mail room never has one."""
+
+    def test_a_thread_card_with_no_note_names_the_private_room_and_the_thread(
+        self, config, db_path,
+    ):
+        with db.get_db(db_path) as conn:
+            private = db.create_web_chat_room(conn, HOST, "General").token
+        _start(config)
+        token = _thread_token(config)
+        (row,) = [m for m in _page(config, token)["messages"] if m["role"] == "user"]
+        assert row["received_mail"]["discuss"] == {"room": private, "about": token}
+
+    def test_a_note_outranks_it(self, config, db_path):
+        with db.get_db(db_path) as conn:
+            private = db.create_web_chat_room(conn, HOST, "General").token
+        _start(config)
+        token = _thread_token(config)
+        (row,) = [m for m in _page(config, token)["messages"] if m["role"] == "user"]
+        with db.get_db(db_path) as conn:
+            db.add_message(conn, private, role="system", body="note", origin_surface="web",
+                           about_room_token=token,
+                           delivery_reference=f"private-pass_on:{row['task_id']}:pass-on")
+        (row,) = [m for m in _page(config, token)["messages"] if m["role"] == "user"]
+        assert "discuss" not in row["received_mail"]
+        assert row["received_mail"]["note_path"] == f"/chat/r/{private}/t/{row['task_id']}"
+
+    def test_with_no_private_room_there_is_none(self, config, db_path):
+        _start(config)
+        (row,) = [m for m in _page(config, _thread_token(config))["messages"]
+                  if m["role"] == "user"]
+        assert "discuss" not in row["received_mail"]
+
+    def test_the_private_email_room_has_none(self, config, db_path):
+        with db.get_db(db_path) as conn:
+            db.create_web_chat_room(conn, HOST, "General")
+        _poll(config, sender=HOST_ADDR, to=(BOT,), message_id="<p1@test.com>",
+              subject="Note to self")
+        with db.get_db(db_path) as conn:
+            private = db.resolve_room_token(conn, "email", email_conversation_token(HOST))
+        (row,) = [m for m in _page(config, private)["messages"] if m["role"] == "user"]
+        assert "discuss" not in row["received_mail"]

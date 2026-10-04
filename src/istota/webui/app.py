@@ -6108,6 +6108,11 @@ EMAIL_THREAD_READ_ONLY = (
     "draft the reply."
 )
 
+#: A send whose ``about_room`` fails any of its checks. One body for every
+#: cause, so the route says nothing about rooms the sender cannot link to.
+ABOUT_ROOM_REFUSED = "cannot link this message to that room"
+_MAX_ABOUT_ROOM_CHARS = 200
+
 
 def _email_thread_room(room_token: str) -> bool:
     """`routing.email_thread_room` over its own connection."""
@@ -7604,6 +7609,9 @@ class _MailView:
     #: ``{task_id: room}``: the room holding a turn's private note, which
     #: outranks ``private_room`` for that turn's link.
     note_rooms: dict = _dc_field(default_factory=dict)
+    #: The email thread room this view is of, or None for the private email
+    #: room: only a thread can be named as a send's ``about_room``.
+    thread: str | None = None
 
 
 def _mail_views(conn, username: str, tokens, task_ids=()) -> dict:
@@ -7614,6 +7622,7 @@ def _mail_views(conn, username: str, tokens, task_ids=()) -> dict:
     """
     from istota.mail.support import own_addresses  # noqa: PLC0415
     from istota.rooms.private_replies import private_room_for  # noqa: PLC0415
+    from istota.rooms.scopes import is_email_thread_room  # noqa: PLC0415
 
     out: dict = {}
     own = None
@@ -7631,7 +7640,8 @@ def _mail_views(conn, username: str, tokens, task_ids=()) -> dict:
             dest = None
         private = dest.room_token if dest is not None and dest.room_token != token else None
         out[token] = _MailView(own=own, private_room=private,
-                               note_rooms=notes)
+                               note_rooms=notes,
+                               thread=token if is_email_thread_room(conn, token) else None)
     return out
 
 
@@ -7684,6 +7694,19 @@ def _mail_note_path(view: _MailView, task_id) -> str | None:
     return path if is_safe_path(path) else None
 
 
+def _mail_discuss(view: _MailView, task_id) -> dict | None:
+    """``{room, about}`` for "Discuss in private chat" on a thread card with no
+    note (hidden email threads, section 0c): the viewer's private room, whose
+    composer is then linked to the thread, sent back as ``about_room``. The
+    send route checks the pair again; this only decides what the menu offers.
+    """
+    if view.thread is None or view.private_room is None:
+        return None
+    if isinstance(task_id, int) and task_id in view.note_rooms:
+        return None
+    return {"room": view.private_room, "about": view.thread}
+
+
 def _decorate_outgoing_mail(out: dict, view: "_MailView | None") -> None:
     """Add the viewer's address labels and the note link to an assistant
     dict's `mail` card, in a mail room."""
@@ -7694,6 +7717,9 @@ def _decorate_outgoing_mail(out: dict, view: "_MailView | None") -> None:
     note = _mail_note_path(view, out.get("task_id"))
     if note is not None:
         mail["note_path"] = note
+    discuss = _mail_discuss(view, out.get("task_id"))
+    if discuss is not None:
+        mail["discuss"] = discuss
 
 
 _MAIL_CHECKS = frozenset({"verified", "failed", "none"})
@@ -7793,6 +7819,9 @@ def _received_mail_field(
     note = _mail_note_path(view, _row_get(row, "task_id"))
     if note is not None:
         out["note_path"] = note
+    discuss = _mail_discuss(view, _row_get(row, "task_id"))
+    if discuss is not None:
+        out["discuss"] = discuss
     return out
 
 
@@ -8652,11 +8681,16 @@ def _chat_create_web_task(
     client_msg_id: str | None = None,
     reply_to_msg_id: int | None = None,
     relay_answer: str | None = None,
+    about_room: str | None = None,
 ) -> tuple[str, int | None]:
     """Rate-limited web-task creation. Returns ``("ok", task_id)``,
     ``("recorded", message_id)`` when the speech gate stored the turn without
-    answering it, ``("rate_limited", window_seconds)`` or
-    ``("reply_target_gone", 0)``.
+    answering it, ``("rate_limited", window_seconds)``,
+    ``("reply_target_gone", 0)`` or ``("about_room_refused", 0)``.
+
+    ``about_room`` links the turn to an email thread with no row to reply to
+    (`private_replies.about_room_link`), checked here so the check and the
+    write are one transaction. The caller drops it when a reply-to row is set.
 
     A cited parent is resolved here, inside the same transaction as the create:
     it must be a message in *this* room, and its body — never a client-supplied
@@ -8714,6 +8748,22 @@ def _chat_create_web_task(
             if target is None or target[0] != token:
                 return ("reply_target_gone", 0)
             reply_to_content = target[1][:_REPLY_SNAPSHOT_CHARS]
+        # Ahead of the cancel below, so a refused link changes nothing. A
+        # replay records nothing new, so it is not asked again.
+        about_room_token: str | None = None
+        if about_room is not None and not replaying:
+            from istota.rooms.private_replies import about_room_link
+
+            try:
+                about_room_token = about_room_link(
+                    conn, _config, user_id=username, room_token=token,
+                    about_token=about_room,
+                )
+            except sqlite3.Error:
+                logger.warning("Could not check the linked room for %s", username)
+                about_room_token = None
+            if about_room_token is None:
+                return ("about_room_refused", 0)
         relay = None
         if reply_to_msg_id is not None and not replaying:
             relay = message_relays.relay_for_room_reply(
@@ -8785,6 +8835,7 @@ def _chat_create_web_task(
             reply_to_content=reply_to_content,
             addressed_to_bot=addressed,
             classified=classified,
+            about_room_token=about_room_token,
         )
     if result.gate_reason == "vetoed":
         return ("room_off", 0)
@@ -10668,6 +10719,16 @@ async def chat_send_message(
         and raw_reply_to > 0
         else None
     )
+    # An email thread this send is about, with no row to reply to ("Discuss in
+    # private chat" with no note). A reply-to row decides the link instead, so
+    # with one this is ignored. Its three checks run with the write below; a
+    # value that is not a token at all is refused here, with the same body.
+    about_room: str | None = None
+    raw_about = data.get("about_room")
+    if reply_to_msg_id is None and raw_about is not None and raw_about != "":
+        if not isinstance(raw_about, str) or len(raw_about) > _MAX_ABOUT_ROOM_CHARS:
+            return JSONResponse({"error": ABOUT_ROOM_REFUSED}, status_code=400)
+        about_room = raw_about
 
     # An attachment-only send is a real message — a voice memo recorded in the
     # composer is the whole message, with nothing typed alongside it. The
@@ -10794,7 +10855,10 @@ async def chat_send_message(
         # The exact answer, whitespace and all; a `!model` prefix already
         # changed the text, so only an unprefixed send keeps its raw form.
         text if model_prefix_used else raw_text,
+        about_room,
     )
+    if outcome == "about_room_refused":
+        return JSONResponse({"error": ABOUT_ROOM_REFUSED}, status_code=400)
     if outcome == "rate_limited":
         return JSONResponse(
             {"error": "rate limit exceeded"},
