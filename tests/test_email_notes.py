@@ -287,3 +287,24 @@ class TestTheDraftOpensTheNote:
         (link,) = [a for a in item["actions"] if a["method"] == "LINK"]
         assert link["href"] == f"/chat/r/{private}/t/{task_id}"
         assert SAFE_PATH_RE.match(link["href"])
+
+
+class TestTheRemarkAndTheLink:
+    @pytest.mark.parametrize(("result", "remark"), [
+        ("NO_ACTION: Alice is only asking Carol.", "Alice is only asking Carol."),
+        ("ACTION: replied to Ana.", "replied to Ana."),
+        ("Done.\nNO_ACTION: nothing else.", "Done.\nnothing else."),
+    ])
+    def test_the_markers_are_stripped(self, result, remark):
+        assert private_replies.email_note_remark(result, None) == remark
+
+    def test_the_link_prefers_the_note_over_an_earlier_question(self, config, db_path):
+        task_id, _private = _absent_turn(config, db_path)
+        with db.get_db(db_path) as conn:
+            asked = db.create_web_chat_room(conn, HOST, "Earlier").token
+            noted = db.create_web_chat_room(conn, HOST, "Later").token
+            db.add_message(conn, asked, role="system", body="q", origin_surface="web",
+                           delivery_reference=f"private-confirmation:{task_id}:abc")
+            db.add_message(conn, noted, role="system", body="n", origin_surface="web",
+                           delivery_reference=f"private-pass_on:{task_id}:pass-on")
+            assert private_replies.note_room_for_task(conn, task_id, HOST) == noted

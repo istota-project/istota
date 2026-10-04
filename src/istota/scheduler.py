@@ -757,8 +757,12 @@ def _write_email_note(config, task, *, thread_token: str, result: str,
             outcome = _thread_reply_outcome(conn, task, thread_token,
                                             delivery_failed=delivery_failed)
             remark = private_replies.email_note_remark(result, mailed)
+            # `NO_ACTION:` says nothing needs the host; its reason is not an
+            # answer to them, so on a mail they were on it writes no note.
+            no_action = not _strip_action_prefix(result)[0]
+            due_remark = "" if no_action and not task.host_absent else remark
             if not private_replies.email_note_due(host_absent=bool(task.host_absent),
-                                                  outcome=outcome, remark=remark):
+                                                  outcome=outcome, remark=due_remark):
                 return
             note, body = private_replies.deliver_email_note(
                 conn, config, task, outcome=outcome, remark=remark,

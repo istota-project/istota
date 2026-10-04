@@ -7587,11 +7587,13 @@ def _mail_views(conn, username: str, tokens, task_ids=()) -> dict:
 
     out: dict = {}
     own = None
+    notes = None
     for token in {t for t in tokens if t}:
         if _db.get_room_binding(conn, token, "email") is None:
             continue
         if own is None:
             own = frozenset(own_addresses(_config, username))
+            notes = _note_rooms(conn, username, task_ids)
         try:
             dest = private_room_for(conn, _config, username, token)
         except Exception:  # noqa: BLE001 — a missing link is the safe answer
@@ -7599,7 +7601,7 @@ def _mail_views(conn, username: str, tokens, task_ids=()) -> dict:
             dest = None
         private = dest.room_token if dest is not None and dest.room_token != token else None
         out[token] = _MailView(own=own, private_room=private,
-                               note_rooms=_note_rooms(conn, username, task_ids))
+                               note_rooms=notes)
     return out
 
 

@@ -211,17 +211,18 @@ class TestThePassOnNote:
         assert _rows(db_path, "SELECT id FROM messages WHERE room_token = ? "
                      "AND role = 'assistant'", (_room_token(config),)) == []
 
-    def test_a_bare_no_action_from_a_turn_the_host_is_on_writes_nothing(
+    def test_no_action_from_a_turn_the_host_is_on_writes_nothing(
         self, config, db_path,
     ):
-        """The host already has this mail, and the bot had nothing to say."""
+        """The host already has this mail, and a reason given with
+        `NO_ACTION:` is not an answer to them."""
         first = _start_thread(config)
         with db.get_db(db_path) as conn:
             private = db.create_web_chat_room(conn, HOST, "Mine").token
             conn.execute("UPDATE tasks SET status = 'completed' WHERE id = ?", (first[0],))
         _poll(config, sender=ALICE, to=(HOST_ADDR,), cc=(BOT,),
               message_id="<a2@ext.example>", references=ROOT, body="Zorg, Friday?")
-        _run_scheduler(config, "NO_ACTION:")
+        _run_scheduler(config, "NO_ACTION: nothing to add.")
         assert _rows(db_path, "SELECT id FROM messages WHERE room_token = ?", (private,)) == []
 
     def test_with_no_private_room_it_is_a_bell_row(self, config, db_path):

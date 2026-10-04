@@ -90,7 +90,9 @@ UNTRUSTED_LABEL = "PARENT ROOM TRANSCRIPT"
 PARENT_CONTEXT_MESSAGES = 40
 PARENT_CONTEXT_CHARS = 12000
 _LABEL_MAX = 80
-_NO_ACTION_RE = re.compile(r"(?m)^[ \t]*NO_ACTION:[ \t]*")
+#: The `ACTION:` / `NO_ACTION:` markers `db.scheduled_assistant_body` reads,
+#: stripped wherever they start a line of a remark.
+_ACTION_MARKER_RE = re.compile(r"(?m)^[ \t]*(?:NO_)?ACTION:[ \t]*")
 
 
 def is_shared_room(conn, room_token: str, *, is_group_chat: bool = False) -> bool:
@@ -933,12 +935,12 @@ def email_note_due(*, host_absent: bool, outcome: str, remark: str) -> bool:
 
 
 def email_note_remark(result: str, mailed: str | None) -> str:
-    """The bot's own words to its host about a mail: ``result`` without a
-    `NO_ACTION:` marker or the mail envelope, and nothing when it only
+    """The bot's own words to its host about a mail: ``result`` without an
+    `ACTION:` / `NO_ACTION:` marker or the mail envelope, and nothing when it only
     repeats the mailed body."""
     from istota.transport.email.outbound import without_email_envelope
 
-    remark = _NO_ACTION_RE.sub("", without_email_envelope(result or "")).strip()
+    remark = _ACTION_MARKER_RE.sub("", without_email_envelope(result or "")).strip()
     if remark and mailed is not None and not db.mailed_body_differs(remark, mailed):
         return ""
     return remark
@@ -997,15 +999,16 @@ def deliver_email_note(conn, config, task, *, outcome: str,
 
 
 def note_room_for_task(conn, task_id, user_id: str) -> str | None:
-    """The private room holding ``task_id``'s email note or private question,
-    or None. Re-checked as ``user_id``'s own private room."""
+    """The private room holding ``task_id``'s email note, else its private
+    question, or None. Re-checked as ``user_id``'s own private room."""
     try:
         ident = int(task_id)
     except (TypeError, ValueError):
         return None
     rows = conn.execute(
         "SELECT room_token FROM messages WHERE delivery_reference = ? "
-        "OR (delivery_reference >= ? AND delivery_reference < ?) ORDER BY id",
+        "OR (delivery_reference >= ? AND delivery_reference < ?) "
+        "ORDER BY delivery_reference LIKE 'private-pass_on:%' DESC, id",
         (f"private-pass_on:{ident}:pass-on",
          f"private-confirmation:{ident}:", f"private-confirmation:{ident};"),
     ).fetchall()
