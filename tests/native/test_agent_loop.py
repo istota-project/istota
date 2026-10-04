@@ -722,24 +722,6 @@ class TestTurnControl:
         end = [e for e in sink.events if e.type == "agent_end"][0]
         assert end.stop_reason == "max_turns"
 
-    async def test_should_stop_after_turn_back_compat(self):
-        async def _stop(ctx, msgs):
-            return True
-
-        provider = MockProvider(
-            [_tool_turn("echo", {"value": "x"}), _tool_turn("echo", {"value": "y"})]
-        )
-        sink = _Sink()
-        await run_agent_loop(
-            [UserMessage(content=[TextContent(text="go")])],
-            _ctx(tools=[_echo_tool([])]),
-            _config(provider, should_stop_after_turn=_stop),
-            sink,
-        )
-        assert len(provider.calls) == 1
-        end = [e for e in sink.events if e.type == "agent_end"][0]
-        assert end.stop_reason == "should_stop_after_turn"
-
 
 # --------------------------------------------------------------------------- #
 # Steering / follow-up queues

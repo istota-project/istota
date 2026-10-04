@@ -93,17 +93,6 @@ compaction if needed, and returns a new context snapshot. The loop applies it
 without knowing what happened.
 """
 
-ShouldStopAfterTurnHook = Callable[
-    ["AgentContext", list[AgentMessage]],
-    Awaitable[bool],
-]
-"""Called after every ``turn_end``. Returns True to stop the loop gracefully.
-
-The degenerate single-condition form of ``stop_conditions``. Kept for
-back-compat; the loop wraps it into the condition list.
-"""
-
-
 @dataclass
 class StopDecision:
     stop: bool
@@ -136,9 +125,7 @@ class AgentLoopConfig:
     before_tool_call: "BeforeToolCallHook | None" = None
     after_tool_call: "AfterToolCallHook | None" = None
     prepare_next_turn: PrepareNextTurnHook | None = None
-    should_stop_after_turn: ShouldStopAfterTurnHook | None = None
-    # Composable stop gate (Crush refinement). ``should_stop_after_turn`` is the
-    # degenerate single-condition case; the loop adapts it into this list.
+    # Composable stop gate (Crush refinement), evaluated after each ``turn_end``.
     stop_conditions: list[StopCondition] = field(default_factory=list)
     get_steering_messages: Callable[[], list[AgentMessage]] | None = None
     get_follow_up_messages: Callable[[], list[AgentMessage]] | None = None

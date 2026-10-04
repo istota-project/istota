@@ -31,7 +31,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+import pytest
+
+REPO =Path(__file__).resolve().parent.parent
 SRC = REPO / "src"
 PACKAGE = SRC / "istota"
 
@@ -243,9 +245,19 @@ def _all_modules() -> list[str]:
     return names
 
 
+# Round-robin chunks, each in its own interpreter, so xdist can spread the sweep
+# across workers (ISSUE-619). Round-robin rather than contiguous because the few
+# heavy modules cluster by package (transport.sms.providers.telnyx alone pulls in
+# about 3,000 third-party modules); contiguous slices left one chunk four times
+# the others. Chunks share nothing: each starts a fresh process.
+SWEEP_CHUNKS = 8
+
+
 class TestImportSweep:
-    def test_every_module_imports_on_its_own(self, tmp_path):
-        names = _all_modules()
+    @pytest.mark.parametrize("chunk", range(SWEEP_CHUNKS))
+    def test_every_module_imports_on_its_own(self, tmp_path, chunk):
+        names = _all_modules()[chunk::SWEEP_CHUNKS]
+        assert names, "a chunk with nothing in it means SWEEP_CHUNKS outgrew the package"
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(SRC), env.get("PYTHONPATH", "")]))
         result = subprocess.run(

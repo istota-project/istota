@@ -100,7 +100,11 @@ class TestStoreRoomTurn:
         assert db.get_messages(conn, "ghosttoken") == []
 
     def test_noop_when_no_conversation_token(self, conn):
-        _store(conn, _task(None), "x")  # nothing raised, nothing stored
+        # A registered room exists, so a write that fell through to some room
+        # would land a row; `get_messages(conn, None)` alone could never see one.
+        db.register_room(conn, "r", "u", origin="talk")
+        assert _store(conn, _task(None), "x") is None
+        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
 
     def test_idempotent_across_retries(self, conn):
         db.register_room(conn, "r", "u", origin="talk")

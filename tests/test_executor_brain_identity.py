@@ -7,7 +7,6 @@ them — `tests/native/test_session_log_integration.py` builds its own requests
 by hand and would stay green against any executor mapping at all.
 """
 
-import dataclasses
 from unittest.mock import patch
 
 from istota import db
@@ -116,30 +115,57 @@ class TestTheIdentityReachesTheBrain:
 
 
 class TestTheIdentitySurvivesAFallbackReroute:
-    def test_replace_preserves_every_identity_field(self, tmp_path):
-        """`_run_fallback` copies a request with `dataclasses.replace(req,
-        model=…, effort=…, advisor=…, is_fallback=True)`, which names no
-        identity field.
+    def test_the_fallback_brain_receives_every_identity_field(self, tmp_path):
+        """`_run_fallback` copies the request for the fallback brain, and the
+        six identity fields have to survive that copy.
 
-        That is what files a fallback native run's session log against the same
-        attempt rather than a nameless one, so it is worth an assertion rather
-        than a comment. `is_fallback` is the one field the copy is *meant* to
-        change (ISSUE-378) and is asserted as changing, since a reroute whose
-        identity survived but whose marker did not would pass a bare loop over
-        the six.
+        That copy is what files a fallback native run's session log against the
+        same attempt rather than a nameless one, so the request the fallback
+        brain actually receives is asserted on, not a copy made here. Every
+        identity field has a value differing from both the `BrainRequest`
+        default and the task row, so a fallback that rebuilt the request by hand,
+        or from the task, would fail. `is_fallback` is the one
+        field the copy is *meant* to change (ISSUE-378) and is asserted as
+        changing, since a reroute whose identity survived but whose marker did
+        not would pass a bare loop over the six.
         """
-        req = _run(tmp_path)
-        copied = dataclasses.replace(
-            req, model="other", effort="high", advisor="", is_fallback=True,
+        from istota.config import BrainConfig
+        from istota.executor import _run_fallback
+
+        config = _config(tmp_path)
+        config.brain = BrainConfig(kind="claude_code", fallback="native")
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="do the thing", user_id="bob", source_type="cli"
+            )
+            task = db.get_task(conn, task_id)
+        identity = {
+            "task_id": task_id + 1000,
+            "attempt": 3,
+            "user_id": "alice",
+            "source_type": "talk",
+            "conversation_token": "a1b2c3d4",
+            "is_group_chat": True,
+        }
+        req = BrainRequest(
+            prompt="p",
+            allowed_tools=[],
+            cwd=tmp_path,
+            env={},
+            timeout_seconds=60,
+            **identity,
         )
+        fallback = _RecordingBrain()
+        with patch("istota.executor.make_brain", return_value=fallback):
+            result, _pin, _effort = _run_fallback(
+                config, config.brain, "native", task, req,
+            )
+
+        assert result is not None and result.success is True
+        assert len(fallback.requests) == 1
+        received = fallback.requests[0]
+        assert received is not req
         assert req.is_fallback is False
-        assert copied.is_fallback is True
-        for field in (
-            "task_id",
-            "attempt",
-            "user_id",
-            "source_type",
-            "conversation_token",
-            "is_group_chat",
-        ):
-            assert getattr(copied, field) == getattr(req, field), field
+        assert received.is_fallback is True
+        for field, value in identity.items():
+            assert getattr(received, field) == value, field

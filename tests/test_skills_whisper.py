@@ -2,7 +2,6 @@
 
 import json
 import os
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,7 +13,6 @@ from istota.skills.whisper.cli import (
     main,
 )
 from istota.skills.whisper.models import (
-    MODEL_REQUIREMENTS,
     _DEFAULT_HEADROOM_GB,
     _DEFAULT_MAX_MODEL,
     _get_headroom_gb,
@@ -174,32 +172,24 @@ class TestDownloadModel:
         assert result["status"] == "error"
         assert "Unknown model" in result["error"]
 
-    @patch("istota.skills.whisper.models.WhisperModel", create=True)
-    def test_success(self, mock_cls):
+    def test_success(self):
+        """The real function, with `faster_whisper` supplied as a stand-in.
+
+        `download_model` imports `WhisperModel` inside its body, so a module in
+        `sys.modules` is what it gets, and the model it loads is the one named.
+        """
+        mock_cls = MagicMock()
         with patch.dict("sys.modules", {"faster_whisper": MagicMock(WhisperModel=mock_cls)}):
-            from importlib import reload
+            result = download_model("tiny")
+        assert result["status"] == "ok"
+        assert result["model"] == "tiny"
+        mock_cls.assert_called_once_with("tiny", device="cpu", compute_type="int8")
 
-            import istota.skills.whisper.models as models_mod
-
-            reload(models_mod)
-            # Just test that the function returns ok when import works
-            result = models_mod.download_model("tiny")
-            # It will try to import faster_whisper — mock it
-        # Re-test with direct mock
-        with patch("istota.skills.whisper.models.WhisperModel", create=True):
-            # Patch the import inside the function. Imported for the side
-            # effect of loading the module under the patch, not for a name.
-            import istota.skills.whisper.models as m  # noqa: F401
-
-
-            def patched_download(name):
-                if name not in MODEL_REQUIREMENTS:
-                    return {"status": "error", "error": f"Unknown model '{name}'."}
-                return {"status": "ok", "model": name, "message": f"Model '{name}' downloaded"}
-
-            result = patched_download("tiny")
-            assert result["status"] == "ok"
-            assert result["model"] == "tiny"
+    def test_a_load_failure_is_an_error(self):
+        mock_cls = MagicMock(side_effect=RuntimeError("network down"))
+        with patch.dict("sys.modules", {"faster_whisper": MagicMock(WhisperModel=mock_cls)}):
+            result = download_model("tiny")
+        assert result == {"status": "error", "error": "network down"}
 
 
 # --- Transcription tests ---
@@ -241,29 +231,15 @@ class TestTranscribeAudio:
 
     @patch("istota.skills.whisper.transcribe.select_model", return_value="tiny")
     def test_import_error(self, mock_select, tmp_path):
+        """A `None` entry in `sys.modules` makes the import raise ImportError,
+        so the real function reaches its own not-installed path."""
         audio = tmp_path / "test.wav"
         audio.write_bytes(b"fake audio")
         with patch.dict("sys.modules", {"faster_whisper": None}):
-            # Force ImportError. Imported for the side effect of loading the
-            # module with faster_whisper masked out, not for a name.
-            import istota.skills.whisper.transcribe as t_mod  # noqa: F401
-
-
-            def failing_import_transcribe(path, model="auto", language=None):
-                audio_path = Path(path)
-                if not audio_path.exists():
-                    return {"status": "error", "error": f"Audio file not found: {path}"}
-                try:
-                    raise ImportError("No module named 'faster_whisper'")
-                except ImportError:
-                    return {
-                        "status": "error",
-                        "error": "faster-whisper not installed. Install with: uv sync --extra whisper",
-                    }
-
-            result = failing_import_transcribe(str(audio))
-            assert result["status"] == "error"
-            assert "not installed" in result["error"]
+            result = transcribe_audio(str(audio))
+        assert result["status"] == "error"
+        assert "not installed" in result["error"]
+        mock_select.assert_not_called()
 
     @patch("istota.skills.whisper.transcribe.select_model")
     def test_model_selection_error(self, mock_select, tmp_path):
