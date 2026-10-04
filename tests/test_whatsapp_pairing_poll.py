@@ -427,6 +427,8 @@ class TestTheClaim:
             return None
 
         monkeypatch.setattr(async_runtime, "spawn_task", fake)
+        # The blocked poll waits this out before giving up; 2s by default.
+        monkeypatch.setattr(runtime, "_POLL_BUSY_TIMEOUT_MS", 100)
         request(config.db_path)
 
         paused = threading.Thread(target=lambda: None)

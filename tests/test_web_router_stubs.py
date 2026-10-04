@@ -14,6 +14,7 @@ context per app.
 """
 
 import ast
+import functools
 import pathlib
 
 import pytest
@@ -243,18 +244,25 @@ class TestTheFactoryKeepsTheBehaviourItReplaced:
         assert app.state.beta_initialised_dbs == {"/tmp/beta.db"}
 
 
+@functools.cache
+def _src_trees() -> tuple[tuple[str, ast.AST], ...]:
+    root = pathlib.Path(__file__).resolve().parents[1] / "src" / "istota"
+    return tuple(
+        (path.relative_to(root).as_posix(), ast.parse(path.read_text()))
+        for path in sorted(root.rglob("*.py"))
+    )
+
+
 class TestNoSixthCopy:
     """The stub body, anywhere under ``src/istota/`` other than the shared
     module, is a router that has declared its own again. Matched on the shape
     of the body rather than on the function name, so a rename does not hide."""
 
     def test_only_web_router_stubs_raises_the_401(self):
-        root = pathlib.Path(__file__).resolve().parents[1] / "src" / "istota"
         offenders: list[str] = []
-        for path in sorted(root.rglob("*.py")):
-            if path.relative_to(root).as_posix() == "webui/router_stubs.py":
+        for rel, tree in _src_trees():
+            if rel == "webui/router_stubs.py":
                 continue
-            tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Try):
                     continue
@@ -268,7 +276,7 @@ class TestNoSixthCopy:
                 if ("AssertionError", "AttributeError") in handlers and any(
                     'session' in ast.dump(s) for s in node.body
                 ):
-                    offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+                    offenders.append(f"{rel}:{node.lineno}")
         assert offenders == [], (
             "a router has declared its own session-reading auth stub again: "
             f"{offenders}"
@@ -281,17 +289,15 @@ class TestNoSixthCopy:
         a stub back copies the name with it. ``verify_origin`` has no
         distinctive body at all (``return None``), so the shape guard cannot
         see it and forking the CSRF key would otherwise be silent."""
-        root = pathlib.Path(__file__).resolve().parents[1] / "src" / "istota"
         offenders: list[str] = []
-        for path in sorted(root.rglob("*.py")):
-            if path.relative_to(root).as_posix() == "webui/router_stubs.py":
+        for rel, tree in _src_trees():
+            if rel == "webui/router_stubs.py":
                 continue
-            tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
                     node.name in ("require_auth", "verify_origin")
                 ):
-                    offenders.append(f"{path.relative_to(root)}:{node.lineno} {node.name}")
+                    offenders.append(f"{rel}:{node.lineno} {node.name}")
         assert offenders == [], (
             "a router has declared its own copy of a shared stub, which forks "
             f"the dependency_overrides key it is registered under: {offenders}"

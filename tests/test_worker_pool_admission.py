@@ -66,6 +66,8 @@ STARVED = host_pressure.PressureSample(
 def _config(db_path, tmp_path, **scheduler_kwargs):
     kwargs = {
         "worker_idle_timeout": 1,
+        # An idle worker's sleep is not interruptible, so shutdown waits it out.
+        "worker_idle_poll_interval": 0.02,
         "poll_interval": 1,
         "host_pressure_enabled": True,
         "min_available_memory_mb": 768,

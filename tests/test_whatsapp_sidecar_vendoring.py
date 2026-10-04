@@ -2571,7 +2571,9 @@ class TestALostCredentialIsAFatalOfItsOwn:
 
     @staticmethod
     def _frames(tmp_path, creds: str | None, backup: str | None = None,
-                listen_for: float = 3.0) -> tuple[list[dict], int | None]:
+                listen_for: float = 3.0,
+                linger_after_fatal: float | None = None,
+                ) -> tuple[list[dict], int | None]:
         import socket
 
         node = shutil.which("node")
@@ -2616,6 +2618,8 @@ class TestALostCredentialIsAFatalOfItsOwn:
                 if not chunk:
                     break
                 buffer += chunk
+                if linger_after_fatal is not None and b'"fatal"' in buffer:
+                    deadline = min(deadline, time.monotonic() + linger_after_fatal)
             frames = [json.loads(line) for line in buffer.splitlines() if line.strip()]
             # The bridge's `_negotiate` drops a connection whose first line is
             # not `hello`, so a frame sent ahead of it would never be read.
@@ -2633,7 +2637,7 @@ class TestALostCredentialIsAFatalOfItsOwn:
     def test_an_unreadable_credential_is_a_permanent_fatal_and_never_a_qr(
         self, tmp_path, damage
     ):
-        frames, returncode = self._frames(tmp_path, damage)
+        frames, returncode = self._frames(tmp_path, damage, linger_after_fatal=0.5)
 
         fatals = [f for f in frames if f["type"] == "fatal"]
         assert fatals and all(

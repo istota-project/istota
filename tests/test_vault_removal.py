@@ -47,6 +47,7 @@ exempt the file that fails.
 from __future__ import annotations
 
 import ast
+import functools
 import sqlite3
 import sys
 from pathlib import Path
@@ -249,28 +250,46 @@ class TestConfigIsTheOnlyReaderOfTheRawField:
     not a hit and an attribute access is.
     """
 
-    def _readers(self, *, exempt_config: bool = True) -> list[str]:
-        out: list[str] = []
+    @staticmethod
+    def _hits(tree: ast.AST) -> list[int]:
+        out: list[int] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == "vault_path":
+                out.append(node.lineno)
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "vault_path"
+            ):
+                out.append(node.lineno)
+        return out
+
+    @staticmethod
+    @functools.cache
+    def _scan() -> tuple[tuple[Path, int], ...]:
+        out: list[tuple[Path, int]] = []
         for path in sorted((REPO / "src").rglob("*.py")):
-            if exempt_config and path.name == "config.py" and path.parent.name == "istota":
-                continue
             try:
                 tree = ast.parse(path.read_text(encoding="utf-8"))
             except (SyntaxError, UnicodeDecodeError):  # pragma: no cover
                 continue
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Attribute) and node.attr == "vault_path":
-                    out.append(f"{path.relative_to(REPO)}:{node.lineno}")
-                elif (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name)
-                    and node.func.id == "getattr"
-                    and len(node.args) >= 2
-                    and isinstance(node.args[1], ast.Constant)
-                    and node.args[1].value == "vault_path"
-                ):
-                    out.append(f"{path.relative_to(REPO)}:{node.lineno}")
-        return out
+            for lineno in TestConfigIsTheOnlyReaderOfTheRawField._hits(tree):
+                out.append((path, lineno))
+        return tuple(out)
+
+    def _readers(self, *, exempt_config: bool = True) -> list[str]:
+        return [
+            f"{path.relative_to(REPO)}:{lineno}"
+            for path, lineno in self._scan()
+            if not (
+                exempt_config
+                and path.name == "config.py"
+                and path.parent.name == "istota"
+            )
+        ]
 
     def test_the_walk_finds_config_itself(self):
         """The control, and it drives `_readers` rather than re-implementing it.
@@ -293,12 +312,7 @@ class TestConfigIsTheOnlyReaderOfTheRawField:
         """
         module = tmp_path / "leaker.py"
         module.write_text("def f(user):\n    return user.vault_path\n")
-        tree = ast.parse(module.read_text())
-        hits = [
-            n for n in ast.walk(tree)
-            if isinstance(n, ast.Attribute) and n.attr == "vault_path"
-        ]
-        assert len(hits) == 1
+        assert self._hits(ast.parse(module.read_text())) == [2]
 
     def test_no_module_outside_config_reads_the_attribute(self):
         assert self._readers() == []

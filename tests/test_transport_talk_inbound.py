@@ -2279,8 +2279,8 @@ class TestThePollGateOutlastsTheServerLongPoll:
     @pytest.mark.asyncio
     async def test_a_late_answer_is_collected_rather_than_cancelled(self, make_config):
         config = make_config()
-        config.scheduler.talk_poll_timeout = 1
-        config.scheduler.talk_poll_wait = 2.0
+        config.scheduler.talk_poll_timeout = 0.1
+        config.scheduler.talk_poll_wait = 0.5
 
         msg = _msg(id=101, actor_id="alice", message="answered just after the gate")
 
@@ -2289,7 +2289,7 @@ class TestThePollGateOutlastsTheServerLongPoll:
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
             ])
-            mock_instance.poll_messages = self._answers_after(1.15, [msg])
+            mock_instance.poll_messages = self._answers_after(0.15, [msg])
 
             with db.get_db(config.db_path) as conn:
                 db.set_talk_poll_state(conn, "room1", 50)
@@ -2297,7 +2297,7 @@ class TestThePollGateOutlastsTheServerLongPoll:
             result = await poll_talk_conversations(config)
 
         assert len(result) == 1, (
-            "the room answered 0.15s after a 1s server-side long-poll — the "
+            "the room answered 0.05s after a 0.1s server-side long-poll — the "
             "earliest it could — and the cycle threw the answer away"
         )
 
@@ -2318,11 +2318,11 @@ class TestThePollGateOutlastsTheServerLongPoll:
         too short.
         """
         config = make_config()
-        config.scheduler.talk_poll_timeout = 1
-        config.scheduler.talk_poll_wait = 2.0
+        config.scheduler.talk_poll_timeout = 0.1
+        config.scheduler.talk_poll_wait = 0.5
 
         async def _poll(token, *args, **kwargs):
-            await asyncio.sleep(1.15)
+            await asyncio.sleep(0.15)
             return [_msg(id=200 if token == "room1" else 300, actor_id="alice")]
 
         with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:

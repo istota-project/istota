@@ -309,18 +309,6 @@ class TestRoutingFields:
         assert uc.routing == {"briefing": "email"}
         assert uc.default_destination == "both"
 
-    def test_migration_adds_columns(self, tmp_path):
-        # A DB created fresh has the columns (schema.sql parity); also verify
-        # the values are readable defaults.
-        from istota import db as _db
-        path = tmp_path / "fresh.db"
-        _db.init_db(path)
-        with _db.get_db(path) as conn:
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(user_profiles)")}
-        assert "routing" in cols
-        assert "default_destination" in cols
-        assert "email_reply_routing" in cols
-
 
 class TestEmailReplyRouting:
     """email_reply_routing scalar round-trip + merge (default origin+thread)."""
@@ -368,14 +356,6 @@ class TestEmailReplyRouting:
 
 class TestBriefingEmailHtml:
     """briefing_email_html bool round-trip + merge (default on)."""
-
-    def test_migration_adds_column(self, tmp_path):
-        from istota import db as _db
-        path = tmp_path / "fresh.db"
-        _db.init_db(path)
-        with _db.get_db(path) as conn:
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(user_profiles)")}
-        assert "briefing_email_html" in cols
 
     def test_default_on_fresh_row(self, db_path):
         p = user_profiles.ensure_profile(db_path, "alice")
@@ -428,14 +408,6 @@ class TestTimezoneFollowLocation:
     an existing row migrated by the ALTER must come back off, and every path
     that fills a profile must agree.
     """
-
-    def test_migration_adds_column(self, tmp_path):
-        from istota import db as _db
-        path = tmp_path / "fresh.db"
-        _db.init_db(path)
-        with _db.get_db(path) as conn:
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(user_profiles)")}
-        assert "timezone_follow_location" in cols
 
     def test_default_off_on_fresh_row(self, db_path):
         p = user_profiles.ensure_profile(db_path, "alice")
