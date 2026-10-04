@@ -455,11 +455,11 @@ def _install_istota_dev(config, dev, dev_bin: Path, repos_root: Path) -> None:
     forges = {}
     for name, url in ((FORGE_GITLAB, dev.gitlab_url), (FORGE_GITHUB, dev.github_url)):
         if url:
-            # Userinfo is masked with the helper's own `redact`, which keeps
-            # the `@` so the helper still refuses the URL (exit 3). This keeps
-            # the value out of this one file only: `forge-policy.json` and the
-            # manifest's GITLAB_URL / GITHUB_URL still carry the URL as
-            # configured.
+            # `load_config` refuses userinfo in either URL (ISSUE-620), which
+            # is what keeps it out of `forge-policy.json` and the manifest's
+            # GITLAB_URL / GITHUB_URL. This mask is a backstop for a `Config`
+            # built without the loader; it keeps the `@` so the helper still
+            # refuses the URL (exit 3).
             forges[name] = {"url": istota_dev_redact(url)}
     helper_config = {
         "version": ISTOTA_DEV_CONFIG_VERSION,
