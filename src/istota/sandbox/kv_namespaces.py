@@ -22,18 +22,23 @@ WhatsApp room's pre-room history has been copied in, and
 `_vault_file`, the filename that user chose out of their vault folder, which is
 reserved for the same reason `_provisioned_rooms` is: it selects which file the
 daemon decrypts with a key it holds, and the folder it names is bound
-read-write into that user's own sandbox. Those
+read-write into that user's own sandbox — and
+`_operator_persona`, the operator persona sync's state (`prompts/persona.py`):
+the shipped digest it last saw and the last good copy of `{root}/PERSONA.md`,
+which every task's prompt falls back to while the mount is unreadable, so a
+task that could write it could choose the bot's character for everyone. Those
 rows are written by the daemon, by the host-side `memory` skill CLI and by the
 `provision-rooms` CLI, and read by neither the model nor the `kv` skill.
 
 Both KV tables, not only the per-user one: `skills/kv` applies this in `main`
 before it dispatches a verb, so `--shared` — which reads and writes the
-deployment-wide `shared_kv` — is covered by the same line. `_avatar_import` and
-`_session_log_sweep` are `shared_kv` namespaces and would otherwise be
-reachable; `_vault_sync` and `_vault_file` are per-user ones, because a vault
-belongs to one user and that table's key already carries a user id.
+deployment-wide `shared_kv` — is covered by the same line. `_avatar_import`,
+`_session_log_sweep` and `_operator_persona` are `shared_kv` namespaces and
+would otherwise be reachable; `_vault_sync` and `_vault_file` are per-user
+ones, because a vault belongs to one user and that table's key already carries
+a user id.
 
-The rule is a name prefix rather than a list, so an eighth reserved namespace
+The rule is a name prefix rather than a list, so a further reserved namespace
 costs nothing here or at either enforcement point. Both of those are needed
 and neither substitutes for the other:
 
