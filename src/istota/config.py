@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
+from urllib.parse import urlsplit
 
 import tomli
 
@@ -4607,6 +4608,7 @@ def load_config(config_path: Path | None = None) -> Config:
     _validate_sms(config)
     _validate_whatsapp(config)
     _validate_forge_clis(config)
+    _validate_forge_urls(config)
 
     return config
 
@@ -5171,6 +5173,48 @@ def _validate_whatsapp(config: Config) -> None:
     errors = whatsapp_structural_config_errors(config)
     if errors:
         raise ValueError("Invalid WhatsApp configuration: " + "; ".join(errors))
+
+
+def forge_url_errors(config: "Config") -> list[str]:
+    """Structural errors in `developer.gitlab_url` / `github_url` (ISSUE-620).
+
+    Both reach the sandbox verbatim, through `forge-policy.json` and the
+    manifest's `GITLAB_URL` / `GITHUB_URL`, so userinfo in either is a
+    credential every admin task with the developer skill can read. Checked
+    whether or not the skill is enabled. Each error names the key, never the
+    value.
+
+    An http(s) scheme and a host are required as well, because without the
+    `//` authority `urlsplit` puts `oauth2:<token>@host` in the path, where
+    the `@` test cannot see it. No consumer works without both, so this
+    refuses nothing that connects today.
+    """
+    errors: list[str] = []
+    for key, token_key in (("gitlab_url", "gitlab_token"), ("github_url", "github_token")):
+        url = getattr(config.developer, key, "")
+        if not url:
+            continue
+        try:
+            parts = urlsplit(url)
+            hostname = parts.hostname
+            parts.port  # raises on an out-of-range or non-numeric port
+        except ValueError:
+            errors.append(f"developer.{key} is not a parseable URL")
+            continue
+        if "@" in parts.netloc:
+            errors.append(
+                f"developer.{key} must not carry userinfo; put the credential "
+                f"in developer.{token_key} and rotate it"
+            )
+        elif parts.scheme not in ("http", "https") or not hostname:
+            errors.append(f"developer.{key} must be an http(s) URL with a host")
+    return errors
+
+
+def _validate_forge_urls(config: "Config") -> None:
+    errors = forge_url_errors(config)
+    if errors:
+        raise ValueError("Invalid developer configuration: " + "; ".join(errors))
 
 
 CONFIG_LOAD_CHECKS = (

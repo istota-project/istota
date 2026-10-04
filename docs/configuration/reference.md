@@ -532,13 +532,13 @@ output = "talk"
 |---|---|---|
 | `enabled` | `false` | Enable developer skill |
 | `repos_dir` | `""` | Root of the per-user repository subtrees. A clone lives at `{repos_dir}/{user_id}/{namespace}/{project}.git` with its worktrees beside it, and an admin developer task has only `{repos_dir}/{user_id}` in its sandbox — never the root, so one admin's clones, worktrees, git configs and package cache are not in another's namespace. The package cache is derived at `{repos_dir}/{user_id}/.package-caches`. Create the root and give it to the daemon; everything below it is created per user. An existing shared tree is migrated by `python -m istota.maintenance.repos_relocate`, which the Ansible role runs — it needs exactly one configured admin to know who owns the clones, and refuses rather than guessing. It leaves `{repos_dir}/.package-caches` behind, orphaned by the derivation and safe to remove by hand |
-| `gitlab_url` | `"https://gitlab.com"` | GitLab instance URL |
+| `gitlab_url` | `"https://gitlab.com"` | GitLab instance URL. Userinfo (`user:secret@`) fails the config load, since the URL reaches the sandbox; the token goes in `gitlab_token` |
 | `gitlab_token` | `""` | API token |
 | `gitlab_username` | `""` | GitLab username for HTTPS auth |
 | `gitlab_default_namespace` | `""` | Default namespace for short repo names |
 | `gitlab_reviewer` | `""` | GitLab username to assign as MR reviewer. `glab mr create --reviewer` resolves by username |
 | `gitlab_reviewer_id` | `""` | That user's numeric id. Recorded for reference; read by nothing |
-| `github_url` | `"https://github.com"` | GitHub instance URL |
+| `github_url` | `"https://github.com"` | GitHub instance URL. Userinfo fails the config load, as for `gitlab_url`; the token goes in `github_token` |
 | `github_token` | `""` | Personal access token |
 | `github_username` | `""` | GitHub username |
 | `github_default_owner` | `""` | Default org/user for short repo names |
