@@ -192,6 +192,7 @@ from .brain.claude_code import CLI_SETTINGS_FILENAME, cli_settings_document  # n
 
 # Audio extensions eligible for pre-transcription; `webui/app.py` imports this name.
 from .lib.audio_sniff import AUDIO_EXTENSIONS as _AUDIO_EXTENSIONS  # noqa: E402
+from .lib.audio_sniff import VOICE_TRANSCRIPT_LABEL  # noqa: E402
 
 # Wall clock for pre-transcribing *all* of one send's audio, not each file.
 # `_pre_transcribe_attachments` runs on a worker thread before the brain is
@@ -319,14 +320,15 @@ def _pre_transcribe_attachments(
     deferred_dir: "str | Path | None" = None,
     temp_dir: "str | Path | None" = None,
     control_dir: "str | Path | None" = None,
-    transcribed: list[str] | None = None,
+    transcribed: dict[str, str] | None = None,
 ) -> str:
     """Pre-transcribe audio attachments so skill selection sees real text.
 
     Returns an enriched prompt with transcribed text, or the original prompt
     if no audio attachments or transcription fails. Each attachment that
-    produced a non-empty transcript is appended to `transcribed`, as given,
-    so the scheduler can delete exactly those inbox copies (ISSUE-611).
+    produced a non-empty transcript is recorded in `transcribed`, keyed as
+    given, with its own text, so the scheduler can delete exactly those inbox
+    copies (ISSUE-611) and put each one's words into the room (ISSUE-613).
 
     The transcript is *appended* to whatever the sender typed rather than
     replacing it: a voice memo can arrive alongside a written message ("have a
@@ -423,7 +425,7 @@ def _pre_transcribe_attachments(
                 text = result["text"].strip()
                 transcribed_parts.append(text)
                 if transcribed is not None:
-                    transcribed.append(audio_path)
+                    transcribed[audio_path] = text
                 logger.debug(
                     "Pre-transcribed %s: %s",
                     Path(audio_path).name,
@@ -441,7 +443,7 @@ def _pre_transcribe_attachments(
     transcribed_text = " ".join(transcribed_parts)
     filenames = ", ".join(Path(p).name for p in audio_paths)
     block = (
-        f"Transcribed voice message: {transcribed_text}\n\n"
+        f"{VOICE_TRANSCRIPT_LABEL}{transcribed_text}\n\n"
         f"(Original audio: {filenames})"
     )
     return block if not prompt.strip() else f"{prompt}\n\n{block}"
@@ -7816,7 +7818,7 @@ def execute_task(
     # this function reads the mutated field any more — every consumer below
     # takes `effective_prompt` explicitly — so the implicit contract the
     # mutation used to carry is gone even though the assignment stays.
-    transcribed_audio: list[str] = []
+    transcribed_audio: dict[str, str] = {}
     enriched_prompt = _pre_transcribe_attachments(
         task.attachments, task.prompt, cancel_check=_cancel_check,
         transcribed=transcribed_audio,
@@ -7832,7 +7834,7 @@ def execute_task(
         temp_dir=config.temp_dir,
         control_dir=control_dir,
     )
-    task.transcribed_audio = tuple(transcribed_audio)
+    task.transcribed_audio = transcribed_audio
     if enriched_prompt != task.prompt:
         logger.info("Pre-transcribed audio for task %s, enriched prompt for skill selection", task.id)
         task.prompt = enriched_prompt

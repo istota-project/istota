@@ -7460,6 +7460,44 @@ def _assistant_message_dict(row, text: str, status: str, *, confirmation: bool =
     if msg_id is not None:
         out["msg_id"] = msg_id
         out["starred"] = bool(_row_get(row, "starred"))
+    mail = _outgoing_mail_field(_row_get(row, "outgoing_mail"))
+    if mail is not None:
+        out["mail"] = mail
+    return out
+
+
+_MAIL_STATES = frozenset({"sent", "held", "failed", "discarded"})
+# The mailed text is a second copy beside the answer on the byte-budgeted
+# room-event stream, the reason the reply excerpt is capped in SQL.
+_MAIL_BODY_MAX_CHARS = 4000
+
+
+def _outgoing_mail_field(raw) -> dict | None:
+    """A row's recorded thread mail as the card renders it (ISSUE-612).
+
+    Only the fields the card reads, so the draft id and anything a later writer
+    adds stay server-side. None for a row that sent no mail, or one whose
+    record cannot be read, which then renders as a plain answer.
+    """
+    if not raw:
+        return None
+    try:
+        mail = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(mail, dict) or mail.get("state") not in _MAIL_STATES:
+        return None
+    out = {
+        "to": [a for a in mail.get("to") or [] if isinstance(a, str) and a],
+        "cc": [a for a in mail.get("cc") or [] if isinstance(a, str) and a],
+        "state": mail["state"],
+    }
+    if isinstance(mail.get("subject"), str) and mail["subject"]:
+        out["subject"] = mail["subject"]
+    body = mail.get("body")
+    if isinstance(body, str) and body:
+        out["body"] = (body if len(body) <= _MAIL_BODY_MAX_CHARS
+                       else body[:_MAIL_BODY_MAX_CHARS].rstrip() + "…")
     return out
 
 
@@ -7517,15 +7555,16 @@ _SPINE_COLUMNS = (
     # pieces precisely so the room tail and the history query cannot disagree
     # about what a reader sees.
     "  m.origin_surface AS origin_surface, "
-    "  m.about_room_token AS about_room_token, "
+    "  m.about_room_token AS about_room_token, m.outgoing_mail AS outgoing_mail, "
     # Truncated here rather than in the dict builder, matching the cross-room
     # fragment: no read path needs more of the parent than the excerpt cap.
     # The literal must track `_REPLY_EXCERPT_CHARS` below.
     "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body "
     "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
     "LEFT JOIN message_stars s ON s.message_id = m.id AND s.user_id = ? "
-    # The cited parent, joined live rather than snapshotted: nothing in the
-    # stack edits `messages.body`, so the join can't drift. A primary-key
+    # The cited parent, joined live rather than snapshotted. The one edit to a
+    # stored body is a voice note's stand-in becoming its transcript
+    # (ISSUE-613), which a citation should show anyway. A primary-key
     # lookup, and a NULL result against a non-NULL id is the deleted case.
     "LEFT JOIN messages p ON p.id = m.reply_to_message_id "
 )
@@ -7652,7 +7691,9 @@ def _row_attachment_names(row, *, message_column: bool = True) -> list[str] | No
     Prefers the display names stored on the canonical `messages` row (what the
     user actually picked). Falls back to basenames of the joined `tasks` paths,
     which covers turns predating the message-side column — and only those, since
-    retention deletes the task row not long after.
+    retention deletes the task row not long after. A stored empty list is an
+    answer, not a gap: a transcribed voice note's chip is removed that way
+    (ISSUE-613), and falling back would bring back the deleted file.
     """
     keys = row.keys()
     if message_column and "attachments" in keys and row["attachments"]:
@@ -7660,8 +7701,8 @@ def _row_attachment_names(row, *, message_column: bool = True) -> list[str] | No
             names = json.loads(row["attachments"])
         except (TypeError, ValueError):
             names = None
-        if isinstance(names, list) and names:
-            return [str(n) for n in names]
+        if isinstance(names, list):
+            return [str(n) for n in names] or None
     raw_paths = None
     if not message_column and "attachments" in keys:
         raw_paths = row["attachments"]

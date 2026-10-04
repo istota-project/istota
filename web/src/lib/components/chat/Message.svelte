@@ -193,21 +193,62 @@
   // is shown verbatim and the assistant body is rendered below.
   const bodyHtml = $derived(isSystem ? renderMarkdown(message.text, mentions) : '');
 
+  // A WhatsApp voice note's stored turn carries its transcript after this label,
+  // at the start of a line, once the task completes (ISSUE-613). The words are
+  // set in italics so they read as machine transcription rather than typed text.
+  const TRANSCRIPT_LABEL = 'Transcribed voice message: ';
+
+  function transcriptPieces(text: string): { text: string; transcript: boolean }[] {
+    const out: { text: string; transcript: boolean }[] = [];
+    let at = 0;
+    let from = 0;
+    while (from <= text.length) {
+      const found = text.indexOf(TRANSCRIPT_LABEL, from);
+      if (found === -1) break;
+      if (found > 0 && text[found - 1] !== '\n') {
+        from = found + 1;
+        continue;
+      }
+      const start = found + TRANSCRIPT_LABEL.length;
+      const newline = text.indexOf('\n', start);
+      const end = newline === -1 ? text.length : newline;
+      out.push({ text: text.slice(at, start), transcript: false });
+      out.push({ text: text.slice(start, end), transcript: true });
+      at = end;
+      from = end;
+    }
+    out.push({ text: text.slice(at), transcript: false });
+    return out.filter((piece) => piece.text !== '');
+  }
+
   // A user row is shown verbatim, so mentions are split out as text segments
   // rather than through the markdown renderer. Not applied to an external
   // turn: a stranger's mail styled with a member's name would read as that
   // member being addressed in the room.
   const userSegments = $derived.by(() => {
     const text = message.text ?? '';
-    const spans = isUser && !message.origin ? findPlainMentions(text, mentions) : [];
-    const out: { text: string; mention?: boolean; self?: boolean }[] = [];
-    let at = 0;
-    for (const span of spans) {
-      if (span.start > at) out.push({ text: text.slice(at, span.start) });
-      out.push({ text: text.slice(span.start, span.end), mention: true, self: span.target.self });
-      at = span.end;
+    const pieces =
+      isUser && message.via === 'whatsapp' ? transcriptPieces(text) : [{ text, transcript: false }];
+    const out: { text: string; mention?: boolean; self?: boolean; transcript?: boolean }[] = [];
+    for (const piece of pieces) {
+      if (piece.transcript) {
+        out.push({ text: piece.text, transcript: true });
+        continue;
+      }
+      const spans = isUser && !message.origin ? findPlainMentions(piece.text, mentions) : [];
+      let at = 0;
+      for (const span of spans) {
+        if (span.start > at) out.push({ text: piece.text.slice(at, span.start) });
+        out.push({
+          text: piece.text.slice(span.start, span.end),
+          mention: true,
+          self: span.target.self,
+        });
+        at = span.end;
+      }
+      if (at < piece.text.length) out.push({ text: piece.text.slice(at) });
     }
-    if (at < text.length || out.length === 0) out.push({ text: text.slice(at) });
+    if (out.length === 0) out.push({ text: '' });
     return out;
   });
 
@@ -273,6 +314,25 @@
       ? `${chars.slice(0, EXTERNAL_PREVIEW_CHARS).join('')}…`
       : chars.join('');
   });
+
+  // ---- Outgoing mail (ISSUE-612) ----------------------------------------------
+  // An answer that went out as a mail into an email thread room. The counterpart
+  // of the external treatment above: the answer renders as usual, and the card
+  // under it says who the mail went to and what became of it. It shows the
+  // mailed text only when that differs from the answer (the server sends `body`
+  // only then), so a post is not shown twice. The state is recorded after the
+  // send and the room stream carries new rows only, so a card already on
+  // screen shows a later state after a reload.
+  const outgoingMail = $derived(!isUser ? message.mail : undefined);
+  const MAIL_STATE_LABELS: Record<string, string> = {
+    sent: 'Sent by email',
+    held: 'Email held for approval',
+    failed: 'Email not sent',
+    discarded: 'Email discarded',
+  };
+  const mailStateLabel = $derived(
+    outgoingMail ? (MAIL_STATE_LABELS[outgoingMail.state] ?? 'Email') : '',
+  );
 
   // The turn's body is an ordered list of render groups (substantial prose +
   // activity chips), interleaved in the model's true block order. A substantial
@@ -880,6 +940,7 @@
               >{#each userSegments as seg, i (i)}{#if seg.mention}<span
                     class="mention"
                     class:mention-self={seg.self}>{seg.text}</span
+                  >{:else if seg.transcript}<em class="transcript">{seg.text}</em
                   >{:else}{seg.text}{/if}{/each}</span
             >
           </div>
@@ -1039,6 +1100,33 @@
           <div class="progress">
             <span class="dot"></span>
             <span class="status-text">{message.progress || 'Thinking…'}</span>
+          </div>
+        {/if}
+
+        {#if outgoingMail}
+          <div class="external outgoing" data-testid="outgoing-mail">
+            <div class="external-head">
+              <span class="external-mark" aria-hidden="true"><Mail size={13} /></span>
+              <span
+                class="external-label"
+                class:mail-failed={outgoingMail.state === 'failed'}
+                class:mail-muted={outgoingMail.state === 'discarded'}>{mailStateLabel}</span
+              >
+              {#if outgoingMail.subject}
+                <span class="external-subject">{outgoingMail.subject}</span>
+              {/if}
+            </div>
+            {#if outgoingMail.to.length}
+              <div class="mail-recipients">To: {outgoingMail.to.join(', ')}</div>
+            {/if}
+            {#if outgoingMail.cc.length}
+              <div class="mail-recipients">Cc: {outgoingMail.cc.join(', ')}</div>
+            {/if}
+            {#if outgoingMail.body}
+              <div class="body user-body">
+                <span class="user-text">{outgoingMail.body}</span>
+              </div>
+            {/if}
           </div>
         {/if}
       {/if}
@@ -1694,6 +1782,24 @@
 	   there is nothing to separate it from. */
   .external .body {
     margin-top: var(--space-1);
+  }
+  /* The outgoing-mail card (ISSUE-612) reuses the external surface, set off
+	   from the answer above it. Recipients are addresses from the thread, so
+	   they wrap rather than clip: who a mail went to is the point of the card. */
+  .outgoing {
+    margin-top: var(--space-2);
+  }
+  .mail-recipients {
+    margin-top: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+  }
+  .mail-failed {
+    color: var(--status-danger-fg);
+  }
+  .mail-muted {
+    color: var(--text-muted);
   }
 
   /* Send lifecycle on the user's own row (ISSUE-200). Both marks sit under the

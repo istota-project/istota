@@ -177,6 +177,8 @@ from istota.rooms.surfaces import (
     origin_surface_for_source_type,
 )
 from .transport.registry import _surface_for_source_type
+from .lib.audio_sniff import VOICE_TRANSCRIPT_LABEL
+from .transport.ingest import describe_attachment_only_message
 from .transport.routing import private_phone_room
 from .storage import BOT_USER_BASE, ensure_user_directories_v2
 
@@ -1062,11 +1064,51 @@ def _localize_owner_file(
     return str(resolved)
 
 
-def remove_transcribed_voice_notes(
+def transcribed_voice_notes(
     config: Config,
     user_id: str,
     row_attachments: list[str],
-    transcribed: "tuple[str, ...] | list[str]",
+    transcribed: "dict[str, str]",
+) -> list[tuple[int, str, str]]:
+    """The WhatsApp voice notes a completed task transcribed, as
+    ``(index in row_attachments, inbox leaf, transcript)``.
+
+    One rule for both halves of ISSUE-611 and ISSUE-613: the delete and the
+    rewrite of the room's user row act on exactly these. `transcribed` names
+    files the way the executor saw them, so the row's attachments are localized
+    again and matched by value. Not by position against `task.attachments`: the
+    executor reassigns that list in place (image renditions, a restricted
+    task's staged copies), and a shifted index would act on a note that was
+    never transcribed. A copy the executor made matches nothing. Only
+    ``/Users/<user_id>/inbox/whatsapp_*`` is eligible; a web-chat memo may be
+    the only copy there is.
+    """
+    from .transport.whatsapp.media import INBOX_NAME_PREFIX  # noqa: PLC0415
+
+    if not user_id or not transcribed:
+        return []
+    local_attachments = localize_workspace_attachments(config, user_id, row_attachments)
+    out: list[tuple[int, str, str]] = []
+    for index, (row, local) in enumerate(zip(row_attachments, local_attachments)):
+        text = transcribed.get(local)
+        if not text:
+            continue
+        parts = owner_path_parts(row, user_id) if isinstance(row, str) else None
+        if (
+            not parts
+            or len(parts) != 2
+            or parts[0] != "inbox"
+            or not parts[1].startswith(f"{INBOX_NAME_PREFIX}_")
+        ):
+            continue
+        out.append((index, parts[1], text))
+    return out
+
+
+def remove_transcribed_voice_notes(
+    config: Config,
+    user_id: str,
+    notes: "list[tuple[int, str, str]]",
 ) -> None:
     """Delete the WhatsApp voice notes this completed task transcribed (ISSUE-611).
 
@@ -1076,38 +1118,19 @@ def remove_transcribed_voice_notes(
     deleted, so a note whose transcription failed, timed out, was cancelled or
     was refused stays behind as the only trace of that failure.
 
-    `transcribed` names files the way the executor saw them, so the row's
-    attachments are localized again and matched by value. Not by position
-    against `task.attachments`: the executor reassigns that list in place
-    (image renditions, a restricted task's staged copies), and a shifted index
-    would delete a note that was never transcribed. A copy the executor made
-    matches nothing and is left alone. Only
-    ``/Users/<user_id>/inbox/whatsapp_*`` is eligible; a web-chat memo may be
-    the only copy there is.
+    `notes` is `transcribed_voice_notes`'s answer, taken in the completing
+    transaction, so the files deleted are the ones whose chips left the room.
 
     The inbox is model-writable, so the delete is relative to an fd from
     `open_overlay_dir` (no link followed at any component) and the leaf must
     be a regular file. A failure is a warning and never fails the task.
     """
     from .skills._loader import open_overlay_dir  # noqa: PLC0415 - import cycle
-    from .transport.whatsapp.media import INBOX_NAME_PREFIX  # noqa: PLC0415
 
     root = config.workspace_root(user_id) if user_id else None
-    if root is None or not transcribed:
+    if root is None:
         return
-    local_attachments = localize_workspace_attachments(config, user_id, row_attachments)
-    row_for_local = dict(zip(local_attachments, row_attachments))
-    for local in transcribed:
-        row = row_for_local.get(local)
-        parts = owner_path_parts(row, user_id) if isinstance(row, str) else None
-        if (
-            not parts
-            or len(parts) != 2
-            or parts[0] != "inbox"
-            or not parts[1].startswith(f"{INBOX_NAME_PREFIX}_")
-        ):
-            continue
-        leaf = parts[1]
+    for _index, leaf, _text in notes:
         fd = open_overlay_dir(root, "inbox")
         if fd is None:
             logger.warning(
@@ -3515,7 +3538,7 @@ def process_one_task(
     # The WhatsApp voice notes to delete once this transaction has closed,
     # as `(row attachments, transcribed paths)` (ISSUE-611). Filled only on the
     # completed branch: a parked or failed task re-runs from the file.
-    voice_notes_to_remove: tuple[list[str], tuple[str, ...]] | None = None
+    voice_notes_to_remove: list[tuple[int, str, str]] | None = None
 
     with db.get_db(config.db_path) as conn:
         if success:
@@ -3696,10 +3719,23 @@ def process_one_task(
                     # `!retry` all read the row.
                     if _row is not None and task.prompt != _row.prompt:
                         db.update_task_prompt(conn, task_id, task.prompt)
-                    voice_notes_to_remove = (
-                        list((_row.attachments if _row else None) or []),
+                    _notes = transcribed_voice_notes(
+                        config, task.user_id, list((_row.attachments if _row else None) or []),
                         task.transcribed_audio,
                     )
+                    if _row is not None and _notes:
+                        # The room shows what was said, not a stand-in and a
+                        # chip for a file that is about to be deleted.
+                        db.replace_voice_notes_in_turn(
+                            conn, task_id,
+                            stand_in=describe_attachment_only_message(_row.attachments or []),
+                            transcript="\n".join(
+                                f"{VOICE_TRANSCRIPT_LABEL}{text}" for _i, _leaf, text in _notes
+                            ),
+                            drop_indexes={index for index, _leaf, _text in _notes},
+                            attachment_count=len(_row.attachments or []),
+                        )
+                    voice_notes_to_remove = _notes
                 if task.source_type == "signup":
                     notification_results.append(task_alert_source.write(
                         conn, task.user_id, dedup_key=f"signup-followup:{task.id}",
@@ -4823,7 +4859,7 @@ def process_one_task(
     # task that has already completed.
     if voice_notes_to_remove is not None:
         try:
-            remove_transcribed_voice_notes(config, task.user_id, *voice_notes_to_remove)
+            remove_transcribed_voice_notes(config, task.user_id, voice_notes_to_remove)
         except Exception:
             logger.warning(
                 "Could not remove transcribed voice notes for task %d", task_id,

@@ -687,3 +687,226 @@ class TestAGuestProposalCarriesTheComposedMail:
 
         assert composed_email_body(config, task, envelope) == "Thursday at 7."
         assert composed_email_body(config, task, "plain prose") == "plain prose"
+
+
+# ---------------------------------------------------------------------------
+# ISSUE-612: a mail the bot sent into the thread is the bot's turn, with a card
+# ---------------------------------------------------------------------------
+
+
+def _mail_rows(db_path, token):
+    return _rows(db_path, "SELECT id, role, task_id, body, outgoing_mail FROM messages "
+                 "WHERE room_token=? AND outgoing_mail IS NOT NULL ORDER BY id", (token,))
+
+
+def _approve_member_post(config, db_path, text):
+    """The host's own `room post`, from their private chat into the thread."""
+    from istota import confirmations
+    from istota.relay import requests
+    from istota.rooms import private_replies
+
+    with db.get_db(db_path) as conn:
+        private = db.create_web_chat_room(conn, HOST, "Mine").token
+        ident = db.create_task(conn, user_id=HOST, source_type="web",
+                               prompt="post it", conversation_token=private,
+                               about_room_token=_room_token(config))
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
+        private_replies.hold_room_post(conn, config, actor_user_id=HOST, task_id=ident,
+                                       request_key="p1", text=text)
+        requests.park_question(conn, config, task=db.get_task(conn, ident))
+        confirmations.approve(conn, db.get_task(conn, ident), config=config, by="web")
+    return ident
+
+
+def _drain(config):
+    import asyncio
+
+    from istota.relay import requests
+    asyncio.run(requests.drain_requests(config))
+    asyncio.run(requests.drain_requests(config))
+
+
+class TestTheBotsMailIsACard:
+    def test_an_approved_post_is_the_bots_turn_carrying_the_mail(self, config, db_path):
+        _start_thread(config)
+        _approve_member_post(config, db_path, "Thursday after 7 works")
+        with patch("istota.transport.email.outbound.reply_to_email",
+                   return_value="<post@test.com>"):
+            _drain(config)
+
+        (row,) = _mail_rows(db_path, _room_token(config))
+        assert row["role"] == "assistant"
+        assert row["body"] == "Thursday after 7 works"
+        # The member's own task ran in their private room: tying the shared
+        # room's row to it would put that task's trace in the shared room.
+        assert row["task_id"] is None
+        mail = json.loads(row["outgoing_mail"])
+        assert mail == {"to": [HOST_ADDR], "cc": [ALICE, BOB],
+                        "subject": "Re: Dinner plans", "state": "sent"}
+
+    def test_a_post_whose_send_fails_says_so(self, config, db_path):
+        _start_thread(config)
+        _approve_member_post(config, db_path, "Thursday after 7 works")
+        with patch("istota.transport.email.outbound.reply_to_email",
+                   side_effect=OSError("smtp down")):
+            _drain(config)
+
+        (row,) = _mail_rows(db_path, _room_token(config))
+        assert json.loads(row["outgoing_mail"])["state"] == "failed"
+
+    def test_a_post_that_fails_before_its_recipients_are_known_says_not_sent(
+        self, config, db_path,
+    ):
+        _start_thread(config)
+        _approve_member_post(config, db_path, "Thursday after 7 works")
+        with patch("istota.transport.email.outbound.email_threads.reply_all",
+                   side_effect=RuntimeError("boom")):
+            _drain(config)
+
+        (row,) = _mail_rows(db_path, _room_token(config))
+        assert json.loads(row["outgoing_mail"]) == {"to": [], "cc": [], "state": "failed"}
+
+    def test_the_footer_does_not_put_the_body_on_the_card(self, config, db_path):
+        config.email.thread_disclosure_footer = True
+        _start_thread(config)
+        _approve_member_post(config, db_path, "Thursday after 7 works")
+        with patch("istota.transport.email.outbound.reply_to_email",
+                   return_value="<post@test.com>") as reply:
+            _drain(config)
+
+        assert "\n\n--\n" in reply.call_args.kwargs["body"]
+        (row,) = _mail_rows(db_path, _room_token(config))
+        assert "body" not in json.loads(row["outgoing_mail"])
+
+    @pytest.mark.parametrize(("row", "mailed", "differs"), [
+        ("OK", "OK", False),
+        ("OK", "OK\n\n--\nWritten by Zorg.", False),
+        # A row that is only the start of the mail hides nothing.
+        ("OK", "OK, but Bob cannot come.", True),
+        ("I told them.", "Thursday works.", True),
+    ])
+    def test_what_counts_as_a_different_mail(self, row, mailed, differs):
+        assert db.mailed_body_differs(row, mailed) is differs
+
+    def test_an_approved_guest_proposal_answers_the_guests_turn(self, config, db_path):
+        from istota import confirmations
+        from istota.rooms import private_replies
+
+        _start_thread(config)
+        task_ids = _poll(config, sender=ALICE, to=(BOT,), cc=(HOST_ADDR, BOB),
+                         message_id="<a2@ext.example>", references=ROOT,
+                         body="Zorg, is Carol free Thursday?")
+        with db.get_db(db_path) as conn:
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_ids[0],))
+            task = db.get_task(conn, task_ids[0])
+            assert private_replies.propose_guest_reply(conn, config, task, "She is.")
+            confirmations.approve(conn, db.get_task(conn, task.id), config=config, by="web")
+        with patch("istota.transport.email.outbound.reply_to_email",
+                   return_value="<post@test.com>"):
+            _drain(config)
+
+        (row,) = _mail_rows(db_path, _room_token(config))
+        # The guest's turn and its answer share a task, so the exchange pairs
+        # into the room's later history like any answered turn.
+        assert row["role"] == "assistant" and row["task_id"] == task.id
+        assert json.loads(row["outgoing_mail"])["state"] == "sent"
+        with db.get_db(db_path) as conn:
+            history = db.get_conversation_history(conn, _room_token(config))
+        assert any(turn.result == row["body"] for turn in history)
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_answer_is_stamped_with_the_mail_it_sent(self, config, db_path):
+        task_ids = _start_thread(config)
+        token = _room_token(config)
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            # What the scheduler stores before delivery: the answer to the host.
+            db.store_turn_message(conn, token, role="assistant", task_id=task.id,
+                                  body="I told them Thursday at 7.", origin_surface="email")
+
+        with patch("istota.transport.email.outbound.reply_to_email",
+                   return_value="<out@test.com>"):
+            await deliver_email_result(config, task, _structured("Thursday at 7 works."))
+
+        (row,) = _mail_rows(db_path, token)
+        assert row["task_id"] == task.id
+        mail = json.loads(row["outgoing_mail"])
+        # The mailed text differs from the answer shown, so the card carries it.
+        assert mail == {"to": [HOST_ADDR], "cc": [ALICE, BOB], "subject": "Re: Dinner plans",
+                        "state": "sent", "body": "Thursday at 7 works."}
+
+    @pytest.mark.asyncio
+    async def test_a_held_reply_reads_held_then_sent_once_released(self, config, db_path):
+        from istota.mail import drafts
+
+        config.users[HOST].trusted_email_senders = []
+        task_ids = _start_thread(config)
+        token = _room_token(config)
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            db.store_turn_message(conn, token, role="assistant", task_id=task.id,
+                                  body="Thursday at 7 works.", origin_surface="email")
+
+        with patch("istota.transport.email.outbound.reply_to_email") as reply:
+            await deliver_email_result(config, task, _structured())
+        reply.assert_not_called()
+        (row,) = _mail_rows(db_path, token)
+        mail = json.loads(row["outgoing_mail"])
+        assert mail["state"] == "held" and isinstance(mail["draft_id"], int)
+        assert "body" not in mail
+
+        with patch("istota.skills.email.send_email", return_value="<rel@test.com>"):
+            drafts.release(config, mail["draft_id"], by="web")
+        assert json.loads(_mail_rows(db_path, token)[0]["outgoing_mail"])["state"] == "sent"
+
+    @pytest.mark.asyncio
+    async def test_a_discarded_draft_reads_discarded(self, config, db_path):
+        from istota.mail import drafts
+
+        config.users[HOST].trusted_email_senders = []
+        task_ids = _start_thread(config)
+        token = _room_token(config)
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            db.store_turn_message(conn, token, role="assistant", task_id=task.id,
+                                  body="Thursday at 7 works.", origin_surface="email")
+        with patch("istota.transport.email.outbound.reply_to_email"):
+            await deliver_email_result(config, task, _structured())
+        draft_id = json.loads(_mail_rows(db_path, token)[0]["outgoing_mail"])["draft_id"]
+
+        with db.get_db(db_path) as conn:
+            drafts.discard(conn, draft_id, by="web")
+        assert json.loads(_mail_rows(db_path, token)[0]["outgoing_mail"])["state"] == "discarded"
+
+    @pytest.mark.asyncio
+    async def test_an_answer_the_room_does_not_hold_gets_no_row(self, config, db_path):
+        """Only a row the room already holds is stamped; none is created."""
+        task_ids = _start_thread(config)
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+        with patch("istota.transport.email.outbound.reply_to_email",
+                   return_value="<out@test.com>"):
+            await deliver_email_result(config, task, _structured())
+        assert _mail_rows(db_path, _room_token(config)) == []
+
+    def test_the_web_transcript_carries_the_card(self, config, db_path):
+        pytest.importorskip("fastapi")
+        from istota.webui import app as web_app
+
+        _start_thread(config)
+        _approve_member_post(config, db_path, "Thursday after 7 works")
+        with patch("istota.transport.email.outbound.reply_to_email",
+                   return_value="<post@test.com>"):
+            _drain(config)
+        prev = web_app._config
+        web_app._config = config
+        try:
+            page = web_app._chat_room_messages(HOST, _room_token(config), 20)
+        finally:
+            web_app._config = prev
+
+        (bubble,) = [m for m in page["messages"] if m.get("mail")]
+        assert bubble["role"] == "assistant"
+        assert bubble["text"] == "Thursday after 7 works"
+        assert bubble["mail"] == {"to": [HOST_ADDR], "cc": [ALICE, BOB],
+                                  "subject": "Re: Dinner plans", "state": "sent"}

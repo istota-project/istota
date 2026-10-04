@@ -112,7 +112,6 @@ MOVES: list[tuple[str, str, str]] = [
     ("rooms_relay", "istota.room_scopes", "istota.rooms.scopes"),
     ("rooms_relay", "istota.room_veto", "istota.rooms.veto"),
     ("rooms_relay", "istota.room_colors", "istota.rooms.colors"),
-    ("rooms_relay", "istota.side_rooms", "istota.rooms.side_rooms"),
     ("rooms_relay", "istota.speech_gate", "istota.rooms.speech_gate"),
     ("rooms_relay", "istota.surfaces", "istota.rooms.surfaces"),
     ("rooms_relay", "istota.provision_rooms", "istota.rooms.provision"),

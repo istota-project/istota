@@ -261,6 +261,16 @@ export interface ChatMessage {
   // The shared room a private reply in the viewer's own room is about
   // (ISSUE-608). `name` is null when the viewer has left that room.
   aboutRoom?: { token: string; name: string | null };
+  // Assistant rows only: the mail this answer sent into an email thread room
+  // (ISSUE-612), rendered as an outgoing-mail card. Same shape as the
+  // server's `mail` field.
+  mail?: {
+    to: string[];
+    cc: string[];
+    subject?: string;
+    state: 'sent' | 'held' | 'failed' | 'discarded';
+    body?: string;
+  };
 
   // ---- Send lifecycle (ISSUE-200) -------------------------------------------
   // User rows this client originated, only. Absent means settled — which every

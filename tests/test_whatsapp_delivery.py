@@ -2655,7 +2655,7 @@ class TestSchedulerDelivery:
         )
 
         def fake_exec(task, *_args, **_kwargs):
-            task.transcribed_audio = tuple(task.attachments or [])
+            task.transcribed_audio = {p: "hello" for p in task.attachments or []}
             return (True, answer, None, None)
 
         monkeypatch.setattr("istota.scheduler.execute_task", fake_exec)

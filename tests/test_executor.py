@@ -1759,20 +1759,20 @@ class TestPreTranscribeAttachments:
             {"status": "error", "error": "corrupted file"},
             {"status": "ok", "text": "  "},
         ]
-        transcribed: list[str] = []
+        transcribed: dict[str, str] = {}
         _pre_transcribe_attachments(
             ["/tmp/a.ogg", "/tmp/photo.jpg", "/tmp/b.ogg", "/tmp/c.ogg"], "",
             transcribed=transcribed,
         )
-        assert transcribed == ["/tmp/a.ogg"]
+        assert transcribed == {"/tmp/a.ogg": "first part"}
 
     @patch(_TRANSCRIBE_PATCH)
     def test_a_file_skipped_by_the_budget_is_not_reported(self, mock_transcribe, monkeypatch):
         monkeypatch.setattr(executor, "_PRE_TRANSCRIBE_TOTAL_TIMEOUT_SECONDS", -1.0)
         mock_transcribe.return_value = {"status": "ok", "text": "never asked"}
-        transcribed: list[str] = []
+        transcribed: dict[str, str] = {}
         _pre_transcribe_attachments(["/tmp/a.ogg"], "", transcribed=transcribed)
-        assert transcribed == []
+        assert transcribed == {}
 
     @patch(_TRANSCRIBE_PATCH)
     def test_execute_task_hands_the_transcribed_paths_to_the_scheduler(
@@ -1799,7 +1799,7 @@ class TestPreTranscribeAttachments:
 
         executor.execute_task(task, config, [], dry_run=True)
 
-        assert task.transcribed_audio == (str(ok),)
+        assert task.transcribed_audio == {str(ok): "call the plumber"}
 
     def test_all_audio_extensions_recognized(self):
         for ext in ["mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"]:

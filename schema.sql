@@ -1485,7 +1485,12 @@ CREATE TABLE IF NOT EXISTS messages (
     -- member's own private room is about (ISSUE-608). NULL on every other row.
     -- A reply to a tagged row is linked to that room (`tasks.about_room_token`).
     -- No index: read by primary key.
-    about_room_token TEXT
+    about_room_token TEXT,
+    -- A mail the bot sent into an email thread room (ISSUE-612), as JSON:
+    -- `to`, `cc`, `subject`, `state` (sent, held, failed, discarded),
+    -- `draft_id` while it is or was a held draft, and `body` only where the
+    -- mailed text differs from this row's. NULL on every other row.
+    outgoing_mail TEXT
 );
 -- No index on either author column: they are projected, never filtered.
 CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id);

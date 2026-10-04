@@ -8,6 +8,7 @@ nothing at it and skipped every one. The scheduler maps it onto the mount
 before execution, for the task's own user only.
 """
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -269,7 +270,9 @@ class TestATranscribedWhatsAppVoiceNoteLeavesTheInbox:
                       event_writer=None, **kw):
             if during is not None:
                 during(list(task.attachments or []))
-            task.transcribed_audio = tuple(transcribed(list(task.attachments or [])))
+            task.transcribed_audio = {
+                p: "hello" for p in transcribed(list(task.attachments or []))
+            }
             if task.transcribed_audio:
                 task.prompt = f"{task.prompt}\n\nTranscribed voice message: hello"
             return (success, "ok" if success else "boom", None, None)
@@ -340,7 +343,7 @@ class TestATranscribedWhatsAppVoiceNoteLeavesTheInbox:
                       event_writer=None, **kw):
             seen = list(task.attachments or [])
             task.attachments = ["/control/rendition.jpg"] + seen
-            task.transcribed_audio = (seen[0],)
+            task.transcribed_audio = {seen[0]: "hello"}
             return (True, "ok", None, None)
 
         with db.get_db(db_path) as conn:
@@ -499,7 +502,7 @@ class TestATranscribedWhatsAppVoiceNoteLeavesTheInbox:
 
         def fake_exec(task, config, user_resources, *, dry_run=False,
                       event_writer=None, **kw):
-            task.transcribed_audio = tuple(task.attachments or [])
+            task.transcribed_audio = {p: "hello" for p in task.attachments or []}
             return (True, "ok", None, None)
 
         with db.get_db(db_path) as conn:
@@ -512,3 +515,149 @@ class TestATranscribedWhatsAppVoiceNoteLeavesTheInbox:
             process_one_task(config, dry_run=True)
 
         assert note.exists()
+
+
+class TestTheTranscriptReplacesTheVoiceNoteInTheRoom:
+    """ISSUE-613: the room's stored turn shows what was said, not a stand-in
+    and a chip for the file ISSUE-611 deletes. Recorded through the real
+    WhatsApp ingest, so the row is the one a phone room actually stores."""
+
+    NOTE = "/Users/alice/inbox/whatsapp_abc.ogg"
+    PHOTO = "/Users/alice/inbox/whatsapp_pic.jpg"
+
+    def _run(self, config, db_path, *, attachments, transcripts, text=None,
+             success=True):
+        from istota.transport.ingest import describe_attachment_only_message
+        from istota.transport.whatsapp.webhook import record_whatsapp_turn
+
+        def fake_exec(task, config, user_resources, *, dry_run=False,
+                      event_writer=None, **kw):
+            task.transcribed_audio = {
+                p: transcripts[os.path.basename(p)]
+                for p in task.attachments or []
+                if os.path.basename(p) in transcripts
+            }
+            return (success, "ok" if success else "boom", None, None)
+
+        with db.get_db(db_path) as conn:
+            turn = record_whatsapp_turn(
+                conn, config, "alice",
+                text or describe_attachment_only_message(attachments),
+                external_id="wamid.1", attachments=attachments,
+            )
+        with patch("istota.scheduler.execute_task", side_effect=fake_exec), \
+                patch("istota.scheduler.asyncio.run", return_value=None):
+            process_one_task(config)
+        with db.get_db(db_path) as conn:
+            row = conn.execute(
+                "SELECT body, attachments, attachment_paths FROM messages "
+                "WHERE task_id = ? AND role = 'user'", (turn.task_id,),
+            ).fetchone()
+            return db.get_task(conn, turn.task_id), row
+
+    def test_the_stand_in_becomes_the_transcript_and_the_chip_goes(
+        self, db_path, tmp_path,
+    ):
+        config = _config(db_path, tmp_path)
+        _inbox_file(config.workspace_path, "alice", "whatsapp_abc.ogg")
+
+        task, row = self._run(
+            config, db_path, attachments=[self.NOTE],
+            transcripts={"whatsapp_abc.ogg": "call the plumber"},
+        )
+
+        assert task.status == "completed"
+        assert row["body"] == "Transcribed voice message: call the plumber"
+        # An empty list, not NULL: NULL sends the history reader to the task
+        # row's paths, which still name the deleted file.
+        assert json.loads(row["attachments"]) == []
+        assert json.loads(row["attachment_paths"]) == []
+
+    def test_a_failed_transcription_leaves_the_row_alone(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        _inbox_file(config.workspace_path, "alice", "whatsapp_abc.ogg")
+
+        _task, row = self._run(
+            config, db_path, attachments=[self.NOTE], transcripts={},
+        )
+
+        assert row["body"] == "Voice message (see attached audio)."
+        assert json.loads(row["attachments"]) == ["whatsapp_abc.ogg"]
+
+    def test_a_failed_task_leaves_the_row_alone(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        _inbox_file(config.workspace_path, "alice", "whatsapp_abc.ogg")
+
+        _task, row = self._run(
+            config, db_path, attachments=[self.NOTE],
+            transcripts={"whatsapp_abc.ogg": "call the plumber"}, success=False,
+        )
+
+        assert row["body"] == "Voice message (see attached audio)."
+
+    def test_only_the_audio_chip_goes_and_typed_text_is_kept(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        _inbox_file(config.workspace_path, "alice", "whatsapp_pic.jpg", b"\xff\xd8")
+        _inbox_file(config.workspace_path, "alice", "whatsapp_abc.ogg")
+
+        _task, row = self._run(
+            config, db_path, attachments=[self.PHOTO, self.NOTE],
+            text="what is this",
+            transcripts={"whatsapp_abc.ogg": "a heron"},
+        )
+
+        assert row["body"] == "what is this\n\nTranscribed voice message: a heron"
+        assert json.loads(row["attachments"]) == ["whatsapp_pic.jpg"]
+
+    def test_a_task_with_no_stored_turn_still_completes(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        _inbox_file(config.workspace_path, "alice", "whatsapp_abc.ogg")
+
+        def fake_exec(task, config, user_resources, *, dry_run=False,
+                      event_writer=None, **kw):
+            task.transcribed_audio = {p: "hello" for p in task.attachments or []}
+            return (True, "ok", None, None)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="x", user_id="alice", source_type="whatsapp",
+                attachments=[self.NOTE],
+            )
+        with patch("istota.scheduler.execute_task", side_effect=fake_exec), \
+                patch("istota.scheduler.asyncio.run", return_value=None):
+            process_one_task(config)
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, task_id).status == "completed"
+            assert conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE task_id = ?", (task_id,),
+            ).fetchone()[0] == 0
+
+    def test_a_second_completion_does_not_repeat_the_transcript(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        _inbox_file(config.workspace_path, "alice", "whatsapp_abc.ogg")
+        task, _row = self._run(
+            config, db_path, attachments=[self.NOTE],
+            transcripts={"whatsapp_abc.ogg": "call the plumber"},
+        )
+        with db.get_db(db_path) as conn:
+            db.replace_voice_notes_in_turn(
+                conn, task.id, stand_in="Voice message (see attached audio).",
+                transcript="Transcribed voice message: call the plumber",
+                drop_indexes={0}, attachment_count=1,
+            )
+            body = conn.execute(
+                "SELECT body FROM messages WHERE task_id = ? AND role = 'user'", (task.id,),
+            ).fetchone()["body"]
+        assert body == "Transcribed voice message: call the plumber"
+
+
+def test_the_web_client_keys_its_italics_on_the_same_label():
+    # `Message.svelte` cannot import the Python constant; a reworded label
+    # would otherwise drop the italics with nothing failing.
+    from istota.lib.audio_sniff import VOICE_TRANSCRIPT_LABEL
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "web/src/lib/components/chat/Message.svelte"
+    ).read_text()
+    assert f"const TRANSCRIPT_LABEL = '{VOICE_TRANSCRIPT_LABEL}';" in source

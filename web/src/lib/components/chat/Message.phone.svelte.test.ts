@@ -63,6 +63,35 @@ describe('the texted-turn mark', () => {
   });
 });
 
+describe('a transcribed voice note', () => {
+  it('sets the transcript in italics and keeps the label upright', () => {
+    const { container } = render(Message, {
+      ...base,
+      message: userMsg({
+        via: 'whatsapp',
+        text: 'what is this\n\nTranscribed voice message: a heron',
+      }),
+    });
+    const words = container.querySelectorAll('.user-text em.transcript');
+    expect([...words].map((e) => e.textContent)).toEqual(['a heron']);
+    expect(container.querySelector('.user-text')?.textContent).toBe(
+      'what is this\n\nTranscribed voice message: a heron',
+    );
+  });
+
+  it('italicizes nothing mid-line or on another surface', () => {
+    for (const message of [
+      userMsg({ via: 'whatsapp', text: 'I said Transcribed voice message: no' }),
+      userMsg({ via: 'sms', text: 'Transcribed voice message: typed' }),
+      userMsg({ text: 'Transcribed voice message: typed' }),
+    ]) {
+      const { container } = render(Message, { ...base, message });
+      expect(container.querySelector('em.transcript')).toBeNull();
+      cleanup();
+    }
+  });
+});
+
 describe('the question in a read-only phone room', () => {
   const asked: ChatMessage = {
     cid: 2,
