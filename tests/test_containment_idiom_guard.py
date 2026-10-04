@@ -28,6 +28,7 @@ The one permitted file is ``sandbox/user_scope.py`` itself.
 from __future__ import annotations
 
 import ast
+import functools
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "istota"
@@ -36,9 +37,12 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "istota"
 OWNER = "sandbox/user_scope.py"
 
 
-def _modules():
-    for path in sorted(SRC.rglob("*.py")):
-        yield path, ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+@functools.cache
+def _modules() -> tuple:
+    return tuple(
+        (path, ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        for path in sorted(SRC.rglob("*.py"))
+    )
 
 
 def _attr_call(node, name: str) -> bool:

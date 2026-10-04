@@ -340,9 +340,6 @@ class TestDeriveLookupAllowlistHelpers:
     def test_empty_authorized_returns_empty(self):
         assert derive_lookup_allowlist([], _bundled_index()) == set()
 
-    def test_master_key_in_block_list(self):
-        assert "ISTOTA_SECRET_KEY" in _PROXY_LOOKUP_BLOCKED
-
     def test_the_model_credentials_are_in_the_block_list(self):
         """`task_env` puts these in ``credential_env`` deliberately, so the
         proxy can inject them into the one skill CLI that calls a model

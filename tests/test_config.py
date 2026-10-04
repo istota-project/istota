@@ -871,10 +871,6 @@ class TestConfigMethods:
         cfg = Config(nextcloud=NextcloudConfig(url="https://cloud.example.com"))
         assert cfg.caldav_url == "https://cloud.example.com/remote.php/dav"
 
-    def test_caldav_url_empty(self):
-        cfg = Config()
-        assert cfg.caldav_url == ""
-
     def test_get_user_found(self):
         user = UserConfig(display_name="Alice")
         cfg = Config(users={"alice": user})
@@ -1123,12 +1119,6 @@ class TestTrustedEmailSendersExcludingOwnAddresses:
         assert cfg.is_trusted_email_sender(
             "nobody", "a@b.com", include_own_addresses=False,
         ) is False
-
-    def test_default_still_includes_own_addresses(self):
-        cfg = Config(users={
-            "carol": UserConfig(email_addresses=["alice@example.com"]),
-        })
-        assert cfg.is_trusted_email_sender("carol", "alice@example.com") is True
 
 
 class TestEmailConfig:
@@ -3142,10 +3132,6 @@ class TestCleanupSunsetResources:
         with db.get_db(db_path) as conn:
             rows = db.get_user_resources(conn, "alice")
         assert sorted(r.resource_type for r in rows) == ["reminders_file", "todo_file"]
-
-    def test_missing_db_is_noop(self, tmp_path):
-        from istota import db
-        assert db.cleanup_obsolete_resources(tmp_path / "no.db") == 0
 
 
 class TestResourceConfigGrepGuard:

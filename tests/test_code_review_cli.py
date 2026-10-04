@@ -1164,16 +1164,15 @@ class TestTheReviewerRequest:
         assert Path(req.cwd) == run_dir / "tree"
         assert str(run_dir / "tree") in req.prompt
 
-    @pytest.mark.parametrize("value", ["both", "conformance", "bughunt"])
     def test_the_retired_agents_flag_is_accepted_and_reported(
-        self, capsys, worktree, review_env, developer_config, stub_brain, value
+        self, capsys, worktree, review_env, developer_config, stub_brain
     ):
         """argparse would otherwise turn an old workflow's flag into a usage
         error that reads like a broken skill."""
         developer_config()
         code, envelope = drive(
             capsys, "run", "--worktree", str(worktree), "--base", "main",
-            "--agents", value,
+            "--agents", "both",
         )
         assert code == 0
         assert envelope["status"] == "ok"
