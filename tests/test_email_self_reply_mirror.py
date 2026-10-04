@@ -302,30 +302,6 @@ class TestSelfAddressedThreadReply:
         # And the question went out by mail, to the address it came from.
         assert mock_post_email.called
 
-    @patch("istota.scheduler.post_result_to_email", return_value=True)
-    @patch("istota.scheduler.post_result_to_talk")
-    @patch("istota.scheduler.run_coro", return_value=414)
-    def test_an_external_thread_still_parks_on_a_question_back(
-        self, mock_run_coro, mock_post_talk, mock_post_email, db_path, config,
-    ):
-        """The guard for the test above. An emissary reply keeps its room leg, so
-        it keeps parking — the bot must not mail "should I proceed?" to the
-        correspondent and take their answer as the user's."""
-        with db.get_db(db_path) as conn:
-            _origin_room(conn)
-            _sent_from_the_room(conn)
-        task = _poll_reply(config, sender=EXTERNAL_ADDR)
-
-        with patch(
-            "istota.scheduler.execute_task",
-            return_value=(True, "I drafted it. Should I proceed?", None, None),
-        ):
-            process_one_task(config)
-
-        with db.get_db(db_path) as conn:
-            after = db.get_task(conn, task.id)
-        assert after.status == "pending_confirmation"
-
 
 # ---------------------------------------------------------------------------
 # ISSUE-275 — the same predicate, on the route the user actually uses
@@ -480,19 +456,6 @@ class TestSelfAddressedFirstContact:
 
 
 class TestEveryoneElseKeepsTheMirror:
-    def test_an_external_correspondent_still_reaches_the_room(
-        self, db_path, config,
-    ):
-        """The case the mirror exists for. The user is not in this thread, so the
-        room copy is the only way they learn the reply arrived."""
-        with db.get_db(db_path) as conn:
-            _origin_room(conn)
-            _sent_from_the_room(conn)
-
-        task = _poll_reply(config, sender=EXTERNAL_ADDR)
-
-        assert task.output_target == f"room:{ROOM},email"
-        assert [r for r, _ in _room_rows(db_path)] == ["user"]
 
     def test_a_plus_address_reply_from_a_third_party_is_not_the_user(
         self, db_path, config,
@@ -515,25 +478,6 @@ class TestEveryoneElseKeepsTheMirror:
 
         assert task.output_target == f"room:{ROOM},email"
         assert task.status == "pending_confirmation"
-
-    @patch("istota.scheduler.post_result_to_email", return_value=True)
-    @patch("istota.scheduler.post_result_to_talk")
-    @patch("istota.scheduler.run_coro", return_value=414)
-    def test_the_external_exchange_keeps_both_halves(
-        self, mock_run_coro, mock_post_talk, mock_post_email, db_path, config,
-    ):
-        with db.get_db(db_path) as conn:
-            _origin_room(conn)
-            _sent_from_the_room(conn)
-        _poll_reply(config, sender=EXTERNAL_ADDR)
-
-        with patch(
-            "istota.scheduler.execute_task",
-            return_value=(True, "They said yes.", None, None),
-        ):
-            process_one_task(config)
-
-        assert [r for r, _ in _room_rows(db_path)] == ["user", "assistant"]
 
     def test_a_reply_to_another_user_is_judged_against_that_user(
         self, db_path, config,

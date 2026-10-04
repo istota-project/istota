@@ -347,7 +347,7 @@ class TestTheReplyIsAReplyAll:
 
 
 class TestNoMirrorIntoASharedRoom:
-    def test_an_emissary_reply_is_not_mirrored_into_a_shared_origin_room(
+    def test_a_reply_to_a_sent_mail_is_not_mirrored_into_a_shared_origin_room(
         self, config, db_path,
     ):
         config.users["dan"] = UserConfig(email_addresses=["dan@test.com"])
@@ -365,7 +365,9 @@ class TestNoMirrorIntoASharedRoom:
 
         assert _rows(db_path, "SELECT id FROM messages WHERE room_token='web-shared'") == []
         with db.get_db(db_path) as conn:
-            assert db.get_task(conn, task_ids[0]).withheld_from_room
+            token = db.get_task(conn, task_ids[0]).conversation_token
+            # The thread's own room, minted at the reply.
+            assert token == db.resolve_room_token(conn, "email", "<out-1@test.com>")
 
 
 # ---------------------------------------------------------------------------

@@ -215,7 +215,7 @@ class ProcessedEmail:
     user_id: str | None
     task_id: int | None
     processed_at: str
-    routing_method: str | None = None  # plus_address, sender_match, thread_match, discarded, quiet, read_error, throttled
+    routing_method: str | None = None  # plus_address, sender_match, thread_room, discarded, quiet, read_error, throttled
     # The namespace `email_id` counts in; the two together are the key
     # (ISSUE-250). 0 means the server never reported a UIDVALIDITY.
     uidvalidity: int = 0

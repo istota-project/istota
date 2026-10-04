@@ -251,14 +251,6 @@ class TestTheHistoryFallback:
             assert db._messages_caught_up(conn, ROOM) is False
         assert self._history(db_path) == []
 
-    def test_an_external_reply_still_is(self, db_path, config):
-        """The guard. The room is where the user learns this arrived, so its
-        history must keep the turn."""
-        task = _external_reply(config, db_path)
-        self._completed(config, db_path, task)
-
-        assert [h.source_type for h in self._history(db_path)] == ["email"]
-
     def test_the_re_surfacing_reader_drops_it_too(self, db_path, config):
         """`get_previous_tasks` is the wider of the two history leaks, not the
         narrower. `executor._build_db_context` runs it on **every** task in the
@@ -270,13 +262,6 @@ class TestTheHistoryFallback:
 
         with db.get_db(db_path) as conn:
             assert db.get_previous_tasks(conn, ROOM) == []
-
-    def test_the_re_surfacing_reader_keeps_an_external_reply(self, db_path, config):
-        task = _external_reply(config, db_path)
-        self._completed(config, db_path, task)
-
-        with db.get_db(db_path) as conn:
-            assert [t.id for t in db.get_previous_tasks(conn, ROOM)] == [task.id]
 
     def test_a_thread_with_no_room_keeps_its_own_history(self, db_path, config):
         """The boundary the column has to respect, and the one place a naive
@@ -391,22 +376,6 @@ class TestTheRoomsMemoryNamespace:
 
         assert _user_chunks(db_path) > 0
 
-    @patch("istota.scheduler.post_result_to_email", return_value=True)
-    @patch("istota.scheduler.post_result_to_talk")
-    @patch("istota.scheduler.run_coro", return_value=414)
-    def test_an_external_reply_still_reaches_it(
-        self, mock_run_coro, mock_post_talk, mock_post_email, db_path, config,
-    ):
-        _external_reply(config, db_path)
-
-        with patch(
-            "istota.scheduler.execute_task",
-            return_value=(True, "They said yes.", None, None),
-        ):
-            process_one_task(config)
-
-        assert _channel_chunks(db_path) > 0
-
 
 # ---------------------------------------------------------------------------
 # Consumer 3 — the channel sleep cycle
@@ -443,19 +412,6 @@ class TestTheChannelSleepCycle:
             assert ROOM not in db.get_active_channel_tokens(
                 conn, "2000-01-01T00:00:00",
             )
-
-    def test_an_external_reply_still_is_collected(self, db_path, config):
-        task = _external_reply(config, db_path)
-        self._completed(db_path, task)
-
-        with db.get_db(db_path) as conn:
-            collected = db.get_completed_channel_tasks_since(
-                conn, ROOM, "2000-01-01T00:00:00",
-            )
-            assert ROOM in db.get_active_channel_tokens(
-                conn, "2000-01-01T00:00:00",
-            )
-        assert [t.id for t in collected] == [task.id]
 
 
 # ---------------------------------------------------------------------------

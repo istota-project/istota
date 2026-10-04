@@ -205,16 +205,27 @@ class TestAThreadSentBeforeTheChange:
         assert "Notify the user" not in reply.prompt
         assert "<email_content>" in reply.prompt
 
-    def test_a_lone_correspondents_reply_still_mints_nothing(self, config):
-        """The received-thread rule is unchanged: two people besides the bot."""
+    def test_a_lone_correspondents_reply_mints_the_room(self, config):
+        """A thread the bot sent needs one person besides the user, at the
+        reply as at the send: the emissary path is gone, so a lone
+        correspondent's reply is a room turn from its first message."""
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(conn, user_id=HOST, message_id=SENT,
                                  to_addr=ANA, subject="Saturday")
 
-        _poll(config, sender=ANA, to=(BOT,), message_id="<a1@ext.example>",
-              references=SENT)
+        task_ids = _poll(config, sender=ANA, to=(BOT,), message_id="<a1@ext.example>",
+                         references=SENT)
 
-        assert _rows(config, "SELECT token FROM rooms") == []
+        token = _room(config)
+        assert token is not None
+        assert _people(config, token) == {ANA: "guest"}
+        assert [m["role"] for m in _messages(config, token)] == ["assistant", "user"]
+        with db.get_db(config.db_path) as conn:
+            reply = db.get_task(conn, task_ids[0])
+        assert reply.conversation_token == token
+        assert reply.output_target == "email"
+        assert _rows(config, "SELECT routing_method FROM processed_emails") == [
+            {"routing_method": "thread_room"}]
 
     def test_a_held_reply_still_mints_nothing(self, config):
         config.users[HOST].trusted_email_senders = []

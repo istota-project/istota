@@ -81,7 +81,9 @@ logger = logging.getLogger(__name__)
 
 SURFACE = "email"
 #: Humans besides the bot a received thread needs before it is a room. A
-#: thread the bot starts needs one besides the user (`register_sent_thread`).
+#: thread the bot started (`register_sent_thread`, or a reply on one sent
+#: before rooms were minted at send) or one written to the user's
+#: plus-address needs one besides the user.
 MIN_HUMANS = 2
 
 _NAME_MAX = 80
@@ -268,16 +270,17 @@ def resolve_thread(
     is `find_thread_room`'s answer, asked before the caller's transaction
     wrote anything; ``ours`` is that the mail threads onto one the bot sent
     for ``owner_user_id``. ``plus_address`` is that the mail was routed to
-    ``owner_user_id`` by their plus-address: that is evidence enough the
-    thread is theirs, and one person on it is enough (stranger first contact,
-    the ``office`` case).
+    ``owner_user_id`` by their plus-address. Either is evidence enough the
+    thread is theirs, and then one person on it is enough: a correspondent's
+    reply to a mail the bot sent, or stranger first contact (the ``office``
+    case).
     """
     people = thread_people(config, email)
     if existing is not None:
         _sync(conn, config, existing.token, people, acknowledged=False)
         return existing
     ids = thread_message_ids(email)
-    if not ids or len(people) < (1 if plus_address else MIN_HUMANS):
+    if not ids or len(people) < (1 if (ours or plus_address) else MIN_HUMANS):
         return None
     owner = config.users.get(owner_user_id)
     owned = {fold(a) for a in (owner.email_addresses if owner else [])}
@@ -628,8 +631,6 @@ def thread_addressed(config: "Config", email, facts: IntakeFacts) -> bool:
 
 
 #: Routes whose held mail is admitted to a room when the user approves it.
-#: `thread_match` (a reply on a thread sent before rooms were minted at send)
-#: keeps its old path until it is deleted.
 _ADMITTED_ROUTES = ("plus_address", "sender_match", "thread_room")
 
 
