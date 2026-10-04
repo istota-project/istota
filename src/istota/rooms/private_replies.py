@@ -24,8 +24,8 @@ The delivery, each a plain function:
   short connections: the Talk post (after the live audience check, stamping
   the Talk id onto the row so a Talk reply resolves to it), the WhatsApp send
   (keyed `private-reply:<row id>`, which is how a quote is resolved back to
-  the row), the heads-up mail for an email-thread parent, and the bell row's
-  delivery. Never raises. Nothing crosses the network under a writer lock.
+  the row), and the bell row's delivery. There is no mail: a note about an
+  email thread reaches the member in a private room like any other. Never raises. Nothing crosses the network under a writer lock.
 
 Linking (`linked_about`, `quoted_private_reply`, `linked_room`,
 `linked_context`, `pin_plan`): a reply to or quote of a tagged row links the
@@ -122,14 +122,6 @@ WHATSAPP_KEY_PREFIX = "private-reply:"
 #: A task's final answer on WhatsApp (`.claude/rules/sms.md`, the namespaces).
 ANSWER_KEY_PREFIX = "task-result:"
 
-_EMAIL_HINTS = {
-    "confirmation": "Reply in your private chat with the bot, or approve it in notifications.",
-    "proposal": "Reply in your private chat with the bot, or approve it in notifications.",
-    "whisper": "Reply in your private chat with the bot.",
-    "answer_notice": "Reply in your private chat with the bot.",
-}
-
-
 @dataclass(frozen=True)
 class PrivateDestination:
     """A member's own private room, and how a note reaches it."""
@@ -216,8 +208,9 @@ def private_room_for(conn, config, user_id: str, about_token: str) -> PrivateDes
 
     First the private room on the shared room's own surface: the member's
     WhatsApp room for a WhatsApp group, their private Talk room for a Talk
-    room, their default web room for a web-only room. An email thread has no
-    such room (a mail is notification only), so it starts at the fallback.
+    room, their default web room for a web-only room. An email thread starts at
+    the fallback: the private email room is never a destination, since a note
+    there would be a mail, a second private channel.
     Then any other private room, in a fixed order: web, Talk, WhatsApp. None
     when there is none; the caller falls back to the bell.
     """
@@ -544,11 +537,10 @@ def deliver_private(conn, config, *, user_id: str, about_token: str, kind: str,
 # ---------------------------------------------------------------------------
 
 
-def _parent_facts(config, about: str) -> tuple[str, bool]:
+def _parent_label(config, about: str) -> str:
     with db.get_db(config.db_path) as conn:
         room = db.get_room(conn, about) if about else None
-        email = room is not None and db.get_room_binding(conn, room.token, "email") is not None
-        return room_label(room), email
+        return room_label(room)
 
 
 def _stamp_talk(config, message_id: int, talk_id: int) -> None:
@@ -605,31 +597,6 @@ async def _send_whatsapp(config, delivery: PrivateDelivery, text: str) -> bool:
     return record.status in REACHED_META
 
 
-async def _send_heads_up(config, delivery: PrivateDelivery, label: str, body: str) -> bool:
-    """The heads-up mail for an email-thread parent: notification only.
-
-    A fresh mail to the member's own address with no threading headers, so it
-    can never land on the thread; a reply to it is a new message, not an answer.
-    """
-    if not getattr(config.email, "enabled", False):
-        return False
-    user = config.users.get(delivery.user_id)
-    address = user.email_addresses[0] if user and user.email_addresses else None
-    if not address:
-        return False
-    try:
-        await asyncio.to_thread(
-            _send_private_mail, config, to=address,
-            subject=HEADER_PREFIX + label,
-            body=f"{body}\n\n{_EMAIL_HINTS[delivery.kind]}",
-        )
-    except Exception as exc:
-        logger.warning("private %s: heads-up mail failed (%s)",
-                       delivery.delivery_reference, type(exc).__name__)
-        return False
-    return True
-
-
 def _late_bell_note(config, delivery: PrivateDelivery, body: str):
     with db.get_db(config.db_path) as conn:
         return _bell_note(conn, user_id=delivery.user_id, about=delivery.about_token,
@@ -643,7 +610,7 @@ async def _send(config, delivery: PrivateDelivery, *, header_room_label, body: s
 
     if delivery.notice is not None:
         await asyncio.to_thread(deliver_pending, config, [delivery.notice])
-    label, email_parent = await asyncio.to_thread(_parent_facts, config, delivery.about_token)
+    label = await asyncio.to_thread(_parent_label, config, delivery.about_token)
     if header_room_label:
         label = flatten(header_room_label)[:_LABEL_MAX] or label
     text = f"{HEADER_PREFIX}{label}\n\n{body}"
@@ -657,10 +624,6 @@ async def _send(config, delivery: PrivateDelivery, *, header_room_label, body: s
         if dest.whatsapp:
             pushed = True
             delivered = await _send_whatsapp(config, delivery, text) or delivered
-    # Not for a pass-on, which is the one item the host gets for its mail.
-    if (email_parent and delivery.kind in _EMAIL_HINTS
-            and await _send_heads_up(config, delivery, label, body)):
-        delivered = True
     if delivery.kind in _UNPARKED_KINDS and pushed and not delivered:
         # A whisper or a pass-on has no park bell behind it: one routed to a
         # surface that reached nobody there would sit unannounced in a transcript.
@@ -674,7 +637,7 @@ async def send_private(config, delivery: PrivateDelivery, *, body: str,
     """Push a recorded note to the surface its room lives on. Never raises.
 
     True when it reached the member outside web: a Talk post, a WhatsApp send
-    the provider accepted, or the heads-up mail handed to SMTP. A web room
+    the provider accepted. A web room
     needs no push (the room-event stream reads the row), so it reports False,
     and so does every failure. For a confirmation or a proposal, False means
     the park's own bell row is still owed its delivery. A whisper owes the
@@ -789,14 +752,6 @@ def pin_plan(config, task, plan: list, *, fallback=None) -> list:
             if not (channel and channel in parent_refs):
                 kept.append(dest)
     return kept
-
-
-def _send_private_mail(config, *, to: str, subject: str, body: str) -> None:
-    from istota.mail.support import get_email_config
-    from istota.skills.email import send_email
-
-    send_email(to=to, subject=subject, body=body, config=get_email_config(config),
-               from_addr=config.email.bot_email)
 
 
 def whatsapp_confirmation_body(prompt: str, task_id: int) -> str:

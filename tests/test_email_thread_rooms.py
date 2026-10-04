@@ -371,13 +371,13 @@ class TestNoMirrorIntoASharedRoom:
 
 
 # ---------------------------------------------------------------------------
-# The heads-up mail (ISSUE-608): a private note about a thread room
+# A private note about a thread room (ISSUE-608): never mailed
 # ---------------------------------------------------------------------------
 
 
-class TestTheHeadsUpMail:
+class TestThePrivateNote:
     @pytest.mark.asyncio
-    async def test_a_private_mail_to_the_users_own_address(self, config, db_path):
+    async def test_a_note_about_a_thread_sends_no_mail(self, config, db_path):
         from istota.rooms import private_replies
 
         _start_thread(config)
@@ -385,16 +385,12 @@ class TestTheHeadsUpMail:
             delivery = private_replies.deliver_private(
                 conn, config, user_id=HOST, about_token=_room_token(config),
                 kind="confirmation", reference="7:abc", body="You are free after 7.")
-        with patch("istota.rooms.private_replies._send_private_mail") as send:
+        with patch("istota.skills.email.send_email") as send:
             ok = await private_replies.send_private(
                 config, delivery, body="You are free after 7.")
 
-        assert ok is True
-        kwargs = send.call_args.kwargs
-        assert kwargs["to"] == HOST_ADDR
-        assert kwargs["subject"].startswith("re: ")
-        assert "in_reply_to" not in kwargs and "references" not in kwargs
-        assert "private chat with the bot" in kwargs["body"]
+        assert ok is False
+        send.assert_not_called()
 
     def test_a_shared_thread_asks_its_confirmations_privately(self, config, db_path):
         from istota.rooms import private_replies
@@ -530,7 +526,7 @@ class TestHeldPostsAndWhispers:
             task = db.get_task(conn, task_ids[0])
             assert private_replies.propose_guest_reply(conn, config, task, "She is.") is None
 
-    def test_a_whisper_reaches_the_members_own_address(self, config, db_path):
+    def test_a_whisper_reaches_the_bell_and_no_mail(self, config, db_path):
         import asyncio
 
         from istota.rooms import private_replies
@@ -542,14 +538,13 @@ class TestHeldPostsAndWhispers:
             private_replies.enqueue_whisper(conn, config, actor_user_id=HOST,
                                        task_id=task_ids[0], request_key="w1",
                                        text="Only for you.")
-        with patch("istota.rooms.private_replies._send_private_mail") as send:
+        with patch("istota.skills.email.send_email") as send, \
+                patch("istota.notifications.store.deliver_pending"):
             asyncio.run(requests.drain_requests(config))
 
-        kwargs = send.call_args.kwargs
-        assert kwargs["to"] == HOST_ADDR
-        assert kwargs["subject"] == "re: Dinner plans"
-        assert kwargs["body"].startswith("Only for you.\n\n")
-        assert "private chat with the bot" in kwargs["body"]
+        send.assert_not_called()
+        rows = _rows(db_path, "SELECT title FROM notifications WHERE source='task_alert'")
+        assert rows == [{"title": "Private note about Dinner plans"}]
 
 
 class TestTheThreadRoomGate:

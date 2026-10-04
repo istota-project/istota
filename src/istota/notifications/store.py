@@ -81,6 +81,9 @@ _ID_CHUNK = 400
 # Rows per DELETE in the retention sweep — see `sweep_retention`.
 _RETENTION_DELETE_CHUNK = 500
 
+#: Where a `room_free` push may go: the surfaces with no room behind them.
+ROOM_FREE_SURFACES = ("ntfy", "email")
+
 _UNREGISTERED_NOTE = "This notification's source is no longer available."
 _UNRENDERABLE_NOTE = "This notification could not be rendered."
 
@@ -93,6 +96,10 @@ class RaiseResult:
     insert branch and the reopen branch, never the bump. `user_id` rides along
     because :func:`deliver_pending` runs after the caller's connection is gone
     and has no other way to know whose routing table to resolve.
+
+    `room_free` marks a push that must not land in any room: the question is
+    already in one, and a second copy in the alerts room is the duplicate
+    #625 recorded. Set by the confirmation source; in memory only.
     """
 
     notification_id: int
@@ -101,6 +108,7 @@ class RaiseResult:
     text: str
     title: str
     purpose: str
+    room_free: bool = False
 
 
 @dataclass(frozen=True)
@@ -382,6 +390,10 @@ def deliver_pending(config: "Config", results: Iterable[RaiseResult | None]) -> 
     Takes an iterable that may contain `None`, so a producer can hand over its
     buffer without filtering the refused writes out of it first.
 
+    A `room_free` result goes to ntfy and email only (`ROOM_FREE_SURFACES`).
+    SMS and WhatsApp are left out too, since each mirrors the push into its
+    phone room. A user routing alerts to neither gets no push; the row stands.
+
     **Each row is re-read before its send.** The result was handed back on the
     caller's still-open transaction, so a producer that went on to roll back —
     or whose row was closed on another surface in the meantime — would otherwise
@@ -427,6 +439,7 @@ def deliver_pending(config: "Config", results: Iterable[RaiseResult | None]) -> 
                         purpose=result.purpose,
                         title=result.title,
                         reference_id=f"notification:{result.notification_id}",
+                        only_surfaces=ROOM_FREE_SURFACES if result.room_free else None,
                     )
                 except Exception:
                     logger.warning(

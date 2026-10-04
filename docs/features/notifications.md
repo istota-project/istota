@@ -85,6 +85,8 @@ Two windows, neither configurable:
 
 The inbox does not change how anything is routed. A row is written; separately, the text goes out through the same Talk / email / ntfy dispatcher as before. Which destinations that reaches is unchanged — see [per-user configuration](../configuration/per-user.md).
 
+**A confirmation's push goes to ntfy and email only.** A question waiting for your approval is already in a room: your private chat, the web room you asked it in, the Talk room, or the alerts room as the email gate's own prompt. Its push therefore skips every destination with a room behind it (Talk and web, and SMS and WhatsApp, which record the push in your phone room), so the same question never lands in a second room. If your alert routing names neither ntfy nor email, the question is not pushed, and the bell row stands.
+
 What varies is whether a producer sends at all, and that is decided per producer rather than per source:
 
 - **Write and deliver** — most sources. A dead Garmin credential delivers because the wiped credential takes the sync job with it, so nothing would ever notice again.

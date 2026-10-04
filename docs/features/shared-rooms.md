@@ -112,7 +112,7 @@ This bounds the transcript, not the room's `CHANNEL.md`, which everyone in the r
 
 Anything meant for one member and not the whole room goes to that member's own private chat with the bot: a private answer, a note, a question they need to approve, and, for the host, a guest's held reply. Nothing creates a chat for this; the bot uses one you already have.
 
-It picks the private chat on the shared room's own surface first: your own WhatsApp chat with the bot for a WhatsApp group, your private Talk conversation for a Talk room, your default web room for a web room. Without one there, it uses your private room on another surface, in the order web, Talk, WhatsApp. An email thread has no private chat of its own, so its notes go to one of those, and you also get a short mail at your own address saying where to answer. SMS is never used.
+It picks the private chat on the shared room's own surface first: your own WhatsApp chat with the bot for a WhatsApp group, your private Talk conversation for a Talk room, your default web room for a web room. Without one there, it uses your private room on another surface, in the order web, Talk, WhatsApp. An email thread has no private chat of its own, so its notes go to one of those, and nothing is mailed. SMS is never used.
 
 Each message is recorded in that chat's transcript and tagged with the shared room it is about. On Talk and WhatsApp it starts with "re: <room>". On web it carries a "re: <room>" chip that opens the room, or reads "a room you left" once you have left it.
 

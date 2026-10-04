@@ -97,11 +97,16 @@ def write(
 
     Returns the :class:`RaiseResult` for the producer to buffer and hand to
     ``deliver_pending`` after its ``with`` block closes — see the store's module
-    docstring for why the two are separate calls.
+    docstring for why the two are separate calls. The result is `room_free`:
+    every parked question is already in a room (the private room, the web
+    room it was asked in, the Talk room) or in the alerts room as the email
+    gate's own prompt, so its push goes to ntfy and email only (#625).
     """
+    from dataclasses import replace
+
     from istota.notifications.store import write_notification
 
-    return write_notification(
+    result = write_notification(
         conn, user_id,
         **_common.row_kwargs(
             source=SOURCE,
@@ -115,6 +120,7 @@ def write(
             room_token=room_token,
         ),
     )
+    return replace(result, room_free=True) if result is not None else None
 
 
 def resolve_for_task(
