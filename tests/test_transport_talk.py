@@ -318,9 +318,10 @@ class TestResolveTarget:
         task = _task(source_type="talk", conversation_token="room9")
         assert t.resolve_target(task) == "room9"
 
-    def test_synthetic_email_token_resolves_to_user_channel(self):
+    def test_an_email_token_naming_no_room_has_no_talk_target(self):
+        # An email task's token is a room or nothing; it never falls through
+        # to the alerts channel.
         config = _config(users={"alice": UserConfig(alerts_channel="alerts1")})
         t = TalkTransport(config)
-        # 16-char lowercase hex = synthetic email-thread token
         task = _task(source_type="email", conversation_token="0123456789abcdef")
-        assert t.resolve_target(task) == "alerts1"
+        assert t.resolve_target(task) is None

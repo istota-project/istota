@@ -2848,6 +2848,35 @@ def _in_private_email_room(config: Config, task: db.Task) -> bool:
         return False
 
 
+def _note_job_failed(conn, task) -> "RaiseResult | None":
+    """The bell row for a scheduled job or briefing that failed for good.
+
+    The private half of the error the delivery room does not get (ISSUE-632),
+    with a Run-now action. Nothing for a `_module.*` job, whose module retries
+    it, nor for any task that is not an automated occurrence. Never raises: it
+    runs inside `process_one_task`'s write transaction.
+    """
+    from istota.notifications.resolvers import cron_job as cron_job_source
+    from istota.notifications.resolvers import job_failure as job_failure_source
+
+    try:
+        if task.source_type == "briefing":
+            name = task.briefing_name or ""
+        elif task.source_type == "scheduled" and task.scheduled_job_id:
+            job = db.get_scheduled_job(conn, task.scheduled_job_id)
+            if job is None or cron_job_source.is_module_job(job.name):
+                return None
+            name = job.name
+        else:
+            return None
+        return job_failure_source.write(conn, task, name)
+    except Exception:
+        logger.warning(
+            "could not raise the failure notice for task %s", task.id, exc_info=True,
+        )
+        return None
+
+
 def _note_job_auto_disabled(
     conn, job_id: int, fail_count: int,
 ) -> RaiseResult | None:
@@ -4195,6 +4224,7 @@ def process_one_task(
                     call_file_handler = True
 
                 # Track scheduled job failure + auto-disable
+                job_switched_off = False
                 if task.scheduled_job_id:
                     fail_count = db.increment_scheduled_job_failures(
                         conn, task.scheduled_job_id, result,
@@ -4217,6 +4247,11 @@ def process_one_task(
                         notification_results.append(_note_job_auto_disabled(
                             conn, task.scheduled_job_id, fail_count,
                         ))
+                        job_switched_off = True
+                if not job_switched_off:
+                    notification_results.append(
+                        _note_job_failed(conn, task),
+                    )
 
     # The transaction above has closed, so the inbox rows raised inside it can
     # be sent. First thing after the `with`, deliberately: everything below it
@@ -4993,6 +5028,29 @@ def _deferred_briefing_placeholder(briefing_name: str) -> str:
     return f"Generate the '{briefing_name}' briefing."
 
 
+def _create_briefing_task(
+    conn, user_id: str, briefing: "BriefingConfig", *,
+    parent_task_id: int | None = None,
+) -> int:
+    """Queue one run of ``briefing``: the cron tick, a trigger file, run-now.
+
+    The prompt is a placeholder; the executor builds the real one off the
+    dispatch thread (ISSUE-143). Raises ``ValueError`` from ``db.create_task``.
+    """
+    return db.create_task(
+        conn,
+        prompt=_deferred_briefing_placeholder(briefing.name),
+        user_id=user_id,
+        source_type="briefing",
+        conversation_token=briefing.conversation_token,
+        output_target=briefing.output,
+        priority=8,
+        queue="background",
+        briefing_name=briefing.name,
+        parent_task_id=parent_task_id,
+    )
+
+
 def briefing_title_for_task(config: Config, task) -> str:
     """The deterministic display title for a finished briefing task.
 
@@ -5225,17 +5283,7 @@ def check_briefings(db_path, app_config: Config) -> list[int]:
             # `create_task` validates before it executes any statement, so
             # nothing is half-written here.
             try:
-                task_id = db.create_task(
-                    conn,
-                    prompt=_deferred_briefing_placeholder(briefing.name),
-                    user_id=user_id,
-                    source_type="briefing",
-                    conversation_token=briefing.conversation_token,
-                    output_target=briefing.output,
-                    priority=8,
-                    queue="background",
-                    briefing_name=briefing.name,
-                )
+                task_id = _create_briefing_task(conn, user_id, briefing)
             except ValueError as e:
                 logger.error(
                     "Briefing '%s' skipped: %s", briefing.name, e,
@@ -5545,17 +5593,7 @@ def check_briefing_triggers(db_path, config: Config) -> list[int]:
             # Queue the briefing task; the prompt is built in the executor off
             # the dispatch thread (ISSUE-143), same as the cron path.
             with db.get_db(db_path) as conn:
-                task_id = db.create_task(
-                    conn,
-                    prompt=_deferred_briefing_placeholder(briefing.name),
-                    user_id=user_id,
-                    source_type="briefing",
-                    conversation_token=briefing.conversation_token,
-                    output_target=briefing.output,
-                    priority=8,
-                    queue="background",
-                    briefing_name=briefing.name,
-                )
+                task_id = _create_briefing_task(conn, user_id, briefing)
             created_tasks.append(task_id)
             logger.info("Triggered briefing %s for %s (task %d)", briefing_name, user_id, task_id)
         except Exception as e:
@@ -8638,6 +8676,191 @@ def _resolve_job_model_effort(job, app_config, pinned_brain, job_effort):
     return job_model, job_effort
 
 
+def _create_scheduled_job_task(
+    conn, app_config: Config, job: "db.ScheduledJob", *,
+    parent_task_id: int | None = None,
+) -> int:
+    """Queue one occurrence of ``job``: the cron tick's path, and run-now's.
+
+    Built from the job row as it stands, so a run-now after an edit runs the
+    edited definition. ``parent_task_id`` links a manual run to the failed
+    occurrence it replaces. Raises ``ValueError`` from ``db.create_task`` for a
+    ``user_id`` that cannot name a directory.
+    """
+    # `TEXT` in a dynamically typed store, so coerce once and use
+    # the same value for the resolution and the column:
+    # `resolve_brain_kind` opens with `(override or "").strip()`,
+    # which raises `AttributeError` on a non-string from a call that
+    # looks total. `commands.brain_for_room` guards the identical
+    # call for the identical reason.
+    pinned_brain = str(job.brain).strip() if job.brain else ""
+    # Aliases resolve at task-creation time so the DB stays
+    # canonical, matching the talk poller's `!model` prefix path.
+    job_model, job_effort = "", (job.effort or "")
+    if job.model:
+        job_model, job_effort = _resolve_job_model_effort(
+            job, app_config, pinned_brain, job_effort,
+        )
+    # Only an *admitted* pin reaches the column, and the reason is
+    # the model beside it. This job's model was resolved against
+    # the kind `resolve_brain_kind` admits, so a refused pin left
+    # the row naming one namespace while `tasks.model` held a name
+    # from another — which `executor._pin_origin_namespace` reads
+    # as a crossing and `_request_model` then drops, at INFO, on
+    # every fire. `room_selectable` ships as `[]`, so that was the
+    # *default* outcome of the feature: the operator's `model`
+    # silently replaced by the running brain's own default while
+    # the only log line said their `brain` had been ignored.
+    #
+    # NULL rather than the fallthrough kind, because the two differ
+    # where the fallthrough kind is itself allowlisted: writing it
+    # would have `resolve_brain_kind` admit a pin nobody asked for
+    # and clear `fallback`, taking availability failover off a job
+    # whose pin was refused. NULL is what the row means — no pin is
+    # in effect — and it puts the origin read on the unpinned
+    # branch, which resolves the same lane this resolution used.
+    #
+    # `room_selectable_kinds` is the predicate `resolve_brain_kind`
+    # itself applies (it already intersects `KNOWN_BRAIN_KINDS`), so
+    # this reuses the one enforcement point rather than restating
+    # it. A room keeps the opposite rule deliberately: `rooms.model`
+    # was written when its pin *was* admitted, so the dropped kind's
+    # namespace is the true origin there. A job re-resolves every
+    # fire, so its row records the kind it just resolved against.
+    admitted_brain = (
+        pinned_brain
+        if pinned_brain in room_selectable_kinds(app_config.brain)
+        else ""
+    )
+    return db.create_task(
+            conn,
+            prompt=job.prompt,
+            user_id=job.user_id,
+            source_type="scheduled",
+            conversation_token=job.conversation_token,
+            output_target=job.output_target,
+            priority=5,
+            heartbeat_silent=job.silent_unless_action,
+            skip_log_channel=job.skip_log_channel,
+            scheduled_job_id=job.id,
+            command=job.command,
+            skill=job.skill,
+            skill_args=job.skill_args,
+            queue="background",
+            model=job_model or None,
+            effort=job_effort or None,
+            brain=admitted_brain or None,
+            parent_task_id=parent_task_id,
+        )
+
+
+# A manual run of the same job inside this window is refused, so a double click
+# or a repeated `!retry` cannot queue a burst of briefings.
+MANUAL_RUN_COOLDOWN_MINUTES = 5
+
+_INFLIGHT_STATUSES = ("pending", "locked", "running", "pending_confirmation")
+
+
+def _job_run_refusal(
+    conn, where: str, params: tuple, label: str, *,
+    exclude_task_id: int | None = None,
+) -> str | None:
+    """Why a manual run of one job cannot start now, else None.
+
+    ``where`` selects the job's occurrences in ``tasks``. ``exclude_task_id`` is
+    the failed occurrence being re-run, which a cooldown must not count: a job
+    that failed seconds after it fired is exactly the one a user re-runs.
+    """
+    placeholders = ",".join("?" * len(_INFLIGHT_STATUSES))
+    inflight = conn.execute(
+        f"SELECT COUNT(*) FROM tasks WHERE {where} AND status IN ({placeholders})",
+        (*params, *_INFLIGHT_STATUSES),
+    ).fetchone()[0]
+    if inflight:
+        return f"{label} is already queued or running."
+    recent = conn.execute(
+        f"SELECT COUNT(*) FROM tasks WHERE {where} AND id != ? "
+        "AND created_at > datetime('now', ?)",
+        (*params, exclude_task_id or 0, f"-{MANUAL_RUN_COOLDOWN_MINUTES} minutes"),
+    ).fetchone()[0]
+    if recent:
+        return (
+            f"{label} ran in the last {MANUAL_RUN_COOLDOWN_MINUTES} minutes. "
+            "Try again in a few minutes."
+        )
+    return None
+
+
+def run_scheduled_job_now(
+    conn, app_config: Config, job: "db.ScheduledJob", *,
+    parent_task_id: int | None = None,
+) -> tuple[int | None, str]:
+    """Queue an occurrence of ``job`` now, outside its schedule.
+
+    Returns ``(task_id, "")`` or ``(None, refusal)``. Leaves ``last_run_at``
+    alone, so the job's next scheduled slot is unchanged. A ``_module.*`` job is
+    refused: its module owns its schedule and its retry.
+    """
+    from istota.notifications.resolvers.cron_job import is_module_job
+
+    label = f"Job '{job.name}'"
+    if is_module_job(job.name):
+        return None, f"{label} is managed by a module and can't be run by hand."
+    refusal = _job_run_refusal(
+        conn, "scheduled_job_id = ?", (job.id,), label,
+        exclude_task_id=parent_task_id,
+    )
+    if refusal:
+        return None, refusal
+    try:
+        task_id = _create_scheduled_job_task(
+            conn, app_config, job, parent_task_id=parent_task_id,
+        )
+    except ValueError as e:
+        return None, f"{label} can't be queued: {e}"
+    logger.info(
+        "Scheduled job '%s' (user: %s) run by hand as task %d",
+        job.name, job.user_id, task_id,
+    )
+    return task_id, ""
+
+
+def run_briefing_now(
+    conn, app_config: Config, user_id: str, briefing_name: str, *,
+    parent_task_id: int | None = None,
+) -> tuple[int | None, str]:
+    """Queue the user's briefing ``briefing_name`` now, from its current config.
+
+    Returns ``(task_id, "")`` or ``(None, refusal)``. Leaves the briefing's
+    last-run stamp alone, so its next scheduled slot is unchanged.
+    """
+    label = f"Briefing '{briefing_name}'"
+    briefing = next(
+        (b for b in get_briefings_for_user(app_config, user_id)
+         if b.name == briefing_name),
+        None,
+    )
+    if briefing is None:
+        return None, f"{label} no longer exists."
+    refusal = _job_run_refusal(
+        conn, "user_id = ? AND source_type = 'briefing' AND briefing_name = ?",
+        (user_id, briefing_name), label, exclude_task_id=parent_task_id,
+    )
+    if refusal:
+        return None, refusal
+    try:
+        task_id = _create_briefing_task(
+            conn, user_id, briefing, parent_task_id=parent_task_id,
+        )
+    except ValueError as e:
+        return None, f"{label} can't be queued: {e}"
+    logger.info(
+        "Briefing '%s' (user: %s) run by hand as task %d",
+        briefing_name, user_id, task_id,
+    )
+    return task_id, ""
+
+
 def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
     """
     Check for scheduled jobs that should run and queue them as tasks.
@@ -8738,76 +8961,13 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                         job.name, job.user_id, inflight,
                     )
                     continue
-                # `TEXT` in a dynamically typed store, so coerce once and use
-                # the same value for the resolution and the column:
-                # `resolve_brain_kind` opens with `(override or "").strip()`,
-                # which raises `AttributeError` on a non-string from a call that
-                # looks total. `commands.brain_for_room` guards the identical
-                # call for the identical reason.
-                pinned_brain = str(job.brain).strip() if job.brain else ""
-                # Aliases resolve at task-creation time so the DB stays
-                # canonical, matching the talk poller's `!model` prefix path.
-                job_model, job_effort = "", (job.effort or "")
-                if job.model:
-                    job_model, job_effort = _resolve_job_model_effort(
-                        job, app_config, pinned_brain, job_effort,
-                    )
-                # Only an *admitted* pin reaches the column, and the reason is
-                # the model beside it. This job's model was resolved against
-                # the kind `resolve_brain_kind` admits, so a refused pin left
-                # the row naming one namespace while `tasks.model` held a name
-                # from another — which `executor._pin_origin_namespace` reads
-                # as a crossing and `_request_model` then drops, at INFO, on
-                # every fire. `room_selectable` ships as `[]`, so that was the
-                # *default* outcome of the feature: the operator's `model`
-                # silently replaced by the running brain's own default while
-                # the only log line said their `brain` had been ignored.
-                #
-                # NULL rather than the fallthrough kind, because the two differ
-                # where the fallthrough kind is itself allowlisted: writing it
-                # would have `resolve_brain_kind` admit a pin nobody asked for
-                # and clear `fallback`, taking availability failover off a job
-                # whose pin was refused. NULL is what the row means — no pin is
-                # in effect — and it puts the origin read on the unpinned
-                # branch, which resolves the same lane this resolution used.
-                #
-                # `room_selectable_kinds` is the predicate `resolve_brain_kind`
-                # itself applies (it already intersects `KNOWN_BRAIN_KINDS`), so
-                # this reuses the one enforcement point rather than restating
-                # it. A room keeps the opposite rule deliberately: `rooms.model`
-                # was written when its pin *was* admitted, so the dropped kind's
-                # namespace is the true origin there. A job re-resolves every
-                # fire, so its row records the kind it just resolved against.
-                admitted_brain = (
-                    pinned_brain
-                    if pinned_brain in room_selectable_kinds(app_config.brain)
-                    else ""
-                )
                 # As in `check_briefings`: one unusable `job.user_id` costs its
                 # own row, not every job after it in the same transaction
                 # (ISSUE-402). `job.user_id` comes off the `scheduled_jobs`
                 # table rather than from `config.users`, so a legacy row can
                 # carry one this guard refuses.
                 try:
-                    task_id = db.create_task(
-                        conn,
-                        prompt=job.prompt,
-                        user_id=job.user_id,
-                        source_type="scheduled",
-                        conversation_token=job.conversation_token,
-                        output_target=job.output_target,
-                        priority=5,
-                        heartbeat_silent=job.silent_unless_action,
-                        skip_log_channel=job.skip_log_channel,
-                        scheduled_job_id=job.id,
-                        command=job.command,
-                        skill=job.skill,
-                        skill_args=job.skill_args,
-                        queue="background",
-                        model=job_model or None,
-                        effort=job_effort or None,
-                        brain=admitted_brain or None,
-                    )
+                    task_id = _create_scheduled_job_task(conn, app_config, job)
                 except ValueError as e:
                     logger.error(
                         "Scheduled job '%s' (user: %s) skipped: %s",

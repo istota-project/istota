@@ -936,6 +936,15 @@
     tick().then(() => pinToBottom());
   }
 
+  // Re-run a failed or cancelled turn's task (ISSUE-631). The new turn comes in
+  // over the room stream, so this only has to follow the transcript down.
+  function retryFailedTask(cid: number, mode: 'retry' | 'resume') {
+    atBottom = true;
+    showJumpToLatest = false;
+    session.retryTask(cid, mode).catch(() => notifyError('Couldn’t retry that task.'));
+    tick().then(() => pinToBottom());
+  }
+
   /**
    * Release a held queued message (ISSUE-238).
    *
@@ -1378,6 +1387,7 @@
                 onToggleStar={session.toggleStar}
                 onDelete={askDeleteMessage}
                 onRetry={inViewMode ? undefined : retryFailedSend}
+                onRetryTask={inViewMode || readOnlyPhone ? undefined : retryFailedTask}
                 retryBusy={busy}
                 onQueueSend={inViewMode ? undefined : releaseQueuedSend}
                 onQueueEdit={inViewMode ? undefined : session.editQueued}

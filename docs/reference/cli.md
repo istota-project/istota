@@ -20,7 +20,10 @@ istota task "prompt" -u USER -x --no-context         # Skip conversation context
 istota list [-s STATUS] [-u USER] [-n N]     # List tasks (default limit 20)
 istota show <task-id>                        # Task details
 istota run [--once] [--briefings] [--dry-run]  # Process pending tasks
+istota job run <user> <name> [--briefing]    # Queue a scheduled job (or briefing) now
 ```
+
+`istota job run` queues the job as it is defined now and leaves its schedule alone; the daemon runs it. It exits 1 while another run of that job is queued or running, within five minutes of the last run, and for a `_module.*` job.
 
 ### Usage and cost
 

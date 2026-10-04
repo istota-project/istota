@@ -4019,6 +4019,29 @@ export function cancelChatTask(taskId: number): Promise<{ status: string }> {
   return apiFetch<{ status: string }>(`/chat/tasks/${taskId}/cancel`, { method: 'POST' });
 }
 
+export interface RetryTaskResult {
+  status: 'queued';
+  task_id: number;
+  retried_task_id: number;
+  // True when the task was a scheduled job or briefing, which runs its current
+  // definition rather than a copy of the failed task.
+  run_now: boolean;
+  message: string;
+}
+
+/** Re-run a failed or cancelled task (ISSUE-631). A refusal is a 409 whose
+ * message is the one `!retry` gives, thrown as the Error's message. */
+export function retryChatTask(
+  taskId: number,
+  mode: 'retry' | 'resume' = 'retry',
+): Promise<RetryTaskResult> {
+  return apiFetch<RetryTaskResult>(`/chat/tasks/${taskId}/retry`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  });
+}
+
 export function chatStreamUrl(taskId: number): string {
   return `${base}/api/chat/tasks/${taskId}/stream`;
 }

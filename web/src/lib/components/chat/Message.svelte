@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Copy, Star, Trash2, Reply, Mail, Info, Pencil, X } from '@lucide/svelte';
+  import { Copy, Star, Trash2, Reply, Mail, Info, Pencil, X, RotateCcw } from '@lucide/svelte';
   import PhoneSurfaceIcon from './PhoneSurfaceIcon.svelte';
   import { chatFileUrl, type ExternalTurnDisplay } from '$lib/api';
   import { copyText } from '$lib/clipboard';
@@ -7,7 +7,12 @@
   import { findPlainMentions, type MentionTarget } from '$lib/mentions';
   import type { ChatMessage } from '$lib/stores/chat';
   import type { OutboundDraft } from '$lib/api';
-  import { messageCopyText, renderGroups } from '$lib/stores/segments';
+  import {
+    hasPriorProgress,
+    isRetryableTurn,
+    messageCopyText,
+    renderGroups,
+  } from '$lib/stores/segments';
   import { online } from '$lib/stores/connectivity';
   import { Avatar, Button, IconButton } from '$lib/components/ui';
   import ActivityTrace from './ActivityTrace.svelte';
@@ -33,6 +38,7 @@
     onReply,
     onJumpToMessage,
     onRetry,
+    onRetryTask,
     retryBusy = false,
     onQueueSend,
     onQueueEdit,
@@ -85,6 +91,10 @@
     // Re-send a message whose send failed. Absent → the failure is reported
     // without an offer to retry it (read-only surfaces, aggregate views).
     onRetry?: (cid: number) => void;
+    // Re-run this failed or cancelled turn's task, from scratch or continuing
+    // from its prior steps (ISSUE-631). Absent → no Retry on a failed turn,
+    // which is how read-only rooms and the aggregate views stay read-only.
+    onRetryTask?: (cid: number, mode: 'retry' | 'resume') => void;
     // True while the room has a turn in flight. Retry is refused then (the
     // store's `runTurn` is not re-entrant), so the button says so rather than
     // silently doing nothing.
@@ -458,6 +468,11 @@
   // `retryable` is false where a retry would fail identically (an expired
   // session), and an offer that cannot work is worse than no offer.
   const showRetry = $derived(sendFailed && message.retryable !== false && !!onRetry);
+  // ---- A failed turn (ISSUE-631) --------------------------------------------
+  // Visible at rest rather than in the hover row: a failed turn's next move is
+  // to run it again, and hiding that behind a hover is how it went unnoticed.
+  const showTaskRetry = $derived(!!onRetryTask && !aggregate && isRetryableTurn(message));
+  const showContinue = $derived(showTaskRetry && hasPriorProgress(message));
   // ---- The send queue (ISSUE-238) -------------------------------------------
   // A message typed into a busy room: written and committed to, never POSTed.
   // Distinct from the *assistant* placeholder's `Queued…` progress line, which
@@ -1147,6 +1162,38 @@
               <div class="body user-body">
                 <span class="user-text">{outgoingMail.body}</span>
               </div>
+            {/if}
+          </div>
+        {/if}
+
+        {#if message.retriedAs !== undefined}
+          <div class="task-retry">
+            <span class="task-retry-text">Retried as #{message.retriedAs}</span>
+          </div>
+        {:else if showTaskRetry}
+          <div class="task-retry">
+            <Button
+              variant="subtle"
+              size="sm"
+              disabled={retryBusy}
+              title={retryBusy ? 'Wait for the current turn to finish' : 'Run this again'}
+              onclick={() => onRetryTask?.(message.cid, 'retry')}
+            >
+              <RotateCcw size={14} />
+              Retry
+            </Button>
+            {#if showContinue}
+              <Button
+                variant="subtle"
+                size="sm"
+                disabled={retryBusy}
+                title={retryBusy
+                  ? 'Wait for the current turn to finish'
+                  : 'Run it again, picking up from the steps it already took'}
+                onclick={() => onRetryTask?.(message.cid, 'resume')}
+              >
+                Continue
+              </Button>
             {/if}
           </div>
         {/if}
@@ -1840,6 +1887,18 @@
   }
   .send-failed-text {
     min-width: 0;
+  }
+  /* A failed turn's Retry / Continue, and the "Retried as" note that replaces
+     them. Same geometry as the send-failure line; muted, since the turn above
+     already says it failed. */
+  .task-retry {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-top: var(--space-1);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
   }
   /* Queued (ISSUE-238). Same geometry as the failure mark, muted rather than
 	   dangerous: nothing has gone wrong, the message simply has not left. */
