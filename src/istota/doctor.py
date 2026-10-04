@@ -9358,9 +9358,12 @@ def check_operator_persona(config: "Config", probe: bool) -> CheckResult:
     The operator's ``{root}/PERSONA.md`` is the one persona for every task,
     synced from the shipped ``config/persona.md`` by the conffile rule
     (``prompts.persona``). Nothing else says when that sync has left something
-    for a person: a ``PERSONA.md.shipped`` waiting to be merged, an operator
-    file the prompt path refuses (so an older copy is quietly in force), or
-    per-user copies ``istota init`` has not retired yet.
+    for a person: a shipped file the sync cannot read (which can leave no
+    persona at all), a ``PERSONA.md.shipped`` waiting to be merged, an operator
+    file the prompt path refuses (so an older copy is quietly in force),
+    per-user copies ``istota init`` has not retired yet, and per-user
+    ``PERSONA.md`` entries that are not regular files, which ``init`` refuses
+    and only a person can remove.
 
     **Counts, never user ids or file contents**, on the vault check's reasoning:
     the result reaches the boot log and the admin Health pane, read by every
@@ -9376,6 +9379,16 @@ def check_operator_persona(config: "Config", probe: bool) -> CheckResult:
     except Exception as exc:  # noqa: BLE001 - a check never raises
         return CheckResult(name, SKIP, f"the persona module could not be loaded: {exc}")
 
+    try:
+        return _operator_persona_result(config, name, persona, persona_retire)
+    except Exception as exc:  # noqa: BLE001 - a raise would become an alerting FAIL
+        return CheckResult(
+            name, WARN, f"the persona state could not be read ({type(exc).__name__})",
+            remedy="Run `istota doctor --only config.operator_persona` and read the log.",
+        )
+
+
+def _operator_persona_result(config: "Config", name: str, persona, persona_retire) -> CheckResult:
     path = persona.operator_persona_path(config)
     if path is None:
         return CheckResult(name, SKIP, "no file root; the shipped persona is in force")
@@ -9395,42 +9408,76 @@ def check_operator_persona(config: "Config", probe: bool) -> CheckResult:
         )
 
     warnings: list[tuple[str, str]] = []
+    notes: list[str] = []
+
+    # Read once, up front: the sync refuses without it, and it is the prompt
+    # path's last fallback, so its absence can leave no persona at all.
+    shipped_path = persona.shipped_persona_path(config)
     try:
-        text, reason, present = persona.read_operator_file(path)
-    except Exception as exc:  # noqa: BLE001 - a check never raises
-        text, reason, present = None, type(exc).__name__, True
-    if reason is not None:
+        shipped_digest = persona.persona_digest(shipped_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        shipped_digest = None
+    if shipped_digest is None:
         warnings.append((
-            f"{persona.PERSONA_FILENAME} refused ({reason}); the last good copy, "
-            "or the shipped persona, is in force",
+            f"the shipped persona {shipped_path} is unreadable, so the sync refuses",
+            f"Restore {shipped_path} from the checkout (`git checkout -- config/persona.md`).",
+        ))
+
+    def fallback() -> str:
+        """What the prompt path falls back to when the operator file gives nothing."""
+        if shipped_digest is not None:
+            return "the last good copy, or else the shipped persona, is in force"
+        if persona.read_last_good(config) is not None:
+            return "the last good copy is in force"
+        return "no persona is in force"
+
+    text, reason, present = persona.read_operator_file(path)
+    if reason is not None:
+        from .skills._loader import OVERLAY_UNREADABLY_LARGE  # noqa: PLC0415
+
+        if reason == OVERLAY_UNREADABLY_LARGE:
+            try:
+                reason = f"{os.lstat(path).st_size} bytes, over {persona.PERSONA_MAX_BYTES}"
+            except OSError:
+                pass
+        warnings.append((
+            f"{persona.PERSONA_FILENAME} refused ({reason}); {fallback()}",
             f"Make {path} a plain UTF-8 file under "
             f"{persona.PERSONA_MAX_BYTES // 1024} KiB, not a link or a pipe.",
         ))
         state = None
     elif not present:
-        state = "no operator file yet; the next sync writes the shipped persona"
+        state = f"no operator file yet; {fallback()} until the next sync writes one"
     elif not text.strip():
-        state = "operator file empty; shipped persona in force"
+        if shipped_digest is None:
+            state = "operator file empty and the shipped persona unreadable; no persona is in force"
+        else:
+            state = "operator file empty; shipped persona in force"
     elif persona.is_shipped(text):
         state = "operator file follows the shipped persona"
-        try:
-            current = persona.persona_digest(
-                persona.shipped_persona_path(config).read_text(encoding="utf-8")
-            )
-        except (OSError, ValueError):
-            current = None
-        if current is not None and persona.persona_digest(text) != current:
+        if shipped_digest is not None and persona.persona_digest(text) != shipped_digest:
             state = "operator file is an older shipped version; the next sync upgrades it"
     else:
         state = "operator file is edited and kept"
 
     beside = root / (persona.PERSONA_FILENAME + persona.SHIPPED_SUFFIX)
     if os.path.lexists(beside):
-        warnings.append((
-            "the shipped persona changed since your edit",
-            f"Compare {beside.name} with {persona.PERSONA_FILENAME} in {root}, "
-            f"and delete {beside.name} when merged.",
-        ))
+        if reason is None and present and text.strip() and persona.is_shipped(text):
+            # Not an edit to merge: the next sync removes it.
+            notes.append(f"{beside.name} is stale and the next sync removes it")
+        elif reason is None and (not present or not text.strip()):
+            # The sync neither merges into nor removes beside a missing or
+            # empty operator file, so only a person clears it.
+            warnings.append((
+                f"{beside.name} is left over beside no edited operator file",
+                f"Delete {beside.name} in {root}.",
+            ))
+        else:
+            warnings.append((
+                "the shipped persona changed since your edit",
+                f"Compare {beside.name} with {persona.PERSONA_FILENAME} in {root}, "
+                f"and delete {beside.name} when merged.",
+            ))
 
     census = persona_retire.census_user_personas(config)
     if census.remaining:
@@ -9439,10 +9486,20 @@ def check_operator_persona(config: "Config", probe: bool) -> CheckResult:
             f"{persona.PERSONA_FILENAME}, which nothing reads",
             "Run `istota init`, which retires them.",
         ))
+    if census.irregular:
+        warnings.append((
+            f"{census.irregular} user(s) have a {config.bot_dir_name}/config/"
+            f"{persona.PERSONA_FILENAME} that is not a regular file",
+            "Remove each by hand: `istota init` refuses a link, a pipe or a "
+            "directory there and leaves it.",
+        ))
 
-    extras = [f"{census.retired} retired per-user copy(ies)"]
+    extras = notes + [f"{census.retired} retired per-user copy(ies)"]
     if census.unreadable:
-        extras.append(f"{census.unreadable} user config folder(s) could not be opened")
+        extras.append(
+            f"{census.unreadable} user config folder(s) could not be opened, "
+            "and `istota init` refuses those users"
+        )
     tail = "; ".join(extras)
 
     if warnings:

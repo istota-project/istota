@@ -307,11 +307,17 @@ def retire_user_personas(config: "Config", *, dry_run: bool = False) -> list[Ret
 class PersonaCensus:
     """What is left in the configured users' config folders. Counts only."""
 
-    #: Users whose folder still holds a ``PERSONA.md`` of any kind.
+    #: Users whose folder still holds a regular ``PERSONA.md``, which the next
+    #: ``istota init`` deletes or retires.
     remaining: int = 0
+    #: Users whose ``PERSONA.md`` is not a regular file (a link, a pipe, a
+    #: directory). ``_retire_one`` refuses those and leaves them, so only a
+    #: person can clear them.
+    irregular: int = 0
     #: ``PERSONA.md.retired*`` files across all configured users.
     retired: int = 0
-    #: Users whose folder exists and could not be opened (a symlink, a file).
+    #: Users whose folder exists and could not be opened (a symlink, a file);
+    #: ``istota init`` refuses these users too.
     unreadable: int = 0
 
 
@@ -320,13 +326,17 @@ def census_user_personas(config: "Config") -> PersonaCensus:
 
     The same walk ``_retire_one`` takes (configured users only, ``O_NOFOLLOW``
     at every component), listing the pinned directory and opening no file, so
-    a FIFO planted there cannot block ``doctor`` on the start-up path. Names
-    no user: ``doctor`` renders this to every admin.
+    a FIFO planted there cannot block ``doctor`` on the start-up path. A
+    ``PERSONA.md`` is classified with ``lstat`` the way the retirement's read
+    would answer it, so the two agree on what ``init`` can clear. Names no
+    user: ``doctor`` renders this to every admin.
     """
-    from istota.skills._loader import open_overlay_dir  # noqa: PLC0415 - import cycle
-
-    remaining = retired = unreadable = 0
-    if not config.has_workspace:
+    remaining = irregular = retired = unreadable = 0
+    try:
+        if not config.has_workspace:
+            return PersonaCensus()
+        from istota.skills._loader import open_overlay_dir  # noqa: PLC0415 - import cycle
+    except Exception:  # noqa: BLE001 - a census never raises
         return PersonaCensus()
     retired_prefix = persona.PERSONA_FILENAME + persona.RETIRED_SUFFIX
     parts = (config.bot_dir_name, "config")
@@ -347,17 +357,30 @@ def census_user_personas(config: "Config") -> PersonaCensus:
                 continue
             try:
                 names = os.listdir(dir_fd)
+                leaf_is_regular = None
+                if persona.PERSONA_FILENAME in names:
+                    try:
+                        st = os.lstat(persona.PERSONA_FILENAME, dir_fd=dir_fd)
+                        leaf_is_regular = stat.S_ISREG(st.st_mode)
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        leaf_is_regular = False
             finally:
                 os.close(dir_fd)
         except Exception:  # noqa: BLE001 - a census never raises
             unreadable += 1
             continue
+        if leaf_is_regular is True:
+            remaining += 1
+        elif leaf_is_regular is False:
+            irregular += 1
         for name in names:
-            if name == persona.PERSONA_FILENAME:
-                remaining += 1
-            elif name.startswith(retired_prefix):
+            if name.startswith(retired_prefix):
                 retired += 1
-    return PersonaCensus(remaining=remaining, retired=retired, unreadable=unreadable)
+    return PersonaCensus(
+        remaining=remaining, irregular=irregular, retired=retired, unreadable=unreadable,
+    )
 
 
 def exit_code(outcomes: list[RetireOutcome]) -> int:
