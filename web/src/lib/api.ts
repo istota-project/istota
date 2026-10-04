@@ -3151,6 +3151,15 @@ export interface OutgoingMail {
   // mail is discussed. Stage 3 of hidden email threads links the room only; a
   // held mail is approved from its notification until the note carries it.
   note_path?: string;
+  // An email thread's card with no note: "Discuss in private chat" opens
+  // `room` with the composer linked to `about` (section 0c).
+  discuss?: MailDiscuss;
+}
+
+/** The private room to discuss a thread's mail in, and the thread itself. */
+export interface MailDiscuss {
+  room: string;
+  about: string;
 }
 
 export interface MailAddress {
@@ -3179,6 +3188,7 @@ export interface ReceivedMail {
   rest: string;
   labels: Record<string, string>;
   note_path?: string;
+  discuss?: MailDiscuss;
   // A row from before the metadata was stored: From, Subject and Date from
   // the prompt wrapper alone, and none of the fields below.
   fallback?: boolean;
@@ -3230,6 +3240,12 @@ export type SendFailure =
 export interface SendOptions {
   /** Canonical `messages.id` this message replies to. */
   replyToMsgId?: number;
+  /**
+   * An email thread room this message is about, with no row to reply to
+   * ("Discuss in private chat" with no note). The server checks it and
+   * refuses with 400; a `replyToMsgId` outranks it, so it is not sent beside one.
+   */
+  aboutRoom?: string;
 }
 
 export interface SendResult {
@@ -3813,6 +3829,7 @@ export async function sendChatMessage(
     // Only the id: the server reads the parent's text from the row it already
     // holds, so nothing here can dictate what the model is told it said.
     ...(options.replyToMsgId ? { reply_to_msg_id: options.replyToMsgId } : {}),
+    ...(options.aboutRoom && !options.replyToMsgId ? { about_room: options.aboutRoom } : {}),
   });
 
   try {

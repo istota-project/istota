@@ -50,7 +50,7 @@
   import { dropDraft } from '$lib/stores/drafts';
   import { dropQueue, MAX_QUEUED_PER_ROOM } from '$lib/stores/sendQueue';
   import { isImeComposing } from '$lib/platform/input';
-  import type { ChatAttachment, ChatRoom, ChatView, RoomMember } from '$lib/api';
+  import type { ChatAttachment, ChatRoom, ChatView, MailDiscuss, RoomMember } from '$lib/api';
   import { loadRoomMembers, dropRoomMembers } from '$lib/roomMembers';
   import { getCurrentUser } from '$lib/userContext';
   import {
@@ -418,11 +418,35 @@
     // sets them, and dropping them there would quietly turn an edited reply into
     // an ordinary message and send it without its parent.
     stagedReplyId = r.replyToMsgId ?? r.replyTo?.msgId ?? null;
+    linkTarget =
+      r.aboutRoom && r.token
+        ? { room: r.token, about: r.aboutRoom, name: threadName(r.aboutRoom) }
+        : null;
     returnedSend = { n: r.n, text: r.text, attachments: r.attachments };
   });
   let returnedSend = $state<{ n: number; text: string; attachments: ChatAttachment[] } | null>(
     null,
   );
+
+  // The email thread the next send is about, with no row to reply to: set by
+  // "Discuss in private chat" on a mail card with no note (hidden email
+  // threads, section 0c). Bound to the room it was set for, so leaving that
+  // room clears it; never written to the draft store.
+  let linkTarget = $state<{ room: string; about: string; name: string } | null>(null);
+  $effect(() => {
+    if (linkTarget && ($view !== 'room' || activeRoom?.token !== linkTarget.room)) {
+      linkTarget = null;
+    }
+  });
+
+  function threadName(token: string): string {
+    return $rooms.find((r) => r.token === token)?.name ?? 'the email thread';
+  }
+
+  function discussInPrivate(discuss: MailDiscuss) {
+    void session.selectRoomByToken(discuss.room);
+    linkTarget = { room: discuss.room, about: discuss.about, name: threadName(discuss.about) };
+  }
 
   /** Stage a reply to the message on this transcript row. */
   function stageReply(cid: number) {
@@ -1467,6 +1491,7 @@
                 onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
                 onJump={(token, taskId) => session.jumpToTask(token, taskId)}
                 onOpenRoom={(token) => session.selectRoomByToken(token)}
+                onDiscuss={inViewMode ? undefined : discussInPrivate}
                 onImageOpen={(imgs, idx) => {
                   lightboxImages = imgs;
                   lightboxIndex = idx;
@@ -1574,8 +1599,12 @@
               showJumpToLatest = false;
               // See retryFailedSend: the store settles its own failures onto the
               // message row, so this only covers a rejection that escaped it.
+              // A cited row decides the link, so the thread rides only a send
+              // that cites nothing; either way the chip is spent.
+              const about = reply ? undefined : linkTarget?.about;
+              linkTarget = null;
               session
-                .send(t, atts, reply ?? undefined)
+                .send(t, atts, reply ?? undefined, about)
                 .catch(() => notifyError('Couldn’t send that message.'));
               tick().then(() => pinToBottom());
             }}
@@ -1588,6 +1617,8 @@
             sendSettled={settleSignal}
             replyTo={stagedReply}
             onReplyChange={(msgId) => (stagedReplyId = msgId)}
+            linkTarget={linkTarget ? { name: linkTarget.name } : null}
+            onLinkClear={() => (linkTarget = null)}
             restoreSend={returnedSend}
             mentionCandidates={mentionTargets}
           />

@@ -6,7 +6,7 @@
   import { renderMarkdown } from '$lib/markdown';
   import { findPlainMentions, type MentionTarget } from '$lib/mentions';
   import type { ChatMessage } from '$lib/stores/chat';
-  import type { OutboundDraft } from '$lib/api';
+  import type { MailDiscuss, OutboundDraft } from '$lib/api';
   import {
     hasPriorProgress,
     isRetryableTurn,
@@ -49,6 +49,7 @@
     onJump,
     onImageOpen,
     onOpenRoom,
+    onDiscuss,
     drafts = [],
     draftActions,
     externalDisplay = 'collapsed',
@@ -127,6 +128,9 @@
     onImageOpen?: (images: string[], index: number) => void;
     // Open a room by token: the shared room a private reply is about.
     onOpenRoom?: (token: string) => void;
+    // "Discuss in private chat" on a mail card with no note: open the private
+    // room with the composer linked to the thread (section 0c).
+    onDiscuss?: (discuss: MailDiscuss) => void;
     // Outbound mail this turn's task composed and the gate is holding. Placed
     // under the turn that produced it, which is where the drafted text and the
     // "this task also created a calendar event" summary are legible together.
@@ -839,7 +843,7 @@
       <!-- An email note: the thread turn's mail, collapsed to one line, and
            its held draft, which is acted on here and nowhere else. -->
       {#if outgoingCard}
-        <MailCard card={outgoingCard} collapsed />
+        <MailCard card={outgoingCard} collapsed {onDiscuss} />
       {/if}
       {#if draftActions}
         {#each drafts as draft (draft.id)}
@@ -941,7 +945,7 @@
 
       {#if isUser}
         {#if incomingCard}
-          <MailCard card={incomingCard} />
+          <MailCard card={incomingCard} {onDiscuss} />
         {:else if isExternal}
           <!-- Provenance first, body second. The header renders at every
                setting: it is what says a message arrived from outside and who
@@ -1100,7 +1104,7 @@
 				     fold into one chip each). Short lead-in narration and reasoning
 				     are dropped — the pre-tool work phase is the cue below. -->
         {#if outgoingCard}
-          <MailCard card={outgoingCard} />
+          <MailCard card={outgoingCard} {onDiscuss} />
         {/if}
         {#each outgoingCard ? [] : groups as g, gi (g.id)}
           {#if g.kind === 'activity'}

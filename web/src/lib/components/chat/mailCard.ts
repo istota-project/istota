@@ -3,7 +3,13 @@
  * stage 3). Every field comes from stored metadata or the stored body, never
  * from model text and never from a raw header read at render time.
  */
-import type { MailAddress, MailAttachment, OutgoingMailState, ReceivedMail } from '$lib/api';
+import type {
+  MailAddress,
+  MailAttachment,
+  MailDiscuss,
+  OutgoingMailState,
+  ReceivedMail,
+} from '$lib/api';
 import type { ChatMessage } from '$lib/stores/segments';
 
 export type MailDirection = 'in' | 'out';
@@ -20,6 +26,10 @@ export interface MailCardData {
   attachments: MailAttachment[];
   labels: Record<string, string>;
   notePath?: string;
+  // An email thread's card with no note: the private room to discuss it in,
+  // with the composer linked to the thread (section 0c). Outranks `notePath`
+  // where the page can act on it.
+  discuss?: MailDiscuss;
   // No stored metadata behind the card: no recipients, attachments or badge,
   // and no headers to show.
   fallback: boolean;
@@ -43,6 +53,7 @@ export function receivedCard(mail: ReceivedMail): MailCardData {
     attachments: mail.attachments ?? [],
     labels: mail.labels ?? {},
     notePath: mail.note_path || undefined,
+    discuss: mail.discuss ?? undefined,
     fallback: !!mail.fallback,
     senderCheck: mail.fallback ? undefined : mail.sender_check,
     trusted: mail.fallback ? undefined : mail.trusted,
@@ -69,6 +80,7 @@ export function sentCard(
     attachments: [],
     labels: mail.labels ?? {},
     notePath: mail.notePath,
+    discuss: mail.discuss,
     fallback: true,
     state: mail.state,
   };

@@ -129,6 +129,32 @@ describe('an incoming card', () => {
     expect(link?.hasAttribute('data-sveltekit-reload')).toBe(true);
   });
 
+  it('with no note, "Discuss in private chat" hands over the private room and the thread', async () => {
+    const onDiscuss = vi.fn();
+    render(MailCard, {
+      card: receivedCard(
+        received({ note_path: '/chat/r/web-1/t/7', discuss: { room: 'web-1', about: 'thr-1' } }),
+      ),
+      onDiscuss,
+    });
+    await openMenu();
+    const item = await screen.findByText('Discuss in private chat');
+    expect(item.closest('a')).toBeNull();
+    await fireEvent.click(item);
+    expect(onDiscuss).toHaveBeenCalledWith({ room: 'web-1', about: 'thr-1' });
+  });
+
+  it('with no handler, falls back to the link', async () => {
+    render(MailCard, {
+      card: receivedCard(
+        received({ note_path: '/chat/r/web-1/t/7', discuss: { room: 'web-1', about: 'thr-1' } }),
+      ),
+    });
+    await openMenu();
+    const link = (await screen.findByText('Discuss in private chat')).closest('a');
+    expect(link?.getAttribute('href')).toBe('/chat/r/web-1/t/7');
+  });
+
   it('lists the stored headers from "Show headers"', async () => {
     render(MailCard, { card: receivedCard(received()) });
     await openMenu();

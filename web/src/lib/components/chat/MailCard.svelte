@@ -13,7 +13,7 @@
     trustedButFailed,
     type MailCardData,
   } from './mailCard';
-  import type { MailAddress } from '$lib/api';
+  import type { MailAddress, MailDiscuss } from '$lib/api';
 
   /** Addresses a list shows before it folds the rest into "+N more". */
   const SHOWN_ADDRESSES = 3;
@@ -21,10 +21,14 @@
   let {
     card,
     collapsed = false,
+    onDiscuss,
   }: {
     card: MailCardData;
     // The one-line form used under a private note; it expands to the card.
     collapsed?: boolean;
+    // Opens the private room with the composer linked to the thread, for a
+    // card with no note to land on (section 0c).
+    onDiscuss?: (discuss: MailDiscuss) => void;
   } = $props();
 
   // Seeded from the prop once: the reader's expand is theirs from then on.
@@ -57,7 +61,13 @@
         onSelect: () => void copyText(address, { label: 'Address copied' }),
       });
     }
-    if (card.notePath) {
+    if (card.discuss && onDiscuss) {
+      const discuss = card.discuss;
+      items.push({
+        label: 'Discuss in private chat',
+        onSelect: () => onDiscuss(discuss),
+      });
+    } else if (card.notePath) {
       items.push({
         label: 'Discuss in private chat',
         href: `${base}${card.notePath}`,

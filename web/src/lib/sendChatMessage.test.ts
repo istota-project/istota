@@ -220,4 +220,21 @@ describe('sendChatMessage', () => {
     await sendChatMessage(1, 'hello');
     expect(sent[0]).not.toHaveProperty('client_msg_id');
   });
+
+  it('carries the linked thread as about_room', async () => {
+    const sent = captureBody();
+    await sendChatMessage(1, 'hello', [], [], undefined, undefined, { aboutRoom: 'thr-1' });
+    expect(sent[0]).toMatchObject({ about_room: 'thr-1' });
+    expect(sent[0]).not.toHaveProperty('reply_to_msg_id');
+  });
+
+  it('sends no about_room beside a reply-to row, which decides the link', async () => {
+    const sent = captureBody();
+    await sendChatMessage(1, 'hello', [], [], undefined, undefined, {
+      aboutRoom: 'thr-1',
+      replyToMsgId: 5,
+    });
+    expect(sent[0]).toMatchObject({ reply_to_msg_id: 5 });
+    expect(sent[0]).not.toHaveProperty('about_room');
+  });
 });
