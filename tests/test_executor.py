@@ -787,8 +787,13 @@ class TestDeveloperEnvVars:
     def test_no_token_means_no_forge_wrappers(self, tmp_path):
         config = self._make_config(tmp_path, gitlab_token="", github_token="")
         env, user_temp = self._hook_env(config, tmp_path)
-        assert "ISTOTA_PATH_PREPEND" not in env
-        assert not (user_temp / ".developer" / "gh").exists()
+        dev_bin = user_temp / ".developer"
+        # `istota-dev` is installed whenever `repos_dir` is set, token or not,
+        # so the PATH entry stays; only the wrappers depend on a token.
+        assert env.get("ISTOTA_PATH_PREPEND") == str(dev_bin)
+        assert (dev_bin / "istota-dev").exists()
+        for name in ("gh", "glab", "forge-policy.json"):
+            assert not (dev_bin / name).exists(), name
 
     def test_the_git_helper_calls_the_framework_shim(self, tmp_path):
         """The proxy branch of setup_env. With the proxy on, the helper must

@@ -4581,7 +4581,9 @@ def check_forge_transport(config: "Config", probe: bool) -> CheckResult:
     its scheme is this check's business.
 
     The detail names the URL and never the token. A URL can carry userinfo, so
-    it is redacted rather than printed raw.
+    it is redacted rather than printed raw. `load_config` refuses userinfo in
+    either forge URL (ISSUE-620, `config.forge_url_errors`), so the `embedded`
+    arm is a backstop for a `Config` built without the loader.
     """
     dev, reason = _dev_gate(config)
     if dev is None:

@@ -1438,6 +1438,11 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # `[security.network] extra_hosts` buys reachability and no credential, so the
 # clone still fails. There is no supported way to configure two of either.
 #
+# Neither URL may carry userinfo (`https://user:secret@host`): both reach the
+# task's sandbox as written, so the config fails to load rather than hand the
+# credential to every developer task. The token goes in `gitlab_token` /
+# `github_token`.
+#
 # `git` itself is not wrapped and knows nothing about either forge: public
 # reads work against any allowlisted host, authenticated pushes only against
 # the two configured ones, and no policy gates git at all. Force-push
