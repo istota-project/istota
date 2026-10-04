@@ -32,7 +32,8 @@ later `-c` beats the repository's own value.
 Every entry but the first is a config key that either runs a command or
 reshapes output a caller parses; `--no-replace-objects` leads the list and says
 at its own line why it is there. `core.fsmonitor`, `diff.external` and the
-`gpg.*` programs are the run-a-command ones — `gpg.program` is reached from a
+`gpg.*` programs, `credential.helper` and `core.askPass` are the run-a-command
+ones — `gpg.program` is reached from a
 plain `git log` whenever `log.showSignature` is on, which is itself just a
 repo-local boolean, and that pair was a working escape past the first three.
 `color.ui` is not an execution route but is just as load-bearing for a parser:
@@ -84,6 +85,14 @@ GIT_HARDENING = (
     "gpg.ssh.program=/nonexistent",
     "-c",
     "gpg.x509.program=/nonexistent",
+    # A challenged https fetch asks both of these, and each names a program in
+    # repository config; `GIT_TERMINAL_PROMPT=0` stops neither. An empty
+    # `credential.helper` clears the list, an empty `core.askPass` disables it
+    # (ISSUE-615). `GIT_ASKPASS` in the daemon's environment still outranks it.
+    "-c",
+    "credential.helper=",
+    "-c",
+    "core.askPass=",
     "-c",
     "color.ui=false",
     "-c",
@@ -96,10 +105,10 @@ GIT_HARDENING = (
 
 #: Environment overlay for a daemon-side `git`, applied over `os.environ`.
 #:
-#: The pair with the `-c` list above, not a substitute for it: these four cover
-#: the system and user config, the credential prompt and the optional index
-#: lock, and none of them touches the repository's own config, which is the
-#: file the model can write.
+#: The pair with the `-c` list above, not a substitute for it: these cover the
+#: system and user config, the credential prompt, the optional index lock and
+#: the transport, and none of them touches the repository's own config, which
+#: is the file the model can write.
 #:
 #: `GIT_CONFIG_NOSYSTEM` and `GIT_CONFIG_GLOBAL=/dev/null` keep a developer's
 #: `~/.gitconfig` — aliases, `url.*.insteadOf` rewrites, a credential helper —
@@ -116,6 +125,22 @@ GIT_HARDENING = (
 #: of every worktree it examined and nothing would ever be reaped after the
 #: first pass.
 #:
+#: `GIT_NO_LAZY_FETCH=1` and `GIT_ALLOW_PROTOCOL=https` are the transport half
+#: (ISSUE-615). In a partial clone any object read fetches what is missing from
+#: the promisor remote, and a fetch runs whatever transport repository config
+#: describes: `remote.<name>.uploadpack` for a local path or `file://`, the
+#: command line of an `ext::` URL (`protocol.ext.allow` is repository config
+#: too), `core.sshCommand` for ssh. Each is a program run as the daemon user,
+#: outside the sandbox. The first makes a missing object an error instead of a
+#: fetch (git 2.44 and later; older git ignores it), the second refuses every
+#: transport but https whatever the config says, and also stands behind the
+#: first on an older git. `worktree_reaper`'s explicit `git fetch origin` is the
+#: one caller that fetches on purpose, and only an https remote can still
+#: answer it. That closes program execution, not the fetch: it still goes to a
+#: URL the repository chose, outside the CONNECT allowlist, and still reads
+#: `http.*` config such as `http.cookieFile`, whose URL-scoped spelling would
+#: outrank a `-c` override.
+#:
 #: Half the policy: what is *set*. The other half is `GIT_SUBPROCESS_ENV_UNSET`
 #: below, and `git_env` is what applies both — reach for that rather than for
 #: either constant, or a call site ends up with half the policy.
@@ -131,6 +156,8 @@ GIT_SUBPROCESS_ENV: Mapping[str, str] = MappingProxyType(
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_ALLOW_PROTOCOL": "https",
     }
 )
 
@@ -167,9 +194,8 @@ GIT_SUBPROCESS_ENV: Mapping[str, str] = MappingProxyType(
 #:   every one of them, so each key `GIT_HARDENING` names is already safe. A key
 #:   it does not name is reachable through them, and equally through the
 #:   repository's own config, which is the exposure this module is built around
-#:   rather than a new one. Dropping the first would also change what the
-#:   reaper's `fetch` can authenticate with, since the developer skill registers
-#:   its credential helper that way.
+#:   rather than a new one. A credential helper registered through them is
+#:   cleared by the `-c credential.helper=` in `GIT_HARDENING` all the same.
 #: - `GIT_CEILING_DIRECTORIES` can only *narrow* discovery: it turns an upward
 #:   walk into a refusal, never into a different repository. Measured, it does
 #:   not bite any caller here at all, since every one passes a path whose `.git`
@@ -180,9 +206,10 @@ GIT_SUBPROCESS_ENV: Mapping[str, str] = MappingProxyType(
 #:   reach no caller that parses stdout. They would land in `repos_relocate`'s
 #:   `merge_stderr=True` text, which goes to an operator rather than a parser,
 #:   and they are that operator's way of debugging a failing sweep.
-#: - `GIT_SSH_COMMAND` and `GIT_ASKPASS` name a program, but only on the network
-#:   path this module's one fetching caller expects to fail anyway, and they are
-#:   a deployment's legitimate way to give that fetch an identity.
+#: - `GIT_ASKPASS` names a program, but it comes from the daemon's environment
+#:   rather than the repository, and it is a deployment's legitimate way to
+#:   give the reaper's fetch an identity. `GIT_SSH_COMMAND` is unreachable now
+#:   that `GIT_ALLOW_PROTOCOL` refuses ssh.
 GIT_SUBPROCESS_ENV_UNSET: tuple[str, ...] = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -223,7 +250,8 @@ def run_git(
 
     ``GIT_HARDENING`` first, before ``-C``: the repository this runs against is
     model-writable, and a plain ``git`` there executes ``core.fsmonitor``,
-    ``diff.external`` or a ``gpg.*`` program of the writer's choosing, as the
+    ``diff.external``, a ``gpg.*`` program or a credential program of the
+    writer's choosing, as the
     daemon user, inheriting the daemon's environment. A later ``-c`` beats the
     repository's own value, which is why the overrides lead.
 

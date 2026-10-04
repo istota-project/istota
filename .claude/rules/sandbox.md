@@ -118,7 +118,7 @@ Scoping a user id under a root (ISSUE-402). A plain join is not a check: `PurePa
 
 ## sandbox/git_hardening.py
 
-`-c` overrides stopping repo config running programs (`core.fsmonitor`, `diff.external`, `gpg.*`, plus output-reshaping keys parsers need). Repo-local config escapes `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL` and is model-written under `developer.repos_dir`. Extracted from `skills/code_review/engine.py` (still re-exported) so `worktree_reaper` avoids importing `istota.skills` (~190ms); same reason as `sandbox/forge_bin.py` and `lib/untrusted.py` (ISSUE-512). No imports.
+`-c` overrides stopping repo config running programs (`core.fsmonitor`, `diff.external`, `gpg.*`, `credential.helper`, `core.askPass`, plus output-reshaping keys parsers need). **A fetch is the other route** (ISSUE-615): in a partial clone every object read lazily fetches from the promisor remote, and any fetch runs the transport repo config names (`remote.<name>.uploadpack` on a local path, an `ext::` command line, `core.sshCommand`) as the daemon user. `GIT_SUBPROCESS_ENV` carries `GIT_NO_LAZY_FETCH=1` (git 2.44+) and `GIT_ALLOW_PROTOCOL=https`, which outranks `protocol.*.allow` in repo config, so the reaper's `git fetch origin` reaches only an https remote. Repo-local config escapes `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL` and is model-written under `developer.repos_dir`. Extracted from `skills/code_review/engine.py` (still re-exported) so `worktree_reaper` avoids importing `istota.skills` (~190ms); same reason as `sandbox/forge_bin.py` and `lib/untrusted.py` (ISSUE-512). No imports.
 
 ## sandbox/git_remote_scrub.py
 

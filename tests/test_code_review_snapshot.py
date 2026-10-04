@@ -519,3 +519,50 @@ class TestSweep:
 
     def test_the_sweep_age_is_an_hour(self):
         assert snapshot.RUN_DIR_MAX_AGE_SECONDS == 3600
+
+
+class TestAPartialClone:
+    """ISSUE-615. A checkout under `developer.repos_dir` can be a partial clone,
+    and in one every blob read (`git diff`, `cat-file --batch`) fetches what is
+    missing from the promisor remote, through the transport its own config
+    names, as the daemon user. `remote.origin.uploadpack` makes that a program
+    of the repository's choosing."""
+
+    @pytest.fixture
+    def partial(self, repos_root, tmp_path):  # noqa: F811 - the imported fixture
+        upstream = tmp_path / "upstream"
+        upstream.mkdir()
+        run_git(upstream, "init", "-q", "-b", "main", ".")
+        (upstream / "app.py").write_text("def existing():\n    return 1\n")
+        commit(upstream, "base")
+        run_git(upstream, "checkout", "-q", "-b", "feature")
+        (upstream / "app.py").write_text("def existing():\n    return 2\n")
+        commit(upstream, "app: change")
+        bare = tmp_path / "upstream.git"
+        run_git(tmp_path, "clone", "-q", "--bare", str(upstream), str(bare))
+        run_git(bare, "config", "uploadpack.allowFilter", "true")
+
+        wt = repos_root / "proj"
+        run_git(
+            repos_root, "clone", "-q", "--no-checkout", "--filter=blob:none",
+            f"file://{bare}", str(wt),
+        )
+        # The bare clone's HEAD is `feature`, so that is what was cloned to.
+        run_git(wt, "branch", "-q", "main", "origin/main")
+
+        marker = tmp_path / "upload-pack-ran"
+        script = tmp_path / "upload-pack.sh"
+        script.write_text(f"#!/bin/sh\ntouch '{marker}'\nexec git-upload-pack \"$@\"\n")
+        script.chmod(0o755)
+        run_git(wt, "config", "remote.origin.uploadpack", str(script))
+        return wt, marker
+
+    def test_reviewing_it_fetches_nothing(self, partial, temp_root):
+        wt, marker = partial
+
+        try:
+            snap(wt, temp_root)
+        except ReviewError:
+            pass  # a missing blob may refuse the diff; the point is what did not run
+
+        assert not marker.exists(), "the review lazily fetched through upload-pack"

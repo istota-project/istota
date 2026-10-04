@@ -357,7 +357,8 @@ def _upstream_head(bare: Path) -> str:
         logger.info(
             "worktree_reaper: could not fetch %s (expected on a private repo — "
             "the git credential helper is registered per task, not for the "
-            "scheduler). Comparing against the local origin/HEAD, which can only "
+            "scheduler — and on any origin that is not https, which the "
+            "scheduler refuses to fetch from). Comparing against the local origin/HEAD, which can only "
             "hold more back; the next developer task on this repository will "
             "refresh it.", bare,
         )
