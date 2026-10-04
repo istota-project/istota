@@ -841,9 +841,15 @@ class TestTheBodyPrescribesNoWorkflow:
             assert mechanic in body, f"{mechanic!r} is no longer named as non-negotiable"
 
     def test_no_surviving_test_or_review_mandate(self):
-        """Scans for the imperative forms that would re-impose a process."""
+        """Scans for the imperative forms that would re-impose a process.
+
+        The last two were an Error Handling bullet ("Tests fail: Fix the code
+        and re-run. Do not push failing tests.") that survived ISSUE-337
+        because this list named only the mandates that change removed."""
         body = self._body()
         for phrase in (
+            "Do not push failing tests",
+            "Fix the code and re-run",
             "always run the full suite",
             "run a review before",
             "must run the tests",
@@ -1116,9 +1122,19 @@ class TestLoadBudget:
     that deletes orders should be able to make. What it leaves behind is worth
     knowing before the next edit: the bundle is at 776 of 776, so the next line
     added anywhere in the three bodies raises the budget, rules file first.
+
+    776 -> 610, the first reduction, by the same procedure applied downwards:
+    the rules file first, then this. Most of the raises above paid for defects
+    in shell recipes the model copied (ISSUE-125, -264, -269, -291), and those
+    recipes are now `istota-dev`, a program installed into the sandbox, so the
+    body describes four verbs and their exit statuses instead of carrying the
+    script. The developer body went from 472 to 393 lines with an Issues
+    section added; the three bodies measured 585, and the ceiling is that
+    rounded up to 590 plus 20, so a small fix lands without a raise and a
+    recipe written back in does not.
     """
 
-    BUDGET_LINES = 776
+    BUDGET_LINES = 610
 
     def test_three_bodies_fit_the_budget(self):
         total = 0
@@ -1150,307 +1166,6 @@ class TestLoadBudget:
         )
 
 
-# ---------------------------------------------------------------------------
-# The bare-clone recipe, executed rather than described.
-
-GIT_ISOLATION = {
-    "GIT_CONFIG_GLOBAL": os.devnull,
-    "GIT_CONFIG_NOSYSTEM": "1",
-    "GIT_AUTHOR_NAME": "Test",
-    "GIT_AUTHOR_EMAIL": "test@example.invalid",
-    "GIT_COMMITTER_NAME": "Test",
-    "GIT_COMMITTER_EMAIL": "test@example.invalid",
-}
-
-
-def _git(cwd: Path, *args: str) -> str:
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=str(cwd), capture_output=True, text=True,
-        env={**os.environ, **GIT_ISOLATION},
-    )
-    if proc.returncode != 0:
-        raise AssertionError(f"git {' '.join(args)} failed:\n{proc.stderr}")
-    return proc.stdout
-
-
-def _extract(marker: str, stop: str) -> str:
-    """Lift a shell fragment out of the shipped `developer` body.
-
-    The fragment is *run*, not restated, so a body edited back to the broken
-    form fails these tests instead of quietly passing against a copy kept here.
-    """
-    body = (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text().splitlines()
-    starts = [i for i, line in enumerate(body) if marker in line]
-    assert len(starts) == 1, (
-        f"expected exactly one {marker!r} in developer/skill.md, got {len(starts)}"
-    )
-    start = starts[0]
-    end = next(i for i in range(start, len(body)) if stop in body[i])
-    return "\n".join(body[start:end + 1])
-
-
-def _run_fragment(fragment: str, bare: Path, **env: str) -> str:
-    proc = subprocess.run(
-        ["bash", "-c", fragment],
-        capture_output=True, text=True,
-        env={**os.environ, **GIT_ISOLATION, "BARE_DIR": str(bare), **env},
-    )
-    assert proc.returncode == 0, f"fragment failed:\n{fragment}\n{proc.stderr}"
-    return proc.stdout
-
-
-# The always-run block that brings any clone to the invariant: origin/HEAD
-# resolves, HEAD is a refs/heads/ ref that does not. Extracted as one piece
-# because its three steps depend on each other's variables.
-_INVARIANT_BLOCK = ("rev-parse -q --verify origin/HEAD", "done")
-
-
-def _drop_origin_head(bare: Path) -> None:
-    """Remove `refs/remotes/origin/HEAD` if this git created one on fetch.
-
-    Git 2.48 learned to write it during `fetch`; the devbox runs git 2.39,
-    which does not. Normalising to *absent* is what makes these tests say the
-    same thing on both, rather than passing on the developer's machine because
-    a newer git quietly did the recipe's job for it.
-    """
-    subprocess.run(
-        ["git", "-C", str(bare), "symbolic-ref", "-d", "refs/remotes/origin/HEAD"],
-        capture_output=True, text=True, env={**os.environ, **GIT_ISOLATION},
-    )
-
-
-@pytest.fixture
-def bare_clone(tmp_path) -> Path:
-    """A bare clone in the shape clones made before ISSUE-269 are still in:
-    remote-tracking refspec configured, fetched, HEAD pointed into
-    `refs/remotes/origin/*`. The clone block overwrites HEAD when a test runs
-    it; the repair path is what has to cope with a clone left like this."""
-    upstream = tmp_path / "upstream"
-    upstream.mkdir()
-    _git(upstream, "init", "-q", "-b", "main", ".")
-    _git(upstream, "commit", "-q", "--allow-empty", "-m", "init")
-
-    bare = tmp_path / "project.git"
-    _git(tmp_path, "clone", "-q", "--bare", str(upstream), str(bare))
-    _git(bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
-    _git(bare, "fetch", "-q", "origin")
-    _git(bare, "symbolic-ref", "HEAD", "refs/remotes/origin/main")
-    return bare
-
-
-class TestTheCloneEnablesTheRepositorysOwnHooks:
-    """ISSUE-291. `core.hooksPath` is per-clone local config, so a bare clone
-    made by the recipe used `$GIT_DIR/hooks` — nothing but `.sample` files —
-    and a repository whose committed hooks scan staged content for credentials
-    got none of that in the checkouts the agent actually commits from. The
-    gitleaks work is inert without this line, which is why it is run here
-    rather than read."""
-
-    FRAGMENT = ("config core.hooksPath", "config core.hooksPath")
-
-    def test_the_recipe_sets_it_on_the_bare_clone(self, bare_clone):
-        _run_fragment(_extract(*self.FRAGMENT), bare_clone)
-
-        assert _git(bare_clone, "config", "--get", "core.hooksPath").strip() == ".githooks"
-
-    def test_a_worktree_inherits_it(self, bare_clone, tmp_path):
-        """Worktrees are where commits happen, and they read the bare repo's
-        config — so setting it once at clone time covers every branch."""
-        _run_fragment(_extract(*self.FRAGMENT), bare_clone)
-        tree = tmp_path / "wt"
-        _git(bare_clone, "worktree", "add", "-q", str(tree), "main")
-
-        assert _git(tree, "config", "--get", "core.hooksPath").strip() == ".githooks"
-
-    def test_an_existing_clone_gets_it_on_a_later_pass(self, bare_clone):
-        """`docs/development/secret-scanning.md` tells the reader that a clone
-        predating this step repairs itself rather than needing the config
-        applied by hand. That holds only because the line sits outside the
-        `if [ ! -d "$BARE_DIR" ]` guard, which the fragment test above cannot
-        see — so run the whole block against a directory that already exists."""
-        assert subprocess.run(
-            ["git", "-C", str(bare_clone), "config", "--get", "core.hooksPath"],
-            capture_output=True,
-        ).returncode != 0, "precondition: the fixture clone has no hooksPath set"
-
-        fragment = _extract('FRESH=""', "config core.hooksPath")
-        assert 'if [ ! -d "$BARE_DIR" ]' in fragment, (
-            "the extracted range has to span the guard, or this passes for free"
-        )
-        _run_fragment(fragment, bare_clone)
-
-        assert _git(bare_clone, "config", "--get", "core.hooksPath").strip() == ".githooks"
-
-
-class TestBareCloneRecipe:
-    """Two shell defects that shipped in the body and that no test could see,
-    because the body was only ever read as text. Both surfaced by running the
-    documented recipe against a real repository."""
-
-    def test_fossil_deletion_survives_the_repointed_head(self, bare_clone):
-        """ISSUE-125 deletes the clone-day `refs/heads/*` fossils, but the step
-        before it used to point HEAD at `refs/remotes/origin/main`. Every `git
-        branch` subcommand then failed with `fatal: HEAD not found below
-        refs/heads!` before deleting anything, so the fossils the loop exists to
-        remove survived every clone."""
-        assert "refs/heads/main" in _git(bare_clone, "for-each-ref", "--format=%(refname)")
-
-        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone, FRESH="1")
-
-        refs = _git(bare_clone, "for-each-ref", "--format=%(refname)")
-        assert "refs/heads/main" not in refs, f"clone-day fossil survived: {refs}"
-        assert "refs/remotes/origin/main" in refs, "the remote-tracking ref must remain"
-
-    def test_the_loop_deletes_the_head_that_head_names(self, bare_clone):
-        """The block points HEAD at `refs/heads/$DEFAULT` *before* the loop
-        runs, so the ref the loop must drop is the one HEAD names. Deleting it
-        is the step that leaves HEAD unborn; a delete that refused here would
-        put the fossil back within reach of `git show`."""
-        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone, FRESH="1")
-
-        assert "refs/heads/main" not in _git(bare_clone, "for-each-ref", "--format=%(refname)")
-        assert _git(bare_clone, "symbolic-ref", "HEAD").strip() == "refs/heads/main"
-
-    def test_a_task_branch_survives_the_loop_on_an_existing_clone(self, bare_clone, tmp_path):
-        """On a clone that already exists, `refs/heads/` holds the branch of
-        every worktree ever made in it — including one whose worktree was
-        pruned, which may be the only copy of that work. Only the ref HEAD
-        names is a fossil there, and a live worktree's branch is skipped on
-        both paths."""
-        live = tmp_path / "live-worktree"
-        _git(bare_clone, "symbolic-ref", "HEAD", "refs/heads/main")
-        _git(bare_clone, "worktree", "add", "-q", "-b", "istota/9-live", str(live), "origin/main")
-        _git(bare_clone, "branch", "istota/8-pruned", "origin/main")
-
-        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
-
-        refs = _git(bare_clone, "for-each-ref", "--format=%(refname)", "refs/heads/")
-        assert "refs/heads/istota/8-pruned" in refs, f"unpushed task branch deleted: {refs}"
-        assert "refs/heads/istota/9-live" in refs, f"live worktree branch deleted: {refs}"
-        assert "refs/heads/main" not in refs, f"the fossil HEAD names survived: {refs}"
-
-    def test_default_branch_falls_back_when_origin_head_is_absent(self, bare_clone):
-        """`symbolic-ref ... | sed ... || echo "main"` takes the *pipeline's*
-        exit status, which is sed's, and sed succeeds on empty input. So the
-        fallback never fired: DEFAULT_BRANCH came out empty and the worktree was
-        created from `origin/`, an unknown revision. `refs/remotes/origin/HEAD`
-        is absent on any clone made before git 2.48, so this was the ordinary
-        path rather than an edge case."""
-        _drop_origin_head(bare_clone)
-
-        fragment = _extract(
-            "symbolic-ref --short refs/remotes/origin/HEAD", "DEFAULT_BRANCH:-main"
-        )
-        out = _run_fragment(fragment + '\necho "$DEFAULT_BRANCH"', bare_clone)
-
-        assert out.strip() == "main", f"fallback did not fire, got {out.strip()!r}"
-        # The point of a fallback: the ref it names has to actually resolve.
-        _git(bare_clone, "rev-parse", f"origin/{out.strip()}")
-
-    def test_default_branch_reads_origin_head_when_present(self, bare_clone):
-        """The fallback must not shadow a repository that is on `master`."""
-        _git(bare_clone, "update-ref", "refs/remotes/origin/master", "refs/remotes/origin/main")
-        _git(bare_clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
-
-        fragment = _extract(
-            "symbolic-ref --short refs/remotes/origin/HEAD", "DEFAULT_BRANCH:-main"
-        )
-        out = _run_fragment(fragment + '\necho "$DEFAULT_BRANCH"', bare_clone)
-
-        assert out.strip() == "master", f"origin/HEAD ignored, got {out.strip()!r}"
-
-    def _assert_invariant(self, bare: Path, branch: str = "main") -> None:
-        """Both halves, stated once: origin/HEAD resolves, HEAD is a
-        `refs/heads/` ref that does not."""
-        assert _git(bare, "rev-parse", "--verify", "origin/HEAD").strip()
-        assert _git(bare, "symbolic-ref", "HEAD").strip() == f"refs/heads/{branch}"
-        proc = subprocess.run(
-            ["git", "-C", str(bare), "rev-parse", "--verify", branch],
-            capture_output=True, text=True, env={**os.environ, **GIT_ISOLATION},
-        )
-        assert proc.returncode != 0, f"a local `{branch}` resolved; the fossil is readable"
-
-    def test_worktree_add_survives_the_block(self, bare_clone, tmp_path):
-        """ISSUE-269. `worktree add -b` writes a new local head and resolves
-        HEAD while doing it, so a HEAD under `refs/remotes/` aborts it with
-        `fatal: HEAD not found below refs/heads!` and no worktree is created —
-        the very next step of the lifecycle has nothing to work in."""
-        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone, FRESH="1")
-
-        work = tmp_path / "project--task"
-        proc = subprocess.run(
-            ["git", "-C", str(bare_clone), "worktree", "add", "-b", "istota/1-slug",
-             str(work), "origin/main"],
-            capture_output=True, text=True, env={**os.environ, **GIT_ISOLATION},
-        )
-        assert proc.returncode == 0, f"worktree add failed:\n{proc.stderr}"
-        assert (work / ".git").exists(), "worktree directory was not created"
-
-    def test_a_fresh_clone_reaches_the_invariant(self, bare_clone):
-        """Both halves at once. Moving HEAD back below `refs/heads/` must not
-        resurrect a *readable* fossil — it stays unborn, so naming a local
-        branch still errors instead of returning clone-day bytes (ISSUE-125),
-        and `origin/HEAD` is established because `clone --bare` never writes
-        it and git only started doing so on fetch in 2.48."""
-        _drop_origin_head(bare_clone)
-
-        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone, FRESH="1")
-
-        self._assert_invariant(bare_clone)
-
-    def test_an_existing_clone_reaches_the_invariant(self, bare_clone, tmp_path):
-        """The clone step sits inside `if [ ! -d "$BARE_DIR" ]`, so a clone that
-        already exists — the production one did — is never revisited by it. The
-        block runs on every pass for that reason, and has to land the same
-        invariant from the broken shape, fossil included."""
-        _drop_origin_head(bare_clone)
-        assert _git(bare_clone, "symbolic-ref", "HEAD").strip() == "refs/remotes/origin/main"
-        assert "refs/heads/main" in _git(bare_clone, "for-each-ref", "--format=%(refname)")
-
-        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
-
-        self._assert_invariant(bare_clone)
-        work = tmp_path / "project--task"
-        _git(bare_clone, "worktree", "add", "-b", "istota/1-slug", str(work), "origin/main")
-
-    def test_a_dangling_origin_head_is_refreshed(self, bare_clone):
-        """`origin/HEAD` survives the upstream default branch being renamed, so
-        it can name a ref that no longer exists — `code_review`'s `_default_base`
-        carries the same note. A presence check reads that as healthy, and the
-        block would then point HEAD at a branch nothing can resolve and hand the
-        worktree step a base that does not exist."""
-        _git(bare_clone, "update-ref", "refs/remotes/origin/gone", "refs/remotes/origin/main")
-        _git(bare_clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/gone")
-        _git(bare_clone, "update-ref", "-d", "refs/remotes/origin/gone")
-
-        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
-
-        self._assert_invariant(bare_clone)
-
-    def test_a_detached_head_is_repaired_quietly(self, bare_clone):
-        """A bare HEAD holding a raw sha is a state to repair. `symbolic-ref`
-        without `-q` prints `fatal: ref HEAD is not a symbolic ref` while doing
-        it, and the lifecycle tells the model to stop on failure output."""
-        _git(bare_clone, "update-ref", "--no-deref", "HEAD", "refs/remotes/origin/main")
-
-        out = _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
-
-        self._assert_invariant(bare_clone)
-        assert "fatal:" not in out
-
-    def test_the_block_is_idempotent_and_respects_master(self, bare_clone):
-        """It runs on every pass, so a second pass over a healthy clone has to
-        change nothing — and must read the default branch rather than assume
-        `main` on a repository using `master`."""
-        _git(bare_clone, "update-ref", "refs/remotes/origin/master", "refs/remotes/origin/main")
-        _git(bare_clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
-
-        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
-        self._assert_invariant(bare_clone, branch="master")
-        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
-        self._assert_invariant(bare_clone, branch="master")
-
 def _fenced_block(body: str, marker: str) -> str:
     """The whole ``` block containing `marker`.
 
@@ -1474,22 +1189,6 @@ def _stanza_through(block: str, marker: str, closer: str) -> str:
     start = next(i for i, line in enumerate(lines) if marker in line)
     end = next(i for i in range(start, len(lines)) if lines[i].strip() == closer)
     return "\n".join(lines[start:end + 1])
-
-
-def _stanza_through_fi(block: str, marker: str) -> str:
-    """From the line containing `marker` through the `fi` closing its guard.
-
-    Equality on the stripped line rather than a substring test: `confirm`
-    contains `fi`, and matching that would lift a fragment stopping two lines
-    before the guard it is meant to exercise — passing while proving nothing.
-    """
-    lines = block.splitlines()
-    start = next(i for i, line in enumerate(lines) if marker in line)
-    end = next(i for i in range(start, len(lines)) if lines[i].strip() == "fi")
-    return "\n".join(lines[start:end + 1])
-
-
-_NAMESPACE_CHECK_MARKER = "RESOLVED=$(glab repo view"
 
 
 @pytest.fixture
@@ -1545,12 +1244,6 @@ def _run_recipe(fragment: str, bin_dir: Path, **env) -> subprocess.CompletedProc
     )
 
 
-def _namespace_check(body: str) -> str:
-    return _stanza_through_fi(
-        _fenced_block(body, _NAMESPACE_CHECK_MARKER), _NAMESPACE_CHECK_MARKER
-    )
-
-
 class TestGlabFieldReads:
     """ISSUE-268. `glab` grew `--jq` well after the version the Ansible path
     installs, so every glab field read written in the `gh` idiom exits `unknown
@@ -1591,50 +1284,6 @@ class TestGlabFieldReads:
         standing it regenerates them the next time someone adds a field read."""
         assert "`--json`/`-F json` plus `--jq`/`-q`" not in self._body(), (
             "the claim that produced all seven broken recipes is back in the body"
-        )
-
-    def test_namespace_check_reads_the_project_without_jq(self, glab_153):
-        """The check has to actually resolve a namespace on the old glab.
-        `unknown flag` assigned an empty string, which is how a guard that never
-        ran still looked like it was running."""
-        proc = _run_recipe(
-            "set -o pipefail\n"
-            + _namespace_check(self._body()).replace("namespace/project", "acme/widget")
-            + '\necho "RESOLVED=$RESOLVED"',
-            glab_153,
-            GLAB_STUB_JSON='{"path_with_namespace": "acme/widget"}',
-        )
-
-        assert proc.returncode == 0, f"aborted on a matching project:\n{proc.stderr}"
-        assert "RESOLVED=acme/widget" in proc.stdout
-
-    def test_namespace_check_aborts_on_the_wrong_project(self, glab_153):
-        """The case the check exists for."""
-        proc = _run_recipe(
-            "set -o pipefail\n"
-            + _namespace_check(self._body()).replace("namespace/project", "acme/widget"),
-            glab_153,
-            GLAB_STUB_JSON='{"path_with_namespace": "someone-else/widget"}',
-        )
-
-        assert proc.returncode != 0, "a push to the wrong project was not stopped"
-        assert "someone-else/widget" in proc.stdout + proc.stderr
-
-    def test_namespace_check_fails_closed_when_glab_fails(self, glab_153):
-        """The property the entry asked for by name. A tool error must not
-        become a value: the old shape turned `unknown flag` into an empty string
-        and then compared it, so the abort was an accident of the comparison
-        rather than a decision — and a recipe whose expected value was itself
-        empty would have sailed through."""
-        proc = _run_recipe(
-            "set -o pipefail\n"
-            + _namespace_check(self._body()).replace("namespace/project", ""),
-            glab_153,
-            GLAB_STUB_FAIL="1",
-        )
-
-        assert proc.returncode != 0, (
-            "glab failed and the check passed — the empty result compared equal"
         )
 
     def test_every_piping_recipe_sets_pipefail_before_it_pipes(self):
@@ -1711,15 +1360,13 @@ class TestCredentialFreeConfigs:
     helper the skill registers, and every worktree cut from the clone inherits
     it. `git remote -v` and `git config --list` then print it into the model's
     context as a matter of routine. The daemon strips these on the way in
-    (`istota.sandbox.git_remote_scrub`); the body has to state the invariant and give
-    the model a check too, because the daemon's sweep runs at setup and the
-    model can be handed a repository at any point after that."""
+    (`istota.sandbox.git_remote_scrub`); the body has to state the invariant, and
+    the model's own check is `istota-dev`'s, run by `clone` and `worktree` and
+    tested in `tests/test_istota_dev.py` against the same cases as the scrub.
+    It used to be an awk recipe in the body, run here as a fragment."""
 
     def _body(self) -> str:
         return (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text()
-
-    def _preflight(self) -> str:
-        return _extract('config --list --includes | awk', "# end of the credential check")
 
     def test_the_invariant_is_stated(self):
         assert "**A remote URL never carries a credential.**" in self._body(), (
@@ -1734,80 +1381,93 @@ class TestCredentialFreeConfigs:
                 f"developer/skill.md:{i} shows a credentialed URL: {line!r}"
             )
 
-    def test_flags_a_credentialed_remote_by_name_only(self, bare_clone):
-        """The fragment is *run*, not restated. It must print the setting's
-        name and never the value — echoing the value is the leak it looks for."""
-        _git(bare_clone, "remote", "add", "leaky",
-             "https://oauth2:glpat-xxxxxxxxxxxxxxxxxxxx@gitlab.com/ns/p.git")
+    def test_the_body_says_exit_3_is_a_stop(self):
+        body = self._body()
+        assert "**A credential in the repository's own config is a stop.**" in body
+        assert "exit 3" in body
 
-        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
 
-        assert out.split() == ["remote.leaky.url"]
-        assert "glpat-xxxxxxxxxxxxxxxxxxxx" not in out
+class TestTheBodyUsesTheHelper:
+    """The repository recipes moved into `istota-dev` (developer helper
+    commands spec). The recipes' defects were shell defects a model retyping
+    them could make again; these guard against a recipe being written back in
+    beside the verb that replaced it, and against the body and the program
+    disagreeing about what an exit status means."""
 
-    def test_is_silent_on_credential_free_remotes(self, bare_clone):
-        """A bare-username https remote and an scp-style ssh remote both
-        contain an `@` and neither carries a secret. Flagging them would make
-        the check noise the model learns to skip."""
-        _git(bare_clone, "remote", "add", "ssh", "git@github.com:ns/p.git")
-        _git(bare_clone, "remote", "add", "user", "https://oauth2@gitlab.com/ns/p.git")
-        _git(bare_clone, "remote", "set-url", "origin", "https://gitlab.com/ns/p.git")
+    def _body(self) -> str:
+        return (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text()
 
-        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+    @pytest.mark.parametrize("verb", ["clone", "worktree", "show", "verify-remote"])
+    def test_every_verb_is_documented(self, verb):
+        assert f"istota-dev {verb} " in self._body()
 
-        assert out.strip() == "", f"false positive: {out!r}"
+    @pytest.mark.parametrize("recipe", [
+        "git clone --bare",
+        "remote set-head origin -a",
+        "config --list --includes",
+        "worktree add -b",
+        "glab repo view -F json",
+        "gh repo view --json nameWithOwner",
+    ])
+    def test_no_retired_recipe_is_back(self, recipe):
+        lines = [ln for ln in _fenced_lines(self._body()) if recipe in ln]
+        assert lines == [], f"a recipe istota-dev replaced is back in a fence: {lines}"
 
-    def test_catches_a_pushurl(self, bare_clone):
-        """`git remote -v` prints the pushurl on its own line, so a credential
-        there leaks exactly the same way."""
-        _git(bare_clone, "remote", "set-url", "origin", "https://gitlab.com/ns/p.git")
-        _git(bare_clone, "config", "remote.origin.pushurl",
-             "https://oauth2:glpat-xxxxxxxxxxxxxxxxxxxx@gitlab.com/ns/p.git")
+    def test_both_merge_request_recipes_verify_the_remote(self):
+        body = self._body()
+        for marker in ("glab mr create", "gh pr create"):
+            block = _fenced_block(body, marker)
+            # A bare `|| exit` keeps the helper's status, so 3 (a credential
+            # in origin) does not arrive as 1 (a mismatch).
+            assert re.search(r"istota-dev verify-remote \S+ \|\| exit\s", block), (
+                f"the {marker!r} recipe pushes without checking origin first"
+            )
 
-        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+    def test_the_exit_table_matches_the_program(self):
+        from istota.skills.developer import istota_dev
 
-        assert out.split() == ["remote.origin.pushurl"]
+        section = _section(self._body(), "## Error Handling")
+        table = section[section.index("`istota-dev` has exit statuses"):]
+        rows = re.findall(r"^\| (\d) \|", table, re.MULTILINE)
+        codes = sorted(
+            value for name, value in vars(istota_dev).items()
+            if name.startswith("EXIT_") and isinstance(value, int)
+        )
+        assert [int(r) for r in rows] == codes
 
-    def test_catches_an_empty_username(self, bare_clone):
-        """`https://:tok@host/x` is a credential the daemon strips. A check
-        that misses it disagrees with the sweep it is documented to back up,
-        and the model-facing one is the weaker of the two."""
-        _git(bare_clone, "remote", "add", "leaky", "https://:glpat-xxxxxxxxxxxxxxxxxxxx@h/x.git")
 
-        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+class TestIssueCommands:
+    """Issue tracking on both forges, each spelling checked against the help of
+    the glab the deployment pins (1.114) and the Debian archive's 1.53."""
 
-        assert out.split() == ["remote.leaky.url"]
+    def _issues(self) -> str:
+        body = (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text()
+        return _section(body, "## Issues")
 
-    def test_catches_a_credential_riding_in_a_key(self, bare_clone):
-        """`url.<base>.insteadOf` puts the secret in the key, so `remote -v`
-        shows something clean while every fetch is rewritten through it."""
-        _git(bare_clone, "config",
-             "url.https://oauth2:glpat-xxxxxxxxxxxxxxxxxxxx@example.com/.insteadOf",
-             "https://example.com/")
+    def test_glab_issue_list_reads_json_with_the_capital_o(self):
+        """On `glab issue list`, and only there, `-F` is `--output-format` and
+        takes `details`, `ids` or `urls`, on 1.53 and 1.114 alike. `-F json`
+        is refused, which is the spelling every other glab read here uses."""
+        lines = [ln for ln in _fenced_lines(self._issues()) if "glab issue list" in ln]
+        assert lines, "the Issues section lists no GitLab issues"
+        for line in lines:
+            assert "-O json" in line and "-F json" not in line, line
 
-        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+    def test_glab_issue_note_takes_no_subcommand(self):
+        """`mr note` grew a `create` subcommand by 1.114; `issue note` did not."""
+        assert "glab issue note N -m" in self._issues()
+        assert "glab issue note create" not in self._issues()
 
-        assert "credential embedded in a config key" in out
-        assert "glpat-xxxxxxxxxxxxxxxxxxxx" not in out, "the check printed the secret"
+    def test_close_never_delete(self):
+        issues = self._issues()
+        assert "never delete one" in issues
+        assert "issue delete" not in "\n".join(_fenced_lines(issues))
 
-    def test_catches_an_extraheader(self, bare_clone):
-        """An Authorization header never appears in a URL at all."""
-        _git(bare_clone, "config", "http.https://gitlab.com/.extraheader",
-             "AUTHORIZATION: basic eHh4eHh4eHh4")
-
-        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
-
-        assert out.split() == ["http.https://gitlab.com/.extraheader"]
-        assert "eHh4eHh4eHh4" not in out
-
-    def test_does_not_print_a_port_as_a_credential(self, bare_clone):
-        """`https://gitlab.com:8443/ns/p.git` has a colon before no `@` of its
-        own — a naive pattern reads the port as a password."""
-        _git(bare_clone, "remote", "set-url", "origin", "https://gitlab.com:8443/ns/p.git")
-
-        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
-
-        assert out.strip() == "", f"false positive on a port: {out!r}"
+    def test_the_quick_reference_has_the_issue_rows(self):
+        body = (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text()
+        for row in ("| File an issue |", "| Read an issue |",
+                    "| Comment on an issue |", "| Close an issue |"):
+            assert row in body
 
 
 def _section(body: str, heading: str) -> str:
