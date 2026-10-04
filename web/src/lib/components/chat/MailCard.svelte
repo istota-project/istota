@@ -10,6 +10,7 @@
     formatSize,
     MAIL_STATE_LABELS,
     senderBadge,
+    trustedButFailed,
     type MailCardData,
   } from './mailCard';
   import type { MailAddress } from '$lib/api';
@@ -144,6 +145,11 @@
             class:mail-badge-warn={card.senderCheck === 'failed' && !card.trusted}
             data-testid="sender-badge">{badge}</span
           >
+          {#if trustedButFailed(card)}
+            <span class="mail-badge mail-badge-warn" data-testid="sender-check-failed"
+              >Failed sender check</span
+            >
+          {/if}
         {/if}
         {#if stateLabel}
           <span

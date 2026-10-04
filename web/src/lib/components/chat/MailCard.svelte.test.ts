@@ -81,6 +81,20 @@ describe('an incoming card', () => {
     expect(card().querySelector('[data-testid="sender-badge"]')?.textContent?.trim()).toBe(badge);
   });
 
+  it('flags a failed check on a trusted sender beside the trust badge', () => {
+    render(MailCard, { card: receivedCard(received({ trusted: true, sender_check: 'failed' })) });
+    expect(card().querySelector('[data-testid="sender-check-failed"]')).toBeTruthy();
+  });
+
+  it('puts the address beside a display name that reads as a label', () => {
+    render(MailCard, {
+      card: receivedCard(
+        received({ cc: [{ name: 'you', address: 'eve@evil.example' }], labels: {} }),
+      ),
+    });
+    expect(text()).toContain('Cc: you <eve@evil.example>');
+  });
+
   it('links an attachment in the workspace and leaves the rest as text', () => {
     render(MailCard, {
       card: receivedCard(

@@ -989,7 +989,9 @@
             >
           </div>
         {/if}
-        {#if message.attachments?.length && !incomingCard}
+        <!-- A mail card draws its own chips; a pre-change row's card has none,
+             so the row's own chips stay. -->
+        {#if message.attachments?.length && (!incomingCard || incomingCard.fallback)}
           <div class="attachments">
             {#each message.attachments as name, i}
               {@const href = message.attachmentPaths?.[i]}

@@ -73,23 +73,12 @@ describe('an outgoing mail row', () => {
   });
 
   it('links a held mail to the private chat and offers no draft controls', () => {
-    const draft = {
-      id: 4,
-      task_id: 9,
-      to: ['carol@example.com'],
-      cc: [],
-      subject: 'Re: Dinner plans',
-      body: 'Thursday after 7 works',
-      status: 'pending',
-    };
+    // The page passes no drafts for a thread row (`draftsForRow`, held by
+    // routes/chat/readOnlyThread.svelte.test.ts); this is the card's half.
     const { container, queryByRole, getByText } = render(Message, {
       ...base,
-      // Even handed a draft, a mail row renders none: the page passes none.
       message: botMsg({ taskId: 9, mail: { ...sent, state: 'held', notePath: '/chat/r/w/t/9' } }),
-      drafts: [],
-      draftActions: { approve: noop, discard: noop, edit: noop } as never,
     });
-    void draft;
     expect(getByText('Open in your private chat').closest('a')?.getAttribute('href')).toBe(
       '/chat/r/w/t/9',
     );
@@ -142,5 +131,21 @@ describe('an incoming mail row', () => {
     expect(mail?.textContent).toContain('Trusted sender');
     // Not also the external block.
     expect(container.querySelector('.external')).toBeNull();
+  });
+
+  it('keeps the row chips on a pre-change mail, whose card has none', () => {
+    const { container } = render(Message, {
+      ...base,
+      message: {
+        cid: 3,
+        role: 'user',
+        text: 'See attached.',
+        segments: [],
+        streaming: false,
+        attachments: ['report.pdf'],
+        receivedMail: { ...received, fallback: true },
+      } as ChatMessage,
+    });
+    expect(container.querySelector('.attachments')?.textContent).toContain('report.pdf');
   });
 });

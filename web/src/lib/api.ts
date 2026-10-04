@@ -3142,8 +3142,9 @@ export interface OutgoingMail {
   // In a mail room: how to name an address other than by itself ("you" for
   // the viewer's own, the bot's name for the bot's), keyed lowercased.
   labels?: Record<string, string>;
-  // In a mail room: the viewer's private room at this turn's task, where a
-  // held mail is approved and the mail is discussed.
+  // In a mail room: the viewer's private room at this turn's task, where the
+  // mail is discussed. Stage 3 of hidden email threads links the room only; a
+  // held mail is approved from its notification until the note carries it.
   note_path?: string;
 }
 
