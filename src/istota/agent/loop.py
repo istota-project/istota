@@ -49,7 +49,6 @@ from .types import (
     AgentLoopConfig,
     AgentMessage,
     QueueMode,
-    StopDecision,
 )
 
 logger = logging.getLogger("istota.agent.loop")
@@ -130,7 +129,7 @@ async def _run_loop(
     (token budget, loop detection, max turns). The ``abort`` event is checked at
     every loop boundary and threaded into tool execution.
     """
-    stop_conditions = _resolve_stop_conditions(config)
+    stop_conditions = list(config.stop_conditions)
 
     pending: list[AgentMessage] = []
     if config.get_steering_messages:
@@ -236,20 +235,6 @@ async def _run_loop(
         break
 
     await emit(AgentEvent(type="agent_end", messages=new_messages, stop_reason=""))
-
-
-def _resolve_stop_conditions(config: AgentLoopConfig):
-    """Merge ``should_stop_after_turn`` (back-compat) into ``stop_conditions``."""
-    conditions = list(config.stop_conditions)
-    hook = config.should_stop_after_turn
-    if hook is not None:
-
-        async def _adapter(ctx: AgentContext, msgs: list[AgentMessage]) -> StopDecision:
-            stop = await hook(ctx, msgs)
-            return StopDecision(stop=bool(stop), reason="should_stop_after_turn")
-
-        conditions.append(_adapter)
-    return conditions
 
 
 def _drain_queue(messages: list[AgentMessage], mode: QueueMode) -> list[AgentMessage]:
