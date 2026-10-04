@@ -33,13 +33,13 @@ Eight sources ship.
 
 | Source | What it is | What you can do | Closes when |
 |---|---|---|---|
-| `confirmation` | A task parked waiting for your approval — a gated email from an unknown sender, or a question the model asked mid-run | Confirm, Discard | The task leaves `pending_confirmation` |
+| `confirmation` | A task parked waiting for your approval — a gated email from an unknown sender, or a question the model asked mid-run | Confirm, Discard; for a relay question, a room post or a guest's held reply, Open (your private chat, where the full text is) and Discard | The task leaves `pending_confirmation` |
 | `outbound_draft` | A reply the bot composed and held at the delivery gate | Send, Discard | The draft is sent or discarded |
 | `cron_job` | A scheduled job the scheduler switched off after five consecutive failures | Nothing in-app; the status note names `!cron enable <name>` | The job's failure counter returns to zero |
 | `connected_service` | A stored credential the remote rejected (Garmin today) | Reconnect, which links to Settings | The service reports connected again |
 | `health_panel` | A lab panel left in draft after OCR | Review, which links to the Labs page | The panel leaves draft |
 | `task_alert` | One-shot alerts: a task that failed, a mail throttle notice, a confirmation that timed out, a DMARC warning, a result that reached nobody | Nothing; it clears itself once you have seen it | You open the panel with it visible |
-| `relay_question` | A [relay question](relay.md) another user asked you, waiting for your answer | Open chat, for a question in a room; the view shows the question | The relay is answered, expires, fails or is cancelled |
+| `relay_question` | A [relay question](relay.md) another user asked you, waiting for your answer | Open, for a question in a room, which opens that room; the view shows the question | The relay is answered, expires, fails or is cancelled |
 | `message_relay` | A change to a relay question you asked: delivered, failed, answered, or an answer kept back | Nothing; `!relay show` has the detail | You open the panel with it visible, or the answer reaches you |
 
 Six are **object-backed**: something outside the table changes and the row closes. `task_alert` and `message_relay` are **fire-and-forget** — nothing will ever close them, so they close when you see them.

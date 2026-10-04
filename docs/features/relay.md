@@ -62,7 +62,7 @@ Are you free on Thursday?
 To answer Alice, reply to this message. Only that answer will be shared.
 ```
 
-It also appears in the recipient's [notification inbox](notifications.md) until it is answered, expires, fails or is cancelled. The pushed notice names who asked and how to answer, and never contains the question, because a push can reach a shared room or a third-party service. The bell shows the question itself. A room question pushes; a WhatsApp or SMS question does not, since the message on the phone is already the alert. The notice's button opens web chat rather than the question itself.
+It also appears in the recipient's [notification inbox](notifications.md) until it is answered, expires, fails or is cancelled. The pushed notice names who asked and how to answer, and never contains the question, because a push can reach a shared room or a third-party service. The bell shows the question itself. A room question pushes; a WhatsApp or SMS question does not, since the message on the phone is already the alert. For a question in a room, the notice's Open button takes you to that room.
 
 ## Answering
 

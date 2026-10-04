@@ -282,7 +282,8 @@ A **Browsers** page lists each live browser instance (user, slot, idle time) and
 | `/istota/api/chat/files` | Files shared into chat |
 | `/istota/api/chat/tasks/{id}/stream` | SSE stream of a task's events (tool use, text deltas) |
 | `/istota/api/chat/tasks/{id}/events` | Snapshot of a task's events |
-| `/istota/api/chat/tasks/{id}/confirm` · `/cancel` | Confirm / cancel a chat task |
+| `/istota/api/chat/tasks/{id}/confirm` · `/cancel` | Confirm / cancel a chat task. Confirm takes an optional `{"room": <token>}`; a relay question, room post or guest proposal needs the private room showing its preview |
+| `/istota/chat/r/{room}` · `/istota/chat/r/{room}/t/{task}` | Deep link from a notification: redirects to that room (and task) for a member, else to the chat page |
 | `/istota/api/chat/attachments` | Attachment upload (multipart, one file per request) |
 | `/istota/api/notifications/count` | Bell badge: `{"open": N, "actionable": M}`. Plain SQL, no resolver pass — the layout polls it every 30s from every route |
 | `/istota/api/notifications` | The panel's rendered rows plus `total_open`; `?filter=` and `?limit=` |
