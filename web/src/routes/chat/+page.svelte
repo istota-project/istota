@@ -116,9 +116,17 @@
   //
   // None in an email thread room: the thread is a view of the mail, so a held
   // mail shows its card and a link to the private chat, where it is acted on.
-  function draftsForRow(message: { role: string; taskId?: number | null }) {
+  // There, the draft goes under the email note: a system row about the thread
+  // that carries the thread turn's task id.
+  function draftsForRow(message: {
+    role: string;
+    taskId?: number | null;
+    aboutRoom?: { token: string } | null;
+  }) {
     if (readOnlyThread) return [];
-    if (message.role !== 'assistant' || message.taskId == null) return [];
+    if (message.taskId == null) return [];
+    const note = message.role === 'system' && !!message.aboutRoom;
+    if (message.role !== 'assistant' && !note) return [];
     return draftsByTask.get(message.taskId) ?? [];
   }
   const draftActions = {

@@ -167,6 +167,56 @@ describe('the composer in an email thread room', () => {
     }
   });
 
+  it('puts the draft under the email note in the private room (stage 5)', async () => {
+    const session = getChatSession() as unknown as Record<string, unknown> & {
+      messages: { set: (v: unknown) => void };
+      outboundDrafts: { set: (v: unknown) => void };
+      answerDraft: ReturnType<typeof vi.fn>;
+    };
+    const note = {
+      cid: 2,
+      role: 'system',
+      text: 'Ana wrote on Book club:\n\n> Thursday?\n\nReply waiting for your approval.',
+      taskId: 9,
+      aboutRoom: { token: 'thread-1', name: 'Book club' },
+      segments: [],
+      streaming: false,
+      mail: { to: ['ana@example.com'], cc: [], state: 'held', body: 'Thursday works.' },
+    };
+    const draft = {
+      id: 4,
+      status: 'pending',
+      task_id: 9,
+      to: ['ana@example.com'],
+      subject: 'Re: Book club',
+      body: 'Thursday works.',
+    };
+    session.messages.set([note]);
+    session.outboundDrafts.set([draft]);
+    try {
+      setRooms([{ name: 'general' }]);
+      renderPage();
+      await waitFor(() => expect(document.querySelector('.draft-card')).toBeTruthy());
+      expect(document.querySelector('[data-testid="mail-collapsed"]')).toBeTruthy();
+      const send = [...document.querySelectorAll<HTMLButtonElement>('.draft-card button')].find(
+        (b) => b.textContent?.trim() === 'Send',
+      );
+      send!.click();
+      await waitFor(() => expect(session.answerDraft).toHaveBeenCalledWith(4, 'approve'));
+      cleanup();
+
+      // The control: a plain notice carrying the same task id gets no draft.
+      session.messages.set([{ ...note, aboutRoom: undefined, mail: undefined }]);
+      setRooms([{ name: 'general' }]);
+      renderPage();
+      await waitFor(() => expect(document.querySelector('.cmd-row')).toBeTruthy());
+      expect(document.querySelector('.draft-card')).toBeNull();
+    } finally {
+      session.messages.set([]);
+      session.outboundDrafts.set([]);
+    }
+  });
+
   it('keeps the composer in an ordinary web room', async () => {
     setRooms([{ name: 'Testing' }]);
     renderPage();

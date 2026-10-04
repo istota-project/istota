@@ -836,6 +836,23 @@
         </div>
       {/if}
 
+      <!-- An email note: the thread turn's mail, collapsed to one line, and
+           its held draft, which is acted on here and nowhere else. -->
+      {#if outgoingCard}
+        <MailCard card={outgoingCard} collapsed />
+      {/if}
+      {#if draftActions}
+        {#each drafts as draft (draft.id)}
+          <DraftCard
+            {draft}
+            onApprove={draftActions.approve}
+            onDiscard={draftActions.discard}
+            onEdit={draftActions.edit}
+            onNeedsFullRow={draftActions.refresh}
+          />
+        {/each}
+      {/if}
+
       <!-- A question parked privately about another room (#624): the card sits
            under the preview it approves. -->
       {#if message.confirmation && message.taskId}

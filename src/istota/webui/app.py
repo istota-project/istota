@@ -4279,6 +4279,11 @@ def _room_events_batch(
             conn, username,
             [(r["msg_id"], r["delivery_reference"]) for r in rows[:want] if r["role"] == "system"],
         ) if len(rows) <= want else {}
+        noted = _noted_rows(
+            conn, username,
+            [(r["msg_id"], r["delivery_reference"], r["about_room_token"])
+             for r in rows[:want] if r["role"] == "system"],
+        ) if len(rows) <= want else {}
         mail_views = _mail_views(
             conn, username, [r["room_token"] for r in rows[:want]],
             [r["task_id"] for r in rows[:want]],
@@ -4289,6 +4294,7 @@ def _room_events_batch(
     for r in rows[:want]:
         d = _cross_room_message_dict(
             r, username, about_names=about_names, parked=parked, mail_views=mail_views,
+            noted=noted,
         )
         if r["msg_id"] in undeletable:
             d["deletable"] = False
@@ -8365,6 +8371,9 @@ def _chat_room_messages(
         parked_notes = _parked_rows(
             conn, username, [(n.id, n.delivery_reference) for n in notes],
         )
+        noted_notes = _noted_rows(
+            conn, username, [(n.id, n.delivery_reference, n.about_room_token) for n in notes],
+        )
         mail_view = _mail_views(
             conn, username, [token], [_row_get(r, "task_id") for r in msg_rows],
         ).get(token)
@@ -8483,6 +8492,7 @@ def _chat_room_messages(
         if parked is not None:
             note["confirmation"] = True
             note["task_id"] = parked
+        _apply_noted(note, noted_notes.get(n.id))
         messages.append(note)
     # Normalize every turn's created_at to explicit ISO 8601 UTC. The stored
     # values are naive UTC (SQLite datetime('now') / strftime, and the Talk-cache
@@ -10285,9 +10295,60 @@ def _parked_rows(conn, username: str, rows) -> dict[int, int]:
     return out
 
 
+def _noted_rows(conn, username: str, rows) -> dict[int, tuple[int, dict | None]]:
+    """``{msg_id: (task_id, mail)}`` for the email notes among ``rows``, each
+    ``(msg_id, delivery_reference, about_room_token)``.
+
+    ``mail`` is the thread room's own row for that task, read live, so a held
+    draft released later shows `sent` under the note too; None when the turn
+    mailed nothing. Attached at read time rather than copied onto the note,
+    which would go stale (hidden email threads, section 5).
+    """
+    from istota.mail.support import own_addresses  # noqa: PLC0415
+    from istota.rooms.private_replies import noted_task_for_reference  # noqa: PLC0415
+
+    out: dict[int, tuple[int, dict | None]] = {}
+    view = None
+    for msg_id, reference, about in rows:
+        task_id = noted_task_for_reference(conn, reference, username)
+        if task_id is None:
+            continue
+        mail = None
+        row = conn.execute(
+            "SELECT body, outgoing_mail FROM messages WHERE task_id = ? "
+            "AND role = 'assistant' AND room_token = ? AND outgoing_mail IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id, about),
+        ).fetchone() if about else None
+        if row is not None:
+            mail = _outgoing_mail_field(row["outgoing_mail"])
+        if mail is not None:
+            # The thread row's body is the mailed body; the record carries one
+            # only when the two differ.
+            if "body" not in mail and row["body"]:
+                body = row["body"]
+                mail["body"] = (body if len(body) <= _MAIL_BODY_MAX_CHARS
+                                else body[:_MAIL_BODY_MAX_CHARS].rstrip() + "…")
+            if view is None:
+                view = _MailView(own=frozenset(own_addresses(_config, username)),
+                                 private_room=None)
+            mail["labels"] = _mail_labels(view, mail["to"] + mail["cc"])
+        out[msg_id] = (task_id, mail)
+    return out
+
+
+def _apply_noted(d: dict, noted: tuple[int, dict | None] | None) -> None:
+    """Give an email note's payload its task id and live mail card."""
+    if noted is None:
+        return
+    d["task_id"] = noted[0]
+    if noted[1] is not None:
+        d["mail"] = noted[1]
+
+
 def _cross_room_message_dict(
     r, username: str, *, about_names: dict | None = None, parked: dict | None = None,
-    mail_views: dict | None = None,
+    mail_views: dict | None = None, noted: dict | None = None,
 ) -> dict:
     """One `db._CROSS_ROOM_COLUMNS` row → the history payload shape.
 
@@ -10326,6 +10387,7 @@ def _cross_room_message_dict(
         if parked_task is not None:
             d["confirmation"] = True
             d["task_id"] = parked_task
+        _apply_noted(d, (noted or {}).get(r["msg_id"]))
     cited = _row_reply_to(r)
     if cited is not None:
         d["reply_to"] = cited

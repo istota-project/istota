@@ -2715,8 +2715,10 @@ function createSession(): ChatSession {
       aboutRoom: m.about_room?.token
         ? { token: m.about_room.token, name: m.about_room.name ?? null }
         : undefined,
+      // An assistant row's own mail, or (on an email note) the thread row's,
+      // which the server attaches under the note.
       mail:
-        m.role === 'assistant' && m.mail
+        (m.role === 'assistant' || m.role === 'system') && m.mail
           ? {
               to: m.mail.to ?? [],
               cc: m.mail.cc ?? [],

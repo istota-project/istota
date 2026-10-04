@@ -459,17 +459,50 @@ def parked_task_for_reference(conn, delivery_reference: str | None, user_id: str
     which is what makes the web card under the row disappear once the
     question is answered anywhere.
     """
-    ref = delivery_reference or ""
-    prefix = next((p for p in PARK_PREFIXES if ref.startswith(p)), None)
-    if prefix is None:
-        return None
-    head = ref[len(prefix):].split(":", 1)[0]
-    if not (head.isascii() and head.isdigit() and len(head) <= 18):
+    ident = _reference_task_id(delivery_reference, PARK_PREFIXES)
+    if ident is None:
         return None
     row = conn.execute(
         "SELECT id FROM tasks WHERE id = ? AND user_id = ? "
         "AND status = 'pending_confirmation'",
-        (int(head), user_id),
+        (ident, user_id),
+    ).fetchone()
+    return row["id"] if row else None
+
+
+#: An email note's reference, ``private-pass_on:<task id>:pass-on``.
+NOTE_PREFIX = "private-pass_on:"
+_NOTE_SUFFIX = ":pass-on"
+
+
+def _reference_task_id(delivery_reference: str | None, prefixes, suffix: str | None = None):
+    """The task id a private row's ``<prefix><task id>:<tail>`` reference
+    names, or None for any other reference. With ``suffix``, the tail must be
+    exactly that."""
+    ref = delivery_reference or ""
+    prefix = next((p for p in prefixes if ref.startswith(p)), None)
+    if prefix is None:
+        return None
+    head, sep, tail = ref[len(prefix):].partition(":")
+    if suffix is not None and sep + tail != suffix:
+        return None
+    if not (head.isascii() and head.isdigit() and len(head) <= 18):
+        return None
+    return int(head)
+
+
+def noted_task_for_reference(conn, delivery_reference: str | None, user_id: str) -> int | None:
+    """The task an email note's row is about, when it is ``user_id``'s.
+
+    The sibling of `parked_task_for_reference` with no status filter: the note
+    stands after its task completes, and the web attaches that task's mail and
+    held draft under it. None for any other row or another user's task.
+    """
+    ident = _reference_task_id(delivery_reference, (NOTE_PREFIX,), _NOTE_SUFFIX)
+    if ident is None:
+        return None
+    row = conn.execute(
+        "SELECT id FROM tasks WHERE id = ? AND user_id = ?", (ident, user_id),
     ).fetchone()
     return row["id"] if row else None
 

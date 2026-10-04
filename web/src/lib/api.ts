@@ -3122,9 +3122,10 @@ export interface ChatHistoryMessage {
   // private room. `name` is null when the viewer is no longer in that room,
   // and the chip then names nothing and opens nothing.
   about_room?: { token: string; name: string | null };
-  // Assistant rows only: the mail this answer sent into an email thread room
-  // (ISSUE-612). `body` is present only when the mailed text differs from
-  // `text`.
+  // On an assistant row, the mail this answer sent into an email thread room
+  // (ISSUE-612); `body` is present only when the mailed text differs from
+  // `text`. On an email note (a system row), the thread row's mail, read
+  // live, with `body` always present.
   mail?: OutgoingMail;
   // User rows in a mail room (an email thread room or the private email
   // room) only: the mail as the incoming-mail card renders it.
