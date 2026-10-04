@@ -672,3 +672,33 @@ describe('a phone room (room-surface-model Stage 24)', () => {
     expect(screen.getByRole('button', { name: PROMOTE_LABEL })).toBeTruthy();
   });
 });
+
+describe('RoomSettings — delete', () => {
+  afterEach(() => cleanup());
+
+  it('shows one dialog at a time, and a cancelled delete returns to settings with edits kept', async () => {
+    const onClose = vi.fn();
+    render(RoomSettings, {
+      props: {
+        open: true,
+        room: room(),
+        onSave: vi.fn(),
+        onDelete: vi.fn(),
+        onPromote: vi.fn(),
+        onClose,
+      },
+    });
+    await fireEvent.input(screen.getByDisplayValue('general'), { target: { value: 'renamed' } });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(screen.getByRole('dialog', { name: 'Delete room' })).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(screen.getByRole('dialog', { name: 'Room settings' })).toBeTruthy();
+    expect(screen.getByDisplayValue('renamed')).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
