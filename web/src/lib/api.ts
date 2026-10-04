@@ -4003,8 +4003,16 @@ export function editOutboundDraft(draftId: number, body: string): Promise<DraftA
   });
 }
 
-export function confirmChatTask(taskId: number): Promise<{ status: string }> {
-  return apiFetch<{ status: string }>(`/chat/tasks/${taskId}/confirm`, { method: 'POST' });
+/** `room` is the room the card rendered in. A relay question, room post or
+ *  guest proposal is approved only from the private room showing its
+ *  preview, and the server answers 409 without it (#624). */
+export function confirmChatTask(taskId: number, room?: string): Promise<{ status: string }> {
+  return apiFetch<{ status: string }>(`/chat/tasks/${taskId}/confirm`, {
+    method: 'POST',
+    ...(room
+      ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ room }) }
+      : {}),
+  });
 }
 
 export function cancelChatTask(taskId: number): Promise<{ status: string }> {
@@ -4580,6 +4588,14 @@ const SAFE_ACTION_PATH = /^\/[A-Za-z0-9][A-Za-z0-9/_-]*$/;
  *  and the two can disagree about which one is the guard. */
 export function isSafeActionPath(path: string | null | undefined): path is string {
   return typeof path === 'string' && SAFE_ACTION_PATH.test(path);
+}
+
+/** Whether an action path is answered by the server rather than by a page.
+ *  `/chat/r/<room>[/t/<task>]` is the deep-link redirect (#624): the
+ *  frontend is prerendered with no route there, so its link must make the
+ *  client do a full navigation. */
+export function isServerActionPath(path: string | null | undefined): boolean {
+  return isSafeActionPath(path) && path.startsWith('/chat/r/');
 }
 
 export function getNotificationCounts(): Promise<NotificationCounts> {

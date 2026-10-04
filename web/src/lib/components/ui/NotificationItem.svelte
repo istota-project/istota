@@ -16,7 +16,12 @@
    * resolves the click for you.
    */
   import { base } from '$app/paths';
-  import { isSafeActionPath, type NotificationAction, type ResolvedNotification } from '$lib/api';
+  import {
+    isSafeActionPath,
+    isServerActionPath,
+    type NotificationAction,
+    type ResolvedNotification,
+  } from '$lib/api';
   import { formatRelative } from '$lib/dateFormat';
   import Button from './Button.svelte';
 
@@ -99,6 +104,7 @@
           <Button
             variant={variants[action.kind] ?? 'secondary'}
             size="sm"
+            reload={isServerActionPath(action.href)}
             href="{base}{action.href}">{action.label}</Button
           >
         {:else if action.method === 'POST'}

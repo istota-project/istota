@@ -222,6 +222,26 @@ describe('actions', () => {
     });
     const anchor = container.ownerDocument.querySelector('a[href$="/health"]');
     expect(anchor).not.toBeNull();
+    // A page the client routes itself: no full navigation.
+    expect(anchor!.hasAttribute('data-sveltekit-reload')).toBe(false);
+  });
+
+  it('makes a deep link the server answers do a full navigation (#624)', () => {
+    // The frontend is prerendered with no route at `/chat/r/…`, so the client
+    // must hand the link to the server's redirect instead of routing it.
+    const { container } = open({
+      actions: [
+        action({
+          id: 'open',
+          label: 'Open',
+          method: 'LINK',
+          endpoint: null,
+          href: '/chat/r/rm_abc/t/31',
+        }),
+      ],
+    });
+    const anchor = container.ownerDocument.querySelector('a[href$="/chat/r/rm_abc/t/31"]');
+    expect(anchor?.hasAttribute('data-sveltekit-reload')).toBe(true);
   });
 });
 

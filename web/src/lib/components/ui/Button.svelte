@@ -19,6 +19,12 @@
     download?: string;
     target?: string;
     rel?: string;
+    /**
+     * On an `href` button, make the client do a full navigation. For a path
+     * the server answers itself (a redirect), which the prerendered frontend
+     * has no route for and would otherwise try to route client-side.
+     */
+    reload?: boolean;
     onclick?: (e: MouseEvent) => void;
     title?: string;
     disabled?: boolean;
@@ -42,6 +48,7 @@
     download,
     target,
     rel,
+    reload = false,
     onclick,
     title,
     disabled,
@@ -69,6 +76,7 @@
       {rel}
       {title}
       {onclick}
+      data-sveltekit-reload={reload ? '' : undefined}
       aria-label={ariaLabel}
     >
       {@render children()}
