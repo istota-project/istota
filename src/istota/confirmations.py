@@ -171,8 +171,7 @@ def describe(conn, task: db.Task) -> str:
     prompt-assembly detail and not something to rest the invariant on.
     """
     if task.whatsapp_confirmation_request_id:
-        row = conn.execute("SELECT kind FROM whatsapp_skill_requests WHERE id=?",
-                           (task.whatsapp_confirmation_request_id,)).fetchone()
+        row = held_request(conn, task)
         if row is not None and row["kind"] == "room_post":
             return "a room post awaiting approval"
         return "a private relay question"
@@ -182,6 +181,47 @@ def describe(conn, task: db.Task) -> str:
             return "an inbound email"
         return describe_email(record.sender_email, record.subject)
     return describe_prompt(task.confirmation_prompt)
+
+
+def held_request(conn, task: db.Task):
+    """The relay-hold request row ``task`` is parked on, or None."""
+    if not task.whatsapp_confirmation_request_id:
+        return None
+    return conn.execute(
+        "SELECT kind, destination FROM whatsapp_skill_requests WHERE id=?",
+        (task.whatsapp_confirmation_request_id,),
+    ).fetchone()
+
+
+def held_destination(row) -> dict:
+    """A request row's frozen destination, or ``{}`` when it cannot be read."""
+    try:
+        value = json.loads(row["destination"] or "{}") if row is not None else {}
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def describe_title(conn, task: db.Task) -> str:
+    """The bell title for a held task, by what it is waiting to send.
+
+    Sentence case, and only for the authenticated web view: the destination's
+    label is a room name somebody chose, so the stored title a push carries
+    stays the producer's fixed text. A task that is not relay-held gets
+    :func:`describe`.
+    """
+    row = held_request(conn, task)
+    if row is None:
+        return describe(conn, task)
+    if row["kind"] != "room_post":
+        return "Relay question waiting for approval"
+    destination = held_destination(row)
+    label = _flatten(str(destination.get("label") or ""))[:_PREVIEW_CHARS] or "a room"
+    # An email destination has no producer since room posts stopped sending
+    # mail; a request held across that upgrade can still carry one.
+    if destination.get("email_ref"):
+        return f"Reply waiting for approval: {label}"
+    return f"Post waiting for approval: {label}"
 
 
 def format_listing(conn, tasks: list[db.Task]) -> str:

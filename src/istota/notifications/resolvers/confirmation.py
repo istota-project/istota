@@ -48,6 +48,11 @@ HELD_STATUS = "pending_confirmation"
 # title already carries the one-line label; this is the rest of what was asked.
 _BODY_CHARS = 400
 
+# The stored title and body of a held room post (a `room post` or a guest
+# proposal), which is what a push carries: fixed words, never the preview.
+ROOM_POST_TITLE = "Room post awaiting approval"
+ROOM_POST_BODY = "Open your private chat with the bot to review and approve it."
+
 
 def dedup_key(task_id: int | str) -> str:
     """``task:{id}``.
@@ -137,6 +142,60 @@ def _task_id(row: "NotificationRow") -> int | None:
     return _common.coerce_object_id(row, noun="task", logger=logger)
 
 
+# Lines of a relay hold's preview the bell shows. The preview is the exact
+# approval document; the bell is a pointer to it, never the place to approve.
+_PREVIEW_LINES = 2
+
+
+def deep_link(room_token: str, task_id: int) -> str | None:
+    """The web path that opens ``room_token`` at ``task_id``'s turn, or None
+    when the token would not pass the notification URL allowlist."""
+    from istota.notifications.sources import SAFE_PATH_RE
+
+    href = f"/chat/r/{room_token}/t/{int(task_id)}"
+    return href if SAFE_PATH_RE.match(href) else None
+
+
+def _relay_held_view(conn, row: "NotificationRow", task) -> "NotificationView":
+    """A relay question, room post or guest proposal waiting on its owner (#624).
+
+    No Confirm: approving it from here would approve a post the user has not
+    seen, so the confirm route refuses one without the private room showing
+    the preview, and the bell offers the link to that room instead. The
+    preview's first lines are fenced, as `relay_question` fences a question:
+    this view reaches only the authenticated web session, while the stored
+    title and body a push carries stay the producer's fixed text.
+    """
+    from istota import confirmations
+    from istota.lib.untrusted import frame_untrusted
+    from istota.notifications.sources import NotificationAction, NotificationView
+    from istota.rooms.private_replies import preview_rooms
+
+    request = confirmations.held_request(conn, task)
+    label = confirmations.flatten(
+        str(confirmations.held_destination(request).get("label") or ""),
+    ) or "a room"
+    lines = [line for line in (task.confirmation_prompt or "").splitlines() if line.strip()]
+    body = f"For {label}. Open your private chat to review and approve it."
+    if lines:
+        body += "\n\n" + frame_untrusted("\n".join(lines[:_PREVIEW_LINES]), "APPROVAL PREVIEW")
+    actions = []
+    rooms = preview_rooms(conn, task)
+    href = deep_link(rooms[0], task.id) if rooms else None
+    if href is not None:
+        actions.append(NotificationAction(
+            id="open", label="Open", kind="primary", method="LINK", href=href,
+        ))
+    actions.append(NotificationAction(
+        id="discard", label="Discard", kind="danger", method="POST",
+        endpoint=f"/chat/tasks/{task.id}/cancel",
+    ))
+    return NotificationView(
+        title=confirmations.describe_title(conn, task), body=body,
+        severity=row.severity, actions=tuple(actions),
+    )
+
+
 class ConfirmationResolver:
     source = SOURCE
     auto_resolve_on_seen = False
@@ -186,9 +245,12 @@ class ConfirmationResolver:
                 actions=(),
             )
 
+        if task.whatsapp_confirmation_request_id:
+            return _relay_held_view(conn, row, task)
+
         return NotificationView(
             title=confirmations.describe(conn, task),
-            body="Open the private conversation to review this relay question." if task.whatsapp_confirmation_request_id else body_for(task.confirmation_prompt),
+            body=body_for(task.confirmation_prompt),
             severity=row.severity,
             actions=(
                 NotificationAction(

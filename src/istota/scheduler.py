@@ -3691,10 +3691,15 @@ def process_one_task(
                 # stream, which reaches a client that happens to be watching and
                 # nobody else, so there this is the first push the user gets on
                 # any surface they are not currently looking at.
+                # A guest proposal's question is its preview, and a push
+                # carries the stored text: fixed words there, as a relay
+                # hold's are, and the preview only in the authenticated bell.
                 held_notification = confirmation_source.write(
                     conn, task.user_id, task_id=task_id,
-                    title=confirmations.describe_prompt(result),
-                    body=confirmation_source.body_for(result),
+                    title=(confirmation_source.ROOM_POST_TITLE if guest_route is not None
+                           else confirmations.describe_prompt(result)),
+                    body=(confirmation_source.ROOM_POST_BODY if guest_route is not None
+                          else confirmation_source.body_for(result)),
                     room_token=transcript_token,
                 )
                 if held_notification is not None:

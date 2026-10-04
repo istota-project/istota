@@ -441,16 +441,68 @@ def park_about(conn, task) -> str | None:
     return parent
 
 
+def parked_task_for_reference(conn, delivery_reference: str | None, user_id: str) -> int | None:
+    """The task a private park's row asks about, while it still waits on ``user_id``.
+
+    ``delivery_reference`` is the row's, ``<prefix><task id>:<prompt hash>``.
+    None for any other row, another user's task, or a task no longer parked,
+    which is what makes the web card under the row disappear once the
+    question is answered anywhere.
+    """
+    ref = delivery_reference or ""
+    prefix = next((p for p in PARK_PREFIXES if ref.startswith(p)), None)
+    if prefix is None:
+        return None
+    head = ref[len(prefix):].split(":", 1)[0]
+    if not (head.isascii() and head.isdigit() and len(head) <= 18):
+        return None
+    row = conn.execute(
+        "SELECT id FROM tasks WHERE id = ? AND user_id = ? "
+        "AND status = 'pending_confirmation'",
+        (int(head), user_id),
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def _park_refs_like() -> str:
+    return " OR ".join("delivery_reference LIKE ?" for _ in PARK_PREFIXES)
+
+
 def parked_here(conn, room_token: str, user_id: str) -> list:
     """``user_id``'s parked tasks whose private question is in ``room_token``."""
-    clauses = " OR ".join("m.delivery_reference LIKE ? || t.id || ':%'" for _ in PARK_PREFIXES)
     rows = conn.execute(
-        "SELECT DISTINCT t.id FROM tasks t JOIN messages m ON m.room_token = ? "
-        f"AND ({clauses}) WHERE t.user_id = ? AND t.status = 'pending_confirmation' "
-        "ORDER BY t.id",
-        (room_token, *PARK_PREFIXES, user_id),
+        f"SELECT delivery_reference FROM messages WHERE room_token = ? AND ({_park_refs_like()})",
+        (room_token, *(f"{p}%" for p in PARK_PREFIXES)),
     ).fetchall()
-    return [task for task in (db.get_task(conn, row["id"]) for row in rows) if task is not None]
+    ids = sorted({ident for ident in (
+        parked_task_for_reference(conn, row["delivery_reference"], user_id) for row in rows
+    ) if ident is not None})
+    return [task for task in (db.get_task(conn, ident) for ident in ids) if task is not None]
+
+
+def preview_rooms(conn, task) -> list[str]:
+    """The private rooms of ``task``'s owner that show its held question, oldest first.
+
+    A privately routed park's row (a guest proposal, a shared room's
+    question), and the task's own room when that is private: a relay question
+    or room post asked there is previewed on the turn itself. The confirm
+    route approves a relay-held task only from one of these, and the bell's
+    deep link opens the first.
+    """
+    rooms = [row["room_token"] for row in conn.execute(
+        f"SELECT room_token, delivery_reference FROM messages WHERE ({_park_refs_like()}) "
+        "ORDER BY id",
+        tuple(f"{p}{task.id}:%" for p in PARK_PREFIXES),
+    ).fetchall() if parked_task_for_reference(conn, row["delivery_reference"], task.user_id) == task.id]
+    if task.conversation_token:
+        own = canonical_token(conn, task.conversation_token)
+        if own:
+            rooms.append(own)
+    seen: list[str] = []
+    for room in rooms:
+        if room not in seen and db.is_private_room_of(conn, room, task.user_id):
+            seen.append(room)
+    return seen
 
 
 # ---------------------------------------------------------------------------
@@ -820,6 +872,15 @@ class GuestProposal:
     preview: str
 
 
+def _mail_new_text(body: str) -> str | None:
+    """The new text of a wrapped email turn, or None when ``body`` is not one."""
+    from istota.mail.support import parse_email_prompt
+    from istota.transport.email.threads import new_text
+
+    parsed = parse_email_prompt(body)
+    return new_text(parsed[1]).strip() if parsed is not None else None
+
+
 def pass_on_body(conn, task) -> str:
     """The pass-on note for a thread turn the host was not on, from the
     stored turn: who wrote, on which room, and their new text quoted.
@@ -828,7 +889,6 @@ def pass_on_body(conn, task) -> str:
     the email wrapper's parser and `threads.new_text`, so neither the wrapper
     nor the quoted history reaches the host.
     """
-    from istota.mail.support import parse_email_prompt
     from istota.transport.email.threads import new_text
 
     row = conn.execute(
@@ -837,8 +897,9 @@ def pass_on_body(conn, task) -> str:
         (task.id,),
     ).fetchone()
     body = (row["body"] if row else None) or task.prompt or ""
-    parsed = parse_email_prompt(body)
-    text = new_text(parsed[1] if parsed is not None else body).strip()
+    text = _mail_new_text(body)
+    if text is None:
+        text = new_text(body).strip()
     label = (row["author_label"] if row else None) or "Someone"
     room = room_label(db.get_room(conn, canonical_token(conn, task.conversation_token) or ""))
     quoted = "\n".join(f"> {line}" if line else ">" for line in text.splitlines()) or ">"
@@ -859,7 +920,11 @@ def deliver_pass_on(conn, config, task) -> tuple[PrivateDelivery, str]:
 
 
 def _guest_words(conn, task) -> tuple[str, str]:
-    """The guest's label and what they wrote, off the transcript row."""
+    """The guest's label and what they wrote, off the transcript row.
+
+    A mirrored email row carries the prompt wrapper; only its new text is
+    quoted, as the pass-on note does. Any other row is quoted as written.
+    """
     row = conn.execute(
         "SELECT body, author_label FROM messages WHERE task_id = ? "
         "AND role = 'user' AND author_participant_id = ? ORDER BY id LIMIT 1",
@@ -867,7 +932,9 @@ def _guest_words(conn, task) -> tuple[str, str]:
     ).fetchone()
     if row is None:
         return "A guest", ""
-    return row["author_label"] or "A guest", row["body"] or ""
+    body = row["body"] or ""
+    text = _mail_new_text(body)
+    return row["author_label"] or "A guest", body if text is None else text
 
 
 _GUEST_QUOTE_CHARS = 500

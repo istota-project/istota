@@ -4607,6 +4607,9 @@ class Message:
     author_label: str | None = None
     #: Canonical token of the shared room a private reply is about, or None.
     about_room_token: str | None = None
+    #: The row's idempotency key, which names a privately parked task's
+    #: question (`private_replies.PARK_PREFIXES`).
+    delivery_reference: str | None = None
 
 
 def _row_to_room(row: sqlite3.Row) -> Room:
@@ -4654,6 +4657,9 @@ def _row_to_message(row: sqlite3.Row) -> Message:
         author_user_id=row["author_user_id"] if "author_user_id" in keys else None,
         author_label=row["author_label"] if "author_label" in keys else None,
         about_room_token=row["about_room_token"] if "about_room_token" in keys else None,
+        delivery_reference=(
+            row["delivery_reference"] if "delivery_reference" in keys else None
+        ),
         id=row["id"],
         room_token=row["room_token"],
         role=row["role"],
@@ -6732,6 +6738,9 @@ _CROSS_ROOM_COLUMNS = (
     # The mail an assistant row sent into an email thread room (ISSUE-612).
     # Selected in the per-room spine too, so both views show the same card.
     "  m.outgoing_mail AS outgoing_mail, "
+    # A private park's question names its task here; the room stream marks
+    # such a row as a confirmation while that task waits (#624).
+    "  m.delivery_reference AS delivery_reference, "
     # Truncated in SQLite rather than in the dict builder: this fragment also
     # backs the live room-event stream, which is byte-budgeted, and a reply to
     # a long answer would otherwise carry that whole answer a second time.

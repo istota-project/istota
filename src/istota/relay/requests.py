@@ -821,7 +821,7 @@ async def present_question(config, *, task, success: bool) -> bool:
         return False
     origin = json.loads(row["origin"])
     post = row["kind"] == "room_post"
-    title = ("Room post awaiting approval" if post
+    title = (confirmation.ROOM_POST_TITLE if post
              else "Private relay question awaiting approval")
     try:
         await message_relays.verify_private_audience(config, actor_user_id=task.user_id, origin=origin)
@@ -834,8 +834,7 @@ async def present_question(config, *, task, success: bool) -> bool:
                 return True
             confirmation.write(conn, task.user_id, task_id=task.id,
                                title=title,
-                               body=("Reply YES or NO in your private chat with the bot, "
-                                     "or approve it in notifications." if post else
+                               body=(confirmation.ROOM_POST_BODY if post else
                                      "Open the private conversation to review this relay question."),
                                room_token=origin.get("room_token"))
             db.drop_pending_steers(conn, task.id)
