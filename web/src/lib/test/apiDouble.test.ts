@@ -66,6 +66,7 @@ describe('the $lib/api double', () => {
       (name) => typeof actual[name] === 'function' && !vi.isMockFunction(double[name]),
     );
     expect(passedThrough.sort()).toEqual([
+      'AdminUserWriteError',
       'AuthError',
       'ChatMemoryBusyError',
       'ChatMemoryConflictError',
