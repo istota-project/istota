@@ -151,6 +151,18 @@ def _draft_id(row: "NotificationRow") -> int | None:
     return _common.coerce_object_id(row, noun="draft", logger=logger)
 
 
+def _open_href(conn: "sqlite3.Connection", draft, user_id: str) -> str | None:
+    """Where Open goes: the private note about the draft's mail, else the
+    room the draft was filed under, at its task's turn. None with neither."""
+    from istota.notifications.resolvers.confirmation import deep_link
+    from istota.rooms.private_replies import note_room_for_task
+
+    if draft.task_id is None:
+        return None
+    room = note_room_for_task(conn, draft.task_id, user_id) or draft.room_token
+    return deep_link(room, draft.task_id) if room else None
+
+
 class OutboundDraftResolver:
     source = SOURCE
     auto_resolve_on_seen = False
@@ -226,6 +238,12 @@ class OutboundDraftResolver:
         if draft is None:
             actions = [actions[1]]
             note = _UNREADABLE_NOTE
+        else:
+            href = _open_href(conn, draft, row.user_id)
+            if href is not None:
+                actions.append(NotificationAction(
+                    id="open", label="Open", kind="default", method="LINK", href=href,
+                ))
         return NotificationView(
             title=title, body=body, severity=row.severity,
             actions=tuple(actions), status_note=note,

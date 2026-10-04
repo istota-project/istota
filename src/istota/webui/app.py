@@ -29,7 +29,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace as _dc_replace
+from dataclasses import dataclass, field as _dc_field, replace as _dc_replace
 from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
@@ -4281,6 +4281,7 @@ def _room_events_batch(
         ) if len(rows) <= want else {}
         mail_views = _mail_views(
             conn, username, [r["room_token"] for r in rows[:want]],
+            [r["task_id"] for r in rows[:want]],
         ) if len(rows) <= want else {}
     truncated = len(rows) > want
     events: list[dict] = []
@@ -7570,9 +7571,12 @@ class _MailView:
     own: frozenset
     #: The viewer's private room, where "Discuss in private chat" goes.
     private_room: str | None
+    #: ``{task_id: room}``: the room holding a turn's private note, which
+    #: outranks ``private_room`` for that turn's link.
+    note_rooms: dict = _dc_field(default_factory=dict)
 
 
-def _mail_views(conn, username: str, tokens) -> dict:
+def _mail_views(conn, username: str, tokens, task_ids=()) -> dict:
     """``{room_token: _MailView}`` for the mail rooms among ``tokens``.
 
     A mail room is one with an email binding. Its rows render as mail cards;
@@ -7594,7 +7598,24 @@ def _mail_views(conn, username: str, tokens) -> dict:
             logger.warning("Could not resolve %s's private room for %s", username, token)
             dest = None
         private = dest.room_token if dest is not None and dest.room_token != token else None
-        out[token] = _MailView(own=own, private_room=private)
+        out[token] = _MailView(own=own, private_room=private,
+                               note_rooms=_note_rooms(conn, username, task_ids))
+    return out
+
+
+def _note_rooms(conn, username: str, task_ids) -> dict:
+    """``{task_id: room}`` for the turns among ``task_ids`` with a private note."""
+    from istota.rooms.private_replies import note_room_for_task  # noqa: PLC0415
+
+    out: dict = {}
+    for task_id in {t for t in task_ids if isinstance(t, int)}:
+        try:
+            room = note_room_for_task(conn, task_id, username)
+        except Exception:  # noqa: BLE001 — a missing link is the safe answer
+            logger.warning("Could not find the private note for task %s", task_id)
+            room = None
+        if room is not None:
+            out[task_id] = room
     return out
 
 
@@ -7616,13 +7637,16 @@ def _mail_labels(view: _MailView, addresses) -> dict:
 
 
 def _mail_note_path(view: _MailView, task_id) -> str | None:
-    """Where "Discuss in private chat" and a held card's link go: the viewer's
-    private room, at the turn's task. Stage 4 points it at the note itself."""
+    """Where "Discuss in private chat" and a held card's link go: the room
+    holding the turn's private note, else the viewer's private room, at the
+    turn's task."""
     from istota.notifications.sources import is_safe_path  # noqa: PLC0415
 
-    if view.private_room is None:
+    room = view.note_rooms.get(task_id) if isinstance(task_id, int) else None
+    room = room or view.private_room
+    if room is None:
         return None
-    path = f"/chat/r/{view.private_room}"
+    path = f"/chat/r/{room}"
     if isinstance(task_id, int):
         path += f"/t/{task_id}"
     return path if is_safe_path(path) else None
@@ -8339,7 +8363,9 @@ def _chat_room_messages(
         parked_notes = _parked_rows(
             conn, username, [(n.id, n.delivery_reference) for n in notes],
         )
-        mail_view = _mail_views(conn, username, [token]).get(token)
+        mail_view = _mail_views(
+            conn, username, [token], [_row_get(r, "task_id") for r in msg_rows],
+        ).get(token)
 
         # 4. Paging metadata: the page's oldest spine (or aux-only) row gives the
         #    next cursor; `has_more` ORs a spine probe with a band-eligible
@@ -10334,7 +10360,8 @@ def _chat_aggregate_messages(
         about_names = _about_room_names(
             conn, username, [r["about_room_token"] for r in rows[:limit]],
         )
-        mail_views = _mail_views(conn, username, [r["room_token"] for r in rows[:limit]])
+        mail_views = _mail_views(conn, username, [r["room_token"] for r in rows[:limit]],
+                                 [r["task_id"] for r in rows[:limit]])
     has_more = len(rows) > limit
     rows = rows[:limit]
     # Rows arrive newest-first; the page's last row is its oldest → the cursor

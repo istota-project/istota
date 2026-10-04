@@ -19,6 +19,7 @@ from unittest.mock import patch
 import pytest
 
 from istota import confirmations, db
+from istota.rooms import private_replies
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email import email_conversation_token, threads
 from istota.transport.email.inbound import poll_emails, received_mail_meta
@@ -383,6 +384,27 @@ class TestTheWebRead:
                 if m["role"] == "user"]
         task_id = rows[-1]["task_id"]
         assert rows[-1]["received_mail"]["note_path"] == f"/chat/r/{private}/t/{task_id}"
+
+    def test_the_cards_link_to_the_room_holding_the_note(self, config, db_path):
+        """Once the note is written (stage 4) the link follows it, wherever it
+        landed, rather than the viewer's current private room."""
+        with db.get_db(db_path) as conn:
+            db.create_web_chat_room(conn, HOST, "General")
+            noted = db.create_web_chat_room(conn, HOST, "Earlier").token
+        _start(config)
+        _poll(config, sender=ALICE, to=(BOT,), cc=(BOB,), message_id="<a2@ext.example>",
+              references=ROOT, body="Zorg, Thursday?")
+        token = _thread_token(config)
+        task_id = [m for m in _page(config, token)["messages"] if m["role"] == "user"][-1]["task_id"]
+        with db.get_db(db_path) as conn:
+            db.add_message(conn, noted, role="system", body="note", origin_surface="web",
+                           about_room_token=token,
+                           delivery_reference=f"private-pass_on:{task_id}:pass-on")
+            current = private_replies.private_room_for(conn, config, HOST, token)
+        assert current.room_token != noted
+
+        rows = [m for m in _page(config, token)["messages"] if m["role"] == "user"]
+        assert rows[-1]["received_mail"]["note_path"] == f"/chat/r/{noted}/t/{task_id}"
 
     def test_with_no_private_room_there_is_no_link(self, config, db_path):
         _start(config)

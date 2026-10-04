@@ -188,45 +188,40 @@ def _run_scheduler(config, result):
 
 
 class TestThePassOnNote:
+    """The note itself is `test_email_notes.py`'s; these keep the shapes this
+    file has always driven through the scheduler with delivery mocked."""
+
     def test_no_action_passes_the_new_text_on_and_sends_nothing(self, config, db_path):
         task_id, private = _host_absent_turn(config, db_path)
-        mail = _run_scheduler(config, "NO_ACTION: Alice is only asking Carol.")
+        _run_scheduler(config, "NO_ACTION: Alice is only asking Carol.")
 
         assert _task(db_path, task_id).status == "completed"
-        mail.assert_not_called()
         (row,) = _rows(db_path, "SELECT role, body, about_room_token, delivery_reference "
                        "FROM messages WHERE room_token = ?", (private,))
         assert row["role"] == "system"
         assert row["about_room_token"] == _room_token(config)
         assert row["delivery_reference"] == f"private-pass_on:{task_id}:pass-on"
         # Built from the stored turn: the new text quoted, no wrapper, no
-        # quoted history, nothing of the model's answer.
+        # quoted history; then the outcome and the model's remark.
         assert row["body"] == (
             f"{ALICE} wrote on Dinner plans, without you on the message:\n\n"
-            "> Can we move dinner to Friday?"
+            "> Can we move dinner to Friday?\n\nNo reply sent.\n\n"
+            "Alice is only asking Carol."
         )
         assert _rows(db_path, "SELECT id FROM messages WHERE room_token = ? "
                      "AND role = 'assistant'", (_room_token(config),)) == []
 
-    def test_control_a_reply_is_sent_as_one(self, config, db_path):
-        task_id, private = _host_absent_turn(config, db_path)
-        mail = _run_scheduler(config, "Friday works too, I'll let Carol know.")
-
-        assert _task(db_path, task_id).status == "completed"
-        mail.assert_called_once()
-        assert _rows(db_path, "SELECT id FROM messages WHERE room_token = ?", (private,)) == []
-
-    def test_control_no_action_from_a_turn_the_host_is_on_is_no_pass_on(
+    def test_a_bare_no_action_from_a_turn_the_host_is_on_writes_nothing(
         self, config, db_path,
     ):
-        """Only a host-absent turn passes on: the host already has this mail."""
+        """The host already has this mail, and the bot had nothing to say."""
         first = _start_thread(config)
         with db.get_db(db_path) as conn:
             private = db.create_web_chat_room(conn, HOST, "Mine").token
             conn.execute("UPDATE tasks SET status = 'completed' WHERE id = ?", (first[0],))
         _poll(config, sender=ALICE, to=(HOST_ADDR,), cc=(BOT,),
               message_id="<a2@ext.example>", references=ROOT, body="Zorg, Friday?")
-        _run_scheduler(config, "NO_ACTION: nothing to add.")
+        _run_scheduler(config, "NO_ACTION:")
         assert _rows(db_path, "SELECT id FROM messages WHERE room_token = ?", (private,)) == []
 
     def test_with_no_private_room_it_is_a_bell_row(self, config, db_path):
@@ -235,17 +230,18 @@ class TestThePassOnNote:
                            message_id="<a2@ext.example>", references=ROOT,
                            body="Can we move dinner to Friday?")
         with db.get_db(db_path) as conn:
-            delivery, body = private_replies.deliver_pass_on(
-                conn, config, db.get_task(conn, task_id),
+            delivery, body = private_replies.deliver_email_note(
+                conn, config, db.get_task(conn, task_id), outcome="none", remark="",
             )
             notes = conn.execute(
-                "SELECT body FROM notifications WHERE source = 'task_alert'",
+                "SELECT body, dedup_key FROM notifications WHERE source = 'task_alert'",
             ).fetchall()
         assert delivery.dest is None and delivery.notice is not None
-        assert body.endswith("> Can we move dinner to Friday?")
+        assert body.endswith("> Can we move dinner to Friday?\n\nNo reply sent.")
         # The bell stores its body flattened (`flatten_body`).
         (note,) = notes
-        assert note["body"].endswith("Can we move dinner to Friday?")
+        assert "Can we move dinner to Friday?" in note["body"]
+        assert note["dedup_key"] == f"private-note:{task_id}"
 
 
 # ---------------------------------------------------------------------------
