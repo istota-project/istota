@@ -1101,6 +1101,23 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  it('keeps a row from a room not yet in the list out of an open aggregate pane', async () => {
+    // A new thread room's first mail streams before the listing has minted
+    // its handle, so its room is not in `$rooms` yet; the server's page hides
+    // a handle-less thread, and the pane must not show it either.
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getChatMessagesView.mockResolvedValue({ ...emptyHistory });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    await s.selectView('all');
+    queueEvents([row(5, 't-new', { role: 'system' }), row(6, 't1', { role: 'system' })], 6);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(get(s.messages).map((m) => m.msgId)).toEqual([6]);
+    s.teardown();
+  });
+
   it('does not lose the colour to an unrelated frame', async () => {
     // The failure the field-by-field merge actually produces: the colour is
     // set, then a rename frame arrives naming every field the snapshot sends.

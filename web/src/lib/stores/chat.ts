@@ -2050,9 +2050,12 @@ function createSession(): ChatSession {
     const v = get(view);
     if (v === 'room' || v === 'starred') return;
     if (v === 'unread' && row.role === 'user') return;
-    // The panes cover the main room list, as the server's page does.
+    // The panes cover the main room list, as the server's page does. A room
+    // not in the list yet (a new thread's first mail streams before the
+    // listing mints its handle) is not in the main list either; the next
+    // page load brings the row back if it belongs.
     const source = get(rooms).find((r) => r.token === row.room_token);
-    if (source && isHiddenRoom(source)) return;
+    if (!source || isHiddenRoom(source)) return;
     if (typeof row.msg_id === 'number' && get(messages).some((m) => m.msgId === row.msg_id)) return;
     // The All view carries no queued rows (`carryClientOnlyRows` drops them in
     // the `token === null` branch) but it does carry stranded failed ones, and

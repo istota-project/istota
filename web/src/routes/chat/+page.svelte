@@ -91,10 +91,14 @@
   // note's `re:` chip and the room stream open a room by finding it there.
   const mainRooms = $derived($rooms.filter((r) => !isHiddenRoom(r)));
   const hiddenRooms = $derived($rooms.filter(isHiddenRoom));
-  // Opened by the user, or by a hidden room becoming the one on screen.
+  // Opened by the user, or by a hidden room *becoming* the one on screen.
+  // Keyed on a boolean, not on `hiddenRooms`: that is a new array on every
+  // room update, and the effect would reopen a group the user closed. A
+  // derived boolean notifies only when it flips.
   let threadsOpen = $state(false);
+  const activeIsHidden = $derived(hiddenRooms.some((r) => r.id === $activeRoomId));
   $effect(() => {
-    if (hiddenRooms.some((r) => r.id === $activeRoomId)) threadsOpen = true;
+    if (activeIsHidden) threadsOpen = true;
   });
 
   // Client-side total for the sidebar Unread badge (sum of per-room counts;

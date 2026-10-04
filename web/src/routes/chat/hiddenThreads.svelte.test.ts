@@ -136,6 +136,20 @@ describe('the room list with email threads', () => {
     expect(document.querySelector('.room-list-threads .room-row.active')).toBeTruthy();
   });
 
+  it('stays collapsed once the user closes it, while its room is on screen', async () => {
+    const rooms = [room(1), thread(2, { name: 'Book club' })];
+    session().rooms.set(rooms);
+    session().activeRoomId.set(2);
+    renderPage();
+    await waitFor(() => expect(groupNames()).toEqual(['Book club']));
+    await fireEvent.click(groupToggle());
+    expect(groupNames()).toEqual([]);
+    // Any room-list update (a message elsewhere, the poll) is a new array.
+    session().rooms.set(rooms.map((r) => ({ ...r })));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(groupNames()).toEqual([]);
+  });
+
   it('leaves a hidden thread’s unread out of the Unread total', async () => {
     session().rooms.set([
       room(1, { unread_count: 0 }),
