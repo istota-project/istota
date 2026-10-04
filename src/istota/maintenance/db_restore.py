@@ -16,7 +16,10 @@ Or a single DB / point in time::
     python -m istota.maintenance.db_restore --user alice --module location --date 2026-07-11
     python -m istota.maintenance.db_restore --framework
 
-Run with the services stopped (the live files are being overwritten).
+Run with the services stopped (the live files are being overwritten), the web
+unit included: the copy keeps the file's inode, so a process left running keeps
+the money store's once-per-file init memo and never re-initialises the
+restored file.
 """
 
 from __future__ import annotations

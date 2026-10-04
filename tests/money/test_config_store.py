@@ -202,6 +202,139 @@ class TestInitDb:
         assert row[0] == "__global__"
 
 
+class TestInitDbRunsOncePerFile:
+    """ISSUE-616: every accessor calls `init_db`, and each call used to run the
+    whole schema script, the migration and the seed again."""
+
+    def _count_inits(self, monkeypatch):
+        calls = []
+        real = cs._migrate_transaction_rules
+
+        def counting(conn):
+            calls.append(1)
+            return real(conn)
+
+        monkeypatch.setattr(cs, "_migrate_transaction_rules", counting)
+        return calls
+
+    def test_repeated_accessors_initialise_once(self, tmp_path, monkeypatch):
+        calls = self._count_inits(monkeypatch)
+        db_path = tmp_path / "money.db"
+        cs.load_invoicing(db_path)
+        cs.load_tax(db_path)
+        for _ in range(5):
+            cs.get_meta(db_path, "schema_version")
+        cs.init_db(db_path)
+        assert len(calls) == 1
+
+    def test_a_relative_and_absolute_spelling_share_one_init(
+        self, tmp_path, monkeypatch,
+    ):
+        calls = self._count_inits(monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        cs.init_db("money.db")
+        cs.init_db(tmp_path / "money.db")
+        assert len(calls) == 1
+
+    def test_a_deleted_file_is_recreated(self, tmp_path, monkeypatch):
+        """Callers rely on `init_db` to create a missing file, so the memo
+        cannot outlive the file it describes."""
+        calls = self._count_inits(monkeypatch)
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        for suffix in ("", "-wal", "-shm"):
+            (tmp_path / f"money.db{suffix}").unlink(missing_ok=True)
+        assert cs.get_meta(db_path, "schema_version") == "1"
+        assert len(calls) == 2
+
+    def test_a_failed_migration_is_retried_on_the_next_call(
+        self, tmp_path, monkeypatch,
+    ):
+        """An init whose migration was swallowed is not recorded as done, so
+        the next accessor tries again as it did before the memo."""
+        db_path = tmp_path / "money.db"
+        legacy_db(db_path, categories={"Software": "Expenses:Software"})
+
+        def boom(mapping):
+            raise RuntimeError("migration exploded")
+
+        monkeypatch.setattr(cs, "_emit_map_entries", boom)
+        cs.init_db(db_path)
+        assert cs.get_meta(db_path, cs._RULES_MIGRATION_SENTINEL) is None
+        monkeypatch.undo()
+        cs.load_monarch(db_path)
+        assert cs.get_meta(db_path, cs._RULES_MIGRATION_SENTINEL) is not None
+
+    def test_an_initialised_wal_file_is_not_switched_again(
+        self, tmp_path, monkeypatch,
+    ):
+        """Setting journal_mode takes a write lock; an init must not issue it
+        against a file already in WAL."""
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        cs._INITIALISED.clear()
+        statements = []
+        real_connect = cs._connect
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def tracing(path):
+            with real_connect(path) as conn:
+                conn.set_trace_callback(statements.append)
+                yield conn
+
+        monkeypatch.setattr(cs, "_connect", tracing)
+        cs.init_db(db_path)
+        assert not any(
+            s.upper().replace(" ", "").startswith("PRAGMAJOURNAL_MODE=")
+            for s in statements
+        )
+
+    def test_two_processes_initialising_one_fresh_file_both_succeed(
+        self, tmp_path,
+    ):
+        """The web unit and the scheduler each keep their own memo, so either
+        may be first to initialise a user's file, or both at once. Racing the
+        WAL switch on a fresh file answered "database is locked" past the busy
+        handler; with a bare `PRAGMA journal_mode=WAL` this failed about one
+        run in seven, so it is a probabilistic guard, not a deterministic one."""
+        import subprocess
+        import sys
+
+        db_path = tmp_path / "money.db"
+        go = tmp_path / "go"
+        script = (
+            "import os, sys, time\n"
+            "from istota.money import config_store as cs\n"
+            "while not os.path.exists(sys.argv[2]): time.sleep(0.001)\n"
+            "cs.init_db(sys.argv[1])\n"
+            "print(cs.get_meta(sys.argv[1], cs._RULES_MIGRATION_SENTINEL) is not None)\n"
+        )
+        procs = [
+            subprocess.Popen(
+                [sys.executable, "-c", script, str(db_path), str(go)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            for _ in range(4)
+        ]
+        go.touch()
+        results = [p.communicate(timeout=60) for p in procs]
+        for proc, (out, err) in zip(procs, results):
+            assert proc.returncode == 0, err
+            assert out.strip() == "True"
+            assert "Traceback" not in err, err
+        with sqlite3.connect(db_path) as conn:
+            seeded = conn.execute(
+                "SELECT COUNT(*) FROM transaction_rules WHERE origin = 'seed'"
+            ).fetchone()[0]
+            globals_ = conn.execute(
+                "SELECT COUNT(*) FROM monarch_profiles WHERE id = 0"
+            ).fetchone()[0]
+        assert seeded == len(MONARCH_CATEGORY_MAP)
+        assert globals_ == 1
+
+
 class TestInvoicingRoundTrip:
     def test_round_trip_dict_save_load(self, tmp_path):
         data = tomli.loads(INVOICING_TOML)
@@ -1230,9 +1363,11 @@ def legacy_db(
     `init_db` runs the migration, so the only way to build the shape it
     migrates *from* is to create the schema, take the sentinel back off and
     write the old tables directly. `profiles` is a list of dicts with `name`,
-    `ledger` and optional `accounts` / `categories` / `tags`.
+    `ledger` and optional `accounts` / `categories` / `tags`. The file is then
+    one this process has not initialised, as a pre-upgrade file would be.
     """
     cs.init_db(db_path)
+    cs._INITIALISED.clear()
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             "DELETE FROM schema_meta WHERE key IN (?, ?)",
