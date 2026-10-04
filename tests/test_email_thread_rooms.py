@@ -619,6 +619,41 @@ class TestAHeldMailStaysOutOfTheRoom:
             assert db.get_task(conn, same[0]).conversation_token == _room_token(config)
         assert _rows(db_path, "SELECT * FROM trusted_email_senders") == []
 
+    def test_approving_an_in_reply_to_only_reply_lands_in_its_thread(
+        self, config, db_path,
+    ):
+        """A client that keeps In-Reply-To alone: approval rebuilds the mail
+        from `processed_emails`, which has to carry that header, or the reply
+        mints a second room (or none) instead of joining its thread."""
+        config.users[HOST].trusted_email_senders = []
+        _start_thread(config)
+        outsider = "dave@else.example"
+        _UID[0] += 1
+        uid = str(_UID[0])
+        envelope = EmailEnvelope(id=uid, subject="Re: Dinner plans", sender=outsider,
+                                 date="Mon, 01 Jan 2026 12:00:00 +0000", is_read=False)
+        email = Email(id=uid, subject="Re: Dinner plans", sender=outsider,
+                      date="Mon, 01 Jan 2026 12:00:00 +0000", body="hi",
+                      attachments=[], message_id="<d1@else.example>", references=None,
+                      in_reply_to=ROOT, to=(BOT, HOST_ADDR), cc=(),
+                      authentication_results=None)
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound._deliver_confirmation_prompts"),
+            patch("istota.transport.email.inbound._deliver_dmarc_alerts"),
+        ):
+            (held,) = poll_emails(config)
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, held)
+            assert task.status == "pending_confirmation"
+            confirmations.approve(conn, task, config=config)
+            task = db.get_task(conn, held)
+        assert task.conversation_token == _room_token(config)
+        assert len(_rows(db_path, "SELECT token FROM rooms WHERE origin='email'")) == 1
+
     def test_a_held_body_is_not_in_the_rooms_transcript(self, config, db_path):
         _start_thread(config)
         _poll(config, sender="mallory@elsewhere.example", to=(BOT,),

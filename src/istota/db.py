@@ -522,6 +522,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _add_columns(conn, "processed_emails", {
         "host_asked": "INTEGER NOT NULL DEFAULT 0",
     })
+    # In-Reply-To, which `threads.admit_approved_mail` rebuilds the held mail
+    # from: a reply naming its parent there alone otherwise finds no thread.
+    _add_columns(conn, "processed_emails", {"in_reply_to": "TEXT"})
 
     # WhatsApp bindings: the adapter split (whatsapp-baileys-adapter spec).
     # `jid` is the Baileys-native identity and `provider` says which adapter
@@ -7086,6 +7089,7 @@ def _migrate_processed_emails_uidvalidity(conn: sqlite3.Connection) -> None:
                 processed_at TEXT DEFAULT (datetime('now')),
                 recipients TEXT,
                 host_asked INTEGER NOT NULL DEFAULT 0,
+                in_reply_to TEXT,
                 UNIQUE (uidvalidity, email_id),
                 FOREIGN KEY (task_id) REFERENCES tasks(id)
             )
@@ -9121,6 +9125,7 @@ def mark_email_processed(
     uidvalidity: int = 0,
     recipients: str | None = None,
     host_asked: bool = False,
+    in_reply_to: str | None = None,
 ) -> int:
     """Record a processed email, keyed by (uidvalidity, email_id).
 
@@ -9130,11 +9135,11 @@ def mark_email_processed(
     """
     cursor = conn.execute(
         """
-        INSERT INTO processed_emails (uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method, recipients, host_asked)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO processed_emails (uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method, recipients, host_asked, in_reply_to)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
-        (uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method, recipients, int(bool(host_asked))),
+        (uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method, recipients, int(bool(host_asked)), in_reply_to),
     )
     return cursor.fetchone()[0]
 

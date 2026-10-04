@@ -282,6 +282,7 @@ CREATE TABLE IF NOT EXISTS processed_emails (
     processed_at TEXT DEFAULT (datetime('now')),
     recipients TEXT,  -- the message's To + Cc, JSON; an email thread room replies to the latest
     host_asked INTEGER NOT NULL DEFAULT 0,  -- the host's authenticated, addressed question on a thread room (ISSUE-607)
+    in_reply_to TEXT,  -- RFC 5322 In-Reply-To, so approving a held reply finds its thread
     UNIQUE (uidvalidity, email_id),
     FOREIGN KEY (task_id) REFERENCES tasks(id)
 );

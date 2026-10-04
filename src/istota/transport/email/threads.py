@@ -671,8 +671,9 @@ def _admit_approved_mail(conn, config: "Config", task) -> str | None:
     from .private_room import email_conversation_token
 
     row = conn.execute(
-        'SELECT sender_email, recipients, message_id, "references", subject, '
-        "routing_method FROM processed_emails WHERE task_id = ? ORDER BY id LIMIT 1",
+        'SELECT sender_email, recipients, message_id, "references", in_reply_to, '
+        "subject, routing_method FROM processed_emails WHERE task_id = ? "
+        "ORDER BY id LIMIT 1",
         (task.id,),
     ).fetchone()
     if row is None or row["routing_method"] not in _ADMITTED_ROUTES:
@@ -683,7 +684,8 @@ def _admit_approved_mail(conn, config: "Config", task) -> str | None:
         listed = []
     email = SimpleNamespace(
         sender=row["sender_email"], to=tuple(str(a) for a in listed if a), cc=(),
-        message_id=row["message_id"], references=row["references"], in_reply_to=None,
+        message_id=row["message_id"], references=row["references"],
+        in_reply_to=row["in_reply_to"],
         subject=row["subject"], body="",
     )
     user_id = task.user_id

@@ -690,6 +690,34 @@ class TestUidValidityMigration:
         )
         assert _processed_uids(config) == {1, 2, 3}
 
+    def test_an_upgraded_ledger_has_the_fresh_columns(self, tmp_path):
+        """Parity: the rebuild's own DDL and the `_add_columns` steps leave
+        the same columns `schema.sql` creates, `in_reply_to` included."""
+        fresh, legacy = tmp_path / "fresh.db", tmp_path / "legacy.db"
+        db.init_db(fresh)
+        _legacy_db(legacy, [("1", "alice@test.com", "One", "plus_address")])
+
+        def columns(path):
+            with db.get_db(path) as conn:
+                return {r[1] for r in conn.execute("PRAGMA table_info(processed_emails)")}
+
+        assert "in_reply_to" in columns(fresh)
+        assert columns(legacy) == columns(fresh)
+
+    def test_a_current_ledger_gains_in_reply_to(self, tmp_path):
+        path = tmp_path / "current.db"
+        db.init_db(path)
+        conn = sqlite3.connect(str(path))
+        conn.execute("ALTER TABLE processed_emails DROP COLUMN in_reply_to")
+        conn.commit()
+        conn.close()
+
+        db.init_db(path)
+
+        with db.get_db(path) as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(processed_emails)")}
+        assert "in_reply_to" in cols
+
     def test_rebuild_is_idempotent(self, tmp_path):
         path = tmp_path / "legacy.db"
         _legacy_db(path, [("1", "alice@test.com", "One", "plus_address")])
