@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db
+from istota import confirmations, db
 from istota.rooms import policy as room_policy
 from istota.rooms import speech_gate
 from istota.config import Config, EmailConfig, UserConfig
@@ -589,6 +589,35 @@ class TestAHeldMailStaysOutOfTheRoom:
             assert [db.get_task(conn, t).status for t in first + second] == [
                 "pending_confirmation", "pending_confirmation"]
             assert not threads.is_present(conn, _room_token(config), outsider)
+
+    def test_a_plain_yes_admits_the_sender_to_that_thread_only(self, config, db_path):
+        """Approving a held mail is admission once per thread: the sender
+        joins the thread's people, so their next mail on it runs ungated,
+        while their mail on another thread still meets the gate. A plain yes
+        writes no trust row."""
+        config.users[HOST].trusted_email_senders = []
+        _start_thread(config)
+        outsider = "mallory@elsewhere.example"
+        (held,) = _poll(config, sender=outsider, to=(BOT,),
+                        message_id="<m1@elsewhere.example>", references=ROOT)
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, held)
+            assert task.status == "pending_confirmation"
+            confirmations.approve(conn, task, config=config)
+            assert threads.is_present(conn, _room_token(config), outsider)
+
+        same = _poll(config, sender=outsider, to=(BOT,),
+                     message_id="<m2@elsewhere.example>",
+                     references=f"{ROOT} <m1@elsewhere.example>")
+        other = _poll(config, sender=outsider, to=("bot+carol@test.com",),
+                      message_id="<x2@elsewhere.example>",
+                      references="<other-root@test.com>", subject="Something else")
+
+        with db.get_db(db_path) as conn:
+            assert [db.get_task(conn, t).status for t in same + other] == [
+                "pending", "pending_confirmation"]
+            assert db.get_task(conn, same[0]).conversation_token == _room_token(config)
+        assert _rows(db_path, "SELECT * FROM trusted_email_senders") == []
 
     def test_a_held_body_is_not_in_the_rooms_transcript(self, config, db_path):
         _start_thread(config)

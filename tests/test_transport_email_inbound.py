@@ -1095,6 +1095,9 @@ class TestSenderMatchConfirmationGate:
         prompt = send.call_args.args[2]
         assert "yes trust" in prompt
         assert "unknown sender" in prompt
+        # A plain yes admits the sender to the thread; the prompt says so.
+        assert "'yes' to process it and admit this sender to this thread" in prompt
+        assert "trust this sender everywhere" in prompt
 
     @staticmethod
     def _gate_prompt(config, *, uid="ob1", sender="stranger@evil.com"):

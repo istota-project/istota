@@ -25,7 +25,7 @@ Emails from untrusted senders require explicit user confirmation before processi
 
 When an email is gated, a confirmation prompt is posted to the user's alerts channel (Talk) asking them to approve, discard, or — for an external sender — trust them so later mail passes. Trusted senders bypass the gate.
 
-A reply from the contact the bot wrote to is not gated: that address is the one the bot chose to correspond with, so the reply carries the same evidence the send did. Someone *else* replying on that thread is, and it takes one approval — `yes trust` after that lets their mail through for good. The `Message-ID` alone is no longer enough, because it is not a secret: it travels to everyone Cc'd, everyone the thread is forwarded to, and into any public archive the thread reaches, and it never expires.
+A reply from the contact the bot wrote to is not gated: that address is the one the bot chose to correspond with, so the reply carries the same evidence the send did. Someone *else* replying on that thread is, and it takes one approval per thread: a plain `yes` processes the mail and adds its sender to the thread's people, so their later mail on that thread is not gated again, while mail from them on any other thread still is. `yes trust` lets their mail through everywhere. The `Message-ID` alone is no longer enough, because it is not a secret: it travels to everyone Cc'd, everyone the thread is forwarded to, and into any public archive the thread reaches, and it never expires.
 
 ### `confirm_sender_match`
 
@@ -192,7 +192,7 @@ A reply held at the delivery leg raises a notification the moment it is held. Th
 
 One fidelity note. A held message stores a single body, so a briefing held on its way into an email thread is released as plain text, losing the HTML alternative with its article links. What you approve is what is sent, which is the property worth keeping; the links are the cost.
 
-One thing worth knowing about what an inbound approval means. Answering `yes` to an inbound confirmation prompt approves *reading* that one message. It writes no trust row, so it does not authorize mailing that sender back — the reply is held separately under whatever policy applies. Answering `yes trust` does authorize both, because it adds the address to your trusted list.
+One thing worth knowing about what an inbound approval means. Answering `yes` to an inbound confirmation prompt approves *reading* that message and admits its sender to that one thread, so their later mail on it passes the inbound gate. It writes no trust row, so it does not authorize mailing that sender back — the reply is held separately under whatever policy applies. Answering `yes trust` does authorize both, because it adds the address to your trusted list.
 
 ## Mail the bot sends
 
