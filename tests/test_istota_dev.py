@@ -186,6 +186,44 @@ class TestClone:
         assert out["fossils_removed"] == []
         _assert_invariant(env.bare())
 
+    # ISSUE-623: a clone interrupted between `clone --bare` and the refspec
+    # write left a directory no later run repaired.
+    def test_a_bare_clone_missing_its_refspec_is_repaired(self, env):
+        upstream = env.upstream()
+        bare = env.bare()
+        bare.parent.mkdir(parents=True, exist_ok=True)
+        _git(env.tmp, "clone", "-q", "--bare", str(upstream), str(bare))
+        assert _git_rc(bare, "config", "--get", "remote.origin.fetch") != 0
+
+        out = env.clone()
+
+        assert out["fresh"] is False
+        assert out["default_branch"] == "main"
+        assert _git(bare, "config", "--get-all", "remote.origin.fetch").splitlines() == [
+            "+refs/heads/*:refs/remotes/origin/*"
+        ]
+        assert "refs/remotes/origin/main" in _refs(bare)
+
+    def test_a_healthy_clone_keeps_one_refspec(self, env):
+        env.upstream()
+        env.clone()
+        env.clone()
+        assert _git(env.bare(), "config", "--get-all", "remote.origin.fetch").splitlines() == [
+            "+refs/heads/*:refs/remotes/origin/*"
+        ]
+
+    def test_a_second_refspec_survives_and_does_not_fail_the_run(self, env):
+        env.upstream()
+        env.clone()
+        extra = "+refs/merge-requests/*/head:refs/remotes/origin/mr/*"
+        _git(env.bare(), "config", "--add", "remote.origin.fetch", extra)
+
+        env.clone()
+
+        assert _git(env.bare(), "config", "--get-all", "remote.origin.fetch").splitlines() == [
+            "+refs/heads/*:refs/remotes/origin/*", extra,
+        ]
+
     def test_master_is_read_not_assumed(self, env):
         env.upstream(branch="master")
         out = env.clone()
@@ -697,6 +735,78 @@ class TestVerifyRemote:
     def test_a_bare_username_is_not_a_credential(self, env, checkout):
         checkout("https://oauth2@gitlab.example.com/acme/widget.git")
         assert env.run("verify-remote", "acme/widget")[0] == 0
+
+    # ISSUE-622: `git push` goes to the push URL when one is set.
+    def test_a_push_url_to_another_project_is_a_mismatch(self, env, checkout):
+        checkout("https://gitlab.example.com/acme/widget.git")
+        _git(Path.cwd(), "config", "remote.origin.pushurl",
+             "https://gitlab.example.com/someone/else.git")
+        code, out = env.run("verify-remote", "acme/widget")
+        assert code == istota_dev.EXIT_MISMATCH
+        assert out["remote"] == "gitlab.example.com/acme/widget"
+        assert out["push_remote"] == "gitlab.example.com/someone/else"
+        assert out["expected"] == "acme/widget"
+
+    def test_a_credentialed_push_url_stops(self, env, checkout):
+        checkout("https://gitlab.example.com/acme/widget.git")
+        _git(Path.cwd(), "config", "remote.origin.pushurl",
+             f"https://oauth2:{SECRET}@gitlab.example.com/acme/widget.git")
+        code, out, err = env.run("verify-remote", "acme/widget", raw=True)
+        assert code == istota_dev.EXIT_CREDENTIAL
+        assert SECRET not in out + err
+
+    def test_a_credentialed_push_url_outranks_a_mismatch(self, env, checkout):
+        checkout("https://gitlab.example.com/acme/widget.git")
+        _git(Path.cwd(), "config", "remote.origin.pushurl",
+             f"https://oauth2:{SECRET}@gitlab.example.com/acme/widget.git")
+        code, out, err = env.run("verify-remote", "acme/other", raw=True)
+        assert code == istota_dev.EXIT_CREDENTIAL
+        assert SECRET not in out + err
+
+    def test_a_credentialed_push_url_outranks_an_unparseable_one(self, env, checkout):
+        checkout("https://gitlab.example.com/acme/widget.git")
+        work = Path.cwd()
+        _git(work, "config", "--add", "remote.origin.pushurl", "/srv/elsewhere.git")
+        _git(work, "config", "--add", "remote.origin.pushurl",
+             f"https://oauth2:{SECRET}@gitlab.example.com/acme/widget.git")
+        code, out, err = env.run("verify-remote", "acme/widget", raw=True)
+        assert code == istota_dev.EXIT_CREDENTIAL
+        assert SECRET not in out + err
+
+    def test_an_unparseable_push_url_is_named(self, env, checkout):
+        checkout("https://gitlab.example.com/acme/widget.git")
+        _git(Path.cwd(), "config", "remote.origin.pushurl", "/srv/elsewhere.git")
+        code, out = env.run("verify-remote", "acme/widget")
+        assert code == istota_dev.EXIT_GIT
+        assert out["error"] == "could not parse the origin push URL"
+
+    def test_one_bad_push_url_among_several_is_a_mismatch(self, env, checkout):
+        checkout("https://gitlab.example.com/acme/widget.git")
+        work = Path.cwd()
+        _git(work, "config", "--add", "remote.origin.pushurl",
+             "https://gitlab.example.com/acme/widget.git")
+        _git(work, "config", "--add", "remote.origin.pushurl",
+             "git@github.com:someone/else.git")
+        code, out = env.run("verify-remote", "acme/widget")
+        assert code == istota_dev.EXIT_MISMATCH
+        assert out["push_remote"] == "github.com/someone/else"
+
+    def test_a_matching_push_url_still_matches(self, env, checkout):
+        checkout("https://gitlab.example.com/acme/widget.git")
+        _git(Path.cwd(), "config", "remote.origin.pushurl",
+             "git@gitlab.example.com:acme/widget.git")
+        assert env.run("verify-remote", "acme/widget") == (
+            0, {"remote": "gitlab.example.com/acme/widget", "forge": "gitlab"},
+        )
+
+    def test_a_push_insteadof_rewrite_is_followed(self, env, checkout):
+        checkout("https://gitlab.example.com/acme/widget.git")
+        _git(Path.cwd(), "config",
+             "url.https://gitlab.example.com/someone/.pushInsteadOf",
+             "https://gitlab.example.com/acme/")
+        code, out = env.run("verify-remote", "acme/widget")
+        assert code == istota_dev.EXIT_MISMATCH
+        assert out["push_remote"] == "gitlab.example.com/someone/widget"
 
     def test_outside_a_worktree_is_a_git_failure(self, env):
         elsewhere = env.tmp / "nowhere"
