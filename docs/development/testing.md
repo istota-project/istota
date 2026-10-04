@@ -271,7 +271,7 @@ The pieces under `testbed/` are general, not forge-specific. The forge chain is 
 
 `testbed/` sits beside `src/` rather than inside `tests/` because it is not part of the shipped application and two repos outside this one consume it. It has its own `pyproject.toml` and imports no pytest, so a failure surfaces as a raised `StackError` rather than as a call into a test runner that is not installed. When a new subsystem needs an end-to-end tier, write a service and reuse these — don't build a second stack alongside them.
 
-`testbed/services/model_endpoint.py`'s wire format has its own tests in the default suite (`tests/test_model_endpoint.py`), pinned against the real provider over a real socket. That matters more than it looks: nothing in a smoke test can tell a correctly framed stream from a subtly wrong one — a stream missing its completion signal arrives as a task that failed for a reason unrelated to what the test was asserting.
+`testbed/services/model_endpoint.py`'s wire formats have their own tests in the default suite (`tests/test_model_endpoint.py`): the OpenAI half pinned against the real provider over a real socket, and the Anthropic Messages half, which the `claude` CLI speaks, pinned by event shape since no Anthropic client is installed for tests. That matters more than it looks: nothing in a smoke test can tell a correctly framed stream from a subtly wrong one — a stream missing its completion signal arrives as a task that failed for a reason unrelated to what the test was asserting.
 
 ### Writing a new service
 

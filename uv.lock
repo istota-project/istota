@@ -1587,6 +1587,7 @@ whisper = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "certifi" },
     { name = "flask" },
     { name = "jinja2" },
     { name = "psutil" },
@@ -1686,6 +1687,7 @@ provides-extras = ["dev", "calendar", "email", "markets", "transcribe", "memory-
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "certifi", specifier = ">=2024.2.2" },
     { name = "flask", specifier = ">=3.1.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "psutil", specifier = ">=5.9.0" },
