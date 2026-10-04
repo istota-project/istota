@@ -43,7 +43,7 @@ What is per person, beyond persona and reach: a member's per-skill instructions 
 
 In a shared room the bot does not answer every message. The **speech gate** decides, using `[speech_gate] mode`:
 
-- `mention` (the default): the bot answers a turn that addresses it and records the rest. On Talk that is an @mention; on web it is `@name` anywhere or the bot's name as the first word; on WhatsApp it is a mention, a reply to one of the bot's messages, or the name as the first word; on email it is the bot's address in To, or the bot's name in the new part of the message (`@name` anywhere, or the name first on a line). Cc without the name means the bot is listening and does not reply.
+- `mention` (the default): the bot answers a turn that addresses it and records the rest. On Talk that is an @mention; on web it is `@name` anywhere or the bot's name as the first word; on WhatsApp it is a mention, a reply to one of the bot's messages, or the name as the first word; on email the rule is the [email thread room's](email.md#email-thread-rooms): the host's own mail asks with the bot in To or named in the new part of the message (`@name` anywhere, or the name first on a line), anyone else's when it names the bot or the host is not on the message.
 - `classifier`: a small, cheap model reads the last few turns and decides whether the latest one is meant for the bot. If the model fails or times out, the bot stays quiet. A turn that addresses the bot is always answered, whatever the model says. An email thread room stays on `mention` even then, because speaking there is a reply-all.
 - `off`: the bot answers every turn.
 
@@ -53,18 +53,18 @@ The unanswered turns still reach the bot as context, so when somebody does addre
 
 Every shared room has a **host**: on web, the person who created it; on Talk, the first Istota member the bot saw there; on WhatsApp, the person who added the bot's number; on email, the person whose thread it is.
 
-A guest's message never runs on the guest's authority. When the bot answers a guest, it acts **for the host**, as the host's emissary. The guest's words are passed to the model as data, not as instructions, and the task:
+A guest's message never runs on the guest's authority. When the bot answers a guest, it acts **for the host**, as the host's emissary. An email thread is the exception: it has no guest mode, and a correspondent's mail runs as the host at full reach, bounded by the email gates instead (see [email thread rooms](email.md#email-thread-rooms)). The guest's words are passed to the model as data, not as instructions, and the task:
 
 - reads nothing private of the host's, whatever the host has shared in that room,
 - takes no action beyond its reply (no calendar write, no email, no web fetch on the native brain),
 - sends anything else, including any question that needs approval, to the host [privately](#private-replies).
 
-How a guest is answered is the room's `guest_reply` setting, which the host changes with `!room guests <off|held|direct>`:
+How a guest is answered is the room's `guest_reply` setting, which the host changes with `!room guests <off|held|direct>`. An email thread room ignores it and does not show it in its settings:
 
 | Setting | What happens to a guest's message |
 |---|---|
 | `direct` | The bot answers in the room. Default on Talk and web. |
-| `held` | The answer goes to the host's private chat with the bot as a proposal, with the guest's words and the exact reply. The host approves it, and only then is it posted. Default on WhatsApp and email. |
+| `held` | The answer goes to the host's private chat with the bot as a proposal, with the guest's words and the exact reply. The host approves it, and only then is it posted. Default on WhatsApp. |
 | `off` | The guest's message is recorded and not answered. |
 
 A guest's `!commands` are ignored, apart from switching the bot off. A guest cannot stop, retry or steer anyone's task, or answer a confirmation.
@@ -79,12 +79,12 @@ A turn runs with its sender's reach. When you ask the bot something in a shared 
 
 This holds with a guest in the room too. Having the guest there, and asking in front of them, is your choice. The room card tells the bot that a guest is reading.
 
-One thing is left out. In a shared room the bot does not load your personal memory into the prompt: `USER.md`, dated memories, recalled memories, remembered facts and playbooks. Those reach a private prompt without you asking for them, so a question about lunch could otherwise come back with something from your health notes. The memory files are still there, so "what did I note about X" works when you ask for it.
+One thing is left out, except on an email thread, which is your correspondence and loads it as any email does. In a shared room the bot does not load your personal memory into the prompt: `USER.md`, dated memories, recalled memories, remembered facts and playbooks. Those reach a private prompt without you asking for them, so a question about lunch could otherwise come back with something from your health notes. The memory files are still there, so "what did I note about X" works when you ask for it.
 
 Two kinds of task run with less:
 
 - **A guest's turn** runs as the room's host and reaches nothing of the host's: no workspace, no private skill, no memory. Only skills that read nothing personal (the room's own tools, untrusted-input handling) and the room's `CHANNEL.md` are available.
-- **A task nobody asked in the room** is restricted the same way, since its answer lands in the room with no member asking there: a subtask whose conversation is a shared room, a scheduled job or briefing aimed at a shared room you are not a member of, or an outside correspondent's reply to an email the bot sent from that room.
+- **A task nobody asked in the room** is restricted the same way, since its answer lands in the room with no member asking there: a subtask whose conversation is a shared room, or a scheduled job or briefing aimed at a shared room you are not a member of.
 
 Your own scheduled jobs (`CRON.md`) and briefings that post into a shared room you are a member of run as your turn there does: setting the job to post in that room is the same decision as asking there. They leave your personal memory out of the prompt in the same way.
 
