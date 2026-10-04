@@ -6156,6 +6156,37 @@ def room_for_task_turn(
     return row["room_token"] if row else None
 
 
+# Which tasks a room's web transcript renders from the task row rather than
+# from the spine: a web or Talk task conversing in the room, or an email task
+# whose user turn the room stored. `webui.app._AUX_ROOM_SCOPE` reads it (its
+# comment says why it stays a literal), and so does `task_shown_in_room`. Both
+# `?` bind the room token.
+TASK_ROOM_SCOPE_SQL = (
+    "((source_type IN ('web', 'talk') AND conversation_token = ?) "
+    "OR (source_type = 'email' AND EXISTS ("
+    "SELECT 1 FROM messages m2 WHERE m2.room_token = ? "
+    "AND m2.task_id = tasks.id AND m2.role = 'user')))"
+)
+
+
+def task_shown_in_room(
+    conn: sqlite3.Connection, task_id: int, user_id: str, room_token: str | None,
+) -> bool:
+    """Whether the web view of `room_token` renders this task from its row.
+
+    A parked task's question has no transcript row of its own; the web view
+    renders it from `tasks.confirmation_prompt`, and only for a task inside
+    `TASK_ROOM_SCOPE_SQL`. So this is the answer to "is the question on screen
+    anywhere" once its push has failed (#635). False for no room."""
+    if not room_token or get_room(conn, room_token) is None:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM tasks WHERE id = ? AND user_id = ? AND " + TASK_ROOM_SCOPE_SQL,
+        (task_id, user_id, room_token, room_token),
+    ).fetchone()
+    return row is not None
+
+
 def list_system_messages(
     conn: sqlite3.Connection, room_token: str, limit: int = 50,
 ) -> list[Message]:
