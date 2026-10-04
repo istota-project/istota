@@ -103,6 +103,9 @@ class IncomingMessage:
     # An email thread room's mail from someone other than the host, with the
     # host on neither To nor Cc (`threads.IntakeFacts.host_absent`).
     host_absent: bool = False
+    # Email only: the mail card's metadata (`inbound.received_mail_meta`),
+    # written onto the stored user row as `messages.received_mail`.
+    mail_meta: "dict | None" = None
     output_target: str | None = None  # "talk"|"email"|"ntfy"|comma list|None
     model: str | None = None          # !model override (canonical id)
     effort: str | None = None

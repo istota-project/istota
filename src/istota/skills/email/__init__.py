@@ -150,6 +150,10 @@ class Email:
     # exists to detect is the one where it has stopped. Read it through
     # `authentication_results_headers`, never directly.
     authentication_results_all: tuple[str, ...] = ()
+    # The display name each From, To and Cc address carried, keyed by the
+    # lowercased address. `to` and `cc` hold addresses only, and the mail card
+    # names people where the header did.
+    display_names: dict[str, str] = field(default_factory=dict)
 
     @property
     def authentication_results_headers(self) -> tuple[str, ...]:
@@ -472,6 +476,12 @@ def _msg_to_email(msg) -> Email:
         for att in msg.attachments
         if att.filename
     ]
+    display_names: dict[str, str] = {}
+    people = [msg.from_values] if msg.from_values else []
+    for person in people + list(msg.to_values or ()) + list(msg.cc_values or ()):
+        name, address = getattr(person, "name", None), getattr(person, "email", None)
+        if isinstance(name, str) and name and isinstance(address, str) and address:
+            display_names.setdefault(address.lower(), name)
     return Email(
         id=msg.uid,
         subject=msg.subject or "(no subject)",
@@ -500,6 +510,7 @@ def _msg_to_email(msg) -> Email:
         # sender's header *is* element 0. Naming our authserv-id makes the
         # distinction explicit, and that needs every header rather than the first.
         authentication_results_all=_header_all(msg, "authentication-results"),
+        display_names=display_names,
     )
 
 

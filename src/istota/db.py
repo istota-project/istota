@@ -525,6 +525,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # In-Reply-To, which `threads.admit_approved_mail` rebuilds the held mail
     # from: a reply naming its parent there alone otherwise finds no thread.
     _add_columns(conn, "processed_emails", {"in_reply_to": "TEXT"})
+    # The mail card's metadata (hidden email threads, stage 3), which approving
+    # a held mail copies onto its room row. Nothing to backfill.
+    _add_columns(conn, "processed_emails", {"mail_meta": "TEXT"})
 
     # WhatsApp bindings: the adapter split (whatsapp-baileys-adapter spec).
     # `jid` is the Baileys-native identity and `provider` says which adapter
@@ -1172,6 +1175,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_room_group(conn)
     # ISSUE-612. Nothing to backfill: no earlier row recorded its mail.
     _add_columns(conn, "messages", {"outgoing_mail": "TEXT"})
+    # Hidden email threads, stage 3. A row from before it renders the card from
+    # the wrapper alone, so nothing is backfilled.
+    _add_columns(conn, "messages", {"received_mail": "TEXT"})
     # Email on rooms, stage 2. Nothing to backfill: no earlier task was asked
     # whether its host was on the message.
     _add_columns(conn, "tasks", {"host_absent": "INTEGER NOT NULL DEFAULT 0"})
@@ -6023,6 +6029,13 @@ def set_outgoing_mail(conn: sqlite3.Connection, message_id: int, mail: dict) -> 
                  (json.dumps(mail), message_id))
 
 
+def set_received_mail(conn: sqlite3.Connection, message_id: int, meta: dict) -> None:
+    """Record the metadata of the mail a room row received (hidden email
+    threads, stage 3). Written once, at intake or at a held mail's approval."""
+    conn.execute("UPDATE messages SET received_mail = ? WHERE id = ?",
+                 (json.dumps(meta), message_id))
+
+
 def settle_draft_mail(
     conn: sqlite3.Connection, room_token: str | None, draft_id: int, *,
     state: str, body: str | None = None,
@@ -6765,6 +6778,9 @@ _CROSS_ROOM_COLUMNS = (
     # The mail an assistant row sent into an email thread room (ISSUE-612).
     # Selected in the per-room spine too, so both views show the same card.
     "  m.outgoing_mail AS outgoing_mail, "
+    # The mail a user row received in a mail room (hidden email threads,
+    # stage 3), for the incoming-mail card.
+    "  m.received_mail AS received_mail, "
     # A private park's question names its task here; the room stream marks
     # such a row as a confirmation while that task waits (#624).
     "  m.delivery_reference AS delivery_reference, "
@@ -7114,6 +7130,7 @@ def _migrate_processed_emails_uidvalidity(conn: sqlite3.Connection) -> None:
                 recipients TEXT,
                 host_asked INTEGER NOT NULL DEFAULT 0,
                 in_reply_to TEXT,
+                mail_meta TEXT,
                 UNIQUE (uidvalidity, email_id),
                 FOREIGN KEY (task_id) REFERENCES tasks(id)
             )
@@ -9150,20 +9167,24 @@ def mark_email_processed(
     recipients: str | None = None,
     host_asked: bool = False,
     in_reply_to: str | None = None,
+    mail_meta: dict | None = None,
 ) -> int:
     """Record a processed email, keyed by (uidvalidity, email_id).
 
     ``recipients`` is the message's To and Cc as a JSON list; ``thread_id`` is
     the room token for a message on an email thread room. ``host_asked`` marks
     the host's own authenticated, addressed question there (ISSUE-607).
+    ``mail_meta`` is the card metadata a held mail's approval copies onto its
+    room row (`inbound.received_mail_meta`).
     """
     cursor = conn.execute(
         """
-        INSERT INTO processed_emails (uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method, recipients, host_asked, in_reply_to)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO processed_emails (uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method, recipients, host_asked, in_reply_to, mail_meta)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
-        (uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method, recipients, int(bool(host_asked)), in_reply_to),
+        (uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method, recipients, int(bool(host_asked)), in_reply_to,
+         json.dumps(mail_meta) if mail_meta is not None else None),
     )
     return cursor.fetchone()[0]
 

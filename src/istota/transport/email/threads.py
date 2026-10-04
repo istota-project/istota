@@ -525,15 +525,22 @@ def new_text(body: str | None) -> str:
     Otherwise every later reply quoting a question to the bot would ask it
     again. A client quoting in some other form is read as new text.
     """
+    kept, _cut, _lines = _cut_quoted(body)
+    return "\n".join(kept)
+
+
+def _cut_quoted(body: str | None) -> tuple[list[str], int, list[str]]:
+    """`new_text`'s walk: the kept lines, the index the quoted history starts
+    at (the line count when there is none), and the body's lines."""
     lines = (body or "").splitlines()
     kept: list[str] = []
     for index, line in enumerate(lines):
         if _ATTRIBUTION.match(line) or _FORWARD.match(line):
-            break
+            return kept, index, lines
         if _HEADER_FROM.match(line) and any(
             _HEADER_NEXT.match(following) for following in lines[index + 1:index + 4]
         ):
-            break
+            return kept, index, lines
         if _ATTRIBUTION_TAIL.search(line):
             head = next(
                 (back for back in (1, 2) if index - back >= 0
@@ -543,11 +550,34 @@ def new_text(body: str | None) -> str:
             )
             if head is not None:
                 del kept[-head:]
-                break
+                return kept, index - head, lines
         if line.lstrip().startswith(">"):
             continue
         kept.append(line)
-    return "\n".join(kept)
+    return kept, len(lines), lines
+
+
+#: The signature separator, RFC 3676's ``-- `` or the bare form clients write.
+_SIGNATURE = re.compile(r"^--\s?$")
+
+
+def split_new_text(body: str | None) -> tuple[str, str]:
+    """A mail's body as the mail card shows it: the new text, and the rest
+    (the signature, then the quoted history) behind "Show quoted text".
+
+    Cut where `new_text` cuts. Unlike `new_text`, ``>`` lines above the cut
+    are kept in place: an inline reply answers them line by line, and a card
+    that dropped them would show answers to nothing. The signature is a
+    display matter too and does not change what intake reads as addressed.
+    """
+    _kept, cut, lines = _cut_quoted(body)
+    kept, rest = lines[:cut], lines[cut:]
+    for index, line in enumerate(kept):
+        if _SIGNATURE.match(line):
+            rest = kept[index:] + rest
+            kept = kept[:index]
+            break
+    return "\n".join(kept).strip(), "\n".join(rest).strip()
 
 
 def addressed_in_new_text(config: "Config", body: str | None) -> bool:
@@ -672,7 +702,7 @@ def _admit_approved_mail(conn, config: "Config", task) -> str | None:
 
     row = conn.execute(
         'SELECT sender_email, recipients, message_id, "references", in_reply_to, '
-        "subject, routing_method FROM processed_emails WHERE task_id = ? "
+        "subject, routing_method, mail_meta FROM processed_emails WHERE task_id = ? "
         "ORDER BY id LIMIT 1",
         (task.id,),
     ).fetchone()
@@ -688,12 +718,20 @@ def _admit_approved_mail(conn, config: "Config", task) -> str | None:
         in_reply_to=row["in_reply_to"],
         subject=row["subject"], body="",
     )
+    # The card metadata the poller stored at intake, so the approved mail's
+    # row renders as it would have on receipt.
+    try:
+        mail_meta = json.loads(row["mail_meta"]) if row["mail_meta"] else None
+    except ValueError:
+        mail_meta = None
+    if not isinstance(mail_meta, dict):
+        mail_meta = None
     user_id = task.user_id
     if is_private_mail(config, email, user_id):
         result = record_phone_turn(
             conn, config, surface=SURFACE, surface_ref=email_conversation_token(user_id),
             user_id=user_id, text=task.prompt, channel_name="Email", record_only=True,
-            sender_address=row["sender_email"],
+            sender_address=row["sender_email"], mail_meta=mail_meta,
         )
         if result.message_id is None:
             return None
@@ -723,6 +761,7 @@ def _admit_approved_mail(conn, config: "Config", task) -> str | None:
         user_id=author.user_id or room.host, text=task.prompt, source_type=SURFACE,
         output_target=SURFACE, sender_address=row["sender_email"], author=author,
         room_container=True, record_only=True, addressed_to_bot=True,
+        mail_meta=mail_meta,
     )
     if result.message_id is None:
         return None
@@ -911,6 +950,7 @@ __all__ = [
     "is_present",
     "is_private_mail",
     "new_text",
+    "split_new_text",
     "recipients_json",
     "record_sent_mail",
     "register_sent_thread",

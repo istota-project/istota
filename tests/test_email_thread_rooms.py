@@ -917,8 +917,11 @@ class TestTheBotsMailIsACard:
         (bubble,) = [m for m in page["messages"] if m.get("mail")]
         assert bubble["role"] == "assistant"
         assert bubble["text"] == "Thursday after 7 works"
+        # The viewer's own address is named "you" on the card (stage 3); no
+        # private room exists here, so there is no link to one.
         assert bubble["mail"] == {"to": [HOST_ADDR], "cc": [ALICE, BOB],
-                                  "subject": "Re: Dinner plans", "state": "sent"}
+                                  "subject": "Re: Dinner plans", "state": "sent",
+                                  "labels": {HOST_ADDR: "you"}}
 
 
 # ---------------------------------------------------------------------------

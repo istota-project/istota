@@ -557,6 +557,8 @@ def record_inbound(
     # To nor Cc: the task may pass it on to the host privately rather than
     # reply (`tasks.host_absent`). Set only by the email poller.
     host_absent: bool = False,
+    # Email only: the mail card's metadata, written onto the stored user row.
+    mail_meta: dict | None = None,
 ) -> InboundResult:
     """Resolve → echo-check → store user message → ask the gate → create task.
 
@@ -867,6 +869,8 @@ def record_inbound(
             author_participant_id=participant_id,
             delivery_reference=delivery_reference,
         )
+        if mail_meta is not None and message_id is not None:
+            db.set_received_mail(conn, message_id, mail_meta)
 
     # 4. Ask the speech gate about a stored turn. Whether more than one human
     #    is here is asked once, after the author's participant row is written,
@@ -965,7 +969,7 @@ def record_phone_turn(
     conn, config, *, surface, surface_ref, user_id, text, channel_name,
     record_only=False, external_id=None, reply_to_content=None, attachments=None,
     reply_to_canonical_id=None, about_room_token=None, delivery_reference=None,
-    queue="foreground", sender_address=None,
+    queue="foreground", sender_address=None, mail_meta=None,
 ):
     """Record an accepted turn in a user's private surface room, and the
     room's permanent pre-room alias.
@@ -991,6 +995,7 @@ def record_phone_turn(
         attachments=attachments, is_command=text.startswith("!"), record_only=record_only,
         about_room_token=about_room_token, delivery_reference=delivery_reference,
         sender_address=sender_address, room_container=surface == "email",
+        mail_meta=mail_meta,
     )
     if result.message_id is not None:
         # Reusing a deleted room's binding must never retarget its history.
@@ -1043,5 +1048,6 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         is_command=msg.is_command,
         room_container=msg.room_container,
         host_absent=msg.host_absent,
+        mail_meta=msg.mail_meta,
     )
     return result.task_id

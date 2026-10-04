@@ -4279,11 +4279,16 @@ def _room_events_batch(
             conn, username,
             [(r["msg_id"], r["delivery_reference"]) for r in rows[:want] if r["role"] == "system"],
         ) if len(rows) <= want else {}
+        mail_views = _mail_views(
+            conn, username, [r["room_token"] for r in rows[:want]],
+        ) if len(rows) <= want else {}
     truncated = len(rows) > want
     events: list[dict] = []
     total = 0
     for r in rows[:want]:
-        d = _cross_room_message_dict(r, username, about_names=about_names, parked=parked)
+        d = _cross_room_message_dict(
+            r, username, about_names=about_names, parked=parked, mail_views=mail_views,
+        )
         if r["msg_id"] in undeletable:
             d["deletable"] = False
         total += len(json.dumps(d))
@@ -7556,6 +7561,185 @@ def _outgoing_mail_field(raw) -> dict | None:
     return out
 
 
+@dataclass(frozen=True)
+class _MailView:
+    """What the viewer's mail cards need from a mail room: an email thread
+    room or the private email room (hidden email threads, stage 3)."""
+
+    #: The viewer's own addresses, lowercased, which a card names "you".
+    own: frozenset
+    #: The viewer's private room, where "Discuss in private chat" goes.
+    private_room: str | None
+
+
+def _mail_views(conn, username: str, tokens) -> dict:
+    """``{room_token: _MailView}`` for the mail rooms among ``tokens``.
+
+    A mail room is one with an email binding. Its rows render as mail cards;
+    every other room's rows render as they did.
+    """
+    from istota.mail.support import own_addresses  # noqa: PLC0415
+    from istota.rooms.private_replies import private_room_for  # noqa: PLC0415
+
+    out: dict = {}
+    own = None
+    for token in {t for t in tokens if t}:
+        if _db.get_room_binding(conn, token, "email") is None:
+            continue
+        if own is None:
+            own = frozenset(own_addresses(_config, username))
+        try:
+            dest = private_room_for(conn, _config, username, token)
+        except Exception:  # noqa: BLE001 — a missing link is the safe answer
+            logger.warning("Could not resolve %s's private room for %s", username, token)
+            dest = None
+        private = dest.room_token if dest is not None and dest.room_token != token else None
+        out[token] = _MailView(own=own, private_room=private)
+    return out
+
+
+def _mail_labels(view: _MailView, addresses) -> dict:
+    """``{address: label}`` for the addresses a card names other than by
+    their own text: the viewer's own as "you", the bot's by its name."""
+    from istota.mail.ownership import is_bot_address  # noqa: PLC0415
+
+    labels: dict = {}
+    for address in addresses:
+        if not isinstance(address, str) or not address:
+            continue
+        folded = address.strip().lower()
+        if folded in view.own:
+            labels[folded] = "you"
+        elif is_bot_address(_config, folded):
+            labels[folded] = _config.bot_name or "Istota"
+    return labels
+
+
+def _mail_note_path(view: _MailView, task_id) -> str | None:
+    """Where "Discuss in private chat" and a held card's link go: the viewer's
+    private room, at the turn's task. Stage 4 points it at the note itself."""
+    from istota.notifications.sources import is_safe_path  # noqa: PLC0415
+
+    if view.private_room is None:
+        return None
+    path = f"/chat/r/{view.private_room}"
+    if isinstance(task_id, int):
+        path += f"/t/{task_id}"
+    return path if is_safe_path(path) else None
+
+
+def _decorate_outgoing_mail(out: dict, view: "_MailView | None") -> None:
+    """Add the viewer's address labels and the note link to an assistant
+    dict's `mail` card, in a mail room."""
+    mail = out.get("mail")
+    if view is None or mail is None:
+        return
+    mail["labels"] = _mail_labels(view, mail["to"] + mail["cc"])
+    note = _mail_note_path(view, out.get("task_id"))
+    if note is not None:
+        mail["note_path"] = note
+
+
+_MAIL_CHECKS = frozenset({"verified", "failed", "none"})
+# A stored string's cap is `inbound.MAIL_META_STRING_CAP`; this re-asserts it
+# on read, since the column is JSON nothing else validates.
+_MAIL_FIELD_MAX_CHARS = 320
+_MAIL_LIST_MAX = 50
+
+
+def _mail_str(value) -> str:
+    return value[:_MAIL_FIELD_MAX_CHARS] if isinstance(value, str) else ""
+
+
+def _mail_person(value) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    address = _mail_str(value.get("address"))
+    if not address:
+        return None
+    return {"name": _mail_str(value.get("name")), "address": address}
+
+
+def _mail_people(values) -> list:
+    if not isinstance(values, list):
+        return []
+    people = [p for p in (_mail_person(v) for v in values[:_MAIL_LIST_MAX]) if p]
+    return people
+
+
+def _received_mail_field(
+    row, parsed, view: _MailView, username: str,
+) -> dict | None:
+    """A mail room's user row as the incoming-mail card renders it.
+
+    Built from the stored `received_mail` metadata, never from a raw header.
+    A row from before that column renders from the wrapper alone, marked
+    ``fallback``: From, Subject and Date, with no recipients, attachments or
+    sender check. None when the row is not a mail at all.
+    """
+    from email.utils import parseaddr  # noqa: PLC0415
+
+    from istota.transport.email.threads import split_new_text  # noqa: PLC0415
+
+    body = parsed[1] if parsed is not None else _row_get(row, "body") or ""
+    new_text, rest = split_new_text(body)
+    stored = None
+    raw = _row_get(row, "received_mail")
+    if raw:
+        try:
+            stored = json.loads(raw)
+        except (TypeError, ValueError):
+            stored = None
+    if not isinstance(stored, dict):
+        if parsed is None:
+            return None
+        headers = parsed[0]
+        name, address = parseaddr(headers.get("from") or "")
+        out = {
+            "fallback": True,
+            "from": {"name": _mail_str(name), "address": _mail_str(address)},
+            "to": [], "cc": [], "attachments": [],
+            "date": _mail_str(headers.get("date")),
+            "subject": _mail_str(headers.get("subject")),
+        }
+    else:
+        attachments = []
+        prefix = f"/Users/{username}/"
+        for item in (stored.get("attachments") or [])[:_MAIL_LIST_MAX]:
+            if not isinstance(item, dict) or not _mail_str(item.get("filename")):
+                continue
+            chip: dict = {"filename": _mail_str(item["filename"])}
+            if isinstance(item.get("size"), int):
+                chip["size"] = item["size"]
+            # Only a copy in the viewer's own workspace, which `/chat/files`
+            # serves under its own containment rules.
+            path = item.get("path")
+            if isinstance(path, str) and path.startswith(prefix) and ".." not in path:
+                chip["path"] = path
+            attachments.append(chip)
+        out = {
+            "from": _mail_person(stored.get("from")) or {"name": "", "address": ""},
+            "to": _mail_people(stored.get("to")),
+            "cc": _mail_people(stored.get("cc")),
+            "date": _mail_str(stored.get("date")),
+            "subject": _mail_str(stored.get("subject")),
+            "message_id": _mail_str(stored.get("message_id")),
+            "in_reply_to": _mail_str(stored.get("in_reply_to")),
+            "attachments": attachments,
+            "sender_check": (stored.get("sender_check")
+                             if stored.get("sender_check") in _MAIL_CHECKS else "none"),
+            "trusted": stored.get("trusted") is True,
+        }
+    out["new_text"] = new_text
+    out["rest"] = rest
+    addresses = [out["from"]["address"]] + [p["address"] for p in out["to"] + out["cc"]]
+    out["labels"] = _mail_labels(view, addresses)
+    note = _mail_note_path(view, _row_get(row, "task_id"))
+    if note is not None:
+        out["note_path"] = note
+    return out
+
+
 def _row_get(row, key: str):
     """sqlite3.Row.get() equivalent — returns None for a column absent from the
     row's keys instead of raising (the two source queries differ in columns)."""
@@ -7611,6 +7795,7 @@ _SPINE_COLUMNS = (
     # about what a reader sees.
     "  m.origin_surface AS origin_surface, "
     "  m.about_room_token AS about_room_token, m.outgoing_mail AS outgoing_mail, "
+    "  m.received_mail AS received_mail, "
     # Truncated here rather than in the dict builder, matching the cross-room
     # fragment: no read path needs more of the parent than the excerpt cap.
     # The literal must track `_REPLY_EXCERPT_CHARS` below.
@@ -7836,7 +8021,9 @@ def _row_attachment_fields(row, username: str, *, message_column: bool = True) -
     return out
 
 
-def _user_row_display(row, viewer: str | None = None) -> dict:
+def _user_row_display(
+    row, viewer: str | None = None, *, mail: "_MailView | None" = None,
+) -> dict:
     """The `text` (and, when they apply, `author` / `origin` / `subject`) of a
     user row.
 
@@ -7901,6 +8088,10 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
     out: dict = {"text": body}
 
     parsed = parse_email_prompt(body)
+    if mail is not None:
+        received = _received_mail_field(row, parsed, mail, viewer or "")
+        if received is not None:
+            out["received_mail"] = received
     if parsed is not None:
         out["text"] = parsed[1]
         # Capped for the same reason `_CROSS_ROOM_COLUMNS` truncates the reply
@@ -8148,6 +8339,7 @@ def _chat_room_messages(
         parked_notes = _parked_rows(
             conn, username, [(n.id, n.delivery_reference) for n in notes],
         )
+        mail_view = _mail_views(conn, username, [token]).get(token)
 
         # 4. Paging metadata: the page's oldest spine (or aux-only) row gives the
         #    next cursor; `has_more` ORs a spine probe with a band-eligible
@@ -8195,11 +8387,12 @@ def _chat_room_messages(
                 "role": "user", "task_id": tid,
                 "created_at": r["created_at"],
                 "msg_id": r["msg_id"], "starred": bool(r["starred"]),
-                **_user_row_display(r, username),
+                **_user_row_display(r, username, mail=mail_view),
             }
             d.update(_row_attachment_fields(r, username))
         else:  # assistant — a stored assistant row is by definition a completed turn
             d = _assistant_message_dict(r, r["body"], r["status"] or "completed")
+            _decorate_outgoing_mail(d, mail_view)
         cited = _row_reply_to(r)
         if cited is not None:
             d["reply_to"] = cited
@@ -10066,6 +10259,7 @@ def _parked_rows(conn, username: str, rows) -> dict[int, int]:
 
 def _cross_room_message_dict(
     r, username: str, *, about_names: dict | None = None, parked: dict | None = None,
+    mail_views: dict | None = None,
 ) -> dict:
     """One `db._CROSS_ROOM_COLUMNS` row → the history payload shape.
 
@@ -10085,11 +10279,14 @@ def _cross_room_message_dict(
         d = {
             "role": "user", "task_id": r["task_id"],
             "status": r["status"], "created_at": r["created_at"], **base,
-            **_user_row_display(r, username),
+            **_user_row_display(
+                r, username, mail=(mail_views or {}).get(r["room_token"]),
+            ),
         }
         d.update(_row_attachment_fields(r, username))
     elif r["role"] == "assistant":
         d = _assistant_message_dict(r, r["body"], r["status"] or "completed")
+        _decorate_outgoing_mail(d, (mail_views or {}).get(r["room_token"]))
         d.update(base)
     else:  # system — same shape as the per-room notes merge
         text = f"**{r['title']}**\n\n{r['body']}" if r["title"] else r["body"]
@@ -10137,6 +10334,7 @@ def _chat_aggregate_messages(
         about_names = _about_room_names(
             conn, username, [r["about_room_token"] for r in rows[:limit]],
         )
+        mail_views = _mail_views(conn, username, [r["room_token"] for r in rows[:limit]])
     has_more = len(rows) > limit
     rows = rows[:limit]
     # Rows arrive newest-first; the page's last row is its oldest → the cursor
@@ -10145,7 +10343,8 @@ def _chat_aggregate_messages(
     oldest_cursor = (
         {"ts": rows[-1]["created_at"], "id": rows[-1]["msg_id"]} if rows else None
     )
-    messages = [_cross_room_message_dict(r, username, about_names=about_names)
+    messages = [_cross_room_message_dict(r, username, about_names=about_names,
+                                         mail_views=mail_views)
                 for r in reversed(rows)]
     for m in messages:
         if m["msg_id"] in undeletable:

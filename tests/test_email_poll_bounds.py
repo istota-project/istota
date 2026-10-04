@@ -702,6 +702,7 @@ class TestUidValidityMigration:
                 return {r[1] for r in conn.execute("PRAGMA table_info(processed_emails)")}
 
         assert "in_reply_to" in columns(fresh)
+        assert "mail_meta" in columns(fresh)
         assert columns(legacy) == columns(fresh)
 
     def test_a_current_ledger_gains_in_reply_to(self, tmp_path):
