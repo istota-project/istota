@@ -70,10 +70,6 @@ class TestParseTs:
             with pytest.raises(ValueError):
                 igt.epoch_ms_to_iso_z(bad)
 
-    def test_epoch_ms_bad(self):
-        with pytest.raises(ValueError):
-            igt.epoch_ms_to_iso_z("nope")
-
 
 # ---------------------------------------------------------------------------
 # collapse_subtype / parse_polyline

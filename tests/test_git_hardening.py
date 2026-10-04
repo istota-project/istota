@@ -165,14 +165,15 @@ class TestTheRedirectVariablesAreRemoved:
         name added to both lists would make it decide the answer."""
         assert not set(GIT_SUBPROCESS_ENV) & set(GIT_SUBPROCESS_ENV_UNSET)
 
-    @pytest.mark.parametrize("name", GIT_SUBPROCESS_ENV_UNSET)
-    def test_none_of_them_reaches_the_subprocess(self, name, tmp_path, shim, monkeypatch):
-        monkeypatch.setenv(name, "/somewhere/else")
+    def test_none_of_them_reaches_the_subprocess(self, tmp_path, shim, monkeypatch):
+        for name in GIT_SUBPROCESS_ENV_UNSET:
+            monkeypatch.setenv(name, "/somewhere/else")
 
         run_git(tmp_path, "status")
 
         _, env = shim()
-        assert name not in env, f"{name} was inherited by the git subprocess"
+        inherited = [name for name in GIT_SUBPROCESS_ENV_UNSET if name in env]
+        assert inherited == [], f"{inherited} were inherited by the git subprocess"
 
     def test_an_inherited_git_dir_does_not_redirect_the_command(
         self, repo, tmp_path, monkeypatch
@@ -422,7 +423,7 @@ class TestItNeverRaises:
         script.chmod(0o755)
         monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
 
-        assert run_git(tmp_path, "status", timeout=0.5) == (1, "")
+        assert run_git(tmp_path, "status", timeout=0.1) == (1, "")
 
 
 class TestTheOverlayIsStatedOnce:
@@ -449,7 +450,10 @@ class TestTheOverlayIsStatedOnce:
     def _names_stated_as_code(path: Path) -> list[str]:
         names = set(EXPECTED_ENV)
         found = set()
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        source = path.read_text(encoding="utf-8")
+        if "GIT_" not in source:
+            return []
+        for node in ast.walk(ast.parse(source)):
             if isinstance(node, ast.Constant) and node.value in names:
                 found.add(node.value)
             elif isinstance(node, ast.keyword) and node.arg in names:

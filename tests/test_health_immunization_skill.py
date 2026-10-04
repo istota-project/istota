@@ -2,26 +2,39 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
-import subprocess
-import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 from istota.health._migrate import ensure_initialised
 from istota.health.workspace import synthesize_health_context
+from istota.skills.health import main as health_main
+
+
+def _invoke(args, env) -> tuple[int, str]:
+    """`istota-skill health <args>` in-process, under exactly `env`."""
+    out = io.StringIO()
+    code = 0
+    with mock.patch.dict(os.environ, env, clear=True), \
+            mock.patch("sys.argv", ["health", *args]), \
+            contextlib.redirect_stdout(out):
+        try:
+            health_main()
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+    return code, out.getvalue()
 
 
 def _run(args, env, expect_success=True) -> dict:
-    proc = subprocess.run(
-        [sys.executable, "-m", "istota.skills.health", *args],
-        capture_output=True, text=True, env=env,
-    )
+    code, stdout = _invoke(args, env)
     if expect_success:
-        assert proc.returncode == 0, (proc.stdout, proc.stderr)
-    return json.loads(proc.stdout) if proc.stdout.strip() else {}
+        assert code == 0, stdout
+    return json.loads(stdout) if stdout.strip() else {}
 
 
 @pytest.fixture
@@ -97,12 +110,8 @@ class TestAddImmunizationDirect:
         assert detail["immunization"]["lot_number"] == "ABC123"
         _run(["delete-immunization", str(iid)], env)
         # After delete, immunization 404 is a CLI failure.
-        proc = subprocess.run(
-            [sys.executable, "-m", "istota.skills.health",
-             "immunization", str(iid)],
-            capture_output=True, text=True, env=env,
-        )
-        assert proc.returncode != 0
+        returncode, stdout = _invoke(["immunization", str(iid)], env)
+        assert returncode != 0
 
 
 class TestDeferredOps:
@@ -187,14 +196,9 @@ class TestImportImmunizations:
         _, env = ready
         paste_file = workspace / "paste.txt"
         paste_file.write_text("Got my flu shot at the pharmacy\n")
-        proc = subprocess.run(
-            [sys.executable, "-m", "istota.skills.health",
-             "import-immunizations", "--paste-file", str(paste_file),
-             "--confirm"],
-            capture_output=True, text=True, env=env,
-        )
-        assert proc.returncode != 0
-        body = json.loads(proc.stdout)
+        returncode, stdout = _invoke(["import-immunizations", "--paste-file", str(paste_file), "--confirm"], env)
+        assert returncode != 0
+        body = json.loads(stdout)
         assert "no usable date_given" in body["error"]
         # The offending line is named, so --dry-run is not the only way to
         # find out which row is at fault.
@@ -214,14 +218,9 @@ class TestImportImmunizations:
         _, env = ready
         paste_file = workspace / "paste.txt"
         paste_file.write_text("Influenza 2026-02-31\n")
-        proc = subprocess.run(
-            [sys.executable, "-m", "istota.skills.health",
-             "import-immunizations", "--paste-file", str(paste_file),
-             "--confirm"],
-            capture_output=True, text=True, env=env,
-        )
-        assert proc.returncode != 0
-        body = json.loads(proc.stdout)
+        returncode, stdout = _invoke(["import-immunizations", "--paste-file", str(paste_file), "--confirm"], env)
+        assert returncode != 0
+        body = json.loads(stdout)
         assert "not a real date" in body["error"]
         assert "Influenza 2026-02-31" in body["error"]
 
@@ -384,12 +383,8 @@ class TestExplainImmunization:
 
     def test_unknown_vaccine_fails(self, ready):
         _, env = ready
-        proc = subprocess.run(
-            [sys.executable, "-m", "istota.skills.health",
-             "explain-immunization", "Notarealvaccine"],
-            capture_output=True, text=True, env=env,
-        )
-        assert proc.returncode != 0
+        returncode, stdout = _invoke(["explain-immunization", "Notarealvaccine"], env)
+        assert returncode != 0
 
 
 class TestSchedulerDeferredReplay:

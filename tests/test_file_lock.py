@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import multiprocessing
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -20,17 +21,57 @@ REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src" / "istota"
 
 
-def _hold(lock_path: str, ready, release) -> None:
-    """Take the lock in another *process* and hold it until told to stop.
+def _serve(conn) -> None:
+    """Take and release locks in another *process*, on request.
 
     A separate process, not a thread: `flock` is per open file description,
     and two threads of one process opening the anchor twice get two
     descriptions — so a thread would contend correctly, but a process is what
     the real writers are and is the honest control.
     """
-    with exclusive_lock(lock_path, timeout_seconds=10):
-        ready.set()
-        release.wait(timeout=30)
+    held = None
+    while True:
+        message = conn.recv()
+        if message is None:
+            return
+        op, lock_path = message
+        if op == "hold":
+            held = exclusive_lock(lock_path, timeout_seconds=10)
+            held.__enter__()
+        else:
+            held.__exit__(None, None, None)
+            held = None
+        conn.send(op)
+
+
+class _Holder:
+    def __init__(self, conn):
+        self._conn = conn
+
+    @contextmanager
+    def holding(self, lock_path):
+        self._conn.send(("hold", str(lock_path)))
+        assert self._conn.poll(30), "holder never acquired the lock"
+        assert self._conn.recv() == "hold"
+        try:
+            yield
+        finally:
+            self._conn.send(("release", str(lock_path)))
+            assert self._conn.poll(30)
+            self._conn.recv()
+
+
+@pytest.fixture(scope="module")
+def holder():
+    ctx = multiprocessing.get_context("spawn")
+    parent, child = ctx.Pipe()
+    process = ctx.Process(target=_serve, args=(child,))
+    process.start()
+    try:
+        yield _Holder(parent)
+    finally:
+        parent.send(None)
+        process.join(timeout=30)
 
 
 class TestAcquisition:
@@ -58,52 +99,34 @@ class TestAcquisition:
 
 
 class TestTimeout:
-    def test_a_held_lock_times_out_with_the_callers_own_exception(self, tmp_path):
+    def test_a_held_lock_times_out_with_the_callers_own_exception(self, tmp_path, holder):
         class WorkStoreLocked(RuntimeError):
             pass
 
         anchor = tmp_path / ".work.lock"
-        ctx = multiprocessing.get_context("spawn")
-        ready = ctx.Event()
-        release = ctx.Event()
-        holder = ctx.Process(target=_hold, args=(str(anchor), ready, release))
-        holder.start()
-        try:
-            assert ready.wait(timeout=30), "holder never acquired the lock"
+        with holder.holding(anchor):
             started = time.monotonic()
             with pytest.raises(WorkStoreLocked) as excinfo:
                 with exclusive_lock(
                     anchor,
-                    timeout_seconds=0.3,
+                    timeout_seconds=0.1,
                     poll_seconds=0.02,
                     on_timeout=WorkStoreLocked,
                 ):
                     pass
             waited = time.monotonic() - started
-        finally:
-            release.set()
-            holder.join(timeout=30)
 
         assert str(excinfo.value) == str(anchor)
-        assert waited >= 0.3
+        assert waited >= 0.1
 
-    def test_the_default_is_a_timeout_error(self, tmp_path):
+    def test_the_default_is_a_timeout_error(self, tmp_path, holder):
         anchor = tmp_path / ".lock"
-        ctx = multiprocessing.get_context("spawn")
-        ready = ctx.Event()
-        release = ctx.Event()
-        holder = ctx.Process(target=_hold, args=(str(anchor), ready, release))
-        holder.start()
-        try:
-            assert ready.wait(timeout=30)
+        with holder.holding(anchor):
             with pytest.raises(TimeoutError):
-                with exclusive_lock(anchor, timeout_seconds=0.2, poll_seconds=0.02):
+                with exclusive_lock(anchor, timeout_seconds=0.05, poll_seconds=0.02):
                     pass
-        finally:
-            release.set()
-            holder.join(timeout=30)
 
-    def test_a_negative_timeout_gives_up_at_once_rather_than_looping(self, tmp_path):
+    def test_a_negative_timeout_gives_up_at_once_rather_than_looping(self, tmp_path, holder):
         """The `max(0.0, ...)` clamp, reached only under contention.
 
         Uncontended, the first `LOCK_NB` succeeds and the deadline is never
@@ -111,65 +134,38 @@ class TestTimeout:
         clamp deleted outright.
         """
         anchor = tmp_path / ".lock"
-        ctx = multiprocessing.get_context("spawn")
-        ready = ctx.Event()
-        release = ctx.Event()
-        holder = ctx.Process(target=_hold, args=(str(anchor), ready, release))
-        holder.start()
-        try:
-            assert ready.wait(timeout=30)
+        with holder.holding(anchor):
             started = time.monotonic()
             with pytest.raises(TimeoutError):
                 with exclusive_lock(anchor, timeout_seconds=-5, poll_seconds=0.02):
                     pass
             assert time.monotonic() - started < 1.0
-        finally:
-            release.set()
-            holder.join(timeout=30)
 
 
 class TestCallerTypesSurvive:
     """Each migrated caller still raises its own class, unchanged."""
 
-    def test_money_work_raises_workstorelocked(self, tmp_path):
+    def test_money_work_raises_workstorelocked(self, tmp_path, holder):
         from istota.money.work import WorkStoreLocked, _work_lock
 
-        ctx = multiprocessing.get_context("spawn")
-        ready = ctx.Event()
-        release = ctx.Event()
         anchor = tmp_path / "invoices" / "work" / ".work.lock"
         anchor.parent.mkdir(parents=True)
-        holder = ctx.Process(target=_hold, args=(str(anchor), ready, release))
-        holder.start()
-        try:
-            assert ready.wait(timeout=30)
+        with holder.holding(anchor):
             with pytest.raises(WorkStoreLocked):
-                with _work_lock(tmp_path, timeout_seconds=0.2):
+                with _work_lock(tmp_path, timeout_seconds=0.05):
                     pass
-        finally:
-            release.set()
-            holder.join(timeout=30)
 
-    def test_ledger_raises_ledgerlocked(self, tmp_path):
+    def test_ledger_raises_ledgerlocked(self, tmp_path, holder):
         from istota.money.core.edit import LedgerLocked, _ledger_lock
 
-        ctx = multiprocessing.get_context("spawn")
-        ready = ctx.Event()
-        release = ctx.Event()
         ledger = tmp_path / "main.beancount"
         anchor = tmp_path / ".ledger.lock"
-        holder = ctx.Process(target=_hold, args=(str(anchor), ready, release))
-        holder.start()
-        try:
-            assert ready.wait(timeout=30)
+        with holder.holding(anchor):
             with pytest.raises(LedgerLocked):
-                with _ledger_lock(ledger, timeout_seconds=0.2):
+                with _ledger_lock(ledger, timeout_seconds=0.05):
                     pass
-        finally:
-            release.set()
-            holder.join(timeout=30)
 
-    def test_memory_md_raises_memorymdlocked(self, tmp_path):
+    def test_memory_md_raises_memorymdlocked(self, tmp_path, holder):
         from istota.memory.curation.file_lock import (
             MemoryMdLocked,
             lock_path_for,
@@ -181,19 +177,10 @@ class TestCallerTypesSurvive:
         anchor = lock_path_for(target, lock_dir=lock_dir)
         anchor.parent.mkdir(parents=True, exist_ok=True)
 
-        ctx = multiprocessing.get_context("spawn")
-        ready = ctx.Event()
-        release = ctx.Event()
-        holder = ctx.Process(target=_hold, args=(str(anchor), ready, release))
-        holder.start()
-        try:
-            assert ready.wait(timeout=30)
+        with holder.holding(anchor):
             with pytest.raises(MemoryMdLocked):
-                with memory_md_lock(target, timeout_seconds=0.2, lock_dir=lock_dir):
+                with memory_md_lock(target, timeout_seconds=0.05, lock_dir=lock_dir):
                     pass
-        finally:
-            release.set()
-            holder.join(timeout=30)
 
 
 #: Files that take an `fcntl.LOCK_NB` lock and are deliberately not copies of

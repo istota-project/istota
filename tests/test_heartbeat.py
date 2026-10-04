@@ -476,7 +476,7 @@ class TestCheckShellCommand:
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
-            config={"command": "sleep 10", "timeout": 1},
+            config={"command": "sleep 10", "timeout": 0.2},
         )
         result = _check_shell_command(check, config)
         assert result.healthy is False

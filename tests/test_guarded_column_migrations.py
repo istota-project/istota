@@ -238,6 +238,7 @@ class TestNoSecondImplementation:
     }
 
     ADD_COLUMN_RE = re.compile(r"ADD\s+COLUMN", re.IGNORECASE)
+    NEAR_RE = re.compile(r"ADD.{0,200}?COLUMN", re.IGNORECASE | re.DOTALL)
 
     def _hits(self, source: str) -> list[int]:
         """Line numbers of string literals spelling ADD COLUMN, docstrings apart.
@@ -299,7 +300,12 @@ class TestNoSecondImplementation:
             rel = str(path.relative_to(SRC))
             if rel in self.EXEMPT:
                 continue
-            hits = self._hits(path.read_text())
+            source = path.read_text()
+            # A literal spelling ADD COLUMN has both words close together in
+            # the source, even split across a concatenation or an f-string.
+            if not self.NEAR_RE.search(source):
+                continue
+            hits = self._hits(source)
             if hits:
                 found[rel] = hits
         return found

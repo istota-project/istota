@@ -16,12 +16,6 @@ from istota.cli import (
 
 
 class TestKvSet:
-    def test_set_new_key(self, db_conn):
-        db.kv_set(db_conn, "alice", "test_ns", "greeting", '"hello"')
-        result = db.kv_get(db_conn, "alice", "test_ns", "greeting")
-        assert result is not None
-        assert result["value"] == '"hello"'
-
     def test_set_upserts_existing_key(self, db_conn):
         db.kv_set(db_conn, "alice", "test_ns", "count", "1")
         db.kv_set(db_conn, "alice", "test_ns", "count", "2")

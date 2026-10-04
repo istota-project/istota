@@ -1,11 +1,14 @@
 """Configuration loading for istota.executor module."""
 
+import functools
 import logging
 import os
 import sys
 from unittest.mock import patch, MagicMock
 
 import pytest
+
+from istota.credentials import store as secrets_store
 
 from istota.executor import (
     _compose_full_result,
@@ -92,6 +95,25 @@ def _skills_config(tmp_path, *, files_skill=True, mount=False, **kw):
     return Config(
         db_path=db_path, skills_dir=skills_dir, temp_dir=tmp_path / "temp", **kw,
     )
+
+
+_derive_fernet_key_once = functools.cache(secrets_store._derive_fernet_key)
+
+
+@pytest.fixture(autouse=True)
+def _scrypt_once_per_key(monkeypatch):
+    """The store derives its key with scrypt on every encrypt and decrypt;
+    the derivation is pure, so each worker pays it once per key."""
+    monkeypatch.setattr(secrets_store, "_derive_fernet_key", _derive_fernet_key_once)
+
+
+@pytest.fixture
+def no_rclone(monkeypatch):
+    """A config with no workspace reaches storage's rclone branch; answer as a
+    host with no rclone rather than spawning one per directory."""
+    from istota.lib import rclone_client
+
+    monkeypatch.setattr(rclone_client, "rclone_run", lambda args, **kwargs: None)
 
 
 def _bare_config(tmp_path):
@@ -3715,6 +3737,7 @@ class TestAnUnusableControlDirectoryFailsTheTask:
         assert not mock_run.called
 
 
+@pytest.mark.usefixtures("no_rclone")
 class TestTheControlDirectoryIsGuardedOnEveryShape:
     """`execute_task`'s two guard entries, read from the request it built.
 
@@ -3844,6 +3867,7 @@ class TestTheControlDirectoryIsGuardedOnEveryShape:
         ), f"the result file {req.result_file} was denied: {denied}"
 
 
+@pytest.mark.usefixtures("no_rclone")
 class TestAnOptionalReadNeverCreatesTheDatabase:
     """ISSUE-570: prompt assembly with no database must not make one.
 

@@ -1,5 +1,6 @@
 """Tests for Google Workspace skill — config, DB tokens, skill selection, setup_env, network."""
 
+import functools
 import json
 import os
 import sqlite3
@@ -10,7 +11,19 @@ from unittest import mock
 import pytest
 
 from istota import config, db
+from istota.credentials import store as secrets_store
 from istota.skills._loader import eligible_skill_names, load_skill_index, select_skills
+
+
+_REAL_DERIVE = secrets_store._derive_fernet_key
+_derive_once = functools.cache(_REAL_DERIVE)
+
+
+@pytest.fixture(autouse=True)
+def _scrypt_once_per_key(monkeypatch):
+    """The store derives its key with scrypt on every encrypt and decrypt;
+    the derivation is pure, so each worker pays it once per key."""
+    monkeypatch.setattr(secrets_store, "_derive_fernet_key", _derive_once)
 
 
 @pytest.fixture

@@ -269,7 +269,14 @@ class TestNoFifthCopy:
         wanted = set(self.KEY_SETS.values())
         found: list[tuple[str, tuple[str, ...]]] = []
         for path in sorted(root.rglob("*.py")):
-            tree = ast.parse(path.read_text())
+            source = path.read_text()
+            # A literal with one of these key sets quotes every key in it.
+            if not any(
+                all(f'"{k}"' in source or f"'{k}'" in source for k in keys)
+                for keys in wanted
+            ):
+                continue
+            tree = ast.parse(source)
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Dict):
                     continue
