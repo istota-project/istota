@@ -208,6 +208,26 @@ class TestClone:
         _git(bare, "worktree", "add", "-q", "-b", "istota/1-slug",
              str(env.tmp / "wt"), "origin/main")
 
+    def test_an_existing_clone_gets_the_hooks_path(self, env):
+        """ISSUE-291. A clone made before the step existed has no
+        `core.hooksPath`, and the repository's committed credential scan never
+        runs in its worktrees. `docs/development/secret-scanning.md` says such a
+        clone repairs itself on the next run."""
+        env.upstream()
+        bare = _pre_269_clone(env)
+        assert _git_rc(bare, "config", "--get", "core.hooksPath") != 0
+
+        env.clone()
+
+        assert _git(bare, "config", "--get", "core.hooksPath").strip() == ".githooks"
+
+    def test_a_worktree_inherits_the_hooks_path(self, env):
+        """Commits happen in worktrees, which read the bare clone's config."""
+        env.upstream()
+        env.clone()
+        work_dir = env.run("worktree", "acme/widget", "hooks")[1]["work_dir"]
+        assert _git(Path(work_dir), "config", "--get", "core.hooksPath").strip() == ".githooks"
+
     def test_a_task_branch_survives_on_an_existing_clone(self, env):
         """On an existing clone `refs/heads/` holds every task branch, including
         one whose worktree was pruned and which may be the only copy."""
