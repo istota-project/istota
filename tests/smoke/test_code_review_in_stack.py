@@ -6,8 +6,9 @@ unit tier checks the request: `allowed_tools`, `fs_read_roots=[run_dir]`, a
 `sandbox_wrap` built with every scope withheld. None of that says what a tool
 call actually returns once the daemon runs it, which is what this file asks.
 
-A task commits a change in its own repos subtree and runs the CLI; the CLI's
-reviewer is scripted to make three reads in one turn and then answer:
+In the native class, a task commits a change in its own repos subtree and runs
+the CLI; the CLI's reviewer is scripted to make three reads in one turn and then
+answer (the claude class's shape is described on the class and its script):
 
 1. the changed file, by a path relative to `tree/`, which must come back with
    the committed content;
@@ -15,19 +16,20 @@ reviewer is scripted to make three reads in one turn and then answer:
    database, which must both come back as tool errors without their content;
 3. a fixed JSON answer, which must arrive in the envelope the task reads.
 
-**Which boundary this witnesses depends on the brain, and the lean stack runs
-the native one.** `NativeBrain` ignores `sandbox_wrap` (that is the Claude
-CLI's namespace, ISSUE-389) and is given no `native_sandbox_wrap` on this path,
-as in `health/_brain_call.py`; its tool server is confined by `fs_read_roots`,
-and the refusals below are that rule's ("path is outside the allowed
-workspace"). So this proves the reviewer's reads are bounded to the snapshot
-in the shipped image on the native brain. It does not exercise the namespace
+**Which boundary this witnesses depends on the brain, so there are two
+scenarios.** `NativeBrain` ignores `sandbox_wrap` (that is the Claude CLI's
+namespace, ISSUE-389) and is given no `native_sandbox_wrap` on this path, as in
+`health/_brain_call.py`; its tool server is confined by `fs_read_roots`, and
+the refusals in the first class are that rule's ("path is outside the allowed
+workspace"). That class does not exercise the namespace
 `build_daemon_sandbox(withheld_scopes=...)` builds, which only the Claude
-brains enter and which nothing in this tier can run: the scripted endpoint
-speaks the OpenAI wire format and the image ships no `claude`. The recorded
-negative controls are in the module's commit message.
+brains enter. The second class does (ISSUE-614): it runs the same CLI on the
+`claude_code` brain, with the image's own `claude` talking to the scripted
+endpoint's Anthropic half, so the reviewer's reads are refused by bubblewrap
+and by nothing else. The recorded negative controls are in the commit messages
+of the two classes.
 
-**The reads are relative to `tree/`**, not absolute as `reviewer.md` asks,
+**The native class's reads are relative to `tree/`**, not absolute as `reviewer.md` asks,
 because the run directory's name is random and a script is fixed before the
 run. On the native brain the tool server's working directory is `req.cwd`,
 which the CLI sets to the snapshot's `tree/`.
@@ -44,6 +46,7 @@ import json
 import pytest
 
 from testbed import profiles
+from testbed.services.model_endpoint import ERROR_PREFIX
 
 pytestmark = pytest.mark.smoke
 
@@ -234,3 +237,186 @@ class TestTheReviewerReadsOnlyItsSnapshot:
         assert result.returncode == 0, result.stderr
         assert WORKSPACE_SENTINEL in result.stdout, result.stdout
         assert DB_SENTINEL in result.stdout, result.stdout
+
+
+# -- The same reviewer on the claude_code brain (ISSUE-614) ------------------
+
+#: The daemon's per-user temp dir (`temp_dir` is `/data/tmp` on the lean
+#: shape). Every task's downloads and deferred-op files live there, which is
+#: why a reviewer with scopes withheld gets a fresh scratch work dir instead;
+#: a file planted here is the witness for that half.
+TEMP_DIR = "/data/tmp/testuser"
+TEMP_SENTINEL = "review-witness-temp-3a81"
+TEMP_FILE = f"{TEMP_DIR}/{PLANTED_NAME}"
+
+CLAUDE_REPO = "review-witness-claude"
+CLAUDE_CONFIG = "/tmp/review-witness-claude.toml"
+
+READ_TEMP = "review-read-temp"
+
+#: What the `claude` CLI's Read answers for a path that is not there.
+CLAUDE_NOT_FOUND = "File does not exist."
+
+#: The reviewer's own budget, passed as `--timeout` so a hung review ends
+#: inside the exec bound below rather than as a `TimeoutExpired` with a
+#: `claude` process still running in the container, where no reset sees it.
+CLAUDE_REVIEW_TIMEOUT = 120
+CLAUDE_EXEC_TIMEOUT = 300
+
+#: Where `build_snapshot` puts run dirs on the lean shape
+#: (`{temp_dir}/.review/{user}/run-<hex>/`).
+REVIEW_ROOT = "/data/tmp/.review/testuser"
+
+#: Both turns are the reviewer's: there is no task here, so nothing precedes
+#: or follows them on the endpoint. The tree witness is a `Grep` over the
+#: review root rather than a `Read`, because the run dir's name is random and
+#: a relative path does not work here: inside the wrap the CLI's working
+#: directory is the scratch work dir, not `tree/` (bwrap's `--chdir` wins over
+#: `req.cwd`, which is why `reviewer.md` asks for absolute paths). The pattern
+#: is the sentinel's first half, so the whole sentinel can only come back from
+#: the file.
+CLAUDE_SCRIPT = [
+    {"tool_calls": [
+        {"id": READ_TREE, "name": "Grep", "arguments": {
+            "pattern": TREE_SENTINEL.rsplit("-", 1)[0],
+            "path": REVIEW_ROOT,
+            "output_mode": "content",
+        }},
+        {"id": READ_WORKSPACE, "name": "Read", "arguments": {"file_path": WORKSPACE_FILE}},
+        {"id": READ_DB, "name": "Read", "arguments": {"file_path": DB_FILE}},
+        {"id": READ_TEMP, "name": "Read", "arguments": {"file_path": TEMP_FILE}},
+    ]},
+    {"text": REVIEWER_ANSWER},
+]
+
+
+def claude_review_command(stack) -> str:
+    """Build a repo, then run the reviewer on the `claude_code` brain.
+
+    Through `docker compose exec` rather than a task's Bash call, so the daemon
+    keeps its native brain and no task turn shares the script. The CLI reads a
+    copy of the rendered config with `[brain] kind` switched; the daemon's own
+    is untouched. `ANTHROPIC_BASE_URL` and the key reach the `claude` process
+    through `build_model_cli_env`'s top-up from this process's environment, the
+    route the skill proxy feeds in production. The proxy's own env assembly is
+    the native scenario's to cover, not this one's.
+
+    This is outside testbed rule 1 on purpose. That rule is about how a service
+    points the *daemon* at itself; the daemon never reads this copy, and its
+    brain has to stay native so no task turn competes for the script.
+    """
+    repo = f"/data/repos/testuser/{CLAUDE_REPO}"
+    git = "git -c user.email=smoke@example.com -c user.name=Smoke"
+    head, tail = TREE_SENTINEL.rsplit("-", 1)
+    return f"""
+set -eu
+cp /data/config/config.toml {CLAUDE_CONFIG}
+sed -i '0,/^kind = "native"$/s//kind = "claude_code"/' {CLAUDE_CONFIG}
+grep -qx 'kind = "claude_code"' {CLAUDE_CONFIG}
+mkdir -p /data/repos/testuser
+rm -rf {repo}
+git init -q -b main {repo}
+cd {repo}
+echo "first line" > {CHANGED_FILE}
+{git} add {CHANGED_FILE}
+{git} commit -q -m "Add {CHANGED_FILE}"
+printf "%s-%s\\n" {head} {tail} >> {CHANGED_FILE}
+{git} commit -q -am "Extend {CHANGED_FILE}"
+cd /app
+env ISTOTA_CONFIG_PATH={CLAUDE_CONFIG} ISTOTA_USER_ID=testuser \\
+    DEVELOPER_REPOS_DIR=/data/repos/testuser \\
+    ANTHROPIC_BASE_URL={stack.endpoint.anthropic_container_url} \\
+    ANTHROPIC_API_KEY=unused-by-the-scripted-endpoint \\
+    uv run python -m istota.skills.code_review run \\
+    --worktree {repo} --base HEAD~1 --intent "smoke witness" \\
+    --timeout {CLAUDE_REVIEW_TIMEOUT}
+"""
+
+
+@pytest.fixture
+def planted_with_temp(planted):
+    """`planted`, plus a file in the per-user temp dir."""
+    result = planted.exec([
+        "sh", "-c", f"mkdir -p {TEMP_DIR} && echo {TEMP_SENTINEL} > {TEMP_FILE}",
+    ])
+    assert result.returncode == 0, result.stderr
+    yield planted
+    planted.exec([
+        "sh", "-c",
+        f"rm -f {TEMP_FILE} {CLAUDE_CONFIG}; "
+        f"rm -rf /data/repos/testuser/{CLAUDE_REPO}",
+    ])
+
+
+@pytest.mark.profile(profiles.FORGE.name)
+class TestTheClaudeReviewerIsConfinedByItsNamespace:
+    """The reviewer's `claude` process, inside `build_daemon_sandbox`'s wrap.
+
+    The CLI runs with `--dangerously-skip-permissions` and ignores
+    `fs_read_roots`, so every refusal here is bubblewrap's: the workspace is
+    unbound because `files` is withheld, the database directory is masked, and
+    the per-user temp dir is unbound because a withheld scope moves the work
+    dir to a fresh scratch dir. The tree read coming back shows the namespace
+    binds the snapshot and that the CLI could read at all.
+    """
+
+    @pytest.mark.script(CLAUDE_SCRIPT)
+    def test_only_the_snapshot_is_readable(self, planted_with_temp):
+        stack = planted_with_temp
+        result = stack.exec(
+            ["sh", "-c", claude_review_command(stack)], timeout=CLAUDE_EXEC_TIMEOUT
+        )
+
+        answer = None
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("{") and '"status"' in line:
+                answer = json.loads(line)
+        assert answer is not None, (
+            f"the CLI printed no envelope (exit {result.returncode})\n"
+            f"--- stdout ---\n{result.stdout}\n"
+            f"--- stderr ---\n{result.stderr[-4000:]}"
+        )
+
+        results = stack.endpoint.tool_results_by_id()
+        missing = {READ_TREE, READ_WORKSPACE, READ_DB, READ_TEMP} - results.keys()
+        assert not missing, (
+            f"no result for {sorted(missing)}: the reviewer never ran its tools "
+            f"on the claude_code brain\n{answer}\n"
+            f"--- stderr ---\n{result.stderr[-4000:]}"
+        )
+
+        # The tree line, not just the sentinel: `meta/diff.patch` carries it too.
+        assert f"/tree/{CHANGED_FILE}:2:{TREE_SENTINEL}" in results[READ_TREE], (
+            "the changed file did not come back from tree/, so the refusals "
+            "below could be a namespace that binds nothing\n"
+            f"--- result ---\n{results[READ_TREE]}"
+        )
+        for call_id, sentinel, path in (
+            (READ_WORKSPACE, WORKSPACE_SENTINEL, WORKSPACE_FILE),
+            (READ_DB, DB_SENTINEL, DB_FILE),
+            (READ_TEMP, TEMP_SENTINEL, TEMP_FILE),
+        ):
+            content = results[call_id]
+            assert sentinel not in content, (
+                f"the claude reviewer read {path}: it is inside the reviewer's "
+                f"namespace\n--- result ---\n{content}"
+            )
+            # "Does not exist" is the namespace's answer: an unbound path and
+            # the database mask both read as absent. A CLI-side refusal would
+            # be an error with a different text.
+            assert content.startswith(ERROR_PREFIX + CLAUDE_NOT_FOUND), (
+                f"reading {path} did not fail as a path absent from the "
+                f"namespace\n--- result ---\n{content}"
+            )
+
+        assert answer["status"] == "ok", answer
+        assert answer["reviewer"]["tools"] is True, answer
+        assert [f["claim"] for f in answer["findings"]] == [FINDING_CLAIM], answer
+
+    def test_the_planted_files_are_there_to_be_refused(self, planted_with_temp):
+        result = planted_with_temp.exec(["cat", WORKSPACE_FILE, DB_FILE, TEMP_FILE])
+
+        assert result.returncode == 0, result.stderr
+        for sentinel in (WORKSPACE_SENTINEL, DB_SENTINEL, TEMP_SENTINEL):
+            assert sentinel in result.stdout, result.stdout
