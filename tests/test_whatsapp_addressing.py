@@ -39,12 +39,12 @@ USER_BSUID = "US.9876543210"
 CLOUD_CAPS = WhatsAppProviderCaps(
     metered=True, has_service_window=True, supports_templates=True,
     delivery_receipts=True, address_field="send_id",
-    service_body_limit=4096, interactive_body_limit=1024,
+    service_body_limit=4096, interactive_body_limit=1024, outbound_media=False,
 )
 BAILEYS_CAPS = WhatsAppProviderCaps(
     metered=False, has_service_window=False, supports_templates=False,
     delivery_receipts=True, address_field="jid",
-    service_body_limit=4096, interactive_body_limit=4096,
+    service_body_limit=4096, interactive_body_limit=4096, outbound_media=True,
 )
 
 

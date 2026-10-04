@@ -527,9 +527,12 @@ async def drain_requests(config, *, limit: int = 20) -> int:
             await message_relays.deliver_question(config, row)
             continue
         try:
+            # A self-send is the requester's own text to their own chat, so an
+            # image it embeds from their workspace may go as an image.
             record = await deliver_whatsapp(
                 config, logical_key=logical_key(row), user_id=row["recipient_user_id"],
                 text="", task_id=None, request_id=row["id"],
+                attach_media=row["kind"] == "self_send",
             )
         except RequestError as exc:
             await asyncio.to_thread(_finish_request, config, row["id"], reason=str(exc))

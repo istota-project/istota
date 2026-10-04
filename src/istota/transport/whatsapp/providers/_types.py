@@ -75,6 +75,11 @@ class WhatsAppProviderCaps:
     provider that has no interactive object has no such cliff and must not
     inherit Meta's number, so the budget is the adapter's answer and the
     scheduler asks for it (`outbound.confirmation_body_budget`).
+
+    `outbound_media` says the adapter can send a staged image as native media
+    (ISSUE-639). Baileys can; the Cloud adapter would need an upload to
+    Meta's `/media` endpoint first and is deferred, so on it an embedded image
+    goes out as its alt text.
     """
     metered: bool
     has_service_window: bool
@@ -83,6 +88,7 @@ class WhatsAppProviderCaps:
     address_field: str
     service_body_limit: int
     interactive_body_limit: int
+    outbound_media: bool
 
 
 @dataclass(frozen=True)

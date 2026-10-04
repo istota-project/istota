@@ -157,6 +157,74 @@ const MEDIA_EXTENSIONS = {
 };
 const MEDIA_EXTENSION_FALLBACK = 'bin';
 
+// --- outbound media ---------------------------------------------------------
+
+/*
+ * The image half of a send (ISSUE-639). The daemon stages a re-encoded copy in
+ * the media directory and names it; this side reads it and hands Baileys the
+ * bytes. Held to inbound's strictness: the name is one ordinary component of
+ * `media.STAGED_NAME_RE`'s shape joined under this process's own staging
+ * root, opened without following a link, a regular file under the same per
+ * file cap, and one of the two types a WhatsApp image message carries. The
+ * daemon only ever produces JPEG and PNG, so anything else is not its file.
+ */
+const OUTBOUND_MEDIA_TYPES = new Set(['image/jpeg', 'image/png']);
+const STAGED_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+// WhatsApp's own cap on an image caption. A longer reply goes as the image
+// followed by the text, still inside one `send` and one ledger row.
+const CAPTION_LIMIT = 1024;
+
+function outboundMedia(media) {
+  if (!media || typeof media !== 'object') return null;
+  if (media.kind !== 'image') return null;
+  const { name, mimetype } = media;
+  if (typeof name !== 'string' || !STAGED_NAME_RE.test(name)) return null;
+  if (typeof mimetype !== 'string' || !OUTBOUND_MEDIA_TYPES.has(mimetype)) return null;
+  const caption = typeof media.caption === 'string' ? media.caption : '';
+  return { name, mimetype, caption };
+}
+
+function readOutboundMedia(dir, name) {
+  if (!dir || typeof name !== 'string' || !STAGED_NAME_RE.test(name)) return null;
+  let fd;
+  try {
+    fd = fs.openSync(
+      path.join(dir, name),
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0),
+    );
+    const info = fs.fstatSync(fd);
+    if (!info.isFile() || info.size === 0 || info.size > MAX_MEDIA_BYTES) return null;
+    return fs.readFileSync(fd);
+  } catch (err) {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch (err) { /* already closed */ }
+    }
+  }
+}
+
+/*
+ * The Baileys contents one send becomes, in order. `text` is the reply with
+ * the picture written as its alt text, and `media.caption` the reply without
+ * it. An image with no bytes is no image, so the text goes alone: the reply
+ * with the picture's description rather than no reply at all.
+ */
+function outboundContents(text, media, bytes) {
+  if (!media || !bytes) {
+    const body = typeof text === 'string' ? text : '';
+    return body ? [{ text: body }] : [];
+  }
+  const body = media.caption || '';
+  const image = { image: bytes, mimetype: media.mimetype };
+  if (body.length <= CAPTION_LIMIT) {
+    if (body) image.caption = body;
+    return [image];
+  }
+  return [image, { text: body }];
+}
+
 // How long one media download may take before it is abandoned. The inbound
 // path is serialized — order within a conversation is meaning — so an
 // unbounded fetch holds every message behind it, which is a surface that has
@@ -2768,12 +2836,29 @@ class Session {
     // land in the catch below as an *ambiguous* failure, spending `unknown`
     // on a message that never left, for a cosmetic thread marker. Dropping
     // it costs the quote and nothing else.
+    // A media part this side cannot read sends the text alone; a send that is
+    // then empty was never anything, so it is refused before trying.
+    const media = outboundMedia(payload.media);
+    const bytes = media ? readOutboundMedia(MEDIA_DIR, media.name) : null;
+    if (payload.media && !bytes) {
+      log('warn', 'an outbound image could not be read; sending the text alone');
+    }
+    const contents = outboundContents(payload.text, media, bytes);
+    if (!contents.length) {
+      this.answer(requestId, { ok: false, reason: 'rejected', definite: true });
+      return;
+    }
     try {
-      const sent = await this.sock.sendMessage(payload.to, { text: payload.text });
-      const id = sent && sent.key && sent.key.id;
-      // `sent.message` is the generated content, which is what `relayMessage`
-      // re-encrypts on a retry — the `{ text }` handed in above is not.
-      rememberSent(id, sent && sent.message);
+      // The last id is the one the ledger keeps: with a long reply split
+      // after its image, that is the text a member quotes back.
+      let id = '';
+      for (const content of contents) {
+        const sent = await this.sock.sendMessage(payload.to, content);
+        id = sent && sent.key && sent.key.id;
+        // `sent.message` is the generated content, which is what
+        // `relayMessage` re-encrypts on a retry — the content handed in is not.
+        rememberSent(id, sent && sent.message);
+      }
       if (typeof id !== 'string' || !id) {
         // Sent, and we cannot name what. Not definite — the message may be on
         // somebody's phone, and the daemon settles that as `unknown`, which is
@@ -3024,6 +3109,11 @@ module.exports = {
   MEDIA_ERRORS,
   MEDIA_EXTENSIONS,
   MEDIA_KINDS,
+  OUTBOUND_MEDIA_TYPES,
+  CAPTION_LIMIT,
+  outboundMedia,
+  readOutboundMedia,
+  outboundContents,
   bareJid,
   chatAddress,
   collectMediaChunk,

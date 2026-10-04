@@ -73,7 +73,7 @@ CLOUD_CAPS = WhatsAppProviderCaps(
     delivery_receipts=True,
     address_field="send_id",
     service_body_limit=4096,
-    interactive_body_limit=1024,
+    interactive_body_limit=1024, outbound_media=False,
 )
 BAILEYS_CAPS = WhatsAppProviderCaps(
     metered=False,
@@ -82,7 +82,7 @@ BAILEYS_CAPS = WhatsAppProviderCaps(
     delivery_receipts=True,
     address_field="jid",
     service_body_limit=4096,
-    interactive_body_limit=4096,
+    interactive_body_limit=4096, outbound_media=True,
 )
 
 
@@ -675,7 +675,7 @@ class TestTheCloudAdapter:
             delivery_receipts=True,
             address_field="send_id",
             service_body_limit=4096,
-            interactive_body_limit=1024,
+            interactive_body_limit=1024, outbound_media=False,
         )
 
     def test_it_satisfies_its_own_registry_contract(self):
@@ -834,7 +834,7 @@ class TestTheBaileysAdapter:
             delivery_receipts=True,
             address_field="jid",
             service_body_limit=4096,
-            interactive_body_limit=4096,
+            interactive_body_limit=4096, outbound_media=True,
         )
 
     def test_it_declares_no_webhook_and_no_signature_together(self):
