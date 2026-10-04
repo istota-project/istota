@@ -54,14 +54,16 @@ Reject reasons (kept on each entry of `rejected`):
   "subheading_missing",
   "empty_subject", "empty_predicate", "empty_object", "invalid_predicate",
   "invalid_valid_from", "object_too_long", "no_db_connection",
-  "pinned_section"
+  "pinned_section", "pinned_heading", "heading_contains_newline",
+  "line_contains_newline"
 
 Pinned sections
 ---------------
 A `## ` heading carrying `<!-- pinned -->` (`types.PINNED_MARKER`) is closed to
 `remove`, `replace`, `remove_heading` and `remove_subheading` unless the caller
-passes `allow_pinned=True`; such an op is rejected as `pinned_section`.
-`append` and `add_heading` are unaffected. Closed is the default, so the
+passes `allow_pinned=True`; such an op is rejected as `pinned_section`. The
+same caller may not create one either: an `add_heading` carrying the marker is
+rejected as `pinned_heading`. `append` to a pinned section is unaffected. Closed is the default, so the
 nightly curator, which acts on nobody's request, is held off without passing
 anything, and so is any automatic caller added later. The runtime `memory` CLI
 acts on the user's own request and opts in. A hand edit never reaches this.
@@ -197,7 +199,7 @@ def _apply_ops_inner(
         if kind == "append":
             result = _apply_append(new_doc, op)
         elif kind == "add_heading":
-            result = _apply_add_heading(new_doc, op)
+            result = _apply_add_heading(new_doc, op, allow_pinned=allow_pinned)
         elif kind == "remove":
             result = _apply_remove(new_doc, op)
         elif kind == "replace":
@@ -340,12 +342,20 @@ def _apply_append(doc: SectionedDoc, op: dict) -> str:
     return "applied"
 
 
-def _apply_add_heading(doc: SectionedDoc, op: dict) -> str:
+def _apply_add_heading(
+    doc: SectionedDoc, op: dict, *, allow_pinned: bool = False
+) -> str:
     heading = op["heading"]
-    if not heading or not heading.strip():
+    if not isinstance(heading, str) or not heading.strip():
         return "empty_heading"
     if heading.lstrip().startswith("#"):
         return "heading_starts_with_hash"
+    if "\n" in heading or "\r" in heading:
+        return "heading_contains_newline"
+    # A caller that may not prune a pinned section may not create one either,
+    # or the curator could write a section it can never correct.
+    if not allow_pinned and is_pinned_heading(heading):
+        return "pinned_heading"
     if doc.find(heading) is not None:
         return "heading_exists"
     lines = op["lines"]
@@ -360,6 +370,11 @@ def _apply_add_heading(doc: SectionedDoc, op: dict) -> str:
         if not line.strip():
             # Drop blank inputs silently — they're not useful in a new section.
             continue
+        # The same one-line, no-heading rule `append` applies: an embedded
+        # newline here wrote a second `## ` heading into the file.
+        reason = validate_appendable_line(line)
+        if reason:
+            return reason
         new_section_lines.append(normalize_to_bullet(line))
 
     if not new_section_lines:

@@ -80,6 +80,64 @@ class TestSerialize:
         assert out == "\n" or out == ""  # acceptable: either empty or single newline
 
 
+FENCED_PINNED = (
+    "## The desk <!-- pinned -->\n"
+    "- Answer mail\n"
+    "\n"
+    "Report format:\n"
+    "```\n"
+    "## Summary\n"
+    "- one line\n"
+    "```\n"
+    "- Escalate invoices to the owner\n"
+    "\n"
+    "## Preferences\n"
+    "- Likes vim\n"
+)
+
+
+class TestCodeFences:
+    def test_a_heading_inside_a_fence_is_body_text(self):
+        doc = parse_sectioned_doc(FENCED_PINNED)
+        assert [s.heading for s in doc.sections] == [
+            "The desk <!-- pinned -->", "Preferences",
+        ]
+        assert "## Summary" in doc.sections[0].lines
+        assert "- Escalate invoices to the owner" in doc.sections[0].lines
+
+    def test_a_fenced_doc_round_trips_byte_for_byte(self):
+        assert serialize_sectioned_doc(parse_sectioned_doc(FENCED_PINNED)) == FENCED_PINNED
+
+    def test_tilde_fence_and_longer_closer(self):
+        text = "## A\n~~~~ md\n## Not a heading\n~~~~~\n## B\n- b\n"
+        doc = parse_sectioned_doc(text)
+        assert [s.heading for s in doc.sections] == ["A", "B"]
+        assert serialize_sectioned_doc(doc) == text
+
+    def test_a_different_marker_does_not_close_the_fence(self):
+        text = "## A\n```\n~~~\n## Inside\n```\n## B\n"
+        assert [s.heading for s in parse_sectioned_doc(text).sections] == ["A", "B"]
+
+    def test_an_unclosed_fence_hides_nothing(self):
+        # A stray marker must not fold later headings into the section above
+        # it; that would put a pinned section under an unpinned heading.
+        text = "## A\n```\n- a\n## B <!-- pinned -->\n- b\n"
+        doc = parse_sectioned_doc(text)
+        assert [s.heading for s in doc.sections] == ["A", "B <!-- pinned -->"]
+        assert serialize_sectioned_doc(doc) == text
+
+    def test_the_curator_cannot_reach_pinned_bullets_through_a_fenced_heading(self):
+        from istota.memory.curation.ops import apply_ops
+
+        doc = parse_sectioned_doc(FENCED_PINNED)
+        new_doc, applied, rejected = apply_ops(
+            doc, [{"op": "remove_heading", "heading": "Summary"}]
+        )
+        assert applied == []
+        assert rejected[0]["reason"] == "heading_missing"
+        assert serialize_sectioned_doc(new_doc) == FENCED_PINNED
+
+
 class TestDocFind:
     def test_find_returns_section_by_heading_exact_match(self):
         doc = parse_sectioned_doc("## Foo\n- a\n## Bar\n- b\n")

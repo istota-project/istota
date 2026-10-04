@@ -137,8 +137,9 @@ def build_op_curation_prompt(
         "   leave it.\n"
         "7. For `remove`, the `match` substring must be specific enough that only ONE line matches.\n"
         f"8. A `## ` heading carrying `{PINNED_MARKER}` is a pinned section the user keeps by hand.\n"
-        "   Never emit `remove`, `replace` or `remove_heading` for it; they are rejected. You may\n"
-        "   still `append` to it."
+        "   Never emit `remove`, `replace` or `remove_heading` for it, and never create a heading\n"
+        "   carrying that marker; both are rejected. Add to a pinned section only what the user\n"
+        "   stated about it in the dated memories above, since you cannot correct it later."
     )
 
     parts.append(

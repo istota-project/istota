@@ -6,7 +6,48 @@ Splits a USER.md-style markdown file at level-2 (`## `) headings. Subheadings
 
 from __future__ import annotations
 
+import re
+
 from .types import Section, SectionedDoc
+
+# A fence opener per CommonMark: up to three spaces, then three or more
+# backticks or tildes. The closer is the same character, at least as long,
+# alone on its line.
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
+def fenced_line_indices(lines: list[str]) -> set[int]:
+    """Indices of the lines inside a *closed* code fence, markers included.
+
+    A `## ` line in a fenced block is example text (a report template, a
+    pasted markdown snippet), not a section of USER.md; splitting there let an
+    op addressed at the fake heading delete the real section's bullets and the
+    closing fence with them.
+
+    An unclosed fence hides nothing, which departs from CommonMark (where it
+    runs to the end of the document) on purpose: honouring it would fold every
+    later `## ` into the section above the stray marker, so one bad line could
+    put a pinned section under an unpinned heading that the curator may drop.
+    One pass, no backtracking.
+    """
+    fenced: set[int] = set()
+    open_at: int | None = None
+    marker = ""
+    for i, line in enumerate(lines):
+        if open_at is None:
+            m = _FENCE_OPEN_RE.match(line)
+            if m:
+                open_at, marker = i, m.group(1)
+            continue
+        stripped = line.strip()
+        if (
+            len(line) - len(line.lstrip(" ")) <= 3
+            and len(stripped) >= len(marker)
+            and stripped == marker[0] * len(stripped)
+        ):
+            fenced.update(range(open_at, i + 1))
+            open_at = None
+    return fenced
 
 
 def parse_sectioned_doc(text: str) -> SectionedDoc:
@@ -20,9 +61,10 @@ def parse_sectioned_doc(text: str) -> SectionedDoc:
     preamble: list[str] = []
     sections: list[Section] = []
     current: Section | None = None
+    fenced = fenced_line_indices(lines)
 
-    for line in lines:
-        if line.startswith("## "):
+    for i, line in enumerate(lines):
+        if line.startswith("## ") and i not in fenced:
             heading = line[3:].rstrip()
             current = Section(heading=heading, lines=[])
             sections.append(current)

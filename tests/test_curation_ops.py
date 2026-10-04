@@ -585,6 +585,31 @@ class TestPinnedSections:
         assert applied == []
         assert rejected[0]["reason"] == "pinned_section"
 
+    def test_the_curator_cannot_create_a_pinned_heading(self):
+        op = {"op": "add_heading", "heading": "Role <!-- PINNED -->", "lines": ["x"]}
+        new_doc, applied, rejected = apply_ops(_doc(PINNED_MD), [op])
+        assert applied == []
+        assert rejected[0]["reason"] == "pinned_heading"
+        assert new_doc.find("Role <!-- PINNED -->") is None
+
+        new_doc, applied, _ = apply_ops(_doc(PINNED_MD), [op], allow_pinned=True)
+        assert applied[0]["outcome"] == "applied"
+        assert new_doc.find("Role <!-- PINNED -->") is not None
+
+    def test_add_heading_lines_cannot_inject_a_heading(self):
+        op = {"op": "add_heading", "heading": "Notes",
+              "lines": ["ok", "x\n## Hijack <!-- PINNED -->"]}
+        new_doc, applied, rejected = apply_ops(_doc(PINNED_MD), [op], allow_pinned=True)
+        assert applied == []
+        assert rejected[0]["reason"] == "line_contains_newline"
+        assert serialize_sectioned_doc(new_doc) == PINNED_MD
+
+    def test_add_heading_name_cannot_inject_a_heading(self):
+        op = {"op": "add_heading", "heading": "Notes\n## Hijack", "lines": ["x"]}
+        _, applied, rejected = apply_ops(_doc(PINNED_MD), [op], allow_pinned=True)
+        assert applied == []
+        assert rejected[0]["reason"] == "heading_contains_newline"
+
     def test_a_missing_heading_still_reports_heading_missing(self):
         _, _, rejected = apply_ops(
             _doc(PINNED_MD), [{"op": "remove_heading", "heading": "The desk"}]

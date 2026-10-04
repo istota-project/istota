@@ -212,6 +212,27 @@ class TestPinnedSectionCli:
         assert out["outcome"] == "applied"
         assert "The desk" not in user_md.read_text()
 
+    def test_headings_skips_a_heading_inside_a_code_fence(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        user_md = _setup_user(tmp_path, monkeypatch)
+        user_md.write_text(
+            f"## {self.PINNED}\n- Answer mail\n```\n## Summary\n- one line\n```\n"
+        )
+        memory_main(["headings"])
+        out = capsys.readouterr().out
+        assert "The desk" in out
+        assert "Summary" not in out
+
+    def test_skill_text_says_a_pin_covers_one_section(self):
+        from pathlib import Path
+
+        import istota.skills.memory as memory_skill
+
+        text = (Path(memory_skill.__file__).parent / "skill.md").read_text()
+        assert "A pin covers one `## ` section" in text
+        assert "with `### ` for its subsections" in text
+
 
 class TestReplaceCli:
     def test_replace_unique_bullet(self, tmp_path, monkeypatch, capsys):
