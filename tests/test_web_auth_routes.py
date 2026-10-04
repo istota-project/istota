@@ -21,6 +21,13 @@ from istota.config import Config, SiteConfig, UserConfig, WebConfig
 PASSWORD = "a long example passphrase"
 
 
+@pytest.fixture(autouse=True)
+def _cheap_password_hash(monkeypatch):
+    # The shipped scrypt cost is ~0.1s a hash; nothing here is about the cost.
+    monkeypatch.setattr(web_auth, "_N", 1024)
+    monkeypatch.setattr(web_auth, "DUMMY_HASH", web_auth.hash_password("unused"))
+
+
 @pytest.fixture
 def configured(db_path, monkeypatch):
     from istota.webui import app as mod

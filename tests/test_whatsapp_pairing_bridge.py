@@ -94,6 +94,12 @@ BAILEYS_CAPS = WhatsAppProviderCaps(
 )
 
 
+@pytest.fixture(autouse=True)
+def _short_shutdown_grace(monkeypatch):
+    # No child here reads the socket, so the shutdown frame never ends one and every reap waited the 5s grace before SIGTERM.
+    monkeypatch.setattr(bridge_module, "SHUTDOWN_GRACE_SECONDS", 0.1)
+
+
 @pytest.fixture
 def sockets():
     directory = SocketDir()
@@ -1160,7 +1166,7 @@ class TestASendInsideAWindow:
         """
         bind_user(config)
         async with running(
-            config, sockets, sidecar_stop_timeout=3.0,
+            config, sockets, send_timeout=0.5, sidecar_stop_timeout=1.0,
         ) as instance:
             use_bridge_as_adapter(monkeypatch, instance)
             async with sidecar(

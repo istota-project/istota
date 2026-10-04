@@ -96,6 +96,13 @@ class _CaptureBrain:
         return []
 
 
+@pytest.fixture(autouse=True)
+def _no_rclone(monkeypatch):
+    """These configs have no mount, so storage falls back to rclone: answer as a
+    host without it does rather than spawning it some twenty times a task."""
+    monkeypatch.setattr("istota.lib.rclone_client.rclone_run", lambda args, **kw: None)
+
+
 @pytest.fixture
 def ocr(monkeypatch):
     """Stub the OCR child boundary and record what it was handed."""

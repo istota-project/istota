@@ -3210,7 +3210,7 @@ class TestTheVaultWriteEndpoints:
         assert body["entry_names"] == []
 
     async def test_the_name_list_is_capped_and_says_so(
-        self, tmp_path, client, app,
+        self, tmp_path, client, app, monkeypatch,
     ):
         """The count is of the whole namespace and the list is cut.
 
@@ -3228,6 +3228,8 @@ class TestTheVaultWriteEndpoints:
         secrets_store.set_secret(
             self._db_path, "alice", "vault", "passphrase", "x" * 40,
         )
+        # Each stored secret costs a scrypt derivation; fifty of them were the test.
+        monkeypatch.setattr(mod, "VAULT_ENTRY_NAMES_SHOWN", 4)
         over = mod.VAULT_ENTRY_NAMES_SHOWN + 3
         for i in range(over):
             secrets_store.set_secret(

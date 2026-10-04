@@ -253,6 +253,8 @@ def _fast_pair(monkeypatch):
     rotations' worth of patience for a human finding their phone; a test
     asserting a timeout must not wait it out."""
     monkeypatch.setattr(cli, "WHATSAPP_PAIR_TIMEOUT_SECONDS", 6.0)
+    # The fake sidecars ignore the shutdown frame, so each stop waited the 5s grace before SIGTERM.
+    monkeypatch.setattr(baileys_bridge, "SHUTDOWN_GRACE_SECONDS", 0.1)
 
 
 class TestTheRefusals:
@@ -331,6 +333,7 @@ class TestTheRefusals:
         monkeypatch.setattr(
             baileys_bridge, "in_tree_sidecar_argv", lambda: ("/bin/true",),
         )
+        monkeypatch.setattr(cli, "WHATSAPP_PAIR_TIMEOUT_SECONDS", 1.0)
 
         # Reaches the wait rather than the refusal, which is the discriminating
         # answer: `/bin/true` exits at once and nobody scans.
@@ -404,6 +407,7 @@ class TestPairingAgainstARealSidecar:
         silent = sockets.path / "silent.py"
         silent.write_text("import time; time.sleep(30)\n")
         _use_sidecar(monkeypatch, (sys.executable, str(silent)))
+        monkeypatch.setattr(cli, "WHATSAPP_PAIR_TIMEOUT_SECONDS", 1.0)
         path = _config_file(tmp_path, sockets)
 
         assert cli.cmd_whatsapp_pair(_args(path)) == 1

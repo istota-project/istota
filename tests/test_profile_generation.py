@@ -218,6 +218,8 @@ class TestTheCallers:
         from tests.test_background_checks import _daemon_config, _run_daemon_isolated
 
         cfg = _daemon_config(tmp_path)
+        # The refresh runs once per outer tick, so the default poll_interval is the wait.
+        cfg.scheduler.poll_interval = 0.2
         wrote = threading.Event()
         resolved: list[str | None] = []
 

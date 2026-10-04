@@ -1392,7 +1392,7 @@ class TestTheNeverRaisesContract:
     def test_a_session_dir_with_a_null_byte_is_reported_rather_than_raised(
         self, tmp_path,
     ):
-        cfg = _config(tmp_path, session_dir="/tmp/session\x00dir")
+        cfg = _config(tmp_path, session_dir=f"{tmp_path}/session\x00dir")
 
         result = _run(cfg, "whatsapp.baileys_session")
 

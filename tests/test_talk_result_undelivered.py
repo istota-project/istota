@@ -64,6 +64,12 @@ def _registry():
     sources.reset_registry()
 
 
+@pytest.fixture(autouse=True)
+def _no_post_backoff(monkeypatch):
+    # Every failed post here is retried; the shipped (1s, 3s) ladder is waited out per post.
+    monkeypatch.setattr("istota.transport.talk._POST_BACKOFF_SECONDS", (0.0, 0.0))
+
+
 @pytest.fixture
 def config(tmp_path, db_path):
     # `db_path` rather than a database of this file's own: `fake_talk` resolves

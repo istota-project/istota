@@ -17,6 +17,7 @@ that matter are the ones a later stage builds an authorization gate on:
 from __future__ import annotations
 
 import ast
+import functools
 import json
 import re
 import sqlite3
@@ -549,6 +550,20 @@ def _reads_groups(func: ast.AST) -> bool:
     return False
 
 
+@functools.lru_cache(maxsize=None)
+def _parsed(root: Path) -> tuple:
+    # The two inertness guards walk the same tree; parse it once per run.
+    parsed = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        readers = [
+            func for func in ast.walk(tree)
+            if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) and _reads_groups(func)
+        ]
+        parsed.append((path, tree, _deciding_nodes(tree), readers))
+    return tuple(parsed)
+
+
 def _branching_reads(field: str, root: Path = SRC) -> list[str]:
     """Code that decides on a group's `field`.
 
@@ -565,20 +580,16 @@ def _branching_reads(field: str, root: Path = SRC) -> list[str]:
     names); it is cheap and runs in the default suite.
     """
     found = []
-    for path in sorted(root.rglob("*.py")):
-        tree = ast.parse(path.read_text(), filename=str(path))
-        deciding = _deciding_nodes(tree)
+    for path, tree, deciding, readers in _parsed(root):
         where = path.relative_to(root)
         hits = set()
         for node, name in _field_reads(tree, field):
             if id(node) in deciding and re.search(r"group(?!_chat)", name, re.I):
                 hits.add((node.lineno, name))
-        for func in ast.walk(tree):
-            if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-                    and _reads_groups(func):
-                for node, name in _field_reads(func, field):
-                    if id(node) in deciding:
-                        hits.add((node.lineno, name))
+        for func in readers:
+            for node, name in _field_reads(func, field):
+                if id(node) in deciding:
+                    hits.add((node.lineno, name))
         found.extend(f"{where}:{line} {name}.{field}" for line, name in sorted(hits))
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str) \

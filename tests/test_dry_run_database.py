@@ -20,6 +20,9 @@ def bare(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     # With a master key the shared-credential gate reaches the database too.
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
+    # A bare config has no mount, so storage falls back to rclone: answer as a
+    # host without it does rather than spawning (and dialling) it ~20 times a task.
+    monkeypatch.setattr("istota.lib.rclone_client.rclone_run", lambda args, **kw: None)
     (tmp_path / "data").mkdir()
     config = Config()
     config.temp_dir = tmp_path / "tmp"
