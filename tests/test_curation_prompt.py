@@ -67,6 +67,14 @@ class TestBuildPrompt:
         assert "remove_heading" in prompt
         assert "subheading" in prompt
 
+    def test_says_pinned_sections_are_off_limits(self):
+        # A doc with no pinned section, so the marker can only come from the rule.
+        doc = parse_sectioned_doc("## A\n- a\n")
+        prompt = build_op_curation_prompt("alice", doc, "dated", None)
+        rules = prompt.split("## Rules", 1)[1].split("## Output format", 1)[0]
+        assert "<!-- pinned -->" in rules
+        assert "Never emit `remove`, `replace` or `remove_heading`" in rules
+
     def test_does_not_claim_subsections_are_opaque(self):
         # remove/replace now reach into subsections; a stale "opaque" /
         # "top region only" instruction would mislead the model.

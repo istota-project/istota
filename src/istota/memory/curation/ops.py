@@ -53,7 +53,18 @@ Reject reasons (kept on each entry of `rejected`):
   "line_starts_with_hash", "heading_starts_with_hash", "multiple_matches",
   "subheading_missing",
   "empty_subject", "empty_predicate", "empty_object", "invalid_predicate",
-  "invalid_valid_from", "object_too_long", "no_db_connection"
+  "invalid_valid_from", "object_too_long", "no_db_connection",
+  "pinned_section"
+
+Pinned sections
+---------------
+A `## ` heading carrying `<!-- pinned -->` (`types.PINNED_MARKER`) is closed to
+`remove`, `replace`, `remove_heading` and `remove_subheading` unless the caller
+passes `allow_pinned=True`; such an op is rejected as `pinned_section`.
+`append` and `add_heading` are unaffected. Closed is the default, so the
+nightly curator, which acts on nobody's request, is held off without passing
+anything, and so is any automatic caller added later. The runtime `memory` CLI
+acts on the user's own request and opts in. A hand edit never reaches this.
 """
 
 from __future__ import annotations
@@ -66,6 +77,7 @@ from .types import (
     Section,
     SectionedDoc,
     classify_line,
+    is_pinned_heading,
     normalize_bullet_text,
     subsection_bounds,
     subsection_is_empty,
@@ -97,17 +109,29 @@ _REQUIRED_FIELDS = {
     "add_fact": ("subject", "predicate", "object"),
 }
 
+# The ops that take something out of a section or rewrite it in place: what a
+# pinned section refuses to every caller but the user's own CLI.
+_PINNED_REFUSED = frozenset(
+    {"remove", "replace", "remove_heading", "remove_subheading"}
+)
+
 # Mirrors knowledge_graph.MAX_FACT_OBJECT_CHARS. Duplicated here to keep the
 # ops module independent of the DB module on import.
 _MAX_FACT_OBJECT_CHARS = 100
 
 
 def apply_ops(
-    doc: SectionedDoc, ops: list[dict[str, Any]]
+    doc: SectionedDoc,
+    ops: list[dict[str, Any]],
+    *,
+    allow_pinned: bool = False,
 ) -> tuple[SectionedDoc, list[dict], list[dict]]:
     """Apply file-only ops. `add_fact` ops are routed to `rejected` as
-    `no_db_connection` — use `apply_ops_with_db` if you need them."""
-    return _apply_ops_inner(doc, ops, db_ctx=None)
+    `no_db_connection` — use `apply_ops_with_db` if you need them.
+
+    `allow_pinned` lets destructive ops reach a pinned section (module
+    docstring, "Pinned sections")."""
+    return _apply_ops_inner(doc, ops, db_ctx=None, allow_pinned=allow_pinned)
 
 
 def apply_ops_with_db(
@@ -118,6 +142,7 @@ def apply_ops_with_db(
     user_id: str,
     source_task_id: int | None = None,
     source_type: str = "extracted",
+    allow_pinned: bool = False,
 ) -> tuple[SectionedDoc, list[dict], list[dict]]:
     """Apply ops including DB-aware ones (`add_fact`).
 
@@ -137,6 +162,7 @@ def apply_ops_with_db(
             "source_task_id": source_task_id,
             "source_type": source_type,
         },
+        allow_pinned=allow_pinned,
     )
 
 
@@ -145,6 +171,7 @@ def _apply_ops_inner(
     ops: list[dict[str, Any]],
     *,
     db_ctx: dict | None,
+    allow_pinned: bool = False,
 ) -> tuple[SectionedDoc, list[dict], list[dict]]:
     new_doc = copy.deepcopy(doc)
     applied: list[dict] = []
@@ -157,6 +184,13 @@ def _apply_ops_inner(
             continue
         if not all(f in op for f in _REQUIRED_FIELDS[kind]):
             rejected.append({"op": op, "reason": "missing_field"})
+            continue
+        if (
+            not allow_pinned
+            and kind in _PINNED_REFUSED
+            and _targets_pinned_section(new_doc, op)
+        ):
+            rejected.append({"op": op, "reason": "pinned_section"})
             continue
 
         result: tuple[str, dict] | str
@@ -191,6 +225,19 @@ def _apply_ops_inner(
             rejected.append({"op": op, "reason": outcome_or_reason})
 
     return new_doc, applied, rejected
+
+
+def _targets_pinned_section(doc: SectionedDoc, op: dict) -> bool:
+    """Is the `## ` section this op names pinned?
+
+    A missing heading is not pinned; the applier then answers
+    `heading_missing` as it would for any other section.
+    """
+    heading = op.get("heading")
+    if not isinstance(heading, str):
+        return False
+    section = doc.find(heading)
+    return section is not None and is_pinned_heading(section.heading)
 
 
 def normalize_to_bullet(text: str) -> str:

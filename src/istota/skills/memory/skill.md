@@ -83,6 +83,7 @@ Rules:
 - `remove` requires a substring unique to one bullet under the heading. The match spans the whole section — top region **and** any `### subsections`. If the substring matches multiple bullets, the CLI returns `multiple_matches`; narrow the substring. `### subheading` lines themselves are never matched.
 - To **reword** a stale bullet, use `replace --match <substr> --line <new text>` — one in-place op instead of `remove` then `append`. To drop an entire stale section, use `remove-heading`; to drop one `### ` subsection of a section, use `remove-subheading`. Those two are the only way to remove a heading line, or prose and numbered items — `remove` only ever takes a bullet.
 - To append under a `### subsection`, pass `--subheading "Name"` to `append`. Without it, `append` targets the section's top region (above the first `###`).
+- A `## ` heading ending in `<!-- pinned -->` is a pinned section: a role or standing instructions the user wants kept. The nightly memory curator can append to it but cannot remove, rewrite or drop anything in it. These commands still can, when the user asks. Address it by its full heading as `memory headings` prints it, marker included. To pin a section on the user's request, create it with the marker in the heading: `add-heading --heading "The desk <!-- pinned -->" --line "..."`.
 
 ### Per-skill overlays
 

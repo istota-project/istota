@@ -1,5 +1,6 @@
 """Configuration loading for istota.sleep_cycle module."""
 
+import json
 import logging
 from datetime import datetime, timedelta
 from unittest.mock import patch
@@ -973,6 +974,35 @@ class TestCurateUserMemory:
         assert (config_dir / "USER.md").read_text() == drift_md
         # No re-index either
         mock_index.assert_not_called()
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_a_remove_in_a_pinned_section_is_rejected_and_audited(
+        self, mock_run, mount_config
+    ):
+        from istota.memory.curation.audit import read_audit_entries
+
+        mount_config.sleep_cycle.curate_user_memory = True
+        original = (
+            "## The desk <!-- pinned -->\n- Escalate invoices to the owner\n\n"
+            "## Preferences\n- Likes vim\n"
+        )
+        config_dir, _ = _setup_curation_fixture(
+            mount_config, existing_user_md=original
+        )
+        mock_run.return_value = (True, json.dumps({"ops": [
+            {"op": "remove", "heading": "The desk <!-- pinned -->",
+             "match": "escalate invoices"},
+        ]}))
+
+        result = curate_user_memory(mount_config, "alice")
+
+        assert result is False
+        assert (config_dir / "USER.md").read_text() == original
+        entries = read_audit_entries(mount_config, "alice")
+        rejected = [r for e in entries for r in e.get("rejected", [])]
+        assert [r["reason"] for r in rejected] == ["pinned_section"]
+        assert entries[-1]["source"] == "nightly"
+        assert entries[-1]["applied"] == []
 
     @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
     def test_empty_ops_response_does_not_touch_file(self, mock_run, mount_config):
