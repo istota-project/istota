@@ -84,7 +84,8 @@ src/istota/
 ├── transport/            # Transport seam: IncomingMessage, registry, ingest, routing, talk/ email/ sms/ whatsapp/ ntfy/ istota_file/ repl/ web/
 │   ├── participants.py   # Who wrote a turn: principal / guest / agent, and the one multi-human predicate → transport.md
 │   ├── whatsapp/groups.py  # A Baileys group as a room: roster, registration, addressing, D14 leave → whatsapp.md
-│   └── email/threads.py  # A multi-party email thread as a room: minting, participants, reply-all → transport.md
+│   ├── email/threads.py  # A multi-party email thread as a room: minting, participants, reply-all → transport.md
+│   └── email/private_room.py  # The user's private email room's ref: mail between the user and the bot alone → transport.md
 ├── rooms/                # The multiplayer room model → transport.md
 │   ├── speech_gate.py    # Whether the bot answers a turn in a multi-human room; every turn is recorded first → transport.md
 │   ├── scopes.py         # The withheld-scope set every reach seam reads, the ambient-memory rule, and a task's resolved group set → sandbox.md

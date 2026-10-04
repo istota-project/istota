@@ -304,8 +304,11 @@ def _ask_policy(
     Only a turn in front of more than one human, or a guest's, consults it, so
     a private room never gets a row. Host loss makes the whole room
     record-only (D14); the other three rungs are about guests. On an email
-    thread room ``guest_reply`` is not read: a correspondent's turn runs as the
-    host, and its reply takes the outbound gate (`guest_reply_mode`).
+    thread room neither ``guest_reply`` nor the loop cap (D9) is read: a
+    correspondent's turn runs as the host, as an email turn always has, and
+    its reply takes the outbound gate (`guest_reply_mode`). Mail before thread
+    rooms had no cap; what bounds a mail loop is the inbound volume budget
+    (ISSUE-250), which counts every message from a sender.
     """
     guest = author_kind == participants.GUEST
     if not (multi_human or guest):
@@ -313,7 +316,7 @@ def _ask_policy(
     policy = room_policy.ensure_policy(conn, room_token)
     host = room_policy.current_host(conn, policy)
     loop_capped = bool(
-        guest and policy is not None
+        guest and not email_thread and policy is not None
         and room_policy.bot_turns_since_principal(conn, room_token)
         >= policy.max_bot_turns_without_human
     )
@@ -993,8 +996,17 @@ def record_phone_turn(
     conn, config, *, surface, surface_ref, user_id, text, channel_name,
     record_only=False, external_id=None, reply_to_content=None, attachments=None,
     reply_to_canonical_id=None, about_room_token=None, delivery_reference=None,
+    queue="foreground", sender_address=None,
 ):
-    """Record an accepted private phone turn and its permanent pre-room alias.
+    """Record an accepted turn in a user's private surface room, and the
+    room's permanent pre-room alias.
+
+    SMS, WhatsApp and email each own one such room per user, minted on the
+    first accepted turn. Email's is the mail between the user and the bot
+    alone (``surface_ref`` from `transport.email.private_room`). Email is a
+    guest surface in `rooms.surfaces`, so its private room takes the container
+    path, as a thread room does; ``queue`` and ``sender_address`` are the
+    poller's, as `IncomingMessage` carries them.
 
     Also the path for a turn the daemon records for the member in their
     private phone room (`room answer-privately`, which passes
@@ -1004,11 +1016,12 @@ def record_phone_turn(
     result = record_inbound(
         conn, config, surface=surface, surface_ref=surface_ref, user_id=user_id,
         text=text, source_type=surface, channel_name=channel_name,
-        output_target=surface, mirror_to_room=False, queue="foreground",
+        output_target=surface, mirror_to_room=False, queue=queue,
         external_id=external_id, reply_to_content=reply_to_content,
         reply_to_canonical_id=reply_to_canonical_id,
         attachments=attachments, is_command=text.startswith("!"), record_only=record_only,
         about_room_token=about_room_token, delivery_reference=delivery_reference,
+        sender_address=sender_address, room_container=surface == "email",
     )
     if result.message_id is not None:
         # Reusing a deleted room's binding must never retarget its history.

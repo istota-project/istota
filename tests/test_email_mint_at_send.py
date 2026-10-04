@@ -263,10 +263,14 @@ class TestEveryRecordingPoint:
                 config, asked, json.dumps({"subject": "", "body": "Yes.", "format": "text"}),
             )
 
+        # A stranger's admitted first mail at the plus-address minted the room
+        # on receipt (stage 3), so the reply finds it rather than minting.
         token = _room(config, "<a0@ext.example>")
         assert token is not None
-        assert _messages(config, token)[0]["body"] == "Yes."
+        assert _messages(config, token)[0]["task_id"] == asked.id
         assert _people(config, token) == {ANA: "guest"}
+        assert _rows(config, "SELECT conversation_token FROM sent_emails") == [
+            {"conversation_token": token}]
 
 
 class TestRegisteringIsBounded:
@@ -294,7 +298,12 @@ class TestRegisteringIsBounded:
         }]))
         _process_deferred_sent_emails(config, task, deferred)
 
-        assert _room(config, "<x@ext.example>") is None
+        # Ana's admitted mail minted Bob's thread room on receipt; the entry
+        # neither rebinds it under Carol nor adds anyone to it.
+        token = _room(config, "<x@ext.example>")
+        with db.get_db(config.db_path) as conn:
+            assert threads.find_host(conn, token) == "bob"
+        assert _people(config, token) == {ANA: "guest"}
         ids = _poll(config, sender=ANA, to=("bot+bob@test.com",),
                     message_id="<x2@ext.example>", references="<x@ext.example>")
         with db.get_db(config.db_path) as conn:

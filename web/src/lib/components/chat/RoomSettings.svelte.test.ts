@@ -676,6 +676,13 @@ describe('a phone room (room-surface-model Stage 24)', () => {
     expect(screen.queryByText('Nextcloud Talk')).toBeNull();
   });
 
+  it('names the private email room as an email transcript (email on rooms, stage 3)', () => {
+    mount(room({ origin: 'email', phone_surface: 'email', read_only: true, name: 'Email' }));
+    expect(screen.getByText(/transcript of an email conversation/)).toBeTruthy();
+    expect(screen.getByText(/reply by email/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: PROMOTE_LABEL })).toBeNull();
+  });
+
   it('names a WhatsApp group as a read-only group', () => {
     mount(
       room({ origin: 'whatsapp', phone_surface: 'whatsapp', read_only: true, phone_group: true }),

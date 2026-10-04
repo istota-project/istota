@@ -17,6 +17,12 @@ origin leg leaves an email-only plan with no error channel at all.
 The guard that matters throughout is an **external correspondent's** reply,
 which keeps every one of these behaviours unchanged — it is the case the room
 mirror exists for.
+
+Email on rooms (stage 3) moved the user's own mail out of the origin room
+altogether: it is a turn in their private email room, so the task no longer
+carries the origin room's token and the column is no longer needed for it.
+The cases below that pinned the column on a self-reply now pin the stronger
+fact, that the origin room's readers never see the exchange.
 """
 
 from unittest.mock import patch
@@ -28,6 +34,8 @@ from istota.config import Config, EmailConfig, MemorySearchConfig, UserConfig
 from istota.scheduler import process_one_task
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email.inbound import poll_emails
+
+from istota.transport.email import email_conversation_token
 
 from .support.rooms import promoted_room
 
@@ -122,6 +130,11 @@ def _poll_reply(config, *, sender, to=("bot@test.com",), body="My answer"):
         return db.get_task(conn, task_ids[0])
 
 
+def _private_room(db_path):
+    with db.get_db(db_path) as conn:
+        return db.resolve_room_token(conn, "email", email_conversation_token(USER))
+
+
 def tmp_deferred_dir(config, task):
     """The user temp dir the deferred handlers read, created on demand."""
     path = config.temp_dir / task.user_id
@@ -152,12 +165,12 @@ class TestTheDecisionIsRecorded:
     """One column, written at ingest by the poller that already computed the
     answer. Everything below is a reader of it."""
 
-    def test_a_self_reply_is_marked_withheld(self, db_path, config):
+    def test_a_self_reply_is_a_turn_in_its_private_room(self, db_path, config):
+        """Stage 3: the inheritance the column compensated for is gone."""
         task = _self_reply(config, db_path)
 
-        assert task.withheld_from_room is True
-        # And the inheritance it exists to compensate for is still in place.
-        assert task.conversation_token == ROOM
+        assert task.conversation_token == _private_room(db_path)
+        assert task.withheld_from_room is False
 
     def test_an_external_reply_is_not(self, db_path, config):
         task = _external_reply(config, db_path)
@@ -184,7 +197,7 @@ class TestTheDecisionIsRecorded:
         # No `sent_emails` row: nothing to thread against.
         task = _poll_reply(config, sender=USER_ADDR)
 
-        assert task.output_target is None
+        assert task.conversation_token == _private_room(db_path)
         assert task.withheld_from_room is False
 
     def test_a_gated_turn_is_not_marked_withheld(self, db_path, config):
@@ -284,7 +297,8 @@ class TestTheHistoryFallback:
                 origin_target=None,
             )
         task = _poll_reply(config, sender=USER_ADDR)
-        assert task.conversation_token == THREAD_HASH
+        # Stage 3: the thread's history is its private email room's.
+        assert task.conversation_token == _private_room(db_path)
         assert task.withheld_from_room is False
         self._completed(config, db_path, task)
 
@@ -582,7 +596,6 @@ class TestAPermanentFailureReachesTheUser:
         # No `sent_emails` row: nothing to thread against.
         task = _poll_reply(config, sender=USER_ADDR)
         assert task.withheld_from_room is False
-        assert task.output_target is None
 
         notify = self._fail_permanently(config, db_path, task)
 
@@ -629,7 +642,7 @@ class TestTheFactIsCarriedForward:
         with db.get_db(db_path) as conn:
             db.update_task_status(conn, task_id, "completed", result="42.")
 
-    def test_a_retry_stays_withheld(self, db_path, config):
+    def test_a_retry_stays_out_of_the_origin_room(self, db_path, config):
         """Reachability is *raised* by this issue, not lowered: the new
         permanent-failure alert is what now tells the user their mailed request
         failed, and `!retry` is what they reach for next. A bare `!retry` typed
@@ -643,14 +656,14 @@ class TestTheFactIsCarriedForward:
             retry_id = _create_retry_task(conn, task, task.prompt)
             retry = db.get_task(conn, retry_id)
 
-        assert retry.conversation_token == ROOM
-        assert retry.withheld_from_room is True
+        # Stage 3: the copy carries the private email room, not the origin.
+        assert retry.conversation_token == _private_room(db_path)
 
         self._completed(db_path, retry_id)
         with db.get_db(db_path) as conn:
             assert db.get_conversation_history(conn, ROOM) == []
 
-    def test_a_deferred_subtask_stays_withheld(self, db_path, config):
+    def test_a_deferred_subtask_stays_out_of_the_origin_room(self, db_path, config):
         """A subtask's token is pinned to its parent's so deferred JSON cannot
         drive routing; the flag is pinned with it for the same reason. Without it
         the subtask's prompt and result are indexed under the origin room's
@@ -676,8 +689,7 @@ class TestTheFactIsCarriedForward:
                 t for t in db.list_tasks(conn, user_id=USER)
                 if t.source_type == "subtask"
             ][0]
-        assert sub.conversation_token == ROOM
-        assert sub.withheld_from_room is True
+        assert sub.conversation_token == _private_room(db_path)
 
         self._completed(db_path, sub.id)
         with db.get_db(db_path) as conn:

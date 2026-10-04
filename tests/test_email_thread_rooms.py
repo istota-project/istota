@@ -151,19 +151,33 @@ class TestAThreadBecomesARoom:
         assert policy.guest_reply == "held"
         assert policy.host_user_id == HOST
 
-    def test_a_single_correspondent_mail_stays_as_it_was(self, config, db_path):
+    def test_the_hosts_mail_to_the_bot_alone_is_their_private_room(self, config, db_path):
+        """Not a thread (email on rooms, stage 3): the host's private email room."""
+        from istota.transport.email import email_conversation_token
+
         task_ids = _poll(config, sender=HOST_ADDR, to=(BOT,), message_id=ROOT)
 
-        assert _rows(db_path, "SELECT token FROM rooms") == []
+        assert _room_token(config) is None
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_ids[0])
-        assert task.conversation_token != _room_token(config)
+            private = db.resolve_room_token(conn, "email", email_conversation_token(HOST))
+        assert task.conversation_token == private
         assert not task.is_group_chat
 
-    def test_a_stranger_cannot_mint_a_room_for_the_host(self, config, db_path):
-        """Existence, never creation, for unsolicited mail: the host is not on
-        the thread and the bot started nothing, so no room appears in their
-        sidebar however many people the stranger copies."""
+    def test_a_strangers_mail_at_the_plus_address_is_a_thread_room(self, config, db_path):
+        """Routed to the host by their plus-address and admitted by trust: a
+        thread room with the host as its only member (section 7)."""
+        (task_id,) = _poll(config, sender=ALICE, to=("bot+carol@test.com",), cc=(BOB,),
+                           message_id=ROOT)
+        token = _room_token(config)
+        assert token is not None
+        with db.get_db(db_path) as conn:
+            assert db.list_room_members(conn, token) == [HOST]
+            assert db.get_task(conn, task_id).conversation_token == token
+
+    def test_a_held_strangers_mail_mints_nothing(self, config, db_path):
+        """Existence, never creation, for mail the gate holds."""
+        config.users[HOST].trusted_email_senders = []
         _poll(config, sender=ALICE, to=("bot+carol@test.com",), cc=(BOB,),
               message_id=ROOT)
         assert _rows(db_path, "SELECT token FROM rooms") == []

@@ -193,7 +193,13 @@
   // but a web-origin room, and its binding is the user's phone identity.
   const canPromote = $derived(room.origin !== 'talk' && !room.phone_surface);
   const phoneLabel = $derived(
-    room.phone_surface === 'sms' ? 'SMS' : room.phone_surface === 'whatsapp' ? 'WhatsApp' : null,
+    room.phone_surface === 'sms'
+      ? 'SMS'
+      : room.phone_surface === 'whatsapp'
+        ? 'WhatsApp'
+        : room.phone_surface === 'email'
+          ? 'email'
+          : null,
   );
   const isPromoted = $derived(canPromote && !!room.talk_token);
   // An imported (Talk-origin) room is hidden per-user, not destroyed — this
@@ -472,8 +478,8 @@
           {phoneLabel} — this room is a {phoneLabel} group. It is read-only here; write in the group on
           {phoneLabel}.
         {:else}
-          {phoneLabel} — this room is the transcript of a {phoneLabel} conversation. It is read-only here;
-          reply by {phoneLabel}.
+          {phoneLabel} — this room is the transcript of {phoneLabel === 'email' ? 'an' : 'a'}
+          {phoneLabel} conversation. It is read-only here; reply by {phoneLabel}.
         {/if}
       </p>
     </div>

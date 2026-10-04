@@ -339,7 +339,16 @@ def approve(
             )
             trusted = True
 
-    _restore_transcript_mirror(conn, task, config)
+    # A held mail is admitted to its room on approval: the user's private
+    # email room, or its thread's room, minted here for a stranger's first
+    # mail at the plus-address (email on rooms, section 7). Anything else
+    # gets its withheld question restored as before.
+    admitted = None
+    if config is not None and task.source_type == "email":
+        from .transport.email.threads import admit_approved_mail
+        admitted = admit_approved_mail(conn, config, db.get_task(conn, task.id) or task)
+    if admitted is None:
+        _restore_transcript_mirror(conn, task, config)
     _close_notification(conn, task, by)
     return trusted
 

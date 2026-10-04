@@ -982,30 +982,26 @@ def _room_for_destination(
     )
 
 
-def private_phone_room(
+def private_surface_room(
     conn, surface: str, user_id: str, channel: str | None = None,
 ) -> str | None:
-    """The user's own SMS or WhatsApp room, if one was minted, else None.
+    """The user's own SMS, WhatsApp or email room, if one was minted, else None.
 
-    The room a phone push lands in as a transcript row. Existence, never
+    The room a push lands in as a transcript row. Existence, never
     creation: a push is the system talking, so a miss writes nothing and the
     send goes ahead exactly as before. A room another human reads is refused
     like any other personal delivery. ``channel`` is the planned destination; a
     WhatsApp channel that is not the user's private chat (a group's room) has
     no private transcript to land in. SMS has no such alternative, since its
-    send always resolves the user's own binding.
+    send always resolves the user's own binding, and email's private room is
+    the mail between the user and the bot alone (email on rooms, section 7).
     """
     from .. import db
-    from .sms import sms_conversation_token
-    from .whatsapp import whatsapp_conversation_token
 
-    if surface == "sms":
-        surface_ref = sms_conversation_token(user_id)
-    elif surface == "whatsapp":
-        surface_ref = whatsapp_conversation_token(user_id)
-        if channel is not None and channel != surface_ref:
-            return None
-    else:
+    surface_ref = private_phone_ref(surface, user_id)
+    if surface_ref is None:
+        return None
+    if surface == "whatsapp" and channel is not None and channel != surface_ref:
         return None
     token = db.resolve_room_token(conn, surface, surface_ref)
     if not token or db.get_room(conn, token) is None:
@@ -1013,6 +1009,10 @@ def private_phone_room(
     if user_id not in db.list_room_members(conn, token) or db.room_is_shared(conn, token):
         return None
     return token
+
+
+#: The name the phone surfaces knew it by, kept until its callers move.
+private_phone_room = private_surface_room
 
 
 def is_private_phone_room(conn, surface: str, user_id: str, room_token) -> bool:
@@ -1028,25 +1028,29 @@ def is_private_phone_room(conn, surface: str, user_id: str, room_token) -> bool:
 
 
 def private_phone_rooms(conn, user_id: str) -> dict[str, str]:
-    """``{room token: surface}`` for ``user_id``'s own SMS and WhatsApp rooms.
+    """``{room token: surface}`` for ``user_id``'s own SMS, WhatsApp and email
+    rooms.
 
     What a reader is told to schedule into such a room by
     (:func:`room_target_descriptor`'s ``phone_surface``). One decision for the
     prompt header, `istota-skill rooms list` and the `talk create` refusal,
-    so they cannot name different targets for the same room. At most two entries.
+    so they cannot name different targets for the same room. At most three
+    entries.
     """
     found: dict[str, str] = {}
     if not user_id:
         return found
-    for surface in ("sms", "whatsapp"):
-        token = private_phone_room(conn, surface, user_id)
+    for surface in ("sms", "whatsapp", "email"):
+        token = private_surface_room(conn, surface, user_id)
         if token:
             found[token] = surface
     return found
 
 
 def private_phone_ref(surface: str, user_id: str) -> str | None:
-    """The ``surface_ref`` of ``user_id``'s own SMS or WhatsApp thread, else None."""
+    """The ``surface_ref`` of ``user_id``'s own SMS, WhatsApp or email thread,
+    else None."""
+    from .email.private_room import email_conversation_token
     from .sms import sms_conversation_token
     from .whatsapp import whatsapp_conversation_token
 
@@ -1056,6 +1060,8 @@ def private_phone_ref(surface: str, user_id: str) -> str | None:
         return sms_conversation_token(user_id)
     if surface == "whatsapp":
         return whatsapp_conversation_token(user_id)
+    if surface == "email":
+        return email_conversation_token(user_id)
     return None
 
 
@@ -1068,7 +1074,8 @@ class PhoneRoom(NamedTuple):
 
 
 def phone_room(conn, room_token) -> PhoneRoom | None:
-    """The room's SMS or WhatsApp binding, if it has one, else None.
+    """The room's SMS or WhatsApp binding, or its private email binding, if it
+    has one, else None.
 
     Web's read-only test (decided 2026-10-01, widened to groups by ISSUE-585):
     web reads a phone-bound room and may not write into it, so the send route
@@ -1079,7 +1086,9 @@ def phone_room(conn, room_token) -> PhoneRoom | None:
 
     Asked of the room, not of a reader, so it answers the same for every
     member. ``group`` is the private-thread test inverted: the binding's ref is
-    not the room creator's own private thread token. SMS has no groups.
+    not the room creator's own private thread token. SMS has no groups. The
+    private email room is read-only for the same reason as a phone thread (a
+    web send would not go by mail); an email thread room is not answered here.
     """
     from .. import db
 
@@ -1094,17 +1103,24 @@ def phone_room(conn, room_token) -> PhoneRoom | None:
         return None
     group = None
     for binding in db.list_room_bindings(conn, room.token):
+        private = binding.surface_ref == private_phone_ref(binding.surface, room.user_id)
+        if binding.surface == "email":
+            # Only the private email room: a thread room is bound under its
+            # root Message-ID and keeps its own rules.
+            if private:
+                return PhoneRoom("email", False)
+            continue
         if binding.surface not in db.PHONE_ROOM_SURFACES:
             continue
-        if binding.surface_ref == private_phone_ref(binding.surface, room.user_id):
+        if private:
             return PhoneRoom(binding.surface, False)
         group = PhoneRoom(binding.surface, True)
     return group
 
 
 def phone_transcript_surface(conn, room_token) -> str | None:
-    """``'sms'`` or ``'whatsapp'`` when the room is a private phone thread's
-    transcript, else None.
+    """``'sms'``, ``'whatsapp'`` or ``'email'`` when the room is a private
+    thread's transcript, else None.
 
     The narrower half of :func:`phone_room`: a private thread has one reader
     and its parked questions are answered by text. A WhatsApp group room is

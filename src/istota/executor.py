@@ -6306,13 +6306,19 @@ def room_identity_line(
             # The web view of a phone room is read-only, so a reminder asked
             # for by text has to be sent by text; the bare surface resolves the
             # user's own binding, and the push is recorded in this room.
-            label = "SMS" if phone_surface == "sms" else "WhatsApp"
+            label = {"sms": "SMS", "whatsapp": "WhatsApp"}.get(phone_surface, "email")
+            # The private email room is mail between the user and the bot
+            # alone (email on rooms, section 7): a bare `email` mails the user.
+            reaches = (
+                "mails it to the user" if phone_surface == "email"
+                else "sends it to the user's phone"
+            )
             return (
                 f"\nRoom: this conversation is a registered room on {label}, "
                 "readable but not writable in web chat. To deliver into it from "
                 "a scheduled job or a reminder, write "
                 f'target = "{descriptor}" and room = "{safe_token}"; that '
-                "sends it to the user's phone and records it here. " + closing
+                f"{reaches} and records it here. " + closing
             )
         if origin in ("whatsapp", "email"):
             # A group or a thread is answered only from its own turns

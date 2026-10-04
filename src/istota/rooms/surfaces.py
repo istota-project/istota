@@ -163,7 +163,10 @@ SURFACES: dict[str, SurfaceRoomFacts] = {
         room_role="member", room_view="canonical", user_turn_mirror=None,
     ),
     # Guest: an email threaded back into a room joins that room's transcript and
-    # never mints one. No room view — see the durable-place test above.
+    # never mints one. No room view — see the durable-place test above. Email's
+    # own rooms (a thread, the user's private email room) take the container
+    # override; a `member` row here would register a room for every other
+    # email ingest's thread hash.
     #
     # Two literals in `db.py` cover the same names for a different question, and
     # neither is derived from this row: `TRANSCRIPT_SURFACE_FILTER`'s

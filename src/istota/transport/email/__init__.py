@@ -27,13 +27,16 @@ from typing import TYPE_CHECKING
 from .._types import IncomingMessage, TransportCapabilities
 from .inbound import poll_emails
 from .outbound import deliver_email_result
+from .private_room import email_conversation_token
 
 if TYPE_CHECKING:
     from ... import db
     from ...config import Config
     from .._types import DeliveryOptions
 
-__all__ = ["EmailTransport", "poll_emails", "deliver_email_result"]
+__all__ = [
+    "EmailTransport", "deliver_email_result", "email_conversation_token", "poll_emails",
+]
 
 
 class EmailTransport:
@@ -56,7 +59,8 @@ class EmailTransport:
         # transcript (`record_inbound`'s `mirror_only` path) and never mints,
         # binds, renames or un-archives one. ISSUE-136's "existence, never
         # creation" rule is this value, and it is what stops mail the bot merely
-        # receives from putting rooms in anyone's sidebar.
+        # receives from putting rooms in anyone's sidebar. A thread room and the
+        # user's private email room arrive as room containers instead.
         inbound_room_role="guest",
     )
 

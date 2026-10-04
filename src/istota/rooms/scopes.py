@@ -242,9 +242,19 @@ def is_email_thread_room(conn, token: str | None) -> bool:
     an admitted turn on it runs as the host at full reach. The token form of
     `transport.email.threads.thread_room_for_task`. Raises what the reads
     raise; each caller chooses its failure direction.
+
+    The user's private email room is bound to email too, under its creator's
+    own token rather than a Message-ID, and is not a thread: its turns are the
+    user's own (`transport.email.private_room`).
     """
+    from istota.transport.email.private_room import is_private_email_ref
+
     room = canonical_token(conn, token)
-    return room is not None and db.get_room_binding(conn, room, "email") is not None
+    binding = db.get_room_binding(conn, room, "email") if room is not None else None
+    if binding is None:
+        return False
+    owner = db.get_room(conn, room)
+    return not is_private_email_ref(binding.surface_ref, owner.user_id if owner else None)
 
 
 def canonical_token(conn, token: str | None) -> str | None:

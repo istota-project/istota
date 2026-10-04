@@ -5681,12 +5681,15 @@ def phone_bindings_for_member(
     `talk_refs_for_member`'s shape and reason: one query for the polled room
     listing rather than a lookup per room. A WhatsApp group room is in it too,
     since its binding is a phone surface's; the listing badges both and asks
-    the private-thread question only of these.
+    the private-thread question only of these. So is an email binding shaped
+    like a private email room's ref (`transport.email.private_room`), which
+    the listing then checks exactly; a thread room's ref is a Message-ID.
     """
     rows = conn.execute(
         "SELECT b.* FROM room_bindings b "
         "JOIN room_members m ON m.room_token = b.room_token "
-        "WHERE b.surface IN (?, ?) AND m.user_id = ? ORDER BY b.surface",
+        "WHERE (b.surface IN (?, ?) OR (b.surface = 'email' "
+        "AND b.surface_ref LIKE 'email-%')) AND m.user_id = ? ORDER BY b.surface",
         (*PHONE_ROOM_SURFACES, user_id),
     ).fetchall()
     out: dict[str, RoomBinding] = {}
@@ -5696,12 +5699,19 @@ def phone_bindings_for_member(
 
 
 def room_has_phone_binding(conn: sqlite3.Connection, room_token: str) -> bool:
-    """Whether the room is bound to SMS or WhatsApp at all."""
-    return conn.execute(
+    """Whether the room is bound to SMS or WhatsApp at all, or is a user's
+    private email room: each is a read-only transcript in web."""
+    from istota.transport.email.private_room import is_private_email_ref
+
+    if conn.execute(
         "SELECT 1 FROM room_bindings WHERE room_token = ? AND surface IN (?, ?) "
         "LIMIT 1",
         (room_token, *PHONE_ROOM_SURFACES),
-    ).fetchone() is not None
+    ).fetchone() is not None:
+        return True
+    binding = get_room_binding(conn, room_token, "email")
+    room = get_room(conn, room_token) if binding is not None else None
+    return room is not None and is_private_email_ref(binding.surface_ref, room.user_id)
 
 
 

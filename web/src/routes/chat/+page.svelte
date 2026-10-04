@@ -187,7 +187,13 @@
   // the gate. A WhatsApp group's parked questions are still answered here, so
   // only a private thread's card says to answer by text.
   const readOnlyPhone = $derived(
-    activeRoom?.read_only ? (activeRoom.phone_surface === 'whatsapp' ? 'WhatsApp' : 'SMS') : null,
+    activeRoom?.read_only
+      ? activeRoom.phone_surface === 'whatsapp'
+        ? 'WhatsApp'
+        : activeRoom.phone_surface === 'email'
+          ? 'email'
+          : 'SMS'
+      : null,
   );
   const readOnlyGroup = $derived(!!readOnlyPhone && !!activeRoom?.phone_group);
   const isTalkRoom = (room: { origin?: string | null; talk_token?: string | null }) =>
@@ -206,11 +212,13 @@
   }) =>
     room.phone_surface === 'sms'
       ? 'SMS conversation'
-      : isWhatsAppGroup(room)
-        ? room.shared
-          ? 'WhatsApp group, shared room'
-          : 'WhatsApp group'
-        : 'WhatsApp conversation';
+      : room.phone_surface === 'email'
+        ? 'Email conversation'
+        : isWhatsAppGroup(room)
+          ? room.shared
+            ? 'WhatsApp group, shared room'
+            : 'WhatsApp group'
+          : 'WhatsApp conversation';
 
   // Who may be `@`-mentioned in the open room (ISSUE-578): its members by user
   // id, the viewer's own entry marked, and the bot's name. Only in a shared
@@ -1459,8 +1467,8 @@
               This room is a {readOnlyPhone} group and is read-only here. Write in the group on
               {readOnlyPhone} to take part.
             {:else}
-              This room is the transcript of a {readOnlyPhone} conversation and is read-only here. Reply
-              by
+              This room is the transcript of {readOnlyPhone === 'email' ? 'an' : 'a'}
+              {readOnlyPhone} conversation and is read-only here. Reply by
               {readOnlyPhone} to continue it.
             {/if}
           </p>

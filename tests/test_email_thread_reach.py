@@ -128,3 +128,37 @@ class TestControlATalkGuestsTurn:
         assert _user_dir(config) not in _binds(seen["argv"])
         assert SENTINEL not in seen["prompt"] + seen["system"]
         assert seen["vault"] == {}
+
+
+class TestTheOfficeTurn:
+    """Email on rooms stage 3, the `office` regression: a stranger's mail at
+    the plus-address of a user who trusts every sender is a thread room turn,
+    and it runs at that user's reach with their USER.md loaded. Driven from the
+    poller rather than a hand-built row."""
+
+    def test_a_strangers_first_mail_runs_at_the_users_reach(self, config):
+        from istota.config import EmailConfig, UserConfig
+
+        from .test_email_thread_rooms import _poll
+
+        config.email = EmailConfig(
+            enabled=True, imap_host="imap.test", imap_port=993, imap_user="user",
+            imap_password="pass", smtp_host="smtp.test", smtp_port=587,
+            bot_email="bot@test.com",
+        )
+        config.bot_name = "Zorg"
+        config.users["alice"] = UserConfig(email_addresses=["alice@test.com"],
+                                           trusted_email_senders=["*"])
+        _user_md(config)
+
+        def _turn(conn):
+            (task_id,) = _poll(config, sender=CORRESPONDENT, to=("bot+alice@test.com",),
+                               message_id="<s1@example.com>", body="Are you open Sunday?")
+            return task_id
+
+        seen = _run(config, _turn)
+        assert "calendar" not in seen["disabled"]
+        assert _user_dir(config) in _binds(seen["argv"])
+        assert SENTINEL in seen["prompt"] + seen["system"]
+        assert "on their correspondence" in seen["system"]
+        assert "Withheld from this turn" not in seen["system"]

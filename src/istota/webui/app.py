@@ -5831,6 +5831,9 @@ def _room_phone_fields(reg, binding) -> dict:
     if binding is None:
         return {"phone_surface": None, "read_only": False, "phone_group": False}
     private = binding.surface_ref == private_phone_ref(binding.surface, reg.user_id)
+    if binding.surface == "email" and not private:
+        # An email thread room, which the listing does not badge.
+        return {"phone_surface": None, "read_only": False, "phone_group": False}
     return {"phone_surface": binding.surface, "read_only": True, "phone_group": not private}
 
 
@@ -6073,10 +6076,14 @@ def _task_phone_transcript_surface(task_id: int) -> str | None:
 
 
 _PHONE_LABELS = {"sms": "SMS", "whatsapp": "WhatsApp"}
+#: Every surface whose private room is read-only here: the phone threads, and
+#: the private email room (email on rooms, section 7). Kept apart from
+#: `_PHONE_LABELS`, which also marks a texted turn's provenance.
+_READ_ONLY_LABELS = {**_PHONE_LABELS, "email": "email"}
 
 
 def _read_only_refusal(surface: str, *, group: bool = False) -> JSONResponse:
-    label = _PHONE_LABELS.get(surface, surface)
+    label = _READ_ONLY_LABELS.get(surface, surface)
     if group:
         error = (f"This room is a {label} group and is read-only here; a message "
                  f"sent from here would reach nobody in the group. Write in the "
@@ -6612,7 +6619,8 @@ def _chat_list_members(username: str, room_id: int) -> dict | None:
         # creator sends `acknowledge_history`.
         message_count = db.count_room_messages(conn, handle.token)
         # The add route refuses one (ISSUE-606); the pane says so instead.
-        email_thread = db.get_room_binding(conn, reg.token, "email") is not None
+        from istota.rooms.scopes import is_email_thread_room
+        email_thread = is_email_thread_room(conn, reg.token)
     members.sort(key=lambda m: (not m["is_owner"], m["user_id"]))
     return {"members": members, "can_manage": can_manage, "message_count": message_count,
             "email_thread": email_thread}
@@ -6642,9 +6650,9 @@ def _chat_add_member(
         from istota.transport.routing import phone_transcript_surface
         phone = phone_transcript_surface(conn, handle.token)
         if phone is not None:
-            label = _PHONE_LABELS.get(phone, phone)
+            label = _READ_ONLY_LABELS.get(phone, phone)
             return 409, {
-                "error": f"This room is the transcript of a {label} "
+                "error": f"This room is the transcript of your {label} "
                          "conversation and has one reader; members cannot be added.",
                 "read_only": True,
             }

@@ -732,13 +732,19 @@ class TestPollEmailsThreadMatching:
         assert _processed(config, "3")["routing_method"] == "discarded"
 
     def test_known_sender_still_works_normally(self, mail_config):
-        """Known sender emails are routed normally (no output_target override)."""
+        """A known sender writing to the bot alone is a turn in their private
+        email room (email on rooms, stage 3), answered by mail."""
+        from istota.transport.email import email_conversation_token
+
         config = mail_config(_users("alice"))
 
         task = _single_task(config, _email(sender="alice@test.com"))
 
         assert task.user_id == "alice"
-        assert task.output_target is None  # Normal email routing
+        assert task.output_target == "email"
+        with db.get_db(config.db_path) as conn:
+            assert task.conversation_token == db.resolve_room_token(
+                conn, "email", email_conversation_token("alice"))
         assert "Emissary" not in task.prompt
 
     def test_emissary_reply_without_conversation_token_uses_thread_id(self, mail_config):
@@ -937,7 +943,11 @@ class TestPollEmailsThreadMatching:
         )
         assert task is not None
         assert task.output_target == "email"
-        assert task.conversation_token == "rm_web123"
+        # Since stage 3 the reply is a turn in carol's private email room, not
+        # a continuation of the origin room.
+        assert task.conversation_token != "rm_web123"
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room_binding(conn, task.conversation_token, "email") is not None
         # Self-reply → plain template, not "an external contact has replied".
         assert "Emissary email reply" not in task.prompt
 
@@ -983,7 +993,9 @@ class TestPollEmailsThreadMatching:
         )
         assert task is not None
         assert task.user_id == "alice"
-        assert task.output_target is None  # mismatched origin dropped → default
+        # Mismatched origin dropped: alice's own mail is a turn in her private
+        # email room (stage 3).
+        assert task.output_target == "email"
         assert task.conversation_token != "rm_web123"
 
     @pytest.mark.parametrize("token", ["web-carol-deadbeef", "rm_example"])
@@ -1005,10 +1017,14 @@ class TestPollEmailsThreadMatching:
         assert task.talk_delivery_token == "alerts_room"
 
     def test_known_sender_resolves_talk_delivery_token_from_alerts(self, mail_config):
-        """plus_address / sender_match routes resolve talk_delivery_token via user config."""
+        """A plus-addressed mail outside any room (a held stranger's, since
+        stage 3 admits the rest to a room) resolves talk_delivery_token via
+        user config."""
         config = mail_config(_users("alice", alerts_channel="alice_alerts"))
 
-        task = _single_task(config, _email(sender="alice@test.com"))
+        task = _single_task(config, _email(sender="stranger@random.com",
+                                           to=("bot+alice@test.com",)))
+        assert task.status == "pending_confirmation"
 
         # conversation_token is the synthetic email-thread hash
         assert task.conversation_token is not None
@@ -1078,8 +1094,10 @@ class TestBotAddressedInTo:
 
         assert bot_addressed_in_to(Config(), _email()) is False
 
+    # Dave on both, so neither is mail to the bot alone, which is a turn in
+    # carol's private email room and takes no `IncomingMessage` (stage 3).
     @pytest.mark.parametrize("to, cc, expected", [
-        (("bot+carol@test.com",), (), True),
+        (("bot+carol@test.com",), ("dave@test.com",), True),
         (("dave@test.com",), ("bot+carol@test.com",), False),
     ])
     def test_the_poller_passes_it_to_ingest(self, mail_config, to, cc, expected):

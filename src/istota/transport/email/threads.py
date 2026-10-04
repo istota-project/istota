@@ -1,8 +1,9 @@
 """Email threads as rooms (multiplayer D6, D10).
 
-A thread with two or more humans besides the bot is a room. Every other mail
-stays exactly as it was: a task on a thread hash, mirrored into a room only by
-the existing routing.
+A thread with two or more humans besides the bot is a room, and so is a
+stranger's first mail at a user's plus-address. Mail between the user and the
+bot alone is the user's private email room. Every other mail stays as it was:
+a task on a thread hash, mirrored into a room only by the existing routing.
 
 - **The key** is the thread's root `Message-ID`: the first id in References,
   else In-Reply-To, else the message's own. The room binding is
@@ -14,17 +15,21 @@ the existing routing.
   room for the same thread. `compute_thread_id` cannot be the key: it hashes the subject and
   the sender, so every correspondent's reply on one thread hashes differently.
 - **Minting** happens only on evidence that the thread is the host's: their
-  own address is on it, or it threads onto a mail the bot sent for them. A
-  thread the bot starts is minted at the send (`register_sent_thread`), with
-  the sent mail as its first row, so the first reply finds it like any other.
-  A reply with two or more people on it, on a thread sent before that
-  existed, mints at the reply. A stranger copying people on a mail to
-  ``bot+<user>@`` mints nothing on receipt, which keeps "existence, never
-  creation" for unsolicited mail; answering it mints at that send. A mail held by the
-  untrusted-sender gate mints nothing either. Rooms are otherwise
-  user-created; this is the second system-minted kind after WhatsApp groups,
-  and for the same reason: the container already exists on the surface, and
-  the room is its transcript rather than a new conversation.
+  own address is on it, it threads onto a mail the bot sent for them, or it
+  reached the bot at their plus-address. A thread the bot starts is minted at
+  the send (`register_sent_thread`), with the sent mail as its first row, so
+  the first reply finds it like any other. A reply with two or more people on
+  it, on a thread sent before that existed, mints at the reply. A stranger's
+  mail to ``bot+<user>@`` mints on receipt with one person on it, once the
+  untrusted-sender gate admits it (a trusted sender, or the user approving the
+  held mail, which mints at the approval: `confirmations.approve`). A held
+  mail mints nothing. Rooms are otherwise user-created; this is the second
+  system-minted kind after WhatsApp groups, and for the same reason: the
+  container already exists on the surface, and the room is its transcript
+  rather than a new conversation.
+- **Mail between the user and the bot alone** is not a thread: it is a turn
+  in the user's private email room (`private_room`, `is_private_mail`), which
+  no message threads into (`thread_binding`).
 - **Participants** are the union of From/To/Cc over the thread, bot addresses
   removed. Nobody leaves by being dropped from a Cc: the union is who has read
   the thread. The first message's people are the epoch baseline; anyone new on
@@ -62,9 +67,12 @@ from typing import TYPE_CHECKING
 
 from istota import db
 from istota.rooms import policy as room_policy
-from istota.mail.ownership import bot_addressed_in_to, is_bot_address, parse_message_ids
+from istota.mail.ownership import (
+    bot_addressed_in_to, is_bot_address, match_thread, parse_message_ids,
+)
 from .. import participants
 from .._types import ParticipantRef
+from .private_room import is_private_email_ref
 
 if TYPE_CHECKING:
     from ...config import Config
@@ -146,13 +154,27 @@ def thread_people(config: "Config", email) -> list[tuple[str, str]]:
     return people
 
 
+def thread_binding(conn, token: str | None):
+    """The room's email binding when the room is a thread, else None.
+
+    The user's private email room is bound to email too, under its creator's
+    own token (`private_room`), and no message threads into it as a thread:
+    mail there is the user's alone, and a Message-ID is a bearer token anyone
+    on a forward holds.
+    """
+    room = db.get_room(conn, token) if token else None
+    binding = db.get_room_binding(conn, token, SURFACE) if room else None
+    if binding is None or is_private_email_ref(binding.surface_ref, room.user_id):
+        return None
+    return binding
+
+
 def find_thread_room(conn, config: "Config", email) -> ThreadRoom | None:
     """The room this message's thread already is, or None. Reads only."""
     for mid in thread_message_ids(email):
         token = db.resolve_room_token(conn, SURFACE, mid) or _token_by_stored_mail(conn, mid)
         token = db._canonical_room_token(conn, token, cross_surface=False) if token else None
-        room = db.get_room(conn, token) if token else None
-        binding = db.get_room_binding(conn, token, SURFACE) if room else None
+        binding = thread_binding(conn, token)
         if binding is None:
             continue
         return ThreadRoom(token=token, ref=binding.surface_ref,
@@ -171,7 +193,7 @@ def _token_by_stored_mail(conn, message_id: str) -> str | None:
             if not row[0]:
                 continue
             token = db._canonical_room_token(conn, row[0], cross_surface=False)
-            if db.get_room_binding(conn, token, SURFACE) is not None:
+            if thread_binding(conn, token) is not None:
                 return token
     return None
 
@@ -221,9 +243,22 @@ def _room_name(subject: str | None) -> str | None:
     return name[:_NAME_MAX] or None
 
 
+def is_private_mail(config: "Config", email, user_id: str) -> bool:
+    """Whether every human on this message is ``user_id`` themselves.
+
+    From, To and Cc, folded, the bot's addresses dropped. Such a mail is a turn
+    in the user's private email room rather than a thread (section 7).
+    """
+    owner = config.users.get(user_id)
+    owned = {fold(a) for a in (owner.email_addresses if owner else [])}
+    people = thread_people(config, email)
+    return bool(people) and all(address in owned for address, _ in people)
+
+
 def resolve_thread(
     conn, config: "Config", email, *,
     owner_user_id: str, existing: ThreadRoom | None, ours: bool,
+    plus_address: bool = False,
 ) -> ThreadRoom | None:
     """Record this message's people in its thread's room, minting one if due.
 
@@ -232,18 +267,21 @@ def resolve_thread(
     copies becomes one of the thread's people on its strength. ``existing``
     is `find_thread_room`'s answer, asked before the caller's transaction
     wrote anything; ``ours`` is that the mail threads onto one the bot sent
-    for ``owner_user_id``.
+    for ``owner_user_id``. ``plus_address`` is that the mail was routed to
+    ``owner_user_id`` by their plus-address: that is evidence enough the
+    thread is theirs, and one person on it is enough (stranger first contact,
+    the ``office`` case).
     """
     people = thread_people(config, email)
     if existing is not None:
         _sync(conn, config, existing.token, people, acknowledged=False)
         return existing
     ids = thread_message_ids(email)
-    if not ids or len(people) < MIN_HUMANS:
+    if not ids or len(people) < (1 if plus_address else MIN_HUMANS):
         return None
     owner = config.users.get(owner_user_id)
     owned = {fold(a) for a in (owner.email_addresses if owner else [])}
-    if not (ours or any(address in owned for address, _ in people)):
+    if not (ours or plus_address or any(address in owned for address, _ in people)):
         return None
     if find_thread_room(conn, config, email) is not None:
         # The thread's room exists but the caller could not use it (its host is
@@ -259,6 +297,12 @@ def _mint(
 ) -> ThreadRoom | None:
     """Mint the thread's room, bound to its root id, with ``people`` as the
     baseline. The one copy, for a mail received and a mail sent alike."""
+    if root.startswith("email-"):
+        # The shape of a private email room's ref (`private_room`). A sender
+        # chooses the Message-ID, and a thread bound under a user's private
+        # token would take their own mail as a thread with a stranger on it.
+        logger.warning("Refusing a thread root shaped like a private email room ref")
+        return None
     room = db.register_bound_room(
         conn, owner_user_id, origin=SURFACE, name=_room_name(subject),
         surface=SURFACE, surface_ref=root,
@@ -322,7 +366,8 @@ def register_sent_thread(
     recipients as its people, only when ``user_id`` hosts it, since the ids
     can come from a deferred file the model writes. A thread with none is
     minted when anyone besides the user and the bot is on it, with the sent
-    mail as its first row; mail to the user's own addresses mints nothing.
+    mail as its first row; mail to the user's own addresses mints nothing and
+    lands in their private email room, when they have one.
     Bcc is never passed in and never becomes a person.
 
     Best-effort and never raises: its writes go in a savepoint, so a failure
@@ -341,7 +386,7 @@ def register_sent_thread(
             conn, config, user_id=user_id,
             ids=SimpleNamespace(message_id=message_id, in_reply_to=in_reply_to,
                                 references=references),
-            to=to, cc=cc, subject=subject, body=body,
+            to=to, cc=cc, subject=subject, body=body, task_id=task_id,
         )
         conn.execute(f"RELEASE {savepoint}")
         return room
@@ -366,8 +411,8 @@ def _bound_room(conn, ids: list[str]) -> ThreadRoom | None:
     for mid in ids:
         token = db.resolve_room_token(conn, SURFACE, mid)
         token = db._canonical_room_token(conn, token, cross_surface=False) if token else None
-        binding = db.get_room_binding(conn, token, SURFACE) if token else None
-        if binding is not None and db.get_room(conn, token) is not None:
+        binding = thread_binding(conn, token)
+        if binding is not None:
             return ThreadRoom(token=token, ref=binding.surface_ref,
                               host=find_host(conn, token))
     return None
@@ -387,9 +432,27 @@ def _stored_for_someone_else(conn, ids: list[str], user_id: str) -> bool:
     return False
 
 
+def _record_in_private_room(
+    conn, *, user_id: str, task_id: int | None, to, cc,
+    subject: str | None, body: str | None,
+) -> None:
+    """Mail the bot sent to the user alone, as a row of their private email
+    room once it exists, like a push into a phone room. Never mints. Not when
+    the sending task's answer is a row there already: the scheduler stores a
+    room turn's answer before it is mailed."""
+    from ..routing import private_surface_room
+
+    room = private_surface_room(conn, SURFACE, user_id)
+    if room is None:
+        return
+    if task_id is not None and db.get_turn_message_id(conn, room, task_id) is not None:
+        return
+    record_sent_mail(conn, room, to=to, cc=cc, subject=subject, body=body)
+
+
 def _register_sent_thread(
     conn, config: "Config", *, user_id: str, ids, to, cc,
-    subject: str | None, body: str | None,
+    subject: str | None, body: str | None, task_id: int | None = None,
 ) -> ThreadRoom | None:
     root_ids = thread_message_ids(ids)
     owner = config.users.get(user_id)
@@ -413,6 +476,9 @@ def _register_sent_thread(
         return None
     owned = {fold(a) for a in owner.email_addresses}
     if not any(address not in owned for address, _ in people):
+        if people:
+            _record_in_private_room(conn, user_id=user_id, task_id=task_id,
+                                    to=to, cc=cc, subject=subject, body=body)
         return None
     room = _mint(conn, config, owner_user_id=user_id, root=root_ids[0],
                  subject=subject, people=people)
@@ -561,11 +627,132 @@ def thread_addressed(config: "Config", email, facts: IntakeFacts) -> bool:
     return facts.named or not facts.host_on_message
 
 
+#: Routes whose held mail is admitted to a room when the user approves it.
+#: `thread_match` (a reply on a thread sent before rooms were minted at send)
+#: keeps its old path until it is deleted.
+_ADMITTED_ROUTES = ("plus_address", "sender_match", "thread_room")
+
+
+def admit_approved_mail(conn, config: "Config", task) -> str | None:
+    """Put a held mail the user just approved into its room, and point its
+    task at that room. Returns the room token, or None to leave the task as it
+    was held.
+
+    The untrusted-sender gate keeps a held mail out of every room; approving
+    is the admission (section 7). The user's own mail lands in their private
+    email room. Anyone else's lands in its thread's room: an existing one
+    records the sender as one of the thread's people, and a stranger's first
+    mail at the user's plus-address mints one, as an admitted mail would have
+    on receipt. The task then runs as that room's turn: its answer is a
+    reply-all through the outbound gate, or a reply to the user.
+
+    Rebuilt from the `processed_emails` row, which holds the headers the
+    decision needs. Runs in a savepoint; a failure rolls this back, logs, and
+    leaves the approval standing.
+    """
+    if config is None or getattr(task, "source_type", None) != SURFACE:
+        return None
+    savepoint = f"admit_mail_{uuid.uuid4().hex[:12]}"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        token = _admit_approved_mail(conn, config, task)
+        conn.execute(f"RELEASE {savepoint}")
+        return token
+    except Exception as e:  # noqa: BLE001 — see the docstring
+        conn.execute(f"ROLLBACK TO {savepoint}")
+        conn.execute(f"RELEASE {savepoint}")
+        logger.warning("Could not admit approved mail of task %s to its room: %s",
+                       task.id, e)
+        return None
+
+
+def _admit_approved_mail(conn, config: "Config", task) -> str | None:
+    from ..ingest import record_inbound, record_phone_turn
+    from .private_room import email_conversation_token
+
+    row = conn.execute(
+        'SELECT sender_email, recipients, message_id, "references", subject, '
+        "routing_method FROM processed_emails WHERE task_id = ? ORDER BY id LIMIT 1",
+        (task.id,),
+    ).fetchone()
+    if row is None or row["routing_method"] not in _ADMITTED_ROUTES:
+        return None
+    try:
+        listed = json.loads(row["recipients"] or "[]")
+    except ValueError:
+        listed = []
+    email = SimpleNamespace(
+        sender=row["sender_email"], to=tuple(str(a) for a in listed if a), cc=(),
+        message_id=row["message_id"], references=row["references"], in_reply_to=None,
+        subject=row["subject"], body="",
+    )
+    user_id = task.user_id
+    if is_private_mail(config, email, user_id):
+        result = record_phone_turn(
+            conn, config, surface=SURFACE, surface_ref=email_conversation_token(user_id),
+            user_id=user_id, text=task.prompt, channel_name="Email", record_only=True,
+            sender_address=row["sender_email"],
+        )
+        if result.message_id is None:
+            return None
+        _point_task_at(conn, task, result.room_token, result.message_id,
+                       host_absent=False)
+        return result.room_token
+    existing = find_thread_room(conn, config, email)
+    if existing is not None and existing.host != user_id:
+        return None
+    sent = match_thread(conn, email) if existing is None else None
+    if sent is not None and sent.user_id != user_id:
+        sent = None
+    room = resolve_thread(
+        conn, config, email, owner_user_id=user_id, existing=existing,
+        ours=sent is not None, plus_address=row["routing_method"] == "plus_address",
+    )
+    if room is None:
+        return None
+    if existing is None and sent is not None:
+        # A thread sent before rooms were minted at send, as the poller's
+        # early mint does: the bot's mail first, with no body to show.
+        record_sent_mail(conn, room.token, to=[sent.to_addr], subject=sent.subject,
+                         body="")
+    author = author_ref(conn, config, room.token, row["sender_email"])
+    result = record_inbound(
+        conn, config, surface=SURFACE, surface_ref=room.ref,
+        user_id=author.user_id or room.host, text=task.prompt, source_type=SURFACE,
+        output_target=SURFACE, sender_address=row["sender_email"], author=author,
+        room_container=True, record_only=True, addressed_to_bot=True,
+    )
+    if result.message_id is None:
+        return None
+    # `reply_all` reads the thread's latest stored mail by room token.
+    conn.execute("UPDATE processed_emails SET thread_id = ? WHERE task_id = ?",
+                 (room.token, task.id))
+    _point_task_at(conn, task, room.token, result.message_id,
+                   host_absent=intake_facts(config, email, room.host).host_absent)
+    return room.token
+
+
+def _point_task_at(conn, task, room_token: str, message_id: int, *, host_absent: bool) -> None:
+    """The held task, as the turn the poller would have created in the room."""
+    multi = participants.is_multi_human(
+        conn, surface=SURFACE, room_token=room_token, is_group_chat=False,
+        room_container=True,
+    )
+    conn.execute("UPDATE messages SET task_id = ? WHERE id = ?", (task.id, message_id))
+    conn.execute(
+        "UPDATE tasks SET conversation_token = ?, output_target = ?, "
+        "talk_delivery_token = NULL, withheld_from_room = 0, host_absent = ?, "
+        "is_group_chat = ?, audience = ? WHERE id = ?",
+        (room_token, SURFACE, int(host_absent), int(multi),
+         room_policy.audience_class(conn, room_token, is_group_chat=multi), task.id),
+    )
+
+
 def thread_room_for_task(conn, task) -> str | None:
     """The thread room an email task belongs to, or None."""
     if getattr(task, "source_type", None) != SURFACE or not task.conversation_token:
         return None
-    if db.get_room_binding(conn, task.conversation_token, SURFACE) is None:
+    if thread_binding(conn, task.conversation_token) is None:
         return None
     return task.conversation_token
 
@@ -677,6 +864,7 @@ def reply_all(
 
 __all__ = [
     "IntakeFacts",
+    "admit_approved_mail",
     "MIN_HUMANS",
     "ReplyAll",
     "SURFACE",
@@ -690,6 +878,7 @@ __all__ = [
     "host_asked",
     "intake_facts",
     "is_present",
+    "is_private_mail",
     "new_text",
     "recipients_json",
     "record_sent_mail",
@@ -699,6 +888,7 @@ __all__ = [
     "speaking_user",
     "thread_message_ids",
     "thread_addressed",
+    "thread_binding",
     "thread_people",
     "thread_room_for_task",
     "thread_room_token",

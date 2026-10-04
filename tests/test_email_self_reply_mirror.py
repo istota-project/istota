@@ -30,6 +30,12 @@ The regression guard that matters is the *external* correspondent: their reply
 must keep mirroring, because the room copy is the only way the user learns it
 arrived. Driven through `poll_emails` → `process_one_task` rather than against
 the helpers, because both legs live in the wiring between them.
+
+Email on rooms (stage 3) gave this mail a room of its own: the user's private
+email room, minted on the first such mail, the way their SMS thread has one.
+So the user's own mail is still never copied into the origin room or the
+notification route; it is a turn in that private room instead, answered by a
+reply to them alone.
 """
 
 from unittest.mock import patch
@@ -41,6 +47,8 @@ from istota.config import Config, EmailConfig, UserConfig
 from istota.scheduler import process_one_task
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email.inbound import poll_emails
+
+from istota.transport.email import email_conversation_token
 
 from .support.rooms import promoted_room
 
@@ -139,6 +147,12 @@ def _poll_reply(config, *, sender, to=("bot@test.com",), body="My answer"):
         return db.get_task(conn, task_ids[0])
 
 
+def _private_room(db_path, user=USER):
+    """The user's private email room (email on rooms, stage 3), or None."""
+    with db.get_db(db_path) as conn:
+        return db.resolve_room_token(conn, "email", email_conversation_token(user))
+
+
 def _room_rows(db_path, role=None):
     with db.get_db(db_path) as conn:
         return [
@@ -163,9 +177,8 @@ class TestSelfAddressedThreadReply:
         task = _poll_reply(config, sender=USER_ADDR)
 
         assert task.output_target == "email"
-        # The origin is still *recovered* — the reply continues that
-        # conversation's context, it just is not delivered back into it.
-        assert task.conversation_token == ROOM
+        # A turn in the user's private email room, not the origin room.
+        assert task.conversation_token == _private_room(db_path)
 
     def test_the_question_is_not_mirrored_into_the_room(self, db_path, config):
         """Leg 2. Suppressing the delivery leg alone changes nothing: the task
@@ -207,15 +220,10 @@ class TestSelfAddressedThreadReply:
         assert task.output_target == "email"
         assert _room_rows(db_path) == []
 
-    def test_the_threads_talk_room_survives_the_suppression(self, db_path, config):
-        """A per-message decision must not have a per-thread side effect.
-
-        `talk_delivery_token` is the one thing that can name a Talk room the
-        registry never heard of (rung 0, ISSUE-057), and the bot's own reply
-        copies it onto the next `sent_emails` row. Clearing it on a self-reply
-        would lose the room for every later message in the thread — including an
-        external correspondent's, whose mirror this fix leaves alone. So the
-        legacy ladder still runs; only the plan changes."""
+    def test_a_legacy_talk_room_is_not_the_reply_s_room(self, db_path, config):
+        """The user's own reply is a turn in their private email room (stage
+        3), so the thread's legacy Talk room carries no part of it. A thread
+        with anyone else on it is a thread room, which routes on its own."""
         with db.get_db(db_path) as conn:
             _origin_room(conn)
             db.record_sent_email(
@@ -229,7 +237,8 @@ class TestSelfAddressedThreadReply:
         task = _poll_reply(config, sender=USER_ADDR)
 
         assert task.output_target == "email"
-        assert task.talk_delivery_token == "legacy_talk_room"
+        assert task.talk_delivery_token is None
+        assert task.conversation_token == _private_room(db_path)
 
     @patch("istota.scheduler.post_result_to_email", return_value=True)
     @patch("istota.scheduler.run_coro", return_value=True)
@@ -377,8 +386,9 @@ class TestSelfAddressedFirstContact:
 
         task = self._poll_first_contact(config, sender=USER_ADDR)
 
-        assert task.output_target is None
-        # And the token stays a thread hash — it never was the room.
+        # A reply by mail, as a turn in the user's private email room.
+        assert task.output_target == "email"
+        assert task.conversation_token == _private_room(db_path)
         assert task.conversation_token != ROOM
 
     def test_the_question_is_not_mirrored(self, db_path, config):
@@ -425,7 +435,8 @@ class TestSelfAddressedFirstContact:
             config, sender=USER_ADDR, to=("bot@test.com",),
         )
 
-        assert task.output_target is None
+        assert task.output_target == "email"
+        assert task.conversation_token == _private_room(db_path)
         assert _room_rows(db_path) == []
 
     def test_a_stranger_at_the_same_address_keeps_the_room(self, db_path, config):
@@ -540,8 +551,10 @@ class TestEveryoneElseKeepsTheMirror:
 
         assert task.user_id == "alice"
         # The origin belonged to carol, so it is dropped outright — the reply
-        # never reaches carol's room by any leg.
-        assert task.output_target is None
+        # never reaches carol's room by any leg. Alice wrote to the bot alone,
+        # so it is a turn in her own private email room.
+        assert task.conversation_token == _private_room(db_path, "alice")
+        assert _private_room(db_path) is None
         assert _room_rows(db_path) == []
 
 
@@ -676,11 +689,13 @@ class TestApprovalDoesNotRestoreIt:
 
         assert _room_rows(db_path) == []
 
-    def test_approving_an_external_reply_still_restores_its_question(
+    def test_approving_an_external_reply_admits_it_to_its_thread_room(
         self, db_path, config,
     ):
-        """The restore's own regression guard. A gated *external* sender's turn
-        is withheld until answered and published on approval, unchanged."""
+        """The restore's own regression guard, moved by stage 3. A gated
+        *external* sender's turn is withheld until answered; approving a mail
+        at the plus-address admits it to its thread's room, minted here, and
+        nothing reaches the origin room."""
         from istota import confirmations
 
         config.email.confirm_sender_match = "gate"
@@ -696,5 +711,10 @@ class TestApprovalDoesNotRestoreIt:
 
         with db.get_db(db_path) as conn:
             confirmations.approve(conn, task, config=config)
+            thread = db.resolve_room_token(conn, "email", ORIGIN_MESSAGE_ID)
+            roles = [m.role for m in db.get_messages(conn, thread)]
 
-        assert [r for r, _ in _room_rows(db_path)] == ["user"]
+        assert _room_rows(db_path) == []
+        # The bot's sent mail first (a pre-change thread's has no body), then
+        # the approved question.
+        assert roles == ["assistant", "user"]
