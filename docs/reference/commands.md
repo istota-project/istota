@@ -73,6 +73,8 @@ It is room-scoped — it targets your most recent `running`/`locked` task in the
 
 `!retry` re-runs the most recent `failed` or `cancelled` task in the room from scratch; `!resume` re-runs it with the failed attempt's captured execution trace (tool calls and intermediate text) prepended, framed as "continue from where you left off". Both accept an explicit `!retry #1234` / `!resume #1234`. Own tasks only, unless you are an admin.
 
+On a failed scheduled job or briefing, `!retry #1234` runs the job again from its current definition rather than copying the failed task, so a job fixed since it failed runs the fixed version. It is refused while another run of that job is queued or running, and within five minutes of the last one; `!resume` on such a task runs it from the start. A bare `!retry` only looks at the room's interactive tasks. In web chat, a failed turn has Retry and Continue buttons that do the same as `!retry` and `!resume`, and a job that fails for good puts a Run now button in the notification bell.
+
 Each creates a **new** task rather than re-queueing the old row, so the failed attempt stays intact in history and out of the automatic backoff. Delivery fields (`output_target`, model, effort, skill) are copied; attachments are not. A task that is still running is rejected (`!stop` it first), as is one that already completed. `!resume` degrades to `!retry` with a note when no usable trace was captured.
 
 ## Usage and plan limits

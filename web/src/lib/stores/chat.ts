@@ -15,6 +15,7 @@ import {
   cancelChatTask,
   chatStreamUrl,
   confirmChatTask,
+  retryChatTask,
   createChatRoom,
   deleteChatMessage,
   deleteChatRoom,
@@ -92,6 +93,7 @@ import {
   applyEvent as applySegmentEvent,
   isStranded,
   isQueued,
+  isRetryableTurn,
   isClientOnly,
   answerGate,
   type ChatMessage,
@@ -383,6 +385,10 @@ export interface ChatSession {
   editQueued: (cid: number) => void;
   releaseQueued: (cid: number) => Promise<void>;
   cancel: () => Promise<void>;
+  // Re-run a failed or cancelled turn's task (ISSUE-631). The new turn arrives
+  // over the room stream, as a typed `!retry` does; the failed turn stays and is
+  // marked with what replaced it. A refusal is reported, the turn untouched.
+  retryTask: (cid: number, mode: 'retry' | 'resume') => Promise<void>;
   confirm: (cid: number, taskId: number) => Promise<void>;
   reject: (cid: number, taskId: number) => Promise<void>;
   // Outbound mail the approval gate is holding. User-scoped rather than
@@ -5125,6 +5131,28 @@ function createSession(): ChatSession {
     }
   }
 
+  async function retryTask(cid: number, mode: 'retry' | 'resume') {
+    const m = get(messages).find((x) => x.cid === cid);
+    if (!m || !isRetryableTurn(m) || m.retriedAs !== undefined) return;
+    const taskId = m.taskId!;
+    let res;
+    try {
+      res = await retryChatTask(taskId, mode);
+    } catch (e) {
+      if (e instanceof AuthError) throw e;
+      notifyError(e instanceof Error ? e.message : 'Could not retry this task.', {
+        key: `chat:retry:${taskId}`,
+      });
+      return;
+    }
+    updateMsg(cid, (x) => {
+      x.retriedAs = res.task_id;
+    });
+    // A scheduled job or briefing answers somewhere else, so nothing will
+    // stream into this room to say it started.
+    if (res.run_now) notifySuccess(res.message, { key: `chat:retry:${taskId}` });
+  }
+
   async function confirm(cid: number, taskId: number) {
     await confirmChatTask(taskId);
     updateMsg(cid, (m) => {
@@ -5245,6 +5273,7 @@ function createSession(): ChatSession {
     sendReturned,
     send,
     retrySend,
+    retryTask,
     removeQueued,
     editQueued,
     releaseQueued,
