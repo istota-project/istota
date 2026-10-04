@@ -44,8 +44,8 @@ USER = "carol"
 USER_ADDR = "carol@test.com"
 EXTERNAL_ADDR = "ext@x.com"
 ORIGIN_MESSAGE_ID = "<origin_out@bot.com>"
-# A synthetic email-thread token: 16 hex chars, the shape `compute_thread_id`
-# produces for a thread that names no room. Spelled from a deliberately small
+# An email-thread token from before email had rooms: 16 hex chars, naming
+# no room. Spelled from a deliberately small
 # alphabet — a random-looking hex blob of this length reads as a credential to
 # the pre-commit secret scan, and the neighbouring ISSUE-254 tests use the same
 # stand-in for the same reason.

@@ -7392,14 +7392,12 @@ def _confirmation_notice_token(task_info: dict, conn=None) -> str | None:
     """The Talk room an expiry notice may fall back to, or None.
 
     The old code passed ``conversation_token`` verbatim, which for an email gate
-    is the synthetic `compute_thread_id` hash — not a room token at all, so the
-    notice posted into nothing and the user was never told their mail had been
-    dropped (ISSUE-241). Same shape as `_talk_target_for_delivery`: a synthetic
-    thread id or a stream-surface token is not a Talk channel. Returning None
-    lets the routing ladder (alerts_channel → briefing → DM) resolve one.
+    was a thread hash — not a room token at all, so the notice posted into
+    nothing and the user was never told their mail had been dropped
+    (ISSUE-241). An email task's token is a room or nothing, and a
+    stream-surface token is not a Talk channel either. Returning None lets the
+    routing ladder (alerts_channel → briefing → DM) resolve one.
     """
-    from istota.mail.support import is_synthetic_email_thread_token
-
     token = task_info.get("conversation_token")
     if not token:
         return None
@@ -7409,7 +7407,8 @@ def _confirmation_notice_token(task_info: dict, conn=None) -> str | None:
             return binding.surface_ref
     if db.is_canonical_room_token(token) or token.startswith(("web-", "repl-")):
         return None
-    if is_synthetic_email_thread_token(token):
+    if task_info.get("source_type") == "email":
+        # Not a room, so a thread hash from before email on rooms.
         return None
     return token
 

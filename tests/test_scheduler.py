@@ -471,11 +471,8 @@ class TestRoomTurnBelongsHere:
 class TestTalkTargetForDelivery:
     """_talk_target_for_delivery resolves the Talk room for a task's notifications.
 
-    Email-source tasks may carry a synthetic 16-char hex thread hash in
-    `conversation_token` (set by the email inbound for plus_address / sender_match
-    routing). Posting to that token silently no-ops because it isn't a real
-    Talk room. The helper falls back to the user's resolved alerts/DM channel
-    in that case while leaving real tokens (talk-originated chains) intact.
+    An email task's `conversation_token` is a room or nothing, so past the
+    room's own Talk binding it has no Talk channel.
     """
 
     def _config(self, tmp_path, alerts_channel="alerts1"):
@@ -503,73 +500,22 @@ class TestTalkTargetForDelivery:
         task = self._task(source_type="talk", conversation_token="real_room")
         assert _talk_target_for_delivery(config, task) == "real_room"
 
-    def test_email_source_synthetic_token_falls_back_to_alerts(self, tmp_path):
+    def test_email_source_non_room_token_returns_none(self, tmp_path):
+        """A thread hash from before email on rooms is not a Talk room, and
+        nothing reroutes it to the alerts ladder any more."""
         config = self._config(tmp_path, alerts_channel="alerts1")
-        # 16 hex chars matches compute_thread_id() output shape
-        synthetic = "a1b2c3d4e5f60718"
-        task = self._task(source_type="email", conversation_token=synthetic)
-        assert _talk_target_for_delivery(config, task) == "alerts1"
-
-    def test_email_source_real_token_passes_through(self, tmp_path):
-        config = self._config(tmp_path, alerts_channel="alerts1")
-        # An 8-char alphanumeric Talk token does not match the synthetic shape
-        task = self._task(source_type="email", conversation_token="r0om4Bcd")
-        assert _talk_target_for_delivery(config, task) == "r0om4Bcd"
-
-    def test_email_source_uppercase_hex_passes_through(self, tmp_path):
-        # Real Talk tokens may include uppercase chars; pure-lowercase-hex is
-        # the synthetic signature. An uppercase-letter 16-char token isn't
-        # treated as synthetic.
-        config = self._config(tmp_path, alerts_channel="alerts1")
-        task = self._task(source_type="email", conversation_token="A1B2C3D4E5F60718")
-        assert _talk_target_for_delivery(config, task) == "A1B2C3D4E5F60718"
+        task = self._task(source_type="email", conversation_token="a1b2c3d4e5f60718")
+        assert _talk_target_for_delivery(config, task) is None
 
     def test_email_source_no_token_returns_none(self, tmp_path):
         config = self._config(tmp_path)
         task = self._task(source_type="email", conversation_token=None)
         assert _talk_target_for_delivery(config, task) is None
 
-    def test_email_source_synthetic_token_no_user_config(self, tmp_path):
-        # No alerts_channel and no other resolvable channel — preserve the
-        # synthetic token rather than returning None, keeping pre-fix behavior
-        # (silent no-op at delivery time) instead of regressing to a different
-        # failure mode.
-        config = Config(
-            db_path=tmp_path / "ignore.db",
-            nextcloud=NextcloudConfig(),
-            talk=TalkConfig(),
-            email=EmailConfig(),
-            scheduler=SchedulerConfig(),
-            temp_dir=tmp_path / "temp",
-        )
-        synthetic = "a1b2c3d4e5f60718"
-        task = self._task(source_type="email", conversation_token=synthetic)
-        assert _talk_target_for_delivery(config, task) == synthetic
-
     def test_briefing_source_passes_through(self, tmp_path):
         config = self._config(tmp_path)
         task = self._task(source_type="briefing", conversation_token="briefing_room")
         assert _talk_target_for_delivery(config, task) == "briefing_room"
-
-    def test_email_synthetic_falls_back_via_briefing_token(self, tmp_path):
-        # alerts_channel empty → resolve_conversation_token falls back to first
-        # briefing's token
-        config = Config(
-            db_path=tmp_path / "ignore.db",
-            nextcloud=NextcloudConfig(),
-            talk=TalkConfig(),
-            email=EmailConfig(),
-            scheduler=SchedulerConfig(),
-            temp_dir=tmp_path / "temp",
-            users={"alice": UserConfig(
-                alerts_channel="",
-                briefings=[BriefingConfig(name="morning", cron="0 8 * * *",
-                                          conversation_token="briefroom")],
-            )},
-        )
-        synthetic = "deadbeef12345678"
-        task = self._task(source_type="email", conversation_token=synthetic)
-        assert _talk_target_for_delivery(config, task) == "briefroom"
 
     # `talk_delivery_token` is still rung 0 and still absolute while anything
     # writes it. These three are the originals, kept verbatim: they are the only
@@ -3756,7 +3702,6 @@ class TestProcessHeartbeatTask:
         )
 
 
-
 # ---------------------------------------------------------------------------
 # TestStripActionPrefix
 # ---------------------------------------------------------------------------
@@ -5513,7 +5458,6 @@ class TestExecuteSkillTask:
         env = captured["env"]
         assert "CALDAV_URL" not in env
         assert "CALDAV_PASSWORD" not in env
-
 
     def test_a_nonzero_exit_keeps_the_stdout_envelope(self, db_path, tmp_path):
         """ISSUE-383: the diagnosis is on stdout, and only stdout has it.

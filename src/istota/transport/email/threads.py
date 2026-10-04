@@ -12,8 +12,7 @@ a task on a thread hash, mirrored into a room only by the existing routing.
   through the room's stored mail (`processed_emails`, and the bot's own
   replies in `sent_emails`), so a client that keeps only In-Reply-To or trims
   References from the front still lands in it rather than founding a second
-  room for the same thread. `compute_thread_id` cannot be the key: it hashes the subject and
-  the sender, so every correspondent's reply on one thread hashes differently.
+  room for the same thread.
 - **Minting** happens only on evidence that the thread is the host's: their
   own address is on it, it threads onto a mail the bot sent for them, or it
   reached the bot at their plus-address. A thread the bot starts is minted at

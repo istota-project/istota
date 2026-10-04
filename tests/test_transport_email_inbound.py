@@ -14,7 +14,6 @@ from istota.config import Config, EmailConfig as AppEmailConfig, UserConfig
 from istota.mail.ownership import thread_reply_from_correspondent
 from istota.mail.support import (
     cleanup_old_emails,
-    compute_thread_id,
     get_email_config,
     normalize_subject,
 )
@@ -266,29 +265,6 @@ def _scheduler_config(db_path, tmp_path, users=None):
 ])
 def test_normalize_subject(subject, expected):
     assert normalize_subject(subject) == expected
-
-
-# =============================================================================
-# TestComputeThreadId
-# =============================================================================
-
-
-class TestComputeThreadId:
-    @pytest.mark.parametrize("a, b", [
-        (("Hello", ["a@test.com", "b@test.com"]), ("Hello", ["a@test.com", "b@test.com"])),
-        (("Hello", ["b@test.com", "a@test.com"]), ("Hello", ["a@test.com", "b@test.com"])),
-        (("Re: Hello", ["a@test.com"]), ("Hello", ["a@test.com"])),
-    ], ids=["deterministic", "sorted_participants", "normalized_subject"])
-    def test_same_thread(self, a, b):
-        assert compute_thread_id(*a) == compute_thread_id(*b)
-
-    def test_length_16(self):
-        assert len(compute_thread_id("Hello", ["a@test.com"])) == 16
-
-    def test_different_subjects_different_ids(self):
-        id1 = compute_thread_id("Hello", ["a@test.com"])
-        id2 = compute_thread_id("Goodbye", ["a@test.com"])
-        assert id1 != id2
 
 
 # =============================================================================

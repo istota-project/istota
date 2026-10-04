@@ -1,6 +1,6 @@
 """ISSUE-247 — an email task's thread token is not a room identifier.
 
-`tasks.conversation_token` on an email task is `compute_thread_id(...)`, a hash
+`tasks.conversation_token` on an email task was a subject-and-sender hash
 whose job is grouping `References`. Three room-facing writers read it as a room:
 the assistant-turn store, the Talk mirror, and `record_inbound`'s `mirror_only`
 gate. Each correctly found no room and fell back to a different workaround, and
@@ -43,8 +43,8 @@ from istota.transport.routing import transcript_room_for_task
 
 from .support.rooms import plain_talk_room, promoted_room
 
-# A first-contact thread hash: the 16-lowercase-hex shape `compute_thread_id`
-# produces, naming no room anywhere. Deliberately repetitive rather than a
+# A first-contact thread hash, in the 16-lowercase-hex shape email tasks
+# carried before they had rooms, naming no room anywhere. Deliberately repetitive rather than a
 # realistic-looking digest — the secret scanner reads a high-entropy hex run of
 # this length as a credential.
 THREAD_TOKEN = "deadbeefdeadbeef"

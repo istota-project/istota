@@ -116,11 +116,6 @@ class TestOriginDescriptor:
                      talk_delivery_token="RealRoomXYZ")
         assert origin_descriptor(task) == "talk:RealRoomXYZ"
 
-    def test_talk_with_synthetic_token(self):
-        # 16-char lowercase hex = synthetic email-thread token, not a real room.
-        task = _task(source_type="talk", conversation_token="0123456789abcdef")
-        assert origin_descriptor(task) == "talk"
-
     def test_talk_without_token(self):
         task = _task(source_type="talk", conversation_token=None)
         assert origin_descriptor(task) == "talk"
@@ -138,17 +133,6 @@ class TestOriginDescriptor:
         # that is an email-only thread, not a recoverable origin surface.
         task = _task(source_type="email", conversation_token="0123456789abcdef")
         assert origin_descriptor(task) is None
-
-    def test_email_web_continuation_recovers_web_origin(self):
-        # An email reply that is a continuation of a web-room origin carries the
-        # web token as conversation_token — recover it so the next round routes
-        # back to the room (issue: multi-round threads lost the origin).
-        task = _task(source_type="email", conversation_token="web-alice-abc123")
-        assert origin_descriptor(task) == "web:web-alice-abc123"
-
-    def test_email_talk_continuation_recovers_talk_origin(self):
-        task = _task(source_type="email", conversation_token="kvcnr723")
-        assert origin_descriptor(task) == "talk:kvcnr723"
 
     def test_email_repl_continuation_is_none(self):
         # A REPL terminal is gone by reply time — not a pushable origin.
@@ -284,15 +268,6 @@ class TestResolveDeliveryPlanParity:
                      output_target="ntfy")
         plan = resolve_delivery_plan(config, task, None)
         assert plan == [Destination("ntfy", None, "push")]
-
-    def test_email_synthetic_token_talk_fallback(self, tmp_path):
-        # Email task explicitly routed to talk with a synthetic conversation
-        # token resolves through the synthetic-token fallback to alerts.
-        config = _config(tmp_path, alerts_channel="alerts")
-        task = _task(source_type="email", conversation_token="a1b2c3d4e5f60718",
-                     output_target="talk")
-        plan = resolve_delivery_plan(config, task, None)
-        assert plan == [Destination("talk", "alerts", "push")]
 
 
 class TestResolveDeliveryPlanEdgeCases:

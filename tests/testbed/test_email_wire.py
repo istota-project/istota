@@ -31,7 +31,7 @@ import pytest
 
 from istota import confirmations, db
 from istota.config import UserConfig
-from istota.mail.support import compute_thread_id, normalize_subject
+from istota.mail.support import normalize_subject
 from istota.skills.email import (
     EmailConfig,
     _get_mailbox,
@@ -335,19 +335,18 @@ class TestThreadingOnTheWire:
         assert row["message_id"] == message_id
         assert row["references"] == "<first@x.test> <earlier@x.test>"
 
-    def test_an_rfc_2047_subject_threads_by_its_decoded_text(self, wire):
-        """The subject arrives encoded and the thread id is computed from the
-        text, not from the encoded-word — so a reply written in one client and
-        answered in another lands on one thread."""
+    def test_an_rfc_2047_subject_is_decoded(self, wire):
+        """The subject arrives encoded and is stored as its text, not as the
+        encoded-word. The user's own mail is a turn in their private email
+        room, whose token is the ledger's thread id."""
         subject = "Re: café plány"
         wire.send(from_addr=USER_ADDRESS, to_addr=USER_TAG_ADDRESS, subject=subject)
 
         wire.poll()
 
         row = _row_for(wire.processed(), subject)
-        assert row["thread_id"] == compute_thread_id(
-            subject, [USER_ADDRESS, mail.BOT_ADDRESS]
-        )
+        assert row["subject"] == subject
+        assert row["thread_id"]
         assert normalize_subject(subject) == "café plány"
 
     def test_a_three_hop_thread_keeps_one_thread_id(self, wire):

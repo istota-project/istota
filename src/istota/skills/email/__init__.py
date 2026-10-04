@@ -1880,7 +1880,7 @@ def _thread_members(root: Email, candidates: list[Email]) -> list[Email]:
 
     Membership is purely by Message-ID / References linkage (a real thread
     walk) — never by subject+participants, so two unrelated same-subject
-    threads are not merged the way ``compute_thread_id`` would.
+    threads are not merged.
 
     Chains are tokenized by ``parse_message_ids`` (the msg-id grammar), not by
     whitespace: a decoded encoded-word chain can glue two ids together, and a

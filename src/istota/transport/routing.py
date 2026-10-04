@@ -207,11 +207,8 @@ def _room_descriptor(conn, surface: str, task: "db.Task") -> str | None:
     surface-qualified fallback still routes.
 
     Two candidate tokens, tried in order: the task's own ``conversation_token``,
-    then ``talk_delivery_token``. The second is there because a task whose
-    channel is a synthetic email-thread hash can still carry the real Talk room
-    separately, and stamping the surface form for it would leave exactly the
-    single-leg descriptor this stage exists to stop writing. (Stage 4 retires
-    that column; until then it is a real source of a room name.)
+    then ``talk_delivery_token``, which can carry a Talk room the task's own
+    token does not name.
 
     Each candidate is resolved to a canonical token by
     ``_canonical_room_token``, because a raw ref is not a room id — comparing
@@ -223,15 +220,14 @@ def _room_descriptor(conn, surface: str, task: "db.Task") -> str | None:
     """
     if conn is None or surface == "repl":
         return None
-    from istota.mail.support import is_synthetic_email_thread_token
 
     candidates = [task.conversation_token, task.talk_delivery_token]
     try:
         from .. import db
 
         for token in candidates:
-            if not token or is_synthetic_email_thread_token(token):
-                continue  # an email thread hash names no room
+            if not token:
+                continue
             # Cross-surface: an email continuation's token belongs to whichever
             # surface the originating send recorded, and its own surface owns no
             # bindings. A wrong answer here is a wrong *descriptor*, which live
@@ -317,14 +313,11 @@ def origin_descriptor(task: "db.Task", conn=None) -> str | None:
     ``talk,email`` branch at the reply site. Never raises — an unexpected
     ``source_type`` resolves to the ``talk`` surface like any other.
 
-    An ``email``-source task is the subtle case: it may be a *continuation* of a
-    non-email origin (we are handling a reply to an email a web/Talk conversation
-    asked us to send), in which case ``conversation_token`` still holds the origin
-    room and we recover the origin from it so the *next* round routes back there
-    too. A genuine email-only thread carries a synthetic thread token → no origin.
-    ``repl`` is never a pushable origin (the terminal is gone by reply time).
+    An ``email``-source task is a turn in its thread's room or the user's
+    private email room, which the room descriptor names; anything else has no
+    origin to recover. ``repl`` is never a pushable origin (the terminal is gone
+    by reply time).
     """
-    from istota.mail.support import is_synthetic_email_thread_token
     from .registry import _surface_for_source_type
     from ..db import is_canonical_room_token
 
@@ -339,22 +332,11 @@ def origin_descriptor(task: "db.Task", conn=None) -> str | None:
         return f"web:{tok}" if tok else "web"
     if surface == "talk":
         tok = task.talk_delivery_token or task.conversation_token
-        # A synthetic email-thread token is not a real Talk room — don't echo it.
-        if tok and not is_synthetic_email_thread_token(tok):
+        if tok:
             return f"talk:{tok}"
         return "talk"  # bare talk → resolve_target / DM at delivery
     if surface == "email":
-        # Recover the origin of an email continuation from its conversation_token.
-        tok = task.conversation_token
-        if not tok or is_synthetic_email_thread_token(tok):
-            return None  # genuine email-only thread — no recoverable origin
-        if tok.startswith("web-"):
-            return f"web:{tok}"
-        if tok.startswith("repl-"):
-            return None  # a since-exited REPL terminal can't be pushed
-        # A non-synthetic, non-web/repl token on an email task is a real Talk
-        # room set by our own inbound continuation routing.
-        return f"talk:{tok}"
+        return None
     if surface == "sms":
         return "sms"
     if surface == "whatsapp":
@@ -731,21 +713,12 @@ def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
        web-sourced task.
     2. **A legacy surface token**, never a minted room identity. An
        unregistered Talk DM can still deliver by its native address.
-    3. **The user's resolved notification channel** (alerts → briefing → DM),
-       for an email task whose token is a synthetic thread hash naming no Talk
-       room at all. Posting to that hash silently no-ops.
-
-    No token and no room resolves to ``None`` rather than falling through to the
-    alerts ladder: a task with nothing to deliver to is not the same as an email
-    whose thread hash needs redirecting, and conflating them would reroute every
-    channel-less task into the user's alerts room.
-
-    A synthetic token that resolves to nothing is returned **as-is** rather than
-    as ``None``, preserving the pre-existing silent no-op at delivery instead of
-    trading it for a different failure mode.
+    An email task's token is a room or nothing, so past the room's own Talk
+    binding it has no Talk channel: ``None``. No token and no room resolves to
+    ``None`` rather than falling through to the alerts ladder, which would
+    reroute every channel-less task into the user's alerts room.
     """
     from ..db import is_canonical_room_token
-    from istota.mail.support import is_synthetic_email_thread_token
 
     if task.talk_delivery_token:
         return task.talk_delivery_token
@@ -753,14 +726,9 @@ def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
     if room_talk:
         return room_talk
     token = task.conversation_token
-    if is_canonical_room_token(token):
+    if is_canonical_room_token(token) or task.source_type == "email":
         return None
-    if not token or task.source_type != "email":
-        return token
-    if not is_synthetic_email_thread_token(token):
-        return token
-    from istota.notifications.delivery import resolve_conversation_token
-    return resolve_conversation_token(config, task.user_id) or token
+    return token
 
 
 def transcript_room(
