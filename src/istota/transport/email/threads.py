@@ -17,9 +17,10 @@ the existing routing.
   own address is on it, or it threads onto a mail the bot sent for them. A
   thread the bot starts is minted at the send (`register_sent_thread`), with
   the sent mail as its first row, so the first reply finds it like any other.
-  A reply on a thread sent before that existed mints at the reply. A
-  stranger copying people on a mail to ``bot+<user>@`` mints nothing, which
-  keeps "existence, never creation" for unsolicited mail. A mail held by the
+  A reply with two or more people on it, on a thread sent before that
+  existed, mints at the reply. A stranger copying people on a mail to
+  ``bot+<user>@`` mints nothing on receipt, which keeps "existence, never
+  creation" for unsolicited mail; answering it mints at that send. A mail held by the
   untrusted-sender gate mints nothing either. Rooms are otherwise
   user-created; this is the second system-minted kind after WhatsApp groups,
   and for the same reason: the container already exists on the surface, and
@@ -350,16 +351,48 @@ def register_sent_thread(
         return None
 
 
+def _bound_room(conn, ids: list[str]) -> ThreadRoom | None:
+    """The room bound to one of ``ids``, through the binding alone.
+
+    Not `find_thread_room`: its stored-mail arm reads `sent_emails`, whose row
+    for this very send names the sending task's room, so a new mail from a
+    task in a thread room would fold into that thread.
+    """
+    for mid in ids:
+        token = db.resolve_room_token(conn, SURFACE, mid)
+        token = db._canonical_room_token(conn, token, cross_surface=False) if token else None
+        binding = db.get_room_binding(conn, token, SURFACE) if token else None
+        if binding is not None and db.get_room(conn, token) is not None:
+            return ThreadRoom(token=token, ref=binding.surface_ref,
+                              host=find_host(conn, token))
+    return None
+
+
+def _stored_for_someone_else(conn, ids: list[str], user_id: str) -> bool:
+    """Whether any of ``ids`` is a mail stored for another user."""
+    marks = ",".join("?" * len(ids))
+    for table in ("processed_emails", "sent_emails"):
+        row = conn.execute(
+            f"SELECT 1 FROM {table} WHERE message_id IN ({marks}) "
+            "AND user_id IS NOT NULL AND user_id != ? LIMIT 1",
+            (*ids, user_id),
+        ).fetchone()
+        if row is not None:
+            return True
+    return False
+
+
 def _register_sent_thread(
     conn, config: "Config", *, user_id: str, ids, to, cc,
     subject: str | None, body: str | None,
 ) -> ThreadRoom | None:
     root_ids = thread_message_ids(ids)
-    if not root_ids:
+    owner = config.users.get(user_id)
+    if not root_ids or owner is None:
         return None
     people = [(address, name) for address, name in _addresses([*to, *cc])
               if not is_bot_address(config, address)]
-    existing = find_thread_room(conn, config, ids)
+    existing = _bound_room(conn, root_ids)
     if existing is not None:
         if existing.host != user_id:
             logger.warning("Sent mail for %s threads onto a room they do not host; "
@@ -367,8 +400,13 @@ def _register_sent_thread(
             return None
         _sync(conn, config, existing.token, people, acknowledged=False)
         return existing
-    owner = config.users.get(user_id)
-    owned = {fold(a) for a in (owner.email_addresses if owner else [])}
+    if _stored_for_someone_else(conn, root_ids, user_id):
+        # The ids can come from a deferred file the task wrote: a thread
+        # another user's mail is on is never bound under this one.
+        logger.warning("Sent mail for %s names another user's thread; no room minted",
+                       user_id)
+        return None
+    owned = {fold(a) for a in owner.email_addresses}
     if not any(address not in owned for address, _ in people):
         return None
     room = _mint(conn, config, owner_user_id=user_id, root=root_ids[0],

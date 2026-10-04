@@ -205,6 +205,17 @@ class TestAThreadSentBeforeTheChange:
         assert "Notify the user" not in reply.prompt
         assert "<email_content>" in reply.prompt
 
+    def test_a_lone_correspondents_reply_still_mints_nothing(self, config):
+        """The received-thread rule is unchanged: two people besides the bot."""
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(conn, user_id=HOST, message_id=SENT,
+                                 to_addr=ANA, subject="Saturday")
+
+        _poll(config, sender=ANA, to=(BOT,), message_id="<a1@ext.example>",
+              references=SENT)
+
+        assert _rows(config, "SELECT token FROM rooms") == []
+
     def test_a_held_reply_still_mints_nothing(self, config):
         config.users[HOST].trusted_email_senders = []
         with db.get_db(config.db_path) as conn:
@@ -269,6 +280,45 @@ class TestRegisteringIsBounded:
                 references=SENT, to=["eve@ext.example"])
         assert theirs is not None and mine is None
         assert set(_people(config, theirs.token)) == {ANA}
+
+    def test_a_deferred_entry_cannot_bind_another_users_thread(self, config, task, deferred):
+        """The deferred file is the task's to write. Naming another user's
+        roomless thread in it must not bind that thread under this user, or
+        mail on it would route here ahead of the plus address."""
+        config.users["bob"] = UserConfig(email_addresses=["bob@test.com"],
+                                         trusted_email_senders=["*@ext.example"])
+        _poll(config, sender=ANA, to=("bot+bob@test.com",), message_id="<x@ext.example>")
+        (deferred / f"task_{task.id}_sent_emails.json").write_text(json.dumps([{
+            "message_id": "<forged@test.com>", "to_addr": ANA, "to": [ANA],
+            "references": "<x@ext.example>",
+        }]))
+        _process_deferred_sent_emails(config, task, deferred)
+
+        assert _room(config, "<x@ext.example>") is None
+        ids = _poll(config, sender=ANA, to=("bot+bob@test.com",),
+                    message_id="<x2@ext.example>", references="<x@ext.example>")
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, ids[0]).user_id == "bob"
+
+    def test_a_new_mail_from_a_thread_rooms_task_gets_its_own_room(self, config):
+        """The `sent_emails` row of a send names the sending task's room, so a
+        lookup through stored mail would fold a new mail into that thread."""
+        with db.get_db(config.db_path) as conn:
+            first = threads.register_sent_thread(
+                conn, config, user_id=HOST, message_id="<r@test.com>", to=[ANA])
+            db.record_sent_email(conn, user_id=HOST, message_id="<new@test.com>",
+                                 to_addr="zed@ext.example", conversation_token=first.token)
+            second = threads.register_sent_thread(
+                conn, config, user_id=HOST, message_id="<new@test.com>",
+                to=["zed@ext.example"])
+        assert second is not None and second.token != first.token
+        assert set(_people(config, first.token)) == {ANA}
+
+    def test_a_user_the_config_does_not_know_mints_nothing(self, config):
+        with db.get_db(config.db_path) as conn:
+            assert threads.register_sent_thread(
+                conn, config, user_id="nobody", message_id=SENT, to=[ANA]) is None
+        assert _rows(config, "SELECT token FROM rooms") == []
 
     def test_a_failure_leaves_the_send_recorded_and_no_half_room(self, config, caplog):
         with db.get_db(config.db_path) as conn:

@@ -2400,6 +2400,7 @@ def poll_emails(config: Config) -> list[int]:
                             existing=None, ours=sent_email_match is not None,
                         )
                         if thread_room is not None and sent_email_match is not None:
+                            # `to_addr` joins To and Cc, so the card lists both as To.
                             email_threads.record_sent_mail(
                                 conn, thread_room.token, to=[sent_email_match.to_addr],
                                 subject=sent_email_match.subject, body="",
