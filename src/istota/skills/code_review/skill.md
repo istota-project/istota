@@ -27,7 +27,7 @@ Never pass the diff, the file contents, or any prompt text. The command assemble
 
 ## When to run one
 
-Whenever you are asked to, over whatever range is named. Where the user's own workflow says when a review happens — before a push, at the close of a stage, above some size — follow that. Where nothing says, a review is not implied by the work being finished. When the review covers part of a larger piece of work, review the range the workflow names: a stage's own commits if it reviews stage by stage, or the whole branch if it reviews once at the end. Where it names no range, a staged piece of work is reviewed once, over the whole branch, rather than stage by stage.
+Whenever you are asked to, over whatever range is named. Where the user's own workflow says when a review happens — before a push, at the close of a stage, above some size — follow that. Where nothing says, a review is not implied by the work being finished. When the review covers part of a larger piece of work, review the range the workflow names: a stage's own commits if it reviews stage by stage, or the whole branch if it reviews once at the end. Where it names no range, a staged piece of work is reviewed stage by stage, each review over that stage's own commits, not everything since the work began.
 
 **Commit first, whatever the trigger.** The review resolves a commit range and reads it from git; uncommitted work appears nowhere in it, so a review run against a dirty worktree reviews an empty diff and comes back clean for the wrong reason. Everything you want reviewed has to be committed before the command runs, and fixes land as their own commits rather than amending one the review already read.
 
