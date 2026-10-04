@@ -303,6 +303,63 @@ def retire_user_personas(config: "Config", *, dry_run: bool = False) -> list[Ret
     return outcomes
 
 
+@dataclass(frozen=True)
+class PersonaCensus:
+    """What is left in the configured users' config folders. Counts only."""
+
+    #: Users whose folder still holds a ``PERSONA.md`` of any kind.
+    remaining: int = 0
+    #: ``PERSONA.md.retired*`` files across all configured users.
+    retired: int = 0
+    #: Users whose folder exists and could not be opened (a symlink, a file).
+    unreadable: int = 0
+
+
+def census_user_personas(config: "Config") -> PersonaCensus:
+    """Count per-user copies, retired copies and unopenable folders. Never raises.
+
+    The same walk ``_retire_one`` takes (configured users only, ``O_NOFOLLOW``
+    at every component), listing the pinned directory and opening no file, so
+    a FIFO planted there cannot block ``doctor`` on the start-up path. Names
+    no user: ``doctor`` renders this to every admin.
+    """
+    from istota.skills._loader import open_overlay_dir  # noqa: PLC0415 - import cycle
+
+    remaining = retired = unreadable = 0
+    if not config.has_workspace:
+        return PersonaCensus()
+    retired_prefix = persona.PERSONA_FILENAME + persona.RETIRED_SUFFIX
+    parts = (config.bot_dir_name, "config")
+    for user_id in sorted(config.users):
+        try:
+            if not is_scopable_user_id(user_id):
+                unreadable += 1
+                continue
+            user_root = config.workspace_root(user_id)
+            if user_root is None:
+                unreadable += 1
+                continue
+            dir_fd = open_overlay_dir(user_root, *parts)
+            if dir_fd is None:
+                reason, _definitive = storage._classify_dir_refusal(user_root, list(parts))
+                if reason != storage.OWNER_FILE_MISSING:
+                    unreadable += 1
+                continue
+            try:
+                names = os.listdir(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except Exception:  # noqa: BLE001 - a census never raises
+            unreadable += 1
+            continue
+        for name in names:
+            if name == persona.PERSONA_FILENAME:
+                remaining += 1
+            elif name.startswith(retired_prefix):
+                retired += 1
+    return PersonaCensus(remaining=remaining, retired=retired, unreadable=unreadable)
+
+
 def exit_code(outcomes: list[RetireOutcome]) -> int:
     actions = {o.action for o in outcomes}
     if actions & {ACTION_NO_WORKSPACE, ACTION_ROOT_UNAVAILABLE}:

@@ -6254,3 +6254,178 @@ class TestEmailAddressUniqueness:
         [result] = self._run(make_config(db_path=tmp_path / "absent.db"))
         assert result.status == SKIP
         assert not (tmp_path / "absent.db").exists()
+
+
+class TestOperatorPersona:
+    """`config.operator_persona`: the one persona, and what the sync left over.
+
+    Every result is counts only: the detail reaches every admin, so no user id
+    and no persona text may appear in it.
+    """
+
+    NAME = "config.operator_persona"
+    SHIPPED = "You are {BOT_NAME}.\n\nShipped character, current version.\n"
+    OLD_SHIPPED = "You are {BOT_NAME}.\n\nShipped character, an older version.\n"
+    EDITED = "You are {BOT_NAME}.\n\nSECRET-EDIT-MARKER character.\n"
+
+    @pytest.fixture(autouse=True)
+    def _digests(self, monkeypatch):
+        from istota.prompts import persona
+
+        monkeypatch.setattr(
+            persona,
+            "SHIPPED_PERSONA_DIGESTS",
+            frozenset({
+                persona.persona_digest(self.SHIPPED),
+                persona.persona_digest(self.OLD_SHIPPED),
+            }),
+        )
+
+    def _config(self, make_config, **overrides):
+        from istota.config import UserConfig
+
+        config = make_config(
+            users={uid: UserConfig() for uid in ("alice", "bob", "carol")}, **overrides
+        )
+        (config.skills_dir.parent / "persona.md").write_text(self.SHIPPED)
+        return config
+
+    @staticmethod
+    def _user_dir(config, user_id):
+        d = Path(config.workspace_path) / "Users" / user_id / config.bot_dir_name / "config"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _run(self, config):
+        [result] = run_checks(config, only=(self.NAME,), probe=False)
+        assert result.scope == DEPLOYMENT
+        return result
+
+    def test_registered_as_deployment(self):
+        assert self.NAME in {name for name, _ in CHECKS}
+        assert doctor.CHECK_SCOPES[self.NAME] == DEPLOYMENT
+
+    def test_skips_without_a_file_root(self, make_config):
+        config = self._config(make_config, workspace_path=None, nextcloud_mount_path=None)
+        assert not config.has_workspace
+        r = self._run(config)
+        assert r.status == SKIP
+        assert "shipped persona is in force" in r.detail
+
+    def test_warns_when_the_root_is_not_a_directory(self, make_config, tmp_path):
+        r = self._run(self._config(make_config, workspace_path=tmp_path / "offline"))
+        assert r.status == WARN
+        assert r.remedy
+        assert not (tmp_path / "offline").exists()
+
+    def test_ok_follows_the_shipped_version_with_a_retired_count(self, make_config):
+        config = self._config(make_config)
+        (Path(config.workspace_path) / "PERSONA.md").write_text(self.SHIPPED)
+        (self._user_dir(config, "alice") / "PERSONA.md.retired").write_text(self.EDITED)
+        (self._user_dir(config, "bob") / "PERSONA.md.retired-20261004T000000").write_text("x")
+        r = self._run(config)
+        assert r.status == OK
+        assert "follows the shipped persona" in r.detail
+        assert "2 retired" in r.detail
+        for uid in ("alice", "bob", "carol"):
+            assert uid not in r.detail
+
+    def test_edited_and_older_shipped_are_told_apart(self, make_config):
+        config = self._config(make_config)
+        operator = Path(config.workspace_path) / "PERSONA.md"
+        operator.write_text(self.EDITED)
+        r = self._run(config)
+        assert r.status == OK
+        assert "edited" in r.detail
+        assert "SECRET-EDIT-MARKER" not in r.detail
+        operator.write_text(self.OLD_SHIPPED)
+        assert "older shipped version" in self._run(config).detail
+
+    def test_an_empty_operator_file_is_the_shipped_persona(self, make_config):
+        config = self._config(make_config)
+        (Path(config.workspace_path) / "PERSONA.md").write_text("  \n")
+        r = self._run(config)
+        assert r.status == OK
+        assert "operator file empty; shipped persona in force" in r.detail
+
+    def test_warns_on_a_shipped_file_beside_an_edit(self, make_config):
+        config = self._config(make_config)
+        root = Path(config.workspace_path)
+        (root / "PERSONA.md").write_text(self.EDITED)
+        (root / "PERSONA.md.shipped").write_text(self.SHIPPED)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "shipped persona changed since your edit" in r.detail
+        assert "PERSONA.md.shipped" in r.remedy
+
+    def test_warns_on_remaining_per_user_copies_by_count(self, make_config):
+        config = self._config(make_config)
+        (Path(config.workspace_path) / "PERSONA.md").write_text(self.SHIPPED)
+        (self._user_dir(config, "alice") / "PERSONA.md").write_text(self.EDITED)
+        (self._user_dir(config, "carol") / "PERSONA.md").write_text(self.SHIPPED)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "2 user(s) still have" in r.detail
+        assert "istota init" in r.remedy
+        for uid in ("alice", "bob", "carol"):
+            assert uid not in r.detail
+            assert uid not in r.remedy
+        assert "SECRET-EDIT-MARKER" not in r.detail
+
+    def test_an_unconfigured_users_copy_is_not_counted(self, make_config):
+        config = self._config(make_config)
+        (Path(config.workspace_path) / "PERSONA.md").write_text(self.SHIPPED)
+        (self._user_dir(config, "mallory") / "PERSONA.md").write_text(self.EDITED)
+        assert self._run(config).status == OK
+
+    def test_warns_on_a_symlinked_operator_file(self, make_config, tmp_path):
+        config = self._config(make_config)
+        target = tmp_path / "elsewhere.md"
+        target.write_text(self.EDITED)
+        (Path(config.workspace_path) / "PERSONA.md").symlink_to(target)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "refused" in r.detail
+        assert "last good copy" in r.detail
+
+    def test_warns_on_an_over_cap_operator_file(self, make_config):
+        from istota.prompts import persona
+
+        config = self._config(make_config)
+        (Path(config.workspace_path) / "PERSONA.md").write_text(
+            "x" * (persona.PERSONA_MAX_BYTES + 1)
+        )
+        r = self._run(config)
+        assert r.status == WARN
+        assert "refused" in r.detail
+
+    def test_a_fifo_does_not_block_the_check(self, make_config):
+        config = self._config(make_config)
+        os.mkfifo(Path(config.workspace_path) / "PERSONA.md")
+        os.mkfifo(self._user_dir(config, "alice") / "PERSONA.md")
+        r = self._run(config)
+        assert r.status == WARN
+        assert "refused" in r.detail
+        assert "1 user(s) still have" in r.detail
+
+    def test_a_symlinked_user_config_folder_is_counted_not_followed(self, make_config, tmp_path):
+        config = self._config(make_config)
+        (Path(config.workspace_path) / "PERSONA.md").write_text(self.SHIPPED)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "PERSONA.md").write_text(self.EDITED)
+        bot_dir = Path(config.workspace_path) / "Users" / "bob" / config.bot_dir_name
+        bot_dir.mkdir(parents=True)
+        (bot_dir / "config").symlink_to(outside)
+        r = self._run(config)
+        assert r.status == OK
+        assert "1 user config folder(s) could not be opened" in r.detail
+
+    def test_nothing_is_written(self, make_config):
+        config = self._config(make_config)
+        root = Path(config.workspace_path)
+        (self._user_dir(config, "alice") / "PERSONA.md").write_text(self.EDITED)
+        before = sorted(str(p) for p in root.rglob("*"))
+        self._run(config)
+        assert sorted(str(p) for p in root.rglob("*")) == before
+        assert not (root / "PERSONA.md").exists()

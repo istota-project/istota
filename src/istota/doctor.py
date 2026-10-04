@@ -9352,6 +9352,111 @@ def check_email_address_uniqueness(config: "Config", probe: bool) -> CheckResult
     )
 
 
+def check_operator_persona(config: "Config", probe: bool) -> CheckResult:
+    """Which persona is in force, and whether anything about it needs a hand.
+
+    The operator's ``{root}/PERSONA.md`` is the one persona for every task,
+    synced from the shipped ``config/persona.md`` by the conffile rule
+    (``prompts.persona``). Nothing else says when that sync has left something
+    for a person: a ``PERSONA.md.shipped`` waiting to be merged, an operator
+    file the prompt path refuses (so an older copy is quietly in force), or
+    per-user copies ``istota init`` has not retired yet.
+
+    **Counts, never user ids or file contents**, on the vault check's reasoning:
+    the result reaches the boot log and the admin Health pane, read by every
+    admin. Never FAIL: a per-user folder is writable from its owner's sandbox,
+    so anything counted there is a state a task can produce on demand, and
+    nothing here stops a task from running. Reads only, through the hardened
+    leaf read and the retirement's own walk; no process, so ``probe`` is unused.
+    """
+    name = "config.operator_persona"
+    try:
+        from istota.maintenance import persona_retire  # noqa: PLC0415 - heavy import graph
+        from istota.prompts import persona  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001 - a check never raises
+        return CheckResult(name, SKIP, f"the persona module could not be loaded: {exc}")
+
+    path = persona.operator_persona_path(config)
+    if path is None:
+        return CheckResult(name, SKIP, "no file root; the shipped persona is in force")
+    root = path.parent
+    try:
+        root_ok = root.is_dir()
+    except OSError:
+        root_ok = False
+    if not root_ok:
+        return CheckResult(
+            name, WARN,
+            f"{root} is not a directory; the last good copy, or the shipped persona, is in force",
+            remedy=(
+                "Check the file root's mount (see `runtime.mount_liveness`). "
+                "The operator persona syncs again once it is reachable."
+            ),
+        )
+
+    warnings: list[tuple[str, str]] = []
+    try:
+        text, reason, present = persona.read_operator_file(path)
+    except Exception as exc:  # noqa: BLE001 - a check never raises
+        text, reason, present = None, type(exc).__name__, True
+    if reason is not None:
+        warnings.append((
+            f"{persona.PERSONA_FILENAME} refused ({reason}); the last good copy, "
+            "or the shipped persona, is in force",
+            f"Make {path} a plain UTF-8 file under "
+            f"{persona.PERSONA_MAX_BYTES // 1024} KiB, not a link or a pipe.",
+        ))
+        state = None
+    elif not present:
+        state = "no operator file yet; the next sync writes the shipped persona"
+    elif not text.strip():
+        state = "operator file empty; shipped persona in force"
+    elif persona.is_shipped(text):
+        state = "operator file follows the shipped persona"
+        try:
+            current = persona.persona_digest(
+                persona.shipped_persona_path(config).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            current = None
+        if current is not None and persona.persona_digest(text) != current:
+            state = "operator file is an older shipped version; the next sync upgrades it"
+    else:
+        state = "operator file is edited and kept"
+
+    beside = root / (persona.PERSONA_FILENAME + persona.SHIPPED_SUFFIX)
+    if os.path.lexists(beside):
+        warnings.append((
+            "the shipped persona changed since your edit",
+            f"Compare {beside.name} with {persona.PERSONA_FILENAME} in {root}, "
+            f"and delete {beside.name} when merged.",
+        ))
+
+    census = persona_retire.census_user_personas(config)
+    if census.remaining:
+        warnings.append((
+            f"{census.remaining} user(s) still have a {config.bot_dir_name}/config/"
+            f"{persona.PERSONA_FILENAME}, which nothing reads",
+            "Run `istota init`, which retires them.",
+        ))
+
+    extras = [f"{census.retired} retired per-user copy(ies)"]
+    if census.unreadable:
+        extras.append(f"{census.unreadable} user config folder(s) could not be opened")
+    tail = "; ".join(extras)
+
+    if warnings:
+        details = [d for d, _ in warnings]
+        if state is not None:
+            details.insert(0, state)
+        return CheckResult(
+            name, WARN,
+            "; ".join(details) + f"; {tail}",
+            remedy=" ".join(r for _, r in warnings),
+        )
+    return CheckResult(name, OK, f"{state}; {tail}")
+
+
 # The name is part of the registry rather than only of the result, so `only=`
 # can select *before* invoking. Filtering afterwards would mean running every
 # check to discard most of them — which is exactly what the config-load path
@@ -9410,6 +9515,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("web.basemap", check_basemap),
     ("web.avatar_import", check_avatar_import),
     ("config.skill_overlays", check_skill_overlays),
+    ("config.operator_persona", check_operator_persona),
     ("users.email_address_uniqueness", check_email_address_uniqueness),
     ("sandbox.masks", check_sandbox_masks),
 )
@@ -9549,6 +9655,9 @@ CHECK_SCOPES: dict[str, str] = {
     # Deployment: it walks the workspace mount, which a bare `docker run` has
     # none of.
     "config.skill_overlays": DEPLOYMENT,
+    # Deployment: it reads the file root and the configured users' folders,
+    # which a bare `docker run` has none of.
+    "config.operator_persona": DEPLOYMENT,
     # Deployment: it reads the install's own user tables.
     "users.email_address_uniqueness": DEPLOYMENT,
     "sandbox.masks": DEPLOYMENT,
