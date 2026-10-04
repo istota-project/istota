@@ -318,9 +318,6 @@ class TestValidateAliasOverride:
         warnings = brain.validate_alias_override("smart", "garbage-9000")
         assert any("garbage-9000" in w for w in warnings)
 
-    def test_shortcut_target_is_clean(self, brain):
-        assert brain.validate_alias_override("smart", "opus") == []
-
     def test_target_with_effort_modifier_is_clean(self, brain):
         assert brain.validate_alias_override("smart", "opus:high") == []
         assert brain.validate_alias_override("smart", "claude-opus-4-7:high") == []

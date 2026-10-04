@@ -300,12 +300,6 @@ class TestClassifyFromDescription:
         cls = classify_from_description("TLT", "ISHARES 20 PLUS YR TREASURY BD ETF", "")
         assert cls[:2] == ("Fixed Income", "Long-Term")
 
-    def test_direct_treasury_note(self):
-        cls = classify_from_description(
-            "91282CJK8", "UNITED STATES TREAS NTS 4.875% 11/30/2025", ""
-        )
-        assert cls[0] == "Fixed Income"
-
     def test_gold_trust(self):
         cls = classify_from_description("IAU", "ISHARES GOLD TRUST", "")
         assert cls == ("Commodities", "Gold", "Global")

@@ -814,7 +814,7 @@ class TestBusyTimeoutActuallyWaits:
             conn = sqlite3.connect(db, timeout=30.0, isolation_level=None)
             conn.execute("BEGIN EXCLUSIVE")
             holding.set()
-            release.wait(5)
+            release.wait(0.4)
             conn.rollback()
             conn.close()
 

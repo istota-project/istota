@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from pykeepass import create_database
+from tests.support.kdbx import create_database
 
 from istota import db, doctor
 from istota.credentials import store as secrets_store

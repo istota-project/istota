@@ -24,12 +24,24 @@ sites and the two disagree, which is the failure being removed.
 
 from __future__ import annotations
 
+import copy
+import functools
 import re
 import tomllib
 from pathlib import Path
 
 import yaml
 from jinja2 import ChainableUndefined, Environment
+
+
+@functools.cache
+def _parsed_yaml(path: Path):
+    return yaml.safe_load(path.read_text())
+
+
+def _load_yaml(path: Path):
+    return copy.deepcopy(_parsed_yaml(path))
+
 
 REPO = Path(__file__).resolve().parent.parent
 ANSIBLE = REPO / "deploy" / "ansible"
@@ -61,7 +73,7 @@ STALE_VARS = {
 
 
 def find_task(name: str) -> dict:
-    for task in yaml.safe_load(TASKS_FILE.read_text()):
+    for task in _load_yaml(TASKS_FILE):
         if isinstance(task, dict) and task.get("name") == name:
             return task
     raise AssertionError(f"task {name!r} not found in tasks/main.yml")
@@ -174,7 +186,7 @@ class TestTheFlagIsRetired:
         assert offenders == [], f"retired flag still named in: {offenders}"
 
     def test_the_default_is_gone(self):
-        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
+        defaults = _load_yaml(DEFAULTS_FILE)
         assert "istota_install_all_extras" not in defaults
 
     def test_settings_to_vars_does_not_map_it(self):

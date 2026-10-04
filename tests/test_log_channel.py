@@ -572,8 +572,10 @@ class TestProcessOneTaskLogChannel:
     @patch("istota.scheduler._finalize_log_channel")
     def test_channel_name_resolved_for_talk_source(
         self, mock_finalize, mock_resolve, mock_arun, mock_exec, db_path, tmp_path,
+        fake_talk,
     ):
         mock_resolve.return_value = "Dev Room"
+        fake_talk.known_channels.update({"dev_tok", "logroom"})
 
         users = {"testuser": UserConfig(log_channel="logroom")}
         config = self._make_config(db_path, tmp_path, users=users)
@@ -592,9 +594,11 @@ class TestProcessOneTaskLogChannel:
     @patch("istota.scheduler._finalize_log_channel")
     def test_subscribers_wired_for_talk_with_progress(
         self, mock_finalize, mock_arun, mock_exec, db_path, tmp_path,
+        fake_talk,
     ):
         """When both Talk progress and log channel are active, the executor
         receives an EventWriter with both subscribers registered."""
+        fake_talk.known_channels.update({"dev_tok", "logroom"})
         mock_exec.return_value = (True, "Done", None, None)
 
         users = {"testuser": UserConfig(log_channel="logroom")}

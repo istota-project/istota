@@ -671,7 +671,7 @@ class TestTheFourTransportCodes:
         container at its memory limit is not mistaken for a wedged listener,
         which is why it is a constant rather than the connect budget."""
         srv = fake_server(lambda conn, line: time.sleep(120))
-        client = _client_copy_with_short_backstop(tmp_path)
+        client = _client_copy_with_short_backstop(tmp_path, seconds=0.5)
         started = time.monotonic()
         done = run_client(srv.path, "true", client=client, timeout=30)
         assert done.returncode == EXIT_CONNECTION_LOST
@@ -727,13 +727,13 @@ class TestTheTerminalFrameIsPassedOn:
         assert somebody is told. A process that `setsid`s out of the group holds
         the descriptor past the drain, and reporting a clean status over the
         hole it leaves is this subsystem's whole failure class."""
-        srv = server_factory(drain_grace=1.0)
+        srv = server_factory(drain_grace=0.3)
         holder = (
             "import os, sys, time\n"
             "sys.stdout.write('start\\n'); sys.stdout.flush()\n"
             "if os.fork() == 0:\n"
             "    os.setsid()\n"
-            "    time.sleep(4)\n"
+            "    time.sleep(2)\n"
             "    os._exit(0)\n"
             "sys.exit(0)\n"
         )
@@ -907,7 +907,7 @@ class TestAClosedStandardDescriptorCannotBecomeTheSocket:
             server.socket_path,
             "sh",
             "-c",
-            "echo to-stderr >&2; sleep 2; echo to-stdout; exit 6",
+            "echo to-stderr >&2; sleep 1; echo to-stdout; exit 6",
             cwd=server.repos,
         )
         assert done.returncode == 6
@@ -1247,11 +1247,11 @@ class TestTheAcknowledgementBackstop:
                     theirs.sendall(b" ")
                 except OSError:
                     return
-                time.sleep(0.1)
+                time.sleep(0.05)
 
         def read():
             try:
-                devbox_exec_client._read_ack(ours, timeout=1.0)
+                devbox_exec_client._read_ack(ours, timeout=0.3)
                 outcome.append("returned")
             except TimeoutError:
                 outcome.append("timeout")

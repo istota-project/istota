@@ -612,7 +612,7 @@ class TestDecodeIsSerialized:
     assertion could be measuring the scheduler rather than the budget.
     """
 
-    async def _peak_concurrency(self, alice, bob, monkeypatch):
+    async def _peak_concurrency(self, alice, bob, monkeypatch, *, wait=5.0):
         live = 0
         peak = 0
         lock = threading.Lock()
@@ -620,7 +620,7 @@ class TestDecodeIsSerialized:
         # Both decodes must be in flight together for a widened pool to show
         # it, so the first one waits for the second to arrive rather than
         # sleeping a hopeful interval.
-        both_in = threading.Barrier(2, timeout=5)
+        both_in = threading.Barrier(2, timeout=wait)
 
         def _slow(*args, **kwargs):
             nonlocal live, peak
@@ -645,7 +645,8 @@ class TestDecodeIsSerialized:
         return peak
 
     async def test_two_uploads_never_decode_at_once(self, alice, bob, monkeypatch):
-        assert await self._peak_concurrency(alice, bob, monkeypatch) == 1
+        # One worker never lets the second arrive, so the barrier always times out.
+        assert await self._peak_concurrency(alice, bob, monkeypatch, wait=0.2) == 1
 
     async def test_the_control_reaches_two_on_a_wider_pool(
         self, alice, bob, monkeypatch,

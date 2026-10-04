@@ -28,6 +28,8 @@ this asserts the template against its own defaults and nothing more.
 
 from __future__ import annotations
 
+import copy
+import functools
 import importlib.util
 import json
 import re
@@ -42,6 +44,16 @@ from jinja2 import Environment, StrictUndefined
 from istota import config as config_module
 from istota.brain.claude_code import HAIKU, OPUS, SONNET
 from istota.config import Config, devbox_container_backend, load_config
+
+
+@functools.cache
+def _parsed_yaml(path: Path):
+    return yaml.safe_load(path.read_text())
+
+
+def _load_yaml(path: Path):
+    return copy.deepcopy(_parsed_yaml(path))
+
 
 REPO = Path(__file__).resolve().parent.parent
 ANSIBLE = REPO / "deploy" / "ansible"
@@ -92,7 +104,7 @@ def _resolve(variables: dict, env: Environment) -> dict:
 
     def expand(value):
         if isinstance(value, str) and "{{" in value:
-            return env.from_string(value).render(**variables)
+            return _compiled_string(env, value).render(**variables)
         if isinstance(value, dict):
             return {k: expand(v) for k, v in value.items()}
         if isinstance(value, list):
@@ -114,17 +126,34 @@ def _resolve(variables: dict, env: Environment) -> dict:
 FACTS = {"processor_vcpus": 4}
 
 
-def render(**overrides) -> str:
-    env = _environment()
-    variables = _resolve(
+@functools.cache
+def _shared_environment() -> Environment:
+    return _environment()
+
+
+@functools.cache
+def _compiled_string(env: Environment, text: str):
+    return env.from_string(text)
+
+
+@functools.cache
+def _compiled_file(path: Path):
+    return _compiled_string(_shared_environment(), path.read_text())
+
+
+def _variables(overrides: dict) -> dict:
+    return _resolve(
         {
-            **yaml.safe_load(DEFAULTS_FILE.read_text()),
+            **_load_yaml(DEFAULTS_FILE),
             "ansible_facts": FACTS,
             **overrides,
         },
-        env,
+        _shared_environment(),
     )
-    return env.from_string(TEMPLATE.read_text()).render(**variables)
+
+
+def render(**overrides) -> str:
+    return _compiled_file(TEMPLATE).render(**_variables(overrides))
 
 
 def _write_temp(text: str) -> str:
@@ -745,7 +774,7 @@ class TestThePackageCacheRoot:
         described, by requiring exactly one creator and no `file:` task naming
         anything *below* the root.
         """
-        tasks = _flatten(yaml.safe_load(TASKS_FILE.read_text()))
+        tasks = _flatten(_load_yaml(TASKS_FILE))
         creators = [
             t for t in tasks
             if isinstance(t.get("file"), dict)
@@ -783,7 +812,7 @@ class TestThePackageCacheRoot:
         `mkdir(parents=True)` would then create it with the daemon's umask
         rather than the owner and mode the role names.
         """
-        tasks = _flatten(yaml.safe_load(TASKS_FILE.read_text()))
+        tasks = _flatten(_load_yaml(TASKS_FILE))
         paths = (
             "{{ istota_developer_repos_dir }}",
             "{{ istota_security_sandbox_cache_dir }}",
@@ -807,7 +836,7 @@ class TestThePackageCacheRoot:
         without the developer skill, which is exactly where nothing else would
         have made the directory.
         """
-        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        tasks = _load_yaml(TASKS_FILE)
         creators = [
             t for t in tasks
             if isinstance(t.get("file"), dict)
@@ -864,7 +893,7 @@ class TestTheReposRelocationTask:
 
     @pytest.fixture
     def tasks(self):
-        return yaml.safe_load(TASKS_FILE.read_text())
+        return _load_yaml(TASKS_FILE)
 
     @pytest.fixture
     def migrator(self, tasks):
@@ -1339,16 +1368,7 @@ SECRETS_TEMPLATE = ANSIBLE / "templates" / "secrets.env.j2"
 
 def render_secrets(**overrides) -> str:
     """`secrets.env.j2` against the same defaults, for the one credential here."""
-    env = _environment()
-    variables = _resolve(
-        {
-            **yaml.safe_load(DEFAULTS_FILE.read_text()),
-            "ansible_facts": FACTS,
-            **overrides,
-        },
-        env,
-    )
-    return env.from_string(SECRETS_TEMPLATE.read_text()).render(**variables)
+    return _compiled_file(SECRETS_TEMPLATE).render(**_variables(overrides))
 
 
 CALDAV_VARS = {
@@ -1389,7 +1409,7 @@ class TestTheCaldavOverride:
         together with its absence from the config, because either half alone is
         equally true of a credential that reaches the daemon by no route.
         """
-        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
+        defaults = _load_yaml(DEFAULTS_FILE)
         assert defaults["istota_use_environment_file"] is True
 
         config = tomllib.loads(render(**CALDAV_VARS))
@@ -1902,7 +1922,7 @@ class TestTheNumericDefaults:
         separate validation task 90 tasks later objects — by which time the
         known-good config is gone and the auto-update cron restarts the units
         without re-rendering."""
-        tasks = _flatten(yaml.safe_load(TASKS_FILE.read_text()))
+        tasks = _flatten(_load_yaml(TASKS_FILE))
         deploy = [
             t for t in tasks
             if t.get("name") == "Deploy istota configuration"

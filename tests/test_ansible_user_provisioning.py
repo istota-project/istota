@@ -16,11 +16,23 @@ all, so a redeploy can never clobber the web-set value.
 
 from __future__ import annotations
 
+import copy
+import functools
 from pathlib import Path
 
 import pytest
 import yaml
 from jinja2 import Environment
+
+
+@functools.cache
+def _parsed_yaml(path: Path):
+    return yaml.safe_load(path.read_text())
+
+
+def _load_yaml(path: Path):
+    return copy.deepcopy(_parsed_yaml(path))
+
 
 REPO = Path(__file__).resolve().parent.parent
 TASKS_FILE = REPO / "deploy" / "ansible" / "tasks" / "main.yml"
@@ -29,7 +41,7 @@ DEFAULTS_FILE = REPO / "deploy" / "ansible" / "defaults" / "main.yml"
 
 def _ensure_profiles_command() -> str:
     """Return the ``command:`` template of the 'Ensure user_profiles rows' task."""
-    tasks = yaml.safe_load(TASKS_FILE.read_text())
+    tasks = _load_yaml(TASKS_FILE)
     for task in tasks:
         if isinstance(task, dict) and task.get("name") == "Ensure user_profiles rows":
             assert "command" in task, "task found but has no `command:` key"
@@ -201,7 +213,7 @@ class TestAnsibleUserEnsureRestartsBothTiers:
 
     @staticmethod
     def _task() -> dict:
-        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        tasks = _load_yaml(TASKS_FILE)
         return next(
             t for t in tasks
             if isinstance(t, dict) and t.get("name") == "Ensure user_profiles rows"
@@ -273,9 +285,7 @@ class TestAnsibleOutboundApprovalSurface:
 
     @staticmethod
     def _defaults() -> dict:
-        return yaml.safe_load(
-            (REPO / "deploy" / "ansible" / "defaults" / "main.yml").read_text()
-        )
+        return _load_yaml(REPO / "deploy" / "ansible" / "defaults" / "main.yml")
 
     @staticmethod
     def _template() -> str:
@@ -340,7 +350,7 @@ class TestAnsibleOutboundApprovalSurface:
         next restart finds it. The assert has to come before the template task
         so the failure names the variable instead.
         """
-        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        tasks = _load_yaml(TASKS_FILE)
         names = [t.get("name") for t in tasks if isinstance(t, dict)]
         assert "Validate outbound approval floor" in names
         assert names.index("Validate outbound approval floor") < names.index(
@@ -356,7 +366,7 @@ class TestAnsibleOutboundApprovalSurface:
             assert f"'{policy}'" in condition, f"{policy} is not an accepted floor"
 
     def test_the_per_user_policy_is_asserted_too(self):
-        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        tasks = _load_yaml(TASKS_FILE)
         assertion = next(
             t for t in tasks
             if isinstance(t, dict)
@@ -476,7 +486,7 @@ class TestTheUserProfileMode:
         )
 
     def test_the_default_is_enforce(self):
-        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
+        defaults = _load_yaml(DEFAULTS_FILE)
         assert defaults["istota_user_profile_mode"] == "enforce"
 
     def test_enforce_passes_managed(self):
@@ -490,7 +500,7 @@ class TestTheUserProfileMode:
         assert "--managed" not in rendered.split()
 
     def test_the_mode_is_asserted_before_the_ensure(self):
-        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        tasks = _load_yaml(TASKS_FILE)
         names = [t.get("name") for t in tasks if isinstance(t, dict)]
         assert names.index("Validate user profile mode") < names.index(
             "Ensure user_profiles rows"
@@ -594,7 +604,7 @@ class TestNothingChownsToTheUserBeforeItExists:
 
     @classmethod
     def _tasks(cls) -> list[dict]:
-        return cls._flatten(yaml.safe_load(TASKS_FILE.read_text()))
+        return cls._flatten(_load_yaml(TASKS_FILE))
 
     def _index_of(self, name: str, tasks: list[dict] | None = None) -> int:
         for index, task in enumerate(tasks if tasks is not None else self._tasks()):
@@ -631,7 +641,7 @@ class TestNothingChownsToTheUserBeforeItExists:
         working and every assertion here goes quietly vacuous.
         """
         top_level = [
-            t for t in yaml.safe_load(TASKS_FILE.read_text()) if isinstance(t, dict)
+            t for t in _load_yaml(TASKS_FILE) if isinstance(t, dict)
         ]
         flattened = self._tasks()
         assert len(flattened) > len(top_level), (
@@ -694,7 +704,7 @@ class TestNothingChownsToTheUserBeforeItExists:
         rather than a hypothetical one; without the recursion and the prefix
         strip it plants a defect the guard reports as clean.
         """
-        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        tasks = _load_yaml(TASKS_FILE)
         tasks.insert(
             0,
             {

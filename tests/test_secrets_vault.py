@@ -109,7 +109,7 @@ def _new_db(tmp_path, *, password=PASSPHRASE, name="vault.kdbx"):
     `secrets_vault.parse_vault` follows and `test_the_library_import_is_function_scoped`
     holds it to.
     """
-    from pykeepass import create_database
+    from tests.support.kdbx import create_database
 
     path = tmp_path / name
     return create_database(str(path), password=password), path

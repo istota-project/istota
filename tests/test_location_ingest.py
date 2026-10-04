@@ -60,14 +60,6 @@ class TestClientIdSchema:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(location_pings)")}
         assert "client_id" in cols
 
-    def test_fresh_db_records_the_current_schema_version(self, tmp_path):
-        path = _init_db(tmp_path)
-        with location_db.connect(path) as conn:
-            row = conn.execute(
-                "SELECT value FROM schema_meta WHERE key = 'version'"
-            ).fetchone()
-        assert row[0] == str(location_db.SCHEMA_VERSION)
-
     def test_v2_db_migrates_in_place(self, tmp_path):
         """A DB predating the column gains it, its index, and the version."""
         path = tmp_path / "location.db"

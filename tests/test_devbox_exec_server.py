@@ -340,6 +340,17 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def _running(pid: int) -> bool:
+    """`_alive`, but a zombie counts as dead: a killed child nobody has waited
+    for yet answers `kill(pid, 0)` until its parent reaps it."""
+    if not _alive(pid):
+        return False
+    state = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+    ).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
 # --------------------------------------------------------------------------- #
 # Exit status
 # --------------------------------------------------------------------------- #
@@ -827,9 +838,9 @@ class TestReaping:
     def test_output_keeps_the_idle_timer_alive(self, server_factory):
         """Traffic in either direction counts, so a chatty build is not reaped
         by a backstop meant for a connection whose peer went away."""
-        srv = server_factory(idle_timeout=2.0)
+        srv = server_factory(idle_timeout=1.0)
         out = srv.run(
-            argv=["sh", "-c", "for i in 1 2 3 4 5 6; do echo tick; sleep 0.5; done"],
+            argv=["sh", "-c", "for i in 1 2 3 4 5 6; do echo tick; sleep 0.25; done"],
             cwd=str(srv.repos),
         )
         assert out.terminal["exit_code"] == 0
@@ -881,7 +892,7 @@ class TestNothingACommandStartedOutlivesIt:
         conn = server.connect()
         conn.send(
             encode_exec_request(
-                argv=["sh", "-c", f"sleep 3; touch {survived}"],
+                argv=["sh", "-c", f"sleep 1; touch {survived}"],
                 cwd=str(server.repos),
             )
         )
@@ -891,12 +902,12 @@ class TestNothingACommandStartedOutlivesIt:
         # within microseconds of the failed acknowledgement, usually before the
         # shell has run its first command, so `started` is a race. The log line
         # is written only when something was still alive to kill, and without
-        # the `finally` there is no line at all and `survived` appears at +3s.
+        # the `finally` there is no line at all and `survived` appears at +1s.
         deadline = time.monotonic() + 20.0
         while time.monotonic() < deadline and "at exit" not in server.log_text():
             time.sleep(0.05)
         assert "reaping process group" in server.log_text()
-        time.sleep(5.0)
+        time.sleep(2.0)
         assert not survived.exists(), "the command outlived the connection that asked"
 
 
@@ -1360,6 +1371,7 @@ class TestTheReaperRecordStream:
         and by then the pid is free for anything else to claim."""
         module = _load_server_module()
         killed = []
+        monkeypatch.setattr(module, "REAPER_VERIFY_SECONDS", 0.1)
         monkeypatch.setattr(module, "group_alive", lambda pgid: pgid == 42)
         monkeypatch.setattr(
             module, "kill_group", lambda pgid, sig: killed.append((pgid, sig))
@@ -1415,6 +1427,7 @@ class TestTheReaperRecordStream:
         assert len(stream) > module.REAPER_MAX_BUFFER_BYTES, "not a real backlog"
 
         killed = []
+        monkeypatch.setattr(module, "REAPER_VERIFY_SECONDS", 0.1)
         monkeypatch.setattr(module, "group_alive", lambda pgid: True)
         monkeypatch.setattr(
             module, "kill_group", lambda pgid, sig: killed.append(pgid)
@@ -1435,6 +1448,7 @@ class TestTheReaperRecordStream:
         with the write end closed the way the kernel closes it on a SIGKILL."""
         module = _load_server_module()
         killed = []
+        monkeypatch.setattr(module, "REAPER_VERIFY_SECONDS", 0.1)
         monkeypatch.setattr(module, "group_alive", lambda pgid: pgid in (42, 43))
         monkeypatch.setattr(
             module, "kill_group", lambda pgid, sig: killed.append(pgid)
@@ -1535,7 +1549,7 @@ class TestTheReaperIsReportedLive:
 
         os.kill(reaper, signal.SIGKILL)
         gone_by = time.monotonic() + 10.0
-        while time.monotonic() < gone_by and _alive(reaper):
+        while time.monotonic() < gone_by and _running(reaper):
             time.sleep(0.05)
 
         # No command in between: that is the whole point. The old field only
@@ -1552,7 +1566,7 @@ class TestTheReaperIsReportedLive:
         srv = server_factory()
         os.kill(self._reaper_pid(srv), signal.SIGKILL)
         gone_by = time.monotonic() + 10.0
-        while time.monotonic() < gone_by and _alive(self._reaper_pid(srv)):
+        while time.monotonic() < gone_by and _running(self._reaper_pid(srv)):
             time.sleep(0.05)
 
         out = srv.run(shell="echo still-serving", cwd=str(srv.repos))

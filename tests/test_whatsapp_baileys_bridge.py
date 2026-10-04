@@ -73,6 +73,12 @@ BAILEYS_CAPS = WhatsAppProviderCaps(
 )
 
 
+@pytest.fixture(autouse=True)
+def _short_shutdown_grace(monkeypatch):
+    # No child here reads the socket, so the shutdown frame never ends one and every reap waited the 5s grace before SIGTERM.
+    monkeypatch.setattr(bridge_module, "SHUTDOWN_GRACE_SECONDS", 0.1)
+
+
 @pytest.fixture
 def sockets():
     directory = SocketDir()

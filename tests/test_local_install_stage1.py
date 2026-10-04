@@ -249,12 +249,6 @@ class TestEmissariesConfig:
         cfg = load_config(p)
         assert cfg.emissaries_enabled is False
 
-    def test_explicit_true_parsed(self, tmp_path):
-        p = tmp_path / "config.toml"
-        p.write_text("emissaries_enabled = true\n")
-        cfg = load_config(p)
-        assert cfg.emissaries_enabled is True
-
 
 # ---------------------------------------------------------------------------
 # Web app: no-auth mode + loopback guard

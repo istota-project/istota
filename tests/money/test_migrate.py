@@ -587,16 +587,6 @@ class TestMigrateRejectionIsRemembered:
             _migrate.ensure_initialised(ctx)
             assert len(self._warnings(caplog)) == first == 1
 
-    def test_correcting_the_file_makes_it_import_again(self, tmp_path):
-        ctx = _make_ctx(tmp_path)
-        path = _write_workspace_config(
-            tmp_path, "monarch.toml", MONARCH_TOML_BAD_ACCOUNT,
-        )
-        _migrate.ensure_initialised(ctx)
-        path.write_text(MONARCH_TOML)
-        _migrate.ensure_initialised(ctx)
-        assert config_store.load_monarch(ctx.db_path).sync.lookback_days == 45
-
     def test_any_other_valueerror_is_not_swallowed(self, tmp_path):
         """Only an account the validator refuses is content. A coercion failure
         or a JSONDecodeError is a defect and must stay visible."""

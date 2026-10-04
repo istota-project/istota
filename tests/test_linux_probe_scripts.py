@@ -24,6 +24,7 @@ pipefail -c`, a superset). Anything that needs bash would be a finding.
 """
 
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -106,9 +107,12 @@ class TestWriteProbe:
 class TestLifecycleProbes:
     def test_the_background_probe_reports_a_pid_and_writes(self, tmp_path):
         marker = tmp_path / "bg.txt"
-        out = _sh(lifecycle.background_probe(marker) + "; sleep 0.6")
+        out = _sh(lifecycle.background_probe(marker))
         assert "BGPID=" in out, out
         assert int(out.split("BGPID=")[1].split()[0]) > 0
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert marker.exists(), "the background writer never wrote"
         # Nothing here reaps it; the tier's own kill paths do. Clean up so a
         # developer machine is not left with a loop per run.
@@ -138,7 +142,7 @@ class TestNetworkProbes:
         """No network is used: 192.0.2.1 is TEST-NET-1 (RFC 5737), which
         routes nowhere, and `--max-time` is what turns that into a labelled
         refusal rather than a hang."""
-        out = _sh(network.fetch_probe("https://192.0.2.1/", "X", max_time=2))
+        out = _sh(network.fetch_probe("https://192.0.2.1/", "X", max_time=1))
         assert "X=REFUSED" in out, out
 
     def test_the_fetch_probe_labels_a_success(self, tmp_path):

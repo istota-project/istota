@@ -449,9 +449,10 @@ class TestTheRefusal:
         The shim's own 30-second wait is what the resolver inherits, and
         waiting it out here would put half a minute into the default suite for
         a property a one-second wait establishes just as well. Patched on the
-        module because `_request` reads the constant at call time.
+        function's keyword default, because that is where `_request` reads it;
+        patching the module constant left this test waiting the full 30s.
         """
-        monkeypatch.setattr(credential_shim, "SOCKET_TIMEOUT_SECONDS", 1)
+        monkeypatch.setitem(credential_shim._request.__kwdefaults__, "timeout", 1)
         monkeypatch.setenv("ISTOTA_SKILL_PROXY_SOCK", str(sock_path))
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(sock_path))

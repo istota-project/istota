@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import sqlite3
@@ -22,13 +24,27 @@ from tests.support.sleep_spy import sleep_spy
 
 
 def _run(args, env, expect_success=True) -> dict:
-    proc = subprocess.run(
-        [sys.executable, "-m", "istota.skills.health", *args],
-        capture_output=True, text=True, env=env,
-    )
+    """The CLI's `main` in-process, under exactly `env`.
+
+    A subprocess per call cost an interpreter start and the package import,
+    about half a second, eighty times over; the handlers read their whole
+    environment per call, so nothing differs. `TestPanelsCli` keeps one real
+    `python -m` run, and `tests/test_skill_cli_facade.py` pins the entry point.
+    """
+    from istota.skills.health import main
+
+    out, err = io.StringIO(), io.StringIO()
+    code = 0
+    with patch.dict(os.environ, env, clear=True), \
+            patch.object(sys, "argv", ["istota-skill-health", *args]), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            main()
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
     if expect_success:
-        assert proc.returncode == 0, (proc.stdout, proc.stderr)
-    return json.loads(proc.stdout) if proc.stdout.strip() else {}
+        assert code == 0, (out.getvalue(), err.getvalue())
+    return json.loads(out.getvalue()) if out.getvalue().strip() else {}
 
 
 @pytest.fixture

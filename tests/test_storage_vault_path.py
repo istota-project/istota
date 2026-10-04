@@ -792,18 +792,18 @@ class TestTheFolderListing:
                 os.fsdecode(b"\xff-broken.kdbx"), ensure_ascii=False,
             ).encode("utf-8")
 
-    def test_the_scan_is_bounded_by_entries_as_well(self, tmp_path, caplog):
+    def test_the_scan_is_bounded_by_entries_as_well(self, tmp_path, caplog, monkeypatch):
         """The result cap bounds what comes back, not what is walked.
 
         A folder of files that are not `.kdbx` matches nothing and used to be
         walked in full, on a FUSE mount, on every settings load and every sync
         tick — and its entry count is not the user's alone to decide.
         """
-        from istota.storage import VAULT_DIR_MAX_SCAN
+        monkeypatch.setattr("istota.storage.VAULT_DIR_MAX_SCAN", 50)
 
         config = _config(tmp_path, alice=UserConfig())
         folder = _vault_dir(config)
-        for i in range(VAULT_DIR_MAX_SCAN + 10):
+        for i in range(50 + 10):
             _seed(folder / f"noise{i:05d}.txt")
 
         with caplog.at_level("WARNING", logger="istota.storage"):

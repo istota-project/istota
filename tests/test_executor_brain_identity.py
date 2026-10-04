@@ -45,6 +45,7 @@ def _config(tmp_path):
         skills_dir=skills_dir,
         bundled_skills_dir=tmp_path / "_empty_bundled",
         temp_dir=tmp_path / "temp",
+        workspace_path=tmp_path / "workspace",
         model="claude-sonnet-4-6",
         security=SecurityConfig(skill_proxy_enabled=False),
     )

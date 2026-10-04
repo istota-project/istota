@@ -86,7 +86,7 @@ class TestKillProcessGroup:
         try:
             assert os.getpgid(proc.pid) != proc.pid  # precondition
             assert kill_process_group(proc.pid) == "process"
-            assert _wait_gone(proc.pid) or proc.poll() is not None
+            assert proc.wait(timeout=5) == -signal.SIGKILL
         finally:
             proc.kill()
             proc.wait(timeout=5)
@@ -277,8 +277,8 @@ class TestSchedulerRunCaptureKillsTheGroup:
                 # `_run_capture`'s bounded post-kill `communicate` would
                 # otherwise wait out its full 10s.
                 _run_capture(
-                    ["sleep", "2"],
-                    timeout=0.5, cwd=str(tmp_path), env=dict(os.environ),
+                    ["sleep", "0.6"],
+                    timeout=0.2, cwd=str(tmp_path), env=dict(os.environ),
                 )
         assert len(signalled) == 1, "the timeout did not signal the process group"
 

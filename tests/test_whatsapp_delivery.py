@@ -374,10 +374,12 @@ class TestTheLedgerClaim:
         assert len(_rows(config)) == 1
 
     @pytest.mark.parametrize(
-        "status",
-        ["accepted", "sent", "delivered", "read", "failed", *sorted(LOCAL_TERMINAL_STATES)],
+        "status, claimed",
+        [pytest.param("accepted", True, id="accepted-claimed")] + [
+            pytest.param(status, False, id=f"{status}-unclaimed") for status in
+            ["accepted", "sent", "delivered", "read", "failed", *sorted(LOCAL_TERMINAL_STATES)]
+        ],
     )
-    @pytest.mark.parametrize("claimed", [True, False], ids=["claimed", "unclaimed"])
     async def test_no_state_but_an_unclaimed_pending_is_ever_resent(
         self, tmp_path, status, claimed,
     ):

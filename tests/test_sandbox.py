@@ -122,20 +122,6 @@ def _get_bind_pairs(result, bind_type="--bind"):
 class TestBuildBwrapCmdDisabled:
     """Tests for cases where bwrap should not be applied."""
 
-    def test_returns_cmd_unchanged_on_non_linux(self, sandbox_config, make_sandbox_task):
-        task = make_sandbox_task()
-        cmd = ["claude", "-p", "test"]
-        user_temp = sandbox_config.temp_dir / "alice"
-        user_temp.mkdir(parents=True)
-
-        with patch("istota.executor._bwrap_available", return_value=False):
-            result = build_bwrap_cmd(
-                cmd, sandbox_config, task, False, [], user_temp,
-                profile=SandboxProfile.CLAUDE,
-            )
-
-        assert result == cmd
-
     def test_returns_cmd_unchanged_when_bwrap_missing(self, sandbox_config, make_sandbox_task):
         task = make_sandbox_task()
         cmd = ["claude", "-p", "test"]

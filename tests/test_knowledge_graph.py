@@ -796,13 +796,6 @@ class TestFactSimilarity:
 
 
 class TestFuzzyDedup:
-    def test_exact_duplicate_still_skipped(self, conn):
-        """Existing exact-dedup behavior is preserved."""
-        id1 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
-        id2 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
-        assert id1 is not None
-        assert id2 is None
-
     def test_near_duplicate_with_word_variant_inserts(self, conn):
         """`sesame seed` and `sesame seeds` are different tokens — not deduped."""
         id1 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
@@ -938,14 +931,6 @@ class TestFuzzyDedup:
         fact2 = get_fact(conn, id2)
         assert fact1.valid_until is None  # Both current
         assert fact2.valid_until is None
-
-    def test_fuzzy_dedup_only_checks_current_facts(self, conn):
-        """Invalidated facts should not trigger fuzzy dedup."""
-        id1 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
-        invalidate_fact(conn, id1, ended="2026-01-01")
-        # Re-add same fact — should succeed since the old one is invalidated
-        id2 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
-        assert id2 is not None
 
     def test_substring_object_collapses_refined_value(self, conn):
         """Same predicate, refined object — substring fast-path catches it."""

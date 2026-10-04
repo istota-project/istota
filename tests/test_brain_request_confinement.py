@@ -33,6 +33,7 @@ file does not justify; the behavioural tests are what cover the shipped sites.
 from __future__ import annotations
 
 import ast
+import functools
 from pathlib import Path
 from unittest.mock import patch
 
@@ -698,12 +699,18 @@ def _calls_named(tree: ast.AST, target: str):
             yield node, node
 
 
+@functools.cache
 def _brain_request_calls():
     """Every ``BrainRequest(...)`` construction site under ``src/istota``."""
+    calls = []
     for path in sorted(SRC.rglob("*.py")):
-        tree = ast.parse(path.read_text(), filename=str(path))
+        text = path.read_text()
+        if "BrainRequest" not in text:
+            continue
+        tree = ast.parse(text, filename=str(path))
         for _, node in _calls_named(tree, "BrainRequest"):
-            yield path, node
+            calls.append((path, node))
+    return tuple(calls)
 
 
 def _keyword(node: ast.Call, arg: str) -> ast.expr | None:
