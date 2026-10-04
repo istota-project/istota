@@ -607,7 +607,14 @@ def email_footer(conn, config, room_token: str | None) -> str | None:
     email_config = getattr(config, "email", None)
     if not room_token or not getattr(email_config, "thread_disclosure_footer", False):
         return None
-    if db.get_room_binding(conn, room_token, "email") is None:
+    binding = db.get_room_binding(conn, room_token, "email")
+    if binding is None:
+        return None
+    from istota.transport.email.private_room import is_private_email_ref
+
+    room = db.get_room(conn, room_token)
+    # The user's private email room: its mail goes to the user alone.
+    if room is not None and is_private_email_ref(binding.surface_ref, room.user_id):
         return None
     return (
         f"Written by {_bot(config)}, an AI assistant, for "

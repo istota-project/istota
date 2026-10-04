@@ -2076,19 +2076,14 @@ def _talk_target_for_delivery(config: Config, task: db.Task) -> str | None:
 def _deliver_deferred_email_output(
     config: Config, task: db.Task, user_temp_dir: Path,
 ) -> None:
-    """Deliver or clean up deferred email output files not handled by the normal path.
+    """Clean up a deferred email output file the normal path will not send.
 
     The normal email delivery path (post_result_to_email via `post_email` flag)
-    handles tasks whose output_target includes an "email" leg. This
-    function handles two gap cases:
-
-    1. source_type="email" but output_target doesn't include email (e.g. an
-       emissary reply routed to Talk) — deliver via post_result_to_email,
-       which will find the processed_email record and reply correctly.
-    2. Non-email source (e.g. Talk user who asked the agent to email someone)
-       where the agent used `email output` instead of `email send` — warn and
-       delete, because there's no processed_email record and the scheduler
-       would send to the wrong recipient.
+    handles tasks whose output_target includes an "email" leg, which every
+    email task admitted to a room has. Anything else (a Talk user who asked
+    the agent to email someone, where it used `email output` instead of
+    `email send`) has no message to reply to, so the file is warned about and
+    deleted rather than sent to the wrong recipient.
     """
     from .transport import parse_output_target
     if plan_has_surface(parse_output_target(task.output_target), "email"):
@@ -2098,29 +2093,13 @@ def _deliver_deferred_email_output(
     if not path.exists():
         return
 
-    if task.source_type == "email":
-        # Email-sourced task with non-email output_target (e.g. emissary reply
-        # with output_target="talk"). The processed_email record exists, so
-        # post_result_to_email can reply correctly.
-        logger.info(
-            "Delivering deferred email output for task %d (source=%s, output_target=%s)",
-            task.id, task.source_type, task.output_target,
-        )
-        email_ok = asyncio.run(post_result_to_email(config, task, ""))
-        if not email_ok:
-            logger.error(
-                "Failed to deliver deferred email output for task %d", task.id,
-            )
-    else:
-        # Non-email source — agent used `email output` instead of `email send`.
-        # No processed_email record, so we can't deliver to the right recipient.
-        logger.warning(
-            "Orphaned deferred email output file for task %d (source=%s): "
-            "Claude used `email output` instead of `email send`. "
-            "The email was NOT delivered. Removing file.",
-            task.id, task.source_type,
-        )
-        path.unlink(missing_ok=True)
+    logger.warning(
+        "Orphaned deferred email output file for task %d (source=%s): "
+        "Claude used `email output` instead of `email send`. "
+        "The email was NOT delivered. Removing file.",
+        task.id, task.source_type,
+    )
+    path.unlink(missing_ok=True)
 
 
 def _purge_obsolete_skill_jobs(conn, skill_index: dict) -> None:

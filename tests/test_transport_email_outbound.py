@@ -60,10 +60,21 @@ def _config(db_path, tmp_path, **overrides):
 
 
 def _make_task(db_path, *, source_type="email", prompt="do a thing", user_id="alice"):
-    """Create a real task row and return the hydrated Task."""
+    """Create a real task row and return the hydrated Task.
+
+    An email task is a turn in an email thread room, as every admitted
+    inbound mail is: the reply is a reply-all on that thread.
+    """
     with db.get_db(db_path) as conn:
+        token = None
+        if source_type == "email":
+            token = db.register_bound_room(
+                conn, user_id, origin="email", name="Thread",
+                surface="email", surface_ref="<thread-root@example.com>",
+            ).token
         tid = db.create_task(
             conn, prompt=prompt, user_id=user_id, source_type=source_type,
+            conversation_token=token, output_target="email" if token else None,
         )
         return db.get_task(conn, tid)
 
@@ -73,18 +84,22 @@ def _link_inbound_email(
     sender="ext@example.com", subject="Original subject",
     message_id="<orig@example.com>", references=None,
 ):
-    """Attach a processed_emails row to a task so it is treated as a reply."""
+    """Attach a processed_emails row to a task so it is treated as a reply,
+    stored under the task's thread room as the poller stores it."""
     with db.get_db(db_path) as conn:
+        thread_id = db.get_task(conn, task_id).conversation_token
         db.mark_email_processed(
             conn,
             email_id=f"imap-{task_id}",
             sender_email=sender,
             subject=subject,
+            thread_id=thread_id,
             message_id=message_id,
             references=references,
             user_id="alice",
             task_id=task_id,
             routing_method="plus_address",
+            recipients=json.dumps(["bot@example.com"]),
         )
 
 
@@ -135,6 +150,27 @@ class TestReplyBranch:
         assert kwargs["content_type"] == "plain"
 
     @pytest.mark.asyncio
+    async def test_an_email_task_with_no_room_is_not_answered(self, db_path, tmp_path):
+        """Every admitted mail is a turn in a room; one with none was held and
+        never admitted, so nothing is sent to its sender."""
+        config = _config(db_path, tmp_path)
+        task = _make_task(db_path)
+        _link_inbound_email(db_path, task.id, message_id="<msg-3@example.com>")
+        with db.get_db(db_path) as conn:
+            conn.execute("UPDATE tasks SET conversation_token = NULL WHERE id = ?", (task.id,))
+            task = db.get_task(conn, task.id)
+
+        with (
+            patch("istota.transport.email.outbound.reply_to_email") as mock_reply,
+            patch("istota.transport.email.outbound.send_email") as mock_send,
+        ):
+            ok = await deliver_email_result(config, task, _structured())
+
+        assert ok is False
+        mock_reply.assert_not_called()
+        mock_send.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_reply_records_sent_email(self, db_path, tmp_path):
         config = _config(db_path, tmp_path)
         task = _make_task(db_path)
@@ -150,7 +186,7 @@ class TestReplyBranch:
             ok = await deliver_email_result(config, task, _structured())
 
         assert ok is True
-        # The reply must be recorded for emissary thread matching.
+        # The reply must be recorded for thread matching.
         with db.get_db(db_path) as conn:
             recorded = db.find_sent_email_by_message_id(conn, "<sent-99@bot.example.com>")
         assert recorded is not None
@@ -648,39 +684,6 @@ class TestBriefingHtmlEmail:
         assert kwargs["body"] == "**not** stripped"
 
     @pytest.mark.asyncio
-    async def test_reply_thread_briefing_gets_html_body(self, db_path, tmp_path):
-        """A briefing landing in an existing thread still goes multipart."""
-        config = _config(
-            db_path, tmp_path,
-            users={"alice": UserConfig(
-                email_addresses=["alice@example.com"],
-                # The reply goes to the correspondent, not to the user, so the
-                # approval gate has an opinion about it. This test is about the
-                # multipart body.
-                trusted_email_senders=["*@example.com"],
-            )},
-        )
-        task = _make_task(db_path, source_type="briefing", prompt="Generate a briefing")
-        _link_inbound_email(db_path, task.id)
-
-        with (
-            patch("istota.transport.email.outbound.send_email"),
-            patch(
-                "istota.transport.email.outbound.reply_to_email",
-                return_value="<r@bot>",
-            ) as mock_reply,
-        ):
-            ok = await deliver_email_result(config, task, _structured(
-                subject="Morning", body=_BRIEFING_MD, fmt="plain",
-            ))
-
-        assert ok is True
-        kwargs = mock_reply.call_args.kwargs
-        assert '<a href="https://semafor.com/a/iran">' in kwargs["html_body"]
-        assert "**" not in kwargs["body"]
-        assert kwargs["in_reply_to"] == "<orig@example.com>"
-
-    @pytest.mark.asyncio
     async def test_structured_html_format_passes_through_as_html_part(
         self, db_path, tmp_path,
     ):
@@ -1172,18 +1175,13 @@ class TestDeliveryLegApprovalGate:
 
     @pytest.mark.asyncio
     async def test_hold_is_attributed_to_the_task_room(self, db_path, tmp_path):
-        """`room_token` is what makes the draft card render inline."""
+        """`room_token` is what makes the draft card render inline: the
+        thread's room."""
         config = _config(
             db_path, tmp_path,
             users={"alice": UserConfig(email_addresses=["alice@example.com"])},
         )
-        with db.get_db(db_path) as conn:
-            db.register_room(conn, token="room-abc", user_id="alice", origin="web")
-            tid = db.create_task(
-                conn, prompt="reply to them", user_id="alice",
-                source_type="email", conversation_token="room-abc",
-            )
-            task = db.get_task(conn, tid)
+        task = _make_task(db_path, prompt="reply to them")
         _link_inbound_email(
             db_path, task.id, sender="stranger@protonmail.test",
             message_id="<inbound-7@protonmail.test>",
@@ -1197,5 +1195,5 @@ class TestDeliveryLegApprovalGate:
             await deliver_email_result(config, task, "")
 
         draft = _drafts(db_path)[0]
-        assert draft["room_token"] == "room-abc"
-        assert draft["origin_target"] == "room:room-abc"
+        assert draft["room_token"] == task.conversation_token
+        assert draft["origin_target"] == f"room:{task.conversation_token}"

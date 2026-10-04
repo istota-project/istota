@@ -748,6 +748,35 @@ def _point_task_at(conn, task, room_token: str, message_id: int, *, host_absent:
     )
 
 
+def private_room_for_task(conn, task) -> str | None:
+    """The user's private email room an email task is a turn in, or None."""
+    token = getattr(task, "conversation_token", None)
+    if getattr(task, "source_type", None) != SURFACE or not token:
+        return None
+    room = db.get_room(conn, token)
+    binding = db.get_room_binding(conn, token, SURFACE) if room else None
+    if binding is None or not is_private_email_ref(binding.surface_ref, room.user_id):
+        return None
+    return token
+
+
+def reply_to_sender(processed) -> ReplyAll | None:
+    """A reply to ``processed`` (a `db.ProcessedEmail`) with its sender as the
+    only recipient, threaded as `reply_all` threads: the private email room's
+    answer, which goes to the user alone."""
+    to = fold(parseaddr(processed.sender_email or "")[1])
+    if "@" not in to:
+        return None
+    message_id = processed.message_id
+    references = processed.references
+    if references and message_id:
+        references = f"{references} {message_id}"
+    elif message_id:
+        references = message_id
+    return ReplyAll(to=to, cc=[], in_reply_to=message_id, references=references,
+                    subject=processed.subject or "")
+
+
 def thread_room_for_task(conn, task) -> str | None:
     """The thread room an email task belongs to, or None."""
     if getattr(task, "source_type", None) != SURFACE or not task.conversation_token:

@@ -119,6 +119,17 @@ class TestThePrivateEmailRoom:
         # The reply to the user mints no thread room of its own.
         assert len(_rows(db_path, "SELECT token FROM rooms")) == 1
 
+    @pytest.mark.asyncio
+    async def test_the_answer_carries_no_thread_disclosure_footer(self, config, db_path):
+        """The footer tells a thread's correspondents how to stop the bot; the
+        private room's mail goes to the user alone."""
+        config.email.thread_disclosure_footer = True
+        (task_id,) = _poll(config, sender=HOST_ADDR, to=(BOT,), message_id="<p2@test.com>")
+        with patch("istota.transport.email.outbound.reply_to_email",
+                   return_value="<out2@test.com>") as reply:
+            assert await deliver_email_result(config, _task(db_path, task_id), _structured())
+        assert "AI assistant" not in reply.call_args.kwargs["body"]
+
     def test_the_scheduler_stores_the_answer_in_it(self, config, db_path):
         from istota.scheduler import process_one_task
 

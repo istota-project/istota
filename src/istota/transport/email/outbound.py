@@ -535,7 +535,8 @@ async def _send_thread_reply(
     consume: bool = True, approved: bool = False,
     message_id: int | None = None,
 ) -> bool:
-    """Reply-all on an email thread room's thread, through the outbound gate.
+    """Reply-all on an email thread room's thread, or the reply to the user in
+    their private email room, through the outbound gate.
 
     True when the mail went out or was held as a draft; False when the gate
     could not run or the send failed. ``consume`` drops the task's deferred
@@ -790,6 +791,13 @@ async def deliver_email_result(
             email_threads.reply_all(conn, config, thread_room, task_id=task.id)
             if thread_room else None
         )
+        if thread_reply is None and processed_email is not None:
+            # The user's private email room: a reply to the message, with the
+            # user's own address as the only recipient.
+            room_token = email_threads.private_room_for_task(conn, task)
+            if room_token is not None:
+                thread_room = room_token
+                thread_reply = email_threads.reply_to_sender(processed_email)
         # The host asked this, in front of everyone on the thread, from a mail
         # that authenticated: that is their consent for the answer to reach
         # those people, so the outbound gate does not hold it (ISSUE-607).
@@ -797,144 +805,77 @@ async def deliver_email_result(
             conn, config, thread_room, task, thread_reply,
         )
         # The answer the scheduler already stored in the room, which the mail
-        # is recorded on. None where the room holds no copy of this exchange
-        # (ISSUE-255), and then no row is created for it here.
+        # is recorded on.
         answer_row = conn.execute(
             "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
             "AND role = 'assistant'", (thread_room, task.id),
         ).fetchone() if thread_reply is not None else None
 
     if thread_reply is not None:
-        # An email thread room (multiplayer D6): a reply-all to the latest
-        # message's people, through the same gate, every recipient checked.
+        # A reply-all to the latest message's people on an email thread room
+        # (multiplayer D6), or a reply to the user in their private email
+        # room, through the same gate, every recipient checked.
         subject = parsed["subject"] or thread_reply.subject
         return await _send_thread_reply(
             config, task, thread_reply, subject=subject, body=body_text,
             content_type=content_type, html_body=html_body, approved=host_asked,
-            # The thread's room, so a held draft is filed where its card is.
+            # The room, so a held draft is filed where its card is.
             room_token=thread_room,
             message_id=answer_row["id"] if answer_row is not None else None,
         )
 
     if processed_email:
-        # Reply to existing email thread
-
-        # Build References: parent's references + parent's message_id (RFC 5322)
-        if processed_email.references and processed_email.message_id:
-            references = f"{processed_email.references} {processed_email.message_id}"
-        elif processed_email.message_id:
-            references = processed_email.message_id
-        else:
-            references = None
-
-        # Use parsed subject if provided, otherwise keep original
-        subject = parsed["subject"] if parsed["subject"] else (processed_email.subject or "")
-
-        # The leg ISSUE-246 was filed about: `email output` lands here, and the
-        # recipient is whoever mailed us — not necessarily anyone the user
-        # authorized. Checked before the send, with the threading headers
-        # already resolved so a hold can snapshot them.
-        #
-        # Two fidelity notes on what a hold stores. The `Re:` prefix is applied
-        # here because `reply_to_email` adds it on the direct path while
-        # `outbound_drafts.release` sends through `send_email`, which does not —
-        # so without this the card and the released mail would both differ from
-        # what an ungated reply looks like. And a multipart briefing's HTML
-        # alternative is *not* carried: the drafts row has a single body and an
-        # `html` flag, so a held briefing releases as the plain part. That is
-        # the honest degradation — what the user approves is what is sent — but
-        # it does lose the article links, and closing it needs a schema change.
-        held_subject = subject
-        if held_subject and not held_subject.lower().startswith("re:"):
-            held_subject = f"Re: {held_subject}"
-        may_send, draft_id = _hold_if_unapproved(
-            config, task,
-            to_addr=processed_email.sender_email,
-            subject=held_subject,
-            body=body_text,
-            html=content_type == "html",
-            in_reply_to=processed_email.message_id,
-            references=references,
+        # Every admitted inbound mail is a turn in a room. One with none was
+        # held and never admitted, so there is no one this may be sent to.
+        logger.warning(
+            "Email task %d has no room to answer in; the reply was not sent", task.id,
         )
-        if not may_send:
-            if draft_id is None:
-                # The check could not run. Leave the file: it is the only copy
-                # of the body, and no draft was written to hold it.
-                return False
-            _consume_deferred_email_output(config, task)
-            return True
+        return False
+
+    # No original email — send fresh email to user (e.g., scheduled job)
+    user_config = config.users.get(task.user_id)
+    if not user_config or not user_config.email_addresses:
+        logger.warning("No email address for user %s (task %d)", task.user_id, task.id)
+        return False
+
+    # Use parsed subject if provided, otherwise fall back to prompt excerpt
+    subject = parsed["subject"] if parsed["subject"] else f"[{config.bot_name}] {task.prompt[:80]}"
+
+    # Addressed to the user's own address, so both live policies clear it —
+    # checked anyway, because "this branch only ever mails the user" is an
+    # invariant of today's callers rather than of this function.
+    may_send, draft_id = _hold_if_unapproved(
+        config, task,
+        to_addr=user_config.email_addresses[0],
+        subject=subject,
+        body=body_text,
+        html=content_type == "html",
+    )
+    if not may_send:
+        if draft_id is None:
+            return False
         _consume_deferred_email_output(config, task)
+        return True
+    _consume_deferred_email_output(config, task)
 
-        try:
-            email_config = get_email_config(config)
-            sent_message_id = reply_to_email(
-                to_addr=processed_email.sender_email,
-                subject=subject,
-                body=body_text,
-                config=email_config,
-                from_addr=config.email.bot_email,
-                in_reply_to=processed_email.message_id,
-                references=references,
-                content_type=content_type,
-                html_body=html_body,
-            )
-            _record_sent_email(
-                config, task, sent_message_id,
-                to_addr=processed_email.sender_email,
-                subject=subject,
-                in_reply_to=processed_email.message_id,
-                references=references,
-                to=[processed_email.sender_email], body=body_text,
-            )
-            return True
-        except Exception as e:
-            logger.error("Failed to send email reply (task %s): %s", task.id, e)
-            return False
-    else:
-        # No original email — send fresh email to user (e.g., scheduled job)
-        user_config = config.users.get(task.user_id)
-        if not user_config or not user_config.email_addresses:
-            logger.warning("No email address for user %s (task %d)", task.user_id, task.id)
-            return False
-
-        # Use parsed subject if provided, otherwise fall back to prompt excerpt
-        subject = parsed["subject"] if parsed["subject"] else f"[{config.bot_name}] {task.prompt[:80]}"
-
-        # Addressed to the user's own address, so both live policies clear it —
-        # checked anyway, because "this branch only ever mails the user" is an
-        # invariant of today's callers rather than of this function.
-        may_send, draft_id = _hold_if_unapproved(
-            config, task,
-            to_addr=user_config.email_addresses[0],
+    try:
+        email_config = get_email_config(config)
+        sent_message_id = send_email(
+            to=user_config.email_addresses[0],
             subject=subject,
             body=body_text,
-            html=content_type == "html",
+            config=email_config,
+            from_addr=config.email.bot_email,
+            content_type=content_type,
+            html_body=html_body,
         )
-        if not may_send:
-            if draft_id is None:
-                return False
-            _consume_deferred_email_output(config, task)
-            return True
-        _consume_deferred_email_output(config, task)
-
-        try:
-            email_config = get_email_config(config)
-            sent_message_id = send_email(
-                to=user_config.email_addresses[0],
-                subject=subject,
-                body=body_text,
-                config=email_config,
-                from_addr=config.email.bot_email,
-                content_type=content_type,
-                html_body=html_body,
-            )
-            _record_sent_email(
-                config, task, sent_message_id,
-                to_addr=user_config.email_addresses[0],
-                subject=subject,
-                to=[user_config.email_addresses[0]], body=body_text,
-            )
-            return True
-        except Exception as e:
-            logger.error("Failed to send email (task %s): %s", task.id, e)
-            return False
+        _record_sent_email(
+            config, task, sent_message_id,
+            to_addr=user_config.email_addresses[0],
+            subject=subject,
+            to=[user_config.email_addresses[0]], body=body_text,
+        )
+        return True
+    except Exception as e:
+        logger.error("Failed to send email (task %s): %s", task.id, e)
+        return False

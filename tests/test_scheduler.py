@@ -6557,8 +6557,9 @@ class TestDeferredOperations:
             tasks = db.list_tasks(conn, user_id="testuser")
         assert all(t.source_type != "subtask" for t in tasks)
 
-    def test_deliver_deferred_email_sends_for_email_source_talk_target(self, tmp_path):
-        """Email-sourced task with output_target=talk: deferred file delivered."""
+    def test_deliver_deferred_email_drops_an_email_task_with_no_email_leg(self, tmp_path):
+        """An email task with no email leg was never admitted to a room, so
+        there is no message the file may be sent in answer to."""
         from istota.scheduler import _deliver_deferred_email_output
 
         config = MagicMock()
@@ -6573,10 +6574,11 @@ class TestDeferredOperations:
         deferred = user_temp / "task_42_email_output.json"
         deferred.write_text('{"subject": "Re: Hi", "body": "Got it", "format": "plain"}')
 
-        with patch("istota.scheduler.post_result_to_email", new_callable=AsyncMock, return_value=True) as mock_send:
+        with patch("istota.scheduler.post_result_to_email", new_callable=AsyncMock) as mock_send:
             _deliver_deferred_email_output(config, task, user_temp)
 
-        mock_send.assert_called_once_with(config, task, "")
+        mock_send.assert_not_called()
+        assert not deferred.exists()
 
     def test_deliver_deferred_email_warns_for_talk_source(self, tmp_path):
         """Talk-sourced task: deferred file warned and removed (no processed_email)."""
@@ -6657,31 +6659,6 @@ class TestDeferredOperations:
 
         mock_send.assert_not_called()
         assert deferred.exists()
-
-    def test_deliver_deferred_email_logs_failure(self, tmp_path):
-        """Failed delivery is logged as error."""
-        from istota.scheduler import _deliver_deferred_email_output
-
-        config = MagicMock()
-        config.temp_dir = tmp_path / "temp"
-        task = db.Task(
-            id=42, status="completed", prompt="Reply",
-            user_id="testuser", source_type="email",
-            output_target="talk",
-        )
-        user_temp = tmp_path / "temp" / "testuser"
-        user_temp.mkdir(parents=True)
-        deferred = user_temp / "task_42_email_output.json"
-        deferred.write_text('{"subject": "Re: Hi", "body": "ok", "format": "plain"}')
-
-        with (
-            patch("istota.scheduler.post_result_to_email", new_callable=AsyncMock, return_value=False),
-            patch("istota.scheduler.logger") as mock_log,
-        ):
-            _deliver_deferred_email_output(config, task, user_temp)
-
-        mock_log.error.assert_called_once()
-        assert "Failed to deliver" in mock_log.error.call_args[0][0]
 
     def test_confirmed_task_cleans_stale_email_output(self, db_path, tmp_path):
         """Stale email_output.json from prior execution is removed before re-execution."""
