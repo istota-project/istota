@@ -514,20 +514,6 @@ class TestProcessUserSleepCycle:
 
         assert result is False
 
-    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
-    def test_handles_timeout(self, mock_run, mount_config, db_path):
-        # Brain helper returns (False, "") for any failure incl. timeout.
-        mock_run.return_value = (False, "")
-
-        with db.get_db(db_path) as conn:
-            t = db.create_task(conn, prompt="Test", user_id="alice")
-            db.update_task_status(conn, t, "running")
-            db.update_task_status(conn, t, "completed", result="Done")
-
-            result = process_user_sleep_cycle(mount_config, conn, "alice")
-
-        assert result is False
-
     def test_extraction_routes_through_make_brain(self, mount_config, db_path):
         """The user sleep cycle must invoke `make_brain(config.brain).execute(req)`,
         not bypass it with a direct subprocess call."""

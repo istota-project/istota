@@ -1614,8 +1614,9 @@ class TestBriefingDeferredPrompt:
         config = Config(
             db_path=db_path, users={"alice": UserConfig(timezone="UTC")},
             skills_dir=skills_dir, bundled_skills_dir=tmp_path / "_empty_bundled",
-            temp_dir=tmp_path / "temp",
+            temp_dir=tmp_path / "temp", workspace_path=tmp_path / "mount",
         )
+        (tmp_path / "mount").mkdir()
         with db.get_db(db_path) as conn:
             task_id = db.create_task(
                 conn, prompt="Generate the 'morning' briefing.", user_id="alice",
@@ -3662,7 +3663,7 @@ class TestWorkerPool:
     def test_dispatch_creates_worker(self, db_path, tmp_path):
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(worker_idle_timeout=1, poll_interval=1),
+            scheduler=SchedulerConfig(worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -3677,13 +3678,12 @@ class TestWorkerPool:
             pool.dispatch()
             # Worker should have been spawned for alice
             assert pool.active_count >= 1
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_respects_max_workers(self, db_path, tmp_path):
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(max_foreground_workers=1, worker_idle_timeout=1, poll_interval=1),
+            scheduler=SchedulerConfig(max_foreground_workers=1, worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -3698,8 +3698,7 @@ class TestWorkerPool:
             pool.dispatch()
             # Only 1 fg worker due to max_foreground_workers=1
             assert pool.active_count == 1
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_no_dispatch_when_empty(self, db_path, tmp_path):
         config = Config(
@@ -3717,7 +3716,7 @@ class TestWorkerPool:
     def test_no_duplicate_workers_for_same_user(self, db_path, tmp_path):
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(user_max_foreground_workers=1, worker_idle_timeout=2, poll_interval=1),
+            scheduler=SchedulerConfig(user_max_foreground_workers=1, worker_idle_timeout=2, worker_idle_poll_interval=0.02, poll_interval=1),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -3733,8 +3732,7 @@ class TestWorkerPool:
             count_after_first = pool.active_count
             pool.dispatch()  # should not create a duplicate
             assert pool.active_count == count_after_first
-
-        pool.shutdown()
+            pool.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -4363,7 +4361,7 @@ class TestWorkerPoolIsolation:
             db_path=db_path,
             scheduler=SchedulerConfig(
                 max_foreground_workers=3,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -4380,8 +4378,7 @@ class TestWorkerPoolIsolation:
             pool.dispatch()
             # All 3 foreground users should get workers (fg cap=3)
             assert pool.active_count == 3
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_background_capped_by_max_background_workers(self, db_path, tmp_path):
         """Background tasks should be capped by max_background_workers."""
@@ -4389,7 +4386,7 @@ class TestWorkerPoolIsolation:
             db_path=db_path,
             scheduler=SchedulerConfig(
                 max_background_workers=1,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -4406,8 +4403,7 @@ class TestWorkerPoolIsolation:
             pool.dispatch()
             # Background cap = 1, so only 1 worker
             assert pool.active_count == 1
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_foreground_prioritized_over_background(self, db_path, tmp_path):
         """Foreground user should get a worker even when background fills cap."""
@@ -4415,7 +4411,7 @@ class TestWorkerPoolIsolation:
             db_path=db_path,
             scheduler=SchedulerConfig(
                 max_foreground_workers=3, max_background_workers=1,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -4433,8 +4429,7 @@ class TestWorkerPoolIsolation:
             pool.dispatch()
             # 2 foreground + 1 background
             assert pool.active_count == 3
-
-        pool.shutdown()
+            pool.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -5823,7 +5818,7 @@ class TestDualWorkerQueue:
         """A user with both fg and bg tasks should get two workers."""
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, worker_idle_timeout=1, poll_interval=1),
+            scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -5838,14 +5833,13 @@ class TestDualWorkerQueue:
             pool.dispatch()
             # Alice should have 2 workers: one fg, one bg
             assert pool.active_count == 2
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_worker_pool_fg_only(self, db_path, tmp_path):
         """A user with only foreground tasks gets one fg worker."""
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, worker_idle_timeout=1, poll_interval=1),
+            scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -5858,14 +5852,13 @@ class TestDualWorkerQueue:
         with patch("istota.scheduler.process_one_task", return_value=None):
             pool.dispatch()
             assert pool.active_count == 1
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_worker_pool_bg_only(self, db_path, tmp_path):
         """A user with only background tasks gets one bg worker."""
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, worker_idle_timeout=1, poll_interval=1),
+            scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -5878,14 +5871,13 @@ class TestDualWorkerQueue:
         with patch("istota.scheduler.process_one_task", return_value=None):
             pool.dispatch()
             assert pool.active_count == 1
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_worker_pool_no_duplicate_workers_per_queue(self, db_path, tmp_path):
         """Calling dispatch twice doesn't duplicate workers for the same (user, queue) when per-user cap is 1."""
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, user_max_foreground_workers=1, worker_idle_timeout=2, poll_interval=1),
+            scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, user_max_foreground_workers=1, worker_idle_timeout=2, worker_idle_poll_interval=0.02, poll_interval=1),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -5900,8 +5892,7 @@ class TestDualWorkerQueue:
             count_after_first = pool.active_count
             pool.dispatch()
             assert pool.active_count == count_after_first
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_worker_pool_respects_per_queue_caps(self, db_path, tmp_path):
         """Workers capped independently by max_foreground_workers and max_background_workers."""
@@ -5909,7 +5900,7 @@ class TestDualWorkerQueue:
             db_path=db_path,
             scheduler=SchedulerConfig(
                 max_foreground_workers=2, max_background_workers=1,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -5931,8 +5922,7 @@ class TestDualWorkerQueue:
             assert fg_count <= 2
             assert bg_count <= 1
             assert pool.active_count <= 3  # 2 fg + 1 bg
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_worker_pool_fg_prioritized_over_bg(self, db_path, tmp_path):
         """Foreground workers spawned independently from background workers."""
@@ -5940,7 +5930,7 @@ class TestDualWorkerQueue:
             db_path=db_path,
             scheduler=SchedulerConfig(
                 max_foreground_workers=2, max_background_workers=0,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -5958,8 +5948,7 @@ class TestDualWorkerQueue:
             pool.dispatch()
             # Both fg workers should get slots, bg should be capped out (bg cap=0)
             assert pool.active_count == 2
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_process_one_task_with_queue(self, db_path, tmp_path):
         """process_one_task should filter by queue when provided."""
@@ -8221,7 +8210,7 @@ class TestWorkerPoolConcurrencyCaps:
             db_path=db_path,
             scheduler=SchedulerConfig(
                 max_foreground_workers=2, max_background_workers=3,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -8239,8 +8228,7 @@ class TestWorkerPoolConcurrencyCaps:
             # Only 2 fg workers despite 3 users, because max_foreground_workers=2
             fg_count = sum(1 for (_, qt, _) in pool._workers if qt == "foreground")
             assert fg_count <= 2
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_dispatch_respects_instance_bg_cap(self, db_path, tmp_path):
         """Background workers capped at max_background_workers."""
@@ -8248,7 +8236,7 @@ class TestWorkerPoolConcurrencyCaps:
             db_path=db_path,
             scheduler=SchedulerConfig(
                 max_foreground_workers=5, max_background_workers=1,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -8264,8 +8252,7 @@ class TestWorkerPoolConcurrencyCaps:
             pool.dispatch()
             bg_count = sum(1 for (_, qt, _) in pool._workers if qt == "background")
             assert bg_count <= 1
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_dispatch_separate_fg_bg_caps(self, db_path, tmp_path):
         """Separate fg and bg caps work independently."""
@@ -8273,7 +8260,7 @@ class TestWorkerPoolConcurrencyCaps:
             db_path=db_path,
             scheduler=SchedulerConfig(
                 max_foreground_workers=4, max_background_workers=3,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -8288,8 +8275,7 @@ class TestWorkerPoolConcurrencyCaps:
         with patch("istota.scheduler.process_one_task", return_value=None):
             pool.dispatch()
             assert pool.active_count == 2
-
-        pool.shutdown()
+            pool.shutdown()
 
 
 class TestMultiWorkerPerUser:
@@ -8302,7 +8288,7 @@ class TestMultiWorkerPerUser:
             scheduler=SchedulerConfig(
                 max_foreground_workers=5,
                 user_max_foreground_workers=2,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -8317,8 +8303,7 @@ class TestMultiWorkerPerUser:
         with patch("istota.scheduler.process_one_task", return_value=None):
             pool.dispatch()
             assert pool.active_count == 2
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_no_doomed_worker_for_same_room_gated_followup(self, db_path, tmp_path):
         """A follow-up queued behind an active task in the SAME room is gated
@@ -8329,7 +8314,7 @@ class TestMultiWorkerPerUser:
             scheduler=SchedulerConfig(
                 max_foreground_workers=5,
                 user_max_foreground_workers=2,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -8348,8 +8333,7 @@ class TestMultiWorkerPerUser:
             pool.dispatch()
             # Gated follow-up → zero claimable → no worker spawned.
             assert pool.active_count == 0
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_spawns_worker_for_different_room_while_one_room_active(self, db_path, tmp_path):
         """The gate is per-room: a pending task in a DIFFERENT room from the
@@ -8359,7 +8343,7 @@ class TestMultiWorkerPerUser:
             scheduler=SchedulerConfig(
                 max_foreground_workers=5,
                 user_max_foreground_workers=2,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -8380,8 +8364,7 @@ class TestMultiWorkerPerUser:
             pool.dispatch()
             # room1 follow-up gated, room2 task free → exactly one worker.
             assert pool.active_count == 1
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_dispatch_respects_per_user_fg_cap(self, db_path, tmp_path):
         """User with 3 pending fg tasks but per-user cap of 2 gets only 2 workers."""
@@ -8390,7 +8373,7 @@ class TestMultiWorkerPerUser:
             scheduler=SchedulerConfig(
                 max_foreground_workers=5,
                 user_max_foreground_workers=2,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -8406,8 +8389,7 @@ class TestMultiWorkerPerUser:
         with patch("istota.scheduler.process_one_task", return_value=None):
             pool.dispatch()
             assert pool.active_count == 2
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_dispatch_per_user_bg_cap(self, db_path, tmp_path):
         """Background workers also respect per-user caps."""
@@ -8416,7 +8398,7 @@ class TestMultiWorkerPerUser:
             scheduler=SchedulerConfig(
                 max_background_workers=5,
                 user_max_background_workers=2,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -8432,8 +8414,7 @@ class TestMultiWorkerPerUser:
         with patch("istota.scheduler.process_one_task", return_value=None):
             pool.dispatch()
             assert pool.active_count == 2
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_dispatch_instance_cap_limits_per_user(self, db_path, tmp_path):
         """Instance cap of 2 overrides per-user cap of 3."""
@@ -8442,7 +8423,7 @@ class TestMultiWorkerPerUser:
             scheduler=SchedulerConfig(
                 max_foreground_workers=2,
                 user_max_foreground_workers=3,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -8458,8 +8439,7 @@ class TestMultiWorkerPerUser:
         with patch("istota.scheduler.process_one_task", return_value=None):
             pool.dispatch()
             assert pool.active_count == 2
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_dispatch_doesnt_spawn_excess_workers_for_few_tasks(self, db_path, tmp_path):
         """Don't spawn 3 workers if user only has 1 pending task."""
@@ -8468,7 +8448,7 @@ class TestMultiWorkerPerUser:
             scheduler=SchedulerConfig(
                 max_foreground_workers=5,
                 user_max_foreground_workers=3,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -8482,8 +8462,7 @@ class TestMultiWorkerPerUser:
         with patch("istota.scheduler.process_one_task", return_value=None):
             pool.dispatch()
             assert pool.active_count == 1
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_dispatch_multiple_users_with_multi_workers(self, db_path, tmp_path):
         """Multiple users each get their per-user cap of workers."""
@@ -8492,7 +8471,7 @@ class TestMultiWorkerPerUser:
             scheduler=SchedulerConfig(
                 max_foreground_workers=10,
                 user_max_foreground_workers=2,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -8510,8 +8489,7 @@ class TestMultiWorkerPerUser:
             pool.dispatch()
             # alice: 2 workers, bob: 2 workers
             assert pool.active_count == 4
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_worker_key_is_three_tuple(self, db_path, tmp_path):
         """Worker keys should be (user_id, queue_type, slot) 3-tuples."""
@@ -8520,7 +8498,7 @@ class TestMultiWorkerPerUser:
             scheduler=SchedulerConfig(
                 max_foreground_workers=5,
                 user_max_foreground_workers=2,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -8538,8 +8516,7 @@ class TestMultiWorkerPerUser:
                 assert len(key) == 3, f"Expected 3-tuple key, got {key}"
                 user_id, queue_type, slot = key
                 assert isinstance(slot, int)
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_redispatch_doesnt_duplicate_existing_slots(self, db_path, tmp_path):
         """Calling dispatch twice doesn't create duplicate workers for same slots."""
@@ -8548,7 +8525,7 @@ class TestMultiWorkerPerUser:
             scheduler=SchedulerConfig(
                 max_foreground_workers=5,
                 user_max_foreground_workers=2,
-                worker_idle_timeout=2, poll_interval=1,
+                worker_idle_timeout=2, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -8565,8 +8542,7 @@ class TestMultiWorkerPerUser:
             count_after_first = pool.active_count
             pool.dispatch()
             assert pool.active_count == count_after_first
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_new_worker_spawned_while_existing_worker_busy(self, db_path, tmp_path):
         """A pending task should get a new worker even if another worker is busy.
@@ -8580,7 +8556,7 @@ class TestMultiWorkerPerUser:
             scheduler=SchedulerConfig(
                 max_foreground_workers=5,
                 user_max_foreground_workers=2,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -8603,8 +8579,7 @@ class TestMultiWorkerPerUser:
             pool.dispatch()
             # Should have 2 workers: slot 0 (busy) + slot 1 (new for task B)
             assert pool.active_count == 2
-
-        pool.shutdown()
+            pool.shutdown()
 
     def test_slot_assignment_handles_gaps(self, db_path, tmp_path):
         """Slot assignment should work even if lower slots have exited."""
@@ -8613,7 +8588,7 @@ class TestMultiWorkerPerUser:
             scheduler=SchedulerConfig(
                 max_foreground_workers=5,
                 user_max_foreground_workers=3,
-                worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
             ),
             workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -8637,8 +8612,7 @@ class TestMultiWorkerPerUser:
             assert 1 in slots, f"Expected slot 1 to still exist, got slots {slots}"
             # No duplicate keys
             assert len(keys) == len(set(keys))
-
-        pool.shutdown()
+            pool.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -9629,7 +9603,7 @@ class TestWorkerIdleWait:
         run_one = _Counter(value=(1, True))
 
         result = _worker_idle_wait(
-            "u", "foreground", _idle_cfg(idle_poll=2, idle_timeout=2),
+            "u", "foreground", _idle_cfg(poll_interval=0.01, idle_poll=2, idle_timeout=2),
             threading.Event(), lambda: False,
             run_one=run_one, pending_count=lambda: 5,
             admission_open=lambda: False,
@@ -9646,7 +9620,7 @@ class TestWorkerIdleWait:
         run_one = _Counter(value=(4, True))
 
         result = _worker_idle_wait(
-            "u", "foreground", _idle_cfg(idle_poll=2, idle_timeout=2),
+            "u", "foreground", _idle_cfg(poll_interval=0.01, idle_poll=2, idle_timeout=2),
             threading.Event(), lambda: False,
             run_one=run_one, pending_count=lambda: 5,
             admission_open=lambda: True,

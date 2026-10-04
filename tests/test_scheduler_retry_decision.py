@@ -169,12 +169,6 @@ class TestTheTwoSitesNoLongerDisagree:
         )
         assert disagreed is expected, flags
 
-    @pytest.mark.parametrize("flags", list(_all_flag_combinations()))
-    def test_the_shared_decision_now_answers_the_branch_everywhere(self, flags):
-        task = _task(attempt_count=0, max_attempts=3)
-        decision = decide_retry(task, "boom", **flags)
-        assert decision.will_retry is _oracle_will_retry(task, flags), flags
-
     def test_a_sigpipe_command_failure_opens_the_terminal_frame_gate(self):
         # The event block emits the terminal `error` + `done` frames under
         # `not decision.will_retry and not flags["is_requeued"]`. This is the

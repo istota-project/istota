@@ -23,6 +23,7 @@ import contextlib
 import dataclasses
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import time
@@ -675,9 +676,10 @@ class TestWaitReady:
             compose_support, "_service_state", lambda args, service, env=None: ("running", "starting")
         )
         monkeypatch.setattr(compose_support, "logs", lambda *a, **k: "(logs)")
+        monkeypatch.setattr(compose_support, "POLL_INTERVAL", 0.01)
 
         with pytest.raises(TimeoutError):
-            compose_support.wait_ready([], "istota", timeout=1)
+            compose_support.wait_ready([], "istota", timeout=0.05)
 
     def test_the_timeout_message_carries_the_service_logs(self, monkeypatch):
         """A bare timeout says nothing about why the service did not start.
@@ -713,10 +715,9 @@ class TestWaitReady:
         assert time.monotonic() - started < 5, "waited out the timeout on a dead service"
 
 
-@pytest.fixture
-def framework_db(tmp_path) -> Path:
-    """A real SQLite file with the real schema, for the local probe path."""
-    path = tmp_path / "istota.db"
+@pytest.fixture(scope="module")
+def _framework_db_template(tmp_path_factory) -> Path:
+    path = tmp_path_factory.mktemp("framework_db") / "istota.db"
     connection = sqlite3.connect(path)
     connection.executescript((REPO / "schema.sql").read_text())
     connection.executemany(
@@ -730,6 +731,14 @@ def framework_db(tmp_path) -> Path:
     )
     connection.commit()
     connection.close()
+    return path
+
+
+@pytest.fixture
+def framework_db(_framework_db_template, tmp_path) -> Path:
+    """A real SQLite file with the real schema, for the local probe path."""
+    path = tmp_path / "istota.db"
+    shutil.copyfile(_framework_db_template, path)
     return path
 
 
@@ -779,14 +788,15 @@ class TestProbe:
         ] == ["third"]
         assert probe.tasks(conversation_token="a-room-nobody-made") == []
 
-    def test_wait_for_task_honours_a_task_id(self, framework_db):
+    def test_wait_for_task_honours_a_task_id(self, framework_db, monkeypatch):
         # Task 1 is completed and task 2 is pending. Without the id filter the
         # wait would return task 1 immediately; with it, task 2 must time out.
+        monkeypatch.setattr("testbed.probe.POLL_INTERVAL", 0.01)
         probe = Probe(local=framework_db)
 
         assert probe.wait_for_task(status="completed", task_id=1, timeout=5)["id"] == 1
         with pytest.raises(TimeoutError):
-            probe.wait_for_task(status="completed", task_id=2, timeout=1)
+            probe.wait_for_task(status="completed", task_id=2, timeout=0.05)
 
     def test_filters_combine_rather_than_replace_each_other(self, framework_db):
         probe = Probe(local=framework_db)
@@ -850,11 +860,12 @@ class TestProbe:
 
         assert task["status"] == "pending_confirmation"
 
-    def test_wait_for_task_times_out_when_nothing_is_terminal(self, framework_db):
+    def test_wait_for_task_times_out_when_nothing_is_terminal(self, framework_db, monkeypatch):
+        monkeypatch.setattr("testbed.probe.POLL_INTERVAL", 0.01)
         probe = Probe(local=framework_db)
 
         with pytest.raises(TimeoutError, match="pending"):
-            probe.wait_for_task(status="completed", user_id="bob", timeout=1)
+            probe.wait_for_task(status="completed", user_id="bob", timeout=0.05)
 
     def test_task_logs_are_scoped_to_one_task(self, framework_db):
         connection = sqlite3.connect(framework_db)

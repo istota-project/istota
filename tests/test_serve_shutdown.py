@@ -98,7 +98,7 @@ def _serving(graceful: int, aware: bool = False):
 
 def test_one_interrupt_stops_within_the_graceful_window():
     """A single Ctrl-C must not wait on a stream that never ends."""
-    graceful = 2
+    graceful = 1
     with _serving(graceful) as proc:
         proc.send_signal(signal.SIGINT)
         status = _wait_exit(proc, graceful + 15)

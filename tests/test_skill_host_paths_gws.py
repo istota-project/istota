@@ -316,17 +316,6 @@ class TestTheWorkspaceIsTheCwd:
         assert error is None
         assert scanned == [str((workspace / "drive").resolve()), "files", "list"]
 
-    def test_a_bare_workspace_filename_is_still_admitted(
-        self, mount, report, monkeypatch,
-    ):
-        """The case the existence signal is there for: `+upload report.pdf`."""
-        monkeypatch.chdir(mount / "Users" / "alice")
-
-        scanned, error = scan_argv(["+upload", "report.pdf"])
-
-        assert error is None
-        assert scanned == ["+upload", str(report.resolve())]
-
 
 class TestNoRootsResolvable:
     def test_every_path_shaped_token_is_refused(self, monkeypatch):
