@@ -227,7 +227,10 @@ class TestBridgeScript:
 
 
 class TestNetworkProxyPeers:
-    def test_unregistered_peer_never_opens_upstream(self, proxy_sock):
+    def test_unregistered_peer_never_opens_upstream(self, proxy_sock, monkeypatch):
+        monkeypatch.setattr(
+            "istota.sandbox.network_proxy.PEER_REGISTRATION_GRACE_SECONDS", 0.05,
+        )
         with patch("istota.sandbox.network_proxy.socket.create_connection") as upstream:
             with NetworkProxy(proxy_sock, {"example.com:443"}):
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
@@ -238,7 +241,12 @@ class TestNetworkProxyPeers:
         assert b"403 Forbidden" in response
         upstream.assert_not_called()
 
-    def test_sibling_is_refused_but_registered_child_reaches_upstream(self, proxy_sock):
+    def test_sibling_is_refused_but_registered_child_reaches_upstream(
+        self, proxy_sock, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            "istota.sandbox.network_proxy.PEER_REGISTRATION_GRACE_SECONDS", 0.05,
+        )
         script = r"""
 import socket, sys
 sys.stdin.readline()

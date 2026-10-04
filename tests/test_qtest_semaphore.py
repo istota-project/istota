@@ -297,7 +297,7 @@ class TestMutualExclusion:
 class TestSlotExhaustion:
     def test_gives_up_with_a_distinct_code_after_the_timeout(self, lock_dir, hold_slot):
         hold_slot()
-        result = run_qtest("true", lock_dir=lock_dir, env={"QTEST_TIMEOUT": "1"})
+        result = run_qtest("true", lock_dir=lock_dir, env={"QTEST_TIMEOUT": "0.1"})
         assert result.returncode == EXIT_NO_SLOT
         assert "timed out" in result.stderr.lower()
 
@@ -305,7 +305,7 @@ class TestSlotExhaustion:
         """75 means the command never ran, so a reader who sees FAIL here would
         go looking for a test that broke. The verdict has to say which it is."""
         hold_slot()
-        result = run_qtest("true", lock_dir=lock_dir, env={"QTEST_TIMEOUT": "1"})
+        result = run_qtest("true", lock_dir=lock_dir, env={"QTEST_TIMEOUT": "0.1"})
         assert result.stderr.strip().splitlines()[-1] == (
             f"qtest: NO-SLOT exit={EXIT_NO_SLOT} command not run"
         )
@@ -318,7 +318,7 @@ class TestSlotExhaustion:
         marker = tmp_path / "ran"
         hold_slot()
         result = run_qtest(
-            "touch", str(marker), lock_dir=lock_dir, env={"QTEST_TIMEOUT": "1"}
+            "touch", str(marker), lock_dir=lock_dir, env={"QTEST_TIMEOUT": "0.1"}
         )
         # Assert the code too: without it, a qtest that failed to start at all
         # would leave the marker absent and pass.
@@ -337,7 +337,7 @@ class TestLockRelease:
 
     def test_slot_is_released_when_the_holder_is_killed(self, lock_dir, hold_slot):
         holder = hold_slot()
-        blocked = run_qtest("true", lock_dir=lock_dir, env={"QTEST_TIMEOUT": "1"})
+        blocked = run_qtest("true", lock_dir=lock_dir, env={"QTEST_TIMEOUT": "0.1"})
         assert blocked.returncode == EXIT_NO_SLOT, "holder never took the slot"
 
         holder.kill()
