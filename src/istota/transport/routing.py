@@ -207,11 +207,8 @@ def _room_descriptor(conn, surface: str, task: "db.Task") -> str | None:
     surface-qualified fallback still routes.
 
     Two candidate tokens, tried in order: the task's own ``conversation_token``,
-    then ``talk_delivery_token``. The second is there because a task whose
-    channel is a synthetic email-thread hash can still carry the real Talk room
-    separately, and stamping the surface form for it would leave exactly the
-    single-leg descriptor this stage exists to stop writing. (Stage 4 retires
-    that column; until then it is a real source of a room name.)
+    then ``talk_delivery_token``, which can carry a Talk room the task's own
+    token does not name.
 
     Each candidate is resolved to a canonical token by
     ``_canonical_room_token``, because a raw ref is not a room id — comparing
@@ -223,15 +220,14 @@ def _room_descriptor(conn, surface: str, task: "db.Task") -> str | None:
     """
     if conn is None or surface == "repl":
         return None
-    from istota.mail.support import is_synthetic_email_thread_token
 
     candidates = [task.conversation_token, task.talk_delivery_token]
     try:
         from .. import db
 
         for token in candidates:
-            if not token or is_synthetic_email_thread_token(token):
-                continue  # an email thread hash names no room
+            if not token:
+                continue
             # Cross-surface: an email continuation's token belongs to whichever
             # surface the originating send recorded, and its own surface owns no
             # bindings. A wrong answer here is a wrong *descriptor*, which live
@@ -317,14 +313,11 @@ def origin_descriptor(task: "db.Task", conn=None) -> str | None:
     ``talk,email`` branch at the reply site. Never raises — an unexpected
     ``source_type`` resolves to the ``talk`` surface like any other.
 
-    An ``email``-source task is the subtle case: it may be a *continuation* of a
-    non-email origin (we are handling a reply to an email a web/Talk conversation
-    asked us to send), in which case ``conversation_token`` still holds the origin
-    room and we recover the origin from it so the *next* round routes back there
-    too. A genuine email-only thread carries a synthetic thread token → no origin.
-    ``repl`` is never a pushable origin (the terminal is gone by reply time).
+    An ``email``-source task is a turn in its thread's room or the user's
+    private email room, which the room descriptor names; anything else has no
+    origin to recover. ``repl`` is never a pushable origin (the terminal is gone
+    by reply time).
     """
-    from istota.mail.support import is_synthetic_email_thread_token
     from .registry import _surface_for_source_type
     from ..db import is_canonical_room_token
 
@@ -339,22 +332,11 @@ def origin_descriptor(task: "db.Task", conn=None) -> str | None:
         return f"web:{tok}" if tok else "web"
     if surface == "talk":
         tok = task.talk_delivery_token or task.conversation_token
-        # A synthetic email-thread token is not a real Talk room — don't echo it.
-        if tok and not is_synthetic_email_thread_token(tok):
+        if tok:
             return f"talk:{tok}"
         return "talk"  # bare talk → resolve_target / DM at delivery
     if surface == "email":
-        # Recover the origin of an email continuation from its conversation_token.
-        tok = task.conversation_token
-        if not tok or is_synthetic_email_thread_token(tok):
-            return None  # genuine email-only thread — no recoverable origin
-        if tok.startswith("web-"):
-            return f"web:{tok}"
-        if tok.startswith("repl-"):
-            return None  # a since-exited REPL terminal can't be pushed
-        # A non-synthetic, non-web/repl token on an email task is a real Talk
-        # room set by our own inbound continuation routing.
-        return f"talk:{tok}"
+        return None
     if surface == "sms":
         return "sms"
     if surface == "whatsapp":
@@ -364,53 +346,6 @@ def origin_descriptor(task: "db.Task", conn=None) -> str | None:
         # durable row and re-sent to hours later.
         return "whatsapp"
     return None  # repl: no durable push target
-
-
-def upgrade_legacy_origin(conn, origin: str) -> str | None:
-    """``room:<canonical_token>`` for a stored descriptor that names one *view*
-    of a multi-surface room; None to keep the descriptor exactly as stored.
-
-    Back-compat only. `origin_descriptor` now stamps `room:<token>` itself, so
-    nothing new needs this — but `sent_emails` rows written before that keep the
-    surface-qualified form (`web:<token>`, `talk:<token>`) for the life of the
-    thread, and reading one literally delivers the reply to the leg the original
-    happened to go out on, leaving the other view of the same room blank. That
-    is the defect `6244348e` fixed; deleting the widening along with the
-    function that used to do it would reintroduce it for every thread already in
-    flight at deploy time.
-
-    **Not transitional, despite the name.** Legacy rows do age out — the next
-    send in a thread re-stamps `room:<token>` — but `origin_descriptor` can only
-    name a room it can find from the task, and a send whose room is reachable
-    from neither `conversation_token` nor `talk_delivery_token` still stamps the
-    surface form. Do not delete this on the assumption that it has become dead
-    code; check `_room_descriptor` actually covers every writer first.
-
-    It is deliberately expressed as an *upgrade to the new form* rather than as
-    the old bare ``"room"``, which relied on the task's own
-    `conversation_token` and so could not name a room the task was not already
-    sitting in.
-
-    Three cases keep the descriptor: a bare surface with no channel (nothing to
-    look up), a token naming no live room, and a room with only the descriptor's
-    own binding — where the room form would cost a lookup per delivery and
-    expand to exactly what the descriptor already says.
-    """
-    from .. import db
-
-    surface, _sep, channel = origin.partition(":")
-    if not channel:
-        return None
-    # A promoted room's per-surface ref is not its canonical token, so resolve
-    # the binding before asking whether the room exists.
-    token = db._canonical_room_token(conn, channel, surface=surface, cross_surface=False)
-    room = db.get_room(conn, token)
-    if room is None or getattr(room, "archived", 0):
-        return None
-    bound = {b.surface for b in db.list_room_bindings(conn, token)}
-    if not bound - {surface}:
-        return None
-    return f"room:{token}"
 
 
 def plan_has_surface(plan: list[Destination], surface: str) -> bool:
@@ -778,21 +713,12 @@ def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
        web-sourced task.
     2. **A legacy surface token**, never a minted room identity. An
        unregistered Talk DM can still deliver by its native address.
-    3. **The user's resolved notification channel** (alerts → briefing → DM),
-       for an email task whose token is a synthetic thread hash naming no Talk
-       room at all. Posting to that hash silently no-ops.
-
-    No token and no room resolves to ``None`` rather than falling through to the
-    alerts ladder: a task with nothing to deliver to is not the same as an email
-    whose thread hash needs redirecting, and conflating them would reroute every
-    channel-less task into the user's alerts room.
-
-    A synthetic token that resolves to nothing is returned **as-is** rather than
-    as ``None``, preserving the pre-existing silent no-op at delivery instead of
-    trading it for a different failure mode.
+    An email task's token is a room or nothing, so past the room's own Talk
+    binding it has no Talk channel: ``None``. No token and no room resolves to
+    ``None`` rather than falling through to the alerts ladder, which would
+    reroute every channel-less task into the user's alerts room.
     """
     from ..db import is_canonical_room_token
-    from istota.mail.support import is_synthetic_email_thread_token
 
     if task.talk_delivery_token:
         return task.talk_delivery_token
@@ -800,14 +726,9 @@ def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
     if room_talk:
         return room_talk
     token = task.conversation_token
-    if is_canonical_room_token(token):
+    if is_canonical_room_token(token) or task.source_type == "email":
         return None
-    if not token or task.source_type != "email":
-        return token
-    if not is_synthetic_email_thread_token(token):
-        return token
-    from istota.notifications.delivery import resolve_conversation_token
-    return resolve_conversation_token(config, task.user_id) or token
+    return token
 
 
 def transcript_room(
@@ -839,16 +760,8 @@ def transcript_room(
        room the plan delivers into, so the answer lands where it is being shown.
 
     What is deliberately **not** a rung is "the room this user's notifications
-    would go to". That is :func:`routed_notification_room`, and only the email
-    poller calls it, on the routes where the message names no conversation at
-    all. Consulting it here would put an ungated `thread_match` reply — the
-    correspondent's verbatim body, which `_conversation_history_from_messages`
-    re-pairs into that room's LLM context — into the user's alerts room whenever
-    their reply-routing policy is `thread`, which is a room the thread had no
-    relationship with. (Since ISSUE-234 "ungated" on that route means the reply
-    came from an address the bot wrote to, which narrows who can do this without
-    changing that they can.) The poller resolves it once and writes the
-    answer into ``output_target``, so every later reader sees rung 2.
+    would go to": that is a route for notices, and a mail's exchange belongs in
+    its own room (a thread room, or the user's private email room).
 
     Existence, never creation, at both rungs: an email task naming no registered
     room (a cron mailing an external address) stays task-only with no
@@ -881,38 +794,6 @@ def transcript_room(
     return None
 
 
-def routed_notification_room(
-    conn, config: "Config", user_id: str,
-) -> str | None:
-    """The registered room this user's ``notification`` route resolves to.
-
-    Where mail that names no conversation of its own surfaces. This routing
-    already decided that; it was just being consulted *inside*
-    ``send_notification``, i.e. after the content had been reduced to a system
-    note, which is why the room could never hold the exchange (ISSUE-247). The
-    email poller calls it before the task exists and writes the answer into
-    ``output_target``, so the room is a delivery destination rather than
-    something derived after the fact.
-
-    Existence, never creation: `None` when the route names no registered room,
-    and then the mail stays task-only exactly as it did.
-
-    A room more than one human reads is skipped, as `refuse_shared_rooms`
-    refuses it for the notification itself: the mail is the user's, and naming
-    the room here records it there before any delivery rule runs.
-    """
-    try:
-        from .. import db
-        from istota.notifications.delivery import resolve_destinations
-        for dest in resolve_destinations(config, user_id, "notification"):
-            room = _room_for_destination(conn, config, user_id, dest)
-            if room and not db.room_is_shared(conn, room):
-                return room
-    except Exception as e:  # pragma: no cover - never abort ingest
-        logger.warning("notification room resolution failed for %s: %s", user_id, e)
-    return None
-
-
 def _room_for_destination(
     conn, config: "Config", user_id: str, dest: Destination,
     *, talk_delivery_token: str | None = None,
@@ -930,8 +811,7 @@ def _room_for_destination(
     A bare ``talk`` leg reads ``talk_delivery_token`` first because
     `talk_channel_for_task` does: that column is rung 0 there, absolutely, and
     is the one thing that knows about a Talk room the registry may never have
-    heard of (the legacy thread-match branch in `transport/email/inbound.py`
-    copies one onto the task). Resolving the notification ladder here instead
+    heard of. Resolving the notification ladder here instead
     would name a different room from the one the Talk post lands in.
     """
     from .. import db
@@ -982,30 +862,26 @@ def _room_for_destination(
     )
 
 
-def private_phone_room(
+def private_surface_room(
     conn, surface: str, user_id: str, channel: str | None = None,
 ) -> str | None:
-    """The user's own SMS or WhatsApp room, if one was minted, else None.
+    """The user's own SMS, WhatsApp or email room, if one was minted, else None.
 
-    The room a phone push lands in as a transcript row. Existence, never
+    The room a push lands in as a transcript row. Existence, never
     creation: a push is the system talking, so a miss writes nothing and the
     send goes ahead exactly as before. A room another human reads is refused
     like any other personal delivery. ``channel`` is the planned destination; a
     WhatsApp channel that is not the user's private chat (a group's room) has
     no private transcript to land in. SMS has no such alternative, since its
-    send always resolves the user's own binding.
+    send always resolves the user's own binding, and email's private room is
+    the mail between the user and the bot alone (email on rooms, section 7).
     """
     from .. import db
-    from .sms import sms_conversation_token
-    from .whatsapp import whatsapp_conversation_token
 
-    if surface == "sms":
-        surface_ref = sms_conversation_token(user_id)
-    elif surface == "whatsapp":
-        surface_ref = whatsapp_conversation_token(user_id)
-        if channel is not None and channel != surface_ref:
-            return None
-    else:
+    surface_ref = private_phone_ref(surface, user_id)
+    if surface_ref is None:
+        return None
+    if surface == "whatsapp" and channel is not None and channel != surface_ref:
         return None
     token = db.resolve_room_token(conn, surface, surface_ref)
     if not token or db.get_room(conn, token) is None:
@@ -1013,6 +889,10 @@ def private_phone_room(
     if user_id not in db.list_room_members(conn, token) or db.room_is_shared(conn, token):
         return None
     return token
+
+
+#: The name the phone surfaces knew it by, kept until its callers move.
+private_phone_room = private_surface_room
 
 
 def is_private_phone_room(conn, surface: str, user_id: str, room_token) -> bool:
@@ -1028,25 +908,29 @@ def is_private_phone_room(conn, surface: str, user_id: str, room_token) -> bool:
 
 
 def private_phone_rooms(conn, user_id: str) -> dict[str, str]:
-    """``{room token: surface}`` for ``user_id``'s own SMS and WhatsApp rooms.
+    """``{room token: surface}`` for ``user_id``'s own SMS, WhatsApp and email
+    rooms.
 
     What a reader is told to schedule into such a room by
     (:func:`room_target_descriptor`'s ``phone_surface``). One decision for the
     prompt header, `istota-skill rooms list` and the `talk create` refusal,
-    so they cannot name different targets for the same room. At most two entries.
+    so they cannot name different targets for the same room. At most three
+    entries.
     """
     found: dict[str, str] = {}
     if not user_id:
         return found
-    for surface in ("sms", "whatsapp"):
-        token = private_phone_room(conn, surface, user_id)
+    for surface in ("sms", "whatsapp", "email"):
+        token = private_surface_room(conn, surface, user_id)
         if token:
             found[token] = surface
     return found
 
 
 def private_phone_ref(surface: str, user_id: str) -> str | None:
-    """The ``surface_ref`` of ``user_id``'s own SMS or WhatsApp thread, else None."""
+    """The ``surface_ref`` of ``user_id``'s own SMS, WhatsApp or email thread,
+    else None."""
+    from .email.private_room import email_conversation_token
     from .sms import sms_conversation_token
     from .whatsapp import whatsapp_conversation_token
 
@@ -1056,6 +940,8 @@ def private_phone_ref(surface: str, user_id: str) -> str | None:
         return sms_conversation_token(user_id)
     if surface == "whatsapp":
         return whatsapp_conversation_token(user_id)
+    if surface == "email":
+        return email_conversation_token(user_id)
     return None
 
 
@@ -1068,7 +954,8 @@ class PhoneRoom(NamedTuple):
 
 
 def phone_room(conn, room_token) -> PhoneRoom | None:
-    """The room's SMS or WhatsApp binding, if it has one, else None.
+    """The room's SMS or WhatsApp binding, or its private email binding, if it
+    has one, else None.
 
     Web's read-only test (decided 2026-10-01, widened to groups by ISSUE-585):
     web reads a phone-bound room and may not write into it, so the send route
@@ -1079,7 +966,9 @@ def phone_room(conn, room_token) -> PhoneRoom | None:
 
     Asked of the room, not of a reader, so it answers the same for every
     member. ``group`` is the private-thread test inverted: the binding's ref is
-    not the room creator's own private thread token. SMS has no groups.
+    not the room creator's own private thread token. SMS has no groups. The
+    private email room is read-only for the same reason as a phone thread (a
+    web send would not go by mail); an email thread room is not answered here.
     """
     from .. import db
 
@@ -1094,17 +983,24 @@ def phone_room(conn, room_token) -> PhoneRoom | None:
         return None
     group = None
     for binding in db.list_room_bindings(conn, room.token):
+        private = binding.surface_ref == private_phone_ref(binding.surface, room.user_id)
+        if binding.surface == "email":
+            # Only the private email room: a thread room is bound under its
+            # root Message-ID and keeps its own rules.
+            if private:
+                return PhoneRoom("email", False)
+            continue
         if binding.surface not in db.PHONE_ROOM_SURFACES:
             continue
-        if binding.surface_ref == private_phone_ref(binding.surface, room.user_id):
+        if private:
             return PhoneRoom(binding.surface, False)
         group = PhoneRoom(binding.surface, True)
     return group
 
 
 def phone_transcript_surface(conn, room_token) -> str | None:
-    """``'sms'`` or ``'whatsapp'`` when the room is a private phone thread's
-    transcript, else None.
+    """``'sms'``, ``'whatsapp'`` or ``'email'`` when the room is a private
+    thread's transcript, else None.
 
     The narrower half of :func:`phone_room`: a private thread has one reader
     and its parked questions are answered by text. A WhatsApp group room is

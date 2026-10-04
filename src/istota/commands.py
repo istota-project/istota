@@ -3052,16 +3052,10 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
     the original attempt, so it runs the brain that attempt ran even if the room
     has since been pointed at another one.
 
-    ``withheld_from_room`` is copied for the same reason (ISSUE-255), and it is
-    load-bearing here rather than tidy: the retry inherits `conversation_token`,
-    so without it a withheld exchange re-enters every reader that column keys —
-    the room's history fallback, its memory namespace, its sleep cycle. A bare
-    ``!retry`` typed in the origin room can reach such a task, since
-    ``_resolve_retry_target`` picks the newest failed task for the token.
-
     ``guest_participant_id`` and ``audience`` go with it (multiplayer D2/D3):
     the prompt is a guest's fenced words, and without the guest a retry would
-    run them as the host's own turn, at the host's grants.
+    run them as the host's own turn, at the host's grants. ``host_absent`` too,
+    so a retried pass-on still passes on rather than replying.
     """
     return db.create_task(
         conn,
@@ -3071,9 +3065,9 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
         conversation_token=original.conversation_token,
         parent_task_id=original.id,
         is_group_chat=original.is_group_chat,
-        withheld_from_room=original.withheld_from_room,
         guest_participant_id=original.guest_participant_id,
         audience=original.audience,
+        host_absent=original.host_absent,
         output_target=original.output_target,
         talk_delivery_token=original.talk_delivery_token,
         model=original.model,

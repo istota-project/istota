@@ -340,7 +340,7 @@ class TestLayerARegressionGuard:
         later message in that thread is still a new decision."""
         db.mark_email_processed(
             conn, email_id="1", sender_email=UNKNOWN,
-            subject="Invite", user_id="alice", routing_method="thread_match",
+            subject="Invite", user_id="alice", routing_method="thread_room",
         )
         db.record_sent_email(
             conn, user_id="alice", message_id="<sent-1@example.com>",
@@ -348,7 +348,7 @@ class TestLayerARegressionGuard:
         )
         db.mark_email_processed(
             conn, email_id="2", sender_email=UNKNOWN,
-            subject="Re: Invite", user_id="alice", routing_method="thread_match",
+            subject="Re: Invite", user_id="alice", routing_method="thread_room",
         )
         config = _config(tmp_path, floor="untrusted")
         assert recipients_require_hold(

@@ -268,7 +268,8 @@ def request_shutdown() -> None:
     global _shutdown_requested
     _shutdown_requested = True
 
-# Pattern to detect confirmation requests in Claude's output
+# Pattern to detect confirmation requests in Claude's output. Matched only
+# against the final paragraph, through `asks_for_confirmation`.
 CONFIRMATION_PATTERN = re.compile(
     r'(?:'
     r'I need your confirmation|'
@@ -281,6 +282,52 @@ CONFIRMATION_PATTERN = re.compile(
     r')',
     re.IGNORECASE
 )
+
+_FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+_INLINE_CODE_RE = re.compile(r"(`+)[^`]*?\1")
+
+
+def final_paragraph(text: str) -> str:
+    """The last paragraph of ``text`` that is the model's own prose.
+
+    Fenced blocks and ``>`` quoted lines are dropped, each acting as a
+    paragraph break, so neither a quoted message nor a code sample can be the
+    final paragraph. An unclosed fence runs to the end.
+    """
+    kept: list[str] = []
+    fence: str | None = None
+    for line in (text or "").splitlines():
+        opener = _FENCE_OPEN_RE.match(line)
+        if fence is not None:
+            if (opener and opener.group(1)[0] == fence[0]
+                    and len(opener.group(1)) >= len(fence)
+                    and not line.strip().strip(fence[0])):
+                fence = None
+            kept.append("")
+            continue
+        if opener:
+            fence = opener.group(1)
+            kept.append("")
+            continue
+        if line.lstrip().startswith(">"):
+            kept.append("")
+            continue
+        kept.append(line)
+    paragraphs = [p for p in re.split(r"\n[ \t]*\n", "\n".join(kept)) if p.strip()]
+    return paragraphs[-1].strip() if paragraphs else ""
+
+
+def asks_for_confirmation(result: str) -> bool:
+    """Whether an answer ends by asking the user to approve something.
+
+    Only the final paragraph counts, with inline code removed: an answer that
+    explains the confirmation card, or quotes "Please confirm" from somewhere,
+    is not itself a question (#625, a web answer about confirmations that was
+    parked as one).
+    """
+    tail = _INLINE_CODE_RE.sub(" ", final_paragraph(result))
+    return CONFIRMATION_PATTERN.search(tail) is not None
+
 
 _POLICY_REFUSAL_KEYWORDS = ("safety", "policy", "content", "refused", "harm", "blocked")
 
@@ -2077,19 +2124,14 @@ def _talk_target_for_delivery(config: Config, task: db.Task) -> str | None:
 def _deliver_deferred_email_output(
     config: Config, task: db.Task, user_temp_dir: Path,
 ) -> None:
-    """Deliver or clean up deferred email output files not handled by the normal path.
+    """Clean up a deferred email output file the normal path will not send.
 
     The normal email delivery path (post_result_to_email via `post_email` flag)
-    handles tasks whose output_target includes an "email" leg. This
-    function handles two gap cases:
-
-    1. source_type="email" but output_target doesn't include email (e.g. an
-       emissary reply routed to Talk) — deliver via post_result_to_email,
-       which will find the processed_email record and reply correctly.
-    2. Non-email source (e.g. Talk user who asked the agent to email someone)
-       where the agent used `email output` instead of `email send` — warn and
-       delete, because there's no processed_email record and the scheduler
-       would send to the wrong recipient.
+    handles tasks whose output_target includes an "email" leg, which every
+    email task admitted to a room has. Anything else (a Talk user who asked
+    the agent to email someone, where it used `email output` instead of
+    `email send`) has no message to reply to, so the file is warned about and
+    deleted rather than sent to the wrong recipient.
     """
     from .transport import parse_output_target
     if plan_has_surface(parse_output_target(task.output_target), "email"):
@@ -2099,29 +2141,13 @@ def _deliver_deferred_email_output(
     if not path.exists():
         return
 
-    if task.source_type == "email":
-        # Email-sourced task with non-email output_target (e.g. emissary reply
-        # with output_target="talk"). The processed_email record exists, so
-        # post_result_to_email can reply correctly.
-        logger.info(
-            "Delivering deferred email output for task %d (source=%s, output_target=%s)",
-            task.id, task.source_type, task.output_target,
-        )
-        email_ok = asyncio.run(post_result_to_email(config, task, ""))
-        if not email_ok:
-            logger.error(
-                "Failed to deliver deferred email output for task %d", task.id,
-            )
-    else:
-        # Non-email source — agent used `email output` instead of `email send`.
-        # No processed_email record, so we can't deliver to the right recipient.
-        logger.warning(
-            "Orphaned deferred email output file for task %d (source=%s): "
-            "Claude used `email output` instead of `email send`. "
-            "The email was NOT delivered. Removing file.",
-            task.id, task.source_type,
-        )
-        path.unlink(missing_ok=True)
+    logger.warning(
+        "Orphaned deferred email output file for task %d (source=%s): "
+        "Claude used `email output` instead of `email send`. "
+        "The email was NOT delivered. Removing file.",
+        task.id, task.source_type,
+    )
+    path.unlink(missing_ok=True)
 
 
 def _purge_obsolete_skill_jobs(conn, skill_index: dict) -> None:
@@ -2802,39 +2828,23 @@ def _whatsapp_confirmation_body(config: Config, result: str, task_id: int) -> st
     return f"{question}{tail}"
 
 
-def _email_task_from_the_user(config: Config, task: db.Task) -> bool:
-    """Whether this email task's own sender is the user it was routed to.
+def _in_private_email_room(config: Config, task: db.Task) -> bool:
+    """Whether this email task is a turn in the user's private email room.
 
-    The fact the two ISSUE-255 failure paths need and that `withheld_from_room`
-    can only carry half of. Recovered from `processed_emails`, which the poller
-    writes for every message it ingests, and judged by
-    `email_support.sender_claims_to_be_user` so this cannot drift from the
-    poller's own answer.
-
-    A *claim*, exactly as at ingest: SMTP `From:` is unauthenticated. That is the
-    right strength here — the consequence is an error notice the user may not
-    have needed, not a trust decision.
-
-    Never raises and never blocks a delivery: a task whose ledger row has been
-    pruned, or a lookup that fails, answers False and leaves the pre-existing
-    behaviour in place.
+    That is the user mailing the bot, waiting for this answer with no room leg
+    to carry it (ISSUE-255, ISSUE-275): the two failure paths below tell them
+    when it fails. A thread room's answer is a reply-all to correspondents, who
+    are not the ones to tell. Never raises and never blocks a delivery.
     """
-    if task.source_type != "email":
+    if task.source_type != "email" or not task.conversation_token:
         return False
-    # Imported here, as every other `email_support` use in this module is: the
-    # module pulls in the email skill, which is an optional extra.
-    from istota.mail.support import sender_claims_to_be_user  # noqa: PLC0415
+    from .transport.routing import phone_transcript_surface
 
     try:
         with db.get_db(config.db_path) as conn:
-            record = db.get_email_for_task(conn, task.id)
-        if record is None:
-            return False
-        return sender_claims_to_be_user(config, task.user_id, record.sender_email)
+            return phone_transcript_surface(conn, task.conversation_token) == "email"
     except Exception as e:  # pragma: no cover - never fail a delivery over this
-        logger.warning(
-            "could not resolve the sender of email task %s: %s", task.id, e,
-        )
+        logger.warning("could not resolve the room of email task %s: %s", task.id, e)
         return False
 
 
@@ -3259,18 +3269,10 @@ def process_one_task(
         _talk_dest.channel if _talk_dest else _talk_target_for_delivery(config, task)
     )
     plan_talk = _talk_dest is not None
-    # The other half of "was the user themselves waiting for this answer"
-    # (ISSUE-275). `tasks.withheld_from_room` records it for a self-addressed
-    # thread reply and cannot record it for self-addressed first contact — the
-    # column means "there is a room and this exchange is deliberately not part of
-    # it", and first contact resolves no room — so this recovers it from the
-    # ledger row the poller already writes. Reconstruction rather than a new
-    # column, and the same reconstruction `confirmations._restore_transcript_
-    # mirror` makes: `sender_claims_to_be_user` is the single definition both
-    # spellings share, which is why it lives in `email_support` rather than in
-    # the poller. Read once here so the two failure paths below cannot answer
-    # differently about the same task.
-    email_from_the_user = _email_task_from_the_user(config, task)
+    # Whether the user themselves was waiting for this answer by mail
+    # (ISSUE-255, ISSUE-275). Read once here so the two failure paths below
+    # cannot answer differently about the same task.
+    email_from_the_user = _in_private_email_room(config, task)
     # A mirror Talk leg (room fan-out from a non-Talk origin, e.g. a web-origin
     # task mirrored to its bound Talk room) carries the confirmation prompt only
     # when the task's own origin is *not* a room surface — a web-origin
@@ -3447,17 +3449,27 @@ def process_one_task(
         from .transport.whatsapp.outbound import is_group_task
         _whatsapp_group_turn = is_group_task(config, task)
     # An email thread room's own task (multiplayer D6): its only leg is the
-    # reply-all, which must never carry the question, and the room is shared,
-    # so the question parks and goes to the principal privately, with a
-    # heads-up mail to their own address (D4 item 3, ISSUE-608).
+    # reply-all, which must never carry the question, so the question parks
+    # and goes to the principal's private room (ISSUE-608), never by mail.
+    # Keyed on the room being a thread, not on `room_is_shared`: a thread with
+    # one correspondent and the host as sole member reads unshared, and its
+    # reply-all still reaches the correspondent.
     _own_email_thread_room = False
+    _thread_token = None
     if task.source_type == "email" and not dry_run:
         from .transport.email.threads import thread_room_for_task
         with db.get_db(config.db_path) as conn:
             _thread_token = thread_room_for_task(conn, task)
-            _own_email_thread_room = bool(
-                _thread_token and db.room_is_shared(conn, _thread_token)
-            )
+            _own_email_thread_room = _thread_token is not None
+    # A thread-room turn whose host was not on the message, with nothing to
+    # reply (email on rooms, section 2): `NO_ACTION:` passes the message on to
+    # the host privately and sends nothing. The note is built from the stored
+    # turn, never from the model's text.
+    _pass_on = bool(
+        success and task.host_absent and _thread_token
+        and task.guest_participant_id is None
+        and not _strip_action_prefix(result)[0]
+    )
     _confirmable_surface = (
         (plan_talk and talk_token and not plan_ntfy)
         or _own_origin_web
@@ -3472,8 +3484,9 @@ def process_one_task(
     is_confirmation_request = bool(
         success
         and _confirmable_surface
+        and not _pass_on
         and not is_no_final_answer(result)
-        and CONFIRMATION_PATTERN.search(result)
+        and asks_for_confirmation(result)
     )
 
     # The room was switched off while this task ran (multiplayer D12): its
@@ -3549,6 +3562,10 @@ def process_one_task(
     from istota.rooms import private_replies
     from istota.relay.requests import text_hash
     private_park: "private_replies.PrivateDelivery | None" = None
+    # The pass-on note a host-absent thread turn wrote instead of a reply,
+    # pushed to the host's private room at the tail.
+    pass_on_note: "private_replies.PrivateDelivery | None" = None
+    pass_on_body = ""
     # The shared room was told only that a private note went out, because its
     # principal has no private room: that post answers nothing.
     shared_room_notice = False
@@ -3703,11 +3720,20 @@ def process_one_task(
                 # stream, which reaches a client that happens to be watching and
                 # nobody else, so there this is the first push the user gets on
                 # any surface they are not currently looking at.
+                # A guest proposal's question is its preview, and a push
+                # carries the stored text: fixed words there, as a relay
+                # hold's are, and the preview only in the authenticated bell.
                 held_notification = confirmation_source.write(
                     conn, task.user_id, task_id=task_id,
-                    title=confirmations.describe_prompt(result),
-                    body=confirmation_source.body_for(result),
+                    title=(confirmation_source.ROOM_POST_TITLE if guest_route is not None
+                           else confirmations.describe_prompt(result)),
+                    body=(confirmation_source.ROOM_POST_BODY if guest_route is not None
+                          else confirmation_source.body_for(result)),
                     room_token=transcript_token,
+                    # A private park with no private room shows the question
+                    # in no room, so its push may not be confined to ntfy and
+                    # email: the bell row is the only place it is.
+                    in_room=private_park is None or private_park.dest is not None,
                 )
                 if held_notification is not None:
                     notification_reference_id = (
@@ -3837,14 +3863,7 @@ def process_one_task(
                             _index_conv(conn, task.user_id, task_id, task.prompt, result,
                                         speaker=_speaker)
                         # Also index under channel namespace if in a channel.
-                        # Skipped for an exchange deliberately kept out of that
-                        # room (ISSUE-255): `_recall_memories` serves this
-                        # namespace back to every later task there, so indexing
-                        # it would put the withheld turn in front of the model
-                        # even where the transcript is clean. The per-user index
-                        # above is untouched — the exchange is the user's own and
-                        # belongs in their own recall.
-                        if (task.conversation_token and not task.withheld_from_room
+                        if (task.conversation_token
                                 and task.guest_participant_id is None):
                             channel_uid = f"channel:{task.conversation_token}"
                             _index_conv(conn, channel_uid, task_id, task.prompt, result,
@@ -3852,7 +3871,14 @@ def process_one_task(
                     except Exception as e:
                         logger.debug("Memory search indexing failed for task %s: %s", task_id, e)
 
-                if task.heartbeat_silent:
+                if _pass_on:
+                    pass_on_note, pass_on_body = private_replies.deliver_pass_on(
+                        conn, config, task,
+                    )
+                    db.log_task(conn, task_id, "info",
+                                "Nothing to reply, and the host was not on the "
+                                "message: passed on to them privately")
+                elif task.heartbeat_silent:
                     # Silent scheduled job — ACTION/NO_ACTION logic
                     should_post, result_to_post = _strip_action_prefix(result)
                     if should_post:
@@ -4167,33 +4193,21 @@ def process_one_task(
                         f"🐙 {friendly_error}", task,
                     )
                     is_failure_notify = True
-                elif task.withheld_from_room or email_from_the_user:
+                elif email_from_the_user:
                     # An email-only plan with no error channel at all (ISSUE-255,
-                    # second arm added by ISSUE-275). The rule beside this branch
-                    # — never email errors — assumes a room leg exists to carry
-                    # them, and here there is none: the user mails the bot, the
-                    # task fails, and nothing tells them anywhere they look.
-                    # Routed by `alert` purpose so it reaches whichever surface
-                    # the user actually reads (ISSUE-241), and buffered for
-                    # delivery after this transaction closes, since an alert
-                    # routed to `web` opens a second connection to this database.
+                    # ISSUE-275). The rule beside this branch — never email
+                    # errors — assumes a room leg exists to carry them, and here
+                    # there is none: the user mails the bot, the task fails, and
+                    # nothing tells them anywhere they look. Routed by `alert`
+                    # purpose so it reaches whichever surface the user actually
+                    # reads (ISSUE-241), and buffered for delivery after this
+                    # transaction closes, since an alert routed to `web` opens a
+                    # second connection to this database.
                     #
-                    # Two spellings of one question — "was the user themselves
-                    # waiting for this answer" — because the poller can only
-                    # record it on the task in one of the two cases.
-                    # `withheld_from_room` covers a self-addressed *thread*
-                    # reply. It reads False for self-addressed *first contact*,
-                    # correctly and by its own rule (no room was resolved, so
-                    # there is nothing for the exchange to be absent from), which
-                    # left the commonest case of all — the user mailing their own
-                    # bot — in exactly the silence this branch exists to end.
-                    #
-                    # Still scoped to that question rather than to "the plan is
-                    # email-only", which is the wider gate this deliberately does
-                    # not take: an external correspondent's reply under
-                    # `email_reply_routing = "thread"` has the identical plan and
-                    # the identical absent channel, and alerting on it is noise —
-                    # a stranger is waiting for that answer, not the user. See
+                    # Scoped to the user's private email room rather than to
+                    # "the plan is email-only": a thread room's correspondent
+                    # has the identical plan, and alerting on it is noise — a
+                    # stranger is waiting for that answer, not the user. See
                     # `tests/test_email_self_reply_residue.py::TestAPermanent
                     # FailureReachesTheUser`, which pins both directions.
                     failure_alert = _with_partial_work(
@@ -4536,6 +4550,11 @@ def process_one_task(
             except Exception as e:
                 logger.debug("Failed to store talk_response_id for task %d: %s", task_id, e)
 
+    if pass_on_note is not None:
+        run_coro(private_replies.send_private(
+            config, pass_on_note, body=pass_on_body,
+        ))
+
     # Store bot's response message ID for reply tracking. Not the shared-room
     # notice's: a reply to it in the room must not reach the question.
     if response_msg_id and not is_failure_notify and not shared_room_notice:
@@ -4619,30 +4638,13 @@ def process_one_task(
             with db.get_db(config.db_path) as conn:
                 db.update_task_status(conn, task_id, "failed", error="Email delivery failed", actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "error", "Task completed but email delivery failed")
-            if (task.withheld_from_room or email_from_the_user) \
-                    and not (plan_talk and talk_token and response_msg_id):
-                # The answer exists and nothing carries it (ISSUE-255, second arm
-                # added by ISSUE-275 — see the permanent-failure branch above for
-                # why `withheld_from_room` alone stopped covering it). With a
-                # room leg that *landed*, the assistant row is stored and the
-                # answer is in front of the user, so a failed send costs the mail
-                # copy alone; with an email-only plan `tasks.result` is the only
-                # copy left, and nothing puts it in front of the user. Carry the
-                # body itself rather than a pointer — the point is that the
-                # answer survives the failure, not that its loss is announced.
-                #
-                # The guard is three terms and each removes a different way of
-                # believing an answer landed when it did not. `plan_talk` alone
-                # is not enough — a plan can carry a Talk leg whose channel
-                # resolves to None, so `talk_token` is the pair the
-                # permanent-failure branch also keys on. And the pair alone is
-                # not enough either (ISSUE-404): `TalkTransport.deliver` returns
-                # None on a `ReadTimeout` exactly as it does on a room that
-                # resolved to nothing, so `response_msg_id` is what makes this a
-                # question about the post rather than about the plan. With both
-                # legs down the pair suppressed the last notice there was, and
-                # an emailed request whose answer reached neither surface was
-                # silent on both.
+            if email_from_the_user:
+                # The answer exists and nothing carries it (ISSUE-255,
+                # ISSUE-275): a private email room has no other leg, so
+                # `tasks.result` is the only copy left and nothing puts it in
+                # front of the user. Carry the body itself rather than a pointer
+                # — the point is that the answer survives the failure, not that
+                # its loss is announced.
                 # Unwrapped for the same reason the room transcript unwraps it
                 # (ISSUE-247): an email task's `result` may *be* the
                 # `{"subject","body","format"}` envelope the send path parses, and
@@ -7489,14 +7491,12 @@ def _confirmation_notice_token(task_info: dict, conn=None) -> str | None:
     """The Talk room an expiry notice may fall back to, or None.
 
     The old code passed ``conversation_token`` verbatim, which for an email gate
-    is the synthetic `compute_thread_id` hash — not a room token at all, so the
-    notice posted into nothing and the user was never told their mail had been
-    dropped (ISSUE-241). Same shape as `_talk_target_for_delivery`: a synthetic
-    thread id or a stream-surface token is not a Talk channel. Returning None
-    lets the routing ladder (alerts_channel → briefing → DM) resolve one.
+    was a thread hash — not a room token at all, so the notice posted into
+    nothing and the user was never told their mail had been dropped
+    (ISSUE-241). An email task's token is a room or nothing, and a
+    stream-surface token is not a Talk channel either. Returning None lets the
+    routing ladder (alerts_channel → briefing → DM) resolve one.
     """
-    from istota.mail.support import is_synthetic_email_thread_token
-
     token = task_info.get("conversation_token")
     if not token:
         return None
@@ -7506,7 +7506,8 @@ def _confirmation_notice_token(task_info: dict, conn=None) -> str | None:
             return binding.surface_ref
     if db.is_canonical_room_token(token) or token.startswith(("web-", "repl-")):
         return None
-    if is_synthetic_email_thread_token(token):
+    if task_info.get("source_type") == "email":
+        # Not a room, so a thread hash from before email on rooms.
         return None
     return token
 

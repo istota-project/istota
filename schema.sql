@@ -92,6 +92,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- the bell when they have none. Such a park neither holds the shared
     -- room's channel gate nor is cancelled by the next message there.
     private_park INTEGER NOT NULL DEFAULT 0,
+    -- 1 for an email thread room's mail from someone other than the host,
+    -- with the host on neither To nor Cc. A `NO_ACTION:` answer then becomes
+    -- a pass-on note in the host's private room instead of a reply.
+    host_absent INTEGER NOT NULL DEFAULT 0,
 
     -- Silent mode (for scheduled jobs with silent_unless_action)
     heartbeat_silent INTEGER DEFAULT 0,  -- Whether to suppress output on no-action
@@ -278,6 +282,7 @@ CREATE TABLE IF NOT EXISTS processed_emails (
     processed_at TEXT DEFAULT (datetime('now')),
     recipients TEXT,  -- the message's To + Cc, JSON; an email thread room replies to the latest
     host_asked INTEGER NOT NULL DEFAULT 0,  -- the host's authenticated, addressed question on a thread room (ISSUE-607)
+    in_reply_to TEXT,  -- RFC 5322 In-Reply-To, so approving a held reply finds its thread
     UNIQUE (uidvalidity, email_id),
     FOREIGN KEY (task_id) REFERENCES tasks(id)
 );
@@ -886,7 +891,6 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     routing TEXT NOT NULL DEFAULT '{}',                  -- JSON object: purpose -> output_target descriptor
     default_destination TEXT NOT NULL DEFAULT 'talk',    -- fallback delivery descriptor
     default_room TEXT NOT NULL DEFAULT '',               -- canonical room token a destination naming no room lands in ('' = the heuristic answers); one token for both surfaces
-    email_reply_routing TEXT NOT NULL DEFAULT 'origin+thread', -- email-reply mirror policy: origin+thread | origin | thread
     outbound_approval TEXT NOT NULL DEFAULT '',          -- outbound email approval: '' = unset (follow [email] outbound_approval_floor) | off | untrusted | all
     external_turn_display TEXT NOT NULL DEFAULT 'collapsed', -- external-origin turn body in web chat: full | collapsed | hidden (the turn itself always renders)
     relay_delivery TEXT NOT NULL DEFAULT '',             -- where relay questions from other users reach this user: '' (asker's choice) | room | whatsapp | sms

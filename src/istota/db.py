@@ -121,12 +121,6 @@ class Task:
     #: Canonical `messages.id` of the cited parent. A *different namespace*
     #: from `reply_to_talk_id` — never assign one to the other.
     reply_to_message_id: int | None = None
-    #: This exchange is deliberately not part of the room `conversation_token`
-    #: names (ISSUE-255) — a self-addressed thread reply, which keeps the room as
-    #: its token for context but is never written back into it. Read by the
-    #: history fallback, the channel memory namespace, the channel sleep cycle,
-    #: and the two failure paths that would otherwise have no channel at all.
-    withheld_from_room: bool = False
     #: The guest whose turn this task answers, as a `room_participants.id`
     #: (multiplayer D2). Set means emissary mode: the task runs as the room's
     #: host, at room-safe reach, with no outbound action beyond the reply.
@@ -138,6 +132,10 @@ class Task:
     #: replies to or quotes a message tagged with that room, in the private
     #: room it was written in. Canonical token; None for an unlinked turn.
     about_room_token: str | None = None
+    #: An email thread room's turn from someone other than the host, with the
+    #: host on neither To nor Cc. A `NO_ACTION:` answer then becomes a pass-on
+    #: note to the host instead of a reply.
+    host_absent: bool = False
     heartbeat_silent: bool = False
     skip_log_channel: bool = False
     scheduled_job_id: int | None = None
@@ -211,7 +209,7 @@ class ProcessedEmail:
     user_id: str | None
     task_id: int | None
     processed_at: str
-    routing_method: str | None = None  # plus_address, sender_match, thread_match, discarded, quiet, read_error, throttled
+    routing_method: str | None = None  # plus_address, sender_match, thread_room, discarded, quiet, read_error, throttled
     # The namespace `email_id` counts in; the two together are the key
     # (ISSUE-250). 0 means the server never reported a UIDVALIDITY.
     uidvalidity: int = 0
@@ -524,6 +522,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _add_columns(conn, "processed_emails", {
         "host_asked": "INTEGER NOT NULL DEFAULT 0",
     })
+    # In-Reply-To, which `threads.admit_approved_mail` rebuilds the held mail
+    # from: a reply naming its parent there alone otherwise finds no thread.
+    _add_columns(conn, "processed_emails", {"in_reply_to": "TEXT"})
 
     # WhatsApp bindings: the adapter split (whatsapp-baileys-adapter spec).
     # `jid` is the Baileys-native identity and `provider` says which adapter
@@ -623,6 +624,13 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass  # Column already dropped or never existed.
 
+    # User profiles: drop the email-reply mirror policy. A reply to mail the
+    # bot sent is a turn in the thread's own room, so nothing routes on it.
+    try:
+        conn.execute("ALTER TABLE user_profiles DROP COLUMN email_reply_routing")
+    except sqlite3.OperationalError:
+        pass  # Column already dropped or never existed.
+
     # Every column below swallows OperationalError beyond the two `add_columns`
     # handles itself, which covers the third expected case: a *lock*. There the
     # degradation is asymmetric but safe — reads go through `_row_get` and fall
@@ -647,8 +655,6 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # answers instead. `_migrate_default_room` backfills existing rows with
         # whatever that heuristic answers today, so nothing moves on upgrade.
         "default_room": "TEXT NOT NULL DEFAULT ''",
-        # Email-reply mirror policy: origin+thread (default) | origin | thread.
-        "email_reply_routing": "TEXT NOT NULL DEFAULT 'origin+thread'",
         # Quiet email senders: fnmatch patterns whose mail is filed silently
         # (no task, no session). Mirrors trusted_email_senders. JSON array.
         "quiet_email_senders": "TEXT NOT NULL DEFAULT '[]'",
@@ -1166,6 +1172,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_room_group(conn)
     # ISSUE-612. Nothing to backfill: no earlier row recorded its mail.
     _add_columns(conn, "messages", {"outgoing_mail": "TEXT"})
+    # Email on rooms, stage 2. Nothing to backfill: no earlier task was asked
+    # whether its host was on the message.
+    _add_columns(conn, "tasks", {"host_absent": "INTEGER NOT NULL DEFAULT 0"})
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
@@ -1411,10 +1420,6 @@ def create_task(
     reply_to_talk_id: int | None = None,
     reply_to_content: str | None = None,
     reply_to_message_id: int | None = None,
-    # This exchange is deliberately not part of the room `conversation_token`
-    # names (ISSUE-255). Written by the one caller that knows — `record_inbound`,
-    # from the same answer that turned off the transcript mirror.
-    withheld_from_room: bool = False,
     # Multiplayer D2/D3: the guest this task answers (emissary mode), and who
     # reads the room. Written only by `record_inbound`.
     guest_participant_id: int | None = None,
@@ -1422,6 +1427,9 @@ def create_task(
     # The shared room a reply to a tagged message is linked to (ISSUE-608).
     # Written only by `record_inbound`, from the parent row.
     about_room_token: str | None = None,
+    # An email thread room's turn the host is not on (`Task.host_absent`).
+    # Written only by `record_inbound`, from the email poller's intake facts.
+    host_absent: bool = False,
     heartbeat_silent: bool = False,
     skip_log_channel: bool = False,
     scheduled_job_id: int | None = None,
@@ -1474,8 +1482,8 @@ def create_task(
             prompt, command, user_id, source_type, conversation_token,
             parent_task_id, is_group_chat, attachments, priority, scheduled_for,
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
-            reply_to_message_id, withheld_from_room, guest_participant_id, audience,
-            about_room_token,
+            reply_to_message_id, guest_participant_id, audience,
+            about_room_token, host_absent,
             heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
             queue, model, effort, brain, model_namespace,
             talk_delivery_token, skill, skill_args
@@ -1498,10 +1506,10 @@ def create_task(
             reply_to_talk_id,
             reply_to_content,
             reply_to_message_id,
-            1 if withheld_from_room else 0,
             guest_participant_id,
             audience,
             about_room_token or None,
+            1 if host_absent else 0,
             1 if heartbeat_silent else 0,
             1 if skip_log_channel else 0,
             scheduled_job_id,
@@ -1533,8 +1541,8 @@ _TASK_COLUMNS = (
     "result, actions_taken, execution_trace, error, confirmation_prompt, "
     "priority, attempt_count, max_attempts, created_at, scheduled_for, "
     "output_target, talk_message_id, talk_response_id, reply_to_talk_id, "
-    "reply_to_content, reply_to_message_id, withheld_from_room, "
-    "guest_participant_id, audience, about_room_token, heartbeat_silent, skip_log_channel, scheduled_job_id, "
+    "reply_to_content, reply_to_message_id, "
+    "guest_participant_id, audience, about_room_token, host_absent, heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
     "brain, model_namespace, talk_delivery_token, skill, skill_args, whatsapp_confirmation_request_id"
 )
@@ -1576,10 +1584,10 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         reply_to_talk_id=row["reply_to_talk_id"],
         reply_to_content=row["reply_to_content"],
         reply_to_message_id=row["reply_to_message_id"],
-        withheld_from_room=bool(row["withheld_from_room"]),
         guest_participant_id=row["guest_participant_id"],
         audience=row["audience"],
         about_room_token=row["about_room_token"],
+        host_absent=bool(row["host_absent"]),
         heartbeat_silent=bool(row["heartbeat_silent"]),
         skip_log_channel=bool(row["skip_log_channel"]),
         scheduled_job_id=row["scheduled_job_id"],
@@ -2911,7 +2919,8 @@ def _conversation_history_from_tasks(
     """Legacy path: reconstruct history from completed `tasks` rows."""
     # `withheld_from_room` excludes an exchange that keeps this token for context
     # but is deliberately not part of the room (ISSUE-255): a self-addressed
-    # thread reply. The `messages` path needs no equivalent — a withheld turn was
+    # thread reply. Nothing sets the column since email on rooms gave such mail
+    # a room of its own; the filter keeps the rows written before that out. The `messages` path needs no equivalent — a withheld turn was
     # never written there, which is the half ISSUE-254 already closed. This
     # fallback is where the quoted chain was still being charged to every later
     # task in the room, and it is not a rare path: it serves any room with no
@@ -4601,6 +4610,9 @@ class Message:
     author_label: str | None = None
     #: Canonical token of the shared room a private reply is about, or None.
     about_room_token: str | None = None
+    #: The row's idempotency key, which names a privately parked task's
+    #: question (`private_replies.PARK_PREFIXES`).
+    delivery_reference: str | None = None
 
 
 def _row_to_room(row: sqlite3.Row) -> Room:
@@ -4648,6 +4660,9 @@ def _row_to_message(row: sqlite3.Row) -> Message:
         author_user_id=row["author_user_id"] if "author_user_id" in keys else None,
         author_label=row["author_label"] if "author_label" in keys else None,
         about_room_token=row["about_room_token"] if "about_room_token" in keys else None,
+        delivery_reference=(
+            row["delivery_reference"] if "delivery_reference" in keys else None
+        ),
         id=row["id"],
         room_token=row["room_token"],
         role=row["role"],
@@ -5669,12 +5684,15 @@ def phone_bindings_for_member(
     `talk_refs_for_member`'s shape and reason: one query for the polled room
     listing rather than a lookup per room. A WhatsApp group room is in it too,
     since its binding is a phone surface's; the listing badges both and asks
-    the private-thread question only of these.
+    the private-thread question only of these. So is an email binding shaped
+    like a private email room's ref (`transport.email.private_room`), which
+    the listing then checks exactly; a thread room's ref is a Message-ID.
     """
     rows = conn.execute(
         "SELECT b.* FROM room_bindings b "
         "JOIN room_members m ON m.room_token = b.room_token "
-        "WHERE b.surface IN (?, ?) AND m.user_id = ? ORDER BY b.surface",
+        "WHERE (b.surface IN (?, ?) OR (b.surface = 'email' "
+        "AND b.surface_ref LIKE 'email-%')) AND m.user_id = ? ORDER BY b.surface",
         (*PHONE_ROOM_SURFACES, user_id),
     ).fetchall()
     out: dict[str, RoomBinding] = {}
@@ -5684,12 +5702,19 @@ def phone_bindings_for_member(
 
 
 def room_has_phone_binding(conn: sqlite3.Connection, room_token: str) -> bool:
-    """Whether the room is bound to SMS or WhatsApp at all."""
-    return conn.execute(
+    """Whether the room is bound to SMS or WhatsApp at all, or is a user's
+    private email room: each is a read-only transcript in web."""
+    from istota.transport.email.private_room import is_private_email_ref
+
+    if conn.execute(
         "SELECT 1 FROM room_bindings WHERE room_token = ? AND surface IN (?, ?) "
         "LIMIT 1",
         (room_token, *PHONE_ROOM_SURFACES),
-    ).fetchone() is not None
+    ).fetchone() is not None:
+        return True
+    binding = get_room_binding(conn, room_token, "email")
+    room = get_room(conn, room_token) if binding is not None else None
+    return room is not None and is_private_email_ref(binding.surface_ref, room.user_id)
 
 
 
@@ -6716,6 +6741,9 @@ _CROSS_ROOM_COLUMNS = (
     # The mail an assistant row sent into an email thread room (ISSUE-612).
     # Selected in the per-room spine too, so both views show the same card.
     "  m.outgoing_mail AS outgoing_mail, "
+    # A private park's question names its task here; the room stream marks
+    # such a row as a confirmation while that task waits (#624).
+    "  m.delivery_reference AS delivery_reference, "
     # Truncated in SQLite rather than in the dict builder: this fragment also
     # backs the live room-event stream, which is byte-budgeted, and a reply to
     # a long answer would otherwise carry that whole answer a second time.
@@ -7061,6 +7089,7 @@ def _migrate_processed_emails_uidvalidity(conn: sqlite3.Connection) -> None:
                 processed_at TEXT DEFAULT (datetime('now')),
                 recipients TEXT,
                 host_asked INTEGER NOT NULL DEFAULT 0,
+                in_reply_to TEXT,
                 UNIQUE (uidvalidity, email_id),
                 FOREIGN KEY (task_id) REFERENCES tasks(id)
             )
@@ -9096,6 +9125,7 @@ def mark_email_processed(
     uidvalidity: int = 0,
     recipients: str | None = None,
     host_asked: bool = False,
+    in_reply_to: str | None = None,
 ) -> int:
     """Record a processed email, keyed by (uidvalidity, email_id).
 
@@ -9105,11 +9135,11 @@ def mark_email_processed(
     """
     cursor = conn.execute(
         """
-        INSERT INTO processed_emails (uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method, recipients, host_asked)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO processed_emails (uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method, recipients, host_asked, in_reply_to)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
-        (uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method, recipients, int(bool(host_asked))),
+        (uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method, recipients, int(bool(host_asked)), in_reply_to),
     )
     return cursor.fetchone()[0]
 

@@ -17,6 +17,12 @@ origin leg leaves an email-only plan with no error channel at all.
 The guard that matters throughout is an **external correspondent's** reply,
 which keeps every one of these behaviours unchanged — it is the case the room
 mirror exists for.
+
+Email on rooms (stage 3) moved the user's own mail out of the origin room
+altogether: it is a turn in their private email room, so the task no longer
+carries the origin room's token and the column is no longer needed for it.
+The cases below that pinned the column on a self-reply now pin the stronger
+fact, that the origin room's readers never see the exchange.
 """
 
 from unittest.mock import patch
@@ -29,6 +35,8 @@ from istota.scheduler import process_one_task
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email.inbound import poll_emails
 
+from istota.transport.email import email_conversation_token
+
 from .support.rooms import promoted_room
 
 ROOM = "rm_web123"
@@ -36,8 +44,8 @@ USER = "carol"
 USER_ADDR = "carol@test.com"
 EXTERNAL_ADDR = "ext@x.com"
 ORIGIN_MESSAGE_ID = "<origin_out@bot.com>"
-# A synthetic email-thread token: 16 hex chars, the shape `compute_thread_id`
-# produces for a thread that names no room. Spelled from a deliberately small
+# An email-thread token from before email had rooms: 16 hex chars, naming
+# no room. Spelled from a deliberately small
 # alphabet — a random-looking hex blob of this length reads as a credential to
 # the pre-commit secret scan, and the neighbouring ISSUE-254 tests use the same
 # stand-in for the same reason.
@@ -122,6 +130,11 @@ def _poll_reply(config, *, sender, to=("bot@test.com",), body="My answer"):
         return db.get_task(conn, task_ids[0])
 
 
+def _private_room(db_path):
+    with db.get_db(db_path) as conn:
+        return db.resolve_room_token(conn, "email", email_conversation_token(USER))
+
+
 def tmp_deferred_dir(config, task):
     """The user temp dir the deferred handlers read, created on demand."""
     path = config.temp_dir / task.user_id
@@ -149,60 +162,14 @@ def _external_reply(config, db_path):
 
 
 class TestTheDecisionIsRecorded:
-    """One column, written at ingest by the poller that already computed the
-    answer. Everything below is a reader of it."""
+    """The column is no longer written: the user's own mail is a turn in their
+    private email room, so the origin room's readers below never see it."""
 
-    def test_a_self_reply_is_marked_withheld(self, db_path, config):
+    def test_a_self_reply_is_a_turn_in_its_private_room(self, db_path, config):
+        """Stage 3: the inheritance the column compensated for is gone."""
         task = _self_reply(config, db_path)
 
-        assert task.withheld_from_room is True
-        # And the inheritance it exists to compensate for is still in place.
-        assert task.conversation_token == ROOM
-
-    def test_an_external_reply_is_not(self, db_path, config):
-        task = _external_reply(config, db_path)
-
-        assert task.withheld_from_room is False
-
-    def test_a_self_addressed_first_contact_is_not(self, db_path, config):
-        """Still False after ISSUE-275 widened the suppression to this case, and
-        the reason is the column's own rule rather than an exemption.
-
-        `withheld_from_room` means "there is a room, and this exchange is
-        deliberately not part of it". A first-contact mail's token is a thread
-        hash naming no room, and the plan now names none either — so nothing was
-        resolved for the exchange to be absent from, and the answer is False.
-        The same rule already covered a genuine email-only thread: flagging it
-        would make every consumer keyed on the token drop the thread's own prior
-        turns from the only history it has.
-
-        The mirror is gone all the same; `test_email_self_reply_mirror.py`
-        asserts that. This column is not what removes it."""
-        config.users[USER].alerts_channel = ROOM
-        with db.get_db(db_path) as conn:
-            _origin_room(conn)
-        # No `sent_emails` row: nothing to thread against.
-        task = _poll_reply(config, sender=USER_ADDR)
-
-        assert task.output_target is None
-        assert task.withheld_from_room is False
-
-    def test_a_gated_turn_is_not_marked_withheld(self, db_path, config):
-        """The two flags are different questions and must not collapse. The
-        untrusted-sender gate withholds a turn that *does* belong in the room,
-        and `confirmations.approve` publishes it once answered — so a gated
-        external turn is not withheld in this column's sense, and the room's
-        context must keep counting it once it lands."""
-        config.email.confirm_sender_match = "gate"
-        with db.get_db(db_path) as conn:
-            _origin_room(conn)
-            _sent_from_the_room(conn)
-        task = _poll_reply(
-            config, sender=EXTERNAL_ADDR, to=("bot+carol@test.com",),
-        )
-
-        assert task.status == "pending_confirmation"
-        assert task.withheld_from_room is False
+        assert task.conversation_token == _private_room(db_path)
 
 
 # ---------------------------------------------------------------------------
@@ -238,14 +205,6 @@ class TestTheHistoryFallback:
             assert db._messages_caught_up(conn, ROOM) is False
         assert self._history(db_path) == []
 
-    def test_an_external_reply_still_is(self, db_path, config):
-        """The guard. The room is where the user learns this arrived, so its
-        history must keep the turn."""
-        task = _external_reply(config, db_path)
-        self._completed(config, db_path, task)
-
-        assert [h.source_type for h in self._history(db_path)] == ["email"]
-
     def test_the_re_surfacing_reader_drops_it_too(self, db_path, config):
         """`get_previous_tasks` is the wider of the two history leaks, not the
         narrower. `executor._build_db_context` runs it on **every** task in the
@@ -257,13 +216,6 @@ class TestTheHistoryFallback:
 
         with db.get_db(db_path) as conn:
             assert db.get_previous_tasks(conn, ROOM) == []
-
-    def test_the_re_surfacing_reader_keeps_an_external_reply(self, db_path, config):
-        task = _external_reply(config, db_path)
-        self._completed(config, db_path, task)
-
-        with db.get_db(db_path) as conn:
-            assert [t.id for t in db.get_previous_tasks(conn, ROOM)] == [task.id]
 
     def test_a_thread_with_no_room_keeps_its_own_history(self, db_path, config):
         """The boundary the column has to respect, and the one place a naive
@@ -284,8 +236,8 @@ class TestTheHistoryFallback:
                 origin_target=None,
             )
         task = _poll_reply(config, sender=USER_ADDR)
-        assert task.conversation_token == THREAD_HASH
-        assert task.withheld_from_room is False
+        # Stage 3: the thread's history is its private email room's.
+        assert task.conversation_token == _private_room(db_path)
         self._completed(config, db_path, task)
 
         with db.get_db(db_path) as conn:
@@ -377,22 +329,6 @@ class TestTheRoomsMemoryNamespace:
 
         assert _user_chunks(db_path) > 0
 
-    @patch("istota.scheduler.post_result_to_email", return_value=True)
-    @patch("istota.scheduler.post_result_to_talk")
-    @patch("istota.scheduler.run_coro", return_value=414)
-    def test_an_external_reply_still_reaches_it(
-        self, mock_run_coro, mock_post_talk, mock_post_email, db_path, config,
-    ):
-        _external_reply(config, db_path)
-
-        with patch(
-            "istota.scheduler.execute_task",
-            return_value=(True, "They said yes.", None, None),
-        ):
-            process_one_task(config)
-
-        assert _channel_chunks(db_path) > 0
-
 
 # ---------------------------------------------------------------------------
 # Consumer 3 — the channel sleep cycle
@@ -430,19 +366,6 @@ class TestTheChannelSleepCycle:
                 conn, "2000-01-01T00:00:00",
             )
 
-    def test_an_external_reply_still_is_collected(self, db_path, config):
-        task = _external_reply(config, db_path)
-        self._completed(db_path, task)
-
-        with db.get_db(db_path) as conn:
-            collected = db.get_completed_channel_tasks_since(
-                conn, ROOM, "2000-01-01T00:00:00",
-            )
-            assert ROOM in db.get_active_channel_tokens(
-                conn, "2000-01-01T00:00:00",
-            )
-        assert [t.id for t in collected] == [task.id]
-
 
 # ---------------------------------------------------------------------------
 # Consumer 4 — a permanent failure has nowhere to go
@@ -455,10 +378,7 @@ class TestAPermanentFailureReachesTheUser:
     errors. With no room leg there is no Talk leg either, so the user mails the
     bot, the task fails, and nothing tells them — no room notice, no mail, no
     trace anywhere they look.
-
-    Not a new failure: any `email_reply_routing = "thread"` user already had it.
-    What changed is that an email-only plan is now the *default* outcome for a
-    self-reply rather than a setting somebody chose."""
+"""
 
     def _fail_permanently(self, config, db_path, task):
         with db.get_db(db_path) as conn:
@@ -542,24 +462,20 @@ class TestAPermanentFailureReachesTheUser:
         # The failure still leads.
         assert body.index(PARTIAL_WORK_MARKER) > 0
 
-    def test_an_email_only_plan_that_is_not_withheld_stays_silent(
+    def test_a_thread_rooms_email_only_plan_stays_silent(
         self, db_path, config,
     ):
         """The scoping guard, and the reason this cannot simply be switched on
         for every email-only plan.
 
-        An external correspondent's thread reply under `email_reply_routing =
-        "thread"` has exactly the same email-only plan and exactly the same
-        absent error channel — it is the population that already had this
-        failure before ISSUE-254 widened it. Gating on who was waiting for the
-        answer, rather than on the shape of the plan, is what keeps it silent: a
-        stranger is waiting for this one. So this is the test that fails if the
-        gate is widened to `not plan_talk` or to `source_type == "email"`, both
-        of which look like tidier spellings of the two arms it actually has."""
-        config.users[USER].email_reply_routing = "thread"
+        An external correspondent's reply is a turn in its thread room, with
+        exactly the same email-only plan and exactly the same absent error
+        channel. Gating on who was waiting for the answer, rather than on the
+        shape of the plan, is what keeps it silent: a stranger is waiting for
+        this one. So this is the test that fails if the gate is widened to
+        `not plan_talk` or to `source_type == "email"`."""
         task = _external_reply(config, db_path)
         assert task.output_target == "email"
-        assert task.withheld_from_room is False
 
         notify = self._fail_permanently(config, db_path, task)
 
@@ -569,20 +485,13 @@ class TestAPermanentFailureReachesTheUser:
         ] == []
 
     def test_a_self_addressed_first_contact_is_told_too(self, db_path, config):
-        """The case ISSUE-275 put back into the silence this class exists to end.
-
-        `withheld_from_room` is False here — no room was resolved, so by the
-        column's own rule there is nothing for the exchange to be absent from —
-        yet the user is the correspondent and is sitting waiting for the answer.
-        The second arm recovers that from `processed_emails`, so both spellings
-        of "the user themselves was waiting" reach the same notice."""
+        """The case ISSUE-275 put back into the silence this class exists to end:
+        the user mailing their own bot, a turn in their private email room."""
         config.users[USER].alerts_channel = ROOM
         with db.get_db(db_path) as conn:
             _origin_room(conn)
         # No `sent_emails` row: nothing to thread against.
         task = _poll_reply(config, sender=USER_ADDR)
-        assert task.withheld_from_room is False
-        assert task.output_target is None
 
         notify = self._fail_permanently(config, db_path, task)
 
@@ -606,7 +515,6 @@ class TestAPermanentFailureReachesTheUser:
                 source_type="scheduled", output_target="email",
             )
             task = db.get_task(conn, task_id)
-        assert task.withheld_from_room is False
 
         notify = self._fail_permanently(config, db_path, task)
 
@@ -629,7 +537,7 @@ class TestTheFactIsCarriedForward:
         with db.get_db(db_path) as conn:
             db.update_task_status(conn, task_id, "completed", result="42.")
 
-    def test_a_retry_stays_withheld(self, db_path, config):
+    def test_a_retry_stays_out_of_the_origin_room(self, db_path, config):
         """Reachability is *raised* by this issue, not lowered: the new
         permanent-failure alert is what now tells the user their mailed request
         failed, and `!retry` is what they reach for next. A bare `!retry` typed
@@ -643,14 +551,14 @@ class TestTheFactIsCarriedForward:
             retry_id = _create_retry_task(conn, task, task.prompt)
             retry = db.get_task(conn, retry_id)
 
-        assert retry.conversation_token == ROOM
-        assert retry.withheld_from_room is True
+        # Stage 3: the copy carries the private email room, not the origin.
+        assert retry.conversation_token == _private_room(db_path)
 
         self._completed(db_path, retry_id)
         with db.get_db(db_path) as conn:
             assert db.get_conversation_history(conn, ROOM) == []
 
-    def test_a_deferred_subtask_stays_withheld(self, db_path, config):
+    def test_a_deferred_subtask_stays_out_of_the_origin_room(self, db_path, config):
         """A subtask's token is pinned to its parent's so deferred JSON cannot
         drive routing; the flag is pinned with it for the same reason. Without it
         the subtask's prompt and result are indexed under the origin room's
@@ -676,8 +584,7 @@ class TestTheFactIsCarriedForward:
                 t for t in db.list_tasks(conn, user_id=USER)
                 if t.source_type == "subtask"
             ][0]
-        assert sub.conversation_token == ROOM
-        assert sub.withheld_from_room is True
+        assert sub.conversation_token == _private_room(db_path)
 
         self._completed(db_path, sub.id)
         with db.get_db(db_path) as conn:

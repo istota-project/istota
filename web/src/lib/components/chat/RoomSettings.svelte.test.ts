@@ -647,6 +647,24 @@ describe('RoomSettings — a shared room another member hosts', () => {
     await mountSettled(room());
     expect(screen.queryByRole('button', { name: 'How guests are answered' })).toBeNull();
   });
+
+  // Email on rooms: a correspondent's mail runs as the host, so an email
+  // thread room has no guest reply setting to show.
+  it('hides the guest setting in an email thread room', async () => {
+    await mountSettled(
+      room({
+        shared: true,
+        policy: {
+          host: 'alice',
+          is_host: true,
+          guest_reply: 'held',
+          email_thread: true,
+          settings_refusal: null,
+        },
+      }),
+    );
+    expect(screen.queryByRole('button', { name: 'How guests are answered' })).toBeNull();
+  });
 });
 
 describe('a phone room (room-surface-model Stage 24)', () => {
@@ -656,6 +674,13 @@ describe('a phone room (room-surface-model Stage 24)', () => {
     expect(screen.getByText(/transcript of an? SMS conversation/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: PROMOTE_LABEL })).toBeNull();
     expect(screen.queryByText('Nextcloud Talk')).toBeNull();
+  });
+
+  it('names the private email room as an email transcript (email on rooms, stage 3)', () => {
+    mount(room({ origin: 'email', phone_surface: 'email', read_only: true, name: 'Email' }));
+    expect(screen.getByText(/transcript of an email conversation/)).toBeTruthy();
+    expect(screen.getByText(/reply by email/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: PROMOTE_LABEL })).toBeNull();
   });
 
   it('names a WhatsApp group as a read-only group', () => {

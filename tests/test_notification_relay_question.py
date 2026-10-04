@@ -51,9 +51,19 @@ def test_a_room_question_links_to_the_chat_within_the_url_allowlist(setup):
                      ('{"kind":"room","label":"Bob\'s room #assistant","room_token":"r","talk_ref":null}', relay_id))
     shown = view(config, as_row(notice(config)))
     (action,) = shown.actions
-    assert action.method == 'LINK' and action.href == relay_question.RELAY_QUESTION_HREF
+    assert action.method == 'LINK' and action.href == '/chat/r/r'
     assert invalid_paths(shown) == []
     assert shown.body.startswith("Reply to the message in Bob's room #assistant.")
+
+
+def test_a_room_token_the_allowlist_refuses_falls_back_to_the_chat_page(setup):
+    config = setup[0]
+    relay_id = question(setup)
+    with db.get_db(config.db_path) as conn:
+        conn.execute("UPDATE message_relays SET surface='room',destination=? WHERE id=?",
+                     ('{"kind":"room","label":"x","room_token":"a?b=1","talk_ref":null}', relay_id))
+    (action,) = view(config, as_row(notice(config))).actions
+    assert action.href == relay_question.RELAY_QUESTION_HREF
 
 
 def test_another_users_row_naming_the_relay_resolves_to_nothing(setup):

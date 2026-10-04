@@ -172,6 +172,10 @@
 
   const isUser = $derived(message.role === 'user');
   const isSystem = $derived(message.role === 'system');
+  // A private reply (ISSUE-608) is the bot speaking about a shared room, so it
+  // takes the bot's face and name rather than a notice's mark. Display only:
+  // the row stays `role='system'`, which keeps it out of history pairing.
+  const botVoice = $derived(isSystem && !!message.aboutRoom);
   // A user row is not always the viewer's own words — a shared room has other
   // members, and an email mirrored into the room it continues was written by
   // whoever sent it. The server names them when it can; `userName` is the
@@ -776,7 +780,11 @@
     data-task-id={message.taskId ?? undefined}
   >
     <div class="gutter">
-      <span class="sys-mark" aria-hidden="true"><Info /></span>
+      {#if botVoice}
+        <Avatar kind="bot" version={botAvatar} label={botName} />
+      {:else}
+        <span class="sys-mark" aria-hidden="true"><Info /></span>
+      {/if}
     </div>
 
     <!-- The image delegation sits on the column rather than on the body inside
@@ -806,6 +814,7 @@
            row is activated. Both elements are inline, so the stamp and the room
            chip share one line without a wrapper — which also keeps the chip a
            direct child of the column it is asserted to sit in. -->
+      {#if botVoice}<span class="author bot">{botName}</span>{/if}
       {#if time}<time class="stamp">{time}</time>{/if}
       {#if showRoomChip}
         <button class="room-chip" onclick={() => onRoomClick?.(message.roomToken!)} type="button">
@@ -819,6 +828,18 @@
         <div class="cmd-output markdown" class:error={message.error}>
           {@html bodyHtml}
         </div>
+      {/if}
+
+      <!-- A question parked privately about another room (#624): the card sits
+           under the preview it approves. -->
+      {#if message.confirmation && message.taskId}
+        <ConfirmationCard
+          onConfirm={() => onConfirm(message.cid, message.taskId!)}
+          onReject={() => onReject(message.cid, message.taskId!)}
+          {botName}
+          {botAvatar}
+          {answerByText}
+        />
       {/if}
 
       <!-- The same row a turn gets, in the same place: under the body, inside
@@ -1956,7 +1977,8 @@
 	   makes the bottom margin count, since a margin on an inline box does not
 	   affect the line box. The trailing gap matches `.meta`'s own, and is inert
 	   on the common row where the stamp is the only thing on the line. */
-  .cmd-row .stamp {
+  .cmd-row .stamp,
+  .cmd-row .author {
     display: inline-block;
     margin-right: var(--space-2);
     margin-bottom: var(--space-1);

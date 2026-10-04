@@ -525,9 +525,11 @@ _REFERENCE_ID_PATTERN = re.compile(r"^istota:task:(\d+):(\w+)$")
 # what a shared room sends a member privately (ISSUE-608): a guest proposal
 # quotes the guest, a whisper and a question were written by a task reading the
 # room. A reply to one reaches its task framed, as the linked room's context.
+# A pass-on quotes an email correspondent's mail.
 _RELAY_REFERENCE_PREFIXES = (
     "relay-question:", "relay-return:",
     "private-whisper:", "private-confirmation:", "private-proposal:",
+    "private-pass_on:",
 )
 
 

@@ -729,31 +729,20 @@ class TestSend:
                             AsyncMock(side_effect=RuntimeError("boom")))
         assert asyncio.run(private_replies.send_private(config, delivery, body="x")) is False
 
-    def test_an_email_thread_parent_also_gets_the_heads_up_mail(self, config):
+    def test_an_email_thread_parent_is_posted_like_any_other_and_never_mailed(
+        self, config, talk,
+    ):
         config.email = EmailConfig(enabled=True, bot_email="bot@example.com")
         with db.get_db(config.db_path) as conn:
             parent = _email_thread(conn, name="Thread")
-            _web_room(conn)
+            private = plain_talk_room(conn, "alice", name="talk")
         delivery = _deliver(config, parent, body="Shall I?")
-        with patch("istota.rooms.private_replies._send_private_mail") as send:
+        with patch("istota.skills.email.send_email") as send:
             delivered = asyncio.run(private_replies.send_private(config, delivery, body="Shall I?"))
         assert delivered is True
-        (call,) = send.call_args_list
-        assert call.kwargs["to"] == "alice@example.com"
-        assert call.kwargs["subject"] == "re: Thread"
-        assert call.kwargs["body"].startswith("Shall I?\n\n")
-        assert "private chat" in call.kwargs["body"]
-        assert "notifications" in call.kwargs["body"]
-
-    def test_no_mail_for_a_parent_that_is_not_an_email_thread(self, config, talk):
-        config.email = EmailConfig(enabled=True, bot_email="bot@example.com")
-        with db.get_db(config.db_path) as conn:
-            parent = _shared_talk(conn)
-            plain_talk_room(conn, "alice", name="talk")
-        delivery = _deliver(config, parent)
-        with patch("istota.rooms.private_replies._send_private_mail") as send:
-            asyncio.run(private_replies.send_private(config, delivery, body="x"))
         send.assert_not_called()
+        (post,) = talk["client"].calls_to(private.talk_ref, method="send_message")
+        assert post.args["message"] == "re: Thread\n\nShall I?"
 
 
 # ---------------------------------------------------------------------------

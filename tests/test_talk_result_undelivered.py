@@ -378,69 +378,6 @@ class TestAMirrorLegIsNotAlerted:
 
 
 # ---------------------------------------------------------------------------
-# The adjacent hole this opened in the email arm
-# ---------------------------------------------------------------------------
-
-
-@patch("istota.scheduler.run_coro", side_effect=asyncio.run)
-class TestWhenBothLegsFail:
-    """The email arm's guard reads `not (plan_talk and talk_token)`, and its own
-    comment says why: "with a room leg the Talk post has already landed and the
-    assistant row is stored, so a failed send costs the mail copy alone".
-
-    ISSUE-404 is that the Talk post has *not* necessarily landed. With both legs
-    down the guard suppressed the one notice left, so an emailed request whose
-    answer reached neither surface was silent on both — and the mirror carve-out
-    above depends on that arm firing, since it is what covers an email-origin
-    task whose Talk copy is only a copy.
-    """
-
-    def _emailed(self, config, promoted):
-        with db.get_db(config.db_path) as conn:
-            return db.create_task(
-                conn, prompt="what is the total?", user_id=USER,
-                source_type="email", conversation_token=promoted.canonical,
-                output_target=f"room:{promoted.canonical}",
-                withheld_from_room=True,
-            )
-
-    def test_the_email_arm_no_longer_assumes_the_talk_post_landed(
-        self, mock_run, config, fake_talk, promoted,
-    ):
-        _timeout(fake_talk, promoted.talk_ref)
-        task_id = self._emailed(config, promoted)
-        with (
-            patch("istota.scheduler.post_result_to_email", return_value=False),
-            patch(
-                "istota.scheduler.send_notification", return_value=True,
-            ) as send,
-        ):
-            _run(config)
-
-        assert not _result_landed(fake_talk, task_id)
-        assert len(_rows(config)) == 1
-        assert ANSWER in send.call_args.args[2]
-
-    def test_a_landed_talk_post_still_suppresses_the_email_notice(
-        self, mock_run, config, fake_talk, promoted,
-    ):
-        """The control, and the behaviour the guard was written for: the answer
-        is in the room, so a failed mail copy is not worth an alert."""
-        task_id = self._emailed(config, promoted)
-        with (
-            patch("istota.scheduler.post_result_to_email", return_value=False),
-            patch(
-                "istota.scheduler.send_notification", return_value=True,
-            ) as send,
-        ):
-            _run(config)
-
-        assert _result_landed(fake_talk, task_id)
-        assert _rows(config) == []
-        assert send.call_count == 0
-
-
-# ---------------------------------------------------------------------------
 # The shapes that are not a completed answer
 # ---------------------------------------------------------------------------
 

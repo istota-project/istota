@@ -283,6 +283,53 @@ class TestConfirmationPattern:
         assert is_no_final_answer("Should I proceed with the deletion?") is False
 
 
+class TestAsksForConfirmation:
+    """#625: only the answer's own final paragraph can ask."""
+
+    def test_a_final_question_parks(self):
+        from istota.scheduler import asks_for_confirmation
+
+        assert asks_for_confirmation(
+            "I drafted the reply to Ana.\n\nShould I proceed?")
+
+    def test_an_explanation_of_the_card_does_not(self):
+        """#625: a web answer explaining the confirmation card."""
+        from istota.scheduler import asks_for_confirmation
+
+        assert not asks_for_confirmation(
+            "That card is a confirmation. The bot asks \"Should I proceed?\" "
+            "or \"Please confirm\" when it needs approval.\n\n"
+            "Click Confirm to run it, or Discard to drop it."
+        )
+
+    def test_a_quoted_line_does_not(self):
+        from istota.scheduler import asks_for_confirmation
+
+        assert not asks_for_confirmation("Ana wrote:\n\n> Please confirm")
+        assert not asks_for_confirmation("Ana wrote:\n> Please confirm\n> by Friday")
+
+    def test_fenced_and_inline_code_do_not(self):
+        from istota.scheduler import asks_for_confirmation
+
+        assert not asks_for_confirmation(
+            "The template reads:\n\n```\nShould I proceed?\n```")
+        assert not asks_for_confirmation(
+            "The prompt string is `Please confirm`, set in the config.")
+
+    def test_the_question_before_a_trailing_code_block_still_parks(self):
+        from istota.scheduler import asks_for_confirmation
+
+        assert asks_for_confirmation(
+            "I will run this. Should I proceed?\n\n```\nrm old.log\n```")
+
+    def test_final_paragraph_drops_quotes_and_fences(self):
+        from istota.scheduler import final_paragraph
+
+        assert final_paragraph("one\n\ntwo\nlines\n\n> quoted") == "two\nlines"
+        assert final_paragraph("a\n~~~\nb\n~~~") == "a"
+        assert final_paragraph("") == ""
+
+
 # ---------------------------------------------------------------------------
 # TestCleanupOldTempFiles
 # ---------------------------------------------------------------------------
@@ -471,11 +518,8 @@ class TestRoomTurnBelongsHere:
 class TestTalkTargetForDelivery:
     """_talk_target_for_delivery resolves the Talk room for a task's notifications.
 
-    Email-source tasks may carry a synthetic 16-char hex thread hash in
-    `conversation_token` (set by the email inbound for plus_address / sender_match
-    routing). Posting to that token silently no-ops because it isn't a real
-    Talk room. The helper falls back to the user's resolved alerts/DM channel
-    in that case while leaving real tokens (talk-originated chains) intact.
+    An email task's `conversation_token` is a room or nothing, so past the
+    room's own Talk binding it has no Talk channel.
     """
 
     def _config(self, tmp_path, alerts_channel="alerts1"):
@@ -503,73 +547,22 @@ class TestTalkTargetForDelivery:
         task = self._task(source_type="talk", conversation_token="real_room")
         assert _talk_target_for_delivery(config, task) == "real_room"
 
-    def test_email_source_synthetic_token_falls_back_to_alerts(self, tmp_path):
+    def test_email_source_non_room_token_returns_none(self, tmp_path):
+        """A thread hash from before email on rooms is not a Talk room, and
+        nothing reroutes it to the alerts ladder any more."""
         config = self._config(tmp_path, alerts_channel="alerts1")
-        # 16 hex chars matches compute_thread_id() output shape
-        synthetic = "a1b2c3d4e5f60718"
-        task = self._task(source_type="email", conversation_token=synthetic)
-        assert _talk_target_for_delivery(config, task) == "alerts1"
-
-    def test_email_source_real_token_passes_through(self, tmp_path):
-        config = self._config(tmp_path, alerts_channel="alerts1")
-        # An 8-char alphanumeric Talk token does not match the synthetic shape
-        task = self._task(source_type="email", conversation_token="r0om4Bcd")
-        assert _talk_target_for_delivery(config, task) == "r0om4Bcd"
-
-    def test_email_source_uppercase_hex_passes_through(self, tmp_path):
-        # Real Talk tokens may include uppercase chars; pure-lowercase-hex is
-        # the synthetic signature. An uppercase-letter 16-char token isn't
-        # treated as synthetic.
-        config = self._config(tmp_path, alerts_channel="alerts1")
-        task = self._task(source_type="email", conversation_token="A1B2C3D4E5F60718")
-        assert _talk_target_for_delivery(config, task) == "A1B2C3D4E5F60718"
+        task = self._task(source_type="email", conversation_token="a1b2c3d4e5f60718")
+        assert _talk_target_for_delivery(config, task) is None
 
     def test_email_source_no_token_returns_none(self, tmp_path):
         config = self._config(tmp_path)
         task = self._task(source_type="email", conversation_token=None)
         assert _talk_target_for_delivery(config, task) is None
 
-    def test_email_source_synthetic_token_no_user_config(self, tmp_path):
-        # No alerts_channel and no other resolvable channel — preserve the
-        # synthetic token rather than returning None, keeping pre-fix behavior
-        # (silent no-op at delivery time) instead of regressing to a different
-        # failure mode.
-        config = Config(
-            db_path=tmp_path / "ignore.db",
-            nextcloud=NextcloudConfig(),
-            talk=TalkConfig(),
-            email=EmailConfig(),
-            scheduler=SchedulerConfig(),
-            temp_dir=tmp_path / "temp",
-        )
-        synthetic = "a1b2c3d4e5f60718"
-        task = self._task(source_type="email", conversation_token=synthetic)
-        assert _talk_target_for_delivery(config, task) == synthetic
-
     def test_briefing_source_passes_through(self, tmp_path):
         config = self._config(tmp_path)
         task = self._task(source_type="briefing", conversation_token="briefing_room")
         assert _talk_target_for_delivery(config, task) == "briefing_room"
-
-    def test_email_synthetic_falls_back_via_briefing_token(self, tmp_path):
-        # alerts_channel empty → resolve_conversation_token falls back to first
-        # briefing's token
-        config = Config(
-            db_path=tmp_path / "ignore.db",
-            nextcloud=NextcloudConfig(),
-            talk=TalkConfig(),
-            email=EmailConfig(),
-            scheduler=SchedulerConfig(),
-            temp_dir=tmp_path / "temp",
-            users={"alice": UserConfig(
-                alerts_channel="",
-                briefings=[BriefingConfig(name="morning", cron="0 8 * * *",
-                                          conversation_token="briefroom")],
-            )},
-        )
-        synthetic = "deadbeef12345678"
-        task = self._task(source_type="email", conversation_token=synthetic)
-        assert _talk_target_for_delivery(config, task) == "briefroom"
 
     # `talk_delivery_token` is still rung 0 and still absolute while anything
     # writes it. These three are the originals, kept verbatim: they are the only
@@ -3756,7 +3749,6 @@ class TestProcessHeartbeatTask:
         )
 
 
-
 # ---------------------------------------------------------------------------
 # TestStripActionPrefix
 # ---------------------------------------------------------------------------
@@ -5514,7 +5506,6 @@ class TestExecuteSkillTask:
         assert "CALDAV_URL" not in env
         assert "CALDAV_PASSWORD" not in env
 
-
     def test_a_nonzero_exit_keeps_the_stdout_envelope(self, db_path, tmp_path):
         """ISSUE-383: the diagnosis is on stdout, and only stdout has it.
 
@@ -6613,8 +6604,9 @@ class TestDeferredOperations:
             tasks = db.list_tasks(conn, user_id="testuser")
         assert all(t.source_type != "subtask" for t in tasks)
 
-    def test_deliver_deferred_email_sends_for_email_source_talk_target(self, tmp_path):
-        """Email-sourced task with output_target=talk: deferred file delivered."""
+    def test_deliver_deferred_email_drops_an_email_task_with_no_email_leg(self, tmp_path):
+        """An email task with no email leg was never admitted to a room, so
+        there is no message the file may be sent in answer to."""
         from istota.scheduler import _deliver_deferred_email_output
 
         config = MagicMock()
@@ -6629,10 +6621,11 @@ class TestDeferredOperations:
         deferred = user_temp / "task_42_email_output.json"
         deferred.write_text('{"subject": "Re: Hi", "body": "Got it", "format": "plain"}')
 
-        with patch("istota.scheduler.post_result_to_email", new_callable=AsyncMock, return_value=True) as mock_send:
+        with patch("istota.scheduler.post_result_to_email", new_callable=AsyncMock) as mock_send:
             _deliver_deferred_email_output(config, task, user_temp)
 
-        mock_send.assert_called_once_with(config, task, "")
+        mock_send.assert_not_called()
+        assert not deferred.exists()
 
     def test_deliver_deferred_email_warns_for_talk_source(self, tmp_path):
         """Talk-sourced task: deferred file warned and removed (no processed_email)."""
@@ -6713,31 +6706,6 @@ class TestDeferredOperations:
 
         mock_send.assert_not_called()
         assert deferred.exists()
-
-    def test_deliver_deferred_email_logs_failure(self, tmp_path):
-        """Failed delivery is logged as error."""
-        from istota.scheduler import _deliver_deferred_email_output
-
-        config = MagicMock()
-        config.temp_dir = tmp_path / "temp"
-        task = db.Task(
-            id=42, status="completed", prompt="Reply",
-            user_id="testuser", source_type="email",
-            output_target="talk",
-        )
-        user_temp = tmp_path / "temp" / "testuser"
-        user_temp.mkdir(parents=True)
-        deferred = user_temp / "task_42_email_output.json"
-        deferred.write_text('{"subject": "Re: Hi", "body": "ok", "format": "plain"}')
-
-        with (
-            patch("istota.scheduler.post_result_to_email", new_callable=AsyncMock, return_value=False),
-            patch("istota.scheduler.logger") as mock_log,
-        ):
-            _deliver_deferred_email_output(config, task, user_temp)
-
-        mock_log.error.assert_called_once()
-        assert "Failed to deliver" in mock_log.error.call_args[0][0]
 
     def test_confirmed_task_cleans_stale_email_output(self, db_path, tmp_path):
         """Stale email_output.json from prior execution is removed before re-execution."""

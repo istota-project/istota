@@ -43,7 +43,10 @@ alerts_channel = "room789"
 
 # Trusted email addresses, in both directions: their mail bypasses the inbound
 # confirmation gate, and mail to them is sent without waiting for approval.
-# Supports fnmatch patterns.
+# On an email thread room their mail also runs as this user at full reach,
+# with this user's memory loaded, and the reply reaches everyone on the
+# thread; trust sparingly (docs/features/email.md, "What trusting a sender
+# means"). Supports fnmatch patterns.
 trusted_email_senders = ["*@company.com", "boss@other.com"]
 
 # This user's outbound email approval policy: off | untrusted | all.
@@ -63,9 +66,6 @@ disabled_modules = ["money"]
 
 # Default delivery surface for results/notifications when nothing else applies
 default_destination = "talk"   # talk | email | sms | ntfy | web | surface:channel | comma list
-
-# Where replies to inbound email threads are delivered
-email_reply_routing = "origin+thread"   # origin+thread (default) | origin | thread
 
 # A KeePass (KDBX) file this user maintains, which Istota reads and never
 # writes. Set it only to name a file somewhere other than their own

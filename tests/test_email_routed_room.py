@@ -1,6 +1,6 @@
 """ISSUE-247 — an email task's thread token is not a room identifier.
 
-`tasks.conversation_token` on an email task is `compute_thread_id(...)`, a hash
+`tasks.conversation_token` on an email task was a subject-and-sender hash
 whose job is grouping `References`. Three room-facing writers read it as a room:
 the assistant-turn store, the Talk mirror, and `record_inbound`'s `mirror_only`
 gate. Each correctly found no room and fell back to a different workaround, and
@@ -37,15 +37,14 @@ from istota.config import (
 from istota.scheduler import process_one_task
 from istota.transport import (
     record_inbound,
-    routed_notification_room,
     transcript_room,
 )
 from istota.transport.routing import transcript_room_for_task
 
 from .support.rooms import plain_talk_room, promoted_room
 
-# A first-contact thread hash: the 16-lowercase-hex shape `compute_thread_id`
-# produces, naming no room anywhere. Deliberately repetitive rather than a
+# A first-contact thread hash, in the 16-lowercase-hex shape email tasks
+# carried before they had rooms, naming no room anywhere. Deliberately repetitive rather than a
 # realistic-looking digest — the secret scanner reads a high-entropy hex run of
 # this length as a credential.
 THREAD_TOKEN = "deadbeefdeadbeef"
@@ -167,26 +166,14 @@ class TestTranscriptRoomResolution:
     def test_the_notification_route_is_not_a_rung_of_this_ladder(
         self, db_path, config,
     ):
-        """It is `routed_notification_room`, and only the poller calls it. As a
-        rung here it would fire for an ungated `thread_match` reply under the
-        `thread` routing policy too — writing an external correspondent's
-        verbatim body into the user's alerts room, whose LLM context then
-        re-pairs it, for a thread that room had no relationship with."""
+        """A mail's exchange belongs in its own room. The room the user's
+        notifications go to is not one the thread has any relationship with."""
         with db.get_db(db_path) as conn:
             _routed_room(conn)
             assert transcript_room(
                 conn, config, user_id="testuser", source_type="email",
                 conversation_token=THREAD_TOKEN, output_target="email",
             ) is None
-            assert routed_notification_room(
-                conn, config, "testuser",
-            ) == ROUTED_ROOM
-
-    def test_an_unregistered_route_resolves_to_no_room(self, db_path, config):
-        """Existence, never creation — a cron mailing an external address, or a
-        user whose notifications go to ntfy, stays task-only."""
-        with db.get_db(db_path) as conn:
-            assert routed_notification_room(conn, config, "testuser") is None
 
     def test_a_bare_talk_leg_follows_the_delivery_token(self, db_path, config):
         """`talk_channel_for_task`'s rung 0 is `tasks.talk_delivery_token`,
@@ -605,14 +592,9 @@ class TestAuxGapFill:
 
 
 class TestPollerNamesTheRoom:
-    """The room has to be resolved *before* delivery. Leaving `output_target`
-    empty is what left the plan email-only, so the only thing that ever reached
-    the room was a notification fired from inside the notifier — after the
-    answer had been reduced to a system note.
-
-    Driven through `poll_emails` rather than asserted against its source: the
-    branch has to actually fire, and it has to *not* fire when the routing names
-    no room."""
+    """A mail is never routed into the user's notification room: an admitted
+    one is a turn in its own room, and a held one has no plan until approving
+    it admits it there. Driven through `poll_emails`."""
 
     def _poll(self, config):
         from istota.skills.email import Email, EmailEnvelope
@@ -654,26 +636,12 @@ class TestPollerNamesTheRoom:
         )
         return config
 
-    def test_a_plus_addressed_email_is_routed_into_the_room(
-        self, db_path, config,
-    ):
+    def test_a_held_mail_names_no_room(self, db_path, config):
+        """A stranger's held mail has no plan, whatever room the user's
+        notification route names."""
         self._email_config(config)
         with db.get_db(db_path) as conn:
             _routed_room(conn)
-
-        task_ids = self._poll(config)
-
-        assert len(task_ids) == 1
-        with db.get_db(db_path) as conn:
-            task = db.get_task(conn, task_ids[0])
-        assert task.output_target == f"room:{ROUTED_ROOM},email"
-        # And the token stays a thread identifier, not the room.
-        assert task.conversation_token != ROUTED_ROOM
-
-    def test_no_registered_room_leaves_the_plan_alone(self, db_path, config):
-        """A deployment whose notification route names no room keeps the
-        email-only plan it always had."""
-        self._email_config(config)
 
         task_ids = self._poll(config)
 

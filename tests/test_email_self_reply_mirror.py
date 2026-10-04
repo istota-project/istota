@@ -30,6 +30,12 @@ The regression guard that matters is the *external* correspondent: their reply
 must keep mirroring, because the room copy is the only way the user learns it
 arrived. Driven through `poll_emails` → `process_one_task` rather than against
 the helpers, because both legs live in the wiring between them.
+
+Email on rooms (stage 3) gave this mail a room of its own: the user's private
+email room, minted on the first such mail, the way their SMS thread has one.
+So the user's own mail is still never copied into the origin room or the
+notification route; it is a turn in that private room instead, answered by a
+reply to them alone.
 """
 
 from unittest.mock import patch
@@ -41,6 +47,8 @@ from istota.config import Config, EmailConfig, UserConfig
 from istota.scheduler import process_one_task
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email.inbound import poll_emails
+
+from istota.transport.email import email_conversation_token
 
 from .support.rooms import promoted_room
 
@@ -139,6 +147,12 @@ def _poll_reply(config, *, sender, to=("bot@test.com",), body="My answer"):
         return db.get_task(conn, task_ids[0])
 
 
+def _private_room(db_path, user=USER):
+    """The user's private email room (email on rooms, stage 3), or None."""
+    with db.get_db(db_path) as conn:
+        return db.resolve_room_token(conn, "email", email_conversation_token(user))
+
+
 def _room_rows(db_path, role=None):
     with db.get_db(db_path) as conn:
         return [
@@ -163,9 +177,8 @@ class TestSelfAddressedThreadReply:
         task = _poll_reply(config, sender=USER_ADDR)
 
         assert task.output_target == "email"
-        # The origin is still *recovered* — the reply continues that
-        # conversation's context, it just is not delivered back into it.
-        assert task.conversation_token == ROOM
+        # A turn in the user's private email room, not the origin room.
+        assert task.conversation_token == _private_room(db_path)
 
     def test_the_question_is_not_mirrored_into_the_room(self, db_path, config):
         """Leg 2. Suppressing the delivery leg alone changes nothing: the task
@@ -178,19 +191,6 @@ class TestSelfAddressedThreadReply:
         _poll_reply(config, sender=USER_ADDR)
 
         assert _room_rows(db_path) == []
-
-    def test_a_policy_of_origin_only_still_delivers_to_email(self, db_path, config):
-        """`origin` names the room and nothing else, so dropping the origin leg
-        would leave an empty plan. The reply must not be lost — the user asked
-        for it and it reaches them where they wrote from."""
-        config.users[USER].email_reply_routing = "origin"
-        with db.get_db(db_path) as conn:
-            _origin_room(conn)
-            _sent_from_the_room(conn, to_addr=USER_ADDR)
-
-        task = _poll_reply(config, sender=USER_ADDR)
-
-        assert task.output_target == "email"
 
     def test_a_legacy_null_origin_row_is_covered_too(self, db_path, config):
         """`origin_descriptor` returns None for a send with no deliverable
@@ -207,15 +207,10 @@ class TestSelfAddressedThreadReply:
         assert task.output_target == "email"
         assert _room_rows(db_path) == []
 
-    def test_the_threads_talk_room_survives_the_suppression(self, db_path, config):
-        """A per-message decision must not have a per-thread side effect.
-
-        `talk_delivery_token` is the one thing that can name a Talk room the
-        registry never heard of (rung 0, ISSUE-057), and the bot's own reply
-        copies it onto the next `sent_emails` row. Clearing it on a self-reply
-        would lose the room for every later message in the thread — including an
-        external correspondent's, whose mirror this fix leaves alone. So the
-        legacy ladder still runs; only the plan changes."""
+    def test_a_legacy_talk_room_is_not_the_reply_s_room(self, db_path, config):
+        """The user's own reply is a turn in their private email room (stage
+        3), so the thread's legacy Talk room carries no part of it. A thread
+        with anyone else on it is a thread room, which routes on its own."""
         with db.get_db(db_path) as conn:
             _origin_room(conn)
             db.record_sent_email(
@@ -229,7 +224,8 @@ class TestSelfAddressedThreadReply:
         task = _poll_reply(config, sender=USER_ADDR)
 
         assert task.output_target == "email"
-        assert task.talk_delivery_token == "legacy_talk_room"
+        assert task.talk_delivery_token is None
+        assert task.conversation_token == _private_room(db_path)
 
     @patch("istota.scheduler.post_result_to_email", return_value=True)
     @patch("istota.scheduler.run_coro", return_value=True)
@@ -293,30 +289,6 @@ class TestSelfAddressedThreadReply:
         # And the question went out by mail, to the address it came from.
         assert mock_post_email.called
 
-    @patch("istota.scheduler.post_result_to_email", return_value=True)
-    @patch("istota.scheduler.post_result_to_talk")
-    @patch("istota.scheduler.run_coro", return_value=414)
-    def test_an_external_thread_still_parks_on_a_question_back(
-        self, mock_run_coro, mock_post_talk, mock_post_email, db_path, config,
-    ):
-        """The guard for the test above. An emissary reply keeps its room leg, so
-        it keeps parking — the bot must not mail "should I proceed?" to the
-        correspondent and take their answer as the user's."""
-        with db.get_db(db_path) as conn:
-            _origin_room(conn)
-            _sent_from_the_room(conn)
-        task = _poll_reply(config, sender=EXTERNAL_ADDR)
-
-        with patch(
-            "istota.scheduler.execute_task",
-            return_value=(True, "I drafted it. Should I proceed?", None, None),
-        ):
-            process_one_task(config)
-
-        with db.get_db(db_path) as conn:
-            after = db.get_task(conn, task.id)
-        assert after.status == "pending_confirmation"
-
 
 # ---------------------------------------------------------------------------
 # ISSUE-275 — the same predicate, on the route the user actually uses
@@ -377,8 +349,9 @@ class TestSelfAddressedFirstContact:
 
         task = self._poll_first_contact(config, sender=USER_ADDR)
 
-        assert task.output_target is None
-        # And the token stays a thread hash — it never was the room.
+        # A reply by mail, as a turn in the user's private email room.
+        assert task.output_target == "email"
+        assert task.conversation_token == _private_room(db_path)
         assert task.conversation_token != ROOM
 
     def test_the_question_is_not_mirrored(self, db_path, config):
@@ -425,20 +398,24 @@ class TestSelfAddressedFirstContact:
             config, sender=USER_ADDR, to=("bot@test.com",),
         )
 
-        assert task.output_target is None
+        assert task.output_target == "email"
+        assert task.conversation_token == _private_room(db_path)
         assert _room_rows(db_path) == []
 
-    def test_a_stranger_at_the_same_address_keeps_the_room(self, db_path, config):
-        """The regression guard, and the reason ISSUE-247 exists. A third party
-        writing to `bot+<user>@` is not the user, and the room copy is the only
-        way the user learns the mail arrived."""
+    def test_a_stranger_at_the_same_address_is_not_routed_to_the_room(
+        self, db_path, config,
+    ):
+        """A third party writing to `bot+<user>@` is held, and its approval
+        admits it to its own thread room, never the notification room."""
         config.users[USER].alerts_channel = ROOM
         with db.get_db(db_path) as conn:
             _origin_room(conn)
 
         task = self._poll_first_contact(config, sender=EXTERNAL_ADDR)
 
-        assert task.output_target == f"room:{ROOM},email"
+        assert task.status == "pending_confirmation"
+        assert task.output_target is None
+        assert _room_rows(db_path) == []
 
     def test_a_gated_self_claim_publishes_nothing_on_approval(
         self, db_path, config,
@@ -469,19 +446,6 @@ class TestSelfAddressedFirstContact:
 
 
 class TestEveryoneElseKeepsTheMirror:
-    def test_an_external_correspondent_still_reaches_the_room(
-        self, db_path, config,
-    ):
-        """The case the mirror exists for. The user is not in this thread, so the
-        room copy is the only way they learn the reply arrived."""
-        with db.get_db(db_path) as conn:
-            _origin_room(conn)
-            _sent_from_the_room(conn)
-
-        task = _poll_reply(config, sender=EXTERNAL_ADDR)
-
-        assert task.output_target == f"room:{ROOM},email"
-        assert [r for r, _ in _room_rows(db_path)] == ["user"]
 
     def test_a_plus_address_reply_from_a_third_party_is_not_the_user(
         self, db_path, config,
@@ -502,27 +466,9 @@ class TestEveryoneElseKeepsTheMirror:
             config, sender=EXTERNAL_ADDR, to=("bot+carol@test.com",),
         )
 
-        assert task.output_target == f"room:{ROOM},email"
+        # Held, with no plan until approval admits it to its own room.
+        assert task.output_target is None
         assert task.status == "pending_confirmation"
-
-    @patch("istota.scheduler.post_result_to_email", return_value=True)
-    @patch("istota.scheduler.post_result_to_talk")
-    @patch("istota.scheduler.run_coro", return_value=414)
-    def test_the_external_exchange_keeps_both_halves(
-        self, mock_run_coro, mock_post_talk, mock_post_email, db_path, config,
-    ):
-        with db.get_db(db_path) as conn:
-            _origin_room(conn)
-            _sent_from_the_room(conn)
-        _poll_reply(config, sender=EXTERNAL_ADDR)
-
-        with patch(
-            "istota.scheduler.execute_task",
-            return_value=(True, "They said yes.", None, None),
-        ):
-            process_one_task(config)
-
-        assert [r for r, _ in _room_rows(db_path)] == ["user", "assistant"]
 
     def test_a_reply_to_another_user_is_judged_against_that_user(
         self, db_path, config,
@@ -540,8 +486,10 @@ class TestEveryoneElseKeepsTheMirror:
 
         assert task.user_id == "alice"
         # The origin belonged to carol, so it is dropped outright — the reply
-        # never reaches carol's room by any leg.
-        assert task.output_target is None
+        # never reaches carol's room by any leg. Alice wrote to the bot alone,
+        # so it is a turn in her own private email room.
+        assert task.conversation_token == _private_room(db_path, "alice")
+        assert _private_room(db_path) is None
         assert _room_rows(db_path) == []
 
 
@@ -551,18 +499,10 @@ class TestEveryoneElseKeepsTheMirror:
 
 
 class TestTheResidueKeyedOnConversationToken:
-    """The task still carries the origin room as its `conversation_token`, so
-    everything keyed on that column rather than on the transcript once saw this
-    exchange anyway.
-
-    **Closed by ISSUE-255**, which took the option this class's original note
-    called the narrower one: the decision is recorded on the task
-    (`tasks.withheld_from_room`) and each consumer reads it, rather than the
-    inheritance being dropped — which would have moved history, the per-channel
-    active-task gate, memory recall and the sleep cycle at once, and is a
-    different question from "does the room show this". The inheritance therefore
-    stays, and the assertions below now pin both halves as closed.
-    `tests/test_email_self_reply_residue.py` covers the other four consumers."""
+    """Everything keyed on `conversation_token` rather than on the transcript
+    once saw this exchange (ISSUE-255). Since the user's own mail became a turn
+    in their private email room the task no longer carries the origin room's
+    token, so neither the transcript nor the tasks fallback reader sees it."""
 
     def test_the_room_transcript_is_clean(self, db_path, config):
         """The half that *is* fixed, stated next to the half that is not: the
@@ -581,19 +521,9 @@ class TestTheResidueKeyedOnConversationToken:
     def test_and_the_tasks_fallback_reader_no_longer_sees_it_either(
         self, db_path, config,
     ):
-        """`get_conversation_history` serves from `messages` only when
-        `_messages_caught_up` says the store is complete for the room, which
-        needs a completed talk/web task still in `tasks`. A room with none — one
-        used only by mail, or one whose last chat turn aged past
-        `task_retention_days` — falls back to selecting straight from `tasks
-        WHERE conversation_token = ?`, where this task is still keyed.
-
-        That fallback used to serve the turn, which is why this assertion was
-        written as one rather than as a comment. ISSUE-255 closed it: the
-        fallback now excludes `withheld_from_room`, so the context cost is gone
-        on both paths. The room is still on the fallback — that half is
-        unchanged and asserted, because the fix must work *there*, not by moving
-        the room onto the `messages` path."""
+        """`get_conversation_history` falls back to `tasks WHERE
+        conversation_token = ?` for a room with no completed talk/web task, and
+        this task no longer carries the room's token."""
         with db.get_db(db_path) as conn:
             _origin_room(conn)
             _sent_from_the_room(conn, to_addr=USER_ADDR)
@@ -644,20 +574,8 @@ class TestApprovalDoesNotRestoreIt:
     def test_approving_a_self_addressed_first_contact_restores_nothing(
         self, db_path, config,
     ):
-        """The scope boundary, redrawn by ISSUE-275 and inverted here with it.
-
-        This case used to be the boundary: a first-contact self-addressed mail
-        carried no thread to suppress, so it kept the `room:<tok>,email` routing
-        ISSUE-247 gave it, and approving it published the question into the room.
-        The predicate is now the sender rather than the thread, so there is no
-        room leg to restore and approval writes nothing.
-
-        `_room_holds_no_copy_of_this_exchange` is not what makes that true here —
-        it reads `withheld_from_room`, which stays False because no room was ever
-        resolved. The restore runs and finds nothing to publish, which is the
-        same fail-safe direction: `transcript_room_for_task` resolves rooms that
-        exist in the plan, and this plan names none. Asserted end to end rather
-        than against either helper, because that agreement is the point."""
+        """Approval admits the held mail to the user's private email room, so
+        nothing is restored into the notification room."""
         from istota import confirmations
 
         config.email.confirm_sender_match = "gate"
@@ -676,11 +594,13 @@ class TestApprovalDoesNotRestoreIt:
 
         assert _room_rows(db_path) == []
 
-    def test_approving_an_external_reply_still_restores_its_question(
+    def test_approving_an_external_reply_admits_it_to_its_thread_room(
         self, db_path, config,
     ):
-        """The restore's own regression guard. A gated *external* sender's turn
-        is withheld until answered and published on approval, unchanged."""
+        """The restore's own regression guard, moved by stage 3. A gated
+        *external* sender's turn is withheld until answered; approving a mail
+        at the plus-address admits it to its thread's room, minted here, and
+        nothing reaches the origin room."""
         from istota import confirmations
 
         config.email.confirm_sender_match = "gate"
@@ -696,5 +616,10 @@ class TestApprovalDoesNotRestoreIt:
 
         with db.get_db(db_path) as conn:
             confirmations.approve(conn, task, config=config)
+            thread = db.resolve_room_token(conn, "email", ORIGIN_MESSAGE_ID)
+            roles = [m.role for m in db.get_messages(conn, thread)]
 
-        assert [r for r, _ in _room_rows(db_path)] == ["user"]
+        assert _room_rows(db_path) == []
+        # The bot's sent mail first (a pre-change thread's has no body), then
+        # the approved question.
+        assert roles == ["assistant", "user"]

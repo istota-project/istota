@@ -3717,17 +3717,26 @@ def check_room_scope_confinement(config: "Config", probe: bool) -> CheckResult:
     a shell command, and it exists only where tasks run in bubblewrap.
     Elsewhere (the shipped Docker stack, macOS, the standalone install) a
     guest's turn can still read the host's workspace from disk.
+
+    Every arm says the same of email thread rooms, which have no guest turn:
+    a correspondent's admitted mail runs as the host at full reach, bounded by
+    the admit gate and the outbound gate rather than by withheld scopes.
     """
     name = "security.room_scope_confinement"
+    email = (
+        " Email thread rooms withhold nothing: a correspondent's admitted mail "
+        "runs as the host, bounded by the untrusted-sender gate and the "
+        "outbound approval gate instead."
+    )
     effective, why = _deployment_sandboxing(config, probe)
     if effective:
         return CheckResult(
-            name, OK, "a guest's turn is also kept out of the host's filesystem",
+            name, OK, "a guest's turn is also kept out of the host's filesystem." + email,
         )
     if effective is None:
         return CheckResult(
             name, WARN, "whether a guest's turn reaches the host's filesystem "
-            "could not be established: " + why,
+            "could not be established: " + why + "." + email,
             remedy="Run `istota doctor --only security.room_scope_confinement` on the host.",
         )
     return CheckResult(
@@ -3735,7 +3744,7 @@ def check_room_scope_confinement(config: "Config", probe: bool) -> CheckResult:
         "tasks run without a sandbox here, so a guest's turn in a shared room "
         "loses the host's data in the prompt, the skills and the environment "
         "only, not on the filesystem: a shell command can still read and write "
-        "the host's files, CRON.md included",
+        "the host's files, CRON.md included." + email,
         remedy="Run istota on Linux with bubblewrap (the Ansible deployment), or "
         "do not let guests into rooms on this deployment.",
     )

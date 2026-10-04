@@ -24,6 +24,12 @@ the task can reach, at the seams ``execute_task`` and ``task_env`` apply it to.
 What a member's turn in a shared room loses is the *ambient* part of their
 memory, which reaches the prompt without being asked for (`ambient_memory_off`):
 the memory skill stays, so a member who asks for a note gets it.
+
+An email thread room is the exception to both (`is_email_thread_room`): it is
+the host's correspondence, so every admitted turn on it runs as the host at
+full reach with their ambient memory loaded, as an email turn always has. The
+mail is fenced as untrusted input, and the admit gate and the outbound gate are
+what bound such a turn, not a scope rail.
 """
 
 from __future__ import annotations
@@ -66,12 +72,11 @@ def withheld_for_task(
     Every scope on a guest's turn. Every scope, too, on a task in a room more
     than one human reads that no member asked there: one with no origin
     surface (a subtask, a CLI task, a heartbeat) unless it is the user's own
-    cron job or briefing and the user is a current member, or one whose
-    stored turn was written by somebody who is not the task's user (an outside
-    correspondent's email continuing the room's thread). Such a task's answer
-    lands in the room with no member asking, so the consent a member's turn
-    carries does not reach it. Nothing otherwise: a member's turn runs at full
-    reach in every room (ISSUE-576).
+    cron job or briefing and the user is a current member. Such a task's
+    answer lands in the room with no member asking, so the consent a member's
+    turn carries does not reach it. Nothing otherwise: a member's turn runs at
+    full reach in every room (ISSUE-576), and nothing is withheld in an email
+    thread room, which is the host's correspondence (`is_email_thread_room`).
 
     ``conn`` is ``None`` for a database that does not exist, which holds no
     room. Any error reading the room withholds every scope.
@@ -82,6 +87,16 @@ def withheld_for_task(
         return all_scopes(skill_index)
     if not task.conversation_token:
         return frozenset()
+    if conn is not None:
+        try:
+            if is_email_thread_room(conn, task.conversation_token):
+                return frozenset()
+        except Exception as exc:
+            logger.warning(
+                "room_scopes: could not read the room %s, withholding every "
+                "scope: %s", task.conversation_token, exc,
+            )
+            return all_scopes(skill_index)
     member_surface = origin_surface_for_source_type(task.source_type) is not None
     if not member_surface and (task.is_group_chat or task.audience == "mixed"):
         return all_scopes(skill_index)
@@ -95,8 +110,6 @@ def withheld_for_task(
         ):
             return frozenset()
         if not member_surface and not _members_own_schedule(conn, task, token):
-            return all_scopes(skill_index)
-        if _written_by_someone_else(conn, task):
             return all_scopes(skill_index)
     except Exception as exc:
         logger.warning(
@@ -162,7 +175,9 @@ def is_current_member(conn: sqlite3.Connection, room_token: str, user_id: str) -
 def _written_by_someone_else(conn: sqlite3.Connection, task: "db.Task") -> bool:
     """Whether the stored turn this task answers names an author other than
     the task's user. A row with neither column set predates attribution and is
-    read as the user's, as every history reader reads it."""
+    read as the user's, as every history reader reads it. Read by
+    `private_replies.my_notes_room`: a correspondent's mail on an email thread
+    runs as the host, and carries none of the host's private notes."""
     row = conn.execute(
         "SELECT author_user_id, author_label FROM messages "
         "WHERE task_id = ? AND role = 'user' ORDER BY id LIMIT 1",
@@ -187,10 +202,24 @@ def ambient_memory_off(conn: sqlite3.Connection | None, task: "db.Task") -> bool
     a health note; that is the one thing asking in the room did not consent to.
     A fixed rule, not a setting. Fails toward leaving the memory out: a room
     whose audience cannot be read counts as shared.
+
+    Not in an email thread room, asked ahead of the audience and the roster
+    (the poller marks every thread turn a group chat): the thread is the
+    host's correspondence and their memory loads as on any email turn.
     """
-    if task.guest_participant_id is not None or task.audience == "mixed":
+    if task.guest_participant_id is not None:
         return True
-    if task.is_group_chat:
+    if task.conversation_token and conn is not None:
+        try:
+            if is_email_thread_room(conn, task.conversation_token):
+                return False
+        except Exception as exc:
+            logger.warning(
+                "room_scopes: could not read the room %s, leaving ambient "
+                "memory out: %s", task.conversation_token, exc,
+            )
+            return True
+    if task.audience == "mixed" or task.is_group_chat:
         return True
     if not task.conversation_token or conn is None:
         return False
@@ -203,6 +232,29 @@ def ambient_memory_off(conn: sqlite3.Connection | None, task: "db.Task") -> bool
             "memory out: %s", task.conversation_token, exc,
         )
         return True
+
+
+def is_email_thread_room(conn, token: str | None) -> bool:
+    """Whether ``token`` names a room bound to an email thread.
+
+    The one rule the three seams ask (the guest branch at ingest, the withheld
+    scopes, the ambient memory): such a room is the host's correspondence, so
+    an admitted turn on it runs as the host at full reach. The token form of
+    `transport.email.threads.thread_room_for_task`. Raises what the reads
+    raise; each caller chooses its failure direction.
+
+    The user's private email room is bound to email too, under its creator's
+    own token rather than a Message-ID, and is not a thread: its turns are the
+    user's own (`transport.email.private_room`).
+    """
+    from istota.transport.email.private_room import is_private_email_ref
+
+    room = canonical_token(conn, token)
+    binding = db.get_room_binding(conn, room, "email") if room is not None else None
+    if binding is None:
+        return False
+    owner = db.get_room(conn, room)
+    return not is_private_email_ref(binding.surface_ref, owner.user_id if owner else None)
 
 
 def canonical_token(conn, token: str | None) -> str | None:

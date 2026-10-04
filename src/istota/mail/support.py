@@ -11,7 +11,6 @@ The low-level IMAP/SMTP client (``list_emails`` / ``read_email`` / ``send_email`
 is email's equivalent of ``istota.nextcloud.talk.TalkClient``.
 """
 
-import hashlib
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -200,6 +199,15 @@ def sender_claims_to_be_user(
     return sender.lower() in own
 
 
+def own_addresses(config: Config, user_id: str) -> set[str]:
+    """``user_id``'s own addresses, stripped and lowercased. The one set the
+    outbound gate and the thread room's intake both compare against."""
+    user = config.users.get(user_id)
+    if not user:
+        return set()
+    return {a.strip().lower() for a in (user.email_addresses or []) if a}
+
+
 def normalize_subject(subject: str) -> str:
     """Normalize subject for thread grouping (remove Re:, Fwd:, etc.)."""
     normalized = subject
@@ -212,26 +220,6 @@ def normalize_subject(subject: str) -> str:
     # Remove extra whitespace
     normalized = " ".join(normalized.split())
     return normalized.lower()
-
-
-def compute_thread_id(subject: str, participants: list[str]) -> str:
-    """Compute a thread ID from normalized subject + sorted participants."""
-    normalized_subject = normalize_subject(subject)
-    sorted_participants = sorted(p.lower() for p in participants)
-    content = f"{normalized_subject}|{'|'.join(sorted_participants)}"
-    return hashlib.sha256(content.encode()).hexdigest()[:16]
-
-
-def is_synthetic_email_thread_token(token: str | None) -> bool:
-    """True if a token has the shape produced by `compute_thread_id`.
-
-    These 16-char-lowercase-hex strings are email-thread grouping keys, not
-    Talk room tokens. Real Talk tokens may include uppercase letters, so a
-    pure-lowercase-hex token of exactly that length is the synthetic signature.
-    """
-    if not token:
-        return False
-    return len(token) == 16 and all(c in "0123456789abcdef" for c in token)
 
 
 def cleanup_old_emails(config: Config, days: int) -> int:

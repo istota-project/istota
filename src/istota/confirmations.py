@@ -171,8 +171,7 @@ def describe(conn, task: db.Task) -> str:
     prompt-assembly detail and not something to rest the invariant on.
     """
     if task.whatsapp_confirmation_request_id:
-        row = conn.execute("SELECT kind FROM whatsapp_skill_requests WHERE id=?",
-                           (task.whatsapp_confirmation_request_id,)).fetchone()
+        row = held_request(conn, task)
         if row is not None and row["kind"] == "room_post":
             return "a room post awaiting approval"
         return "a private relay question"
@@ -182,6 +181,47 @@ def describe(conn, task: db.Task) -> str:
             return "an inbound email"
         return describe_email(record.sender_email, record.subject)
     return describe_prompt(task.confirmation_prompt)
+
+
+def held_request(conn, task: db.Task):
+    """The relay-hold request row ``task`` is parked on, or None."""
+    if not task.whatsapp_confirmation_request_id:
+        return None
+    return conn.execute(
+        "SELECT kind, destination FROM whatsapp_skill_requests WHERE id=?",
+        (task.whatsapp_confirmation_request_id,),
+    ).fetchone()
+
+
+def held_destination(row) -> dict:
+    """A request row's frozen destination, or ``{}`` when it cannot be read."""
+    try:
+        value = json.loads(row["destination"] or "{}") if row is not None else {}
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def describe_title(conn, task: db.Task) -> str:
+    """The bell title for a held task, by what it is waiting to send.
+
+    Sentence case, and only for the authenticated web view: the destination's
+    label is a room name somebody chose, so the stored title a push carries
+    stays the producer's fixed text. A task that is not relay-held gets
+    :func:`describe`.
+    """
+    row = held_request(conn, task)
+    if row is None:
+        return describe(conn, task)
+    if row["kind"] != "room_post":
+        return "Relay question waiting for approval"
+    destination = held_destination(row)
+    label = _flatten(str(destination.get("label") or ""))[:_PREVIEW_CHARS] or "a room"
+    # An email destination has no producer since room posts stopped sending
+    # mail; a request held across that upgrade can still carry one.
+    if destination.get("email_ref"):
+        return f"Reply waiting for approval: {label}"
+    return f"Post waiting for approval: {label}"
 
 
 def format_listing(conn, tasks: list[db.Task]) -> str:
@@ -339,7 +379,16 @@ def approve(
             )
             trusted = True
 
-    _restore_transcript_mirror(conn, task, config)
+    # A held mail is admitted to its room on approval: the user's private
+    # email room, or its thread's room, minted here for a stranger's first
+    # mail at the plus-address (email on rooms, section 7). Anything else
+    # gets its withheld question restored as before.
+    admitted = None
+    if config is not None and task.source_type == "email":
+        from .transport.email.threads import admit_approved_mail
+        admitted = admit_approved_mail(conn, config, db.get_task(conn, task.id) or task)
+    if admitted is None:
+        _restore_transcript_mirror(conn, task, config)
     _close_notification(conn, task, by)
     return trusted
 
@@ -584,31 +633,6 @@ def record_ack(
         return None
 
 
-def _room_holds_no_copy_of_this_exchange(conn, task: db.Task) -> bool:
-    """Whether this email turn is one the room deliberately never mirrored.
-
-    The gate's suppression means "not yet" and is undone below; ISSUE-254's
-    means "never", and approving must not hand back the copy that fix removed.
-    The two co-occur only under ``confirm_sender_match``, which stops the
-    own-address claim from counting as trust and so lets a self-addressed thread
-    reply reach the gate at all.
-
-    A column read since ISSUE-255. The poller computes the decision and now
-    records it on the task, so this asks the writer rather than reconstructing
-    the answer from two observable halves — the plan naming no room, and the
-    sender being the user — which needed a ``Config`` in scope and could only
-    ever be an inference about what some other code had already concluded.
-
-    A task created before that column existed reads False and is restored as it
-    would have been before, which is the same direction the reconstruction's own
-    fail-open branch chose: restoring wrongly costs one duplicated turn, while
-    suppressing wrongly hides an approved stranger's message from the room the
-    user is watching for it. The exposure is a single confirmation open across
-    the upgrade, against a two-hour timeout.
-    """
-    return task.source_type == "email" and task.withheld_from_room
-
-
 def _restore_transcript_mirror(conn, task: db.Task, config=None) -> None:
     """Publish the approved turn's question into its room, if it has one.
 
@@ -644,8 +668,6 @@ def _restore_transcript_mirror(conn, task: db.Task, config=None) -> None:
     if not room_token:
         return
     try:
-        if _room_holds_no_copy_of_this_exchange(conn, task):
-            return
         if db.get_room(conn, room_token) is None:
             return
         already = conn.execute(

@@ -5131,6 +5131,15 @@ function createSession(): ChatSession {
     }
   }
 
+  // The room a card was rendered in: the row's own room on an aggregate view,
+  // else the open room. The confirm route approves a relay-held task only from
+  // the private room showing its preview (#624), so it is always sent.
+  function cardRoom(message: ChatMessage | undefined): string | undefined {
+    if (message?.roomToken) return message.roomToken;
+    const rid = get(activeRoomId);
+    return rid == null ? undefined : roomTokenOf(rid);
+  }
+
   async function retryTask(cid: number, mode: 'retry' | 'resume') {
     const m = get(messages).find((x) => x.cid === cid);
     if (!m || !isRetryableTurn(m) || m.retriedAs !== undefined) return;
@@ -5154,7 +5163,22 @@ function createSession(): ChatSession {
   }
 
   async function confirm(cid: number, taskId: number) {
-    await confirmChatTask(taskId);
+    const message = get(messages).find((m) => m.cid === cid);
+    try {
+      await confirmChatTask(taskId, cardRoom(message));
+    } catch (err) {
+      notifyWarning(err instanceof Error ? err.message : 'Could not confirm.');
+      return;
+    }
+    // A card under a private park's row belongs to a task in another room. It
+    // has no stream here and never held this room's queue, so answering it
+    // only takes the card down (#624).
+    if (message?.role === 'system') {
+      updateMsg(cid, (m) => {
+        m.confirmation = false;
+      });
+      return;
+    }
     updateMsg(cid, (m) => {
       m.confirmation = false;
       m.status = 'pending';
@@ -5185,6 +5209,14 @@ function createSession(): ChatSession {
       await cancelChatTask(taskId);
     } catch {
       /* ignore */
+    }
+    if (get(messages).find((m) => m.cid === cid)?.role === 'system') {
+      // As in `confirm`: the task is another room's, so this room's queue
+      // stays as it was.
+      updateMsg(cid, (m) => {
+        m.confirmation = false;
+      });
+      return;
     }
     updateMsg(cid, (m) => {
       m.confirmation = false;

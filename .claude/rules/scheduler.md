@@ -54,7 +54,7 @@ One loop thread, one pooled `httpx.AsyncClient` for all Talk I/O.
 ### `process_one_task()`
 `process_one_task(config, dry_run=False, user_id=None) -> tuple[int, bool] | None`: claim, `running`, resources/ack/attachments, `execute_task()`.
 
-**Success:** `detect_malformed_result()` can reclassify as failure; `CONFIRMATION_PATTERN`; `completed`; index; deliver; reset job failures and close the `cron_job` row.
+**Success:** `detect_malformed_result()` can reclassify as failure; `asks_for_confirmation` (`CONFIRMATION_PATTERN` against the final paragraph only, quoted, fenced and inline-code text skipped, #625); `completed`; index; deliver; reset job failures and close the `cron_job` row.
 - `once = true`: row deleted, CRON.md removal buffered (ISSUE-387; the FUSE write held the lock). `_remove_once_job_from_cron_md` runs after `deliver_pending`, never raises (post-commit), and re-deletes the row after writing, since `_sync_cron_files` could re-insert it in between.
 
 **Failure:** the row branch and the terminal-event block classify through one pair, `retry_flags(task, result, *, success)` and `decide_retry(...)` (F4); `retry_flags` returns `decide_retry`'s keyword names so no site can disagree on one flag (the event block once omitted `is_sigpipe`, latent). `RetryDecision.reason` is diagnostic only; do not refactor sites onto it (reasons collapse onto one else-arm; the event block tests `is_requeued` before `is_cancelled`). `decide_retry` owns the `1 << (attempt_count * 2)` backoff and `attempt_count < max_attempts - 1` budget; `tests/test_scheduler_retry_decision.py` enumerates all 64 combinations and greps for a copy. `run_task_inline` keeps its own `is_cancelled`.
@@ -73,7 +73,7 @@ Sandboxed tasks have no DB, so they and skill CLIs write JSON to the temp dir an
 
 - `_process_deferred_subtasks`: admin-only (others deleted), `source_type="subtask"`, inherits `queue`.
 - `_process_retired_deferred_files`: deletes `_RETIRED_DEFERRED_SUFFIXES` files (`tracked_transactions`, ISSUE-427, fed dead framework tables). Runs first; must precede `_warn_unconsumed_deferred_files`. The suffix stays in `_KNOWN_DEFERRED_SUFFIXES` (purge still clears it) but not in the `expected name:` hint.
-- `_process_deferred_sent_emails`: `sent_emails` rows for emissary reply matching.
+- `_process_deferred_sent_emails`: `sent_emails` rows, which thread replies onto the bot's sends and mint their rooms (`threads.register_sent_thread`).
 - `_process_deferred_kg_ops`: commits per op.
 - `_process_deferred_kv_ops`: set ops re-read the value so they compose; `set-trim` skipped on a missing row. Non-dict entries skipped (ISSUE-451; `_load_deferred_json` checks only the outer list); same in sent_emails.
 - `_process_deferred_user_alerts`; `_load_deferred_email_output` (preferred over stdout-JSON).

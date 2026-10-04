@@ -340,7 +340,7 @@ class TestBackfill:
             db.mark_email_processed(
                 conn, "uid-ext", '"Boss" <contact@example.com>', subject="Hi",
                 user_id="alice", task_id=ext_tid,
-                routing_method="thread_match",
+                routing_method="thread_room",
             )
             db.add_message(
                 conn, "rm", role="user", body="external mail",
@@ -457,7 +457,7 @@ class TestBackfill:
         with db.get_db(config.db_path) as conn:
             db.mark_email_processed(
                 conn, "uid-ext-2", "later@example.com", subject="Hi",
-                user_id="alice", task_id=ext_tid, routing_method="thread_match",
+                user_id="alice", task_id=ext_tid, routing_method="thread_room",
             )
         self._run(config)
         with db.get_db(config.db_path) as conn:

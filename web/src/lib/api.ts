@@ -2920,7 +2920,7 @@ export interface ChatRoom {
   updated_at: string;
   /** Surface the room was created on. Talk-origin rooms surface here
    * automatically once the bot is messaged in them. */
-  origin?: 'web' | 'talk' | 'sms' | 'whatsapp';
+  origin?: 'web' | 'talk' | 'sms' | 'whatsapp' | 'email';
   /** The bound Talk conversation, or null when the room is web-only. Sent on
    * every room the listing returns, not only on a fresh promote response — the
    * room-list refresh writes this key unconditionally, so a listing that
@@ -2949,12 +2949,15 @@ export interface ChatRoom {
    * row's stamp can be written straight onto the room. Absent on older
    * backends → the room keeps whatever position the server gave it. */
   last_activity?: string;
-  /** The phone surface this room is bound to, a WhatsApp group included; null
-   * for every other room. What the sidebar badge and the settings line read. */
-  phone_surface?: 'sms' | 'whatsapp' | null;
-  /** The room is bound to SMS or WhatsApp, a WhatsApp group included: web
-   * reads it and the server refuses a send into it, so no composer. True for
-   * every member, since adding a reader does not make the thread writable. */
+  /** The phone surface this room is bound to, a WhatsApp group included, or
+   * `email` for the user's private email room; null for every other room, an
+   * email thread room included. What the sidebar badge and the settings line
+   * read. */
+  phone_surface?: 'sms' | 'whatsapp' | 'email' | null;
+  /** The room is bound to SMS or WhatsApp, a WhatsApp group included, or is
+   * the user's private email room: web reads it and the server refuses a send
+   * into it, so no composer. True for every member, since adding a reader does
+   * not make the thread writable. */
   read_only?: boolean;
   /** The phone binding is a WhatsApp group, not the creator's private thread.
    * Its parked questions are answered from web and it takes members; only the
@@ -2990,6 +2993,9 @@ export interface RoomPolicyView {
   host: string | null;
   is_host: boolean;
   guest_reply: GuestReply;
+  /** An email thread room: no guest mode, so the guest reply setting is
+   * not shown. */
+  email_thread?: boolean;
   /** Why the caller may not change the room-wide settings, or null when they
    * may. The server's own refusal text, so it is shown verbatim. */
   settings_refusal: string | null;
@@ -3997,8 +4003,16 @@ export function editOutboundDraft(draftId: number, body: string): Promise<DraftA
   });
 }
 
-export function confirmChatTask(taskId: number): Promise<{ status: string }> {
-  return apiFetch<{ status: string }>(`/chat/tasks/${taskId}/confirm`, { method: 'POST' });
+/** `room` is the room the card rendered in. A relay question, room post or
+ *  guest proposal is approved only from the private room showing its
+ *  preview, and the server answers 409 without it (#624). */
+export function confirmChatTask(taskId: number, room?: string): Promise<{ status: string }> {
+  return apiFetch<{ status: string }>(`/chat/tasks/${taskId}/confirm`, {
+    method: 'POST',
+    ...(room
+      ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ room }) }
+      : {}),
+  });
 }
 
 export function cancelChatTask(taskId: number): Promise<{ status: string }> {
@@ -4597,6 +4611,14 @@ const SAFE_ACTION_PATH = /^\/[A-Za-z0-9][A-Za-z0-9/_-]*$/;
  *  and the two can disagree about which one is the guard. */
 export function isSafeActionPath(path: string | null | undefined): path is string {
   return typeof path === 'string' && SAFE_ACTION_PATH.test(path);
+}
+
+/** Whether an action path is answered by the server rather than by a page.
+ *  `/chat/r/<room>[/t/<task>]` is the deep-link redirect (#624): the
+ *  frontend is prerendered with no route there, so its link must make the
+ *  client do a full navigation. */
+export function isServerActionPath(path: string | null | undefined): boolean {
+  return isSafeActionPath(path) && path.startsWith('/chat/r/');
 }
 
 export function getNotificationCounts(): Promise<NotificationCounts> {

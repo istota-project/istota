@@ -246,7 +246,7 @@ class TestProcessedEmailPrune:
             )
             row_id = db.mark_email_processed(
                 conn, email_id="threaded", sender_email="stranger@example.com",
-                task_id=task_id, routing_method="thread_match",
+                task_id=task_id, routing_method="thread_room",
             )
             conn.execute(
                 "UPDATE processed_emails SET processed_at = datetime('now', '-400 days') "

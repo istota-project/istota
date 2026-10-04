@@ -14,7 +14,6 @@ from istota.config import Config, EmailConfig as AppEmailConfig, UserConfig
 from istota.mail.ownership import thread_reply_from_correspondent
 from istota.mail.support import (
     cleanup_old_emails,
-    compute_thread_id,
     get_email_config,
     normalize_subject,
 )
@@ -266,29 +265,6 @@ def _scheduler_config(db_path, tmp_path, users=None):
 ])
 def test_normalize_subject(subject, expected):
     assert normalize_subject(subject) == expected
-
-
-# =============================================================================
-# TestComputeThreadId
-# =============================================================================
-
-
-class TestComputeThreadId:
-    @pytest.mark.parametrize("a, b", [
-        (("Hello", ["a@test.com", "b@test.com"]), ("Hello", ["a@test.com", "b@test.com"])),
-        (("Hello", ["b@test.com", "a@test.com"]), ("Hello", ["a@test.com", "b@test.com"])),
-        (("Re: Hello", ["a@test.com"]), ("Hello", ["a@test.com"])),
-    ], ids=["deterministic", "sorted_participants", "normalized_subject"])
-    def test_same_thread(self, a, b):
-        assert compute_thread_id(*a) == compute_thread_id(*b)
-
-    def test_length_16(self):
-        assert len(compute_thread_id("Hello", ["a@test.com"])) == 16
-
-    def test_different_subjects_different_ids(self):
-        id1 = compute_thread_id("Hello", ["a@test.com"])
-        id2 = compute_thread_id("Goodbye", ["a@test.com"])
-        assert id1 != id2
 
 
 # =============================================================================
@@ -675,10 +651,11 @@ class TestMatchThread:
 
 
 class TestPollEmailsThreadMatching:
-    """Tests for email poller routing emissary replies via thread matching."""
+    """A reply on a thread the bot sent before rooms were minted at send."""
 
     def test_unknown_sender_reply_routes_to_originating_user(self, mail_config):
-        """Reply from unknown sender matching a sent thread routes to originating user."""
+        """The reply resolves the user the bot wrote for, and mints the
+        thread's room: the answer is a reply-all there, not an origin route."""
         config = mail_config(_users("carol"))
         _sent(config, "<outbound@bot.com>", to_addr="external@proton.me",
               subject="Set up a meeting", conversation_token="talk_room_42")
@@ -689,9 +666,11 @@ class TestPollEmailsThreadMatching:
         ))
 
         assert task.user_id == "carol"
-        assert task.output_target == "talk,email"
-        assert task.conversation_token == "talk_room_42"
-        assert "Emissary email reply" in task.prompt
+        assert task.output_target == "email"
+        with db.get_db(config.db_path) as conn:
+            assert task.conversation_token == db.resolve_room_token(
+                conn, "email", "<outbound@bot.com>")
+        assert "Emissary email reply" not in task.prompt
         assert "external@proton.me" in task.prompt
         assert "How about Tuesday?" in task.prompt
 
@@ -715,9 +694,10 @@ class TestPollEmailsThreadMatching:
         ))
 
         assert task.user_id == "carol"
-        assert task.conversation_token == "room_7"
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room_binding(conn, task.conversation_token, "email") is not None
         row = _processed(config, "9")
-        assert row["routing_method"] == "thread_match"
+        assert row["routing_method"] == "thread_room"
         assert row["user_id"] == "carol"
 
     def test_unknown_sender_no_thread_match_discarded(self, mail_config):
@@ -732,180 +712,20 @@ class TestPollEmailsThreadMatching:
         assert _processed(config, "3")["routing_method"] == "discarded"
 
     def test_known_sender_still_works_normally(self, mail_config):
-        """Known sender emails are routed normally (no output_target override)."""
+        """A known sender writing to the bot alone is a turn in their private
+        email room (email on rooms, stage 3), answered by mail."""
+        from istota.transport.email import email_conversation_token
+
         config = mail_config(_users("alice"))
 
         task = _single_task(config, _email(sender="alice@test.com"))
 
         assert task.user_id == "alice"
-        assert task.output_target is None  # Normal email routing
+        assert task.output_target == "email"
+        with db.get_db(config.db_path) as conn:
+            assert task.conversation_token == db.resolve_room_token(
+                conn, "email", email_conversation_token("alice"))
         assert "Emissary" not in task.prompt
-
-    def test_emissary_reply_without_conversation_token_uses_thread_id(self, mail_config):
-        """If original sent email had no conversation_token, fall back to thread_id."""
-        config = mail_config(_users("carol"))
-        _sent(config, "<out@bot.com>", conversation_token=None)
-
-        task = _single_task(config, _email(
-            id="4", subject="Re: Hello", sender="ext@x.com", references="<out@bot.com>",
-        ))
-
-        assert task.user_id == "carol"
-        assert task.output_target == "talk,email"
-        # Should use thread_id since no conversation_token on sent email
-        assert task.conversation_token is not None
-
-    def test_thread_match_inherits_talk_delivery_token(self, mail_config):
-        """ISSUE-057: thread_match inherits talk_delivery_token from sent_emails row."""
-        config = mail_config(_users("carol"))
-        _sent(config, "<out@bot.com>", subject="Plan",
-              conversation_token="talk_room_99", talk_delivery_token="real_talk_room")
-
-        task = _single_task(config, _email(
-            id="9", subject="Re: Plan", sender="ext@x.com", references="<out@bot.com>",
-        ))
-
-        assert task.talk_delivery_token == "real_talk_room"
-        # conversation_token still preserves the email-thread grouping key
-        assert task.conversation_token == "talk_room_99"
-
-    def _origin_reply(self, config, *, origin_target, policy=None,
-                      sent_conversation_token="rm_web123"):
-        """Record a sent_email with origin_target, poll a thread-matched reply,
-        and return the created task. Shared by the origin-routing tests."""
-        config.email = _email_config()
-        user = UserConfig(email_addresses=["carol@test.com"])
-        if policy is not None:
-            user.email_reply_routing = policy
-        config.users = {"carol": user}
-        _sent(config, "<origin_out@bot.com>", subject="Question",
-              conversation_token=sent_conversation_token, origin_target=origin_target)
-
-        return _single_task(config, _email(
-            id="20", subject="Re: Question", sender="ext@x.com",
-            references="<origin_out@bot.com>",
-        ))
-
-    @pytest.mark.parametrize("origin_target, policy, token, expected", [
-        ("web:rm_web123", None, "rm_web123", "web:rm_web123,email"),
-        ("web:rm_web123", "origin", "rm_web123", "web:rm_web123"),
-        ("web:rm_web123", "thread", None, "email"),
-        ("talk:RealRoomXYZ", None, "RealRoomXYZ", "talk:RealRoomXYZ,email"),
-    ], ids=[
-        "web_default_policy_origin_plus_thread", "web_origin_only",
-        "web_thread_only", "talk_descriptor_routes_to_token",
-    ])
-    def test_origin_policy(self, make_config, origin_target, policy, token, expected):
-        # The pre-existing case: a descriptor naming no registered room at all
-        # routes by the policy alone.
-        task = self._origin_reply(
-            make_config(), origin_target=origin_target, policy=policy,
-            sent_conversation_token=token or "rm_web123",
-        )
-        assert task.output_target == expected
-        if token is not None:
-            assert task.conversation_token == token
-
-    # -- Dual-bound origin room: the descriptor must not pick one surface ------
-    #
-    # A room reachable on both Talk and web is ONE conversation. A stored
-    # `web:<tok>` descriptor delivers the reply to the web leg only, so the Talk
-    # view of that same room shows nothing — the exact mirror of the ISSUE-242
-    # gap, arrived at from the other side. `room` is the primitive that already
-    # fans out by live bindings, and bindings are resolved at reply time because
-    # a room can be promoted to Talk after the send that stamped the descriptor.
-
-    def _dual_bound(self, config, token="rm_web123"):
-        with db.get_db(config.db_path) as conn:
-            db.register_room(conn, token, "carol", origin="web")
-            db.add_room_binding(conn, token, "web", token)
-            db.add_room_binding(conn, token, "talk", token)
-
-    def test_dual_bound_web_origin_fans_out_to_room(self, make_config):
-        config = make_config()
-        self._dual_bound(config)
-        task = self._origin_reply(config, origin_target="web:rm_web123")
-        # The stored descriptor names one view of the room; it is upgraded to the
-        # room form at reply time so the fan-out reaches every view of it.
-        assert task.output_target == "room:rm_web123,email"
-        assert task.conversation_token == "rm_web123"
-
-    def test_dual_bound_talk_origin_fans_out_to_room(self, make_config):
-        config = make_config()
-        self._dual_bound(config, token="RealRoomXYZ")
-        task = self._origin_reply(
-            config, origin_target="talk:RealRoomXYZ",
-            sent_conversation_token="RealRoomXYZ",
-        )
-        assert task.output_target == "room:RealRoomXYZ,email"
-
-    def test_dual_bound_respects_origin_only_policy(self, make_config):
-        config = make_config()
-        self._dual_bound(config)
-        task = self._origin_reply(
-            config, origin_target="web:rm_web123", policy="origin",
-        )
-        assert task.output_target == "room:rm_web123"
-
-    def test_single_bound_room_keeps_its_surface_descriptor(self, make_config):
-        # Nothing to fan out to: one binding means one surface, and `room` would
-        # add a DB lookup at every delivery for no change in outcome.
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            db.register_room(conn, "rm_web123", "carol", origin="web")
-            db.add_room_binding(conn, "rm_web123", "web", "rm_web123")
-        task = self._origin_reply(config, origin_target="web:rm_web123")
-        assert task.output_target == "web:rm_web123,email"
-
-    def test_a_stored_room_descriptor_is_used_as_is(self, make_config):
-        """The form new sends stamp. No upgrade step — it already names the
-        conversation, and expansion reads live bindings at delivery."""
-        config = make_config()
-        self._dual_bound(config)
-        task = self._origin_reply(config, origin_target="room:rm_web123")
-        assert task.output_target == "room:rm_web123,email"
-        assert task.conversation_token == "rm_web123"
-
-    def _archive(self, config):
-        self._dual_bound(config)
-        with db.get_db(config.db_path) as conn:
-            conn.execute(
-                "UPDATE rooms SET archived = 1 WHERE token = ?", ("rm_web123",),
-            )
-
-    def test_an_archived_origin_room_falls_back_rather_than_dropping(
-        self, make_config,
-    ):
-        """A reply must never be lost because its room went away.
-
-        The room is gone, so there is nothing to fan out to — but the email leg
-        is still a real delivery and the reply reaches the contact who sent it.
-        """
-        config = make_config()
-        self._archive(config)
-        task = self._origin_reply(config, origin_target="web:rm_web123")
-        # Not upgraded to the room form: the room is not live to upgrade to.
-        # Note this is deliberately *not* the same outcome as the sibling test
-        # below, where the descriptor names the room directly and expansion
-        # yields email alone. A legacy descriptor names a surface leg, so it
-        # keeps delivering to that leg — "existing values keep routing as they
-        # do today" — while the room form asks about a room that is gone.
-        assert task.output_target == "web:rm_web123,email"
-
-    def test_an_archived_room_named_directly_still_delivers_to_email(
-        self, make_config,
-    ):
-        """Same room, but the descriptor names it directly — the case a send
-        stamped before the room was archived. Expansion yields the origin
-        delivery alone rather than raising or dropping the reply."""
-        from istota.transport.routing import resolve_delivery_plan
-
-        config = make_config()
-        self._archive(config)
-        task = self._origin_reply(config, origin_target="room:rm_web123")
-        assert task.output_target == "room:rm_web123,email"
-        plan = resolve_delivery_plan(config, task, None)
-        assert [d.surface for d in plan] == ["email"]
 
     def _origin_sent_and_reply(self, config, *, sender, to, sent_to="ext@x.com"):
         """Record carol's origin-stamped send, poll one reply to it, and return
@@ -937,40 +757,36 @@ class TestPollEmailsThreadMatching:
         )
         assert task is not None
         assert task.output_target == "email"
-        assert task.conversation_token == "rm_web123"
+        # Since stage 3 the reply is a turn in carol's private email room, not
+        # a continuation of the origin room.
+        assert task.conversation_token != "rm_web123"
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room_binding(conn, task.conversation_token, "email") is not None
         # Self-reply → plain template, not "an external contact has replied".
         assert "Emissary email reply" not in task.prompt
 
-    def test_self_reply_ignores_the_origin_policy(self, mail_config):
-        """The suppression is per-message, not per-user, so it overrides the
-        policy rather than being expressible through it (ISSUE-254). `origin`
-        names the room and nothing else, and an empty plan would lose the reply
-        — so it falls back to email, where the user wrote from."""
-        config = mail_config(_users("carol", email_reply_routing="origin"))
-        task = self._origin_sent_and_reply(
-            config, sender="carol@test.com", to=("bot@test.com",), sent_to="carol@test.com",
-        )
-        assert task.output_target == "email"
-
-    def test_plus_address_reply_recovers_origin(self, mail_config):
-        # Dormant second path: a reply addressed to the bot's plus-address is
-        # resolved at step 1, also pre-empting thread-match. The origin must
-        # still be recovered.
+    def test_a_held_plus_address_reply_names_no_room(self, mail_config):
+        # A stranger's reply to the bot's plus-address is held, and has no
+        # plan until approving it admits it to the thread's room; the origin
+        # descriptor routes nothing.
         config = mail_config(_users("carol"))
         task = self._origin_sent_and_reply(
             config, sender="ext@x.com", to=("bot+carol@test.com",),
         )
         assert task is not None
-        assert task.output_target == "web:rm_web123,email"
-        assert task.conversation_token == "rm_web123"
+        assert task.status == "pending_confirmation"
+        assert task.output_target is None
+        assert task.conversation_token != "rm_web123"
 
-    def test_external_thread_reply_keeps_emissary_prompt(self, mail_config):
+    def test_external_thread_reply_is_a_room_turn(self, mail_config):
         # An external contact (not a configured email, no plus-address) resolves
-        # purely by thread-match → emissary template AND origin routing.
+        # by the sent row, and the reply is a turn in the thread's room with the
+        # plain wrapper; the origin descriptor routes nothing.
         config = mail_config(_users("carol"))
         task = self._origin_sent_and_reply(config, sender="ext@x.com", to=("bot@test.com",))
-        assert task.output_target == "web:rm_web123,email"
-        assert "Emissary email reply" in task.prompt
+        assert task.output_target == "email"
+        assert task.conversation_token != "rm_web123"
+        assert "Emissary email reply" not in task.prompt
 
     def test_thread_row_for_other_user_not_applied(self, mail_config):
         # Defence-in-depth: a reply sender-matched to user A must not inherit the
@@ -983,38 +799,10 @@ class TestPollEmailsThreadMatching:
         )
         assert task is not None
         assert task.user_id == "alice"
-        assert task.output_target is None  # mismatched origin dropped → default
+        # Mismatched origin dropped: alice's own mail is a turn in her private
+        # email room (stage 3).
+        assert task.output_target == "email"
         assert task.conversation_token != "rm_web123"
-
-    @pytest.mark.parametrize("token", ["web-carol-deadbeef", "rm_example"])
-    def test_legacy_null_origin_with_web_token_not_used_as_talk_channel(self, mail_config, token):
-        # A legacy (pre-migration) sent_emails row with NULL origin_target whose
-        # conversation_token is a web room token must NOT be used as a Talk
-        # delivery channel (that would post to a nonexistent Talk room).
-        config = mail_config(_users("carol", alerts_channel="alerts_room"))
-        _sent(config, "<legacy_web@bot.com>", subject="Q",
-              conversation_token=token, origin_target=None)  # legacy row
-
-        task = _single_task(config, _email(
-            id="30", subject="Re: Q", sender="ext@x.com", references="<legacy_web@bot.com>",
-        ))
-        assert task.output_target == "talk,email"
-        # The web token must not leak in as the Talk channel; the ladder falls
-        # through to the resolved alerts room instead.
-        assert task.talk_delivery_token != token
-        assert task.talk_delivery_token == "alerts_room"
-
-    def test_known_sender_resolves_talk_delivery_token_from_alerts(self, mail_config):
-        """plus_address / sender_match routes resolve talk_delivery_token via user config."""
-        config = mail_config(_users("alice", alerts_channel="alice_alerts"))
-
-        task = _single_task(config, _email(sender="alice@test.com"))
-
-        # conversation_token is the synthetic email-thread hash
-        assert task.conversation_token is not None
-        assert len(task.conversation_token) == 16
-        # talk_delivery_token resolves to the user's alerts channel
-        assert task.talk_delivery_token == "alice_alerts"
 
 
 # =============================================================================
@@ -1078,8 +866,10 @@ class TestBotAddressedInTo:
 
         assert bot_addressed_in_to(Config(), _email()) is False
 
+    # Dave on both, so neither is mail to the bot alone, which is a turn in
+    # carol's private email room and takes no `IncomingMessage` (stage 3).
     @pytest.mark.parametrize("to, cc, expected", [
-        (("bot+carol@test.com",), (), True),
+        (("bot+carol@test.com",), ("dave@test.com",), True),
         (("dave@test.com",), ("bot+carol@test.com",), False),
     ])
     def test_the_poller_passes_it_to_ingest(self, mail_config, to, cc, expected):
@@ -1139,14 +929,14 @@ class TestPollEmailsPlusAddressRouting:
 
         assert _processed(config, "14")["routing_method"] == "sender_match"
 
-    def test_routing_method_stored_for_thread_match(self, mail_config):
+    def test_routing_method_stored_for_a_pre_change_thread_reply(self, mail_config):
         config = mail_config(_users("carol"))
         _sent(config, "<out15@bot.com>")
 
         _poll(config, _email(id="15", subject="Re: Hello", sender="ext@x.com",
                              references="<out15@bot.com>"))
 
-        assert _processed(config, "15")["routing_method"] == "thread_match"
+        assert _processed(config, "15")["routing_method"] == "thread_room"
 
 
 class TestEmailConfirmationGate:
@@ -1305,6 +1095,9 @@ class TestSenderMatchConfirmationGate:
         prompt = send.call_args.args[2]
         assert "yes trust" in prompt
         assert "unknown sender" in prompt
+        # A plain yes admits the sender to the thread; the prompt says so.
+        assert "'yes' to process it and admit this sender to this thread" in prompt
+        assert "trust this sender everywhere" in prompt
 
     @staticmethod
     def _gate_prompt(config, *, uid="ob1", sender="stranger@evil.com"):
@@ -1424,14 +1217,14 @@ class TestSenderMatchConfirmationGate:
         warned = [r for r in caplog.records if "could not be delivered" in r.getMessage()]
         assert bool(warned) is warns
 
-    def test_confirm_sender_match_does_not_reach_an_emissary_reply(self, mail_config):
+    def test_confirm_sender_match_does_not_reach_a_correspondents_reply(self, mail_config):
         """`confirm_sender_match` is about the own-address claim. Turning it on must
         not start holding a correspondent's reply, which makes no such claim.
 
-        Named for the thread route being ungated *by design* until ISSUE-234, which
-        narrowed it to the correspondent rather than removing it — this sender is
-        the address the bot wrote to, so it stays ungated for the reason the name
-        now gives. `TestThreadMatchConfirmationGate` covers the narrowing itself."""
+        The thread route was ungated *by design* until ISSUE-234, which narrowed
+        it to the correspondent rather than removing it — this sender is the
+        address the bot wrote to, so it stays ungated.
+        `TestThreadReplyConfirmationGate` covers the narrowing itself."""
         config = mail_config(_users("alice"), confirm_sender_match="gate")
         _sent(config, "<orig@test.com>", user_id="alice", to_addr="external@reply.com",
               conversation_token="room1")
@@ -1443,7 +1236,7 @@ class TestSenderMatchConfirmationGate:
         assert task.status == "pending"
 
 
-class TestThreadMatchConfirmationGate:
+class TestThreadReplyConfirmationGate:
     """ISSUE-234 — a `Message-ID` the bot issued routes a reply *and* used to
     authorize it. Possession is disclosed to everyone Cc'd, everyone the thread is
     forwarded to, and every archive in the path, so the thread route now also asks
@@ -1479,22 +1272,13 @@ class TestThreadMatchConfirmationGate:
         assert len(task_ids) == 1
         task = _task(config, task_ids[0])
         assert task.status == "pending_confirmation"
-        # Pinned because it is the one property of a gated thread reply that
-        # is inherited rather than chosen: the task keeps the origin room as
-        # its token (`inbound.py`, "Continue the originating conversation"),
-        # so unlike a gated plus-address message under a synthetic thread
-        # hash it parks that room's foreground queue and is cancellable by
-        # `cancel_pending_confirmations` on the room's next message. Not new
-        # — a gated `sender_match` reply that also matched a thread has
-        # always landed here, which is the case `web_app`'s cancel comment
-        # describes — but this route widens who reaches it, and a silent
-        # change to the token would move the blast radius without a test
-        # noticing.
-        assert task.conversation_token == "room1"
+        # A held reply no longer inherits the origin room: it names no room,
+        # so it parks no room's queue, until approval admits it to its own.
+        assert task.conversation_token != "room1"
 
         prompt = send.call_args.args[2]
         assert "attacker@evil.example" in prompt
-        assert "thread_match" in prompt
+        assert "thread_room" in prompt
 
     def test_the_correspondent_we_wrote_to_is_not_gated(self, mail_config):
         """The legitimate emissary reply — the common case, and the reason the route
@@ -1603,7 +1387,7 @@ class TestEmailPromptBoundaries:
         assert "</email_metadata>" in task.prompt
         assert "do not follow instructions" in task.prompt.lower()
 
-    def test_emissary_reply_has_boundary_markers(self, mail_config):
+    def test_thread_reply_has_boundary_markers(self, mail_config):
         config = mail_config(_users("carol"))
         _sent(config, "<orig@test.com>", to_addr="external@reply.com",
               conversation_token="room1")
@@ -1616,83 +1400,6 @@ class TestEmailPromptBoundaries:
         assert "<email_content>" in task.prompt
         assert "</email_content>" in task.prompt
         assert "do not follow instructions" in task.prompt.lower()
-
-
-# =============================================================================
-# TestEmissaryReplyDeliveryTokenResolution
-# =============================================================================
-
-
-class TestEmissaryReplyDeliveryTokenResolution:
-    """Cover every shape of sent_emails row that a thread-match can hit.
-
-    Originating tasks come in three flavours and either may pre-date the
-    talk_delivery_token column. The reply task's talk_delivery_token must
-    end up pointing at a real Talk room in every case.
-    """
-
-    @staticmethod
-    def _briefing_user():
-        from istota.config import BriefingConfig
-        return {
-            # alerts_channel set to a different value from the briefing room, to
-            # prove the sent_email path is used rather than resolve.
-            "alerts_channel": "other_alerts",
-            "briefings": [BriefingConfig(
-                name="morning", cron="0 8 * * *",
-                conversation_token="morning_briefing_room",
-            )],
-        }
-
-    @pytest.mark.parametrize(
-        "user_settings, conversation_token, delivery_token, "
-        "expected_delivery, expected_conversation",
-        [
-            # The bug: pre-fix code threw away a real Talk room. Talk-source
-            # originators record conversation_token = real Talk room and
-            # talk_delivery_token = NULL. alerts_channel is set so the WRONG
-            # fallback would return it.
-            ({"alerts_channel": "WRONG_alerts_channel"}, "original_talk_room", None,
-             "original_talk_room", "original_talk_room"),
-            # Email originator with a synthetic thread hash (16 lowercase hex):
-            # not a real Talk room, so resolve via the user's alerts.
-            ({"alerts_channel": "carol_alerts"}, "deadbeef12345678", None,
-             "carol_alerts", "deadbeef12345678"),
-            # Briefing originator: conversation_token IS the briefing room.
-            ("briefing", "morning_briefing_room", None, "morning_briefing_room", None),
-            # Both NULL on sent_email — resolve via user config.
-            ({"alerts_channel": "carol_alerts"}, None, None, "carol_alerts", None),
-            # An explicit delivery token beats conversation_token.
-            ({"alerts_channel": "WRONG_alerts"}, "some_other_room", "explicit_delivery_room",
-             "explicit_delivery_room", None),
-            # No resolvable channel and a real-looking conversation_token: use it,
-            # rather than returning None because resolve cannot help.
-            ({}, "orig_room", None, "orig_room", None),
-        ],
-        ids=[
-            "talk_originator", "email_originator_synthetic", "briefing_originator",
-            "both_null_resolves", "explicit_delivery_wins", "no_user_channel_keeps_room",
-        ],
-    )
-    def test_reply_delivery_token(
-        self, mail_config, user_settings, conversation_token, delivery_token,
-        expected_delivery, expected_conversation,
-    ):
-        if user_settings == "briefing":
-            user_settings = self._briefing_user()
-        config = mail_config(_users("carol", **user_settings))
-        _sent(config, "<out@bot.com>", subject="Plan",
-              conversation_token=conversation_token, talk_delivery_token=delivery_token)
-
-        task = _single_task(config, _email(
-            id="r1", subject="Re: Plan", sender="ext@x.com", body="reply body",
-            references="<out@bot.com>",
-        ))
-
-        assert task.user_id == "carol"
-        assert task.talk_delivery_token == expected_delivery
-        if expected_conversation is not None:
-            assert task.conversation_token == expected_conversation
 
 
 # =============================================================================
@@ -1799,67 +1506,52 @@ class TestEmissaryLifecycle:
             references=f"<{message_id}>",
         ))
 
-    def test_talk_task_sends_email_reply_routes_to_original_room(
-        self, db_path, tmp_path, mail_config,
+    @staticmethod
+    def _talk_task(conn):
+        return db.create_task(
+            conn, prompt="send email", user_id="alice",
+            source_type="talk", conversation_token="talkroom_42",
+        )
+
+    @staticmethod
+    def _email_task(conn):
+        return db.create_task(
+            conn, prompt="reply", user_id="alice", source_type="email",
+            conversation_token="0123456789abcdef", talk_delivery_token="alerts_room",
+        )
+
+    @staticmethod
+    def _subtask(conn):
+        parent_id = db.create_task(
+            conn, prompt="parent", user_id="alice",
+            source_type="talk", conversation_token="parent_room",
+        )
+        return db.create_task(
+            conn, prompt="child", user_id="alice",
+            source_type="subtask", parent_task_id=parent_id,
+            conversation_token="parent_room", talk_delivery_token="parent_room",
+        )
+
+    @pytest.mark.parametrize("make_task", ["_talk_task", "_email_task", "_subtask"])
+    def test_the_reply_lands_in_the_room_the_send_minted(
+        self, db_path, tmp_path, mail_config, make_task,
     ):
-        """Full loop: talk task sends, external replies, routes to original room."""
+        """Whatever the originator, the send mints the thread's room, and the
+        first reply is a turn in it rather than a routed notice (stage 1 of
+        email-on-rooms): reply-all by mail, nothing mirrored into the origin."""
         with db.get_db(db_path) as conn:
-            tid = db.create_task(
-                conn, prompt="send email", user_id="alice",
-                source_type="talk", conversation_token="talkroom_42",
-            )
-            task = db.get_task(conn, tid)
+            task = db.get_task(conn, getattr(self, make_task)(conn))
 
-        new_task = self._round_trip(db_path, tmp_path, mail_config, task, "m_talk@bot.com")
+        new_task = self._round_trip(db_path, tmp_path, mail_config, task, "m_out@bot.com")
 
+        with db.get_db(db_path) as conn:
+            room = db.resolve_room_token(conn, "email", "<m_out@bot.com>")
+        assert room is not None
         assert new_task.user_id == "alice"
-        assert new_task.conversation_token == "talkroom_42"
-        # The reply routes back to the origin Talk room via the stored origin
-        # descriptor (talk:<token>) rather than the talk_delivery_token ladder.
-        assert new_task.output_target == "talk:talkroom_42,email"
-
-    def test_email_task_sends_email_reply_routes_via_alerts(
-        self, db_path, tmp_path, mail_config,
-    ):
-        """Email-source originator: reply routes via the recorded delivery token."""
-        synthetic = "0123456789abcdef"
-
-        with db.get_db(db_path) as conn:
-            tid = db.create_task(
-                conn, prompt="reply", user_id="alice",
-                source_type="email", conversation_token=synthetic,
-                talk_delivery_token="alerts_room",
-            )
-            task = db.get_task(conn, tid)
-
-        new_task = self._round_trip(db_path, tmp_path, mail_config, task, "m_email@bot.com")
-
-        assert new_task.talk_delivery_token == "alerts_room"
-        # conversation_token still preserves the original synthetic email-thread key
-        assert new_task.conversation_token == synthetic
-
-    def test_subtask_sends_email_reply_routes_to_parent_room(
-        self, db_path, tmp_path, mail_config,
-    ):
-        """Subtask of a talk task sends an email — reply must reach parent's room."""
-        with db.get_db(db_path) as conn:
-            parent_id = db.create_task(
-                conn, prompt="parent", user_id="alice",
-                source_type="talk", conversation_token="parent_room",
-            )
-            sub_id = db.create_task(
-                conn, prompt="child", user_id="alice",
-                source_type="subtask", parent_task_id=parent_id,
-                conversation_token="parent_room",
-                talk_delivery_token="parent_room",
-            )
-            sub = db.get_task(conn, sub_id)
-
-        new_task = self._round_trip(db_path, tmp_path, mail_config, sub, "m_sub@bot.com")
-
-        # Reply reaches the parent's room via the origin descriptor (talk:<token>).
-        assert new_task.conversation_token == "parent_room"
-        assert new_task.output_target == "talk:parent_room,email"
+        assert new_task.conversation_token == room
+        assert new_task.output_target == "email"
+        assert new_task.talk_delivery_token is None
+        assert "Notify the user" not in new_task.prompt
 
 
 # =============================================================================

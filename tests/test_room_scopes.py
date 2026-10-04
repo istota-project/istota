@@ -184,33 +184,66 @@ class TestAMembersOwnScheduleInASharedRoom:
         assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == self.ALL
 
 
-class TestATurnWrittenBySomeoneElse:
-    """An outside correspondent's reply continuing a shared room's email
-    thread runs as the member it was routed to, but no member asked it."""
+def _email_thread_room(conn) -> str:
+    """A thread room as the poller leaves it: the host the one member, two
+    correspondents on the thread, bound to the root Message-ID."""
+    room = db.register_bound_room(conn, "alice", origin="email", name="Dinner",
+                                  surface="email", surface_ref="<root@example.com>")
+    for address in ("carol@example.com", "dave@example.com"):
+        db.upsert_room_participant(conn, room_token=room.token, surface="email",
+                                   surface_ref=address, kind="guest")
+    return room.token
+
+
+class TestAnEmailThreadRoom:
+    """Email on rooms, section 2a: the thread is the host's correspondence, so
+    a correspondent's turn runs as the host at full reach with their memory."""
 
     INDEX = _index(calendar="private")
 
     def _turn(self, conn, token, **author):
         tid = db.create_task(conn, user_id="alice", source_type="email",
-                             prompt="p", conversation_token=token)
+                             prompt="p", conversation_token=token, is_group_chat=True,
+                             audience="mixed")
         db.add_message(conn, token, role="user", body="p", origin_surface="email",
                        task_id=tid, **author)
         return db.get_task(conn, tid)
 
-    def test_an_outside_sender_withholds_every_scope(self, conn):
-        task = self._turn(conn, _shared_room(conn), author_label="carol@example.com")
+    def test_it_is_recognised_by_its_email_binding(self, conn):
+        assert room_scopes.is_email_thread_room(conn, _email_thread_room(conn))
+        assert not room_scopes.is_email_thread_room(conn, _shared_room(conn))
+        assert not room_scopes.is_email_thread_room(conn, "no-such-room")
+
+    def test_a_correspondents_turn_withholds_nothing(self, conn):
+        task = self._turn(conn, _email_thread_room(conn), author_label="carol@example.com")
+        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == frozenset()
+
+    def test_a_correspondents_turn_loads_ambient_memory(self, conn):
+        task = self._turn(conn, _email_thread_room(conn), author_label="carol@example.com")
+        assert room_scopes.ambient_memory_off(conn, task) is False
+
+    def test_control_a_talk_guests_turn_still_withholds_everything(self, conn):
+        token = _shared_room(conn)
+        db.add_room_binding(conn, token, "talk", "talk-ref-9")
+        task = self._turn(conn, token, author_label="max")
+        conn.execute("UPDATE tasks SET guest_participant_id = 3 WHERE id = ?", (task.id,))
+        task = db.get_task(conn, task.id)
         assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == {
             "calendar", "files", "memory",
         }
+        assert room_scopes.ambient_memory_off(conn, task) is True
 
-    def test_control_the_members_own_mail_withholds_nothing(self, conn):
+    def test_control_a_shared_web_room_still_leaves_memory_out(self, conn):
         task = self._turn(conn, _shared_room(conn), author_user_id="alice")
-        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == frozenset()
+        assert room_scopes.ambient_memory_off(conn, task) is True
 
-    def test_control_a_private_room_withholds_nothing(self, conn):
-        room = db.create_web_chat_room(conn, "alice", "Mine")
-        task = self._turn(conn, room.token, author_label="carol@example.com")
-        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == frozenset()
+    def test_an_unreadable_room_withholds_everything(self, make_task):
+        broken = sqlite3.connect(":memory:")
+        task = make_task(user_id="alice", conversation_token="t", source_type="email")
+        assert room_scopes.withheld_for_task(broken, task, skill_index=self.INDEX) == {
+            "calendar", "files", "memory",
+        }
+        assert room_scopes.ambient_memory_off(broken, task) is True
 
 
 class TestAmbientMemory:

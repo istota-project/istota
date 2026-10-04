@@ -4275,11 +4275,15 @@ def _room_events_batch(
         about_names = _about_room_names(
             conn, username, [r["about_room_token"] for r in rows[:want]],
         ) if len(rows) <= want else {}
+        parked = _parked_rows(
+            conn, username,
+            [(r["msg_id"], r["delivery_reference"]) for r in rows[:want] if r["role"] == "system"],
+        ) if len(rows) <= want else {}
     truncated = len(rows) > want
     events: list[dict] = []
     total = 0
     for r in rows[:want]:
-        d = _cross_room_message_dict(r, username, about_names=about_names)
+        d = _cross_room_message_dict(r, username, about_names=about_names, parked=parked)
         if r["msg_id"] in undeletable:
             d["deletable"] = False
         total += len(json.dumps(d))
@@ -5831,6 +5835,9 @@ def _room_phone_fields(reg, binding) -> dict:
     if binding is None:
         return {"phone_surface": None, "read_only": False, "phone_group": False}
     private = binding.surface_ref == private_phone_ref(binding.surface, reg.user_id)
+    if binding.surface == "email" and not private:
+        # An email thread room, which the listing does not badge.
+        return {"phone_surface": None, "read_only": False, "phone_group": False}
     return {"phone_surface": binding.surface, "read_only": True, "phone_group": not private}
 
 
@@ -6073,10 +6080,14 @@ def _task_phone_transcript_surface(task_id: int) -> str | None:
 
 
 _PHONE_LABELS = {"sms": "SMS", "whatsapp": "WhatsApp"}
+#: Every surface whose private room is read-only here: the phone threads, and
+#: the private email room (email on rooms, section 7). Kept apart from
+#: `_PHONE_LABELS`, which also marks a texted turn's provenance.
+_READ_ONLY_LABELS = {**_PHONE_LABELS, "email": "email"}
 
 
 def _read_only_refusal(surface: str, *, group: bool = False) -> JSONResponse:
-    label = _PHONE_LABELS.get(surface, surface)
+    label = _READ_ONLY_LABELS.get(surface, surface)
     if group:
         error = (f"This room is a {label} group and is read-only here; a message "
                  f"sent from here would reach nobody in the group. Write in the "
@@ -6552,6 +6563,9 @@ def _room_sharing(conn, reg, username: str) -> dict:
             "host": policy.host_user_id,
             "is_host": policy.host_user_id == username,
             "guest_reply": policy.guest_reply,
+            # An email thread room has no guest mode, so the modal hides the
+            # guest reply setting (`private_replies.guest_reply_mode`).
+            "email_thread": db.get_room_binding(conn, reg.token, "email") is not None,
             "settings_refusal": refusal,
         },
     }
@@ -6609,7 +6623,8 @@ def _chat_list_members(username: str, room_id: int) -> dict | None:
         # creator sends `acknowledge_history`.
         message_count = db.count_room_messages(conn, handle.token)
         # The add route refuses one (ISSUE-606); the pane says so instead.
-        email_thread = db.get_room_binding(conn, reg.token, "email") is not None
+        from istota.rooms.scopes import is_email_thread_room
+        email_thread = is_email_thread_room(conn, reg.token)
     members.sort(key=lambda m: (not m["is_owner"], m["user_id"]))
     return {"members": members, "can_manage": can_manage, "message_count": message_count,
             "email_thread": email_thread}
@@ -6639,9 +6654,9 @@ def _chat_add_member(
         from istota.transport.routing import phone_transcript_surface
         phone = phone_transcript_surface(conn, handle.token)
         if phone is not None:
-            label = _PHONE_LABELS.get(phone, phone)
+            label = _READ_ONLY_LABELS.get(phone, phone)
             return 409, {
-                "error": f"This room is the transcript of a {label} "
+                "error": f"This room is the transcript of your {label} "
                          "conversation and has one reader; members cannot be added.",
                 "read_only": True,
             }
@@ -8090,6 +8105,9 @@ def _chat_room_messages(
             conn, username,
             [r["about_room_token"] for r in msg_rows] + [n.about_room_token for n in notes],
         )
+        parked_notes = _parked_rows(
+            conn, username, [(n.id, n.delivery_reference) for n in notes],
+        )
 
         # 4. Paging metadata: the page's oldest spine (or aux-only) row gives the
         #    next cursor; `has_more` ORs a spine probe with a band-eligible
@@ -8200,6 +8218,10 @@ def _chat_room_messages(
         about = _about_room_field(n.about_room_token, about_names)
         if about is not None:
             note["about_room"] = about
+        parked = parked_notes.get(n.id)
+        if parked is not None:
+            note["confirmation"] = True
+            note["task_id"] = parked
         messages.append(note)
     # Normalize every turn's created_at to explicit ISO 8601 UTC. The stored
     # values are naive UTC (SQLite datetime('now') / strftime, and the Talk-cache
@@ -9988,7 +10010,23 @@ def _about_room_field(token, names: dict | None) -> dict | None:
     return {"token": token, "name": (names or {}).get(token)}
 
 
-def _cross_room_message_dict(r, username: str, *, about_names: dict | None = None) -> dict:
+def _parked_rows(conn, username: str, rows) -> dict[int, int]:
+    """``{msg_id: task_id}`` for the system rows that ask a question still
+    waiting on ``username``: a privately parked task's preview, under which
+    the web renders the confirmation card (#624)."""
+    from istota.rooms.private_replies import parked_task_for_reference
+
+    out: dict[int, int] = {}
+    for msg_id, reference in rows:
+        task_id = parked_task_for_reference(conn, reference, username)
+        if task_id is not None:
+            out[msg_id] = task_id
+    return out
+
+
+def _cross_room_message_dict(
+    r, username: str, *, about_names: dict | None = None, parked: dict | None = None,
+) -> dict:
     """One `db._CROSS_ROOM_COLUMNS` row → the history payload shape.
 
     Shared by the paginated aggregate views and the live room-event stream, so
@@ -10019,6 +10057,10 @@ def _cross_room_message_dict(r, username: str, *, about_names: dict | None = Non
             "role": r["role"], "text": text, "notif_id": r["msg_id"],
             "created_at": r["created_at"], **base,
         }
+        parked_task = (parked or {}).get(r["msg_id"])
+        if parked_task is not None:
+            d["confirmation"] = True
+            d["task_id"] = parked_task
     cited = _row_reply_to(r)
     if cited is not None:
         d["reply_to"] = cited
@@ -10421,8 +10463,16 @@ async def chat_send_message(
     }
 
 
-def _chat_confirm_task(task_id: int, actor_user_id: str | None = None) -> None:
+_CONFIRM_FROM_PRIVATE_CHAT = (
+    "Approve this from your private chat, where the full preview is shown."
+)
+
+
+def _chat_confirm_task(
+    task_id: int, actor_user_id: str | None = None, room: str | None = None,
+) -> None:
     from istota import confirmations, db
+    from istota.rooms.private_replies import canonical_token, preview_rooms
     with db.get_db(_config.db_path) as conn:
         task = db.get_task(conn, task_id)
         if task is None or task.status != "pending_confirmation":
@@ -10438,6 +10488,15 @@ def _chat_confirm_task(task_id: int, actor_user_id: str | None = None) -> None:
         if actor_user_id != task.user_id:
             from fastapi import HTTPException
             raise HTTPException(status_code=403, detail="not your task")
+        # A relay question, room post or guest proposal is approved only from
+        # a private room showing its preview: the card sends the room it
+        # rendered in, and a bell click or a hand-built POST has none (#624).
+        if task.whatsapp_confirmation_request_id and (
+            not room or canonical_token(conn, room) not in preview_rooms(conn, task)
+        ):
+            from fastapi import HTTPException
+            logger.info("task %s: confirm refused outside its preview room", task_id)
+            raise HTTPException(status_code=409, detail=_CONFIRM_FROM_PRIVATE_CHAT)
         # Shared with the Talk poller and `!confirm` so all three restore the
         # transcript mirror the gate withheld (ISSUE-241), and so all three
         # prune the parked attempt's terminal frames the same way (ISSUE-235).
@@ -10881,6 +10940,7 @@ def _chat_cancel_task(task_id: int, actor_user_id: str | None = None) -> str | N
 @api_router.post("/chat/tasks/{task_id}/confirm")
 async def chat_confirm_task(
     task_id: int,
+    request: Request,
     user: dict = Depends(_require_api_auth),
     _csrf: None = Depends(_verify_origin),
 ):
@@ -10890,8 +10950,73 @@ async def chat_confirm_task(
     phone = await asyncio.to_thread(_task_phone_transcript_surface, task_id)
     if phone is not None:
         return _read_only_refusal(phone)
-    await asyncio.to_thread(_chat_confirm_task, task_id, user["username"])
+    # Optional `{"room": <token>}`: the room the card rendered in. The bell's
+    # POST and older clients send no body.
+    room = None
+    if await request.body():
+        try:
+            payload = await request.json()
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("room"), str):
+            room = payload["room"]
+    await asyncio.to_thread(_chat_confirm_task, task_id, user["username"], room)
     return {"status": "ok"}
+
+
+def _deep_link_target(username: str, room_token: str, task_id: str | None) -> str:
+    """Where `/chat/r/<room>[/t/<task>]` lands ``username``.
+
+    The chat page itself, with the room and task named, only when the user is
+    a member of the room and owns (or, as an admin, may read) the task. Any
+    other case lands on the bare chat page, and says nothing about which part
+    failed: the link must not tell a stranger that a room or task exists.
+    """
+    from urllib.parse import urlencode
+
+    from istota import db
+    from istota.rooms.scopes import canonical_token
+
+    fallback = "/istota/chat"
+    params: dict[str, str] = {}
+    with db.get_db(_config.db_path) as conn:
+        token = canonical_token(conn, room_token)
+        if token is None or not db.is_room_member(conn, token, username):
+            return fallback
+        params["room"] = token
+    if task_id is not None:
+        if not (task_id.isascii() and task_id.isdigit() and len(task_id) <= 18):
+            return fallback
+        owner = _task_owner(int(task_id))
+        if owner is None or (owner != username and not _user_is_web_admin(username)):
+            return fallback
+        params["task"] = task_id
+    return f"{fallback}?{urlencode(params)}"
+
+
+async def _deep_link(request: Request, room_token: str, task_id: str | None):
+    try:
+        user = await asyncio.to_thread(_require_api_auth, request)
+    except _UnauthorizedException:
+        return RedirectResponse(url="/istota/chat", status_code=302)
+    target = await asyncio.to_thread(_deep_link_target, user["username"], room_token, task_id)
+    return RedirectResponse(url=target, status_code=302)
+
+
+# A deep link into a room, and optionally to a task's turn in it, for the
+# notification bell's LINK actions (#624). A server redirect because the
+# frontend is prerendered with no SPA fallback, and a path because
+# `SAFE_PATH_RE` and the client's `isSafeActionPath` admit no query string
+# (`.claude/rules/relay.md`). The LINK button carries `data-sveltekit-reload`
+# so the client navigates here rather than routing it itself.
+@auth_router.get("/chat/r/{room_token}/t/{task_id}")
+async def chat_deep_link_task(request: Request, room_token: str, task_id: str):
+    return await _deep_link(request, room_token, task_id)
+
+
+@auth_router.get("/chat/r/{room_token}")
+async def chat_deep_link_room(request: Request, room_token: str):
+    return await _deep_link(request, room_token, None)
 
 
 def _chat_retry_task(task_id: int, username: str, resume: bool):

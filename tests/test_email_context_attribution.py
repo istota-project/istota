@@ -42,7 +42,7 @@ def _completed_task(conn, *, prompt, result, source_type="email", token="room1")
     return task_id
 
 
-def _record_email(conn, task_id, sender, *, routing_method="thread_match"):
+def _record_email(conn, task_id, sender, *, routing_method="thread_room"):
     db.mark_email_processed(
         conn, email_id=f"uid-{task_id}", sender_email=sender,
         subject="Re: the thing", user_id="alice", task_id=task_id,

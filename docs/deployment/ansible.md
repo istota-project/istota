@@ -117,7 +117,6 @@ istota_users:
       alert: "ntfy"
       log: "talk:room123"
     default_destination: "talk"
-    email_reply_routing: "origin+thread"  # origin+thread | origin | thread
     outbound_approval: "all"        # off | untrusted | all; quote it
     external_turn_display: "collapsed"    # full | collapsed | hidden
     resources:

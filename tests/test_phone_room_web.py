@@ -561,3 +561,74 @@ class TestDeletingAPhoneRoom:
             assert db.room_ref_tokens(conn, again, include_surface_refs=False) == [again]
             # The hash names the deleted room still, and so names no room.
             assert db._canonical_room_token(conn, hash_token, cross_surface=False) == hash_token
+
+
+def _mint_email(conn, config, user="alice"):
+    """The user's private email room (email on rooms, stage 3), as the poller
+    records its first mail."""
+    from istota.transport.email import email_conversation_token
+
+    return record_phone_turn(
+        conn, config, surface="email", surface_ref=email_conversation_token(user),
+        user_id=user, text="first mail", channel_name="Email",
+    )
+
+
+def _email_thread_room(conn, host="alice", root="<root@example.com>"):
+    room = db.register_bound_room(conn, host, origin="email", name="Dinner",
+                                  surface="email", surface_ref=root)
+    return room.token
+
+
+class TestThePrivateEmailRoom:
+    """Read-only in web like a phone thread: a web send would not go by mail.
+    An email thread room is not this, and is not badged."""
+
+    def test_the_predicates(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            private = _mint_email(conn, config).room_token
+            thread = _email_thread_room(conn)
+            assert phone_room(conn, private) == ("email", False)
+            assert phone_transcript_surface(conn, private) == "email"
+            assert phone_room(conn, thread) is None
+            assert phone_transcript_surface(conn, thread) is None
+
+    def test_it_is_never_the_default_room(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            private = _mint_email(conn, config).room_token
+            db.ensure_web_chat_handle(conn, "alice", private, "Email")
+            assert db.default_web_room(conn, "alice") is None
+            assert not db.is_private_room_of(conn, private, "alice")
+
+    @web_only
+    async def test_the_listing_marks_it_read_only(self, client, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            private = _mint_email(conn, config).room_token
+            thread = _email_thread_room(conn)
+        rooms = await _rooms(client, await _login(client))
+        assert (rooms[private]["phone_surface"], rooms[private]["read_only"],
+                rooms[private]["phone_group"]) == ("email", True, False)
+        assert (rooms[thread]["phone_surface"], rooms[thread]["read_only"]) == (None, False)
+
+    @web_only
+    async def test_a_web_send_is_refused(self, client, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            private = _mint_email(conn, config).room_token
+        cookies = await _login(client)
+        room_id = (await _rooms(client, cookies))[private]["id"]
+        resp = await client.post(
+            f"/istota/api/chat/rooms/{room_id}/messages",
+            json={"text": "hello from web"}, cookies=cookies, headers=ORIGIN,
+        )
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["read_only"] is True
+        assert "Reply by email" in body["error"]
+        with db.get_db(db_path) as conn:
+            assert [r["body"] for r in conn.execute(
+                "SELECT body FROM messages WHERE room_token = ?", (private,),
+            )] == ["first mail"]

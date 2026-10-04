@@ -85,8 +85,6 @@ class UserProfile:
     # does not need naming twice. Read only through
     # `db.configured_delivery_room`; see ISSUE-477.
     default_room: str = ""
-    # Email-reply mirror policy: origin+thread | origin | thread.
-    email_reply_routing: str = "origin+thread"
     # Outbound email approval: '' (unset — follow the operator floor) | off |
     # untrusted | all. Unset is a real value here, not a missing one.
     outbound_approval: str = ""
@@ -116,7 +114,7 @@ _PROFILE_COLUMNS = (
     "max_foreground_workers", "max_background_workers",
     "disabled_skills", "trusted_email_senders", "quiet_email_senders",
     "disabled_modules",
-    "routing", "default_destination", "default_room", "email_reply_routing",
+    "routing", "default_destination", "default_room",
     "outbound_approval", "external_turn_display", "relay_delivery",
     "default_briefings", "briefing_email_html",
     "timezone_follow_location",
@@ -431,7 +429,6 @@ def _row_to_profile(row: sqlite3.Row) -> UserProfile:
         # — the per-surface heuristic keeps answering, which is what every user
         # had before this column existed.
         default_room=str(_row_get(row, "default_room") or ""),
-        email_reply_routing=row["email_reply_routing"] or "origin+thread",
         # No `or` default: '' is the unset value the floor resolution reads.
         outbound_approval=str(_row_get(row, "outbound_approval") or ""),
         external_turn_display=(
@@ -620,7 +617,6 @@ def _seeded_profile(
         disabled_modules=list(_attr(seed_from, "disabled_modules") or []),
         routing=dict(_attr(seed_from, "routing") or {}),
         default_destination=_attr(seed_from, "default_destination") or "talk",
-        email_reply_routing=_attr(seed_from, "email_reply_routing") or "origin+thread",
         outbound_approval=str(_attr(seed_from, "outbound_approval") or ""),
         external_turn_display=(
             _attr(seed_from, "external_turn_display") or "collapsed"
@@ -695,8 +691,6 @@ def _same_value(col: str, current: object, value: object) -> bool:
         return _coerce_bool(current, bool_default) == _coerce_bool(value, bool_default)
     if col == "default_destination":
         return (current or "talk") == (value or "talk")
-    if col == "email_reply_routing":
-        return (current or "origin+thread") == (value or "origin+thread")
     if col == "external_turn_display":
         return (current or "collapsed") == (value or "collapsed")
     if col in {"max_foreground_workers", "max_background_workers"}:
@@ -797,8 +791,6 @@ def update_profile(
             value = int(value or 0)
         elif col == "default_destination":
             value = str(value) if value else "talk"
-        elif col == "email_reply_routing":
-            value = str(value) if value else "origin+thread"
         elif col == "external_turn_display":
             value = str(value) if value else "collapsed"
         else:
@@ -983,7 +975,6 @@ def insert_profile(conn: sqlite3.Connection, profile: UserProfile, *, replace: b
         json.dumps(dict(profile.routing)),
         profile.default_destination or "talk",
         profile.default_room or "",
-        profile.email_reply_routing or "origin+thread",
         profile.outbound_approval or "",
         profile.external_turn_display or "collapsed",
         profile.relay_delivery or "",
@@ -1056,7 +1047,6 @@ def import_from_user_configs(
             disabled_modules=list(getattr(user_config, "disabled_modules", []) or []),
             routing=dict(getattr(user_config, "routing", {}) or {}),
             default_destination=getattr(user_config, "default_destination", "") or "talk",
-            email_reply_routing=getattr(user_config, "email_reply_routing", "") or "origin+thread",
             outbound_approval=str(getattr(user_config, "outbound_approval", "") or ""),
             external_turn_display=(
                 getattr(user_config, "external_turn_display", "") or "collapsed"
@@ -1101,7 +1091,6 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
     setattr(user_config, "timezone", profile.timezone or "UTC")
     setattr(user_config, "sms_phone_number", profile.sms_phone_number or "")
     setattr(user_config, "default_destination", profile.default_destination or "talk")
-    setattr(user_config, "email_reply_routing", profile.email_reply_routing or "origin+thread")
     setattr(user_config, "outbound_approval", profile.outbound_approval or "")
     setattr(
         user_config, "external_turn_display",

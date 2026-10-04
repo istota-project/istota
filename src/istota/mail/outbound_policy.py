@@ -165,13 +165,6 @@ def _warn_catch_all_patterns(config: "Config", user_id: str) -> None:
         )
 
 
-def _own_addresses(config: "Config", user_id: str) -> set[str]:
-    user = config.users.get(user_id)
-    if not user:
-        return set()
-    return {a.strip().lower() for a in (user.email_addresses or []) if a}
-
-
 def _expand(recipient: object) -> list[str] | None:
     """Every addr-spec in one recipient entry, lowercased. ``None`` if the entry
     is not usable, which the caller treats as a hold.
@@ -271,7 +264,11 @@ def recipients_require_hold(
         # Only the user's own addresses go out unapproved. This is what keeps a
         # briefing or a self-addressed note fast in the strictest mode; anything
         # addressed outward is the user's decision to make.
-        own = _own_addresses(config, user_id)
+        # Imported here, since `mail.support` loads the email skill and this
+        # module is the light one that skill imports.
+        from istota.mail.support import own_addresses
+
+        own = own_addresses(config, user_id)
         if all(a in own for a in addrs):
             return None
         return HOLD_ALL_MODE

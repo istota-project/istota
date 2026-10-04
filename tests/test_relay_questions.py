@@ -283,20 +283,36 @@ def test_binding_replacement_after_claim_cannot_retarget_question(setup, monkeyp
 
 
 @pytest.mark.asyncio
+def _card_post(room):
+    """The confirm route's request as the web card sends it: the room it rendered in."""
+    import json
+    from types import SimpleNamespace
+
+    body = json.dumps({'room': room}).encode()
+
+    async def read():
+        return body
+
+    async def as_json():
+        return json.loads(body)
+
+    return SimpleNamespace(body=read, json=as_json)
+
+
 async def test_web_admin_cannot_approve_another_users_relay(setup, monkeypatch):
     from fastapi import HTTPException
     from istota.webui import app as web_app
-    config, ident, _, sent = setup
+    config, ident, token, sent = setup
     hold(setup)
     park(setup)
     monkeypatch.setattr(web_app, '_config', config)
     monkeypatch.setattr(web_app, '_user_is_web_admin', lambda user: True)
     with pytest.raises(HTTPException) as error:
-        await web_app.chat_confirm_task(ident, user={'username': 'bob'}, _csrf=None)
+        await web_app.chat_confirm_task(ident, _card_post(token), user={'username': 'bob'}, _csrf=None)
     assert error.value.status_code == 403
     await requests.drain_requests(config)
     assert not sent
-    await web_app.chat_confirm_task(ident, user={'username': 'alice'}, _csrf=None)
+    await web_app.chat_confirm_task(ident, _card_post(token), user={'username': 'alice'}, _csrf=None)
     await requests.drain_requests(config)
     assert len(sent) == 1
 

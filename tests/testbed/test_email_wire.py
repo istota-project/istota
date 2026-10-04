@@ -31,7 +31,7 @@ import pytest
 
 from istota import confirmations, db
 from istota.config import UserConfig
-from istota.mail.support import compute_thread_id, normalize_subject
+from istota.mail.support import normalize_subject
 from istota.skills.email import (
     EmailConfig,
     _get_mailbox,
@@ -122,15 +122,15 @@ class TestRoutingPrecedence:
         wire.poll()
 
         row = _row_for(wire.processed(), "Re: Quarterly")
-        assert row["routing_method"] == "thread_match"
+        assert row["routing_method"] == "thread_room"
         assert row["user_id"] == USER_ID
 
-    def test_a_thread_match_recovers_the_origin_target(self, wire):
-        """The reply goes back where the conversation started, not to email.
+    def test_a_reply_on_a_sent_thread_is_a_turn_in_its_room(self, wire):
+        """The reply mints the thread's room and is answered there by mail.
 
-        The `sent_emails` row is the only record of where a thread came from, so
-        losing it turns a Talk conversation that happens to have gone out by
-        email into an email-only one.
+        The `sent_emails` row still records where the send came from, but a
+        reply no longer routes back to it: the thread is its own room, and
+        the room the user asked from is their private conversation.
         """
         with db.get_db(wire.config.db_path) as conn:
             db.record_sent_email(
@@ -152,8 +152,10 @@ class TestRoutingPrecedence:
         wire.poll()
 
         task = wire.tasks()[-1]
-        assert task["conversation_token"] == "roomtoken123"
-        assert "room:roomtoken123" in (task["output_target"] or "")
+        assert task["conversation_token"] != "roomtoken123"
+        assert task["output_target"] == "email"
+        with db.get_db(wire.config.db_path) as conn:
+            assert db.get_room_binding(conn, task["conversation_token"], "email") is not None
 
     def test_a_thread_row_belonging_to_another_user_is_dropped(self, wire):
         """Identity wins over payload.
@@ -268,7 +270,7 @@ class TestRepliesThreadByMessageId:
         wire.poll()
 
         row = _row_for(wire.processed(), "Re: Long thread")
-        assert row["routing_method"] == "thread_match", (
+        assert row["routing_method"] == "thread_room", (
             "the References chain arrived as encoded-words and its ids were not "
             f"recovered; the ledger stored references={row['references']!r}"
         )
@@ -293,7 +295,7 @@ class TestRepliesThreadByMessageId:
         wire.poll()
 
         row = _row_for(wire.processed(), "Re: Long thread folded")
-        assert row["routing_method"] == "thread_match"
+        assert row["routing_method"] == "thread_room"
 
     def test_two_ids_glued_at_a_fold_boundary_still_separate(self, wire, sent):
         """The other half of the same rule.
@@ -312,7 +314,7 @@ class TestRepliesThreadByMessageId:
         wire.poll()
 
         row = _row_for(wire.processed(), "Re: Long thread glued")
-        assert row["routing_method"] == "thread_match"
+        assert row["routing_method"] == "thread_room"
 
 
 class TestThreadingOnTheWire:
@@ -333,19 +335,18 @@ class TestThreadingOnTheWire:
         assert row["message_id"] == message_id
         assert row["references"] == "<first@x.test> <earlier@x.test>"
 
-    def test_an_rfc_2047_subject_threads_by_its_decoded_text(self, wire):
-        """The subject arrives encoded and the thread id is computed from the
-        text, not from the encoded-word — so a reply written in one client and
-        answered in another lands on one thread."""
+    def test_an_rfc_2047_subject_is_decoded(self, wire):
+        """The subject arrives encoded and is stored as its text, not as the
+        encoded-word. The user's own mail is a turn in their private email
+        room, whose token is the ledger's thread id."""
         subject = "Re: café plány"
         wire.send(from_addr=USER_ADDRESS, to_addr=USER_TAG_ADDRESS, subject=subject)
 
         wire.poll()
 
         row = _row_for(wire.processed(), subject)
-        assert row["thread_id"] == compute_thread_id(
-            subject, [USER_ADDRESS, mail.BOT_ADDRESS]
-        )
+        assert row["subject"] == subject
+        assert row["thread_id"]
         assert normalize_subject(subject) == "café plány"
 
     def test_a_three_hop_thread_keeps_one_thread_id(self, wire):

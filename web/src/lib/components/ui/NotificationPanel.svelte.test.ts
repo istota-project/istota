@@ -315,6 +315,26 @@ describe('actions', () => {
     expect(screen.queryByText('Bad link')).toBeNull();
   });
 
+  it("gives the row a held post's Open link a full navigation (#624)", async () => {
+    set(notificationItems, [
+      row(1, {
+        actions: [
+          {
+            id: 'open',
+            label: 'Open',
+            kind: 'primary',
+            method: 'LINK',
+            endpoint: null,
+            href: '/chat/r/rm_abc/t/31',
+          },
+        ],
+      }),
+    ]);
+    await openPanel();
+    const open = await screen.findByText('Open');
+    expect(open.closest('a')?.hasAttribute('data-sveltekit-reload')).toBe(true);
+  });
+
   it('opens the detail modal from the row', async () => {
     set(notificationItems, [row(1)]);
     await openPanel();

@@ -36,13 +36,24 @@ OBJECT_TYPE = "message_relay"
 SEVERITY = "info"
 OPEN_STATES = ("waiting", "uncertain")
 
-# Where the "answer" action points. The web chat's message deep link is
-# `/chat?room=<token>&task=<id>`, and a query string is outside the
-# notification URL allowlist (`notification_sources.SAFE_PATH_RE`, and its
-# client copy `isSafeActionPath`), so neither a message anchor nor a room can be
-# named here. The chat page is the most specific path the allowlist admits; the
-# view's body names the room.
+# Where the "answer" action points when the room cannot be named. The chat
+# page's own deep link carries a query string, which the notification URL
+# allowlist (`notification_sources.SAFE_PATH_RE`, and its client copy
+# `isSafeActionPath`) refuses, so a room is named through the web app's
+# `/chat/r/<token>` redirect instead (#624), and this is the fallback.
 RELAY_QUESTION_HREF = "/chat"
+
+
+def href_for(relay) -> str:
+    """The question's room, through the server redirect, or the chat page."""
+    from istota.notifications.sources import SAFE_PATH_RE
+
+    token = _destination(relay).get("room_token")
+    if isinstance(token, str) and token:
+        href = f"/chat/r/{token}"
+        if SAFE_PATH_RE.match(href):
+            return href
+    return RELAY_QUESTION_HREF
 
 
 def _destination(relay) -> dict:
@@ -113,7 +124,7 @@ class RelayQuestionResolver:
         if relay["surface"] == "room":
             actions = (NotificationAction(
                 id="answer", label="Open chat", kind="primary", method="LINK",
-                href=RELAY_QUESTION_HREF,
+                href=href_for(relay),
             ),)
         body = instruction(relay) + "\n\n" + frame_untrusted(relay["question"], "RELAY QUESTION")
         return NotificationView(title=title_for(relay), body=body, severity=row.severity,

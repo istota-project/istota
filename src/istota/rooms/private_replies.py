@@ -24,8 +24,8 @@ The delivery, each a plain function:
   short connections: the Talk post (after the live audience check, stamping
   the Talk id onto the row so a Talk reply resolves to it), the WhatsApp send
   (keyed `private-reply:<row id>`, which is how a quote is resolved back to
-  the row), the heads-up mail for an email-thread parent, and the bell row's
-  delivery. Never raises. Nothing crosses the network under a writer lock.
+  the row), and the bell row's delivery. There is no mail: a note about an
+  email thread reaches the member in a private room like any other. Never raises. Nothing crosses the network under a writer lock.
 
 Linking (`linked_about`, `quoted_private_reply`, `linked_room`,
 `linked_context`, `pin_plan`): a reply to or quote of a tagged row links the
@@ -105,7 +105,10 @@ def room_label(room: db.Room | None) -> str:
 
 
 
-KINDS = ("whisper", "confirmation", "proposal", "answer_notice")
+KINDS = ("whisper", "confirmation", "proposal", "answer_notice", "pass_on")
+#: The kinds with no park behind them: no bell row is owed by anyone else, so
+#: one that reaches nobody becomes its own `private_note` bell row.
+_UNPARKED_KINDS = ("whisper", "pass_on")
 
 #: What the shared room is told when a member's note could not stay out of
 #: sight any other way. Names nobody and carries nothing of the note.
@@ -118,14 +121,6 @@ PRIVATE_NOTE_ALERT = "private_note"
 WHATSAPP_KEY_PREFIX = "private-reply:"
 #: A task's final answer on WhatsApp (`.claude/rules/sms.md`, the namespaces).
 ANSWER_KEY_PREFIX = "task-result:"
-
-_EMAIL_HINTS = {
-    "confirmation": "Reply in your private chat with the bot, or approve it in notifications.",
-    "proposal": "Reply in your private chat with the bot, or approve it in notifications.",
-    "whisper": "Reply in your private chat with the bot.",
-    "answer_notice": "Reply in your private chat with the bot.",
-}
-
 
 @dataclass(frozen=True)
 class PrivateDestination:
@@ -213,8 +208,9 @@ def private_room_for(conn, config, user_id: str, about_token: str) -> PrivateDes
 
     First the private room on the shared room's own surface: the member's
     WhatsApp room for a WhatsApp group, their private Talk room for a Talk
-    room, their default web room for a web-only room. An email thread has no
-    such room (a mail is notification only), so it starts at the fallback.
+    room, their default web room for a web-only room. An email thread starts at
+    the fallback: the private email room is never a destination, since a note
+    there would be a mail, a second private channel.
     Then any other private room, in a fixed order: web, Talk, WhatsApp. None
     when there is none; the caller falls back to the bell.
     """
@@ -434,27 +430,85 @@ def park_about(conn, task) -> str | None:
     A task in a shared room asks its principal privately, never in front of
     the room (multiplayer D4). A guest's turn does too even in a room no
     second member reads: the guest is the audience it must not reach (D2).
+    An email thread room does too with one correspondent and the host as its
+    only member, which `room_is_shared` reads as unshared: the thread's only
+    leg is the reply-all, and the correspondent reads it.
     """
+    from istota.rooms.scopes import is_email_thread_room
+
     parent = canonical_token(conn, task.conversation_token) if task.conversation_token else None
     room = db.get_room(conn, parent) if parent else None
     if room is None:
         return None
     if (getattr(task, "guest_participant_id", None) is None
-            and not (task.is_group_chat or db.room_is_shared(conn, parent))):
+            and not (task.is_group_chat or db.room_is_shared(conn, parent)
+                     or is_email_thread_room(conn, parent))):
         return None
     return parent
 
 
+def parked_task_for_reference(conn, delivery_reference: str | None, user_id: str) -> int | None:
+    """The task a private park's row asks about, while it still waits on ``user_id``.
+
+    ``delivery_reference`` is the row's, ``<prefix><task id>:<prompt hash>``.
+    None for any other row, another user's task, or a task no longer parked,
+    which is what makes the web card under the row disappear once the
+    question is answered anywhere.
+    """
+    ref = delivery_reference or ""
+    prefix = next((p for p in PARK_PREFIXES if ref.startswith(p)), None)
+    if prefix is None:
+        return None
+    head = ref[len(prefix):].split(":", 1)[0]
+    if not (head.isascii() and head.isdigit() and len(head) <= 18):
+        return None
+    row = conn.execute(
+        "SELECT id FROM tasks WHERE id = ? AND user_id = ? "
+        "AND status = 'pending_confirmation'",
+        (int(head), user_id),
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def _park_refs_like() -> str:
+    return " OR ".join("delivery_reference LIKE ?" for _ in PARK_PREFIXES)
+
+
 def parked_here(conn, room_token: str, user_id: str) -> list:
     """``user_id``'s parked tasks whose private question is in ``room_token``."""
-    clauses = " OR ".join("m.delivery_reference LIKE ? || t.id || ':%'" for _ in PARK_PREFIXES)
     rows = conn.execute(
-        "SELECT DISTINCT t.id FROM tasks t JOIN messages m ON m.room_token = ? "
-        f"AND ({clauses}) WHERE t.user_id = ? AND t.status = 'pending_confirmation' "
-        "ORDER BY t.id",
-        (room_token, *PARK_PREFIXES, user_id),
+        f"SELECT delivery_reference FROM messages WHERE room_token = ? AND ({_park_refs_like()})",
+        (room_token, *(f"{p}%" for p in PARK_PREFIXES)),
     ).fetchall()
-    return [task for task in (db.get_task(conn, row["id"]) for row in rows) if task is not None]
+    ids = sorted({ident for ident in (
+        parked_task_for_reference(conn, row["delivery_reference"], user_id) for row in rows
+    ) if ident is not None})
+    return [task for task in (db.get_task(conn, ident) for ident in ids) if task is not None]
+
+
+def preview_rooms(conn, task) -> list[str]:
+    """The private rooms of ``task``'s owner that show its held question, oldest first.
+
+    A privately routed park's row (a guest proposal, a shared room's
+    question), and the task's own room when that is private: a relay question
+    or room post asked there is previewed on the turn itself. The confirm
+    route approves a relay-held task only from one of these, and the bell's
+    deep link opens the first.
+    """
+    rooms = [row["room_token"] for row in conn.execute(
+        f"SELECT room_token, delivery_reference FROM messages WHERE ({_park_refs_like()}) "
+        "ORDER BY id",
+        tuple(f"{p}{task.id}:%" for p in PARK_PREFIXES),
+    ).fetchall() if parked_task_for_reference(conn, row["delivery_reference"], task.user_id) == task.id]
+    if task.conversation_token:
+        own = canonical_token(conn, task.conversation_token)
+        if own:
+            rooms.append(own)
+    seen: list[str] = []
+    for room in rooms:
+        if room not in seen and db.is_private_room_of(conn, room, task.user_id):
+            seen.append(room)
+    return seen
 
 
 # ---------------------------------------------------------------------------
@@ -525,7 +579,7 @@ def deliver_private(conn, config, *, user_id: str, about_token: str, kind: str,
                   delivery_reference=delivery_reference)
     if dest is None:
         notice = None
-        if kind == "whisper":
+        if kind in _UNPARKED_KINDS:
             notice = _bell_note(conn, user_id=user_id, about=about, reference=reference,
                                 body=body, task_id=task_id)
         return PrivateDelivery(None, None, notice=notice, **common)
@@ -541,11 +595,10 @@ def deliver_private(conn, config, *, user_id: str, about_token: str, kind: str,
 # ---------------------------------------------------------------------------
 
 
-def _parent_facts(config, about: str) -> tuple[str, bool]:
+def _parent_label(config, about: str) -> str:
     with db.get_db(config.db_path) as conn:
         room = db.get_room(conn, about) if about else None
-        email = room is not None and db.get_room_binding(conn, room.token, "email") is not None
-        return room_label(room), email
+        return room_label(room)
 
 
 def _stamp_talk(config, message_id: int, talk_id: int) -> None:
@@ -602,31 +655,6 @@ async def _send_whatsapp(config, delivery: PrivateDelivery, text: str) -> bool:
     return record.status in REACHED_META
 
 
-async def _send_heads_up(config, delivery: PrivateDelivery, label: str, body: str) -> bool:
-    """The heads-up mail for an email-thread parent: notification only.
-
-    A fresh mail to the member's own address with no threading headers, so it
-    can never land on the thread; a reply to it is a new message, not an answer.
-    """
-    if not getattr(config.email, "enabled", False):
-        return False
-    user = config.users.get(delivery.user_id)
-    address = user.email_addresses[0] if user and user.email_addresses else None
-    if not address:
-        return False
-    try:
-        await asyncio.to_thread(
-            _send_private_mail, config, to=address,
-            subject=HEADER_PREFIX + label,
-            body=f"{body}\n\n{_EMAIL_HINTS[delivery.kind]}",
-        )
-    except Exception as exc:
-        logger.warning("private %s: heads-up mail failed (%s)",
-                       delivery.delivery_reference, type(exc).__name__)
-        return False
-    return True
-
-
 def _late_bell_note(config, delivery: PrivateDelivery, body: str):
     with db.get_db(config.db_path) as conn:
         return _bell_note(conn, user_id=delivery.user_id, about=delivery.about_token,
@@ -640,7 +668,7 @@ async def _send(config, delivery: PrivateDelivery, *, header_room_label, body: s
 
     if delivery.notice is not None:
         await asyncio.to_thread(deliver_pending, config, [delivery.notice])
-    label, email_parent = await asyncio.to_thread(_parent_facts, config, delivery.about_token)
+    label = await asyncio.to_thread(_parent_label, config, delivery.about_token)
     if header_room_label:
         label = flatten(header_room_label)[:_LABEL_MAX] or label
     text = f"{HEADER_PREFIX}{label}\n\n{body}"
@@ -654,11 +682,9 @@ async def _send(config, delivery: PrivateDelivery, *, header_room_label, body: s
         if dest.whatsapp:
             pushed = True
             delivered = await _send_whatsapp(config, delivery, text) or delivered
-    if email_parent and await _send_heads_up(config, delivery, label, body):
-        delivered = True
-    if delivery.kind == "whisper" and pushed and not delivered:
-        # A whisper has no park bell behind it: one routed to a surface that
-        # reached nobody there would sit unannounced in a transcript.
+    if delivery.kind in _UNPARKED_KINDS and pushed and not delivered:
+        # A whisper or a pass-on has no park bell behind it: one routed to a
+        # surface that reached nobody there would sit unannounced in a transcript.
         notice = await asyncio.to_thread(_late_bell_note, config, delivery, body)
         await asyncio.to_thread(deliver_pending, config, [notice])
     return delivered
@@ -669,7 +695,7 @@ async def send_private(config, delivery: PrivateDelivery, *, body: str,
     """Push a recorded note to the surface its room lives on. Never raises.
 
     True when it reached the member outside web: a Talk post, a WhatsApp send
-    the provider accepted, or the heads-up mail handed to SMTP. A web room
+    the provider accepted. A web room
     needs no push (the room-event stream reads the row), so it reports False,
     and so does every failure. For a confirmation or a proposal, False means
     the park's own bell row is still owed its delivery. A whisper owes the
@@ -786,14 +812,6 @@ def pin_plan(config, task, plan: list, *, fallback=None) -> list:
     return kept
 
 
-def _send_private_mail(config, *, to: str, subject: str, body: str) -> None:
-    from istota.mail.support import get_email_config
-    from istota.skills.email import send_email
-
-    send_email(to=to, subject=subject, body=body, config=get_email_config(config),
-               from_addr=config.email.bot_email)
-
-
 def whatsapp_confirmation_body(prompt: str, task_id: int) -> str:
     """A privately routed question as the member's WhatsApp chat carries it.
 
@@ -835,12 +853,19 @@ def guest_reply_mode(conn, task) -> str | None:
     ``off`` included: the turn already ran, and the host is the one to decide
     about its answer. None when the task's principal is no longer the room's
     host, and the answer then goes to nobody.
+
+    ``direct`` on an email thread room, whatever its ``guest_reply`` says: it
+    has no guest mode, and its reply is held, when it is, by the outbound gate
+    as a draft (`rooms.scopes.is_email_thread_room`).
     """
     from istota.rooms import policy as room_policy
+    from istota.rooms.scopes import is_email_thread_room
 
     token = canonical_token(conn, task.conversation_token)
     if not token or _host_of(conn, token) != task.user_id:
         return None
+    if is_email_thread_room(conn, token):
+        return "direct"
     policy = room_policy.get_policy(conn, token)
     return "direct" if policy.guest_reply == room_policy.DIRECT else "held"
 
@@ -853,8 +878,59 @@ class GuestProposal:
     preview: str
 
 
+def _mail_new_text(body: str) -> str | None:
+    """The new text of a wrapped email turn, or None when ``body`` is not one."""
+    from istota.mail.support import parse_email_prompt
+    from istota.transport.email.threads import new_text
+
+    parsed = parse_email_prompt(body)
+    return new_text(parsed[1]).strip() if parsed is not None else None
+
+
+def pass_on_body(conn, task) -> str:
+    """The pass-on note for a thread turn the host was not on, from the
+    stored turn: who wrote, on which room, and their new text quoted.
+
+    Built from the transcript row, never from the model's text, and through
+    the email wrapper's parser and `threads.new_text`, so neither the wrapper
+    nor the quoted history reaches the host.
+    """
+    from istota.transport.email.threads import new_text
+
+    row = conn.execute(
+        "SELECT body, author_label FROM messages WHERE task_id = ? "
+        "AND role = 'user' ORDER BY id LIMIT 1",
+        (task.id,),
+    ).fetchone()
+    body = (row["body"] if row else None) or task.prompt or ""
+    text = _mail_new_text(body)
+    if text is None:
+        text = new_text(body).strip()
+    label = (row["author_label"] if row else None) or "Someone"
+    room = room_label(db.get_room(conn, canonical_token(conn, task.conversation_token) or ""))
+    quoted = "\n".join(f"> {line}" if line else ">" for line in text.splitlines()) or ">"
+    return f"{label} wrote on {room}, without you on the message:\n\n{quoted}"
+
+
+def deliver_pass_on(conn, config, task) -> tuple[PrivateDelivery, str]:
+    """Record the pass-on note for ``task`` in its host's private room, inside
+    the caller's transaction, and return it with its body for `send_private`.
+    With no private room it is a `private_note` bell row, as a whisper is.
+    """
+    body = pass_on_body(conn, task)
+    delivery = deliver_private(
+        conn, config, user_id=task.user_id, about_token=task.conversation_token,
+        kind="pass_on", reference=f"{task.id}:pass-on", body=body, task_id=task.id,
+    )
+    return delivery, body
+
+
 def _guest_words(conn, task) -> tuple[str, str]:
-    """The guest's label and what they wrote, off the transcript row."""
+    """The guest's label and what they wrote, off the transcript row.
+
+    A mirrored email row carries the prompt wrapper; only its new text is
+    quoted, as the pass-on note does. Any other row is quoted as written.
+    """
     row = conn.execute(
         "SELECT body, author_label FROM messages WHERE task_id = ? "
         "AND role = 'user' AND author_participant_id = ? ORDER BY id LIMIT 1",
@@ -862,7 +938,9 @@ def _guest_words(conn, task) -> tuple[str, str]:
     ).fetchone()
     if row is None:
         return "A guest", ""
-    return row["author_label"] or "A guest", row["body"] or ""
+    body = row["body"] or ""
+    text = _mail_new_text(body)
+    return row["author_label"] or "A guest", body if text is None else text
 
 
 _GUEST_QUOTE_CHARS = 500
@@ -895,35 +973,14 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
         if len(words) > _GUEST_QUOTE_CHARS:
             words = words[:_GUEST_QUOTE_CHARS].rstrip() + "…"
         bot = flatten(getattr(config, "bot_name", "") or "") or "the assistant"
-        recipients = ""
-        email_recipients = None
-        if destination.get("email_ref"):
-            # On an email thread the post is a mail to these exact people, and
-            # the host approving this preview approves that mail (D20): the
-            # outbound gate does not hold a send that matches it.
-            from istota.rooms.veto import with_email_footer
-            from istota.transport.email import threads as email_threads
-            from istota.transport.email.outbound import recipients_of
-
-            plan = email_threads.reply_all(conn, config, parent, task_id=task.id)
-            if plan is None:
-                raise RequestError("parent_unavailable")
-            email_recipients = recipients_of(plan)
-            reply = with_email_footer(conn, config, parent, reply)
-            recipients = (
-                f"To: {email_recipients['to']}\n"
-                f"Cc: {', '.join(email_recipients['cc']) or '(nobody)'}\n\n"
-            )
         preview = (
             f"{label} asked in {destination['label']}:\n{words}\n\n"
             f"Post this answer there as {bot}? Reply yes to post it exactly as "
             "written, or no to drop it. Only the message below is posted.\n\n"
-            f"{recipients}Message:\n{reply}"
+            f"Message:\n{reply}"
         )
         stored_destination = {key: destination[key]
                               for key in ("kind", "room_token", "talk_ref", "label")}
-        if email_recipients is not None:
-            stored_destination["email_recipients"] = email_recipients
         with write_transaction(conn):
             # The host's own room, where the preview lands; with none, the
             # bell carries it and the origin names no room.
@@ -1104,7 +1161,13 @@ def queue_private_answer(conn, config, *, actor_user_id: str, task_id: int) -> d
 
 
 def _post_destination(conn, parent_token: str, user_id: str) -> dict:
-    """The room a post goes to, re-resolved the same way at hold and delivery."""
+    """The room a post goes to, re-resolved the same way at hold and delivery.
+
+    Never an email thread room (`email_thread`): mail sent on a user's behalf
+    is approved as a draft, so a post there is written with `email reply`,
+    which takes the outbound gate. That also closes a guest proposal or a
+    queued post on one, which nothing could send.
+    """
     from istota.relay.destinations import destination_fingerprint
 
     room = db.get_room(conn, parent_token)
@@ -1117,15 +1180,14 @@ def _post_destination(conn, parent_token: str, user_id: str) -> dict:
         # Switched off (D12): an approved post is refused, and the request
         # closes rather than waiting for the room to come back on.
         raise RequestError("room_off")
+    if db.get_room_binding(conn, parent_token, "email") is not None:
+        raise RequestError("email_thread")
     talk = db.get_room_binding(conn, parent_token, "talk")
     whatsapp = db.get_room_binding(conn, parent_token, "whatsapp")
-    email = db.get_room_binding(conn, parent_token, "email")
     destination = {"kind": "room", "room_token": parent_token,
                    "talk_ref": talk.surface_ref if talk else None, "label": room_label(room)}
     if whatsapp is not None:
         destination["whatsapp_ref"] = whatsapp.surface_ref
-    if email is not None:
-        destination["email_ref"] = email.surface_ref
     destination["fingerprint"] = destination_fingerprint(destination)
     return destination
 
@@ -1241,8 +1303,6 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
             if row["state"] != "queued":
                 return None
             whatsapp_group = False
-            email_thread = False
-            email_recipients = None
             if row["queue_deadline"] is None or row["queue_deadline"] <= db.sql_datetime_now():
                 raise RequestError("queue_expired")
             user = row["requester_user_id"]
@@ -1263,11 +1323,6 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                     raise RequestError("destination_changed")
                 parent = current["room_token"]
                 whatsapp_group = bool(current.get("whatsapp_ref"))
-                email_thread = bool(current.get("email_ref"))
-                # Only a preview that showed them carries them (a guest
-                # proposal on an email thread), and the digest check above is
-                # what makes them the ones approved.
-                email_recipients = destination.get("email_recipients")
                 reference = "room-post:" + request_id
                 message_id = db.add_message(
                     conn, parent, role="assistant", body=body, origin_surface="web",
@@ -1275,8 +1330,7 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                     task_id=_post_answers_task(conn, row["origin_task_id"], parent),
                 )
                 claim.update(message_id=message_id, talk_ref=current["talk_ref"], parent=parent,
-                             reference=reference, whatsapp_group=whatsapp_group,
-                             email_thread=email_thread, email_recipients=email_recipients)
+                             reference=reference, whatsapp_group=whatsapp_group)
             else:
                 # A whisper (stored kind `side_whisper`): the principal's own
                 # private room, resolved now rather than at enqueue.
@@ -1388,19 +1442,6 @@ async def deliver_request(config, row) -> None:
                     text=claim["body"], group_room=claim["parent"])
             except Exception as exc:
                 logger.warning("room post %s: WhatsApp post failed: %s", claim["request_id"], exc)
-        if claim["email_thread"] and claim["task_id"] is not None:
-            # The thread itself, as a reply-all through the outbound gate. As
-            # with the other halves, the canonical row is the post; a held or
-            # failed mail is reported by the gate and the send log.
-            from istota.transport.email.outbound import deliver_thread_post, record_unsent_post
-            try:
-                await deliver_thread_post(
-                    config, task_id=int(claim["task_id"]), room_token=claim["parent"],
-                    body=claim["body"], approved_recipients=claim["email_recipients"],
-                    message_id=claim["message_id"])
-            except Exception as exc:
-                logger.warning("room post %s: email reply-all failed: %s", claim["request_id"], exc)
-                await asyncio.to_thread(record_unsent_post, config, claim["message_id"])
     else:
         # Never raises; a whisper that reached nobody becomes a bell row there.
         await send_private(config, claim["delivery"], body=claim["body"])

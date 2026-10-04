@@ -43,7 +43,7 @@ What is per person, beyond reach: a member's per-skill instructions (`{bot_dir}/
 
 In a shared room the bot does not answer every message. The **speech gate** decides, using `[speech_gate] mode`:
 
-- `mention` (the default): the bot answers a turn that addresses it and records the rest. On Talk that is an @mention; on web it is `@name` anywhere or the bot's name as the first word; on WhatsApp it is a mention, a reply to one of the bot's messages, or the name as the first word; on email it is the bot's address in To, or the bot's name in the new part of the message (`@name` anywhere, or the name first on a line). Cc without the name means the bot is listening and does not reply.
+- `mention` (the default): the bot answers a turn that addresses it and records the rest. On Talk that is an @mention; on web it is `@name` anywhere or the bot's name as the first word; on WhatsApp it is a mention, a reply to one of the bot's messages, or the name as the first word; on email the rule is the [email thread room's](email.md#email-thread-rooms): the host's own mail asks with the bot in To or named in the new part of the message (`@name` anywhere, or the name first on a line), anyone else's when it names the bot or the host is not on the message.
 - `classifier`: a small, cheap model reads the last few turns and decides whether the latest one is meant for the bot. If the model fails or times out, the bot stays quiet. A turn that addresses the bot is always answered, whatever the model says. An email thread room stays on `mention` even then, because speaking there is a reply-all.
 - `off`: the bot answers every turn.
 
@@ -53,25 +53,25 @@ The unanswered turns still reach the bot as context, so when somebody does addre
 
 Every shared room has a **host**: on web, the person who created it; on Talk, the first Istota member the bot saw there; on WhatsApp, the person who added the bot's number; on email, the person whose thread it is.
 
-A guest's message never runs on the guest's authority. When the bot answers a guest, it acts **for the host**, as the host's emissary. The guest's words are passed to the model as data, not as instructions, and the task:
+A guest's message never runs on the guest's authority. When the bot answers a guest, it acts **for the host**, as the host's emissary. An email thread is the exception: it has no guest mode, and a correspondent's mail runs as the host at full reach, bounded by the email gates instead (see [email thread rooms](email.md#email-thread-rooms)). The guest's words are passed to the model as data, not as instructions, and the task:
 
 - reads nothing private of the host's, whatever the host has shared in that room,
 - takes no action beyond its reply (no calendar write, no email, no web fetch on the native brain),
 - sends anything else, including any question that needs approval, to the host [privately](#private-replies).
 
-How a guest is answered is the room's `guest_reply` setting, which the host changes with `!room guests <off|held|direct>`:
+How a guest is answered is the room's `guest_reply` setting, which the host changes with `!room guests <off|held|direct>`. An email thread room ignores it and does not show it in its settings:
 
 | Setting | What happens to a guest's message |
 |---|---|
 | `direct` | The bot answers in the room. Default on Talk and web. |
-| `held` | The answer goes to the host's private chat with the bot as a proposal, with the guest's words and the exact reply. The host approves it, and only then is it posted. Default on WhatsApp and email. |
+| `held` | The answer goes to the host's private chat with the bot as a proposal, with the guest's words and the exact reply. The host approves it, and only then is it posted. Default on WhatsApp. |
 | `off` | The guest's message is recorded and not answered. |
 
 A guest's `!commands` are ignored, apart from switching the bot off. A guest cannot stop, retry or steer anyone's task, or answer a confirmation.
 
 If the host leaves, the room goes quiet: turns are recorded and nobody is answered until a member runs `!room host` to take over. Nobody becomes host automatically. On WhatsApp the bot leaves the group instead.
 
-After three of its own replies in a row with no member speaking, the bot stops answering guests until a member writes again, so a guest's autoresponder cannot keep it talking. The cap applies to guests only and never holds back a member's turn. Another bot is never answered at all.
+After three of its own replies in a row with no member speaking, the bot stops answering guests until a member writes again, so a guest's autoresponder cannot keep it talking. The cap applies to guests only and never holds back a member's turn. An email thread has no cap: a correspondent's mail runs as the host, and the email volume limits bound a mail loop instead. Another bot is never answered at all.
 
 ## What a task can reach
 
@@ -79,12 +79,12 @@ A turn runs with its sender's reach. When you ask the bot something in a shared 
 
 This holds with a guest in the room too. Having the guest there, and asking in front of them, is your choice. The room card tells the bot that a guest is reading.
 
-One thing is left out. In a shared room the bot does not load your personal memory into the prompt: `USER.md`, dated memories, recalled memories, remembered facts and playbooks. Those reach a private prompt without you asking for them, so a question about lunch could otherwise come back with something from your health notes. The memory files are still there, so "what did I note about X" works when you ask for it.
+One thing is left out, except on an email thread, which is your correspondence and loads it as any email does. In a shared room the bot does not load your personal memory into the prompt: `USER.md`, dated memories, recalled memories, remembered facts and playbooks. Those reach a private prompt without you asking for them, so a question about lunch could otherwise come back with something from your health notes. The memory files are still there, so "what did I note about X" works when you ask for it.
 
 Two kinds of task run with less:
 
 - **A guest's turn** runs as the room's host and reaches nothing of the host's: no workspace, no private skill, no memory. Only skills that read nothing personal (the room's own tools, untrusted-input handling) and the room's `CHANNEL.md` are available.
-- **A task nobody asked in the room** is restricted the same way, since its answer lands in the room with no member asking there: a subtask whose conversation is a shared room, a scheduled job or briefing aimed at a shared room you are not a member of, or an outside correspondent's reply to an email the bot sent from that room.
+- **A task nobody asked in the room** is restricted the same way, since its answer lands in the room with no member asking there: a subtask whose conversation is a shared room, or a scheduled job or briefing aimed at a shared room you are not a member of.
 
 Your own scheduled jobs (`CRON.md`) and briefings that post into a shared room you are a member of run as your turn there does: setting the job to post in that room is the same decision as asking there. They leave your personal memory out of the prompt in the same way.
 
@@ -112,7 +112,7 @@ This bounds the transcript, not the room's `CHANNEL.md`, which everyone in the r
 
 Anything meant for one member and not the whole room goes to that member's own private chat with the bot: a private answer, a note, a question they need to approve, and, for the host, a guest's held reply. Nothing creates a chat for this; the bot uses one you already have.
 
-It picks the private chat on the shared room's own surface first: your own WhatsApp chat with the bot for a WhatsApp group, your private Talk conversation for a Talk room, your default web room for a web room. Without one there, it uses your private room on another surface, in the order web, Talk, WhatsApp. An email thread has no private chat of its own, so its notes go to one of those, and you also get a short mail at your own address saying where to answer. SMS is never used.
+It picks the private chat on the shared room's own surface first: your own WhatsApp chat with the bot for a WhatsApp group, your private Talk conversation for a Talk room, your default web room for a web room. Without one there, it uses your private room on another surface, in the order web, Talk, WhatsApp. An email thread has no private chat of its own, so its notes go to one of those, and nothing is mailed. SMS is never used.
 
 Each message is recorded in that chat's transcript and tagged with the shared room it is about. On Talk and WhatsApp it starts with "re: <room>". On web it carries a "re: <room>" chip that opens the room, or reads "a room you left" once you have left it.
 
@@ -120,13 +120,13 @@ Each message is recorded in that chat's transcript and tagged with the shared ro
 
 - **For a private answer**, ask in the shared room and add "answer me privately", or ask something the room should not read, such as your calendar or your health. The bot asks your question again in your private chat, exactly as you wrote it, answers there with your personal memory available, and tells the room only that it answered you privately. The answer runs with your private chat's own model settings, not the shared room's.
 - **To post into the room from your private chat**, reply to or quote one of the bot's messages about that room and say what to post, for example "post in the group that Friday works". You can also name the room instead: "post in Family that I'll be late". The bot shows you the exact text, and nothing is posted until you approve it. If the text is your own words and posting is the first thing the bot does, it goes straight through. Asked from WhatsApp or SMS, the text has to fit in one message there, since you approve what you see; a longer post is refused.
-- **To answer a confirmation**, reply in the private chat where it was asked, or approve it from the notification bell. On web and Talk a plain "yes" answers it when it is the only question waiting in that chat; with more than one, use `!confirm <id> yes` or `no`. On WhatsApp use the `!confirm <id> yes|no` the message names. A "yes" typed in the shared room never answers it.
+- **To answer a confirmation**, reply in the private chat where it was asked, or approve it from the notification bell. A post into a room, and a guest's held reply, are approved only from your private chat, where the exact text is shown: on web the card sits under it, and the bell's Open button takes you there. On web and Talk a plain "yes" answers it when it is the only question waiting in that chat; with more than one, use `!confirm <id> yes` or `no`. On WhatsApp use the `!confirm <id> yes|no` the message names. A "yes" typed in the shared room never answers it.
 
 A turn in your private chat is linked to a shared room only when it replies to or quotes one of these tagged messages, or one of the bot's answers in a linked turn, or is the question asked again for a private answer. Replies and quotes work on web, Talk and WhatsApp. A linked turn sees the room's last 40 messages (up to 12,000 characters), marked as the room's conversation rather than instructions, as long as you are still in the room. Its answer stays in your private chat. Any other turn there is an ordinary private turn, and a link never carries over to your next message: if you mean a room the turn is not linked to, the bot says it has no context for it and asks you to reply to one of its messages about the room or to name it.
 
 ### With no private chat
 
-If you have no private chat with the bot on any surface, a confirmation or a guest proposal waits in the notification bell, where you can approve it, and a note arrives as a bell notification. A private answer is refused, and the bot asks you in the room to message it directly first. When something went to the bell, the shared room is told only "I've sent a private note to the person who asked. If you don't have a private chat with me yet, message me directly.", which names nobody.
+If you have no private chat with the bot on any surface, a confirmation waits in the notification bell, where you can approve it, and a note arrives as a bell notification. A guest proposal waits there too, but is approved from a private chat: open one and answer with `!confirm <id> yes`. A private answer is refused, and the bot asks you in the room to message it directly first. When something went to the bell, the shared room is told only "I've sent a private note to the person who asked. If you don't have a private chat with me yet, message me directly.", which names nobody.
 
 A WhatsApp private chat exists once you have messaged the bot's number yourself. Being in a group with it is not enough.
 

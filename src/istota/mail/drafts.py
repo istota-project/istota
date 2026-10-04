@@ -575,6 +575,7 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
     from istota import db
     from istota.mail.support import get_email_config
     from istota.skills.email import send_email
+    from istota.transport.email import threads as email_threads
 
     email_config = get_email_config(config)
     if not config.email.enabled or not email_config.smtp_host:
@@ -715,9 +716,9 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
                     conn,
                     user_id=draft.user_id,
                     message_id=message_id,
-                    # The whole recipient string, matching what the direct CLI
-                    # path stores and what was handed to `to=`.
-                    to_addr=", ".join(draft.to_addrs),
+                    # To and Cc, the form the direct CLI path and a thread
+                    # reply store. Bcc is never recorded.
+                    to_addr=", ".join([*draft.to_addrs, *draft.cc_addrs]),
                     subject=draft.subject,
                     task_id=draft.task_id,
                     in_reply_to=draft.in_reply_to,
@@ -725,6 +726,13 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
                     conversation_token=draft.room_token,
                     talk_delivery_token=_talk_delivery_token(conn, draft.task_id),
                     origin_target=draft.origin_target,
+                )
+                # Never raises; a failure rolls back only its own writes.
+                email_threads.register_sent_thread(
+                    conn, config, user_id=draft.user_id, message_id=message_id,
+                    in_reply_to=draft.in_reply_to, references=draft.references,
+                    to=list(draft.to_addrs), cc=list(draft.cc_addrs),
+                    subject=draft.subject, body=draft.body, task_id=draft.task_id,
                 )
             except Exception as e:  # noqa: BLE001 — provenance is not the send
                 # Losing this row costs reply routing on this thread, not the

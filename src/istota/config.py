@@ -769,7 +769,6 @@ class UserConfig:
     disabled_modules: list[str] = field(default_factory=list)  # modules to disable (default-on otherwise)
     routing: dict[str, str] = field(default_factory=dict)  # purpose -> output_target descriptor
     default_destination: str = "talk"  # fallback delivery descriptor
-    email_reply_routing: str = "origin+thread"  # origin+thread | origin | thread
     # Outbound approval policy: "" (unset — follow the operator floor) | off |
     # untrusted | all. Unset rather than a concrete default so that raising
     # [email] outbound_approval_floor reaches every user who never touched it.
@@ -2398,27 +2397,6 @@ class Config:
                 return True
         return False
 
-    def email_reply_routing_for(self, user_id: str) -> str:
-        """Per-user mirror policy for email replies to messages we sent.
-
-        One of ``origin+thread`` (default — deliver to the origin surface AND
-        continue the email thread), ``origin`` (origin surface only), or
-        ``thread`` (email only). An unrecognized stored value falls back to the
-        default and logs a warning.
-        """
-        valid = ("origin+thread", "origin", "thread")
-        user = self.users.get(user_id)
-        value = (getattr(user, "email_reply_routing", "") or "").strip() if user else ""
-        if not value:
-            return "origin+thread"
-        if value not in valid:
-            logger.warning(
-                "Unknown email_reply_routing %r for user %s; using 'origin+thread'",
-                value, user_id,
-            )
-            return "origin+thread"
-        return value
-
     def briefing_email_html_for(self, user_id: str) -> bool:
         """Whether this user's briefing email is sent as HTML + plain multipart.
 
@@ -2937,6 +2915,13 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
     # the Docker entrypoint's path into `UserConfig`. It was the one writer of
     # `sms_phone_number` that read nothing, so a number set this way was
     # silently ignored and the binding simply did not exist.
+    if "email_reply_routing" in user_data:
+        # Retired with the origin reply routing it chose between: a reply to
+        # mail the bot sent is a turn in the thread's own room.
+        logger.warning(
+            "[users.%s] email_reply_routing is no longer used and is ignored", user_id,
+        )
+
     from .user_profiles import normalize_sms_phone_number
     sms_phone_number = normalize_sms_phone_number(
         user_data.get("sms_phone_number", ""), allow_empty=True,
@@ -2959,7 +2944,6 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         disabled_modules=user_data.get("disabled_modules", []),
         routing=dict(user_data.get("routing", {}) or {}),
         default_destination=user_data.get("default_destination", "talk") or "talk",
-        email_reply_routing=user_data.get("email_reply_routing", "origin+thread") or "origin+thread",
         # No `or` fallback: "" is a meaningful value here (follow the floor),
         # not an absent one.
         outbound_approval=str(user_data.get("outbound_approval", "") or ""),
@@ -3448,7 +3432,7 @@ def _validate_outbound_approval_floor(raw: object) -> str:
     """Validate ``[email] outbound_approval_floor``, raising on anything else.
 
     Deliberately a hard failure rather than the warn-and-fall-back other
-    enum-ish keys use (``[web] token_storage``, ``email_reply_routing``). Every
+    enum-ish keys use (``[web] token_storage``). Every
     wrong answer here is unsafe in one direction or the other and there is no
     neutral one to pick: falling back to ``off`` disables a gate the operator
     asked for, and silently falling back to ``untrusted`` overrides an operator

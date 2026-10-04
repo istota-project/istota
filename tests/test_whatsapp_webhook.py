@@ -1950,12 +1950,10 @@ class TestPrivateRoomIsolation:
         source = source_of(webhook_module)
         # `add_message` rather than `store_message`, which is not a function
         # in this tree and therefore guarded nothing. The list is the backstop;
-        # the real control is the positive test below, because omitting the
-        # kwarg entirely reintroduces the mirror (`record_inbound` defaults it
-        # to True) while passing every name check here.
+        # the real control is the positive test below.
         for forbidden in (
             "register_room", "add_room_binding", "add_room_member",
-            "add_message", "rename_room", "mirror_to_room=True",
+            "add_message", "rename_room",
         ):
             assert forbidden not in source
 

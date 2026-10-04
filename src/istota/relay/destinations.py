@@ -162,6 +162,8 @@ def destination_fingerprint(destination: dict) -> str:
         parts = [destination["room_token"], destination["talk_ref"]]
         if destination.get("whatsapp_ref"):
             parts.append(destination["whatsapp_ref"])
+        # No post goes to an email thread any more, but fingerprints stored
+        # before that carry the ref, and the room migration re-verifies them.
         if destination.get("email_ref"):
             parts.append("email:" + destination["email_ref"])
         return text_hash(json.dumps(parts, ensure_ascii=True, separators=(",", ":")))
