@@ -1257,6 +1257,49 @@ class TestAWithheldConfirmationIsOwedBackWhenTheSmsFails:
             ]
         assert "confirmation" in sources
         assert pushed, "the withheld confirmation was never owed back"
+        # No room shows an SMS question (#635), so the push takes the user's
+        # whole alert routing rather than ntfy and email alone.
+        assert [r.room_free for r in pushed] == [False]
+        assert [r.skip_surfaces for r in pushed] == [("sms",)]
+
+    def test_an_unknown_send_is_not_texted_again_by_the_owed_push(
+        self, tmp_path, monkeypatch
+    ):
+        """#635. A timed-out send is `unknown`, and the ledger never resends one.
+        With alerts routed to SMS, the owed push must not text the question a
+        second time under its own `notification:` key."""
+        config = _config(tmp_path)
+        config.users["alice"].routing = {"alert": "sms"}
+        texts = []
+
+        def send(req):
+            texts.append(req.text)
+            raise TimeoutError("provider timed out")
+
+        providers = _providers(_adapter(send))
+        monkeypatch.setattr(
+            "istota.transport.sms.providers.registry.make_provider_registry",
+            lambda _config: providers,
+        )
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task", lambda *_a, **_k: (
+                True, "I need your confirmation before deleting the file.", None, None,
+            ),
+        )
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="delete", user_id="alice", source_type="sms",
+                conversation_token=sms_conversation_token("alice"), output_target="sms",
+            )
+
+        from istota.scheduler import process_one_task
+        assert process_one_task(config) == (task_id, True)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "pending_confirmation"
+            statuses = [r["status"] for r in conn.execute("SELECT status FROM sent_sms")]
+        assert statuses == ["unknown"]
+        assert len(texts) == 1
 
 
 class TestATextedAnswerResolvesOnlyItsOwnConversation:

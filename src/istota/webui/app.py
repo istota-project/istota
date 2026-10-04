@@ -7675,12 +7675,11 @@ _AUX_COLUMNS = (
 # `is_room_member` correctly excludes — is the whole point of the second arm.
 # Interpolating a surface set would collapse the two arms into one and put a
 # gated email's `tasks.prompt` back within reach of this query.
-_AUX_ROOM_SCOPE = (
-    "((source_type IN ('web', 'talk') AND conversation_token = ?) "
-    "OR (source_type = 'email' AND EXISTS ("
-    "SELECT 1 FROM messages m2 WHERE m2.room_token = ? "
-    "AND m2.task_id = tasks.id AND m2.role = 'user')))"
-)
+#
+# The literal lives in `db.TASK_ROOM_SCOPE_SQL`, because the scheduler asks the
+# same question of a parked task (#635): a second copy would let the two
+# disagree about whether a question is on screen.
+_AUX_ROOM_SCOPE = _db.TASK_ROOM_SCOPE_SQL
 
 
 def _row_reply_to(row) -> dict | None:
