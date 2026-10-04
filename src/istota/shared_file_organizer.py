@@ -12,10 +12,13 @@ from .storage import get_user_shared_path, ensure_user_directories_v2
 
 logger = logging.getLogger("istota.shared_file_organizer")
 
-# Bot-managed names at the root. The operator persona is owned by the bot
-# account today, but that skip holds only while the bot is not a configured user.
-_ROOT_SKIP = frozenset({
-    "users",
+# Bot-managed directories at the root, skipped whoever owns them.
+_ROOT_SKIP = frozenset({"users"})
+
+# The operator persona's names. Skipped only when the bot account owns the
+# item: a user who shares a file under one of these names into the root is
+# sharing their own file, and left there it would become every user's persona.
+_BOT_OWNED_SKIP = frozenset({
     PERSONA_FILENAME.lower(),
     (PERSONA_FILENAME + SHIPPED_SUFFIX).lower(),
 })
@@ -69,6 +72,9 @@ def discover_and_organize_shared_files(config: Config) -> list[OrganizedFile]:
         owner = get_file_owner(config, item_name)
         if not owner:
             # Could not determine owner, skip
+            continue
+
+        if item_name.lower() in _BOT_OWNED_SKIP and owner == config.nextcloud.username:
             continue
 
         # Check if owner is a configured user
