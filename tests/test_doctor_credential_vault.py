@@ -74,7 +74,7 @@ def _write_vault(path: Path, *, password: str = PASSPHRASE) -> Path:
     follows: nothing in this repository pays `pykeepass`'s import graph at
     collection.
     """
-    from pykeepass import create_database
+    from tests.support.kdbx import create_database
 
     path.parent.mkdir(parents=True, exist_ok=True)
     kp = create_database(str(path), password=password)
@@ -88,7 +88,7 @@ def _write_vault(path: Path, *, password: str = PASSPHRASE) -> Path:
 
 def _write_unscoped_vault(config, user_id="alice") -> Path:
     """Rewrite that user's vault with no top-level `istota` group (§1)."""
-    from pykeepass import create_database
+    from tests.support.kdbx import create_database
 
     path = (
         Path(config.workspace_path) / "Users" / user_id / "config" / "vault.kdbx"

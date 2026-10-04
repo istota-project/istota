@@ -9,7 +9,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
-from pykeepass import create_database
+from tests.support.kdbx import create_database
 
 from istota import db
 from istota.credentials import store as secrets_store

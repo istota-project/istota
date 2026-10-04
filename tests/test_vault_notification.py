@@ -135,7 +135,7 @@ def _write_vault(path: Path, *, password: str = PASSPHRASE) -> None:
     function-scopes its own import: it pulls `lxml`, `argon2-cffi` and
     `pycryptodomex`, and nothing here should pay that at collection.
     """
-    from pykeepass import create_database
+    from tests.support.kdbx import create_database
 
     path.parent.mkdir(parents=True, exist_ok=True)
     kp = create_database(str(path), password=password)
@@ -904,7 +904,7 @@ class TestTheResolver:
 
 def _write_unscoped_vault(path: Path, *, password: str = PASSPHRASE) -> None:
     """A real KDBX with **no** top-level `istota` group, so the read is unscoped."""
-    from pykeepass import create_database
+    from tests.support.kdbx import create_database
 
     path.parent.mkdir(parents=True, exist_ok=True)
     kp = create_database(str(path), password=password)

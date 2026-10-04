@@ -104,7 +104,7 @@ def _write_vault(path: Path, *, password=PASSPHRASE, karakeep=True, ntfy=False):
     own import: `pykeepass` pulls `lxml`, `argon2-cffi` and `pycryptodomex`, and
     nothing here should pay that at collection.
     """
-    from pykeepass import create_database
+    from tests.support.kdbx import create_database
 
     path.parent.mkdir(parents=True, exist_ok=True)
     kp = create_database(str(path), password=password)

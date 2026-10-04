@@ -112,7 +112,7 @@ def tmp_dir(cfg: Path) -> Path:
 
 def _write_unscoped_vault(path: Path, *, password=PASSPHRASE):
     """A KDBX with no top-level `istota` group, so §1 reads the whole file."""
-    from pykeepass import create_database
+    from tests.support.kdbx import create_database
 
     path.parent.mkdir(parents=True, exist_ok=True)
     kp = create_database(str(path), password=password)
@@ -124,7 +124,7 @@ def _write_unscoped_vault(path: Path, *, password=PASSPHRASE):
 
 def _write_colliding_vault(path: Path, *, password=PASSPHRASE):
     """Two entries that slug to one name, so the read records a skip."""
-    from pykeepass import create_database
+    from tests.support.kdbx import create_database
 
     path.parent.mkdir(parents=True, exist_ok=True)
     kp = create_database(str(path), password=password)
@@ -135,7 +135,7 @@ def _write_colliding_vault(path: Path, *, password=PASSPHRASE):
 
 
 def _write_vault(path: Path, *, password=PASSPHRASE, ntfy=False, group_name="karakeep"):
-    from pykeepass import create_database
+    from tests.support.kdbx import create_database
 
     path.parent.mkdir(parents=True, exist_ok=True)
     kp = create_database(str(path), password=password)
@@ -857,7 +857,7 @@ def test_vault_new_refuses_a_name_a_local_credential_holds(env, monkeypatch, cap
     so `vault-new` asks the store before it writes the file."""
     import sys
 
-    from pykeepass import create_database
+    from tests.support.kdbx import create_database
 
     from istota.cli import main
     from istota.credentials.broker.bindings import parse_binding
