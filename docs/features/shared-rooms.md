@@ -47,6 +47,8 @@ In a shared room the bot does not answer every message. The **speech gate** deci
 - `classifier`: a small, cheap model reads the last few turns and decides whether the latest one is meant for the bot. If the model fails or times out, the bot stays quiet. A turn that addresses the bot is always answered, whatever the model says. An email thread room stays on `mention` even then, because speaking there is a reply-all.
 - `off`: the bot answers every turn.
 
+The host can set a mode for one room that overrides the deployment's, in either direction: `!room speak classifier` tries the classifier in one group while the deployment stays on `mention`, and `!room speak default` puts the room back on the deployment's mode. `!room speak` on its own says which mode the room is on and whether it is the room's own or the deployment's. The same choice is the Replies field in the web room settings, shown to every member and editable by the host. An email thread room has no such setting.
+
 The unanswered turns still reach the bot as context, so when somebody does address it, it knows what was said. Every decision is logged in the `speech_gate_decisions` table for tuning; the log holds no message text. See [`[speech_gate]`](../configuration/reference.md#speech_gate).
 
 ## Hosts and guests
@@ -161,6 +163,7 @@ Personal memory is not extracted from shared rooms: what is said in front of mor
 |---|---|---|
 | `!room host` | any member | Take over a room that has lost its host |
 | `!room guests [off\|held\|direct]` | host to change | Show or set how guests are answered |
+| `!room speak [mention\|classifier\|off\|default]` | host to change | Show or set [when the bot speaks](#when-the-bot-speaks) in this room |
 | `!room group [<id>\|none]` | host to change | Show or set the room's [group](groups.md#linking-a-room-to-a-group) link |
 | `!room notes [<room>]` | you, in your private chat | List the shared rooms you can keep [notes](#my-notes) about, or show your notes for one |
 | `!<bot name> off` / `on` | anyone | [Switch the bot off](room-veto.md) in this room, or ask for it back |

@@ -667,6 +667,73 @@ describe('RoomSettings — a shared room another member hosts', () => {
   });
 });
 
+// ISSUE-640: the room's own speech mode, beside the Guests field.
+describe('RoomSettings — when the bot replies', () => {
+  afterEach(cleanup);
+
+  const SPEAK = 'When to reply to a message not addressed to the bot';
+  const shared = (over: Record<string, unknown> = {}) =>
+    room({
+      shared: true,
+      policy: {
+        host: 'alice',
+        is_host: true,
+        guest_reply: 'direct',
+        speech_mode: null,
+        effective_speech_mode: 'mention',
+        deployment_speech_mode: 'mention',
+        settings_refusal: null,
+        ...over,
+      },
+    });
+
+  it('names what following the deployment means', async () => {
+    await mountSettled(shared());
+    expect(screen.getByRole('button', { name: SPEAK })).toBeTruthy();
+    expect(screen.getByText('Follow deployment (Only when addressed)')).toBeTruthy();
+  });
+
+  it('lets the host opt the room into the classifier', async () => {
+    const onSave = vi.fn();
+    await mountSettled(shared(), onSave);
+    await pick(SPEAK, 'Decide from context');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(onSave).toHaveBeenCalledWith({ speech_mode: 'classifier' });
+  });
+
+  it('sends null to follow the deployment again', async () => {
+    const onSave = vi.fn();
+    await mountSettled(shared({ speech_mode: 'off', effective_speech_mode: 'off' }), onSave);
+    await pick(SPEAK, 'Follow deployment (Only when addressed)');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(onSave).toHaveBeenCalledWith({ speech_mode: null });
+  });
+
+  it('warns when every turn is answered', async () => {
+    await mountSettled(shared());
+    expect(screen.queryByText(/answer every message/)).toBeNull();
+    await pick(SPEAK, 'Every turn');
+    expect(screen.getByText(/answer every message anyone sends/)).toBeTruthy();
+  });
+
+  it('is read-only for a member who is not the host', async () => {
+    await mountSettled(shared({ is_host: false }));
+    const control = screen.getByRole('button', { name: SPEAK }) as HTMLButtonElement;
+    expect(control.disabled).toBe(true);
+    expect(screen.getByText(/host, alice, sets this/)).toBeTruthy();
+  });
+
+  it('is hidden in an email thread room', async () => {
+    await mountSettled(shared({ email_thread: true }));
+    expect(screen.queryByRole('button', { name: SPEAK })).toBeNull();
+  });
+
+  it('is hidden in a private room', async () => {
+    await mountSettled(room());
+    expect(screen.queryByRole('button', { name: SPEAK })).toBeNull();
+  });
+});
+
 describe('a phone room (room-surface-model Stage 24)', () => {
   it('shows the binding read-only and offers no Talk promote', () => {
     mount(room({ origin: 'sms', phone_surface: 'sms', read_only: true, name: 'SMS' }));

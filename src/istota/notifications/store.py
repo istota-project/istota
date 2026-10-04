@@ -707,13 +707,14 @@ def mark_seen(
             return None
 
         auto_sources = sources.auto_resolve_sources()
+        kept = sources.kept_until_dismissed()
         now = db.iso_utc_now()
 
         for chunk in _chunks(list(wanted)):
             placeholders = ",".join("?" for _ in chunk)
             rows = _read(
                 conn,
-                "SELECT id, source, state, updated_at FROM notifications "
+                "SELECT id, source, dedup_key, state, updated_at FROM notifications "
                 f"WHERE user_id = ? AND id IN ({placeholders})",
                 [user_id, *chunk],
             ).fetchall()
@@ -731,6 +732,7 @@ def mark_seen(
                 r["id"]
                 for r in rows
                 if r["source"] in auto_sources
+                and not sources.is_kept_until_dismissed(r["source"], r["dedup_key"], kept)
                 and r["state"] == STATE_OPEN
                 and r["updated_at"] == wanted.get(r["id"])
             ]
@@ -778,17 +780,23 @@ def sweep_expired_alerts(conn: sqlite3.Connection) -> int:
         auto_sources = sorted(sources.auto_resolve_sources())
         if not auto_sources:
             return 0
+        kept = sources.kept_until_dismissed()
         cutoff = db.iso_utc_days_ago(NOTIFICATION_ALERT_MAX_AGE_DAYS)
         now = db.iso_utc_now()
         closed = 0
-        for chunk in _chunks(auto_sources):
-            placeholders = ",".join("?" for _ in chunk)
+        for source in auto_sources:
+            # `substr` rather than LIKE: a prefix carrying `_` or `%` would match
+            # more than it names.
+            prefixes = kept.get(source, ())
+            exempt = "".join(
+                " AND substr(dedup_key, 1, ?) != ?" for _ in prefixes
+            )
+            exempt_args = [v for p in prefixes for v in (len(p), p)]
             cursor = conn.execute(
                 "UPDATE notifications SET state = 'resolved', resolved_at = ?, "
                 "resolved_by = 'system', updated_at = ? "
-                f"WHERE state = 'open' AND source IN ({placeholders}) "
-                "  AND updated_at < ?",
-                [now, now, *chunk, cutoff],
+                "WHERE state = 'open' AND source = ? AND updated_at < ?" + exempt,
+                [now, now, source, cutoff, *exempt_args],
             )
             closed += cursor.rowcount or 0
         if closed:

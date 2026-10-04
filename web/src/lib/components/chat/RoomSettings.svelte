@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { ChatRoom, GuestReply, RoomPatch, SelectableBrain } from '$lib/api';
+  import type { ChatRoom, GuestReply, RoomPatch, SelectableBrain, SpeechMode } from '$lib/api';
   import { Modal, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
   import RoomMembers from './RoomMembers.svelte';
   import RoomGroupLink from './RoomGroupLink.svelte';
@@ -56,6 +56,30 @@
   ];
   let guestReplyValue = $state<GuestReply>(untrack(() => room.policy?.guest_reply ?? 'direct'));
   const guestReplyChanged = $derived(!!room.policy && guestReplyValue !== room.policy.guest_reply);
+
+  // When the bot answers an unaddressed turn here (ISSUE-640). "" follows the
+  // deployment's mode, which the server names so the option can say what it is.
+  const SPEECH_MODE_LABELS: Record<string, string> = {
+    mention: 'Only when addressed',
+    classifier: 'Decide from context',
+    off: 'Every turn',
+  };
+  const speechModeOptions = $derived<SelectOption[]>([
+    {
+      value: '',
+      label: `Follow deployment (${SPEECH_MODE_LABELS[room.policy?.deployment_speech_mode ?? ''] ?? room.policy?.deployment_speech_mode ?? 'unknown'})`,
+    },
+    { value: 'mention', label: SPEECH_MODE_LABELS.mention },
+    { value: 'classifier', label: SPEECH_MODE_LABELS.classifier },
+    { value: 'off', label: SPEECH_MODE_LABELS.off },
+  ]);
+  let speechModeValue = $state<string>(untrack(() => room.policy?.speech_mode ?? ''));
+  const speechModeChanged = $derived(
+    !!room.policy && speechModeValue !== (room.policy.speech_mode ?? ''),
+  );
+  const showSpeechMode = $derived(
+    !!room.policy && !room.policy.email_thread && room.policy.speech_mode !== undefined,
+  );
 
   // Model + effort defaults for this room (canonical values, shared Talk+web).
   // "" is the "instance default" sentinel (cleared on the backend as null).
@@ -242,6 +266,7 @@
       effortValue = room.effort ?? '';
       brainValue = room.brain ?? '';
       guestReplyValue = room.policy?.guest_reply ?? 'direct';
+      speechModeValue = room.policy?.speech_mode ?? '';
       showDeleteConfirm = false;
       copied = false;
       copyError = '';
@@ -266,6 +291,7 @@
     trimmed.length > 0 &&
       (colorChanged ||
         guestReplyChanged ||
+        speechModeChanged ||
         (!locked && (nameChanged || modelChanged || effortChanged || brainChanged))),
   );
 
@@ -297,6 +323,7 @@
     }
     if (colorChanged) patch.color = colorValue || null;
     if (guestReplyChanged) patch.guest_reply = guestReplyValue;
+    if (speechModeChanged) patch.speech_mode = (speechModeValue || null) as SpeechMode | null;
     onSave(patch);
   }
 
@@ -441,6 +468,35 @@
           A guest's turn runs on behalf of this room's host, {room.policy.host}, who sets this.
         {:else}
           This room has no host, so guests are not answered until a member claims it.
+        {/if}
+      </p>
+    </div>
+  {/if}
+
+  {#if room.policy && showSpeechMode}
+    <div class="field">
+      <span>Replies</span>
+      <Select
+        value={speechModeValue}
+        options={speechModeOptions}
+        onValueChange={(v) => (speechModeValue = v)}
+        ariaLabel="When to reply to a message not addressed to the bot"
+        disabled={!room.policy.is_host}
+        fullWidth
+      />
+      {#if speechModeValue === 'off'}
+        <p class="banner warn speech-warning">
+          The bot will answer every message anyone sends in this room.
+        </p>
+      {/if}
+      <p class="caption">
+        {#if room.policy.is_host}
+          When the bot answers a message nobody addressed to it. You set this as the room's host.
+        {:else if room.policy.host}
+          When the bot answers a message nobody addressed to it. This room's host, {room.policy
+            .host}, sets this.
+        {:else}
+          This room has no host, so nobody can change this until a member claims it.
         {/if}
       </p>
     </div>

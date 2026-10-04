@@ -232,6 +232,23 @@ def auto_resolve_sources() -> set[str]:
     }
 
 
+def kept_until_dismissed() -> dict[str, tuple[str, ...]]:
+    """Per auto-resolve source, the `dedup_key` prefixes whose rows stay open
+    until dismissed: rows that are the user's only copy of something (#638)."""
+    kept: dict[str, tuple[str, ...]] = {}
+    for source, resolver in all_resolvers().items():
+        prefixes = tuple(getattr(resolver, "kept_until_dismissed", ()) or ())
+        if prefixes:
+            kept[source] = prefixes
+    return kept
+
+
+def is_kept_until_dismissed(source: str, dedup_key: str | None,
+                            kept: dict[str, tuple[str, ...]]) -> bool:
+    prefixes = kept.get(source)
+    return bool(prefixes) and (dedup_key or "").startswith(prefixes)
+
+
 def _register_all() -> None:
     """Import and register every built-in resolver. Idempotent, explicit.
 
