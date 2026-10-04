@@ -159,6 +159,22 @@ class TestFlagHelper:
         assert "--allowedTools" not in flags
         assert "--disallowedTools" not in flags
 
+    def test_a_read_only_grant_keeps_its_tool_flags_on_the_tmux_path(
+        self, tmp_path
+    ):
+        # Appended outside `_add`, so no unsupported-flag set can drop them and
+        # run a read-only grant with every tool.
+        unsupported = tmux_claude._TMUX_UNSUPPORTED_FLAGS | {
+            "--tools", "--strict-mcp-config", "--disallowedTools",
+        }
+        flags = build_claude_cli_flags(
+            _req(tmp_path, allowed_tools=["Read", "Grep", "Glob"]),
+            unsupported=unsupported,
+        )
+        assert flags[flags.index("--tools") + 1] == "Read,Grep,Glob"
+        assert "--strict-mcp-config" in flags
+        assert "Bash" in flags
+
 
 class TestComposedSystemPromptReachesTmux:
     """Istota's composed system half rides the same shared helper the headless

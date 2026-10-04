@@ -581,24 +581,24 @@ Routing builds into the container needs the three settings above, a container fo
 
 ### `[developer.review]`
 
-The `code_review` skill's models, caps and budget. There is no separate feature flag — the skill is already gated by `developer.enabled` and an admin check, so `enabled = false` here is the off switch.
+The `code_review` skill's model, caps and budget. There is no separate feature flag — the skill is already gated by `developer.enabled` and an admin check, so `enabled = false` here is the off switch.
+
+One reviewer reads the diff and the code around it with `Read`, `Grep` and `Glob`, over a copy of the reviewed commit written out of git into `{temp_dir}/.review/`. On a sandboxed deployment that copy is the only thing it can read. Where the copy or the sandbox cannot be built, it reviews the diff alone, and the result says so in `reviewer.tools`.
 
 | Setting | Default | Description |
 |---|---|---|
-| `enabled` | `true` | Run a review before opening a merge request |
-| `conformance_model` | `"general"` | Role alias for the spec-conformance reviewer. A `:effort` modifier is honoured |
-| `bughunt_model` | `"smart:high"` | Role alias for the second, skeptical reviewer |
-| `both_agents_threshold_lines` | `150` | Diffs at or above this get both reviewers |
-| `boundary_patterns` | auth, secret, credential, token, password, migration, schema.sql, billing, payment, money, crypto, sandbox, proxy, deploy, ansible | Case-insensitive substrings matched against changed paths. A hit puts both reviewers on the diff however small it is |
-| `max_diff_chars` | `200000` | Cap on the diff handed to a reviewer |
-| `max_context_chars` | `60000` | Cap on the assembled surrounding context |
-| `max_file_chars` | `20000` | Per changed file, for whole-body inclusion; over it that file falls back to its own hunks |
-| `max_callers_per_symbol` | `8` | Cap on caller sites gathered per changed symbol |
-| `max_need_files` | `6` | Files a reviewer may request on its one re-invocation. `0` disables the round trip, and the offer is then kept out of the prompt rather than made and refused |
-| `timeout_seconds` | `120` | Per agent. Both run concurrently, so this is wall time |
-| `max_calls_per_task` | `8` | Review rounds per task |
+| `enabled` | `true` | `false` switches the CLI off; a workflow that asks for a review then reports it unavailable and lands anyway |
+| `model` | `"smart:high"` | Role alias for the reviewer. A `:effort` modifier is honoured |
+| `file_budget` | `8` | Files the reviewer may read beyond the changed ones. `0` or less reads as `8`, with a warning |
+| `snapshot_max_bytes` | `104857600` (100 MiB) | Total size of the reviewed commit's copy. Changed files are written first; over the cap the rest is listed as skipped. `0` or less keeps the default |
+| `snapshot_max_file_bytes` | `2097152` (2 MiB) | Per file in that copy; a larger file is skipped. `0` or less keeps the default |
+| `max_diff_chars` | `200000` | Cap on the diff in the prompt. The full patch is in the copy either way |
+| `timeout_seconds` | `480` | The reviewer's budget, including a reformat of an unusable answer. Clamped to fit under the skill proxy's ceiling for `code_review` |
+| `max_calls_per_task` | `8` | Review runs per task |
 
-`max_calls_per_task` counts *waves* of model calls, not `code_review run` invocations. One run charges 1, or 2 when a reviewer took its `max_need_files` round trip; a wave is up to four invocations, since each of two agents may retry a malformed answer once. Guard refusals and breaker skips are free. At the cap the review degrades to `skipped` rather than erroring — a blocking cap would stop a task that had already finished its work from landing it. `0` or less permits no reviews at all rather than reading as "unlimited"; use `enabled = false` to switch the feature off.
+`bughunt_model` from an older config is read as `model` when `model` is unset. `conformance_model`, `both_agents_threshold_lines`, `boundary_patterns`, `max_context_chars`, `max_file_chars`, `max_callers_per_symbol` and `max_need_files` are retired: they are dropped at load with one INFO line and do nothing.
+
+`max_calls_per_task` counts runs that reached the model. One run charges 1, which covers the review and, if its answer could not be parsed, one text-only reformat call. Guard refusals and breaker skips are free. At the cap the review degrades to `skipped` rather than erroring — a blocking cap would stop a task that had already finished its work from landing it. `0` or less permits no reviews at all rather than reading as "unlimited"; use `enabled = false` to switch the feature off.
 
 ## ntfy push notifications
 

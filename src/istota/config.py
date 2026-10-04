@@ -841,10 +841,10 @@ class PlaybooksConfig:
 
 @dataclass
 class ReviewConfig:
-    """`[developer.review]` — the code_review CLI's models, caps and budget.
+    """`[developer.review]` — the code_review CLI's model, caps and budget.
 
     Distinct from `skills.code_review.engine.ReviewConfig`, which carries only
-    the sizing and caps the engine works from. Keeping them apart is what lets
+    the caps and budget the engine works from. Keeping them apart is what lets
     every engine function be tested without importing this module; the CLI
     builds the engine's from this one.
 
@@ -855,59 +855,40 @@ class ReviewConfig:
     """
 
     enabled: bool = True
-    # Role aliases. A `:effort` modifier is honoured: the CLI splits it off with
-    # `split_effort` and passes it as `BrainRequest.effort`, because
+    # A role alias. A `:effort` modifier is honoured: the CLI splits it off
+    # with `split_effort` and passes it as `BrainRequest.effort`, because
     # `resolve_model_name` strips the modifier and keeps only the base, so a
-    # value handed to it whole would silently run at default effort.
-    conformance_model: str = "general"
-    bughunt_model: str = "smart:high"
-    both_agents_threshold_lines: int = 150
-    # Matched against changed paths as case-insensitive substrings. A hit puts
-    # both reviewers on the diff however small it is.
-    boundary_patterns: list[str] = field(default_factory=lambda: [
-        "auth", "secret", "credential", "token", "password",
-        "migration", "schema.sql", "billing", "payment", "money",
-        "crypto", "sandbox", "proxy", "deploy", "ansible",
-    ])
+    # value handed to it whole would silently run at default effort. Was
+    # `bughunt_model`; `_review_section` reads the old name when this is unset.
+    model: str = "smart:high"
+    # Files the reviewer may read beyond the changed ones. 0 or less is read as
+    # the default with a warning: "no files" would turn the reviewer back into
+    # a text-only one by configuration.
+    file_budget: int = 8
+    # The reviewed commit's tree, written for the reviewer to read. Over the
+    # total, the files least related to the change are left out; over the
+    # per-file cap, a file is left out whatever it is.
+    snapshot_max_bytes: int = 104_857_600
+    snapshot_max_file_bytes: int = 2_097_152
     max_diff_chars: int = 200_000
-    max_context_chars: int = 60_000
-    # Per changed file, for whole-body inclusion; over it, that file falls back
-    # to its own hunks.
-    max_file_chars: int = 20_000
-    max_callers_per_symbol: int = 8
-    # Files a reviewer may request on the one re-invocation; 0 disables the
-    # round trip, and the offer is then kept out of the reviewer's prompt rather
-    # than made and refused. A round trip spends a second model round, so it is
-    # also withheld when `max_calls_per_task` has no room for one.
-    max_need_files: int = 6
-    # Per agent. Both agents run concurrently, so this is wall time and not half
-    # of it, and a fast reviewer finishing early buys the slow one nothing.
+    # The reviewer's own wall-clock budget.
     #
-    # 480 rather than 120 (ISSUE-448). `bughunt_model` is `smart:high` and
-    # `size_review` only puts that reviewer on diffs over
-    # `both_agents_threshold_lines`, so the expensive reviewer runs exclusively
-    # on the large diffs — and 240 was measured killing it on every real one.
-    # The two errors are not symmetric: a budget that is too large costs wall
-    # time on a reviewer that was going to fail anyway, while one that is too
-    # small guarantees the call is paid for and discarded. So this is set
-    # generously and bounded by the proxy ceiling rather than tuned. There is
-    # no per-agent split: once the ceiling stops binding, one budget large
-    # enough for bughunt is large enough for conformance, and the agents are
-    # concurrent so conformance finishing early costs nothing.
+    # 480 rather than 120 (ISSUE-448): 240 was measured killing a `smart:high`
+    # reviewer on every real diff. The two errors are not symmetric: a budget
+    # that is too large costs wall time on a reviewer that was going to fail
+    # anyway, while one that is too small guarantees the call is paid for and
+    # discarded. So this is set generously and bounded by the proxy ceiling
+    # rather than tuned.
     timeout_seconds: int = 480
-    # Review rounds per task, where a round is one *wave* of model calls rather
-    # than one `code_review run`: a run charges 1, or 2 when a reviewer took its
-    # `max_need_files` round trip. A wave is up to four invocations, since each
-    # of two agents may retry a malformed answer once — so one run is at most
-    # two rounds and six invocations. Guard refusals and breaker skips are free
-    # and a malformed-output retry rides on the round that provoked it, because
-    # a run that spends every call and parses none must still charge, or a
+    # Review runs per task. A run charges 1 whatever it spent: the reformat
+    # call for an unparseable answer rides on the run that provoked it, because
+    # a run that spends its calls and parses nothing must still charge, or a
     # reviewer stuck answering in prose loops past a cap that never moves.
-    # 0 or less permits
-    # no reviews at all, matching `max_need_files` above rather than reading as
-    # "unlimited"; use `enabled = false` to switch the feature off. At the cap
-    # the review degrades to `skipped` rather than erroring, because a blocking
-    # cap would stop a task that had already finished its work from landing it.
+    # Guard refusals and breaker skips are free. 0 or less permits no reviews
+    # at all rather than reading as "unlimited"; use `enabled = false` to
+    # switch the feature off. At the cap the review degrades to `skipped`
+    # rather than erroring, because a blocking cap would stop a task that had
+    # already finished its work from landing it.
     max_calls_per_task: int = 8
 
 
@@ -3999,6 +3980,52 @@ def _positive_int(raw: object, key: str) -> object:
     return value
 
 
+#: `[developer.review]` keys from the two-reviewer design, which no field reads.
+_RETIRED_REVIEW_KEYS = (
+    "conformance_model",
+    "bughunt_model",
+    "both_agents_threshold_lines",
+    "boundary_patterns",
+    "max_context_chars",
+    "max_file_chars",
+    "max_callers_per_symbol",
+    "max_need_files",
+)
+
+
+def _review_section(raw: object, key: str) -> object:
+    """`[developer.review]`, with the two-reviewer keys migrated or dropped.
+
+    `bughunt_model` was the correctness reviewer's model, which is what the one
+    reviewer now is, so it stands in for an absent `model`. Every retired key
+    is then dropped before the walk with one INFO line: an upgraded deployment
+    did nothing wrong by still having them, and the unknown-key warning would
+    say otherwise on every boot. The rest of the section is walked as usual,
+    its own hooks included.
+    """
+    if not isinstance(raw, dict):
+        return _warn(key, raw, "a table")
+    data = dict(raw)
+    if "model" not in data and "bughunt_model" in data:
+        data["model"] = data["bughunt_model"]
+        logger.info(
+            "[config] [%s] bughunt_model is now model; using its value", key,
+        )
+    retired = [name for name in _RETIRED_REVIEW_KEYS if name in data]
+    for name in retired:
+        del data[name]
+    if retired:
+        logger.info(
+            "[config] [%s] ignoring settings retired with the second reviewer: %s",
+            key, ", ".join(retired),
+        )
+    review = ReviewConfig()
+    unknown: list[str] = []
+    apply_section(review, data, prefix=key, hooks=_CONFIG_HOOKS, unknown=unknown)
+    report_unknown(unknown)
+    return review
+
+
 def _forge_cli_list(raw: object, key: str) -> object:
     """A forge-CLI policy list, tolerating the bare-string hand-edit."""
     if isinstance(raw, str):
@@ -4053,6 +4080,12 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     # meant to be.
     "developer.forge_cli_extra_denied": lambda raw, key: _forge_cli_list(raw, key),
     "developer.forge_cli_permit": lambda raw, key: _forge_cli_list(raw, key),
+    "developer.review": _review_section,
+    # Zero files would make the reviewer text-only by configuration.
+    "developer.review.file_budget": _positive_int,
+    # Same reason: a zero cap writes an empty tree for a reviewer with tools.
+    "developer.review.snapshot_max_bytes": _positive_int,
+    "developer.review.snapshot_max_file_bytes": _positive_int,
     # An empty string means "unset" here, not a relative path of `.`.
     "security.sandbox_cache_dir": lambda raw, key: str(raw or ""),
     "security.sandbox_cache_max_gb": _positive_float,

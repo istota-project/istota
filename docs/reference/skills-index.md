@@ -61,7 +61,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 |---|---|---|
 | `developer` | git, gitlab, github, repo, commit, branch, MR, PR, worktree, clone | doc-only (env setup via hook) |
 | `commit` | commit, commit message, changelog, git commit, staging | doc-only |
-| `code_review` | review, code review, review the diff, review before merge | yes -- `run --worktree PATH [--base REF] [--range RANGE] [--intent TEXT] [--agents both\|conformance\|bughunt]`. Admin-only |
+| `code_review` | review, code review, review the diff, review before merge | yes -- `run --worktree PATH [--base REF] [--range RANGE] [--intent TEXT] [--timeout N]`. Admin-only |
 
 `developer` is the entry point and declares `commit` and `code_review` as `companion_skills`, so all three load together on any task that reaches for git. The split is about what each one owns: `developer` covers repository work and the merge-request and pull-request lifecycle, `commit` covers message format, what gets staged and what must never be committed, and `code_review` covers running a review and acting on its findings.
 
@@ -75,9 +75,9 @@ The two binaries are not interchangeable in their flags. `gh` filters output wit
 
 ### Review before merge
 
-A change large enough to be more than a one-or-two-file edit is reviewed before the merge request opens. A reviewer reads the branch diff against a one-line statement of what the change was meant to do, and the bot fixes what comes back before pushing, reporting anything it disagreed with as a decision rather than dropping it silently.
+A review runs when the task or your own workflow asks for one (in `USER.md`, `config/skills/developer.md` or a project room's `CHANNEL.md`). A reviewer reads the branch diff against a one-line statement of what the change was meant to do, and the bot fixes what comes back before pushing, reporting anything it disagreed with as a decision rather than dropping it silently. Before acting on a must-fix or high finding the reviewer could not confirm, the bot checks it in its own worktree.
 
-Two reviewers run on a diff at or above `both_agents_threshold_lines` (150), and on any diff touching a boundary path — credentials, money, migrations, the sandbox, deploy. Smaller diffs get the conformance reviewer alone. A reviewer may ask once for files it was not given, up to `max_need_files`. Where review cannot run at all — the budget is spent, the model is unreachable — the merge request still opens and says it is unreviewed. Caps and models are under [`[developer.review]`](../configuration/reference.md#developerreview).
+One reviewer reads the diff and the surrounding code itself, with read-only file tools over a copy of the reviewed commit, and reads up to `file_budget` files beyond the changed ones. It reports what it proved, what it could not confirm and how to settle it, and the theories it checked and ruled out. Where review cannot run at all — the budget is spent, the model is unreachable — the merge request still opens and says it is unreviewed. Caps and models are under [`[developer.review]`](../configuration/reference.md#developerreview).
 
 ## Accounting
 
