@@ -23,6 +23,15 @@ from dataclasses import dataclass, field
 # and a space. Leading whitespace allowed.
 _BULLET_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+")
 
+#: Written on a `## ` heading line to keep the nightly curator out of that
+#: section. The same HTML-comment idiom as the agents header in `lint.py`, so
+#: it renders as nothing in a markdown viewer.
+PINNED_MARKER = "<!-- pinned -->"
+
+# Tolerates the spacing and case a hand edit produces; the marker is matched
+# anywhere on the heading line, since `parse_sectioned_doc` keeps it there.
+_PINNED_RE = re.compile(r"<!--\s*pinned\s*-->", re.IGNORECASE)
+
 
 @dataclass
 class Section:
@@ -43,6 +52,11 @@ class SectionedDoc:
 
     def has(self, heading: str) -> bool:
         return self.find(heading) is not None
+
+
+def is_pinned_heading(heading: str) -> bool:
+    """Does this `## ` heading text carry the pinned marker?"""
+    return bool(_PINNED_RE.search(heading))
 
 
 def classify_line(line: str) -> str:

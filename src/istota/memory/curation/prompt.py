@@ -6,7 +6,7 @@ from collections.abc import Sequence
 
 from istota.lib.llm_json import strip_fences
 from .parser import serialize_sectioned_doc
-from .types import SectionedDoc
+from .types import PINNED_MARKER, SectionedDoc
 
 #: Bounds on one inventory row. A skill name is a directory name in the
 #: operator's own tree and a count is a `len()`, so both are already small;
@@ -135,7 +135,11 @@ def build_op_curation_prompt(
         '5. Most nights, the right answer is `{"ops": []}` — do not invent edits to seem useful.\n'
         "6. To remove an outdated entry, it must be clearly contradicted by newer information. If unsure,\n"
         "   leave it.\n"
-        "7. For `remove`, the `match` substring must be specific enough that only ONE line matches."
+        "7. For `remove`, the `match` substring must be specific enough that only ONE line matches.\n"
+        f"8. A `## ` heading carrying `{PINNED_MARKER}` is a pinned section the user keeps by hand.\n"
+        "   Never emit `remove`, `replace` or `remove_heading` for it, and never create a heading\n"
+        "   carrying that marker; both are rejected. Add to a pinned section only what the user\n"
+        "   stated about it in the dated memories above, since you cannot correct it later."
     )
 
     parts.append(

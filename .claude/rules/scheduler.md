@@ -20,7 +20,7 @@ paths:
 
 ### The interval gate table (F33)
 
-`build_interval_gates(config, *, pool, background_checks, doctor_state, pressure_state, backup_state)` returns `IntervalGate` rows in loop order; `seed_interval_clocks` builds the clocks. Readers: `_tick_interval_gates` (daemon; `background` rows go through `_spawn_background_check`, clock advances at spawn) and `_run_interval_gates_once` (`run_scheduler`; the nine `one_shot` rows, synchronously, no clocks). Load-bearing order: `shared-files` before `tasks-file-poll`; `backup-stale-alert` right after `db-backup`. A grep guard fails if a loop restates a gate.
+`build_interval_gates(config, *, pool, background_checks, doctor_state, pressure_state, backup_state)` returns `IntervalGate` rows in loop order; `seed_interval_clocks` builds the clocks. Readers: `_tick_interval_gates` (daemon; `background` rows go through `_spawn_background_check`, clock advances at spawn) and `_run_interval_gates_once` (`run_scheduler`; the ten `one_shot` rows, synchronously, no clocks). Load-bearing order: `shared-files` before `tasks-file-poll`; `backup-stale-alert` right after `db-backup`. A grep guard fails if a loop restates a gate.
 
 - `field` is authoritative, `interval()` derives from it. `None` = not a config field (`travel-timezone`, `status-write` = 60, `backup-stale-alert`). `__post_init__` refuses both or neither, since neither would silently mean "every tick".
 - A non-positive interval bypasses the clock (`backup-stale-alert`), so a backwards NTP step cannot skip it.
@@ -63,7 +63,7 @@ One loop thread, one pooled `httpx.AsyncClient` for all Talk I/O.
 - Shutdown collateral (`_is_shutdown_collateral`: `_shutdown_requested` and `is_signal_termination`): `db.release_task_for_restart`, no attempt charged, no backoff, deferred files purged (ISSUE-191, restart SIGTERMs the cgroup). The unit's `KillMode=mixed` routes this to orphan recovery; this branch is the half shipped by auto-update. Bounded by `fail_ancient_pending_tasks`. Event block emits "Scheduler restarting" `progress_text`.
 - Permanent provider error (`is_api_error_banner` and `is_permanent_api_error`): no retry (ISSUE-212). Banner-gated so an answer discussing a 400 still retries.
 - Else retry at 1, 4, 16 min (not OOM), else fail with `result` = `partial_result`, appended to both notices by `_with_partial_work` below the error line, uncapped, terminal failures only.
-- Job auto-disable (here, policy refusal, `_record_publish_failure`): `db.suspend_scheduled_job` writes `auto_disabled_at`, never `enabled` (the CRON.md sync rewrites `enabled` every tick), and a `cron_job` notification is buffered for `deliver_pending`. `!cron disable` uses `db.disable_scheduled_job` since it also writes the file. Resolver closes on `auto_disabled_at IS NULL`.
+- Job auto-disable (here, policy refusal, `_record_publish_failure`): `db.suspend_scheduled_job` writes `auto_disabled_at`, never `enabled` (the CRON.md sync rewrites `enabled` every tick), and a `cron_job` notification is buffered for `deliver_pending`. `!cron disable` uses `db.disable_scheduled_job` since it also writes the file. Resolver closes on `auto_disabled_at IS NULL`, except for a `_module.*` job, which closes on a success since the row's `updated_at` (`last_success_at`), because `_sync_module_jobs` clears `auto_disabled_at` on a cooldown whether or not anything was fixed; see notifications.md.
 
 Deliver results outside the DB context.
 
@@ -147,7 +147,7 @@ Below `min_available_memory_mb` of `MemAvailable` or above `host_pressure_psi_th
 
 Each poller runs on its same-named interval key: `_talk_poll_loop()`, `poll_emails()`, `poll_all_tasks_files()`, `check_heartbeats()`, `check_db_health()`, `discover_and_organize_shared_files()`, `check_skill_overlay_reindex()`, `check_doctor()` (3600s); briefings, jobs and sleep cycles on `briefing_check_interval`; `check_travel_timezone()` (900s, `location.enabled`).
 - `check_worktree_reap()`: gated on `developer.enabled`, `repos_dir`, `worktree_reap_enabled`.
-- `check_sandbox_cache_sweep()`: gated on `sandbox_cache_sweep_enabled` and `sandbox_cache_sweep_root(config)`; skips users with a live task.
+- `check_sandbox_cache_sweep()`: gated on `sandbox_cache_sweep_enabled` and `sandbox_cache_sweep_targets(config)`, which may name both layouts at once; skips users with a live task.
 - `check_avatar_import()`: gated on `storage_is_nextcloud` and `web.avatar_import_from_nextcloud`. Users from `config.users`, never `user_avatars`; no transaction across a fetch; a generated avatar writes a NULL-image probe row with the ETag; stamps `shared_kv` `_avatar_import`/`last_tick` for doctor.
 
 **Learned playbooks** (`playbooks.enabled`, ISSUE-174): sleep-cycle extraction gains a `PLAYBOOKS:` section (gated on `min_tool_calls`) copying commands verbatim from the `Tools (N):` line into a thin router; `_process_extracted_playbooks` writes `playbooks/<slug>.md` indexed as `source_type="playbook"`. `pinned: true` files are re-indexed from their content, never overwritten or pruned. `cleanup_old_playbooks` prunes on last-use mtime (stamped by `_recall_playbooks`) and deletes the chunks; grandfathered once (`.retention_initialized`). See `memory.md` for the full lifecycle.
@@ -165,7 +165,7 @@ After completion with `auto_index_conversations`: index under `user_id`, and `ch
 
 | Param | Default | Notes |
 |---|---|---|
-| `poll_interval` / `dispatch_interval` | 2s / 0.5s | Sub-tick dispatch; 0 or ≥ poll = once per tick |
+| `poll_interval` / `dispatch_interval` | 5s / 0.5s | Sub-tick dispatch; 0 or ≥ poll = once per tick |
 | `talk_poll_timeout` | 30s | Server-side hold only, so the wait gate is `talk_poll_timeout + talk_poll_wait`. Refused ≤ 0 (`_positive_int`, ISSUE-399) |
 | `talk_poll_full_sweep_interval` | 300s | ISSUE-399. Between sweeps a room whose listing `lastMessage.id` is not past its cursor is skipped; fails toward fetching; a stale (fallback) list ungates. `archive_orphaned_talk_rooms` runs only on a sweep. 0 = always sweep |
 | `email_poll_interval` / `email_poll_batch_size` | 60s / 50 | Batch of oldest UIDs above the `email_poll_state` cursor (ISSUE-250); `processed_emails` stays the authority |

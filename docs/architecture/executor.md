@@ -10,7 +10,7 @@ The executor (`executor.py`) is responsible for assembling prompts, building the
 
 1. **Header**: role definition, user_id, current datetime, task_id, conversation_token, source, output target, the per-user email address, a line stating the database is reachable only through skill CLIs — the path itself is deliberately not in the prompt — and the task's privileges
 2. **Emissaries**: constitutional principles from `config/emissaries.md` (skipped for briefings)
-3. **Persona**: user workspace `PERSONA.md` overrides `config/persona.md` (skipped for briefings)
+3. **Persona**: the operator's `PERSONA.md` at the file root, the same for every user and every room; while that file is unreadable, the last good copy recorded by the sync, then the shipped `config/persona.md`. An empty operator file means the shipped persona (skipped for briefings)
 4. **Workspace layout**: one static line describing the workspace, plus any CalDAV-discovered calendars. The Resources sunset replaced the enumerated Folders / TODO Files / Notes / Reminders sections with that single line
 5. **Tools**: available tools documentation (file access, browser, CalDAV, email). No `sqlite3` bullet — the databases are masked out of the sandbox and reached only through skill CLIs
 6. **Rules**: resource restrictions, confirmation flow, subtask creation, output format

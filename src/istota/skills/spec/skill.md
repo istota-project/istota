@@ -20,7 +20,7 @@ Concretely, a good spec:
 - Specifies behaviour for the happy path, edge cases, and error handling. No "handle errors appropriately" hand-waving.
 - Calls out data-model changes (schemas, migrations, indexes) and config / env-var changes explicitly.
 - Defines the test strategy: what tests to write, what they assert, what fixtures or mocks are needed.
-- Breaks the work into ordered stages or phases, each independently completable and verifiable.
+- Breaks the work into ordered stages, each independently completable and verifiable. Aim for 4 to 8 stages and never more than 10. A stage is a meaningful slice of the work that lands with its own tests, not a single edit: fold a rename, a config key, a doc update or a lone function into the stage that needs it. Work that needs more than 10 stages is two specs, split where the first one ships something usable, with each spec's Context saying what the other covers.
 - Records decisions and the alternatives rejected, so the implementer doesn't relitigate them.
 - Lists open questions explicitly — anything left unanswered is a blocker the implementer will have to escalate, so flag it before handoff rather than burying it.
 
@@ -95,6 +95,7 @@ The skill is invoked through natural language, not as a CLI. Recognise these int
    ## Stages
    - [ ] Stage 1 — <name>
    - [ ] Stage 2 — <name>
+   <4 to 8 stages, never more than 10>
 
    ## Open questions
    <things to resolve before or during implementation>
@@ -133,7 +134,7 @@ When the user asks to edit, extend, or revise a spec, edit it in place — do no
 
 - Filenames: `lowercase-with-dashes.md`. No dates in filenames (the filesystem mtime is enough).
 - Soft-wrap prose; no hard line wrapping inside paragraphs.
-- Stages tracked as a checklist (`- [ ]` / `- [x]`) so the "done" gate can verify completion.
+- Stages tracked as a checklist (`- [ ]` / `- [x]`) so the "done" gate can verify completion. 4 to 8 of them, 10 at most.
 - Frontmatter: include at least a `created` date. Add an `agents:` field only if the spec has non-obvious read/write quirks (per the notes skill convention).
 - Specs are not committed to project repos — they live in the user's notes_folder.
 

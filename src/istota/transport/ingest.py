@@ -583,7 +583,7 @@ def record_inbound(
     room_token = db.resolve_room_token(conn, surface, surface_ref)
     # Does this surface *own* rooms — register an unknown token, bind it, add
     # membership, rename from the surface? `surfaces.SURFACES` answers it;
-    # `room_role == "member"` is talk and web, and email's `guest` is what keeps
+    # `room_role == "member"` is talk, web, sms and whatsapp, and email's `guest` is what keeps
     # the mirror-only path below off every one of those side effects. Not the
     # room-*view* question, which drives the outbound fan-out and which
     # `is_room_view` answers separately for the one site where the two can
@@ -749,7 +749,7 @@ def record_inbound(
             )
 
         # The room's standing brain, on the same terms and inside the same
-        # guard: Talk and web, never email, matching what `model` and `effort`
+        # guard: Talk, web and the phone rooms, never email, matching what `model` and `effort`
         # already do (ISSUE-136 — a guest surface joins a room's transcript and
         # takes none of its settings). Frozen onto the task here so a later edit
         # to the room cannot change a task already running.

@@ -96,16 +96,16 @@ A shared room is not bound to its host's bot. Every per-user input to a task is 
 
 | Input | Source | Varies per turn? |
 |---|---|---|
-| Persona | `load_persona(config, user_id=task.user_id)`: that user's `PERSONA.md`, else `config/persona.md` | yes |
 | Per-skill overlays | that user's `{bot_dir}/config/skills/`; not loaded when `memory` is withheld (guest and unasked turns) | yes |
 | Reach (skills, files, credentials) | that user's, minus the withheld scopes above | yes |
 | `USER.md`, recall, knowledge facts, playbooks | not loaded in any shared room | no |
 | My notes | the principal's `{bot_dir}/config/rooms/<token>.md` | yes |
+| Persona | `load_persona(config)`: the operator's `{root}/PERSONA.md`, else the last good copy, else `config/persona.md` | no |
 | Emissaries, guidelines, custom system prompt | `config/`, deployment-wide | no |
 | Model, effort, brain | the room's own settings (host-only to change), else the deployment's | no |
 | Transcript and `CHANNEL.md` | the room's, bounded by the latest audience epoch | no |
 
-The room card names whose persona is in use, so the model knows which person it is speaking as. Loading the host's persona into another member's turn was rejected: a member's `PERSONA.md` is writable from that member's sandbox, so it would let one user, or an injection in one user's task, give standing instructions to a task running with another user's credentials.
+The persona is the one thing in the system half that used to follow the principal, and it no longer does. With a persona per user, a room with two members changed character from one message to the next under the same bot name. There is now one persona per installation, the operator's, and only reach follows the principal. The operator's file sits at the file root, which is bound into no sandbox, so no user's task can write it; the old per-user copies were writable from their owner's sandbox, which is why loading one user's persona into another's turn was never allowed. See [Persona](../configuration/persona.md).
 
 ## Audience
 
@@ -140,9 +140,8 @@ Without bubblewrap (the shipped Docker stack, macOS, the standalone install), wi
 The prompt has two halves (see [executor](executor.md)). In a shared room the system half carries a **room card** (`executor.room_card`) in place of the old one-line group notice. It is built from tables, never from model output, and lists:
 
 - who reads the room: members by Istota user id, guests as a count, never a display name;
-- the room's standing rule: each member's turn runs as that member, with their own persona and reach, a confirmation goes to the asker's own private chat with the bot, and what happens to a guest's message under the room's `guest_reply` (answered as the host with nothing beyond the reply, that reply held for the host's approval, or recorded and not answered). This line is on every card, so a model asked to explain the room does not generalise this turn's principal into the room's owner or invent an approval rule;
+- the room's standing rule: each member's turn runs as that member, with their own reach, a confirmation goes to the asker's own private chat with the bot, and what happens to a guest's message under the room's `guest_reply` (answered as the host with nothing beyond the reply, that reply held for the host's approval, or recorded and not answered). This line is on every card, so a model asked to explain the room does not generalise this turn's principal into the room's owner or invent an approval rule;
 - whom the bot is acting for on this turn, and who hosts;
-- whose persona is in use (always the task's own user: the host on a guest's turn);
 - what this turn reaches, and on a restricted turn what is withheld;
 - the private-reply verbs (`istota-skill room whisper`, `room answer-privately`) when the `room` CLI is available;
 - that the room's `CHANNEL.md` is read by everyone, and that a member's private notes are never read or written in the room.

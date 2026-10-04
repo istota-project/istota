@@ -180,6 +180,60 @@ class TestRemove:
         assert "Prefers short replies" in body
 
 
+class TestPinnedSectionCli:
+    """The pinned guard holds off the nightly curator only: the CLI acts on
+    the user's own request and edits a pinned section like any other."""
+
+    PINNED = "The desk <!-- pinned -->"
+
+    def _pin(self, user_md):
+        user_md.write_text(
+            f"## {self.PINNED}\n\n- Escalate invoices to the owner\n- Sign as the desk\n"
+        )
+
+    def test_remove_in_a_pinned_section_applies(self, tmp_path, monkeypatch, capsys):
+        user_md = _setup_user(tmp_path, monkeypatch)
+        self._pin(user_md)
+        memory_main(["remove", "--heading", self.PINNED, "--match", "escalate"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["outcome"] == "applied"
+        body = user_md.read_text()
+        assert "Escalate invoices" not in body
+        assert "Sign as the desk" in body
+        assert _audit_entries(tmp_path)[-1]["source"] == "runtime"
+
+    def test_remove_heading_of_a_pinned_section_applies(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        user_md = _setup_user(tmp_path, monkeypatch)
+        self._pin(user_md)
+        memory_main(["remove-heading", "--heading", self.PINNED])
+        out = json.loads(capsys.readouterr().out)
+        assert out["outcome"] == "applied"
+        assert "The desk" not in user_md.read_text()
+
+    def test_headings_skips_a_heading_inside_a_code_fence(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        user_md = _setup_user(tmp_path, monkeypatch)
+        user_md.write_text(
+            f"## {self.PINNED}\n- Answer mail\n```\n## Summary\n- one line\n```\n"
+        )
+        memory_main(["headings"])
+        out = capsys.readouterr().out
+        assert "The desk" in out
+        assert "Summary" not in out
+
+    def test_skill_text_says_a_pin_covers_one_section(self):
+        from pathlib import Path
+
+        import istota.skills.memory as memory_skill
+
+        text = (Path(memory_skill.__file__).parent / "skill.md").read_text()
+        assert "A pin covers one `## ` section" in text
+        assert "with `### ` for its subsections" in text
+
+
 class TestReplaceCli:
     def test_replace_unique_bullet(self, tmp_path, monkeypatch, capsys):
         user_md = _setup_user(tmp_path, monkeypatch)

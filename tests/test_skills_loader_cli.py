@@ -436,7 +436,7 @@ class TestShowOverlays:
 
     def test_no_mount_means_no_overlay(self, tmp_path, monkeypatch, capsys):
         """Overlays are filesystem reads, so an rclone-remote deployment skips
-        them silently — the condition the per-user PERSONA.md already carries."""
+        them silently."""
         overlays = self._ctx(tmp_path, monkeypatch, mount=False)
         (overlays / "primary.md").write_text("- An overlay rule.\n")
         from istota.skills.skills import cmd_show

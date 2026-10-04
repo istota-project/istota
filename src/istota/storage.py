@@ -67,7 +67,6 @@ Configuration files live in the `config/` subfolder:
 - **config/TASKS.md** — Task queue (`- [ ] do something`)
 - **config/HEARTBEAT.md** — Health monitoring configuration
 - **config/CRON.md** — Scheduled recurring jobs
-- **config/PERSONA.md** — Bot personality (editable copy of global persona)
 
 See `examples/` for detailed documentation and configuration reference.
 """
@@ -93,8 +92,6 @@ it up automatically. Status updates are written back to the file.
 Set up periodic checks that alert you when something needs attention.
 - **config/CRON.md** — (Optional) Scheduled recurring jobs. \
 Configure tasks that run on a cron schedule with results delivered to Talk or email.
-- **config/PERSONA.md** — (Optional) Bot personality. \
-Edit this to customize how Istota behaves and communicates with you.
 
 ## Other content
 
@@ -359,11 +356,6 @@ def get_user_cron_path(user_id: str, bot_dir: str) -> str:
 
 
 
-def get_user_persona_path(user_id: str, bot_dir: str) -> str:
-    """Get the path to a user's PERSONA.md file."""
-    return f"{get_user_config_path(user_id, bot_dir)}/PERSONA.md"
-
-
 def get_user_skill_overlays_path(user_id: str, bot_dir: str) -> str:
     """Directory of per-skill user overlay files.
 
@@ -385,8 +377,7 @@ def resolve_user_skill_overlays_dir(config: "Config", user_id: str) -> Path | No
     leaving one path silently inert while both test suites stay green.
 
     None without a mount. Overlays are filesystem reads, so an rclone-remote
-    deployment has none — the condition ``load_persona`` already applies to a
-    per-user ``PERSONA.md``.
+    deployment has none.
 
     None as well when the directory leads outside the user's own tree.
     ``config`` and ``skills`` are ordinary entries under a root bound
@@ -463,7 +454,7 @@ def resolve_user_config_dir(config: "Config", user_id: str) -> Path | None:
     """The user's ``{bot_dir}/config`` directory, resolved, or None.
 
     One level up from ``resolve_user_skill_overlays_dir`` and for the same
-    reason (ISSUE-339). ``config/`` holds USER.md, PERSONA.md and the seeded
+    reason (ISSUE-339). ``config/`` holds USER.md and the seeded
     TASKS/CRON/HEARTBEAT files, and it is an ordinary entry under
     ``{mount}/Users/{user_id}``, which ``build_bwrap_cmd`` binds **read-write**
     into that user's own sandbox — so ``mv config config.real && ln -s
@@ -481,8 +472,7 @@ def resolve_user_config_dir(config: "Config", user_id: str) -> Path | None:
     The **resolved** path comes back and callers must use it, since the check
     and the reads that follow are separated by at least one ``open(2)``.
 
-    None without a mount — an rclone-remote deployment has no such directory,
-    the condition ``load_persona`` already applies to a per-user PERSONA.md.
+    None without a mount: an rclone-remote deployment has no such directory.
     """
     if not config.has_workspace:
         return None
@@ -2191,27 +2181,9 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
         if create_file_if_absent(cron_file, _build_cron_seed(config, user_id)):
             logger.debug("Created %s/config/CRON.md for %s", bot_dir, user_id)
 
-        # Seed PERSONA.md from the global persona file. Read lazily, inside the
-        # absence check: this function runs on every task, every scheduler pass
-        # and every inbound email, and hoisting the read out of the guard made
-        # an undecodable operator persona raise on all of them rather than once
-        # at first seed. `encoding` is pinned because the seed is written UTF-8.
-        persona_file = config_dir / "PERSONA.md"
-        if not persona_file.exists():
-            global_persona = config.skills_dir.parent / "persona.md"
-            if global_persona.exists():
-                try:
-                    seed = global_persona.read_text(encoding="utf-8")
-                except (OSError, ValueError) as e:
-                    logger.warning(
-                        "persona_seed_unreadable user=%s error=%s",
-                        user_id, type(e).__name__,
-                    )
-                    seed = None
-                if seed is not None and create_file_if_absent(persona_file, seed):
-                    logger.debug(
-                        "Created %s/config/PERSONA.md for %s", bot_dir, user_id,
-                    )
+        # No PERSONA.md is seeded. The persona is the operator's
+        # `{root}/PERSONA.md` for every user, and the copies earlier releases
+        # seeded are retired by `istota init` (`maintenance.persona_retire`).
 
         # Write example files (always overwrite to stay current). These are the
         # one place an overwrite is intended, and they were the last unhardened

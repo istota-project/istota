@@ -71,6 +71,22 @@ istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR 
 
 `--quiet-sender` is the counterpart to `--trusted-sender`: mail matching the pattern is filed without creating a task. `--briefing-email-html` selects HTML rather than plain-text briefing email. `--timezone-follow-location` opts into having the stored timezone updated when the location module sees you settle in a new one (off by default; see [location](../features/location.md)).
 
+### Web login identities
+
+```bash
+istota auth list                             # Profiles and email identities, flags, last login
+istota auth add USER --email ADDR [--create-user] [--send-invite | --print-link | --password-stdin]
+istota auth set-password USER [--password-stdin]   # Prompts privately; no password argument
+istota auth invite USER [--send | --print-link]    # Enrolment link (default: send)
+istota auth reset USER [--send | --print-link]     # Password-reset link
+istota auth sign-in-code USER                # Fresh code for the user's pending email sign-in
+istota auth disable USER | enable USER       # Change login availability, revoke sessions
+istota auth logout-all USER                  # Revoke every session for the identity
+istota auth remove USER                      # Remove the login identity; keep profile and data
+```
+
+Email login for the web UI, enabled by `[web] auth`. A sign-in code works only in the browser that asked for it. See [email login](../features/web-interface.md#email-login).
+
 ### Resources
 
 ```bash
@@ -174,6 +190,8 @@ istota email test                            # Test email configuration
 ```bash
 istota whatsapp pair                         # Baileys: link the number by scanning a QR code
 istota whatsapp pair --reset                 # Baileys: move an unusable session aside first
+istota whatsapp restore-session --list      # Baileys: list archived sessions, change nothing
+istota whatsapp restore-session [--date TS] # Baileys: put an archived session back (daemon stopped)
 istota whatsapp billing-status               # Cloud: read the billable circuit breaker
 istota whatsapp billing-unblock              # Cloud: clear it, after checking Meta billing
 ```

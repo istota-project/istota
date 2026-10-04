@@ -28,7 +28,7 @@ Voice is the changelog's own: second person, plain, specific, what it does rathe
 
 The prose is capped at two paragraphs whatever the release: 980 commits earned about 350 words of it, and 36 commits earn three sentences and no upgrade list at all. Only the list grows with the release, because every entry in it is an action somebody has to take. The worked example is the announcement opening the most recent release in `CHANGELOG.md` — read it beside the section it opens.
 
-## Two gotchas that have already cost a release
+## Three gotchas that have already cost a release
 
 - **A tag force-push does not re-trigger `push: tags:`.** A workflow that ran with bad input cannot be fixed by re-pushing the tag; re-run it through `workflow_dispatch` with the tag as input.
 - **`git tag -a -m` strips lines starting with `#`** unless `--cleanup=verbatim` is passed, which `release.sh` does. Anything else building an annotation from the changeset needs it too.

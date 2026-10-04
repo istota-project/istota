@@ -41,6 +41,6 @@ paths = [
   '''^web/package-lock\.json$''',
 ]
 
-# CHANGELOG.md and DEVLOG.md are deliberately NOT allowlisted: prose written
+# CHANGELOG.md is deliberately NOT allowlisted: prose written
 # from a terminal session is exactly where a copy-pasted credential or hostname
 # lands.

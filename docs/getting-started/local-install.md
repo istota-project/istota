@@ -154,7 +154,7 @@ Set both or neither. The URL, the username and the password each fall back to `[
 
 **Heavy modules.** Install the matching extra (above), then the module is on by default (opt out per user via `disabled_modules`).
 
-See the [configuration reference](../configuration/reference.md) for every option and [per-user configuration](../configuration/per-user.md) for the workspace files (`USER.md`, `PERSONA.md`, `CRON.md`, and the rest) each user owns.
+See the [configuration reference](../configuration/reference.md) for every option and [per-user configuration](../configuration/per-user.md) for the workspace files (`USER.md`, `CRON.md`, and the rest) each user owns. The bot's persona is one file for the whole install, `PERSONA.md` at the workspace root (see [Persona](../configuration/persona.md)).
 
 ## Notes
 

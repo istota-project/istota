@@ -508,7 +508,7 @@ features = []
 #                                  # with their clean verbs. A user with a task in flight is
 #                                  # skipped rather than raced. Cadence is
 #                                  # [scheduler] sandbox_cache_sweep_interval; inert while
-#                                  # sandbox_cache_dir is empty.
+#                                  # neither this nor a developer repos_dir is set.
 # sandbox_cache_max_gb = 10.0      # the ceiling, per user. Bytes rather than an age window
 #                                  # because one `uv sync --all-extras` writes about 1.8 GB in
 #                                  # a single command, which blows any sane window at once.

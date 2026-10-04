@@ -154,6 +154,44 @@ class TestDiscoverAndOrganize:
         result = discover_and_organize_shared_files(config)
         assert len(result) == 0
 
+    @pytest.mark.parametrize("name", ["PERSONA.md", "PERSONA.md.shipped", "persona.md"])
+    @patch("istota.shared_file_organizer.ensure_user_directories_v2")
+    @patch("istota.shared_file_organizer.move_file", return_value=True)
+    @patch("istota.shared_file_organizer.path_exists", return_value=False)
+    @patch("istota.shared_file_organizer.get_file_owner", return_value="istota")
+    @patch("istota.shared_file_organizer.list_files")
+    def test_skips_the_operator_persona_owned_by_the_bot_account(
+        self, mock_list, mock_owner, mock_exists, mock_move, mock_ensure, make_config, name
+    ):
+        """The operator persona sits at the root beside `Users/`, owned by the
+        bot account. With the bot account configured as a user, the owner
+        check no longer skips it, so the name and the owner together have to."""
+        config = make_config(users={"alice": UserConfig(), "istota": UserConfig()})
+        mock_list.return_value = [{"name": name, "is_dir": False, "size": 100}]
+
+        assert discover_and_organize_shared_files(config) == []
+        mock_move.assert_not_called()
+
+    @pytest.mark.parametrize("name", ["PERSONA.md", "PERSONA.md.shipped"])
+    @patch("istota.shared_file_organizer.ensure_user_directories_v2")
+    @patch("istota.shared_file_organizer.move_file", return_value=True)
+    @patch("istota.shared_file_organizer.path_exists", return_value=False)
+    @patch("istota.shared_file_organizer.get_file_owner", return_value="alice")
+    @patch("istota.shared_file_organizer.list_files")
+    def test_a_user_owned_persona_at_the_root_is_still_moved(
+        self, mock_list, mock_owner, mock_exists, mock_move, mock_ensure, make_config, name
+    ):
+        """A file a user shared into the bot's root under the persona's name is
+        theirs, not the operator's: left at the root it would become every
+        user's persona."""
+        config = make_config()
+        mock_list.return_value = [{"name": name, "is_dir": False, "size": 100}]
+
+        result = discover_and_organize_shared_files(config)
+
+        assert [(r.original_path, r.owner_id) for r in result] == [(name, "alice")]
+        mock_move.assert_called_once_with(config, name, f"/Users/alice/shared/{name}")
+
     @patch("istota.shared_file_organizer.get_file_owner", return_value=None)
     @patch("istota.shared_file_organizer.list_files")
     def test_skips_unknown_owner(self, mock_list, mock_owner, make_config):

@@ -300,12 +300,20 @@
     onSave(patch);
   }
 
+  // Only one dialog is up at a time: settings steps aside while the delete
+  // confirm is shown, and its unsaved edits are still here if that is cancelled.
+  // Hiding it for the confirm is not a close, so it must not reach `onClose`.
   function handleOpenChange(next: boolean) {
-    if (!next) onClose();
+    if (!next && !showDeleteConfirm) onClose();
   }
 </script>
 
-<Modal bind:open title="Room settings" onOpenChange={handleOpenChange} width="380px">
+<Modal
+  open={open && !showDeleteConfirm}
+  title="Room settings"
+  onOpenChange={handleOpenChange}
+  width="380px"
+>
   {#if lockedReason}
     <p class="caption locked-note" role="note">{lockedReason}</p>
   {/if}

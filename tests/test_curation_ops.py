@@ -518,6 +518,105 @@ class TestRemoveHeading:
         assert new_doc.find("B") is not None
 
 
+PINNED_MD = (
+    "## The desk <!-- pinned -->\n"
+    "- Answer mail sent to the desk address\n"
+    "### Escalation\n"
+    "- Escalate invoices to the owner\n"
+    "\n"
+    "## Preferences\n"
+    "- Likes vim\n"
+)
+PINNED = "The desk <!-- pinned -->"
+
+
+class TestPinnedSections:
+    """A pinned `## ` section is closed to destructive ops by default (the
+    nightly curator's path) and open to a caller that opts in (the memory CLI)."""
+
+    DESTRUCTIVE = [
+        {"op": "remove", "heading": PINNED, "match": "answer mail"},
+        {"op": "replace", "heading": PINNED, "match": "answer mail", "line": "Gone"},
+        {"op": "remove_heading", "heading": PINNED},
+        {"op": "remove_subheading", "heading": PINNED, "subheading": "Escalation"},
+    ]
+
+    def test_every_destructive_op_is_rejected_by_default(self):
+        doc = _doc(PINNED_MD)
+        new_doc, applied, rejected = apply_ops(doc, list(self.DESTRUCTIVE))
+        assert applied == []
+        assert [r["reason"] for r in rejected] == ["pinned_section"] * 4
+        assert serialize_sectioned_doc(new_doc) == PINNED_MD
+
+    def test_the_same_ops_apply_when_the_caller_allows_pinned(self):
+        for op in self.DESTRUCTIVE:
+            new_doc, applied, rejected = apply_ops(
+                _doc(PINNED_MD), [op], allow_pinned=True
+            )
+            assert rejected == [], op
+            assert applied[0]["outcome"] == "applied", op
+            assert serialize_sectioned_doc(new_doc) != PINNED_MD, op
+
+    def test_append_to_a_pinned_section_is_allowed(self):
+        new_doc, applied, rejected = apply_ops(
+            _doc(PINNED_MD),
+            [{"op": "append", "heading": PINNED, "line": "Sign as the desk"}],
+        )
+        assert rejected == []
+        assert applied[0]["outcome"] == "applied"
+        assert "- Sign as the desk" in new_doc.find(PINNED).lines
+
+    def test_an_unpinned_section_is_unchanged_by_the_guard(self):
+        new_doc, applied, rejected = apply_ops(
+            _doc(PINNED_MD),
+            [{"op": "remove", "heading": "Preferences", "match": "vim"},
+             {"op": "remove", "heading": PINNED, "match": "answer mail"}],
+        )
+        assert [a["outcome"] for a in applied] == ["applied"]
+        assert [r["reason"] for r in rejected] == ["pinned_section"]
+        assert "- Likes vim" not in new_doc.find("Preferences").lines
+        assert "- Answer mail sent to the desk address" in new_doc.find(PINNED).lines
+
+    def test_the_marker_is_matched_loosely(self):
+        md = "## Role <!--Pinned-->\n- keep me\n"
+        _, applied, rejected = apply_ops(
+            _doc(md), [{"op": "remove_heading", "heading": "Role <!--Pinned-->"}]
+        )
+        assert applied == []
+        assert rejected[0]["reason"] == "pinned_section"
+
+    def test_the_curator_cannot_create_a_pinned_heading(self):
+        op = {"op": "add_heading", "heading": "Role <!-- PINNED -->", "lines": ["x"]}
+        new_doc, applied, rejected = apply_ops(_doc(PINNED_MD), [op])
+        assert applied == []
+        assert rejected[0]["reason"] == "pinned_heading"
+        assert new_doc.find("Role <!-- PINNED -->") is None
+
+        new_doc, applied, _ = apply_ops(_doc(PINNED_MD), [op], allow_pinned=True)
+        assert applied[0]["outcome"] == "applied"
+        assert new_doc.find("Role <!-- PINNED -->") is not None
+
+    def test_add_heading_lines_cannot_inject_a_heading(self):
+        op = {"op": "add_heading", "heading": "Notes",
+              "lines": ["ok", "x\n## Hijack <!-- PINNED -->"]}
+        new_doc, applied, rejected = apply_ops(_doc(PINNED_MD), [op], allow_pinned=True)
+        assert applied == []
+        assert rejected[0]["reason"] == "line_contains_newline"
+        assert serialize_sectioned_doc(new_doc) == PINNED_MD
+
+    def test_add_heading_name_cannot_inject_a_heading(self):
+        op = {"op": "add_heading", "heading": "Notes\n## Hijack", "lines": ["x"]}
+        _, applied, rejected = apply_ops(_doc(PINNED_MD), [op], allow_pinned=True)
+        assert applied == []
+        assert rejected[0]["reason"] == "heading_contains_newline"
+
+    def test_a_missing_heading_still_reports_heading_missing(self):
+        _, _, rejected = apply_ops(
+            _doc(PINNED_MD), [{"op": "remove_heading", "heading": "The desk"}]
+        )
+        assert rejected[0]["reason"] == "heading_missing"
+
+
 class TestAppendSubheading:
     def test_append_under_existing_subheading(self):
         doc = _doc("## Pref\n- top\n### Editor\n- vs code\n")

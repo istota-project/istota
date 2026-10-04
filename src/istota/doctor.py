@@ -9361,6 +9361,168 @@ def check_email_address_uniqueness(config: "Config", probe: bool) -> CheckResult
     )
 
 
+def check_operator_persona(config: "Config", probe: bool) -> CheckResult:
+    """Which persona is in force, and whether anything about it needs a hand.
+
+    The operator's ``{root}/PERSONA.md`` is the one persona for every task,
+    synced from the shipped ``config/persona.md`` by the conffile rule
+    (``prompts.persona``). Nothing else says when that sync has left something
+    for a person: a shipped file the sync cannot read (which can leave no
+    persona at all), a ``PERSONA.md.shipped`` waiting to be merged, an operator
+    file the prompt path refuses (so an older copy is quietly in force),
+    per-user copies ``istota init`` has not retired yet, and per-user
+    ``PERSONA.md`` entries that are not regular files, which ``init`` refuses
+    and only a person can remove.
+
+    **Counts, never user ids or file contents**, on the vault check's reasoning:
+    the result reaches the boot log and the admin Health pane, read by every
+    admin. Never FAIL: a per-user folder is writable from its owner's sandbox,
+    so anything counted there is a state a task can produce on demand, and
+    nothing here stops a task from running. Reads only, through the hardened
+    leaf read and the retirement's own walk; no process, so ``probe`` is unused.
+    """
+    name = "config.operator_persona"
+    try:
+        from istota.maintenance import persona_retire  # noqa: PLC0415 - heavy import graph
+        from istota.prompts import persona  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001 - a check never raises
+        return CheckResult(name, SKIP, f"the persona module could not be loaded: {exc}")
+
+    try:
+        return _operator_persona_result(config, name, persona, persona_retire)
+    except Exception as exc:  # noqa: BLE001 - a raise would become an alerting FAIL
+        return CheckResult(
+            name, WARN, f"the persona state could not be read ({type(exc).__name__})",
+            remedy="Run `istota doctor --only config.operator_persona` and read the log.",
+        )
+
+
+def _operator_persona_result(config: "Config", name: str, persona, persona_retire) -> CheckResult:
+    path = persona.operator_persona_path(config)
+    if path is None:
+        return CheckResult(name, SKIP, "no file root; the shipped persona is in force")
+    root = path.parent
+    try:
+        root_ok = root.is_dir()
+    except OSError:
+        root_ok = False
+    if not root_ok:
+        return CheckResult(
+            name, WARN,
+            f"{root} is not a directory; the last good copy, or the shipped persona, is in force",
+            remedy=(
+                "Check the file root's mount (see `runtime.mount_liveness`). "
+                "The operator persona syncs again once it is reachable."
+            ),
+        )
+
+    warnings: list[tuple[str, str]] = []
+    notes: list[str] = []
+
+    # Read once, up front: the sync refuses without it, and it is the prompt
+    # path's last fallback, so its absence can leave no persona at all.
+    shipped_path = persona.shipped_persona_path(config)
+    try:
+        shipped_digest = persona.persona_digest(shipped_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        shipped_digest = None
+    if shipped_digest is None:
+        warnings.append((
+            f"the shipped persona {shipped_path} is unreadable, so the sync refuses",
+            f"Restore {shipped_path} from the checkout (`git checkout -- config/persona.md`).",
+        ))
+
+    def fallback() -> str:
+        """What the prompt path falls back to when the operator file gives nothing."""
+        if shipped_digest is not None:
+            return "the last good copy, or else the shipped persona, is in force"
+        if persona.read_last_good(config) is not None:
+            return "the last good copy is in force"
+        return "no persona is in force"
+
+    text, reason, present = persona.read_operator_file(path)
+    if reason is not None:
+        from .skills._loader import OVERLAY_UNREADABLY_LARGE  # noqa: PLC0415
+
+        if reason == OVERLAY_UNREADABLY_LARGE:
+            try:
+                reason = f"{os.lstat(path).st_size} bytes, over {persona.PERSONA_MAX_BYTES}"
+            except OSError:
+                pass
+        warnings.append((
+            f"{persona.PERSONA_FILENAME} refused ({reason}); {fallback()}",
+            f"Make {path} a plain UTF-8 file under "
+            f"{persona.PERSONA_MAX_BYTES // 1024} KiB, not a link or a pipe.",
+        ))
+        state = None
+    elif not present:
+        state = f"no operator file yet; {fallback()} until the next sync writes one"
+    elif not text.strip():
+        if shipped_digest is None:
+            state = "operator file empty and the shipped persona unreadable; no persona is in force"
+        else:
+            state = "operator file empty; shipped persona in force"
+    elif persona.is_shipped(text):
+        state = "operator file follows the shipped persona"
+        if shipped_digest is not None and persona.persona_digest(text) != shipped_digest:
+            state = "operator file is an older shipped version; the next sync upgrades it"
+    else:
+        state = "operator file is edited and kept"
+
+    beside = root / (persona.PERSONA_FILENAME + persona.SHIPPED_SUFFIX)
+    if os.path.lexists(beside):
+        if reason is None and present and text.strip() and persona.is_shipped(text):
+            # Not an edit to merge: the next sync removes it.
+            notes.append(f"{beside.name} is stale and the next sync removes it")
+        elif reason is None and (not present or not text.strip()):
+            # The sync neither merges into nor removes beside a missing or
+            # empty operator file, so only a person clears it.
+            warnings.append((
+                f"{beside.name} is left over beside no edited operator file",
+                f"Delete {beside.name} in {root}.",
+            ))
+        else:
+            warnings.append((
+                "the shipped persona changed since your edit",
+                f"Compare {beside.name} with {persona.PERSONA_FILENAME} in {root}, "
+                f"and delete {beside.name} when merged.",
+            ))
+
+    census = persona_retire.census_user_personas(config)
+    if census.remaining:
+        warnings.append((
+            f"{census.remaining} user(s) still have a {config.bot_dir_name}/config/"
+            f"{persona.PERSONA_FILENAME}, which nothing reads",
+            "Run `istota init`, which retires them.",
+        ))
+    if census.irregular:
+        warnings.append((
+            f"{census.irregular} user(s) have a {config.bot_dir_name}/config/"
+            f"{persona.PERSONA_FILENAME} that is not a regular file",
+            "Remove each by hand: `istota init` refuses a link, a pipe or a "
+            "directory there and leaves it.",
+        ))
+
+    extras = notes + [f"{census.retired} retired per-user copy(ies)"]
+    if census.unreadable:
+        extras.append(
+            f"{census.unreadable} user config folder(s) could not be opened, "
+            "and `istota init` refuses those users"
+        )
+    tail = "; ".join(extras)
+
+    if warnings:
+        details = [d for d, _ in warnings]
+        if state is not None:
+            details.insert(0, state)
+        return CheckResult(
+            name, WARN,
+            "; ".join(details) + f"; {tail}",
+            remedy=" ".join(r for _, r in warnings),
+        )
+    return CheckResult(name, OK, f"{state}; {tail}")
+
+
 # The name is part of the registry rather than only of the result, so `only=`
 # can select *before* invoking. Filtering afterwards would mean running every
 # check to discard most of them — which is exactly what the config-load path
@@ -9419,6 +9581,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("web.basemap", check_basemap),
     ("web.avatar_import", check_avatar_import),
     ("config.skill_overlays", check_skill_overlays),
+    ("config.operator_persona", check_operator_persona),
     ("users.email_address_uniqueness", check_email_address_uniqueness),
     ("sandbox.masks", check_sandbox_masks),
 )
@@ -9558,6 +9721,9 @@ CHECK_SCOPES: dict[str, str] = {
     # Deployment: it walks the workspace mount, which a bare `docker run` has
     # none of.
     "config.skill_overlays": DEPLOYMENT,
+    # Deployment: it reads the file root and the configured users' folders,
+    # which a bare `docker run` has none of.
+    "config.operator_persona": DEPLOYMENT,
     # Deployment: it reads the install's own user tables.
     "users.email_address_uniqueness": DEPLOYMENT,
     "sandbox.masks": DEPLOYMENT,
