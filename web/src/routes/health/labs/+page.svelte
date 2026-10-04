@@ -142,10 +142,10 @@
   onMount(load);
 </script>
 
-{#if !loading}
-  <!-- Held back while loading so the pane shows nothing but the centered
-       loading message, rather than centering it in the space left under
-       this header. -->
+{#if !loading && (!error || specimen)}
+  <!-- Held back while loading, and on a failed unfiltered load, so the pane
+       shows nothing but the centered message. A failed filtered load keeps
+       it: the filter is the only way to change what failed. -->
   <div class="header">
     <h1>Labs</h1>
     <div class="actions">

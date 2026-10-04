@@ -904,12 +904,19 @@ class TestBrokerTrustSplit:
         import shlex
 
         monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        # The proxy env carries the daemon's own trust store (ISSUE-410) under
+        # the same name, so what must stay out is the bundle's value, not the key.
+        import certifi
+        daemon_bundle = certifi.where()
+        monkeypatch.setenv("SSL_CERT_FILE", daemon_bundle)
         config = _config(tmp_path, credential_broker=CredentialBrokerConfig(enabled=True))
         runtime = task_env.build_task_runtime(config, **runtime_inputs)
         assert runtime.sandbox_env
+        bundle_paths = set(runtime.sandbox_env.values())
         assert all(k not in runtime.env for k in runtime.sandbox_env)
-        assert all(k not in runtime.proxy_ctx.base_env for k in runtime.sandbox_env)
-        assert all(k not in runtime.proxy_ctx.credential_env for k in runtime.sandbox_env)
+        assert not bundle_paths & set(runtime.proxy_ctx.base_env.values())
+        assert not bundle_paths & set(runtime.proxy_ctx.credential_env.values())
+        assert runtime.proxy_ctx.base_env.get("SSL_CERT_FILE") == daemon_bundle
         for path in runtime.sandbox_env.values():
             assert Path(path).is_relative_to(runtime_inputs["control_dir"])
             assert "PRIVATE KEY" not in Path(path).read_text()
