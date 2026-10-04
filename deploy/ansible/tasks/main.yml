@@ -1118,9 +1118,10 @@
 # log and the caches back on bubblewrap's root tmpfs. Shipped blank, so this
 # fires only for an operator who set the key by hand.
 #
-# It does *not* fire for a developer deployment. There the cache is derived at
-# `{repos_dir}/{user_id}/.package-caches`, created by the daemon along with the
-# subtree it sits in, and this key is not read at all.
+# On a developer deployment an admin's cache is derived at
+# `{repos_dir}/{user_id}/.package-caches` and this key is not read for them; a
+# non-admin's task cache still goes under it (ISSUE-320), and the sweep walks
+# it for them (ISSUE-630).
 #
 # 0700, because the root holds one cache directory per user.
 - name: Create the fallback package-cache root

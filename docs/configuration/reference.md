@@ -365,6 +365,17 @@ These need `Delegate=` and `DelegateSubgroup=supervisor` on the scheduler unit, 
 
 `sandbox_admin_db_write` was removed: the framework DB is no longer bound into the sandbox for anyone, so there is no bind left to widen. A stale key logs a warning and is ignored.
 
+### `[security.credential_broker]`
+
+Opt-in substitution of credential placeholders in authentication headers, for hosts a credential is bound to. Needs the network proxy and effective sandboxing. See [HTTP credential broker](credentials.md#http-credential-broker).
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Turn the broker on |
+| `enforce_reveal` | `false` | `false` logs each public value read of a brokered credential (`credential_reveal`, `action=would_refuse`) and still returns it; `true` refuses reads of entries without the `istota:reveal` tag. No effect while `enabled = false`. Enable it only after a week with no `would_refuse` records |
+| `scan_max_bytes` | `1048576` | Request scan and response scrub limit |
+| `leaf_validity_hours` | `24` | Lifetime of the per-host TLS certificates the broker issues |
+
 ### `[security.network]`
 
 | Setting | Default | Description |
@@ -656,7 +667,16 @@ The agent-writable static web root (`enabled` / `base_path`) was removed. A publ
 | Setting | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Enable web interface |
-| `auth` | `"nextcloud"` | Auth mode. `"nextcloud"` is OAuth2 against Nextcloud; `"none"` disables auth entirely for the single-user local install and must never be used on a reachable host. Env override: `ISTOTA_WEB_AUTH` |
+| `auth` | `["nextcloud"]` | Login methods: any of `"nextcloud"` (OAuth2 against Nextcloud) and `"email"` (an email identity with a password or an emailed sign-in code), or `["none"]` alone. A bare string is still accepted, and unknown names are dropped with a warning. `"none"` disables auth entirely; it is exclusive and only the loopback `istota serve` launcher accepts it (Docker, Ansible and direct uvicorn refuse it). Email identities are managed with [`istota auth`](../reference/cli.md#web-login-identities). Env override: `ISTOTA_WEB_AUTH`, comma-separated. See [email login](../features/web-interface.md#email-login) |
+| `auth_enrol_ttl_hours` | `168` | Lifetime of an enrolment link |
+| `auth_reset_ttl_hours` | `1` | Lifetime of a password-reset link |
+| `auth_sign_in_code_ttl_minutes` | `10` | Lifetime of an emailed sign-in code. The code works only in the browser that asked for it |
+| `auth_min_password_length` | `12` | Minimum password length. Never below 8; a value above 128 is refused |
+| `auth_throttle_window_seconds` | `900` | Window for the two password-attempt budgets below |
+| `auth_throttle_max_email` | `10` | Password attempts per address per window |
+| `auth_throttle_max_ip` | `30` | Password attempts per client address per window. Inactive while `trusted_proxy_hops` is `0`, since no client address is read |
+| `auth_mail_link_max_email` | `3` | Self-service mails per address per hour, reset links and sign-in codes together |
+| `trusted_proxy_hops` | `0` | How many trusted proxies sit in front of the backend; selects the client address from `X-Forwarded-For` for the IP budget. Set it only when the backend cannot be reached around those proxies |
 | `token_storage` | `"ephemeral"` | Where per-user Nextcloud tokens live. `"ephemeral"` keeps them in the session only; `"encrypted"` retains them in `web_user_tokens` and requires `ISTOTA_WEB_TOKEN_KEY`. Any other value warns and falls back to ephemeral. **The Docker deployment renders `"encrypted"`**, because its entrypoint mints `/data/.web_token_key` itself; every other shape leaves that key to the operator and so cannot assume it exists. Env override: `ISTOTA_WEB_TOKEN_STORAGE` |
 | `port` | `8766` | Web app port |
 | `oauth2_provider` | `""` | Public Nextcloud URL (browser-facing), no trailing slash |
@@ -741,6 +761,16 @@ Explicit CalDAV override. When any field is set it wins over the value derived f
 | `enabled` | `false` | Enable the headless browser container |
 | `api_url` | `"http://localhost:9223"` | Browser container's Flask API |
 | `vnc_url` | `""` | External noVNC console URL, for operators. The browser service builds each live instance's viewer link from it, and the admin Browsers page shows those links. The admin page ignores a URL that is not absolute `http(s)` or that embeds a VNC password. Do not hand it to users: the console exposes live user IDs to anyone who can reach it (see [browser profiles](../deployment/docker.md#browser-profiles)) |
+
+## `[wordpress]`
+
+Operator settings for the [`wordpress` skill](../features/wordpress.md). Sites and their credentials are per-user vault entries, not config.
+
+| Setting | Default | Description |
+|---|---|---|
+| `private_hosts` | `[]` | Exact host names a site may resolve to a private, loopback or reserved address (a local development site, an internal backend). Everything else that resolves non-public is refused. Operator-only, since it is the rule that stops a user-chosen URL reaching the daemon's own network |
+| `max_upload_mb` | `25` | Largest file one media upload may send |
+Docker: `ISTOTA_WORDPRESS_PRIVATE_HOSTS`, `ISTOTA_WORDPRESS_MAX_UPLOAD_MB`. Ansible: `istota_wordpress_private_hosts`, `istota_wordpress_max_upload_mb`.
 
 ## `[devbox]`
 

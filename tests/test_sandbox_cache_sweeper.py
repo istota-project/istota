@@ -973,6 +973,60 @@ class TestSchedulerIntegration:
         assert outcomes["alice"].action == ACTION_BUSY
         assert toolbox.calls() == []
 
+    def test_a_non_admins_cache_is_swept_on_a_developer_deployment(
+        self, tmp_path, toolbox,
+    ):
+        """ISSUE-630, through the scheduler. The resolver puts a non-admin's
+        cache at `{sandbox_cache_dir}/{user_id}` even with the developer skill
+        on, and the sweep used to walk `repos_dir` alone there, so that cache
+        grew without bound."""
+        from istota.config import DeveloperConfig, UserConfig
+        from istota.scheduler import check_sandbox_cache_sweep
+
+        toolbox("uv")
+        toolbox("npm")
+        repos = tmp_path / "repos"
+        _fill(repos / "alice" / CACHE_ROOT_NAME / CACHE_UV / "archive-v0", "wheel", 4 * MB)
+        _age(repos, 86400)
+        caches = tmp_path / "caches"
+        _cache(caches, "bob", uv=4 * MB)
+        _age(caches, 86400)
+
+        config = self._config(caches, tmp_path)
+        config.developer = DeveloperConfig(enabled=True, repos_dir=str(repos))
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        config.admin_users = {"alice"}
+
+        outcomes = _by_user(check_sandbox_cache_sweep(config))
+
+        assert sorted(outcomes) == ["alice", "bob"]
+        assert outcomes["bob"].path == (caches / "bob").resolve()
+        assert outcomes["alice"].path == (repos / "alice" / CACHE_ROOT_NAME).resolve()
+
+    def test_a_non_admin_devbox_cache_under_repos_dir_is_still_swept(
+        self, tmp_path, toolbox,
+    ):
+        """The devbox sets `UV_CACHE_DIR` to `{repos_dir}/{user}/.package-caches`
+        for every devbox user with no admin gate, so a non-admin can have a
+        cache there that no task wrote, and the sweep has to keep bounding it."""
+        from istota.config import DeveloperConfig, UserConfig
+        from istota.scheduler import check_sandbox_cache_sweep
+
+        toolbox("uv")
+        toolbox("npm")
+        repos = tmp_path / "repos"
+        _fill(repos / "bob" / CACHE_ROOT_NAME / CACHE_UV / "archive-v0", "wheel", 4 * MB)
+        _age(repos, 86400)
+
+        config = self._config("", tmp_path)
+        config.developer = DeveloperConfig(enabled=True, repos_dir=str(repos))
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        config.admin_users = {"alice"}
+
+        outcomes = _by_user(check_sandbox_cache_sweep(config))
+
+        assert outcomes["bob"].path == (repos / "bob" / CACHE_ROOT_NAME).resolve()
+
     def test_an_unreadable_task_table_refuses_to_sweep(self, tmp_path, toolbox, caplog):
         """Fail closed. An empty busy set reads as 'nobody is working', which is
         the one wrong answer that costs a running task its cache."""
@@ -1208,13 +1262,17 @@ class TestTheDerivedLayout:
 
 
 class TestTheSweepRootPredicate:
-    """`scheduler.sandbox_cache_sweep_root` has to answer the same question
+    """`scheduler.sandbox_cache_sweep_targets` has to answer the same question
     `executor.resolve_sandbox_cache_dir` does, from the other end."""
 
-    def _config(self, tmp_path, *, repos_dir="", enabled=False, cache_dir="", users=()):
+    def _config(
+        self, tmp_path, *, repos_dir="", enabled=False, cache_dir="", users=(),
+        admins=(),
+    ):
         from istota.config import Config, DeveloperConfig, SecurityConfig, UserConfig
 
         config = Config()
+        config.admin_users = set(admins)
         # Under `data/`, not directly in `tmp_path`: the resolver refuses a
         # cache root under the database directory, and a `db_path` at the top
         # of the fixture makes `tmp_path` that directory — which would refuse
@@ -1228,28 +1286,28 @@ class TestTheSweepRootPredicate:
     def test_the_developer_shape_yields_the_repos_root_and_the_daemons_users(
         self, tmp_path,
     ):
-        from istota.scheduler import sandbox_cache_sweep_root
+        from istota.scheduler import sandbox_cache_sweep_targets
 
         repos = tmp_path / "repos"
         config = self._config(
             tmp_path, repos_dir=repos, enabled=True, users=("alice", "bob"),
         )
 
-        assert sandbox_cache_sweep_root(config) == (repos, ["alice", "bob"])
+        assert sandbox_cache_sweep_targets(config) == [(repos, ["alice", "bob"])]
 
     def test_the_fallback_shape_yields_the_configured_root_and_no_list(self, tmp_path):
-        from istota.scheduler import sandbox_cache_sweep_root
+        from istota.scheduler import sandbox_cache_sweep_targets
 
         caches = tmp_path / "caches"
         config = self._config(tmp_path, cache_dir=caches)
 
-        assert sandbox_cache_sweep_root(config) == (caches, None)
+        assert sandbox_cache_sweep_targets(config) == [(caches, None)]
 
     def test_the_developer_shape_wins_over_a_stale_configured_key(self, tmp_path):
         """The resolver ignores the key when the skill is on, so a sweep that
         honoured it would walk a directory nothing writes into while the real
         caches grew."""
-        from istota.scheduler import sandbox_cache_sweep_root
+        from istota.scheduler import sandbox_cache_sweep_targets
 
         repos = tmp_path / "repos"
         config = self._config(
@@ -1257,14 +1315,12 @@ class TestTheSweepRootPredicate:
             cache_dir=tmp_path / "old-caches", users=("alice",),
         )
 
-        root, user_ids = sandbox_cache_sweep_root(config)
-        assert root == repos
-        assert user_ids == ["alice"]
+        assert sandbox_cache_sweep_targets(config) == [(repos, ["alice"])]
 
     def test_neither_configured_means_nothing_to_sweep(self, tmp_path):
-        from istota.scheduler import sandbox_cache_sweep_root
+        from istota.scheduler import sandbox_cache_sweep_targets
 
-        assert sandbox_cache_sweep_root(self._config(tmp_path)) is None
+        assert sandbox_cache_sweep_targets(self._config(tmp_path)) == []
 
     def test_it_agrees_with_the_resolver_on_every_shape(self, tmp_path):
         """The property that makes the sweep worth running: the root it walks
@@ -1273,7 +1329,7 @@ class TestTheSweepRootPredicate:
         looks exactly like a deployment that is inside its ceiling.
         """
         from istota.executor import resolve_sandbox_cache_dir
-        from istota.scheduler import sandbox_cache_sweep_root
+        from istota.scheduler import sandbox_cache_sweep_targets
 
         repos = tmp_path / "repos"
         repos.mkdir()
@@ -1289,13 +1345,82 @@ class TestTheSweepRootPredicate:
         for shape in shapes:
             config = self._config(tmp_path, **shape)
             resolved = resolve_sandbox_cache_dir(config, "alice")
-            target = sandbox_cache_sweep_root(config)
-            assert resolved is not None and target is not None, shape
-            root, _ = target
-            assert resolved.is_relative_to(root), (
-                f"{shape}: the resolver writes to {resolved}, the sweep walks {root}"
+            roots = [root for root, _ in sandbox_cache_sweep_targets(config)]
+            assert resolved is not None, shape
+            assert any(resolved.is_relative_to(root) for root in roots), (
+                f"{shape}: the resolver writes to {resolved}, the sweep walks {roots}"
             )
 
+
+    def test_a_mixed_deployment_yields_both_layouts(self, tmp_path):
+        """ISSUE-630. With an admins file, a non-admin's task cache is at
+        `{sandbox_cache_dir}/{user_id}` on the same deployment where an admin's
+        is derived under `repos_dir`, so the sweep has to walk both. The
+        `repos_dir` list keeps every user, since the devbox puts a non-admin's
+        cache there too."""
+        from istota.scheduler import sandbox_cache_sweep_targets
+
+        repos = tmp_path / "repos"
+        caches = tmp_path / "caches"
+        config = self._config(
+            tmp_path, repos_dir=repos, enabled=True, cache_dir=caches,
+            users=("alice", "bob"), admins=("alice",),
+        )
+
+        assert sandbox_cache_sweep_targets(config) == [
+            (repos, ["alice", "bob"]), (caches, None),
+        ]
+
+    def test_a_fallback_root_at_or_above_repos_dir_is_not_walked(self, tmp_path):
+        """The resolver refuses it, and a one-level walk there would take each
+        user's repos subtree for their cache and run reclaim verbs inside it."""
+        from istota.scheduler import sandbox_cache_sweep_targets
+
+        repos = tmp_path / "repos"
+        for cache_dir in (repos, tmp_path):
+            config = self._config(
+                tmp_path, repos_dir=repos, enabled=True, cache_dir=cache_dir,
+                users=("alice", "bob"), admins=("alice",),
+            )
+            assert sandbox_cache_sweep_targets(config) == [
+                (repos, ["alice", "bob"]),
+            ], cache_dir
+
+    def test_a_relative_repos_dir_still_sweeps_the_non_admin_root(self, tmp_path):
+        """The refusal is about the derived root alone; the resolver still
+        writes a non-admin's cache under the configured key."""
+        from istota.scheduler import sandbox_cache_sweep_targets
+
+        caches = tmp_path / "caches"
+        config = self._config(
+            tmp_path, repos_dir="relative/repos", enabled=True, cache_dir=caches,
+            users=("alice", "bob"), admins=("alice",),
+        )
+
+        assert sandbox_cache_sweep_targets(config) == [(caches, None)]
+
+    def test_every_users_cache_is_under_a_swept_root_on_a_mixed_deployment(
+        self, tmp_path,
+    ):
+        from istota.executor import resolve_sandbox_cache_dir
+        from istota.scheduler import sandbox_cache_sweep_targets
+
+        repos = tmp_path / "repos"
+        repos.mkdir()
+        caches = tmp_path / "caches"
+        caches.mkdir()
+        config = self._config(
+            tmp_path, repos_dir=repos, enabled=True, cache_dir=caches,
+            users=("alice", "bob"), admins=("alice",),
+        )
+        roots = [root for root, _ in sandbox_cache_sweep_targets(config)]
+
+        for user in ("alice", "bob"):
+            resolved = resolve_sandbox_cache_dir(config, user)
+            assert resolved is not None, user
+            assert any(resolved.is_relative_to(r) for r in roots), (
+                f"{user}: the resolver writes to {resolved}, the sweep walks {roots}"
+            )
 
 def test_the_cache_root_name_matches_the_executors():
     """The second literal shared with `executor`, on the same terms as the two
@@ -1601,18 +1726,18 @@ class TestTheSweepRootRefusals:
         while this would resolve it against the daemon's working directory and
         run reclaim verbs in whatever happens to be at that path."""
         from istota.executor import resolve_sandbox_cache_dir
-        from istota.scheduler import sandbox_cache_sweep_root
+        from istota.scheduler import sandbox_cache_sweep_targets
 
         config = self._config(tmp_path, repos_dir="relative/repos", enabled=True)
 
         assert resolve_sandbox_cache_dir(config, "alice") is None
-        assert sandbox_cache_sweep_root(config) is None
+        assert sandbox_cache_sweep_targets(config) == []
 
     def test_a_relative_cache_dir_is_refused(self, tmp_path):
         from istota.executor import resolve_sandbox_cache_dir
-        from istota.scheduler import sandbox_cache_sweep_root
+        from istota.scheduler import sandbox_cache_sweep_targets
 
         config = self._config(tmp_path, cache_dir="relative/caches")
 
         assert resolve_sandbox_cache_dir(config, "alice") is None
-        assert sandbox_cache_sweep_root(config) is None
+        assert sandbox_cache_sweep_targets(config) == []

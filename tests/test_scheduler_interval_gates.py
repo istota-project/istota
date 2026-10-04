@@ -463,10 +463,10 @@ class TestTheEnablingConditions:
             scheduler=SchedulerConfig(sandbox_cache_sweep_interval=60),
         )
         monkeypatch.setattr(
-            sched, "sandbox_cache_sweep_root", lambda c: (tmp_path, None)
+            sched, "sandbox_cache_sweep_targets", lambda c: [(tmp_path, None)]
         )
         assert gate.enabled(config) is True
-        monkeypatch.setattr(sched, "sandbox_cache_sweep_root", lambda c: None)
+        monkeypatch.setattr(sched, "sandbox_cache_sweep_targets", lambda c: [])
         assert gate.enabled(config) is False
 
     @pytest.mark.parametrize("name", ["db-backup", "backup-stale-alert"])

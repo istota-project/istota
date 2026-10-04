@@ -22,6 +22,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 | `nextcloud` | share, sharing, download link, nextcloud, permission, access, capabilities, quota | yes -- capabilities, user, group, share (incl. `share link`), files, talk, notify, activity. Gated on `requires_capability: [nextcloud]` |
 | `ntfy` | ntfy, push notification, notify me, notify my phone, mobile alert | yes -- send (one-way push to the user's ntfy device) |
 | `relay` | ask, relay, question for, ask someone, ask another user | yes -- ask (hold a question to another user; `--via room\|whatsapp\|sms`), status, list. See [relay questions](../features/relay.md) |
+| `room` | whisper, privately, only me, answer privately, private chat, post to the room | yes -- whisper (from a shared room into your principal's private chat), answer-privately (ask the member's question again in their private chat), post (from a private chat into a shared room; usually held for approval). See [private replies](../features/shared-rooms.md#private-replies) |
 | `whatsapp` | — | yes -- send (a separate message to your own WhatsApp), status. Gated on `requires_capability: [whatsapp]` |
 
 ## Productivity
@@ -83,6 +84,12 @@ A review runs when the task or your own workflow asks for one (in `USER.md`, `co
 
 One reviewer reads the diff and the surrounding code itself, with read-only file tools over a copy of the reviewed commit, and reads up to `file_budget` files beyond the changed ones. It reports what it proved, what it could not confirm and how to settle it, and the theories it checked and ruled out. Where review cannot run at all — the budget is spent, the model is unreachable — the merge request still opens and says it is unreviewed. Caps and models are under [`[developer.review]`](../configuration/reference.md#developerreview).
 
+## Publishing
+
+| Skill | Keywords | CLI |
+|---|---|---|
+| `wordpress` | wordpress, wp, blog post, cms, acf, custom post type, publish | yes -- sites, describe, list, get, create, update, delete, publish, terms, media, users, settings, plugins, rest, abilities, options, network, fields. One vault entry per site (`wordpress_<name>`); publishing and admin writes need `--confirmed`. See [WordPress](../features/wordpress.md) |
+
 ## Accounting
 
 | Skill | Keywords | CLI | Notes |
@@ -137,7 +144,7 @@ Codifies a spec-driven development workflow. Specs live in `{notes_folder}/Specs
 |---|---|---|
 | `untrusted_input` | (none — never selected directly) | doc-only |
 
-`untrusted_input` is a doc-only companion skill with no triggers. It loads via `companion_skills` declarations on the ten ingest-shaped skills (`email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`, `briefings`, `nextcloud`, `tasks`), so its inbound-content security rules ride along whenever a task processes content from outside the trust boundary. It pairs with `sensitive_actions` (outbound rules there, inbound-reading rules here).
+`untrusted_input` is a doc-only companion skill with no triggers. It loads via `companion_skills` declarations on every skill that reads content from outside the trust boundary (`email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`, `briefings`, `nextcloud`, `tasks`, `rooms`, `room`, `relay`, `whatsapp`, `wordpress`, `developer`, `code_review`), so its inbound-content security rules ride along whenever a task processes content from outside the trust boundary. It pairs with `sensitive_actions` (outbound rules there, inbound-reading rules here).
 
 ## Selection
 

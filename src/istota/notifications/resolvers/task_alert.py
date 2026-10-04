@@ -18,6 +18,9 @@ Each producer writes here under its own key:
 ``expired:{task_id}``                a confirmation that timed out
 ``dmarc:{verdict}``                  the inbound-mail DMARC canary
 ``undelivered:{task_id}``            a task result that reached nobody
+``private-note:{reference}``         a private reply for a shared-room member
+                                     with no private room to take it
+``room-migration:partial``           the room migration's partial outcome
 ``vault-unscoped``                   a credential vault whose file has no
                                      ``istota`` group, so all of it is shared
 ``persona-retired``                  a user's edited ``PERSONA.md`` was
@@ -25,7 +28,8 @@ Each producer writes here under its own key:
                                      ``istota init`` and never delivered
 ===================================  ==================================
 
-``vault-unscoped`` is a fixed key — one row per user, raised on the first
+``vault-unscoped`` is a fixed key, like ``room-migration:partial`` — one row
+per user, raised on the first
 unscoped sync and never again, gated on the durable ``_vault_sync`` record
 rather than on this table. It is deliberately **not** on ``connected_service``,
 where the vault's own sync-failure row lives: that source's dedup key is the

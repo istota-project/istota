@@ -190,7 +190,7 @@ No variable names the checkout a stack builds from. `LeanShape` and `FullShape` 
 
 One developer machine, August 2026 (arm64, 10 cores, Docker Desktop 29.6), warm caches, runs serialized through `scripts/qtest`. Treat them as shape, not threshold; the tier prints its own `docker compose exec` fraction at the end of each session.
 
-- Lean tier: six stacks per session (`base`, `forge`, `no-forge`, `notify`, `feeds`, `mail`), about 165 seconds. Per-profile boot 6.5 to 9 seconds, per-test setup after that about 0.7 seconds.
+- Lean tier: seven stacks per session (`base`, `forge`, `no-forge`, `notify`, `feeds`, `mail`, `signaling`). About 165 seconds for the first six, measured before `signaling` was added. Per-profile boot 6.5 to 9 seconds, per-test setup after that about 0.7 seconds.
 - Full tier: one cold boot of six containers, 50 to 84 seconds to both healthchecks. Nextcloud is healthy before `up` returns, because `istota` declares `depends_on: service_healthy`.
 - `docker compose exec` is about 31% of a lean session (123 to 127 ms a call) and 5 to 8% of a full one. No optimization was built; the counters stay.
 
