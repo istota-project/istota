@@ -29,12 +29,14 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from istota import db, storage
+from istota.lib.sqlite_util import connect_read_only
 from istota.lib.timestamps import iso_now
 
 if TYPE_CHECKING:
@@ -169,12 +171,19 @@ def _read_state(config: "Config") -> dict | None:
     """
     if not db.database_present(config.db_path):
         return None
+    # A pure read, and the dry run must write nothing: a read-write open is
+    # the last one out on a stopped deployment and would checkpoint its WAL.
+    conn = None
     try:
-        with db.get_db(config.db_path, busy_timeout_ms=_db_timeout_ms(config)) as conn:
-            row = db.shared_kv_get(conn, KV_NAMESPACE, KV_KEY)
+        conn = connect_read_only(config.db_path)
+        conn.row_factory = sqlite3.Row
+        row = db.shared_kv_get(conn, KV_NAMESPACE, KV_KEY)
     except Exception as exc:  # noqa: BLE001 - never raises
         logger.debug("operator_persona_state_unread err=%s", type(exc).__name__)
         return None
+    finally:
+        if conn is not None:
+            conn.close()
     if row is None:
         return {}
     try:

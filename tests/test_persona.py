@@ -335,6 +335,36 @@ class TestLastGood:
         assert read_last_good(config) is None
 
 
+class TestStateReadsWriteNothing:
+    """The state row is read on a read-only connection (`--dry-run`, the prompt path)."""
+
+    def _no_writer(self, monkeypatch):
+        def _refuse(*a, **k):
+            raise AssertionError("a read opened a read-write connection")
+
+        monkeypatch.setattr(persona.db, "get_db", _refuse)
+
+    def test_a_dry_run_still_reads_the_recorded_digest(self, setup, monkeypatch):
+        config, root = setup
+        (root / "PERSONA.md").write_text("An operator edit.\n")
+        _record_shipped_digest(config, persona_digest(OLD_SHIPPED))
+        self._no_writer(monkeypatch)
+        # A state read that failed would read as "nothing recorded" and keep the edit quietly.
+        assert sync_operator_persona(config, dry_run=True).action == "wrote_shipped_beside"
+
+    def test_read_last_good_opens_no_writer(self, setup, monkeypatch):
+        config, root = setup
+        sync_operator_persona(config)
+        self._no_writer(monkeypatch)
+        assert read_last_good(config) == SHIPPED
+
+    def test_a_missing_database_is_not_created(self, setup, tmp_path):
+        config, _root = setup
+        config.db_path = tmp_path / "absent" / "istota.db"
+        assert read_last_good(config) is None
+        assert not config.db_path.exists()
+
+
 def test_the_namespace_is_reserved():
     from istota.sandbox.kv_namespaces import is_reserved_namespace
 
