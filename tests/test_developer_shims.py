@@ -22,8 +22,11 @@ holds that one.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -37,7 +40,7 @@ from istota.config import (
     DeveloperConfig,
     SecurityConfig,
 )
-from istota.skills.developer import setup_env
+from istota.skills.developer import istota_dev, setup_env
 
 SHIM_DIR_NAME = "exec-shims"
 
@@ -212,12 +215,14 @@ class TestWhatIsOnPath:
     def test_the_path_entry_arrives_with_no_forge_token_configured(self, tmp_path):
         """A deployment routing builds into the devbox does so whether or not it
         has a forge. Before this the reserved key was set only inside the
-        forge-wrapper branch."""
+        forge-wrapper branch. `.developer` is there too, for `istota-dev`, and
+        still first."""
         config = _make_config(tmp_path)
 
         env, user_temp = _run_hook(config, tmp_path)
 
-        assert env["ISTOTA_PATH_PREPEND"] == str(_shim_dir(user_temp))
+        entries = env["ISTOTA_PATH_PREPEND"].split(os.pathsep)
+        assert entries == [str(user_temp / ".developer"), str(_shim_dir(user_temp))]
 
 
 class TestBothPathsAreBakedIn:
@@ -477,3 +482,87 @@ class TestItContactsNothing:
         setup_env(ctx)
 
         assert not _shim_dir(user_temp).exists()
+
+
+class TestTheRepositoryHelper:
+    """`istota-dev` and its config file, installed whenever the task has a
+    repos subtree, with or without a forge token, with or without a devbox."""
+
+    def _hook(self, tmp_path, *, admin=True, **developer):
+        config = _make_config(tmp_path, devbox=False)
+        for key, value in developer.items():
+            setattr(config.developer, key, value)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True, exist_ok=True)
+        ctx = _Ctx(config, user_temp)
+        ctx.is_admin = admin
+        return setup_env(ctx), user_temp / ".developer"
+
+    def test_the_helper_and_its_config_are_written_at_their_modes(self, tmp_path):
+        _, dev_bin = self._hook(tmp_path)
+
+        helper = dev_bin / "istota-dev"
+        cfg = dev_bin / "istota-dev.json"
+        assert stat.S_IMODE(helper.stat().st_mode) == 0o700
+        assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
+        assert helper.read_text() == Path(istota_dev.__file__).read_text()
+
+    def test_developer_is_on_the_prepend_with_no_token_and_no_devbox(self, tmp_path):
+        """Public repositories need no token. Before this the prepend was set
+        only by the forge-token branch and the exec-transport branch."""
+        env, dev_bin = self._hook(tmp_path)
+
+        assert env["ISTOTA_PATH_PREPEND"].split(os.pathsep) == [str(dev_bin)]
+
+    def test_the_config_names_the_emitted_repos_dir(self, tmp_path):
+        env, dev_bin = self._hook(
+            tmp_path, gitlab_url="https://gitlab.example.com/", github_url="",
+        )
+
+        cfg = json.loads((dev_bin / "istota-dev.json").read_text())
+        assert cfg["repos_dir"] == env["DEVELOPER_REPOS_DIR"]
+        assert cfg["version"] == istota_dev.CONFIG_VERSION
+        assert cfg["bot_dir"] == "istota"
+        assert cfg["forges"] == {"gitlab": {"url": "https://gitlab.example.com/"}}
+
+    def test_a_forge_url_with_userinfo_is_redacted_and_still_refused(self, tmp_path):
+        """The value must not land in a file the sandbox reads, and the helper
+        must still stop on it rather than clone from the bare host."""
+        secret = "s3cr3t-value"
+        _, dev_bin = self._hook(
+            tmp_path, gitlab_url=f"https://bot:{secret}@gitlab.example.com",
+        )
+
+        assert secret not in (dev_bin / "istota-dev.json").read_text()
+        with pytest.raises(istota_dev.Stop) as stop:
+            istota_dev.load_config(dev_bin / "istota-dev.json")
+        assert stop.value.code == istota_dev.EXIT_CREDENTIAL
+
+    def test_the_installed_copy_runs_against_its_config(self, tmp_path):
+        """Through the real seam: the copy, run by an isolated `python3 -I`,
+        finds the config beside itself and resolves the repository under the
+        task's subtree."""
+        env, dev_bin = self._hook(tmp_path, github_url="")
+        proc = subprocess.run(
+            [sys.executable, "-I", str(dev_bin / "istota-dev"),
+             "worktree", "gitlab:acme/widget", "fix-thing"],
+            capture_output=True, text=True, timeout=60,
+            env={"PATH": os.environ.get("PATH", ""), "ISTOTA_TASK_ID": "7",
+                 "DEVELOPER_REPOS_DIR": env["DEVELOPER_REPOS_DIR"]},
+        )
+
+        assert proc.returncode == istota_dev.EXIT_MISSING, proc.stdout + proc.stderr
+        payload = json.loads(proc.stdout)
+        assert payload["error"] == (
+            f"no bare clone at {env['DEVELOPER_REPOS_DIR']}/acme/widget.git"
+        )
+
+    def test_a_non_admin_gets_no_helper_and_a_stale_one_is_removed(self, tmp_path):
+        _, dev_bin = self._hook(tmp_path)
+        assert (dev_bin / "istota-dev").is_file()
+
+        env, dev_bin = self._hook(tmp_path, admin=False)
+
+        assert not (dev_bin / "istota-dev").exists()
+        assert not (dev_bin / "istota-dev.json").exists()
+        assert "ISTOTA_PATH_PREPEND" not in env
