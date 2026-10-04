@@ -335,6 +335,26 @@ describe('actions', () => {
     expect(open.closest('a')?.hasAttribute('data-sveltekit-reload')).toBe(true);
   });
 
+  it('keeps a detail-only action out of the row and in the modal (#633)', async () => {
+    // A held post's bell Confirm approves the preview in the body, so it is
+    // offered only where the body is shown.
+    set(notificationItems, [
+      row(1, {
+        body: 'the whole preview',
+        actions: [
+          { ...row(1).actions[0], endpoint: '/chat/tasks/1/confirm/abc', detail_only: true },
+          row(1).actions[1],
+        ],
+      }),
+    ]);
+    await openPanel();
+    await screen.findByText('Discard');
+    expect(screen.queryByText('Confirm')).toBeNull();
+    await fireEvent.click(await screen.findByLabelText('Open notification: Question 1'));
+    expect(await screen.findByText('the whole preview')).toBeInTheDocument();
+    expect(await screen.findByText('Confirm')).toBeInTheDocument();
+  });
+
   it('opens the detail modal from the row', async () => {
     set(notificationItems, [row(1)]);
     await openPanel();

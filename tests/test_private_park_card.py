@@ -6,7 +6,8 @@ waits, so the card renders under the preview. A relay-held task (a relay
 question, a room post, a guest proposal) is approved only from a private room
 showing its preview: the confirm route takes the room the card rendered in and
 refuses anything else with 409, and the bell offers no Confirm for one, only a
-link that opens the preview.
+link that opens the preview. An owner with no such room approves from the bell,
+which then shows the whole preview and a Confirm bound to its digest (#633).
 """
 import pytest
 
@@ -400,3 +401,175 @@ class TestTheBellCard:
             confirmation_source.write(conn, "alice", task_id=ident, title="Proceed?")
             (item,), _total = store.list_open(config, conn, "alice")
         assert {a.id for a in item.actions} == {"confirm", "discard"}
+
+
+# ---------------------------------------------------------------------------
+# A host with no private room approves from the bell (#633)
+# ---------------------------------------------------------------------------
+
+
+def _held_post_without_a_preview_room(conn, config):
+    """A held post whose owner has no private room showing it.
+
+    Bob joining the room it was asked in makes that room shared, so
+    `preview_rooms` has nothing left to offer.
+    """
+    parent, private, ident = _held_post(conn, config)
+    db.add_web_room_member(conn, private.token, "bob")
+    assert private_replies.preview_rooms(conn, db.get_task(conn, ident)) == []
+    return parent, private, ident
+
+
+def _digest(conn, ident):
+    return requests.text_hash(db.get_task(conn, ident).confirmation_prompt or "")
+
+
+class TestTheBellCardWithoutAPreviewRoom:
+    def _item(self, config):
+        from istota.notifications import store
+        from istota.notifications.resolvers import confirmation as confirmation_source
+
+        with db.get_db(config.db_path) as conn:
+            _parent, _private_room, ident = _held_post_without_a_preview_room(conn, config)
+            confirmation_source.write(conn, "alice", task_id=ident,
+                                      title=confirmation_source.ROOM_POST_TITLE,
+                                      body=confirmation_source.ROOM_POST_BODY)
+            (item,), _total = store.list_open(config, conn, "alice")
+            stored = conn.execute("SELECT title, body FROM notifications").fetchone()
+            digest = _digest(conn, ident)
+        return item, stored, ident, digest
+
+    def test_it_shows_the_whole_preview_and_a_detail_only_confirm(self, config, _registry):
+        from istota.notifications.sources import SAFE_PATH_RE
+
+        item, stored, ident, digest = self._item(config)
+        actions = {a.id: a for a in item.actions}
+        assert "open" not in actions
+        confirm = actions["confirm"]
+        assert confirm.method == "POST" and confirm.detail_only is True
+        assert confirm.endpoint == f"/chat/tasks/{ident}/confirm/{digest}"
+        assert SAFE_PATH_RE.match(confirm.endpoint)
+        assert confirm.to_dict()["detail_only"] is True
+        assert actions["discard"].detail_only is False
+        # The whole approval document, fenced: the post itself is in it.
+        assert "UNTRUSTED APPROVAL PREVIEW" in item.body
+        assert POST in item.body
+        # The push still carries fixed words only.
+        assert POST not in stored["title"] and POST not in stored["body"]
+
+    def test_a_host_with_a_preview_room_still_gets_no_confirm(self, config, _registry):
+        """The control: the bell confirm exists only where nothing else can."""
+        from istota.notifications import store
+        from istota.notifications.resolvers import confirmation as confirmation_source
+
+        with db.get_db(config.db_path) as conn:
+            _parent, private, ident = _held_post(conn, config)
+            confirmation_source.write(conn, "alice", task_id=ident, title="t")
+            (item,), _total = store.list_open(config, conn, "alice")
+        assert "confirm" not in {a.id for a in item.actions}
+
+
+@_needs_web_deps
+class TestTheBellConfirmRoute:
+    async def _confirm(self, client, cookies, ident, digest):
+        return await client.post(f"/istota/api/chat/tasks/{ident}/confirm/{digest}",
+                                  cookies=cookies, headers=ORIGIN)
+
+    def _status(self, ident):
+        with db.get_db(_mod()._config.db_path) as conn:
+            return db.get_task(conn, ident).status
+
+    async def test_the_shown_preview_confirms(self, client):
+        cookies = await _login(client, "alice")
+        with db.get_db(_mod()._config.db_path) as conn:
+            _p, _r, ident = _held_post_without_a_preview_room(conn, _mod()._config)
+            digest = _digest(conn, ident)
+        resp = await self._confirm(client, cookies, ident, digest)
+        assert resp.status_code == 200
+        assert self._status(ident) != "pending_confirmation"
+
+    async def test_a_wrong_digest_is_409(self, client):
+        cookies = await _login(client, "alice")
+        with db.get_db(_mod()._config.db_path) as conn:
+            _p, _r, ident = _held_post_without_a_preview_room(conn, _mod()._config)
+        resp = await self._confirm(client, cookies, ident, "0" * 64)
+        assert resp.status_code == 409
+        assert self._status(ident) == "pending_confirmation"
+
+    async def test_a_preview_changed_since_it_was_shown_is_409(self, client):
+        cookies = await _login(client, "alice")
+        with db.get_db(_mod()._config.db_path) as conn:
+            _p, _r, ident = _held_post_without_a_preview_room(conn, _mod()._config)
+            digest = _digest(conn, ident)
+            conn.execute("UPDATE tasks SET confirmation_prompt = confirmation_prompt || 'x' "
+                         "WHERE id = ?", (ident,))
+        resp = await self._confirm(client, cookies, ident, digest)
+        assert resp.status_code == 409
+        assert self._status(ident) == "pending_confirmation"
+
+    async def test_with_a_preview_room_the_bell_route_is_409(self, client):
+        cookies = await _login(client, "alice")
+        with db.get_db(_mod()._config.db_path) as conn:
+            _p, _r, ident = _held_post(conn, _mod()._config)
+            digest = _digest(conn, ident)
+        resp = await self._confirm(client, cookies, ident, digest)
+        assert resp.status_code == 409
+        assert self._status(ident) == "pending_confirmation"
+
+    async def test_another_users_task_is_refused(self, client):
+        await _login(client, "alice")
+        with db.get_db(_mod()._config.db_path) as conn:
+            _p, _r, ident = _held_post_without_a_preview_room(conn, _mod()._config)
+            digest = _digest(conn, ident)
+        cookies = await _login(client, "bob")
+        resp = await self._confirm(client, cookies, ident, digest)
+        assert resp.status_code in (403, 404)
+        assert self._status(ident) == "pending_confirmation"
+
+    async def test_an_ordinary_park_takes_the_plain_route(self, client):
+        cookies = await _login(client, "alice")
+        with db.get_db(_mod()._config.db_path) as conn:
+            room = _private(conn)
+            ident = _running(conn, "alice", room.token)
+            db.set_task_confirmation(conn, ident, "Proceed?")
+            digest = _digest(conn, ident)
+        resp = await self._confirm(client, cookies, ident, digest)
+        assert resp.status_code == 409
+        assert self._status(ident) == "pending_confirmation"
+
+    async def test_a_digest_that_is_not_one_is_409(self, client):
+        cookies = await _login(client, "alice")
+        with db.get_db(_mod()._config.db_path) as conn:
+            _p, _r, ident = _held_post_without_a_preview_room(conn, _mod()._config)
+        for digest in ("abc", "G" * 64):
+            resp = await self._confirm(client, cookies, ident, digest)
+            assert resp.status_code == 409
+        assert self._status(ident) == "pending_confirmation"
+
+    async def test_the_room_card_answers_a_stale_preview_with_409(self, client):
+        """Before #633 a refused `approve_request` was a 500 from this route."""
+        cookies = await _login(client, "alice")
+        with db.get_db(_mod()._config.db_path) as conn:
+            _p, private, ident = _held_post(conn, _mod()._config)
+            conn.execute("UPDATE whatsapp_skill_requests SET preview = preview || 'x' "
+                         "WHERE origin_task_id = ?", (ident,))
+        resp = await client.post(f"/istota/api/chat/tasks/{ident}/confirm", cookies=cookies,
+                                 headers=ORIGIN, json={"room": private.token})
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "This can no longer be approved."
+        assert self._status(ident) == "pending_confirmation"
+
+
+class TestApproveWithADigest:
+    def test_a_digest_with_no_held_request_is_refused(self, config):
+        from istota import confirmations
+
+        with db.get_db(config.db_path) as conn:
+            room = _private(conn)
+            ident = _running(conn, "alice", room.token)
+            db.set_task_confirmation(conn, ident, "Proceed?")
+            task = db.get_task(conn, ident)
+            with pytest.raises(requests.RequestError):
+                confirmations.approve(conn, task, by="web",
+                                      preview_digest=requests.text_hash("Proceed?"))
+            assert db.get_task(conn, ident).status == "pending_confirmation"

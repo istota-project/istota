@@ -4547,6 +4547,8 @@ export interface NotificationAction {
   method: 'POST' | 'LINK';
   endpoint: string | null;
   href: string | null;
+  /** Offered only in the detail modal, beside the full body it acts on. */
+  detail_only?: boolean;
 }
 
 /** A stored notification as the panel renders it.

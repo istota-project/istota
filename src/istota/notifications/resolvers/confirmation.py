@@ -52,6 +52,8 @@ _BODY_CHARS = 400
 # proposal), which is what a push carries: fixed words, never the preview.
 ROOM_POST_TITLE = "Room post awaiting approval"
 ROOM_POST_BODY = "Open your private chat with the bot to review and approve it."
+# The same, for an owner with no private chat: the bell is the preview (#633).
+ROOM_POST_BELL_BODY = "Open this notification to review and approve it."
 
 
 def dedup_key(task_id: int | str) -> str:
@@ -147,8 +149,9 @@ def _task_id(row: "NotificationRow") -> int | None:
     return _common.coerce_object_id(row, noun="task", logger=logger)
 
 
-# Lines of a relay hold's preview the bell shows. The preview is the exact
-# approval document; the bell is a pointer to it, never the place to approve.
+# Lines of a relay hold's preview the bell shows when a private room shows the
+# whole of it: there the bell is a pointer to the preview, not the place to
+# approve.
 _PREVIEW_LINES = 2
 
 
@@ -161,36 +164,56 @@ def deep_link(room_token: str, task_id: int) -> str | None:
     return href if SAFE_PATH_RE.match(href) else None
 
 
+def bell_confirm_endpoint(task_id: int, digest: str) -> str:
+    """The confirm route the bell posts to: the task and the preview it showed."""
+    return f"/chat/tasks/{int(task_id)}/confirm/{digest}"
+
+
 def _relay_held_view(conn, row: "NotificationRow", task) -> "NotificationView":
     """A relay question, room post or guest proposal waiting on its owner (#624).
 
-    No Confirm: approving it from here would approve a post the user has not
-    seen, so the confirm route refuses one without the private room showing
-    the preview, and the bell offers the link to that room instead. The
-    preview's first lines are fenced, as `relay_question` fences a question:
-    this view reaches only the authenticated web session, while the stored
-    title and body a push carries stay the producer's fixed text.
+    Where a private room shows the preview, no Confirm: the bell offers the
+    link to that room, and the confirm route refuses an approval made anywhere
+    else. Where none does (#633), the bell is the only place the preview can be
+    read, so it shows the whole of it and offers a Confirm in the detail view
+    only, whose path carries the digest of the preview shown; the route refuses
+    it once the preview has changed or a private room has appeared. The preview
+    is fenced, as `relay_question` fences a question: this view reaches only
+    the authenticated web session, while the stored title and body a push
+    carries stay the producer's fixed text.
     """
     from istota import confirmations
     from istota.lib.untrusted import frame_untrusted
     from istota.notifications.sources import NotificationAction, NotificationView
+    from istota.relay.requests import text_hash
     from istota.rooms.private_replies import preview_rooms
 
     request = confirmations.held_request(conn, task)
     label = confirmations.flatten(
         str(confirmations.held_destination(request).get("label") or ""),
     ) or "a room"
-    lines = [line for line in (task.confirmation_prompt or "").splitlines() if line.strip()]
-    body = f"For {label}. Open your private chat to review and approve it."
-    if lines:
-        body += "\n\n" + frame_untrusted("\n".join(lines[:_PREVIEW_LINES]), "APPROVAL PREVIEW")
+    preview = task.confirmation_prompt or ""
+    lines = [line for line in preview.splitlines() if line.strip()]
     actions = []
     rooms = preview_rooms(conn, task)
-    href = deep_link(rooms[0], task.id) if rooms else None
-    if href is not None:
-        actions.append(NotificationAction(
-            id="open", label="Open", kind="primary", method="LINK", href=href,
-        ))
+    if rooms:
+        body = f"For {label}. Open your private chat to review and approve it."
+        if lines:
+            body += "\n\n" + frame_untrusted("\n".join(lines[:_PREVIEW_LINES]), "APPROVAL PREVIEW")
+        href = deep_link(rooms[0], task.id)
+        if href is not None:
+            actions.append(NotificationAction(
+                id="open", label="Open", kind="primary", method="LINK", href=href,
+            ))
+    else:
+        body = f"For {label}. Confirm approves exactly the preview below."
+        if lines:
+            body += "\n\n" + frame_untrusted(preview, "APPROVAL PREVIEW")
+            actions.append(NotificationAction(
+                id="confirm", label="Confirm", kind="primary", method="POST",
+                endpoint=bell_confirm_endpoint(task.id, text_hash(preview)),
+                detail_only=True,
+            ))
     actions.append(NotificationAction(
         id="discard", label="Discard", kind="danger", method="POST",
         endpoint=f"/chat/tasks/{task.id}/cancel",

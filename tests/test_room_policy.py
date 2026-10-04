@@ -511,11 +511,24 @@ class TestGuestReplyThroughTheScheduler:
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, ident)
             bell = conn.execute(
-                "SELECT state, last_delivered_at FROM notifications "
+                "SELECT state, last_delivered_at, body FROM notifications "
                 "WHERE source = 'confirmation' AND object_id = ?", (str(ident),)).fetchone()
             rooms = conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
+            from istota.notifications import sources, store
+            from istota.notifications.resolvers import confirmation as confirmation_source
+            sources.reset_registry()
+            try:
+                (item,), _total = store.list_open(config, conn, "alice")
+            finally:
+                sources.reset_registry()
         assert task.status == "pending_confirmation"
         assert bell is not None and bell["state"] == "open"
+        # The push points at the bell, the one place the host can approve it,
+        # and the bell shows the proposal with a Confirm (#633).
+        assert bell["body"] == confirmation_source.ROOM_POST_BELL_BODY
+        assert REPLY not in bell["body"]
+        assert REPLY in item.body
+        assert {a.id for a in item.actions} == {"confirm", "discard"}
         assert rooms == 1
         sends = [c.args["message"] for c in fake_talk.calls_to("grp", method="send_message")]
         assert SHARED_ROOM_NOTICE in sends

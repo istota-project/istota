@@ -102,6 +102,9 @@ class NotificationAction:
     method: str                 # one of ACTION_METHODS
     endpoint: str | None = None  # method == 'POST'
     href: str | None = None      # method == 'LINK'
+    # Offered only in the detail view, where the full body is shown: an action
+    # that approves what the body says must not be one click from the list.
+    detail_only: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -111,6 +114,7 @@ class NotificationAction:
             "method": self.method,
             "endpoint": self.endpoint,
             "href": self.href,
+            "detail_only": self.detail_only,
         }
 
 

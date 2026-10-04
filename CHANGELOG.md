@@ -55,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A room post or guest proposal can be approved from the notification bell when you have no private chat with the bot** (ISSUE-633). Opening the notification shows the whole text that would be posted, with a Confirm button that approves exactly that text; if the text changed since you opened it, Confirm is refused. Before, the only way to approve one was `!confirm <id> yes`, which approved it without showing it. Where a private chat shows the text, you still approve it there.
 - **An answer that mentions a confirmation is no longer parked as one** (#625). Only the answer's last paragraph is read as a request for approval, and quoted lines, code blocks and inline code in it are skipped, so a reply explaining the confirmation card or quoting "Please confirm" from a mail completes normally.
 - Deleting a room from its settings no longer stacks the confirmation on top of the settings dialog in web chat. The settings dialog steps aside while the confirmation is up, and Cancel brings it back with any unsaved edits.
 - The package-cache sweep now reaches non-admin caches on a developer deployment (ISSUE-630). With `developer.enabled`, a `repos_dir` and an admins file, a non-admin's cache lives under `security.sandbox_cache_dir`, but the sweep walked `repos_dir` alone, so those caches grew past `sandbox_cache_max_gb` unchecked. Each user's layout is now decided by the resolver's own predicate, and both roots are swept when both are in use.

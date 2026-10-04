@@ -294,7 +294,7 @@ def cancel_for_conversation(
 
 def approve(
     conn, task: db.Task, *, trust_sender: bool = False, config=None,
-    by: str = "system",
+    by: str = "system", preview_digest: str | None = None,
 ) -> bool:
     """Release a held task for execution.
 
@@ -323,17 +323,28 @@ def approve(
     notification row. It defaults to ``"system"`` rather than to any one surface
     so a caller that forgets is visibly unattributed instead of quietly filed
     under somebody else's.
+
+    ``preview_digest`` is the digest of the preview the approver was shown, for
+    a caller that showed it outside the task's own rooms (the bell, #633): a
+    relay-held task whose preview has changed since then is refused with
+    ``RequestError`` rather than approved. Without it the current preview is
+    taken as the one shown.
     """
     # Read the association under the writer lock, never trust a stale task
     # object or a confirmed_at timestamp from an earlier action.
-    from istota.relay.requests import approve_request, text_hash, write_transaction
+    from istota.relay.requests import (
+        RequestError, approve_request, text_hash, write_transaction,
+    )
     with write_transaction(conn):
         current = db.get_task(conn, task.id)
         proposal = None
+        if preview_digest is not None and not (current and current.whatsapp_confirmation_request_id):
+            raise RequestError("confirmation_unavailable")
         if current and current.whatsapp_confirmation_request_id:
             request_id = current.whatsapp_confirmation_request_id
             approve_request(conn, task=current, request_id=request_id,
-                            preview_digest=text_hash(current.confirmation_prompt or ""))
+                            preview_digest=preview_digest
+                            or text_hash(current.confirmation_prompt or ""))
             if current.guest_participant_id is not None:
                 # Only the proposal the scheduler made of the guest's answer;
                 # a room post the task asked for itself re-runs as any does.

@@ -3723,17 +3723,20 @@ def process_one_task(
                 # A guest proposal's question is its preview, and a push
                 # carries the stored text: fixed words there, as a relay
                 # hold's are, and the preview only in the authenticated bell.
+                bell_only = private_park is not None and private_park.dest is None
                 held_notification = confirmation_source.write(
                     conn, task.user_id, task_id=task_id,
                     title=(confirmation_source.ROOM_POST_TITLE if guest_route is not None
                            else confirmations.describe_prompt(result)),
-                    body=(confirmation_source.ROOM_POST_BODY if guest_route is not None
+                    body=((confirmation_source.ROOM_POST_BELL_BODY if bell_only
+                           else confirmation_source.ROOM_POST_BODY)
+                          if guest_route is not None
                           else confirmation_source.body_for(result)),
                     room_token=transcript_token,
                     # A private park with no private room shows the question
                     # in no room, so its push may not be confined to ntfy and
                     # email: the bell row is the only place it is.
-                    in_room=private_park is None or private_park.dest is not None,
+                    in_room=not bell_only,
                 )
                 if held_notification is not None:
                     notification_reference_id = (

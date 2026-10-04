@@ -10468,10 +10468,18 @@ _CONFIRM_FROM_PRIVATE_CHAT = (
 )
 
 
+_CONFIRM_PREVIEW_CHANGED = (
+    "This changed since it was shown. Open the notification again to review it."
+)
+_CONFIRM_UNAVAILABLE = "This can no longer be approved."
+
+
 def _chat_confirm_task(
     task_id: int, actor_user_id: str | None = None, room: str | None = None,
+    preview_digest: str | None = None,
 ) -> None:
     from istota import confirmations, db
+    from istota.relay.requests import RequestError
     from istota.rooms.private_replies import canonical_token, preview_rooms
     with db.get_db(_config.db_path) as conn:
         task = db.get_task(conn, task_id)
@@ -10488,10 +10496,16 @@ def _chat_confirm_task(
         if actor_user_id != task.user_id:
             from fastapi import HTTPException
             raise HTTPException(status_code=403, detail="not your task")
-        # A relay question, room post or guest proposal is approved only from
-        # a private room showing its preview: the card sends the room it
-        # rendered in, and a bell click or a hand-built POST has none (#624).
-        if task.whatsapp_confirmation_request_id and (
+        # A relay question, room post or guest proposal is approved only where
+        # its preview is shown: a private room showing it, whose card sends the
+        # room it rendered in (#624), or, for an owner with no such room, the
+        # bell, whose Confirm names the digest of the preview it showed (#633).
+        if preview_digest is not None:
+            if not task.whatsapp_confirmation_request_id or preview_rooms(conn, task):
+                from fastapi import HTTPException
+                logger.info("task %s: bell confirm refused, not a bell-only hold", task_id)
+                raise HTTPException(status_code=409, detail=_CONFIRM_FROM_PRIVATE_CHAT)
+        elif task.whatsapp_confirmation_request_id and (
             not room or canonical_token(conn, room) not in preview_rooms(conn, task)
         ):
             from fastapi import HTTPException
@@ -10500,7 +10514,17 @@ def _chat_confirm_task(
         # Shared with the Talk poller and `!confirm` so all three restore the
         # transcript mirror the gate withheld (ISSUE-241), and so all three
         # prune the parked attempt's terminal frames the same way (ISSUE-235).
-        confirmations.approve(conn, task, config=_config, by="web")
+        try:
+            confirmations.approve(conn, task, config=_config, by="web",
+                                  preview_digest=preview_digest)
+        except RequestError:
+            from fastapi import HTTPException
+            logger.info("task %s: confirm refused, preview no longer current", task_id)
+            raise HTTPException(
+                status_code=409,
+                detail=(_CONFIRM_PREVIEW_CHANGED if preview_digest is not None
+                        else _CONFIRM_UNAVAILABLE),
+            )
 
 
 # Ceiling on an edited draft body. Not a policy about email length — it exists
@@ -10961,6 +10985,30 @@ async def chat_confirm_task(
         if isinstance(payload, dict) and isinstance(payload.get("room"), str):
             room = payload["room"]
     await asyncio.to_thread(_chat_confirm_task, task_id, user["username"], room)
+    return {"status": "ok"}
+
+
+@api_router.post("/chat/tasks/{task_id}/confirm/{digest}")
+async def chat_confirm_task_from_bell(
+    task_id: int,
+    digest: str,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Approve a relay-held task from the bell, which showed its preview (#633).
+
+    Only for an owner with no private room showing it; ``digest`` is the
+    preview the bell rendered, so a preview changed since is refused.
+    """
+    await _authorize_task_access(task_id, user)
+    phone = await asyncio.to_thread(_task_phone_transcript_surface, task_id)
+    if phone is not None:
+        return _read_only_refusal(phone)
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise HTTPException(status_code=409, detail=_CONFIRM_PREVIEW_CHANGED)
+    await asyncio.to_thread(
+        _chat_confirm_task, task_id, user["username"], None, digest,
+    )
     return {"status": "ok"}
 
 
