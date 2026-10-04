@@ -203,7 +203,7 @@ Anti-detection strategy: Chrome launches with the stealth extension natively. Pa
 
 **Regular Nextcloud user, not bot API.** The bot runs as an ordinary user. File sharing, CalDAV, and Talk messaging work through standard protocols. No special server configuration.
 
-**File-as-config for user self-service.** Users configure briefings, cron jobs, heartbeats, and persona through markdown files in their Nextcloud workspace. No CLI access needed.
+**File-as-config for user self-service.** Users configure briefings, cron jobs, heartbeats, and their own memory through markdown files in their Nextcloud workspace. The persona is the operator's, one file at the file root. No CLI access needed.
 
 **Functional over object-oriented.** Most code is module-level functions. Classes exist only where shared state across calls is necessary (TalkClient, UserWorker, WorkerPool).
 

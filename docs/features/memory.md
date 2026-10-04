@@ -178,6 +178,22 @@ When `[sleep_cycle] curate_user_memory = true` (opt-in, off by default), the use
 >
 > If you want curation to manage everything in a section, keep it flat. If you want to protect content from edits, drop a `### subheading` above it.
 
+### Pinned sections
+
+A `## ` heading that ends in `<!-- pinned -->` marks a pinned section: a role or standing instructions you want kept as written, such as what the bot does for you, how it handles your mail, or whom to escalate to.
+
+```markdown
+## The desk <!-- pinned -->
+- Answer mail sent to the shared address within a working day.
+
+### Escalation
+- Anything about billing goes to the account owner.
+```
+
+The nightly curator may append a bullet to a pinned section, but it cannot remove, replace or drop anything in it: `remove`, `replace`, `remove_heading` and `remove_subheading` there are rejected as `pinned_section` and recorded in the audit log. It cannot create a pinned section either (`pinned_heading`). You can still change a pinned section by hand, or by asking the bot, since the `memory` skill acts on your request.
+
+A pin covers one `## ` section and ends at the next `## ` line. Put everything that has to stay protected under that one heading and use `### ` for its subsections; a second `## ` heading in pasted text is not pinned unless it carries the marker too. A `## ` line inside a code fence is text, not a heading. `istota-skill memory headings` lists the `## ` headings as the curator sees them, so you can check that the pinned heading is the only one your text produces.
+
 ### Op rules and rejection reasons
 
 Ops only operate on the **top region** of a section — the lines before the first `### subheading`. Subsections are treated as opaque structure that the curation pass cannot edit. This keeps human-curated subsections (deeper structure, longer prose) safe from automated edits.
@@ -191,7 +207,7 @@ The applier validates strictly:
 - **`add_heading`**: rejects existing names, empty lines arrays, and headings that begin with `#`.
 - **`remove`**: zero matches → `noop_no_match` (quiet); multiple matches → `multiple_matches` rejection (the model must be more specific).
 
-Reject reasons recorded in the audit log: `unknown_op`, `missing_field`, `heading_missing`, `heading_exists`, `empty_line`, `empty_lines`, `empty_heading`, `empty_match`, `line_starts_with_hash`, `heading_starts_with_hash`, `multiple_matches`.
+Reject reasons recorded in the audit log: `unknown_op`, `missing_field`, `heading_missing`, `heading_exists`, `empty_line`, `empty_lines`, `empty_heading`, `empty_match`, `line_starts_with_hash`, `heading_starts_with_hash`, `multiple_matches`, `pinned_section`, `pinned_heading`, `heading_contains_newline`, `line_contains_newline`.
 
 Outcomes recorded for applied entries: `applied`, `noop_dup`, `noop_no_match`.
 

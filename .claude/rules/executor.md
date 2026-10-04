@@ -58,7 +58,7 @@ Split by **authority**, not size (ISSUE-375): standing instructions go to `.syst
 - **No system line may point at user-half material.** Accessible resources (rule 1), `Today's date` / `Current time` / `User timezone` (rules 7, 8) and `Current UTC` (rule 9) are system-half beside the rules naming them; the group line dropped "below". `tests/test_prompt_split.py` asserts each pairing.
 - Header scalars (bot name, user id, source, output target, email, token, timezone) go through `_one_line()`. Persona, emissaries, guidelines, changelog and overlays stay multiline.
 
-**System**: header (role, ids, datetime, token, source, output target, email, a database line naming no path, privileges); emissaries (not briefings); persona, workspace `PERSONA.md` over `config/persona.md` (not briefings or `skip_persona`); workspace layout line plus calendars (system because rule 1 names it); tools, then `skills_index` if the menu is non-empty; rules; `config/guidelines/{source_type}.md`; skills changelog; eager skill bodies with overlays.
+**System**: header (role, ids, datetime, token, source, output target, email, a database line naming no path, privileges); emissaries (not briefings); persona, the operator's `{root}/PERSONA.md`, else the last good copy, else `config/persona.md`, the same for every user (not briefings or `skip_persona`; `.claude/rules/prompts.md`); workspace layout line plus calendars (system because rule 1 names it); tools, then `skills_index` if the menu is non-empty; rules; `config/guidelines/{source_type}.md`; skills changelog; eager skill bodies with overlays.
 
 File-access framing is storage-backend-aware (storage-agnostic-vocabulary spec): Nextcloud via mount, via rclone, or local, keyed on `config.storage_backend`. Local mode says the workspace is the managed area, not the limit of what an unsandboxed bot can read. The executor is the single home of storage framing; skill bodies use `{workspace}` / `{storage}`.
 
@@ -212,7 +212,7 @@ Background types excluded from context: `scheduled`, `briefing`. Control dir `CO
 - `_split_credential_env()`: called twice; `proxy_base_env = {**env, **proxy_only_env}` is snapshotted before `ISTOTA_SANDBOXED`.
 - `custom_system_prompt_path(config)`: `abspath` of `config/system-prompt.md` (the name the CLI is handed), else `None`; one source for field and bind. The rest of `config/` is never bound. It once depended on the `/srv/app` default. Caveat: DB masks run last, so a config dir under `db_path.parent` would be shadowed.
 - `effective_sandboxing(config)`: `sandbox_enabled and _bwrap_available()`. The one name for `native_fs_confinement_active`, `build_prompt`'s `db_masked`, `ISTOTA_SANDBOXED` and the REPL `cwd` (ISSUE-308); drift would make the prompt claim a false boundary. The probe runs once per process.
-- Also: `_ensure_reply_parent_in_history`, `load_emissaries` (global only), `load_persona` (workspace over global), `_build_network_allowlist`, `execute_task_interactive`.
+- Also: `_ensure_reply_parent_in_history`, `load_emissaries` (global only), `load_persona` (the operator file over the last good copy over the shipped file; no user), `_build_network_allowlist`, `execute_task_interactive`.
 
 ### `build_bwrap_cmd()`
 - Binds `{repos_dir}/{user_id}` RW for an admin with the skill enabled; never the root.
