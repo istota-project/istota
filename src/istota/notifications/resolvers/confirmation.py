@@ -97,15 +97,20 @@ def write(
     title: str,
     body: str = "",
     room_token: str | None = None,
+    in_room: bool = True,
 ) -> "RaiseResult | None":
     """Write the row on the producer's own connection, inside its transaction.
 
     Returns the :class:`RaiseResult` for the producer to buffer and hand to
     ``deliver_pending`` after its ``with`` block closes — see the store's module
-    docstring for why the two are separate calls. The result is `room_free`:
-    every parked question is already in a room (the private room, the web
-    room it was asked in, the Talk room) or in the alerts room as the email
-    gate's own prompt, so its push goes to ntfy and email only (#625).
+    docstring for why the two are separate calls.
+
+    ``in_room`` says the question is already shown in a room (the private
+    room, the web room it was asked in, the Talk room), and makes the result
+    `room_free`, so its push goes to ntfy and email only (#625). A producer
+    whose question is in no room passes False and the push takes the user's
+    whole alert routing: a private park with no private room, and the email
+    gate, whose row is pushed only when its own prompt reached nobody.
     """
     from dataclasses import replace
 
@@ -125,7 +130,7 @@ def write(
             room_token=room_token,
         ),
     )
-    return replace(result, room_free=True) if result is not None else None
+    return replace(result, room_free=in_room) if result is not None else None
 
 
 def resolve_for_task(

@@ -3701,6 +3701,10 @@ def process_one_task(
                     body=(confirmation_source.ROOM_POST_BODY if guest_route is not None
                           else confirmation_source.body_for(result)),
                     room_token=transcript_token,
+                    # A private park with no private room shows the question
+                    # in no room, so its push may not be confined to ntfy and
+                    # email: the bell row is the only place it is.
+                    in_room=private_park is None or private_park.dest is not None,
                 )
                 if held_notification is not None:
                     notification_reference_id = (

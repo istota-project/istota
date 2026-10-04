@@ -190,6 +190,47 @@ class TestTheRoomFreePush:
 
 
 # ---------------------------------------------------------------------------
+# The email gate's fallback
+# ---------------------------------------------------------------------------
+
+
+class TestTheEmailGateFallback:
+    def test_a_prompt_that_reached_nobody_pushes_to_talk(self, config, ntfy, fake_talk):
+        """The gate's row is pushed only when its own prompt failed, so the
+        question is in no room and the push is not confined to ntfy and email."""
+        from istota.skills.email import Email, EmailEnvelope
+        from istota.transport.email.inbound import poll_emails
+
+        fake_talk.db_path = config.db_path
+        with db.get_db(config.db_path) as conn:
+            alerts = plain_talk_room(conn, "alice", name="alerts")
+        config.users["alice"].routing = {"alert": f"talk:{alerts.talk_ref}"}
+        sender = "stranger@elsewhere.example"
+        envelope = EmailEnvelope(id="1", subject="Hello", sender=sender,
+                                 date="Mon, 01 Jan 2026 12:00:00 +0000", is_read=False)
+        email = Email(id="1", subject="Hello", sender=sender,
+                      date="Mon, 01 Jan 2026 12:00:00 +0000", body="hi", attachments=[],
+                      message_id="<s1@elsewhere.example>", references=None,
+                      to=("bot+alice@example.com",), cc=(), authentication_results=None)
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound._deliver_dmarc_alerts"),
+            patch("istota.notifications.delivery.send_confirmation_prompt",
+                  return_value=(False, None)),
+        ):
+            (held,) = poll_emails(config)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, held).status == "pending_confirmation"
+        assert fake_talk.calls_to(alerts.talk_ref, method="send_message")
+        (row,) = _rows(config, "SELECT last_delivered_at FROM notifications "
+                       "WHERE source='confirmation'")
+        assert row["last_delivered_at"] is not None
+
+
+# ---------------------------------------------------------------------------
 # Through the scheduler's park
 # ---------------------------------------------------------------------------
 
@@ -224,6 +265,26 @@ class TestThePark:
         assert task.status == "pending_confirmation"
         (pushed,) = [r for r in delivered if r.notification_id]
         assert pushed.room_free is True
+
+    def test_a_private_park_with_no_private_room_pushes_to_talk(
+        self, config, ntfy, fake_talk,
+    ):
+        """The question is in no room, so its push takes the user's whole
+        alert routing rather than ntfy and email alone, which would reach
+        nobody who routes alerts to Talk."""
+        fake_talk.db_path = config.db_path
+        with db.get_db(config.db_path) as conn:
+            group = _shared_talk(conn)
+            alerts = plain_talk_room(conn, "alice", name="alerts")
+            ident = db.create_task(conn, prompt="invite them", user_id="alice",
+                                   source_type="talk", conversation_token=group.canonical,
+                                   is_group_chat=True)
+        config.users["alice"].routing = {"alert": f"talk:{alerts.talk_ref}"}
+        with patch("istota.rooms.private_replies.private_room_for", return_value=None):
+            task = _run(config, ident, QUESTION)
+        assert task.status == "pending_confirmation"
+        assert fake_talk.calls_to(alerts.talk_ref, method="send_message")
+        assert ntfy == []
 
     def test_a_talk_private_room_that_delivers_pushes_nothing_more(
         self, config, monkeypatch, fake_talk,
