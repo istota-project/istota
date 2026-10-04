@@ -469,8 +469,8 @@ def _record_sent_email(
         logger.warning("Failed to record sent email for task %d: %s", task.id, e)
 
 
-def composed_email_body(config: "Config", task: db.Task, result: str) -> str:
-    """The body of the mail an email task composed, or ``result`` with none.
+def composed_mail_body(config: "Config", task: db.Task, result: str) -> str | None:
+    """The body of the mail an email task composed, or None when it composed none.
 
     The deferred file first, then an envelope in the result, as
     `deliver_email_result` reads them; the file is peeked, never consumed.
@@ -481,7 +481,13 @@ def composed_email_body(config: "Config", task: db.Task, result: str) -> str:
     )
     if parsed and parsed.get("body"):
         return parsed["body"]
-    return result
+    return None
+
+
+def composed_email_body(config: "Config", task: db.Task, result: str) -> str:
+    """The body of the mail an email task composed, or ``result`` with none."""
+    body = composed_mail_body(config, task, result)
+    return result if body is None else body
 
 
 #: Display cap on a recorded subject: it comes from an inbound header.

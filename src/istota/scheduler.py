@@ -3913,6 +3913,16 @@ def process_one_task(
                         room_body = email_transcript_body(delivery_result)
                     else:
                         room_body = delivery_result
+                    # An email thread room records the mail, not the model's
+                    # report to its user: the row is the body that is mailed,
+                    # read the way delivery reads it, and with nothing composed
+                    # there is no row. A private email room keeps the answer.
+                    transcript_body = room_body
+                    if _thread_token is not None:
+                        from .transport.email.outbound import composed_mail_body
+                        transcript_body = composed_mail_body(
+                            config, task, delivery_result,
+                        )
                     # One decision, before any per-surface branch, replacing the
                     # three calls that each hung off one: the Talk plan, an
                     # own-room web push, and the email-only plan the first two
@@ -3949,13 +3959,13 @@ def process_one_task(
                             or transcript_token == task.conversation_token
                         )
                     )
-                    if _room_turn_belongs_here(
+                    if transcript_body is not None and _room_turn_belongs_here(
                         conn, task, task_id, transcript_token,
                         delivering_into_room=bool(
                             _talk_lands_here or own_room_canonical_dests
                         ),
                     ):
-                        _store_room_turn(conn, task, transcript_token, room_body)
+                        _store_room_turn(conn, task, transcript_token, transcript_body)
                     # A phone leg's own transcript row (room-surface-model §F):
                     # a minted SMS or WhatsApp room is the readable copy of what
                     # was texted. Written here, inside the transaction and ahead

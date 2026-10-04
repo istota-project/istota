@@ -296,6 +296,11 @@ class TestTheEmailRoomCard:
         assert "reaches everyone on the thread: 'carol' and 2 other people" in card
         assert "untrusted input" in card
         assert "answer `NO_ACTION:`" in card
+        assert "passed on to them privately" not in card
+        # The thread records the mailed body; the answer text is the host's note.
+        assert "with `istota-skill email output`" in card
+        assert "Your answer text is shown only to 'carol'" in card
+        assert "Do not write a separate alert" in card
         # None of the shared-room card's rules apply on a thread.
         for absent in ("guest's turn", "Withheld", "room whisper", "answer-privately",
                        ALICE):

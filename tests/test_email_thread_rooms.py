@@ -919,3 +919,84 @@ class TestTheBotsMailIsACard:
         assert bubble["text"] == "Thursday after 7 works"
         assert bubble["mail"] == {"to": [HOST_ADDR], "cc": [ALICE, BOB],
                                   "subject": "Re: Dinner plans", "state": "sent"}
+
+
+# ---------------------------------------------------------------------------
+# The thread records the mail, not the model's report (#636 part 3)
+# ---------------------------------------------------------------------------
+
+
+def _complete(config, result, *, deferred_body=None, task_id=None):
+    """Run the scheduler on the next task with ``result`` as the model's
+    answer and, when given, ``deferred_body`` as its `email output` file.
+    Delivery runs for real up to the SMTP seam."""
+    from istota.executor import task_deferred_dir
+    from istota.scheduler import process_one_task
+
+    if deferred_body is not None:
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_id)
+        out = task_deferred_dir(config, task)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / f"task_{task.id}_email_output.json").write_text(json.dumps(
+            {"subject": "", "body": deferred_body, "format": "plain"}))
+    with (
+        patch("istota.scheduler.execute_task", return_value=(True, result, None, None)),
+        patch("istota.transport.email.outbound.reply_to_email",
+              return_value="<out@test.com>") as reply,
+    ):
+        process_one_task(config)
+    return reply
+
+
+def _assistant_rows(db_path, token):
+    return _rows(db_path, "SELECT body, outgoing_mail FROM messages "
+                 "WHERE room_token = ? AND role = 'assistant'", (token,))
+
+
+class TestTheThreadRecordsTheMail:
+    def test_the_row_is_the_deferred_mail_not_the_report(self, config, db_path):
+        (task_id,) = _start_thread(config)
+        reply = _complete(
+            config, "I told them Thursday at 7, which clashes with your course.",
+            deferred_body="Thursday at 7 works.", task_id=task_id,
+        )
+
+        reply.assert_called_once()
+        (row,) = _assistant_rows(db_path, _room_token(config))
+        assert row["body"] == "Thursday at 7 works."
+        # The row is the mail, so the card does not repeat the body.
+        mail = json.loads(row["outgoing_mail"])
+        assert mail["state"] == "sent" and "body" not in mail
+
+    def test_an_envelope_result_is_its_body(self, config, db_path):
+        _start_thread(config)
+        _complete(config, _structured("Friday then."))
+        (row,) = _assistant_rows(db_path, _room_token(config))
+        assert row["body"] == "Friday then."
+
+    def test_no_action_leaves_no_row(self, config, db_path):
+        _start_thread(config)
+        reply = _complete(config, "NO_ACTION: nothing for anyone here.")
+        reply.assert_not_called()
+        assert _assistant_rows(db_path, _room_token(config)) == []
+
+    def test_an_answer_with_no_mail_leaves_no_row(self, config, db_path):
+        """A model that answered without `email output` mailed nothing, so
+        the thread has nothing to record."""
+        _start_thread(config)
+        reply = _complete(config, "Thursday clashes with your first-aid course.")
+        reply.assert_not_called()
+        assert _assistant_rows(db_path, _room_token(config)) == []
+
+    def test_control_the_private_email_room_keeps_the_answer(self, config, db_path):
+        from istota.transport.email import email_conversation_token
+
+        (task_id,) = _poll(config, sender=HOST_ADDR, to=(BOT,),
+                           message_id="<p1@test.com>", body="What is on today?")
+        _complete(config, "Nothing until the evening.",
+                  deferred_body="Your day is clear.", task_id=task_id)
+        with db.get_db(db_path) as conn:
+            token = db.resolve_room_token(conn, "email", email_conversation_token(HOST))
+        (row,) = _assistant_rows(db_path, token)
+        assert row["body"] == "Nothing until the evening."
