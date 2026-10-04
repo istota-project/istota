@@ -134,6 +134,16 @@ class TestRetire:
         # Written, never delivered: init runs with every service stopped.
         assert delivered is None
 
+    def test_a_notice_the_store_refuses_is_reported_as_failed(self, setup):
+        config, root = setup
+        path = _plant(config, root, "alice", EDITED)
+        with db.get_db(config.db_path) as conn:
+            conn.execute("DROP TABLE notifications")
+        outcome = _by_user(retire_user_personas(config))["alice"]
+        assert outcome.action == "retired"
+        assert outcome.notice_failed is True
+        assert path.with_name("PERSONA.md.retired").read_text() == EDITED
+
     def test_users_without_a_copy_are_absent(self, setup):
         config, root = setup
         _config_dir(config, root, "bob")
@@ -219,6 +229,55 @@ class TestRetire:
         assert outcome.action == "refused"
         assert (outside / "PERSONA.md").read_text() == SHIPPED
 
+    def test_a_symlinked_bot_dir_inside_the_tree_is_refused(self, setup):
+        # Every component is opened O_NOFOLLOW, whatever the link points at.
+        config, root = setup
+        real = root / "Users" / "alice" / "real"
+        (real / "config").mkdir(parents=True)
+        (real / "config" / "PERSONA.md").write_text(EDITED)
+        (root / "Users" / "alice" / config.bot_dir_name).symlink_to(real, target_is_directory=True)
+        outcome = _by_user(retire_user_personas(config))["alice"]
+        assert outcome.action == "refused"
+        assert (real / "config" / "PERSONA.md").read_text() == EDITED
+
+    @pytest.mark.parametrize("user_id", ["..", ".", "a/b"])
+    def test_an_unscopable_user_id_is_refused(self, setup, user_id):
+        config, root = setup
+        config.users = {user_id: UserConfig()}
+        # Where `{mount}/Users/..` would lead.
+        target = root / config.bot_dir_name / "config" / "PERSONA.md"
+        target.parent.mkdir(parents=True)
+        target.write_text(EDITED)
+        outcome = _by_user(retire_user_personas(config))[user_id]
+        assert outcome.action == "refused"
+        assert target.read_text() == EDITED
+
+    def test_a_retired_name_created_after_the_check_is_not_overwritten(self, setup, monkeypatch):
+        # Every existence check loses the race: the name looks free, and only
+        # a move that refuses an existing target keeps the racer's file.
+        config, root = setup
+        path = _plant(config, root, "alice", EDITED)
+        racer = path.with_name("PERSONA.md.retired")
+        racer.write_text("written in between")
+        monkeypatch.setattr(persona_retire, "_exists_at", lambda name, dir_fd: False)
+        outcome = _by_user(retire_user_personas(config))["alice"]
+        assert outcome.action == "refused"
+        assert racer.read_text() == "written in between"
+        assert path.read_text() == EDITED
+        assert _alerts(config) == []
+
+    def test_a_filesystem_without_hard_links_still_retires(self, setup, monkeypatch):
+        config, root = setup
+        path = _plant(config, root, "alice", EDITED)
+
+        def _no_links(*a, **k):
+            raise PermissionError(1, "Operation not permitted")
+
+        monkeypatch.setattr(persona_retire.os, "link", _no_links)
+        assert _by_user(retire_user_personas(config))["alice"].action == "retired"
+        assert path.with_name("PERSONA.md.retired").read_text() == EDITED
+        assert not path.exists()
+
     def test_dry_run_changes_nothing(self, setup):
         config, root = setup
         _plant(config, root, "alice", EDITED)
@@ -284,6 +343,37 @@ class TestMain:
         assert persona_retire.main([]) == 2
         assert (root / "Users" / "alice" / config.bot_dir_name / "config" / "PERSONA.md.retired").exists()
 
+    def _live_task(self, config):
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(conn, prompt="p", user_id="alice")
+            conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (task_id,))
+
+    def test_a_task_in_flight_refuses_a_real_run(self, run, capsys):
+        config, root = run
+        path = _plant(config, root, "alice", EDITED)
+        self._live_task(config)
+        assert persona_retire.main([]) == 1
+        err = capsys.readouterr().err
+        assert "refusal: live_tasks" in err
+        assert "stop all units first" in err
+        assert path.read_text() == EDITED
+
+    def test_an_unreadable_task_table_refuses_a_real_run(self, run, capsys):
+        config, root = run
+        path = _plant(config, root, "alice", EDITED)
+        with db.get_db(config.db_path) as conn:
+            conn.execute("DROP TABLE tasks")
+        assert persona_retire.main([]) == 1
+        assert "refusal: live_tasks" in capsys.readouterr().err
+        assert path.read_text() == EDITED
+
+    def test_list_runs_beside_a_task_in_flight(self, run, capsys):
+        config, root = run
+        _plant(config, root, "alice", EDITED)
+        self._live_task(config)
+        assert persona_retire.main(["--list"]) == 0
+        assert "alice: would retire" in capsys.readouterr().out
+
     def test_list_writes_nothing(self, run, capsys):
         config, root = run
         _plant(config, root, "alice", EDITED)
@@ -341,17 +431,17 @@ class TestInit:
         assert "user persona alice: refused" in capsys.readouterr().err
 
     def test_a_notice_that_cannot_be_written_is_reported(self, setup, monkeypatch, capsys):
+        # The store never raises: a failed write is a None return, so the
+        # failure has to be real rather than a patched raise.
         from istota import cli
-        from istota.notifications.resolvers import task_alert as alerts
 
         config, root = setup
         edited = _plant(config, root, "alice", EDITED)
+        with db.get_db(config.db_path) as conn:
+            conn.execute("DROP TABLE notifications")
         monkeypatch.setattr(cli, "load_config", lambda path: config)
-
-        def _boom(*a, **k):
-            raise RuntimeError("database locked")
-
-        monkeypatch.setattr(alerts, "write", _boom)
+        # `init_db` would recreate the table this test removed.
+        monkeypatch.setattr(cli.db, "init_db", lambda path: None)
         assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=False)) is None
         assert edited.with_name("PERSONA.md.retired").read_text() == EDITED
         err = capsys.readouterr().err

@@ -15,17 +15,21 @@ are read by nothing. This removes them:
   delivered: this runs from ``istota init`` with every service stopped, the
   ``room_relocate.record_outcome`` precedent.
 
-Only ``config.users`` are visited, never a directory listing. Each user's
-``config/`` is resolved with ``storage.resolve_user_config_dir`` (containment
-under ``{root}/Users/{uid}``) and then opened ``O_NOFOLLOW``, so the read,
-the delete and the rename all happen relative to one pinned directory fd.
-The tree is bound read-write into its owner's sandbox, so a symlink or FIFO
-planted at ``PERSONA.md`` is refused and left alone, never followed.
+Only ``config.users`` are visited, never a directory listing, and a user id
+that does not name one plain directory is refused. Each user's
+``{bot_dir}/config`` is walked with ``O_NOFOLLOW`` at every component
+(``skills._loader.open_overlay_dir``, the ISSUE-344 rule for this tree), so
+the read, the delete and the rename all happen relative to one pinned
+directory fd. The tree is bound read-write into its owner's sandbox, so a
+symlink or FIFO planted at ``PERSONA.md`` or above it is refused and left
+alone, never followed.
 
 Idempotent by construction: after a run there is no ``PERSONA.md`` left to
 act on. ``python -m istota.maintenance.persona_retire [--dry-run|--list]``;
 exit 0 complete (including nothing to do), 1 refusal with nothing touched
-(no file root, root unavailable), 2 partial (a user refused). Never raises.
+(no file root, root unavailable, or a task in flight on a real run, with a
+``refusal: live_tasks`` line as ``repos_relocate`` prints), 2 partial (a user
+refused). Never raises.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ from typing import TYPE_CHECKING
 
 from istota import db, storage
 from istota.prompts import persona
+from istota.sandbox.user_scope import is_scopable_user_id
 
 if TYPE_CHECKING:
     from istota.config import Config
@@ -121,6 +126,40 @@ def _retired_name(dir_fd: int) -> str | None:
     return None
 
 
+def _move_without_replacing(src: str, dst: str, dir_fd: int) -> str | None:
+    """Move ``src`` to ``dst`` in one directory, never replacing ``dst``.
+
+    ``rename(2)`` replaces an existing target, so the move is ``link(2)``,
+    which fails with ``EEXIST``, then ``unlink`` of the old name. A filesystem
+    with no hard links (an rclone FUSE mount among them) falls back to a check
+    and a ``rename``; the gap between the two is closed only by every service
+    being stopped, which ``init`` and ``main``'s live-task guard provide.
+    Returns a refusal reason, or None when the move happened.
+    """
+    try:
+        os.link(src, dst, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
+    except FileExistsError:
+        return f"{dst} appeared"
+    except FileNotFoundError:
+        return f"{src} vanished"
+    except OSError:
+        if _exists_at(dst, dir_fd):
+            return f"{dst} appeared"
+        os.rename(src, dst, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        return None
+    try:
+        os.unlink(src, dir_fd=dir_fd)
+    except OSError as exc:
+        # Two names on one inode: drop the new one so a later run sees the
+        # state this one started from.
+        try:
+            os.unlink(dst, dir_fd=dir_fd)
+        except OSError:
+            pass
+        return f"could not remove {src} ({errno.errorcode.get(exc.errno or 0, 'OSError')})"
+    return None
+
+
 def _write_notice(config: "Config", user_id: str, name: str) -> bool:
     """One fire-and-forget row for ``user_id``, written and never delivered."""
     from istota.notifications.resolvers import task_alert  # noqa: PLC0415
@@ -130,7 +169,8 @@ def _write_notice(config: "Config", user_id: str, name: str) -> bool:
         return False
     try:
         with db.get_db(config.db_path) as conn:
-            task_alert.write(
+            # The store never raises; a refused or failed write is None.
+            written = task_alert.write(
                 conn, user_id,
                 dedup_key=task_alert.persona_retired_key(),
                 title=NOTICE_TITLE,
@@ -142,6 +182,9 @@ def _write_notice(config: "Config", user_id: str, name: str) -> bool:
         logger.warning(
             "persona_retire_notice_unwritten user=%s err=%s", user_id, type(exc).__name__,
         )
+        return False
+    if written is None:
+        logger.warning("persona_retire_notice_unwritten user=%s reason=store_refused", user_id)
         return False
     return True
 
@@ -165,20 +208,27 @@ def _retire_one(
 ) -> RetireOutcome:
     from istota.skills._loader import (  # noqa: PLC0415 - import cycle
         OVERLAY_UNREADABLY_LARGE,
+        open_overlay_dir,
         read_overlay_bytes,
     )
 
-    config_dir = storage.resolve_user_config_dir(config, user_id)
-    if config_dir is None:
-        logger.warning("persona_retire user=%s action=refused reason=outside_user_tree", user_id)
-        return RetireOutcome(user_id, ACTION_REFUSED, "config directory leads outside the user's tree")
-    try:
-        dir_fd = os.open(config_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    except FileNotFoundError:
-        return RetireOutcome(user_id, ACTION_ABSENT)
-    except OSError as exc:
-        logger.warning("persona_retire user=%s action=refused errno=%s", user_id, exc.errno)
-        return RetireOutcome(user_id, ACTION_REFUSED, f"config directory unreadable ({exc.errno})")
+    if not is_scopable_user_id(user_id):
+        logger.warning("persona_retire user=%r action=refused reason=unscopable_user_id", user_id)
+        return RetireOutcome(user_id, ACTION_REFUSED, "user id does not name one directory")
+    user_root = config.workspace_root(user_id)
+    if user_root is None:
+        return RetireOutcome(user_id, ACTION_REFUSED, "user id does not name one directory")
+    parts = (config.bot_dir_name, "config")
+    # Walked with O_NOFOLLOW at every component (ISSUE-344): the tree is bound
+    # read-write into its owner's sandbox, so a resolve-then-open check could
+    # be redirected by a component swapped in between.
+    dir_fd = open_overlay_dir(user_root, *parts)
+    if dir_fd is None:
+        reason, _definitive = storage._classify_dir_refusal(user_root, list(parts))
+        if reason == storage.OWNER_FILE_MISSING:
+            return RetireOutcome(user_id, ACTION_ABSENT)
+        logger.warning("persona_retire user=%s action=refused reason=%s", user_id, reason)
+        return RetireOutcome(user_id, ACTION_REFUSED, f"config directory refused: {reason}")
     try:
         leaf = persona.PERSONA_FILENAME
         data, reason, size = read_overlay_bytes(
@@ -207,12 +257,10 @@ def _retire_one(
             return RetireOutcome(user_id, ACTION_REFUSED, "both retired names are taken")
         if dry_run:
             return RetireOutcome(user_id, ACTION_RETIRED, f"dry run: would be {name}")
-        # `rename` replaces an existing target, so the name is checked again
-        # at the last moment. `init` runs with every service stopped, so no
-        # task is writing this directory in between.
-        if _exists_at(name, dir_fd):
-            return RetireOutcome(user_id, ACTION_REFUSED, f"{name} appeared")
-        os.rename(leaf, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        refusal = _move_without_replacing(leaf, name, dir_fd)
+        if refusal is not None:
+            logger.warning("persona_retire user=%s action=refused reason=%s", user_id, refusal)
+            return RetireOutcome(user_id, ACTION_REFUSED, refusal)
         logger.info("persona_retire user=%s action=retired", user_id)
         if not _write_notice(config, user_id, name):
             return RetireOutcome(
@@ -277,10 +325,34 @@ def _render(outcome: RetireOutcome, *, planned: bool) -> str:
     return f"{outcome.user_id}: {label}" + (f" ({detail})" if detail else "")
 
 
+REFUSE_LIVE_TASKS = "live_tasks"
+
+
+def _live_task_refusal(config: "Config") -> str | None:
+    """Why a real run must not start now, or None.
+
+    ``init`` runs with every service stopped; a hand run of this module may
+    not, and a task writing the directory between the check and the rename is
+    the gap ``_move_without_replacing`` cannot close everywhere. An unreadable
+    task table refuses too, since "unknown" is not "nobody is working". No
+    database at all is not a refusal: nothing can be running against it.
+    """
+    if not db.database_present(config.db_path):
+        return None
+    try:
+        with db.get_db(config.db_path) as conn:
+            busy = db.get_users_with_live_tasks(conn)
+    except Exception as exc:  # noqa: BLE001 - never raises out of main
+        return f"the task table could not be read ({type(exc).__name__}); stop all units first"
+    if busy:
+        return "a task is in flight; stop all units first"
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="istota.maintenance.persona_retire",
-        description="Delete or retire the per-user PERSONA.md copies.",
+        description="Delete or retire the per-user PERSONA.md copies. Stop all service units first.",
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
@@ -319,6 +391,12 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_REFUSED
 
     planned = args.dry_run or args.list_only
+    if not planned:
+        refusal = _live_task_refusal(config)
+        if refusal is not None:
+            print(f"persona_retire: refused — {refusal}", file=sys.stderr)
+            print(f"refusal: {REFUSE_LIVE_TASKS}", file=sys.stderr)
+            return EXIT_REFUSED
     try:
         if args.dry_run:
             sync = persona.sync_operator_persona(config, dry_run=True)
