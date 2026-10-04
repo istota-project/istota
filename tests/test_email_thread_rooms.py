@@ -490,14 +490,12 @@ class TestCoParticipantFactsAreNotExtracted:
 
 
 class TestHeldPostsAndWhispers:
-    def test_an_approved_room_post_is_a_reply_all_on_the_thread(self, config, db_path):
-        """The held `room post` (and every `guest_reply = held` proposal)
-        lands on the thread once approved, through the outbound gate."""
-        import asyncio
-
-        from istota import confirmations
+    def test_a_room_post_into_the_thread_is_refused(self, config, db_path):
+        """Mail sent on the host's behalf is approved as a draft, so a post
+        into an email thread is refused (`email_thread`); `email reply` is the
+        way to send it, through the outbound gate."""
+        from istota.relay.requests import RequestError
         from istota.rooms import private_replies
-        from istota.relay import requests
 
         _start_thread(config)
         with db.get_db(db_path) as conn:
@@ -507,20 +505,30 @@ class TestHeldPostsAndWhispers:
                                    prompt="post it", conversation_token=private,
                                    about_room_token=_room_token(config))
             conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
-            private_replies.hold_room_post(conn, config, actor_user_id=HOST, task_id=ident,
-                                      request_key="p1", text="Thursday after 7 works")
-            requests.park_question(conn, config, task=db.get_task(conn, ident))
-            confirmations.approve(conn, db.get_task(conn, ident), config=config, by="web")
-        with patch("istota.transport.email.outbound.reply_to_email",
-                   return_value="<post@test.com>") as reply:
-            asyncio.run(requests.drain_requests(config))
-            asyncio.run(requests.drain_requests(config))
+            with pytest.raises(RequestError, match="email_thread"):
+                private_replies.hold_room_post(
+                    conn, config, actor_user_id=HOST, task_id=ident,
+                    request_key="p1", text="Thursday after 7 works")
+            assert conn.execute(
+                "SELECT COUNT(*) FROM whatsapp_skill_requests").fetchone()[0] == 0
 
-        kwargs = reply.call_args.kwargs
-        assert kwargs["body"] == "Thursday after 7 works"
-        assert kwargs["to_addr"] == HOST_ADDR
-        assert kwargs["cc"] == [ALICE, BOB]
-        assert kwargs["in_reply_to"] == ROOT
+    def test_a_guest_proposal_on_the_thread_is_not_made(self, config, db_path):
+        """A guest turn in flight from before email on rooms gets no proposal:
+        its answer could only be sent as a mail the host never approved."""
+        from istota.rooms import private_replies
+
+        _start_thread(config)
+        task_ids = _poll(config, sender=ALICE, to=(BOT,), cc=(HOST_ADDR, BOB),
+                         message_id="<a2@ext.example>", references=ROOT,
+                         body="Zorg, is Carol free Thursday?")
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "UPDATE tasks SET status='running', guest_participant_id = ("
+                "SELECT id FROM room_participants WHERE surface_ref = ?) WHERE id=?",
+                (ALICE, task_ids[0]),
+            )
+            task = db.get_task(conn, task_ids[0])
+            assert private_replies.propose_guest_reply(conn, config, task, "She is.") is None
 
     def test_a_whisper_reaches_the_members_own_address(self, config, db_path):
         import asyncio
@@ -564,7 +572,6 @@ class TestTheThreadRoomGate:
 
         with db.get_db(db_path) as conn:
             assert db.get_task(conn, task_ids[0]).status == "pending"
-
 
 
 # ---------------------------------------------------------------------------
@@ -629,7 +636,6 @@ class TestTheChainFindsTheRoom:
         rows = _rows(db_path, "SELECT author_label FROM messages WHERE room_token=? "
                      "AND role='user' ORDER BY id", (_room_token(config),))
         assert rows[-1]["author_label"] == BOB
-
 
     def test_a_reply_to_the_bots_own_mail_alone_lands_in_the_room(self, config, db_path):
         _start_thread(config)
@@ -725,83 +731,30 @@ def _mail_rows(db_path, token):
                  "WHERE room_token=? AND outgoing_mail IS NOT NULL ORDER BY id", (token,))
 
 
-def _approve_member_post(config, db_path, text):
-    """The host's own `room post`, from their private chat into the thread."""
-    from istota import confirmations
-    from istota.relay import requests
-    from istota.rooms import private_replies
-
+async def _answer_by_mail(config, db_path, shown, mailed=None):
+    """The host's question answered: the answer stored in the room, then
+    mailed reply-all on the thread."""
+    task_ids = _start_thread(config)
+    token = _room_token(config)
     with db.get_db(db_path) as conn:
-        private = db.create_web_chat_room(conn, HOST, "Mine").token
-        ident = db.create_task(conn, user_id=HOST, source_type="web",
-                               prompt="post it", conversation_token=private,
-                               about_room_token=_room_token(config))
-        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
-        private_replies.hold_room_post(conn, config, actor_user_id=HOST, task_id=ident,
-                                       request_key="p1", text=text)
-        requests.park_question(conn, config, task=db.get_task(conn, ident))
-        confirmations.approve(conn, db.get_task(conn, ident), config=config, by="web")
-    return ident
-
-
-def _drain(config):
-    import asyncio
-
-    from istota.relay import requests
-    asyncio.run(requests.drain_requests(config))
-    asyncio.run(requests.drain_requests(config))
+        task = db.get_task(conn, task_ids[0])
+        db.store_turn_message(conn, token, role="assistant", task_id=task.id,
+                              body=shown, origin_surface="email")
+    with patch("istota.transport.email.outbound.reply_to_email",
+               return_value="<out@test.com>") as reply:
+        await deliver_email_result(config, task, _structured(mailed or shown))
+    return reply, token
 
 
 class TestTheBotsMailIsACard:
-    def test_an_approved_post_is_the_bots_turn_carrying_the_mail(self, config, db_path):
-        _start_thread(config)
-        _approve_member_post(config, db_path, "Thursday after 7 works")
-        with patch("istota.transport.email.outbound.reply_to_email",
-                   return_value="<post@test.com>"):
-            _drain(config)
 
-        (row,) = _mail_rows(db_path, _room_token(config))
-        assert row["role"] == "assistant"
-        assert row["body"] == "Thursday after 7 works"
-        # The member's own task ran in their private room: tying the shared
-        # room's row to it would put that task's trace in the shared room.
-        assert row["task_id"] is None
-        mail = json.loads(row["outgoing_mail"])
-        assert mail == {"to": [HOST_ADDR], "cc": [ALICE, BOB],
-                        "subject": "Re: Dinner plans", "state": "sent"}
-
-    def test_a_post_whose_send_fails_says_so(self, config, db_path):
-        _start_thread(config)
-        _approve_member_post(config, db_path, "Thursday after 7 works")
-        with patch("istota.transport.email.outbound.reply_to_email",
-                   side_effect=OSError("smtp down")):
-            _drain(config)
-
-        (row,) = _mail_rows(db_path, _room_token(config))
-        assert json.loads(row["outgoing_mail"])["state"] == "failed"
-
-    def test_a_post_that_fails_before_its_recipients_are_known_says_not_sent(
-        self, config, db_path,
-    ):
-        _start_thread(config)
-        _approve_member_post(config, db_path, "Thursday after 7 works")
-        with patch("istota.transport.email.outbound.email_threads.reply_all",
-                   side_effect=RuntimeError("boom")):
-            _drain(config)
-
-        (row,) = _mail_rows(db_path, _room_token(config))
-        assert json.loads(row["outgoing_mail"]) == {"to": [], "cc": [], "state": "failed"}
-
-    def test_the_footer_does_not_put_the_body_on_the_card(self, config, db_path):
+    @pytest.mark.asyncio
+    async def test_the_footer_does_not_put_the_body_on_the_card(self, config, db_path):
         config.email.thread_disclosure_footer = True
-        _start_thread(config)
-        _approve_member_post(config, db_path, "Thursday after 7 works")
-        with patch("istota.transport.email.outbound.reply_to_email",
-                   return_value="<post@test.com>") as reply:
-            _drain(config)
+        reply, token = await _answer_by_mail(config, db_path, "Thursday after 7 works")
 
         assert "\n\n--\n" in reply.call_args.kwargs["body"]
-        (row,) = _mail_rows(db_path, _room_token(config))
+        (row,) = _mail_rows(db_path, token)
         assert "body" not in json.loads(row["outgoing_mail"])
 
     @pytest.mark.parametrize(("row", "mailed", "differs"), [
@@ -813,38 +766,6 @@ class TestTheBotsMailIsACard:
     ])
     def test_what_counts_as_a_different_mail(self, row, mailed, differs):
         assert db.mailed_body_differs(row, mailed) is differs
-
-    def test_an_approved_guest_proposal_answers_the_guests_turn(self, config, db_path):
-        from istota import confirmations
-        from istota.rooms import private_replies
-
-        _start_thread(config)
-        task_ids = _poll(config, sender=ALICE, to=(BOT,), cc=(HOST_ADDR, BOB),
-                         message_id="<a2@ext.example>", references=ROOT,
-                         body="Zorg, is Carol free Thursday?")
-        with db.get_db(db_path) as conn:
-            # A guest turn from before email on rooms, still in flight: no new
-            # email turn has a guest id, and section 8.6 removes this path.
-            conn.execute(
-                "UPDATE tasks SET status='running', guest_participant_id = ("
-                "SELECT id FROM room_participants WHERE surface_ref = ?) WHERE id=?",
-                (ALICE, task_ids[0]),
-            )
-            task = db.get_task(conn, task_ids[0])
-            assert private_replies.propose_guest_reply(conn, config, task, "She is.")
-            confirmations.approve(conn, db.get_task(conn, task.id), config=config, by="web")
-        with patch("istota.transport.email.outbound.reply_to_email",
-                   return_value="<post@test.com>"):
-            _drain(config)
-
-        (row,) = _mail_rows(db_path, _room_token(config))
-        # The guest's turn and its answer share a task, so the exchange pairs
-        # into the room's later history like any answered turn.
-        assert row["role"] == "assistant" and row["task_id"] == task.id
-        assert json.loads(row["outgoing_mail"])["state"] == "sent"
-        with db.get_db(db_path) as conn:
-            history = db.get_conversation_history(conn, _room_token(config))
-        assert any(turn.result == row["body"] for turn in history)
 
     @pytest.mark.asyncio
     async def test_an_ordinary_answer_is_stamped_with_the_mail_it_sent(self, config, db_path):
@@ -921,19 +842,16 @@ class TestTheBotsMailIsACard:
             await deliver_email_result(config, task, _structured())
         assert _mail_rows(db_path, _room_token(config)) == []
 
-    def test_the_web_transcript_carries_the_card(self, config, db_path):
+    @pytest.mark.asyncio
+    async def test_the_web_transcript_carries_the_card(self, config, db_path):
         pytest.importorskip("fastapi")
         from istota.webui import app as web_app
 
-        _start_thread(config)
-        _approve_member_post(config, db_path, "Thursday after 7 works")
-        with patch("istota.transport.email.outbound.reply_to_email",
-                   return_value="<post@test.com>"):
-            _drain(config)
+        _, token = await _answer_by_mail(config, db_path, "Thursday after 7 works")
         prev = web_app._config
         web_app._config = config
         try:
-            page = web_app._chat_room_messages(HOST, _room_token(config), 20)
+            page = web_app._chat_room_messages(HOST, token, 20)
         finally:
             web_app._config = prev
 

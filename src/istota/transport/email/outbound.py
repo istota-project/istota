@@ -516,35 +516,21 @@ def _stamp_thread_mail(
         logger.warning("Could not record the thread mail on message %s: %s", message_id, e)
 
 
-def record_unsent_post(config: "Config", message_id: int | None) -> None:
-    """Mark a room post's card as not sent, when the send stopped before it knew
-    its recipients. Never raises, like the stamp."""
-    if message_id is None:
-        return
-    try:
-        with db.get_db(config.db_path) as conn:
-            db.set_outgoing_mail(conn, message_id, {"to": [], "cc": [], "state": "failed"})
-    except Exception as e:  # noqa: BLE001 — the card is a view of the send
-        logger.warning("Could not record the unsent thread post %s: %s", message_id, e)
-
-
 async def _send_thread_reply(
     config: "Config", task: db.Task, plan: "email_threads.ReplyAll", *,
     subject: str, body: str, content_type: str = "plain",
     html_body: str | None = None, room_token: str | None = None,
-    consume: bool = True, approved: bool = False,
-    message_id: int | None = None,
+    approved: bool = False, message_id: int | None = None,
 ) -> bool:
     """Reply-all on an email thread room's thread, or the reply to the user in
     their private email room, through the outbound gate.
 
     True when the mail went out or was held as a draft; False when the gate
-    could not run or the send failed. ``consume`` drops the task's deferred
-    email output once accounted for; a room post carries its own body and
-    leaves the task's file alone. ``approved`` is a send the user already
-    approved, body and recipients both (D20), which the gate does not hold a
-    second time. ``message_id`` is the room's row for this mail, stamped with
-    its recipients and outcome so web chat shows it as a sent mail.
+    could not run or the send failed. The task's deferred email output is
+    dropped once accounted for. ``approved`` is the host's own authenticated
+    question on the thread (ISSUE-607), which the gate does not hold.
+    ``message_id`` is the room's row for this mail, stamped with its
+    recipients and outcome so web chat shows it as a sent mail.
 
     The operator's disclosure footer, when turned on, goes on here so every
     mail into the thread carries it, a held draft included (ISSUE-605).
@@ -578,11 +564,9 @@ async def _send_thread_reply(
             stamp("failed")
             return False
         stamp("held", draft_id)
-        if consume:
-            _consume_deferred_email_output(config, task)
-        return True
-    if consume:
         _consume_deferred_email_output(config, task)
+        return True
+    _consume_deferred_email_output(config, task)
     try:
         sent_message_id = reply_to_email(
             to_addr=plan.to, subject=subject, body=body,
@@ -603,51 +587,6 @@ async def _send_thread_reply(
         to=[plan.to], cc=list(plan.cc), body=mailed,
     )
     return True
-
-
-def recipients_of(plan: "email_threads.ReplyAll") -> dict:
-    """A reply-all's recipients, as an approval records and compares them."""
-    return {"to": email_threads.fold(plan.to),
-            "cc": [email_threads.fold(address) for address in plan.cc]}
-
-
-async def deliver_thread_post(
-    config: "Config", *, task_id: int, room_token: str, body: str,
-    approved_recipients: dict | None = None, message_id: int | None = None,
-) -> bool:
-    """An approved `room post` into an email thread room, as a reply-all.
-
-    ``message_id`` is the post's row in the room, which records the mail.
-
-    The post's approval was for its text and its room; the recipients are the
-    thread's latest people at send time, and the outbound gate decides whether
-    they may receive it (D11: the gate holds untrusted reply-all regardless).
-    A held draft shows in the thread's room.
-
-    ``approved_recipients`` is the recipient list a guest proposal's preview
-    showed the host, whose approval of that exact mail is the outbound approval
-    too (D20). A send to exactly those people is not held again; a send to
-    anyone else, the thread having moved on meanwhile, is held as before.
-    """
-    with db.get_db(config.db_path) as conn:
-        task = db.get_task(conn, task_id)
-        plan = email_threads.reply_all(conn, config, room_token, task_id=task_id)
-    if task is None or plan is None:
-        logger.warning(
-            "room post into email thread %s: nothing to reply to; not sent", room_token,
-        )
-        record_unsent_post(config, message_id)
-        return False
-    approved = (
-        approved_recipients is not None
-        and recipients_of(plan) == {
-            "to": approved_recipients.get("to"), "cc": approved_recipients.get("cc"),
-        }
-    )
-    return await _send_thread_reply(
-        config, task, plan, subject=plan.subject, body=body, room_token=room_token,
-        consume=False, approved=approved, message_id=message_id,
-    )
 
 
 def _legacy_briefing_subject(task: db.Task) -> str:

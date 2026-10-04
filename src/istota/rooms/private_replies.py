@@ -945,35 +945,14 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
         if len(words) > _GUEST_QUOTE_CHARS:
             words = words[:_GUEST_QUOTE_CHARS].rstrip() + "…"
         bot = flatten(getattr(config, "bot_name", "") or "") or "the assistant"
-        recipients = ""
-        email_recipients = None
-        if destination.get("email_ref"):
-            # On an email thread the post is a mail to these exact people, and
-            # the host approving this preview approves that mail (D20): the
-            # outbound gate does not hold a send that matches it.
-            from istota.rooms.veto import with_email_footer
-            from istota.transport.email import threads as email_threads
-            from istota.transport.email.outbound import recipients_of
-
-            plan = email_threads.reply_all(conn, config, parent, task_id=task.id)
-            if plan is None:
-                raise RequestError("parent_unavailable")
-            email_recipients = recipients_of(plan)
-            reply = with_email_footer(conn, config, parent, reply)
-            recipients = (
-                f"To: {email_recipients['to']}\n"
-                f"Cc: {', '.join(email_recipients['cc']) or '(nobody)'}\n\n"
-            )
         preview = (
             f"{label} asked in {destination['label']}:\n{words}\n\n"
             f"Post this answer there as {bot}? Reply yes to post it exactly as "
             "written, or no to drop it. Only the message below is posted.\n\n"
-            f"{recipients}Message:\n{reply}"
+            f"Message:\n{reply}"
         )
         stored_destination = {key: destination[key]
                               for key in ("kind", "room_token", "talk_ref", "label")}
-        if email_recipients is not None:
-            stored_destination["email_recipients"] = email_recipients
         with write_transaction(conn):
             # The host's own room, where the preview lands; with none, the
             # bell carries it and the origin names no room.
@@ -1154,7 +1133,13 @@ def queue_private_answer(conn, config, *, actor_user_id: str, task_id: int) -> d
 
 
 def _post_destination(conn, parent_token: str, user_id: str) -> dict:
-    """The room a post goes to, re-resolved the same way at hold and delivery."""
+    """The room a post goes to, re-resolved the same way at hold and delivery.
+
+    Never an email thread room (`email_thread`): mail sent on a user's behalf
+    is approved as a draft, so a post there is written with `email reply`,
+    which takes the outbound gate. That also closes a guest proposal or a
+    queued post on one, which nothing could send.
+    """
     from istota.relay.destinations import destination_fingerprint
 
     room = db.get_room(conn, parent_token)
@@ -1167,15 +1152,14 @@ def _post_destination(conn, parent_token: str, user_id: str) -> dict:
         # Switched off (D12): an approved post is refused, and the request
         # closes rather than waiting for the room to come back on.
         raise RequestError("room_off")
+    if db.get_room_binding(conn, parent_token, "email") is not None:
+        raise RequestError("email_thread")
     talk = db.get_room_binding(conn, parent_token, "talk")
     whatsapp = db.get_room_binding(conn, parent_token, "whatsapp")
-    email = db.get_room_binding(conn, parent_token, "email")
     destination = {"kind": "room", "room_token": parent_token,
                    "talk_ref": talk.surface_ref if talk else None, "label": room_label(room)}
     if whatsapp is not None:
         destination["whatsapp_ref"] = whatsapp.surface_ref
-    if email is not None:
-        destination["email_ref"] = email.surface_ref
     destination["fingerprint"] = destination_fingerprint(destination)
     return destination
 
@@ -1291,8 +1275,6 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
             if row["state"] != "queued":
                 return None
             whatsapp_group = False
-            email_thread = False
-            email_recipients = None
             if row["queue_deadline"] is None or row["queue_deadline"] <= db.sql_datetime_now():
                 raise RequestError("queue_expired")
             user = row["requester_user_id"]
@@ -1313,11 +1295,6 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                     raise RequestError("destination_changed")
                 parent = current["room_token"]
                 whatsapp_group = bool(current.get("whatsapp_ref"))
-                email_thread = bool(current.get("email_ref"))
-                # Only a preview that showed them carries them (a guest
-                # proposal on an email thread), and the digest check above is
-                # what makes them the ones approved.
-                email_recipients = destination.get("email_recipients")
                 reference = "room-post:" + request_id
                 message_id = db.add_message(
                     conn, parent, role="assistant", body=body, origin_surface="web",
@@ -1325,8 +1302,7 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                     task_id=_post_answers_task(conn, row["origin_task_id"], parent),
                 )
                 claim.update(message_id=message_id, talk_ref=current["talk_ref"], parent=parent,
-                             reference=reference, whatsapp_group=whatsapp_group,
-                             email_thread=email_thread, email_recipients=email_recipients)
+                             reference=reference, whatsapp_group=whatsapp_group)
             else:
                 # A whisper (stored kind `side_whisper`): the principal's own
                 # private room, resolved now rather than at enqueue.
@@ -1438,19 +1414,6 @@ async def deliver_request(config, row) -> None:
                     text=claim["body"], group_room=claim["parent"])
             except Exception as exc:
                 logger.warning("room post %s: WhatsApp post failed: %s", claim["request_id"], exc)
-        if claim["email_thread"] and claim["task_id"] is not None:
-            # The thread itself, as a reply-all through the outbound gate. As
-            # with the other halves, the canonical row is the post; a held or
-            # failed mail is reported by the gate and the send log.
-            from istota.transport.email.outbound import deliver_thread_post, record_unsent_post
-            try:
-                await deliver_thread_post(
-                    config, task_id=int(claim["task_id"]), room_token=claim["parent"],
-                    body=claim["body"], approved_recipients=claim["email_recipients"],
-                    message_id=claim["message_id"])
-            except Exception as exc:
-                logger.warning("room post %s: email reply-all failed: %s", claim["request_id"], exc)
-                await asyncio.to_thread(record_unsent_post, config, claim["message_id"])
     else:
         # Never raises; a whisper that reached nobody becomes a bell row there.
         await send_private(config, claim["delivery"], body=claim["body"])

@@ -21,7 +21,6 @@ import pytest
 
 from istota import db
 from istota.config import Config, EmailConfig, UserConfig
-from istota.rooms import private_replies
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email import threads
 from istota.transport.email.inbound import poll_emails
@@ -131,17 +130,6 @@ class TestNoAnnouncementOnEmail:
             ).fetchone()
         assert row is None or row["announced_at"] is None
 
-    def test_a_guest_proposal_carries_nothing_by_default(self, config):
-        _start_thread(config)
-        (task_id,) = _poll(config, sender=ALICE, to=(BOT,), cc=(HOST_ADDR, BOB),
-                           message_id="<a2@ext.example>", body="Zorg, Thursday?")
-        with db.get_db(config.db_path) as conn:
-            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
-            proposal = private_replies.propose_guest_reply(
-                conn, config, db.get_task(conn, task_id), "Thursday at 7.",
-            )
-        assert proposal.preview.endswith("Message:\nThursday at 7.")
-
 
 class TestTheDisclosureFooter:
     FOOTER = ("Written by Zorg, an AI assistant, for Carol. To stop it replying "
@@ -162,18 +150,6 @@ class TestTheDisclosureFooter:
                          message_id="<c2@test.com>", body="Zorg, and Dave?")
         third = _deliver(config, task2, "Dave too.").call_args.kwargs["body"]
         assert third == f"Dave too.\n\n--\n{self.FOOTER}"
-
-    def test_a_held_proposal_shows_it_once_and_sends_it_once(self, config):
-        config.email.thread_disclosure_footer = True
-        _start_thread(config)
-        (task_id,) = _poll(config, sender=ALICE, to=(BOT,), cc=(HOST_ADDR, BOB),
-                           message_id="<a2@ext.example>", body="Zorg, Thursday?")
-        with db.get_db(config.db_path) as conn:
-            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
-            proposal = private_replies.propose_guest_reply(
-                conn, config, db.get_task(conn, task_id), "Thursday at 7.",
-            )
-        assert proposal.preview.count(self.FOOTER) == 1
 
     def test_the_veto_still_works_by_mail_with_the_footer_off(self, config):
         from istota.rooms import veto as room_veto

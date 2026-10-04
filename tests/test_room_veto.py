@@ -5,12 +5,10 @@ bot off there with `!<bot name> off` (or, on WhatsApp, by removing its number).
 D12: while it is off nothing is recorded — no transcript row, no classifier
 call, no task — until a member turns it back on and everyone who switched it
 off has agreed with their own `!<bot name> on`, or has left. The bot announces
-itself once in a room a guest is in. D20: a held email proposal the host
-approved is not held a second time when the send matches what was approved.
+itself once in a room a guest is in.
 
 Each surface is driven through its own production entry point: the Talk poll,
-`handle_whatsapp_batch`, `poll_emails`, the web send route, and the request
-drain for the D20 release.
+`handle_whatsapp_batch`, `poll_emails` and the web send route.
 """
 
 import asyncio
@@ -19,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from istota import confirmations, db
+from istota import db
 from istota.rooms import policy as room_policy
 from istota.rooms import veto as room_veto
 from istota.rooms import private_replies
@@ -876,73 +874,6 @@ class TestTheAnnouncement:
         assert [c.kwargs["body"] for c in reply.call_args_list] == [
             "Thursday works.", "Thursday works.",
         ]
-
-
-# ---------------------------------------------------------------------------
-# D20: a held email proposal is approved once
-# ---------------------------------------------------------------------------
-
-
-def _email_proposal(config, reply="Thursday at 7 suits Carol."):
-    """A guest's addressed mail runs as the host; its answer held as a proposal.
-
-    A guest turn from before email on rooms, still in flight: no new email
-    turn has a guest id, and section 8.6 of that spec removes this path.
-    """
-    _start_thread(config)
-    (task_id,) = _mail(config, sender=ALICE_ADDR, cc=(HOST_ADDR, BOB_ADDR),
-                       message_id="<a2@ext.example>", references=ROOT,
-                       body="Zorg, can Carol do Thursday?")
-    with db.get_db(config.db_path) as conn:
-        conn.execute(
-            "UPDATE tasks SET status='running', guest_participant_id = ("
-            "SELECT id FROM room_participants WHERE surface_ref = ?) WHERE id=?",
-            (ALICE_ADDR, task_id),
-        )
-        task = db.get_task(conn, task_id)
-        proposal = private_replies.propose_guest_reply(conn, config, task, reply)
-    return task_id, proposal
-
-
-def _approve(config, task_id):
-    with db.get_db(config.db_path) as conn:
-        confirmations.approve(conn, db.get_task(conn, task_id), config=config, by="web")
-
-
-class TestOneApproval:
-    def test_the_proposal_names_its_exact_recipients(self, tmp_path):
-        config = _email_config(tmp_path, trusted=())
-        _task_id, proposal = _email_proposal(config)
-        assert f"To: {ALICE_ADDR}" in proposal.preview
-        assert f"Cc: {HOST_ADDR}, {BOB_ADDR}" in proposal.preview
-
-    def test_an_approved_proposal_is_sent_without_a_second_hold(self, tmp_path):
-        config = _email_config(tmp_path, trusted=())
-        task_id, _ = _email_proposal(config)
-        _approve(config, task_id)
-        with patch("istota.transport.email.outbound.reply_to_email",
-                   return_value="<p@test.com>") as reply:
-            asyncio.run(requests.drain_requests(config))
-        assert reply.call_count == 1
-        assert reply.call_args.kwargs["to_addr"] == ALICE_ADDR
-        assert reply.call_args.kwargs["cc"] == [HOST_ADDR, BOB_ADDR]
-        assert "Thursday at 7 suits Carol." in reply.call_args.kwargs["body"]
-        with db.get_db(config.db_path) as conn:
-            assert _count(conn, "SELECT COUNT(*) FROM outbound_drafts") == 0
-
-    def test_a_send_to_different_recipients_is_held_as_before(self, tmp_path):
-        config = _email_config(tmp_path, trusted=())
-        task_id, _ = _email_proposal(config)
-        _approve(config, task_id)
-        # A new correspondent writes on the thread before the post goes out:
-        # the latest message's people are no longer the approved list.
-        _mail(config, sender=BOB_ADDR, cc=(HOST_ADDR, ALICE_ADDR, "dave@ext.example"),
-              message_id="<b3@ext.example>", references=ROOT, body="and me")
-        with patch("istota.transport.email.outbound.reply_to_email") as reply:
-            asyncio.run(requests.drain_requests(config))
-        reply.assert_not_called()
-        with db.get_db(config.db_path) as conn:
-            assert _count(conn, "SELECT COUNT(*) FROM outbound_drafts") == 1
 
 
 # ---------------------------------------------------------------------------
