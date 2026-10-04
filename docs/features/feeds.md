@@ -54,7 +54,7 @@ Requests are paced **per host**, not per feed. A feed's poll interval says nothi
 
 The standoff never schedules a throttled feed sooner than a healthy one would poll: it floors at the largest of the feed's own interval, the 30-minute default and a 60-minute rate-limit backoff, and a server-named `Retry-After` is taken only where it is longer than that floor, capped at 6 hours. Every `next_poll_at` — success and failure alike — is multiplied by a random factor within ±10%, so a group of feeds refreshed together drifts apart instead of bursting, failing and rescheduling in lockstep forever.
 
-A poll run reports `throttled` alongside `errors`, and per feed `rate_limited` and `retry_after_seconds`; a run that was turned away for every feed exits non-zero rather than reading as a clean poll that found nothing.
+A poll run reports `throttled` alongside `errors`, and per feed `rate_limited` and `retry_after_seconds`; a run that was turned away for every feed reports `status: partial_error` rather than reading as a clean poll that found nothing. It does not fail the scheduled task, because the throttle has already pushed the feed past any retry.
 
 The known gap is that none of this spans users: a poll is a per-user subprocess, so two users reach one host from one IP with no shared budget.
 

@@ -383,12 +383,12 @@ class TestPoll:
             conn.commit()
         assert json.loads(_invoke(ctx, ["run-scheduled", "--limit", "60"]).output)["polled"] == 60
 
-    def test_a_wholly_throttled_run_is_reported_as_a_failure(self, ctx, monkeypatch):
-        """A 429 is not a feed error, but a run turned away everywhere is not ok.
+    def test_a_wholly_throttled_run_is_not_a_task_failure(self, ctx, monkeypatch):
+        """ISSUE-621: one due feed answering 429 failed the scheduled task, and
+        the retry a minute later found nothing due.
 
-        Without the throttled counter this run reported `status: ok`,
-        `errors: 0` and nothing else — indistinguishable from a clean poll that
-        found no new entries.
+        It must still not read as a clean run (ISSUE-347): `partial_error`, the
+        throttled count and the per-feed fields are what tell it apart.
         """
         _seed_db(ctx, feeds=[{"url": "https://throttled.test/feed"}])
 
@@ -400,15 +400,45 @@ class TestPoll:
         monkeypatch.setattr(httpx, "get", lambda *a, **kw: _Resp())
 
         runner = CliRunner()
-        r = runner.invoke(cli, ["poll"], obj=ctx, standalone_mode=False)
+        r = runner.invoke(cli, ["run-scheduled"], obj=ctx, standalone_mode=False)
         out = json.loads(r.output)
-        assert r.exit_code == 1
-        assert out["status"] == "error"
+        assert r.exit_code == 0
+        assert out["status"] == "partial_error"
+        assert out["polled"] == 1
         assert out["throttled"] == 1
         assert out["errors"] == 0
-        assert "rate-limited" in out["error"]
         assert out["feeds"][0]["rate_limited"] is True
         assert out["feeds"][0]["retry_after_seconds"] == 120
+
+    def test_a_partly_throttled_run_stays_ok(self, ctx, monkeypatch):
+        _seed_db(ctx, feeds=[
+            {"url": "https://throttled.test/feed"},
+            {"url": "https://fine.test/feed"},
+        ])
+
+        class _Throttled:
+            status_code = 429
+            headers = {"Retry-After": "120"}
+
+        class _Empty:
+            status_code = 200
+            headers = {}
+            text = "<rss version='2.0'><channel><title>t</title></channel></rss>"
+            content = text.encode()
+
+        import httpx
+        monkeypatch.setattr(
+            httpx, "get",
+            lambda url, *a, **kw: _Throttled() if "throttled" in url else _Empty(),
+        )
+
+        r = _invoke(ctx, ["poll"])
+        out = json.loads(r.output)
+        assert r.exit_code == 0
+        assert out["status"] == "ok"
+        assert out["polled"] == 2
+        assert out["throttled"] == 1
+        assert out["errors"] == 0
 
     def test_a_run_whose_only_due_feed_fails_is_not_a_task_failure(
         self, ctx, monkeypatch,
