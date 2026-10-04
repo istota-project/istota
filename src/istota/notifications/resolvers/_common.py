@@ -49,6 +49,21 @@ if TYPE_CHECKING:
     import sqlite3
 
     from istota.notifications.sources import NotificationRow
+    from istota.notifications.store import RaiseResult
+
+
+def pushing_only(result: "RaiseResult | None", text: str) -> "RaiseResult | None":
+    """``result`` with its push cut to its title and ``text``, the row untouched.
+
+    For a row whose stored body is somebody's words, or is wrong for this one
+    push: the bell keeps the row, and the push, which can land in a room,
+    carries only the notice (#638).
+    """
+    from dataclasses import replace
+
+    if result is None:
+        return None
+    return replace(result, text=f"{result.title}\n\n{text}")
 
 
 def object_dedup_key(prefix: str, value: object) -> str:

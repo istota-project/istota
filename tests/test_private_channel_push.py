@@ -283,8 +283,47 @@ class TestThePark:
         with patch("istota.rooms.private_replies.private_room_for", return_value=None):
             task = _run(config, ident, QUESTION)
         assert task.status == "pending_confirmation"
-        assert fake_talk.calls_to(alerts.talk_ref, method="send_message")
+        (posted,) = fake_talk.calls_to(alerts.talk_ref, method="send_message")
         assert ntfy == []
+        # #638: the alerts room gets a notice about the question, never the
+        # question itself; the bell shows the question.
+        assert "invite" not in posted.args["message"]
+        assert f"#{ident}" in posted.args["message"]
+        assert "notification" in posted.args["message"]
+
+    def test_the_bell_still_shows_the_question(self, config, fake_talk):
+        """The stored row carries fixed text for the push; the bell renders the
+        question from the live task, so nothing is lost by the change."""
+        from istota.notifications.store import list_open
+
+        fake_talk.db_path = config.db_path
+        with db.get_db(config.db_path) as conn:
+            web = db.create_web_chat_room(conn, "alice", "general").token
+            ident = db.create_task(conn, prompt="send the invite", user_id="alice",
+                                   source_type="web", conversation_token=web,
+                                   output_target="room")
+        with patch("istota.scheduler.deliver_pending"):
+            _run(config, ident, QUESTION)
+        stored = _rows(config, "SELECT title, body FROM notifications "
+                               "WHERE source = 'confirmation'")
+        assert stored == [{"title": confirmation_source.park_title(ident),
+                           "body": confirmation_source.PARK_BODY}]
+        with db.get_db(config.db_path) as conn:
+            (item,), _total = list_open(config, conn, "alice")
+        assert "invite" in item.title + item.body
+
+    def test_a_web_origin_parks_push_carries_no_question(self, config, ntfy, fake_talk):
+        fake_talk.db_path = config.db_path
+        with db.get_db(config.db_path) as conn:
+            web = db.create_web_chat_room(conn, "alice", "general").token
+            ident = db.create_task(conn, prompt="send the invite", user_id="alice",
+                                   source_type="web", conversation_token=web,
+                                   output_target="room")
+        config.users["alice"].routing = {"alert": "ntfy"}
+        _run(config, ident, QUESTION)
+        ((_user, message),) = ntfy
+        # ntfy carries the title in a header, so the message is the body alone.
+        assert message == confirmation_source.PARK_BODY
 
     def test_a_talk_private_room_that_delivers_pushes_nothing_more(
         self, config, monkeypatch, fake_talk,

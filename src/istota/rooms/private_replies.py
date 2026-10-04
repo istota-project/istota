@@ -541,14 +541,15 @@ def _existing(conn, delivery_reference: str, user_id: str) -> PrivateDestination
 
 
 def _bell_note(conn, *, user_id: str, about: str, reference: str, body: str, task_id):
-    from istota.notifications.resolvers import task_alert
+    from istota.notifications.resolvers import _common, task_alert
 
-    return task_alert.write(
+    # The bell keeps the note; the push can land in the alerts room (#638).
+    return _common.pushing_only(task_alert.write(
         conn, user_id, dedup_key=task_alert.private_note_key(reference),
         title=f"Private note about {room_label(db.get_room(conn, about))}",
         body=body, severity="info",
         params={"alert_type": PRIVATE_NOTE_ALERT, "about_room": about, "task_id": task_id},
-    )
+    ), task_alert.PRIVATE_NOTE_POINTER)
 
 
 def deliver_private(conn, config, *, user_id: str, about_token: str, kind: str,

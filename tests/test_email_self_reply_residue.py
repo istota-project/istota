@@ -372,6 +372,16 @@ class TestTheChannelSleepCycle:
 # ---------------------------------------------------------------------------
 
 
+def _undelivered_body(db_path):
+    """The bell row's stored body for the one undelivered-result notice."""
+    with db.get_db(db_path) as conn:
+        (row,) = conn.execute(
+            "SELECT body FROM notifications WHERE source = 'task_alert' "
+            "AND dedup_key LIKE 'undelivered:%'",
+        ).fetchall()
+    return row[0]
+
+
 class TestAPermanentFailureReachesTheUser:
     """`process_one_task` delivers a user-facing error only under `plan_talk and
     talk_token`, beside a comment recording a deliberate decision never to email
@@ -456,11 +466,12 @@ class TestAPermanentFailureReachesTheUser:
             if c.kwargs.get("purpose") == "alert"
         ]
         assert alerts, "a failed self-reply told the user nothing"
-        body = alerts[0].args[2]
-        assert PARTIAL_WORK_MARKER in body
+        # The push is a notice; the partial work is model prose and stays in
+        # the bell row, where the failure still leads (#638).
+        assert "cursor" not in alerts[0].args[2]
+        body = _undelivered_body(db_path)
         assert "The poller's cursor never advances." in body
-        # The failure still leads.
-        assert body.index(PARTIAL_WORK_MARKER) > 0
+        assert body.index(PARTIAL_WORK_MARKER) > body.index("failed")
 
     def test_a_thread_rooms_email_only_plan_stays_silent(
         self, db_path, config,
@@ -627,8 +638,10 @@ class TestADeliveryFailureKeepsTheAnswer:
             c for c in notify.call_args_list
             if c.kwargs.get("purpose") == "alert"
         ]
-        assert alerts, "the only copy of the answer was left in tasks.result"
-        assert "The number is 42." in alerts[0].args[2]
+        assert alerts, "the user was not told the reply failed"
+        # The push points at the answer and the bell row carries it (#638).
+        assert "42" not in alerts[0].args[2]
+        assert "The number is 42." in _undelivered_body(db_path)
 
     def test_a_structured_result_is_unwrapped_first(self, db_path, config):
         """An email task's `result` may *be* the `{"subject","body","format"}`
@@ -656,12 +669,13 @@ class TestADeliveryFailureKeepsTheAnswer:
         ):
             process_one_task(config)
 
-        body = [
+        assert [
             c for c in notify.call_args_list
             if c.kwargs.get("purpose") == "alert"
-        ][0].args[2]
+        ]
+        body = _undelivered_body(db_path)
         assert "The number is 42." in body
-        assert '"subject"' not in body
+        assert "subject" not in body
 
     def test_an_external_thread_is_left_alone(self, db_path, config):
         """The guard. An emissary reply keeps its room leg, so a failed send

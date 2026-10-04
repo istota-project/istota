@@ -7,7 +7,9 @@ alert" or a "your emailed request failed" notice. So this source is the one with
 ``auto_resolve_on_seen = True``: the row closes when the panel is opened with it
 visible, and :func:`istota.notifications.store.sweep_expired_alerts` is the
 backstop for rows that fell below the render limit or belong to a user who never
-opens the panel.
+opens the panel. Two kinds are exempt and stay until dismissed
+(``KEPT_UNTIL_DISMISSED``): ``undelivered:`` and ``private-note:`` rows hold
+text their push no longer carries, so the row is the user's copy (#638).
 
 Each producer writes here under its own key:
 
@@ -157,12 +159,27 @@ MAX_PARAM_ENTRIES = 20
 # task result lives in `tasks.result`; this is the readable record of it.
 MAX_ALERT_BODY_CHARS = 1000
 MAX_ALERT_TITLE_CHARS = 160
+# An `undelivered:` row keeps the text its push no longer carries (#638), so it
+# holds a whole answer: the Talk transport's own split size, still a bound.
+MAX_UNDELIVERED_BODY_CHARS = 30_000
+
+# What an undelivered-result notice pushes in place of the text (#638). The
+# alert route can be a room, and a room gets notices about the conversation,
+# never the conversation.
+UNDELIVERED_POINTER = (
+    "A copy is kept with this notice in your notifications in the web app."
+)
+
+# Rows that are the user's only copy of what their push left out, so neither
+# being seen nor the alert clock closes them; Dismiss does.
+KEPT_UNTIL_DISMISSED = ("undelivered:", "private-note:")
 
 # Why there are no buttons. `status_note` exists precisely so this is
 # distinguishable from "no actions because nobody registered this source".
 STATUS_NOTE = (
     "This notice has no in-app action. It clears itself once you have seen it."
 )
+KEPT_STATUS_NOTE = "This notice stays until you dismiss it."
 
 
 def flatten(text: str | None) -> str:
@@ -287,6 +304,26 @@ def undelivered_key(task_id: int | str) -> str:
     return f"undelivered:{_slug(task_id, limit=24, fallback='0')}"
 
 
+def undelivered_push(title: str, detail: str = "") -> str:
+    """The push for an undelivered-result notice: a title, an optional
+    system-composed detail, and the pointer. Never the text it is about."""
+    parts = [f"⚠️ **{title}**"]
+    if detail:
+        parts.append(detail)
+    parts.append(UNDELIVERED_POINTER)
+    return "\n\n".join(parts)
+
+
+# What a private note's bell row pushes in place of the note (#638).
+PRIVATE_NOTE_POINTER = "Open your notifications in the web app to read it."
+
+
+def _body_cap(dedup_key: str | None) -> int:
+    if (dedup_key or "").startswith("undelivered:"):
+        return MAX_UNDELIVERED_BODY_CHARS
+    return MAX_ALERT_BODY_CHARS
+
+
 def private_note_key(reference: str) -> str:
     """A private note for a member with no private room (`rooms.private_replies`)."""
     return f"private-note:{_slug(reference, limit=64, fallback='0')}"
@@ -364,7 +401,7 @@ def write(
             source=SOURCE,
             dedup_key=dedup_key,
             title=flatten(title)[:MAX_ALERT_TITLE_CHARS] or "Notice",
-            body=flatten_body(body)[:MAX_ALERT_BODY_CHARS],
+            body=flatten_body(body)[:_body_cap(dedup_key)],
             severity=severity,
             actionable=actionable,
             params=params or {},
@@ -461,7 +498,7 @@ def body_for(row: "NotificationRow") -> str:
         rendered = "\n".join(f"- {line}" for line in lines if line)
         if rendered:
             return rendered[:MAX_ALERT_BODY_CHARS]
-    return flatten_body(row.body)[:MAX_ALERT_BODY_CHARS]
+    return flatten_body(row.body)[:_body_cap(row.dedup_key)]
 
 
 class TaskAlertResolver:
@@ -469,6 +506,7 @@ class TaskAlertResolver:
     # The whole point of this source. Nothing outside the table will ever close
     # one of these rows, so being read is what closes it.
     auto_resolve_on_seen = True
+    kept_until_dismissed = KEPT_UNTIL_DISMISSED
 
     def resolve(
         self, config: "Config", conn: "sqlite3.Connection", row: "NotificationRow",
@@ -490,7 +528,8 @@ class TaskAlertResolver:
             severity=row.severity,
             actions=(),
             link=None,
-            status_note=STATUS_NOTE,
+            status_note=(KEPT_STATUS_NOTE if (row.dedup_key or "").startswith(KEPT_UNTIL_DISMISSED)
+                         else STATUS_NOTE),
         )
 
 
