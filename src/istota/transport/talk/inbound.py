@@ -687,12 +687,19 @@ def _apply_room_pass(
             # rooms were folded in with NULL names; without this they'd show the
             # generic "Talk room" until their next message). Talk-origin only —
             # a web-origin (incl. promoted) room's user-set name wins.
-            if (
-                existing_room.origin == "talk"
-                and plan.display_name
-                and existing_room.name != plan.display_name
-            ):
-                db.rename_room(conn, plan.canonical, plan.display_name)
+            if existing_room.origin == "talk":
+                if db.get_room_binding(conn, plan.canonical, "talk") is None:
+                    # A room migrated with no binding row has nowhere to keep
+                    # the last-seen name; ingest binds the same pair on every
+                    # inbound. Seeded as the migration seeds Talk bindings.
+                    db.add_room_binding(conn, plan.canonical, "talk", plan.token)
+                    if existing_room.name:
+                        db.record_external_room_name(
+                            conn, plan.canonical, "talk", existing_room.name,
+                        )
+                db.observe_external_room_name(
+                    conn, plan.canonical, "talk", plan.display_name,
+                )
         elif plan.conv_type != 4 and plan.participants is not None:
             # Register the Talk room in the unified registry on first sight so
             # it surfaces in web chat even when no one has messaged the bot in
@@ -719,6 +726,9 @@ def _apply_room_pass(
             ) if member_ids else None
             if room is not None:
                 plan.canonical = room.token
+                db.observe_external_room_name(
+                    conn, plan.canonical, "talk", plan.display_name,
+                )
                 # Founders, not joiners: the room is registered the first
                 # time it is seen, so everyone on its roster now — guests
                 # included — is who it was already written for.
