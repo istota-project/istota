@@ -514,20 +514,6 @@ def _poll_due(ctx: FeedsContext, limit) -> None:
     # due (ISSUE-604). A dead feed surfaces on the feed itself, through
     # `last_error` and its backoff.
     polled = len(outcomes)
-    # A wholly throttled run is still a hard failure (ISSUE-347). It is not a
-    # *feed* failure, so it does not go through `error_total`, but reporting it
-    # as a success that found nothing is the silence this counter exists to
-    # break.
-    if polled and throttled_total == polled:
-        _output(_err(
-            f"all {polled} feed poll(s) were rate-limited",
-            polled=polled,
-            new_entries=new_total,
-            errors=error_total,
-            throttled=throttled_total,
-            feeds=summary,
-        ))
-        return
     payload = _ok(
         polled=polled,
         new_entries=new_total,
@@ -535,7 +521,11 @@ def _poll_due(ctx: FeedsContext, limit) -> None:
         throttled=throttled_total,
         feeds=summary,
     )
-    if error_total:
+    # A wholly throttled run is `partial_error` too, never a task failure: like
+    # the all-errored case it is usually one due feed, and the 429 already
+    # pushed that feed past the retry (ISSUE-621). `partial_error` plus the
+    # throttled count is what keeps it from reading as a clean run (ISSUE-347).
+    if error_total or (polled and throttled_total == polled):
         payload["status"] = "partial_error"
     _output(payload)
 
