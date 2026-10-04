@@ -19,7 +19,7 @@ from ...async_runtime import get_talk_client
 from ...config import Config
 from istota.nextcloud.talk import TalkClient, clean_message_content
 from .._types import WEBMIRROR_REF_PREFIX, IncomingMessage, ParticipantRef
-from ..ingest import classify_ahead, ingest_message
+from ..ingest import classifier_refs, classify_ahead, ingest_message
 from ..participants import classify as classify_participant
 from ..participants import guest_label
 from ._db_lock import DB_BUSY_TIMEOUT_MS, loop_db_lock, talk_db
@@ -1555,8 +1555,8 @@ async def _classify_batch_ahead(
     """The speech gate's classifier answers for a batch, keyed ``(token, id)``.
 
     Runs before ``_process_poll_results`` opens its transaction, so no model
-    call holds the write lock. Empty unless ``[speech_gate] mode`` is
-    ``classifier``. Only an unmentioned istota user's turn can reach the
+    call holds the write lock. Empty for a conversation whose room is not on
+    the classifier, by its own ``speech_mode`` or the deployment's. Only an unmentioned istota user's turn can reach the
     classifier rung, so only those are submitted, and `classify_ahead` drops
     the ones in a room holding one human; each sees the turns ahead of it in
     the batch, guests' included, which are not stored yet. A turn this pass did not answer is
@@ -1571,10 +1571,17 @@ async def _classify_batch_ahead(
     This pass reads the same filters the results loop applies but acts on
     none of them; the loop still decides what happens to every message.
     """
-    if speech_gate.normalize_mode(config.speech_gate.mode) != "classifier":
+    # Per conversation, not the deployment's mode alone: a room can opt in on
+    # its own (ISSUE-640), and one opted out needs no roster fetch.
+    on = await asyncio.to_thread(
+        classifier_refs, config, "talk", [token for token, _m in results],
+    )
+    if not on:
         return {}
     jobs: list[tuple[tuple[str, int], dict]] = []
     for conversation_token, messages in results:
+        if conversation_token not in on:
+            continue
         earlier: list[tuple[str, str]] = []
         participants: list[dict] | None = None
         for msg in messages:

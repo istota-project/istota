@@ -349,6 +349,39 @@ def guest_prompt(label: str, host: str, text: str) -> str:
     )
 
 
+def classifier_refs(config, surface: str, surface_refs: Sequence[str]) -> set[str]:
+    """The conversations among ``surface_refs`` whose room is on the classifier.
+
+    For a batch pre-pass to drop the others before it fetches a roster for
+    them. The rule is `classify_ahead`'s own (`room_policy.classifier_in_use`,
+    then the room's effective mode), so the two cannot disagree; a read error
+    keeps every ref on a classifier deployment, leaving `classify_ahead` to
+    decide each one, and none on any other, where a roster fetch per
+    conversation would buy nothing on the common path.
+    """
+    refs = set(surface_refs)
+    if not refs:
+        return set()
+    try:
+        with db.get_db(config.db_path) as conn:
+            if not room_policy.classifier_in_use(conn, config.speech_gate.mode):
+                return set()
+            on = set()
+            for ref in refs:
+                room_token = db.resolve_room_token(conn, surface, ref) or ref
+                mode = room_policy.effective_speech_mode(
+                    conn, room_token, config.speech_gate.mode,
+                )
+                if speech_gate.normalize_mode(mode) == "classifier":
+                    on.add(ref)
+            return on
+    except Exception as e:  # noqa: BLE001 — classify_ahead still decides each turn
+        logger.warning("speech gate: reading room modes failed: %s", type(e).__name__)
+        if speech_gate.normalize_mode(config.speech_gate.mode) == "classifier":
+            return refs
+        return set()
+
+
 def classify_ahead(
     config: "Config",
     *,
@@ -371,11 +404,12 @@ def classify_ahead(
     that would be a write lock held for the whole call. The window is read on a
     connection of its own, closed before the model is asked.
 
-    None when the classifier rung cannot be reached — any mode but
-    ``classifier``, a turn addressed to the bot, a surface that does not own
-    its rooms, or a room `participants.is_multi_human` says holds one human
-    (the predicate `record_inbound`'s gate reads) — so the default mode costs
-    one string comparison. ``room_container`` is the caller's statement that
+    None when the classifier rung cannot be reached — a turn addressed to the
+    bot, a surface that does not own its rooms, no room on the classifier at
+    all (`room_policy.classifier_in_use`), or a room
+    `participants.is_multi_human` says holds one human (the predicate
+    `record_inbound`'s gate reads) — so the default mode with no opted-in
+    room costs one read of the small `room_policy` table and no model call. ``room_container`` is the caller's statement that
     the conversation is a WhatsApp group or an email thread room (D10), and the
     room's own effective mode (`room_policy.effective_speech_mode`) decides
     once the room is read, so an email thread room on a classifier deployment
@@ -386,8 +420,6 @@ def classify_ahead(
     the gate reads as "do not speak".
     """
     gate = config.speech_gate
-    if speech_gate.normalize_mode(gate.mode) != "classifier":
-        return None
     if addressed_to_bot or not is_room_member_for(surface, room_container=room_container):
         return None
     source_type = source_type or surface
@@ -395,6 +427,10 @@ def classify_ahead(
         from ..executor import build_speech_gate_completer
 
         with db.get_db(config.db_path) as conn:
+            # Not the deployment's mode alone: a room can opt in on its own
+            # (ISSUE-640), and the per-room check below decides for it.
+            if not room_policy.classifier_in_use(conn, gate.mode):
+                return None
             room_token = (
                 db.resolve_room_token(conn, surface, surface_ref) or surface_ref
             )

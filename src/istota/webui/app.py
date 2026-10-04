@@ -6249,6 +6249,7 @@ class _RoomSettingsRefused(Exception):
 def _chat_update_room(
     username: str, room_id: int, name: str | None, archived: bool | None,
     model=_UNSET, effort=_UNSET, brain=_UNSET, color=_UNSET, guest_reply=_UNSET,
+    speech_mode=_UNSET,
 ) -> dict | None:
     """Apply a room PATCH. `_UNSET` on a field means its key was absent.
 
@@ -6298,6 +6299,10 @@ def _chat_update_room(
                 raise _RoomSettingsRefused(refusal)
         if guest_reply is not _UNSET:
             refusal = room_policy.guest_reply_refusal(conn, room.token, username)
+            if refusal:
+                raise _RoomSettingsRefused(refusal)
+        if speech_mode is not _UNSET:
+            refusal = room_policy.speech_mode_refusal(conn, room.token, username)
             if refusal:
                 raise _RoomSettingsRefused(refusal)
         # `_UNSET` → leave the column alone; `None` (an explicit null or "" in
@@ -6374,6 +6379,8 @@ def _chat_update_room(
                 db.rename_room(conn, updated.token, updated.name)
             if guest_reply is not _UNSET:
                 room_policy.set_guest_reply(conn, updated.token, guest_reply)
+            if speech_mode is not _UNSET:
+                room_policy.set_speech_mode(conn, updated.token, speech_mode)
             if archived is not None:
                 reg = db.get_room(conn, updated.token)
                 if _is_talk_backed(conn, reg, updated.token):
@@ -6566,6 +6573,17 @@ def _room_sharing(conn, reg, username: str) -> dict:
             # An email thread room has no guest mode, so the modal hides the
             # guest reply setting (`private_replies.guest_reply_mode`).
             "email_thread": db.get_room_binding(conn, reg.token, "email") is not None,
+            # The room's own speech mode (null: it follows the deployment),
+            # what it resolves to now, and what following the deployment
+            # means, so the modal can label "Follow deployment" (ISSUE-640).
+            "speech_mode": room_policy.normalize_mode(policy.speech_mode),
+            "effective_speech_mode": room_policy.effective_speech_mode(
+                conn, reg.token, _config.speech_gate.mode,
+            ),
+            "deployment_speech_mode": (
+                room_policy.normalize_mode(_config.speech_gate.mode)
+                or _config.speech_gate.mode
+            ),
             "settings_refusal": refusal,
         },
     }
@@ -9318,6 +9336,16 @@ async def chat_update_room(
         guest_reply = str(data["guest_reply"] or "").strip().lower()
         if guest_reply not in GUEST_REPLY_VALUES:
             return JSONResponse({"error": "invalid guest_reply"}, status_code=400)
+    # When the bot answers an unaddressed turn here (ISSUE-640). Host only, and
+    # refused on an email thread room; "" or null means `default`.
+    speech_mode = _UNSET
+    if "speech_mode" in data:
+        from istota.rooms.policy import DEFAULT_SPEECH_MODE, SPEECH_MODE_VALUES
+        speech_mode = (
+            str(data["speech_mode"] or "").strip().lower() or DEFAULT_SPEECH_MODE
+        )
+        if speech_mode not in SPEECH_MODE_VALUES:
+            return JSONResponse({"error": "invalid speech_mode"}, status_code=400)
     # Per-room brain pin. Same key-presence contract as `model` — absent leaves
     # it alone, "" / null clears it, a string sets it — and the same three
     # answers `!brain` gives, in the same order and for the same reasons.
@@ -9387,7 +9415,7 @@ async def chat_update_room(
     try:
         updated = await asyncio.to_thread(
             _chat_update_room, user["username"], room_id, name, archived, model,
-            effort, brain, color, guest_reply,
+            effort, brain, color, guest_reply, speech_mode,
         )
     except _RoomSettingsRefused as refused:
         return JSONResponse({"error": str(refused)}, status_code=403)

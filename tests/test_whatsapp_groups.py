@@ -707,6 +707,23 @@ class TestTheClassifierReachesTheGroup:
 
         assert decision is not None and decision.speak
 
+    def test_a_group_opted_in_on_a_mention_deployment_is_classified(self, group):
+        """ISSUE-640: the group's own mode decides, not the deployment's alone."""
+        from istota.rooms import policy as room_policy
+        from istota.transport.whatsapp.groups import classify_group_event
+
+        group.speech_gate.mode = "mention"
+        with db.get_db(group.db_path) as conn:
+            token = conn.execute(
+                "SELECT room_token FROM room_bindings WHERE surface = 'whatsapp'"
+            ).fetchone()[0]
+            room_policy.set_speech_mode(conn, token, "classifier")
+        with patch("istota.executor.build_speech_gate_completer",
+                   return_value=lambda prompt: '{"speak": true, "reason": "asked"}'):
+            decision = classify_group_event(group, _message("plumber?", message_id="C4"))
+
+        assert decision is not None and decision.rung == "classifier"
+
 
 # ---------------------------------------------------------------------------
 # A private chat's minted room beside a group room (room-surface-model Stage 20)

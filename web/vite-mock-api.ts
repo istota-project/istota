@@ -1442,6 +1442,8 @@ const mockRoomHosts = new Map<number, string | null>([
   [3, 'carol'],
 ]);
 const mockRoomGuestReply = new Map<number, 'off' | 'held' | 'direct'>();
+const mockRoomSpeechMode = new Map<number, 'mention' | 'classifier' | 'off'>();
+const MOCK_DEPLOYMENT_SPEECH_MODE = 'mention';
 const mockRoomGroups = new Map<number, string | null>();
 const mockRoomsWithGuests = new Set<number>([2]);
 const mockRoomsOff = new Set<number>([2]);
@@ -1486,6 +1488,9 @@ function mockRoomSharing(room: MockChatRoom) {
       host,
       is_host: host === 'carol',
       guest_reply: mockRoomGuestReply.get(room.id) ?? 'direct',
+      speech_mode: mockRoomSpeechMode.get(room.id) ?? null,
+      effective_speech_mode: mockRoomSpeechMode.get(room.id) ?? MOCK_DEPLOYMENT_SPEECH_MODE,
+      deployment_speech_mode: MOCK_DEPLOYMENT_SPEECH_MODE,
       settings_refusal: mockSettingsRefusal(room.id),
     },
   };
@@ -1874,8 +1879,18 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
     const room = mockChatRooms.find((r) => r.id === Number(roomPatch[1]));
     if (!room) return { error: 'room not found' };
     const refusal = mockSettingsRefusal(room.id);
-    if (refusal && ['name', 'model', 'effort', 'guest_reply'].some((k) => k in (body ?? {})))
+    if (
+      refusal &&
+      ['name', 'model', 'effort', 'guest_reply', 'speech_mode'].some((k) => k in (body ?? {}))
+    )
       return { __status: 403, error: refusal };
+    if ('speech_mode' in (body ?? {})) {
+      const mode = String(body.speech_mode || '').toLowerCase() || 'default';
+      if (!['mention', 'classifier', 'off', 'default'].includes(mode))
+        return { __status: 400, error: 'invalid speech_mode' };
+      if (mode === 'default') mockRoomSpeechMode.delete(room.id);
+      else mockRoomSpeechMode.set(room.id, mode as 'mention' | 'classifier' | 'off');
+    }
     if (body?.guest_reply != null) {
       if (!['off', 'held', 'direct'].includes(body.guest_reply))
         return { __status: 400, error: 'unknown guest_reply' };
