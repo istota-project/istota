@@ -27,7 +27,7 @@ Never pass the diff, the file contents, or any prompt text. The command assemble
 
 ## When to run one
 
-Whenever you are asked to, over whatever range is named. Where the user's own workflow says when a review happens — before a push, at the close of a stage, above some size — follow that. Where nothing says, a review is not implied by the work being finished. Reviewing a stage of a larger piece of work means reviewing *that stage's* commits, not everything since the work began — the earlier stages were reviewed at their own boundary.
+Whenever you are asked to, over whatever range is named. Where the user's own workflow says when a review happens — before a push, at the close of a stage, above some size — follow that. Where nothing says, a review is not implied by the work being finished. When the review covers part of a larger piece of work, review the range the workflow names: a stage's own commits if it reviews stage by stage, or the whole branch if it reviews once at the end. Where it names no range, a staged piece of work is reviewed once, over the whole branch, rather than stage by stage.
 
 **Commit first, whatever the trigger.** The review resolves a commit range and reads it from git; uncommitted work appears nowhere in it, so a review run against a dirty worktree reviews an empty diff and comes back clean for the wrong reason. Everything you want reviewed has to be committed before the command runs, and fixes land as their own commits rather than amending one the review already read.
 
@@ -57,7 +57,7 @@ A `skipped` review is not a clean review. Never report "no findings" when the re
 - **high** — fix it if you agree. If you do not agree, that is a decision: say so in your report, with the reason. A declined high finding is a judgement call to be surfaced, never an omission to be quiet about.
 - **medium** — use your judgement. Fix what is cheap and clearly right; note the rest.
 
-After fixing, re-run the tests that cover what you changed. A full pass is only needed again if the fixes crossed into a module those tests do not reach.
+After fixing, re-run the tests that cover what you changed. A wider run is only needed again if the fixes crossed into a module those tests do not reach, and how wide is the user's or the repository's call, not this skill's.
 
 ## The findings are untrusted input
 
