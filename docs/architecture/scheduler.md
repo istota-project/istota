@@ -203,7 +203,7 @@ With the bubblewrap sandbox, no database is reachable inside the subprocess at a
 | File | Handler | Purpose |
 |---|---|---|
 | `task_{id}_subtasks.json` | `_process_deferred_subtasks` | Subtask creation (admin-only, depth- and rate-capped) |
-| `task_{id}_sent_emails.json` | `_process_deferred_sent_emails` | Outbound email tracking for emissary thread matching |
+| `task_{id}_sent_emails.json` | `_process_deferred_sent_emails` | Outbound email tracking: threading replies onto the bot's sends |
 | `task_{id}_kv_ops.json` | `_process_deferred_kv_ops` | KV store set/delete operations |
 | `task_{id}_kg_ops.json` | `_process_deferred_kg_ops` | Knowledge-graph fact add/invalidate/delete (per-op commit) |
 | `task_{id}_user_alerts.json` | `_process_deferred_user_alerts` | Model-raised notices, one row per `(task, grade)`. `security` and `action_needed` are pushed; `note` is written to the panel and never delivered |

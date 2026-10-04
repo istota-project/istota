@@ -67,9 +67,6 @@ disabled_modules = ["money"]
 # Default delivery surface for results/notifications when nothing else applies
 default_destination = "talk"   # talk | email | sms | ntfy | web | surface:channel | comma list
 
-# Where replies to inbound email threads are delivered
-email_reply_routing = "origin+thread"   # origin+thread (default) | origin | thread
-
 # A KeePass (KDBX) file this user maintains, which Istota reads and never
 # writes. Set it only to name a file somewhere other than their own
 # `istota/vault/` folder, which is the ordinary route and needs no line here.

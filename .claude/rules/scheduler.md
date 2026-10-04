@@ -73,7 +73,7 @@ Sandboxed tasks have no DB, so they and skill CLIs write JSON to the temp dir an
 
 - `_process_deferred_subtasks`: admin-only (others deleted), `source_type="subtask"`, inherits `queue`.
 - `_process_retired_deferred_files`: deletes `_RETIRED_DEFERRED_SUFFIXES` files (`tracked_transactions`, ISSUE-427, fed dead framework tables). Runs first; must precede `_warn_unconsumed_deferred_files`. The suffix stays in `_KNOWN_DEFERRED_SUFFIXES` (purge still clears it) but not in the `expected name:` hint.
-- `_process_deferred_sent_emails`: `sent_emails` rows for emissary reply matching.
+- `_process_deferred_sent_emails`: `sent_emails` rows, which thread replies onto the bot's sends and mint their rooms (`threads.register_sent_thread`).
 - `_process_deferred_kg_ops`: commits per op.
 - `_process_deferred_kv_ops`: set ops re-read the value so they compose; `set-trim` skipped on a missing row. Non-dict entries skipped (ISSUE-451; `_load_deferred_json` checks only the outer list); same in sent_emails.
 - `_process_deferred_user_alerts`; `_load_deferred_email_output` (preferred over stdout-JSON).

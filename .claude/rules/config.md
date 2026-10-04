@@ -200,7 +200,7 @@ A bare `[sleep_cycle]` header keeps `enabled = True` (the old loader made it fal
 
 ## Per-user profile fields
 
-- `email_reply_routing` (`origin+thread`|`origin`|`thread`) via `Config.email_reply_routing_for`.
+- `email_reply_routing` is retired (email on rooms stage 4): the column is dropped at init, and a `[users.X]` TOML value is warned about in `_parse_user_data` (users are parsed by hand, outside the `config_mapper` walk) and ignored.
 - `outbound_approval` (`''`|`off`|`untrusted`|`all`): `''` is unset, resolves to the floor. `mail.outbound_policy.effective_policy` = `max(floor, user)`: users tighten, never loosen. An invalid row warns and counts as unset.
 - `external_turn_display` (`collapsed`): `hidden` still shows the header row, since a bot answer with no question above it is the ISSUE-136 defect.
 - `briefing_email_html` (true; unknown user → True): `multipart/alternative` via `render_briefing_html`.

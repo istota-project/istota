@@ -29,7 +29,7 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 | `talk_messages` | Poller-fed message cache for conversation context |
 | `processed_emails` | Email dedup with RFC 5322 thread tracking |
 | `email_poll_state` | Inbound poll cursor, one row per polled folder: `folder, uidvalidity, last_uid, updated_at`. Each tick takes the oldest `email_poll_batch_size` UIDs *above* `last_uid`, so the batch is a boundary rather than a window and a backlog drains instead of truncating. A changed `uidvalidity` means the mailbox was recreated and UIDs restarted, so the cursor is meaningless and resets (ISSUE-250) |
-| `sent_emails` | Outbound email tracking for emissary thread matching |
+| `sent_emails` | Outbound email tracking: threading replies onto the bot's sends |
 | `signup_tags` | One row per credential Istota created with a signup address: `tag, user_id, slug`, plus `reserved_at`, `opened_at` (null while the vault write is pending), `task_minted_at` and `closed_at`. `UNIQUE(user_id, slug)`. Deleting the credential from the vault closes the tag. See [signup addresses](../features/email.md) |
 | `signup_emails` | Mail filed against an open signup tag: `tag, user_id, sender, subject, body, received_at`. Never used as a task prompt; read through `istota-skill email signup-inbox`. Bodies are blanked after `[email] signup_body_retention_days`, rows kept. The matching `processed_emails` row has `routing_method = 'signup'` |
 | `trusted_email_senders` | Per-user fnmatch allowlist for the email trust gate, read in both directions (inbound confirmation and outbound approval) |
