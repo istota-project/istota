@@ -298,3 +298,133 @@ class TestToolResults:
         from testbed.services.model_endpoint import ScriptedEndpoint
 
         assert ScriptedEndpoint([{"text": "ok"}]).tool_results() == []
+
+    def test_anthropic_tool_result_blocks_are_read_and_errors_marked(self):
+        """The `claude` CLI's shape: blocks in a `user` message, `is_error`
+        beside them, content a string or a list of text blocks."""
+        from testbed.services.model_endpoint import ERROR_PREFIX
+
+        endpoint = self._endpoint_with({"messages": [
+            {"role": "user", "content": [{"type": "text", "text": "prompt"}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "a", "content": "read ok"},
+                {"type": "tool_result", "tool_use_id": "b", "is_error": True,
+                 "content": [{"type": "text", "text": "File does not exist."}]},
+            ]},
+        ]})
+
+        assert endpoint.tool_results_by_id() == {
+            "a": "read ok",
+            "b": ERROR_PREFIX + "File does not exist.",
+        }
+
+
+def _post(endpoint, body: dict) -> tuple[int, list[tuple[str, dict]]]:
+    """POST to `/v1/messages` and parse the SSE reply into `(event, data)`."""
+    import json
+    import urllib.request
+
+    request = urllib.request.Request(
+        endpoint.url.removesuffix("/v1") + "/v1/messages?beta=true",
+        data=json.dumps(body).encode(),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        status, text = response.status, response.read().decode()
+    events = []
+    for frame in text.split("\n\n"):
+        lines = dict(
+            line.split(": ", 1) for line in frame.splitlines() if ": " in line
+        )
+        if "event" in lines:
+            events.append((lines["event"], json.loads(lines["data"])))
+    return status, events
+
+
+class TestTheAnthropicHalf:
+    """`/v1/messages`, the format the `claude` CLI speaks (ISSUE-614).
+
+    No Anthropic client is installed in the test extra, so the framing is held
+    by event shape here; the real client is the `claude` CLI in the smoke tier's
+    `TestTheClaudeReviewerIsConfinedByItsNamespace`.
+    """
+
+    def test_a_tool_call_turn_is_framed_as_tool_use_blocks(self):
+        import json
+
+        turn = {"tool_calls": [
+            {"id": "t1", "name": "Read", "arguments": {"file_path": "/x/y.txt"}},
+        ]}
+        with serve_script([turn]) as endpoint:
+            status, events = _post(endpoint, {"model": "m", "messages": []})
+
+        assert status == 200
+        names = [name for name, _ in events]
+        assert names[0] == "message_start" and names[-1] == "message_stop"
+        start = next(d for n, d in events if n == "content_block_start")
+        assert start["content_block"] == {
+            "type": "tool_use", "id": "t1", "name": "Read", "input": {},
+        }
+        partial = "".join(
+            d["delta"]["partial_json"] for n, d in events
+            if n == "content_block_delta"
+        )
+        assert json.loads(partial) == {"file_path": "/x/y.txt"}
+        delta = next(d for n, d in events if n == "message_delta")
+        assert delta["delta"]["stop_reason"] == "tool_use"
+
+    def test_a_text_turn_ends_the_turn(self):
+        with serve_script([{"text": "the answer"}]) as endpoint:
+            _, events = _post(endpoint, {"model": "m", "messages": []})
+
+        text = "".join(
+            d["delta"]["text"] for n, d in events if n == "content_block_delta"
+        )
+        assert text == "the answer"
+        delta = next(d for n, d in events if n == "message_delta")
+        assert delta["delta"]["stop_reason"] == "end_turn"
+
+    def test_the_head_check_and_the_title_call_take_no_turn(self):
+        """The CLI sends both around its first real turn; either one served
+        from the script shifts every scripted turn."""
+        import urllib.request
+
+        title = {"model": "m", "messages": [], "output_config": {"format": {
+            "type": "json_schema",
+            "schema": {"type": "object", "required": ["title"]},
+        }}}
+        with serve_script([{"text": "the real turn"}]) as endpoint:
+            head = urllib.request.Request(
+                endpoint.url.removesuffix("/v1") + "/", method="HEAD"
+            )
+            with urllib.request.urlopen(head, timeout=10) as response:
+                assert response.status == 200
+            _, title_events = _post(endpoint, title)
+            _, real_events = _post(endpoint, {"model": "m", "messages": []})
+
+            assert endpoint.served == 1
+            assert endpoint.titles_served == 1
+            assert len(endpoint.requests) == 1
+
+        real = "".join(
+            d["delta"]["text"] for n, d in real_events if n == "content_block_delta"
+        )
+        assert real == "the real turn"
+        title_text = "".join(
+            d["delta"]["text"] for n, d in title_events
+            if n == "content_block_delta"
+        )
+        assert "title" in title_text
+
+    def test_running_off_the_end_is_a_400_that_names_itself(self):
+        import json
+        import urllib.error
+
+        with serve_script([]) as endpoint:
+            with pytest.raises(urllib.error.HTTPError) as caught:
+                _post(endpoint, {"model": "m", "messages": []})
+
+        assert caught.value.code == 400
+        body = json.loads(caught.value.read())
+        assert "scripted endpoint exhausted" in body["error"]["message"]

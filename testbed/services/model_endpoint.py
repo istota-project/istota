@@ -1,4 +1,8 @@
-"""A scripted OpenAI-compatible endpoint, for driving the daemon offline.
+"""A scripted model endpoint, for driving the daemon offline.
+
+It speaks the OpenAI chat-completions format, which the native brain uses, and
+Anthropic's Messages format at `/v1/messages`, which the `claude` CLI uses.
+Both replay the same script, one turn per request, in call order.
 
 Why an HTTP server and not `llm/replay.py`'s `ReplayProvider`: the lean compose
 stack runs the daemon inside a container and the test on the host, so the
@@ -89,6 +93,9 @@ class ScriptedEndpoint(HttpStub):
         #: Requests turned away while the barrier was up. Read by `Stack.reset`
         #: to tell "nothing arrived during the swap" from "something did".
         self.refused: int = 0
+        #: `claude` CLI session-title requests, answered without a turn and
+        #: not recorded in `requests` (see `_is_title_request`).
+        self.titles_served: int = 0
         self._barred: bool = False
 
     # -- the `Service` members --------------------------------------------
@@ -161,6 +168,14 @@ class ScriptedEndpoint(HttpStub):
     def container_url(self) -> str:
         """For a caller inside a container on this host."""
         return f"http://{FROM_CONTAINER}:{self.port}/v1"
+
+    @property
+    def anthropic_container_url(self) -> str:
+        """`ANTHROPIC_BASE_URL` for a `claude` CLI inside a container.
+
+        No `/v1`: the CLI appends `/v1/messages` itself.
+        """
+        return f"http://{FROM_CONTAINER}:{self.port}"
 
     # -- scripting --------------------------------------------------------
 
@@ -284,6 +299,18 @@ class ScriptedEndpoint(HttpStub):
         and a failure-report renderer — an `AttributeError` from either reads as
         a harness crash mid-scenario rather than as the thing that went wrong.
         """
+        return list(self.tool_results_by_id().values())
+
+    def tool_results_by_id(self) -> dict[str, str]:
+        """`tool_results`, keyed by the call id, in either wire format.
+
+        OpenAI carries a result as a `tool`-role message with `tool_call_id`;
+        Anthropic as a `tool_result` block inside a `user` message, keyed by
+        `tool_use_id`, with `is_error` beside it. An Anthropic error result is
+        returned with `ERROR_PREFIX` in front, since the flag is the one place
+        that wire format says a tool refused and a caller asserting on a
+        refusal needs it. Never raises on a malformed body.
+        """
         with self._lock:
             bodies = list(self.requests)
         results: dict[str, str] = {}
@@ -294,14 +321,39 @@ class ScriptedEndpoint(HttpStub):
             for message in messages:
                 if not isinstance(message, dict):
                     continue
-                if message.get("role") != "tool":
+                if message.get("role") == "tool":
+                    content = str(message.get("content"))
+                    key = str(message.get("tool_call_id") or content)
+                    results.setdefault(key, content)
                     continue
-                content = str(message.get("content"))
-                key = str(message.get("tool_call_id") or content)
-                results.setdefault(key, content)
+                blocks = message.get("content")
+                if message.get("role") != "user" or not isinstance(blocks, list):
+                    continue
+                for block in blocks:
+                    if not isinstance(block, dict) or block.get("type") != "tool_result":
+                        continue
+                    content = _block_text(block.get("content"))
+                    if block.get("is_error"):
+                        content = ERROR_PREFIX + content
+                    key = str(block.get("tool_use_id") or content)
+                    results.setdefault(key, content)
         # Insertion-ordered since 3.7, so this is first-seen order, which is the
         # order the calls were made.
-        return list(results.values())
+        return results
+
+
+#: What `tool_results_by_id` puts in front of an Anthropic `is_error` result.
+ERROR_PREFIX = "[tool error] "
+
+
+def _block_text(content: object) -> str:
+    """A `tool_result` block's content as text: a string, or text blocks."""
+    if isinstance(content, list):
+        return "\n".join(
+            str(part.get("text", "")) for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return str(content)
 
 
 def _chunks(text: str, size: int) -> list[str]:
@@ -403,6 +455,112 @@ def _exhausted_frame(served: int, scripted: int) -> bytes:
     )
 
 
+def _is_title_request(body: dict) -> bool:
+    """Whether this is the `claude` CLI's session-title call.
+
+    The CLI sends it beside the first real turn, concurrently, as a
+    structured-output request whose schema has one required `title`. Served
+    from the script it would take a turn at a race-dependent position, so it
+    gets a fixed answer and no turn. Matched on the schema rather than on the
+    prompt text, which is the CLI's to change.
+    """
+    config = body.get("output_config")
+    if not isinstance(config, dict):
+        return False
+    fmt = config.get("format")
+    if not isinstance(fmt, dict):
+        return False
+    schema = fmt.get("schema")
+    return isinstance(schema, dict) and schema.get("required") == ["title"]
+
+
+def _event(name: str, payload: dict) -> bytes:
+    return f"event: {name}\ndata: {json.dumps(payload)}\n\n".encode()
+
+
+def _anthropic_turn_frames(turn: dict, model: str) -> list[bytes]:
+    """One scripted turn as Anthropic Messages streaming events.
+
+    The same turn shape `_turn_frames` takes, so one script serves either
+    wire format. This half exists for the `claude` CLI, which is the only
+    client that speaks it here; it is driven for real by
+    `tests/smoke/test_code_review_in_stack.py`'s claude class.
+    """
+    frames = [_event("message_start", {
+        "type": "message_start",
+        "message": {
+            "id": "msg_scripted", "type": "message", "role": "assistant",
+            "model": model, "content": [], "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    })]
+    index = 0
+    text = turn.get("text", "")
+    if text:
+        frames.append(_event("content_block_start", {
+            "type": "content_block_start", "index": index,
+            "content_block": {"type": "text", "text": ""},
+        }))
+        for piece in _chunks(text, TEXT_CHUNK):
+            frames.append(_event("content_block_delta", {
+                "type": "content_block_delta", "index": index,
+                "delta": {"type": "text_delta", "text": piece},
+            }))
+        frames.append(_event("content_block_stop", {
+            "type": "content_block_stop", "index": index,
+        }))
+        index += 1
+    for call in turn.get("tool_calls") or []:
+        frames.append(_event("content_block_start", {
+            "type": "content_block_start", "index": index,
+            "content_block": {
+                "type": "tool_use", "id": call["id"], "name": call["name"],
+                "input": {},
+            },
+        }))
+        arguments = call.get("arguments", {})
+        encoded = arguments if isinstance(arguments, str) else json.dumps(arguments)
+        for piece in _chunks(encoded, ARGS_CHUNK):
+            frames.append(_event("content_block_delta", {
+                "type": "content_block_delta", "index": index,
+                "delta": {"type": "input_json_delta", "partial_json": piece},
+            }))
+        frames.append(_event("content_block_stop", {
+            "type": "content_block_stop", "index": index,
+        }))
+        index += 1
+    stop_reason = "tool_use" if turn.get("tool_calls") else "end_turn"
+    frames.append(_event("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+        "usage": {"output_tokens": 1},
+    }))
+    frames.append(_event("message_stop", {"type": "message_stop"}))
+    return frames
+
+
+#: The status an exhausted Anthropic script is answered with. Not an in-stream
+#: `error` event, which the `claude` CLI reports as "an empty or malformed
+#: response" and so loses the message (measured on 2.1.197); a 400 is quoted
+#: and not retried.
+ANTHROPIC_EXHAUSTED_STATUS = 400
+
+
+def _anthropic_exhausted_body(served: int, scripted: int) -> bytes:
+    """`_exhausted_frame`'s message, as an Anthropic JSON error body."""
+    return json.dumps({
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": (
+                f"scripted endpoint exhausted: request {served + 1} arrived "
+                f"but only {scripted} turn(s) were scripted"
+            ),
+        },
+    }).encode()
+
+
 def serve_script(
     turns: list[dict],
     *,
@@ -463,9 +621,26 @@ def serve_script(
             pytest then attaches to whichever test happens to be running.
             """
 
+        def do_HEAD(self) -> None:
+            """The `claude` CLI's connectivity check, answered without a turn.
+
+            It sends `HEAD /` before its first `/v1/messages` POST; counting
+            that as a request would shift every scripted turn by one.
+            """
+            self.send_response(200)
+            self.send_header("content-length", "0")
+            self.end_headers()
+
         def do_POST(self) -> None:
-            if not self.path.endswith("/chat/completions"):
-                self.send_error(404, "only /chat/completions is scripted")
+            path = self.path.split("?", 1)[0]
+            if path.endswith("/chat/completions"):
+                anthropic = False
+            elif path.endswith("/v1/messages"):
+                anthropic = True
+            else:
+                self.send_error(
+                    404, "only /chat/completions and /v1/messages are scripted"
+                )
                 return
 
             length = int(self.headers.get("content-length") or 0)
@@ -485,6 +660,20 @@ def serve_script(
                 # A 400 the caller can see beats a traceback in someone else's
                 # test output.
                 self.send_error(400, "expected a JSON body")
+                return
+
+            if anthropic and _is_title_request(body):
+                with endpoint._lock:
+                    endpoint.titles_served += 1
+                payload = b"".join(_anthropic_turn_frames(
+                    {"text": json.dumps({"title": "Scripted session"})},
+                    body.get("model", ""),
+                ))
+                self.send_response(200)
+                self.send_header("content-type", "text/event-stream")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
                 return
 
             with endpoint._lock:
@@ -514,7 +703,17 @@ def serve_script(
                 return
 
             model = body.get("model", "")
-            if index < len(scripted):
+            if anthropic and index >= len(scripted):
+                body_bytes = _anthropic_exhausted_body(index, len(scripted))
+                self.send_response(ANTHROPIC_EXHAUSTED_STATUS)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body_bytes)))
+                self.end_headers()
+                self.wfile.write(body_bytes)
+                return
+            if anthropic:
+                frames = _anthropic_turn_frames(scripted[index], model)
+            elif index < len(scripted):
                 frames = _turn_frames(scripted[index], model)
             else:
                 frames = [_exhausted_frame(index, len(scripted))]
