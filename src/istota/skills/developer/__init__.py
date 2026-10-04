@@ -46,7 +46,7 @@ import logging
 import os
 import shlex
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from istota import config as istota_config
 from istota.lib.atomic_write import write_text_atomic
@@ -66,6 +66,7 @@ from istota.sandbox.git_remote_scrub import scrub_and_report
 from istota.sandbox.user_scope import scoped_user_dir
 from istota.skills.developer.istota_dev import CONFIG_NAME as ISTOTA_DEV_CONFIG_NAME
 from istota.skills.developer.istota_dev import CONFIG_VERSION as ISTOTA_DEV_CONFIG_VERSION
+from istota.skills.developer.istota_dev import redact as istota_dev_redact
 
 logger = logging.getLogger("istota.skills.developer")
 
@@ -441,23 +442,6 @@ def _install_exec_transport(ctx, dev, dev_bin: Path) -> str:
     return str(shim_dir)
 
 
-def _forge_url_for_helper(url: str) -> str:
-    """The forge URL as ``istota-dev.json`` carries it.
-
-    A URL with userinfo keeps an ``@`` with the credential replaced, so the
-    helper still refuses it (exit 3) without the value landing in a file the
-    sandbox can read.
-    """
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return url
-    if "@" not in (parts.netloc or ""):
-        return url
-    host = parts.netloc.rpartition("@")[2]
-    return urlunsplit(parts._replace(netloc=f"***@{host}"))
-
-
 def _install_istota_dev(config, dev, dev_bin: Path, repos_root: Path) -> None:
     """Write ``istota-dev`` and its config file into ``.developer``.
 
@@ -471,7 +455,12 @@ def _install_istota_dev(config, dev, dev_bin: Path, repos_root: Path) -> None:
     forges = {}
     for name, url in ((FORGE_GITLAB, dev.gitlab_url), (FORGE_GITHUB, dev.github_url)):
         if url:
-            forges[name] = {"url": _forge_url_for_helper(url)}
+            # Userinfo is masked with the helper's own `redact`, which keeps
+            # the `@` so the helper still refuses the URL (exit 3). This keeps
+            # the value out of this one file only: `forge-policy.json` and the
+            # manifest's GITLAB_URL / GITHUB_URL still carry the URL as
+            # configured.
+            forges[name] = {"url": istota_dev_redact(url)}
     helper_config = {
         "version": ISTOTA_DEV_CONFIG_VERSION,
         "repos_dir": str(repos_root),
@@ -489,6 +478,21 @@ def _install_istota_dev(config, dev, dev_bin: Path, repos_root: Path) -> None:
         )
     except OSError as exc:
         logger.error("developer: could not install istota-dev: %s", exc)
+
+
+# What the forge-token branch installs, by name. Listed so the no-token branch
+# can take them away: `.developer` is on PATH whenever the task has a repos
+# subtree, so a wrapper left by an earlier token-configured task would
+# otherwise stay reachable by name after the tokens are removed.
+_FORGE_WRAPPER_FILES = ("gh", "glab", "github-api", "gitlab-api", "forge-policy.json")
+
+
+def _remove_forge_wrappers(dev_bin: Path) -> None:
+    for name in _FORGE_WRAPPER_FILES:
+        try:
+            (dev_bin / name).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("developer: could not remove the stale %s: %s", name, exc)
 
 
 def _remove_istota_dev(dev_bin: Path) -> None:
@@ -692,6 +696,8 @@ def setup_env(ctx) -> dict[str, str]:
         # See executor.HOOK_PATH_PREPEND_KEY — that ordering is a security
         # property, not housekeeping.
         env["ISTOTA_PATH_PREPEND"] = str(dev_bin)
+    else:
+        _remove_forge_wrappers(dev_bin)
 
     # --- istota-dev ---------------------------------------------------------
     #

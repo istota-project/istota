@@ -416,8 +416,12 @@ class TestConcurrentTasksForOneUser:
                 start.wait(timeout=10)
                 for _ in range(4):
                     env = setup_env(_Ctx(config, user_temp))
-                    if "ISTOTA_PATH_PREPEND" not in env:
-                        raise AssertionError("the hook returned no PATH entry")
+                    # The shim directory, not just the key: `.developer`
+                    # is on the prepend for every admin task now, so the key
+                    # alone no longer shows the shim install succeeded.
+                    entries = env.get("ISTOTA_PATH_PREPEND", "").split(os.pathsep)
+                    if str(_shim_dir(user_temp)) not in entries:
+                        raise AssertionError("the hook returned no shim PATH entry")
             except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
                 failures.append(exc)
 
@@ -566,3 +570,25 @@ class TestTheRepositoryHelper:
         assert not (dev_bin / "istota-dev").exists()
         assert not (dev_bin / "istota-dev.json").exists()
         assert "ISTOTA_PATH_PREPEND" not in env
+
+    def test_an_unparseable_forge_url_is_still_redacted(self, tmp_path):
+        secret = "s3cr3t-value"
+        _, dev_bin = self._hook(tmp_path, gitlab_url=f"https://bot:{secret}@[::1")
+
+        assert secret not in (dev_bin / "istota-dev.json").read_text()
+
+    def test_wrappers_left_by_a_token_configured_task_are_removed(self, tmp_path):
+        """`.developer` is on PATH whenever there is a repos subtree, so a
+        wrapper from an earlier task must not stay reachable once the tokens
+        are gone."""
+        _, dev_bin = self._hook(
+            tmp_path, gitlab_token="t" * 20, gitlab_url="https://gitlab.example.com",
+        )
+        assert (dev_bin / "glab").is_file()
+
+        env, dev_bin = self._hook(tmp_path, gitlab_token="")
+
+        for name in ("gh", "glab", "github-api", "gitlab-api", "forge-policy.json"):
+            assert not (dev_bin / name).exists(), name
+        assert (dev_bin / "istota-dev").is_file()
+        assert env["ISTOTA_PATH_PREPEND"].split(os.pathsep) == [str(dev_bin)]
