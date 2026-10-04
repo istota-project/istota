@@ -48,7 +48,7 @@ Boundaries and operations:
 src/istota/
 ├── brain/                # Pluggable model invocation (Brain protocol)
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
-├── skills/               # 37 self-contained skills (skill.md + optional CLI)
+├── skills/               # 41 self-contained skills (skill.md + optional CLI)
 │   └── _group_access.py  # The one gate for `kv --group` and `memory --group`: current member and in the task's resolved group set → memory.md
 ├── session/              # The native brain's application layer: compaction, results, transcripts
 │   ├── session_log.py       # Append-only JSONL transcript of one NativeBrain task attempt, and its sweep → maintenance.md
