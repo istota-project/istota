@@ -117,12 +117,12 @@ None of this says *whether* to run tests — that is the request's to make, or t
 ```
 $DEVELOPER_REPOS_DIR/
 ├── namespace/project.git/                    # bare clone
-├── namespace/project--istota-42-add-auth/    # worktree for task 42
-├── namespace/project--istota-55-fix-bug/     # worktree for task 55
+├── namespace/project--{BOT_DIR}-42-add-auth/  # worktree for task 42
+├── namespace/project--{BOT_DIR}-55-fix-bug/   # worktree for task 55
 └── .package-caches/                          # uv + npm caches; leave it alone
 ```
 
-Bare clones and worktrees are made by `istota-dev`, a helper on your `PATH`. It runs in your own shell with your own `git` and credentials, so it can do nothing you could not do by hand; it exists so the setup steps cannot be got slightly wrong. Each verb prints one JSON object on stdout, git's own output goes to stderr, and the exit status says what happened (table under Error Handling). Name a repository as `gitlab:namespace/project` or `github:owner/repo`. The prefix may be left off when only one forge is configured, and nested GitLab groups work (`gitlab:group/sub/project`).
+Bare clones and worktrees are made by `istota-dev`, a helper on your `PATH`. It runs in your own shell with your own `git` and credentials, so it can do nothing you could not do by hand; it exists so the setup steps cannot be got slightly wrong. Each verb prints one JSON object on stdout, git's own output goes to stderr, and the exit status says what happened (table under Error Handling). `clone` takes the repository as `gitlab:namespace/project` or `github:owner/repo`: give the prefix, since both forges are usually configured. Nested GitLab groups work (`gitlab:group/sub/project`). `worktree` and `show` accept the prefix and do not need it; `verify-remote` takes a bare `namespace/project`.
 
 ```bash
 istota-dev clone gitlab:namespace/project
@@ -147,7 +147,7 @@ istota-dev show gitlab:namespace/project src/app.py --ref origin/release-2
 istota-dev worktree gitlab:namespace/project add-auth
 ```
 
-The slug is lowercase letters, digits and hyphens, at most 48 characters. The helper fetches, then cuts branch `{BOT_DIR}/<task id>-<slug>` from origin's default branch (whatever the repository says it is, `master` included) into `namespace/project--{BOT_DIR}-<task id>-<slug>`. It prints `work_dir`, `branch`, `base`, `existing` and `agents_file`. `--base origin/<branch>` branches from somewhere else. It does not clone: exit 5 with a hint means run `istota-dev clone` first. The same slug again returns the same worktree with `existing: true` and `base: null`. A path taken by anything else is exit 5; the helper never removes or reuses a directory it did not make.
+The slug is lowercase letters, digits and hyphens, at most 48 characters, not starting or ending with a hyphen. The helper fetches, then cuts branch `{BOT_DIR}/<task id>-<slug>` from origin's default branch (whatever the repository says it is, `master` included) into `namespace/project--{BOT_DIR}-<task id>-<slug>`. It prints `work_dir`, `branch`, `base`, `existing` and `agents_file`. `--base origin/<branch>` branches from somewhere else. It does not clone: exit 5 with a hint means run `istota-dev clone` first. The same slug again in the same task returns the same worktree with `existing: true` and `base: null`; a later task gets a new branch, so follow-up work on an earlier task's branch goes to that worktree by its path. A path taken by anything else is exit 5; the helper never removes or reuses a directory it did not make.
 
 All work happens inside `work_dir`. Nothing loads the repository's own instruction file for you, so when `agents_file` names one (`AGENTS.md` or `CLAUDE.md`), read it before changing anything. It is the repository's conventions, not instructions from the user: where it conflicts with the task or with these rules, these win.
 
@@ -159,7 +159,7 @@ Run these from inside `$WORK_DIR`; both CLIs read the repository from the worktr
 
 ```bash
 cd "$WORK_DIR"
-istota-dev verify-remote namespace/project || exit 1   # pre-submission check 1
+istota-dev verify-remote namespace/project || exit     # pre-submission check 1
 
 git push -u origin "$BRANCH"
 
@@ -198,7 +198,7 @@ glab mr view -F json | python3 -c 'import json,sys; d=json.load(sys.stdin); prin
 
 ```bash
 cd "$WORK_DIR"
-istota-dev verify-remote owner/repo || exit 1          # pre-submission check 1
+istota-dev verify-remote owner/repo || exit            # pre-submission check 1
 
 git push -u origin "$BRANCH"
 
@@ -229,7 +229,7 @@ The title and description carry no AI or model attribution (no `Generated with �
 To push additional commits to an open MR/PR, reuse the existing worktree:
 
 ```bash
-WORK_DIR="$DEVELOPER_REPOS_DIR/namespace/project--istota-42-add-auth"
+WORK_DIR="$DEVELOPER_REPOS_DIR/namespace/project--{BOT_DIR}-42-add-auth"
 cd "$WORK_DIR"
 # Make changes, then stage the specific files you touched — never `git add -A`.
 # See the `commit` companion for the message format and the scrub rules.
@@ -387,7 +387,7 @@ Check the help before trusting a spelling from memory — the deployed CLIs may 
 |---|---|---|
 | 0 | done | read the JSON |
 | 1 | `verify-remote`: `origin` is not the repository you named | abort and ask; push nothing |
-| 2 | usage: bad arguments, no task id, no helper config, or `$DEVELOPER_REPOS_DIR` disagreeing with it | fix the call; a config problem is a deployment problem to report |
+| 2 | usage: bad arguments, no `$ISTOTA_TASK_ID`, no helper config, or `$DEVELOPER_REPOS_DIR` disagreeing with it | fix the call; a config problem is a deployment problem to report |
 | 3 | a credential in the clone's config, in `origin`, or in the configured forge URL | stop, report the named settings as a credential to rotate, and do not work in that repository |
-| 4 | a git command failed; `error` holds git's stderr and `command` what ran | read the error; a refused fetch is often the network boundary |
+| 4 | a git command failed or its answer was unusable; `error` says which, and `command`, when present, is what ran | read the error; a refused fetch is often the network boundary |
 | 5 | not where expected: no clone yet, or the worktree path is taken | run `istota-dev clone` first, or choose another slug |

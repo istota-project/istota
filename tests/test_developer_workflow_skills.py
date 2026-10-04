@@ -1417,7 +1417,9 @@ class TestTheBodyUsesTheHelper:
         body = self._body()
         for marker in ("glab mr create", "gh pr create"):
             block = _fenced_block(body, marker)
-            assert "istota-dev verify-remote" in block and "|| exit 1" in block, (
+            # A bare `|| exit` keeps the helper's status, so 3 (a credential
+            # in origin) does not arrive as 1 (a mismatch).
+            assert re.search(r"istota-dev verify-remote \S+ \|\| exit\s", block), (
                 f"the {marker!r} recipe pushes without checking origin first"
             )
 
