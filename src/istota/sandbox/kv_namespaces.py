@@ -27,8 +27,8 @@ read-write into that user's own sandbox — and
 the shipped digest it last saw and the last good copy of `{root}/PERSONA.md`,
 which every task's prompt falls back to while the mount is unreadable, so a
 task that could write it could choose the bot's character for everyone. Those
-rows are written by the daemon, by the host-side `memory` skill CLI and by the
-`provision-rooms` CLI, and read by neither the model nor the `kv` skill.
+rows are written by the daemon, by the host-side `memory` skill CLI, by the
+`provision-rooms` CLI and by `istota init`, and read by neither the model nor the `kv` skill.
 
 Both KV tables, not only the per-user one: `skills/kv` applies this in `main`
 before it dispatches a verb, so `--shared` — which reads and writes the

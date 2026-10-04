@@ -2,11 +2,12 @@
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
 
-from istota import db
+from istota import db, storage
 from istota.config import Config
 from istota.prompts import persona
 from istota.prompts.persona import (
@@ -60,6 +61,10 @@ def _record_shipped_digest(config, digest):
         )
 
 
+def _full_disk(*args, **kwargs):
+    raise OSError(28, "No space left on device")
+
+
 def _tree(root):
     return sorted(
         (str(p.relative_to(root)), p.read_bytes() if p.is_file() else None)
@@ -73,6 +78,9 @@ class TestDigest:
         assert persona_digest("a\r\nb") == base
         assert persona_digest("a\nb\n") == base
         assert persona_digest("  \n a\nb \n\n") == base
+
+    def test_a_leading_bom_and_lone_carriage_returns_do_not_count(self):
+        assert persona_digest("\ufeffa\rb") == persona_digest("a\nb")
 
     def test_a_changed_word_does(self):
         assert persona_digest("a\nb") != persona_digest("a\nc")
@@ -223,6 +231,53 @@ class TestSync:
         config.db_path.unlink()
         assert sync_operator_persona(config).action == "wrote"
         assert not config.db_path.exists()
+
+    def test_a_failed_write_leaves_no_empty_file_and_is_retried(self, setup, monkeypatch):
+        config, root = setup
+        real = storage.write_text_atomic
+        monkeypatch.setattr(storage, "write_text_atomic", _full_disk)
+        assert sync_operator_persona(config).action == "refused"
+        assert not (root / "PERSONA.md").exists()
+        assert _state(config) is None
+
+        monkeypatch.setattr(storage, "write_text_atomic", real)
+        assert sync_operator_persona(config).action == "wrote"
+        assert (root / "PERSONA.md").read_text() == SHIPPED
+
+    def test_a_failed_shipped_write_beside_an_edit_is_retried(self, setup, monkeypatch):
+        config, root = setup
+        (root / "PERSONA.md").write_text("Edited.")
+        real = storage.write_text_atomic
+        monkeypatch.setattr(storage, "write_text_atomic", _full_disk)
+        assert sync_operator_persona(config).action == "refused"
+        assert not (root / "PERSONA.md.shipped").exists()
+
+        monkeypatch.setattr(storage, "write_text_atomic", real)
+        assert sync_operator_persona(config).action == "wrote_shipped_beside"
+        assert (root / "PERSONA.md.shipped").read_text() == SHIPPED
+
+    def test_an_unread_state_row_does_not_bring_back_a_merged_shipped_file(
+        self, setup, monkeypatch,
+    ):
+        config, root = setup
+        (root / "PERSONA.md").write_text("Edited.")
+        assert sync_operator_persona(config).action == "wrote_shipped_beside"
+        (root / "PERSONA.md.shipped").unlink()
+
+        def locked(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(db, "shared_kv_get", locked)
+        assert sync_operator_persona(config).action == "kept_edited"
+        assert not (root / "PERSONA.md.shipped").exists()
+
+    def test_a_stale_shipped_file_is_refreshed(self, setup):
+        config, root = setup
+        _record_shipped_digest(config, persona_digest(SHIPPED))
+        (root / "PERSONA.md").write_text("Edited.")
+        (root / "PERSONA.md.shipped").write_text(OLD_SHIPPED)
+        assert sync_operator_persona(config).action == "wrote_shipped_beside"
+        assert (root / "PERSONA.md.shipped").read_text() == SHIPPED
 
 
 class TestLastGood:

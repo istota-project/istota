@@ -66,9 +66,12 @@ ACTION_REFUSED = "refused"
 def persona_digest(text: str) -> str:
     """sha256 of ``text`` with CRLF folded and surrounding whitespace stripped.
 
-    So an editor's trailing newline or a CRLF save reads as unedited.
+    So an editor's trailing newline, a CRLF save or a leading BOM reads as
+    unedited. None of the shipped versions carries a BOM or a CR, so this
+    folds nothing out of the digests below.
     """
-    normalised = text.replace("\r\n", "\n").strip()
+    normalised = text.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    normalised = normalised.strip()
     return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
 
 
@@ -135,14 +138,37 @@ def _read_operator_file(path: Path) -> tuple[str | None, str | None, bool]:
     return "", None, True
 
 
+def _write_new(path: Path, text: str) -> bool:
+    """``write_regular_file`` for a file that was absent, undone on failure.
+
+    Its ``O_CREAT`` probe leaves a zero-byte file behind when the write that
+    follows fails, and an empty ``PERSONA.md`` is the operator choosing the
+    shipped persona, so the next sync would leave it alone for good.
+    """
+    if storage.write_regular_file(path, text):
+        return True
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISREG(st.st_mode) and st.st_size == 0:
+        storage.remove_regular_file(path)
+    return False
+
+
 def _db_timeout_ms(config: "Config") -> int | None:
     return config.scheduler.main_loop_read_timeout_ms or None
 
 
 def _read_state(config: "Config") -> dict | None:
-    """The state row, ``{}`` when absent, None when it could not be read."""
+    """The state row, ``{}`` when absent, None when it could not be read.
+
+    No database counts as unread rather than as an empty row: "never recorded"
+    is what lets the sync write ``.shipped`` beside an edit, and an unread row
+    must not re-raise a gap the operator already merged.
+    """
     if not db.database_present(config.db_path):
-        return {}
+        return None
     try:
         with db.get_db(config.db_path, busy_timeout_ms=_db_timeout_ms(config)) as conn:
             row = db.shared_kv_get(conn, KV_NAMESPACE, KV_KEY)
@@ -230,7 +256,7 @@ def sync_operator_persona(config: "Config", *, dry_run: bool = False) -> SyncRes
     if not present:
         action = ACTION_WROTE
         if not dry_run:
-            if storage.write_regular_file(path, shipped_text):
+            if _write_new(path, shipped_text):
                 good_text = shipped_text
             else:
                 file_step_done = False
@@ -250,16 +276,29 @@ def sync_operator_persona(config: "Config", *, dry_run: bool = False) -> SyncRes
                 # The gap `.shipped` described has closed.
                 storage.remove_regular_file(beside)
     else:
+        beside_present = os.path.lexists(beside)
+        beside_text, _reason, _ = (
+            _read_operator_file(beside) if beside_present else (None, None, False)
+        )
         moved = recorded_shipped is not None and recorded_shipped != shipped_digest
-        first = recorded_shipped is None and not os.path.lexists(beside)
-        if moved or first:
+        # Only a row that was read and holds no digest is a first sync.
+        first = state is not None and recorded_shipped is None and not beside_present
+        # A `.shipped` holding other text than the current shipped persona
+        # (an older version, a lost row, a failed write) is refreshed.
+        stale = beside_text is not None and persona_digest(beside_text) != shipped_digest
+        if moved or first or stale:
             action = ACTION_WROTE_SHIPPED_BESIDE
             if not dry_run:
-                if storage.write_regular_file(beside, shipped_text):
+                written = (
+                    storage.write_regular_file(beside, shipped_text)
+                    if beside_present
+                    else _write_new(beside, shipped_text)
+                )
+                if written:
                     logger.warning(
                         "operator_persona_sync action=wrote_shipped_beside "
                         "reason=edited_copy_and_shipped_%s",
-                        "moved" if moved else "unrecorded",
+                        "moved" if moved else ("stale" if stale else "unrecorded"),
                     )
                 else:
                     file_step_done = False
