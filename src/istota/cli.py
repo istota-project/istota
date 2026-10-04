@@ -73,6 +73,7 @@ def cmd_init(args):
     db.init_db(config.db_path)
     print(f"Database initialized at {config.db_path}")
     _init_sync_operator_persona(config)
+    _init_retire_user_personas(config)
     if getattr(args, "relocate_rooms", False):
         from istota.maintenance.room_relocate import migrate_database, reconcile_mount, record_outcome
         problems: list[str] = []
@@ -109,6 +110,26 @@ def _init_sync_operator_persona(config) -> None:
     if result.action in _PERSONA_SYNC_REPORTED:
         detail = f": {result.detail}" if result.detail else ""
         print(f"operator persona: {result.action}{detail}", file=sys.stderr)
+
+
+def _init_retire_user_personas(config) -> None:
+    """Retire per-user PERSONA.md copies from ``init``; never changes its exit code.
+
+    After the sync, so a copy equal to the operator file just written is
+    recognised as unedited. Notices are written, never delivered, since
+    ``init`` runs with every service stopped.
+    """
+    try:
+        from istota.maintenance import persona_retire
+
+        outcomes = persona_retire.retire_user_personas(config)
+    except Exception as exc:  # noqa: BLE001 - a deploy must not fail on this
+        print(f"user personas: retirement failed ({type(exc).__name__})", file=sys.stderr)
+        return
+    for outcome in outcomes:
+        if outcome.action == persona_retire.ACTION_REFUSED:
+            detail = f": {outcome.detail}" if outcome.detail else ""
+            print(f"user persona {outcome.user_id}: refused{detail}", file=sys.stderr)
 
 
 def cmd_doctor(args):

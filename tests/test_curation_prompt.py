@@ -271,7 +271,7 @@ class TestOverlayInventoryFromDisk:
 
     def test_no_mount_means_no_inventory(self, tmp_path):
         """Overlays are filesystem reads, so an rclone-remote deployment has
-        none — the condition `load_persona` already applies to `PERSONA.md`."""
+        none."""
         config = self._config(tmp_path)
         (self._overlays(config) / "developer.md").write_text("- a rule\n")
         remote = self._config(tmp_path, workspace_path=None)

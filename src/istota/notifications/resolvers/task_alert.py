@@ -9,7 +9,7 @@ visible, and :func:`istota.notifications.store.sweep_expired_alerts` is the
 backstop for rows that fell below the render limit or belong to a user who never
 opens the panel.
 
-Six producers write here, each with its own key:
+Each producer writes here under its own key:
 
 ===================================  ==================================
 ``task:{task_id}:{alert_type}``      deferred alerts the model wrote from
@@ -20,16 +20,19 @@ Six producers write here, each with its own key:
 ``undelivered:{task_id}``            a task result that reached nobody
 ``vault-unscoped``                   a credential vault whose file has no
                                      ``istota`` group, so all of it is shared
+``persona-retired``                  a user's edited ``PERSONA.md`` was
+                                     renamed ``.retired``, written by
+                                     ``istota init`` and never delivered
 ===================================  ==================================
 
-The last one is the only fixed key here — one row per user, raised on the first
+``vault-unscoped`` is a fixed key — one row per user, raised on the first
 unscoped sync and never again, gated on the durable ``_vault_sync`` record
 rather than on this table. It is deliberately **not** on ``connected_service``,
 where the vault's own sync-failure row lives: that source's dedup key is the
 service name, so the two would collide and each bump the other. See
 ``secrets_vault._report_unscoped``.
 
-Three rules hold across all six, and each exists because of a specific way this
+Three rules hold across all of them, and each exists because of a specific way this
 class can go wrong.
 
 **No ``link``, and no ``LINK`` action. Unconditionally.** The deferred-alert
@@ -287,6 +290,11 @@ def private_note_key(reference: str) -> str:
 
 def room_migration_key() -> str:
     return "room-migration:partial"
+
+
+def persona_retired_key() -> str:
+    """One per user: their edited PERSONA.md was renamed `.retired` (`maintenance.persona_retire`)."""
+    return "persona-retired"
 
 
 def admin_readers(config: "Config") -> list[str]:
