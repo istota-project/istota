@@ -31,11 +31,11 @@ import logging
 import os
 import stat
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from istota import db, storage
+from istota.lib.timestamps import iso_now
 
 if TYPE_CHECKING:
     from istota.config import Config
@@ -321,7 +321,7 @@ def sync_operator_persona(config: "Config", *, dry_run: bool = False) -> SyncRes
                 new_state["last_good_text"] = good_text
                 new_state["last_good_digest"] = digest
         if new_state != state:
-            new_state["updated_at"] = datetime.now(timezone.utc).isoformat()
+            new_state["updated_at"] = iso_now()
             _write_state(config, new_state)
 
     if action not in (ACTION_UNCHANGED, ACTION_KEPT_EDITED):
