@@ -252,7 +252,9 @@ def _git_env(root: Path) -> dict[str, str]:
     credentials means the failure of any one of those measures is not
     immediately a credential disclosure.
 
-    `GIT_SUBPROCESS_ENV` is the four settings every daemon-side git run shares.
+    `GIT_SUBPROCESS_ENV` is the settings every daemon-side git run shares,
+    including `GIT_NO_LAZY_FETCH`: a partial clone would otherwise fetch every
+    missing blob the diff or the snapshot reads (ISSUE-615).
     Everywhere else it is an overlay on `os.environ`; here it is a *base* for a
     built-from-nothing environment, which is the whole difference between this
     function and `git_hardening.run_git`, and why this is not a call to it.

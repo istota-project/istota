@@ -1,6 +1,6 @@
 """`git_hardening.run_git` and `GIT_SUBPROCESS_ENV`.
 
-The four environment variables were written out at four call sites before this
+The environment variables were written out at four call sites before this
 module owned them, and the failure mode a green suite does not notice is one of
 them going missing from the shared copy: `GIT_TERMINAL_PROMPT` costs a hang on
 a prompt nobody is at, `GIT_OPTIONAL_LOCKS` costs the worktree reaper its idle
@@ -39,6 +39,16 @@ EXPECTED_ENV = {
     "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_OPTIONAL_LOCKS": "0",
+    "GIT_NO_LAZY_FETCH": "1",
+    "GIT_ALLOW_PROTOCOL": "https",
+}
+
+# What fixture-building git runs with: the overlay minus the transport policy,
+# since building a partial clone is itself a local fetch.
+FIXTURE_ENV = {
+    name: value
+    for name, value in EXPECTED_ENV.items()
+    if name not in ("GIT_NO_LAZY_FETCH", "GIT_ALLOW_PROTOCOL")
 }
 
 TEST_IDENTITY = {
@@ -54,7 +64,7 @@ def _plain_git(cwd: Path, *args: str) -> str:
     proc = subprocess.run(
         ["git", *args],
         cwd=str(cwd), capture_output=True, text=True,
-        env={**os.environ, **EXPECTED_ENV, **TEST_IDENTITY},
+        env={**os.environ, **FIXTURE_ENV, **TEST_IDENTITY},
     )
     if proc.returncode != 0:
         raise AssertionError(f"git {' '.join(args)} failed:\n{proc.stderr}")
@@ -105,7 +115,7 @@ def shim(tmp_path, monkeypatch):
 
 
 class TestTheEnvironmentOverlay:
-    def test_it_states_exactly_the_four_variables(self):
+    def test_it_states_exactly_these_variables(self):
         assert dict(GIT_SUBPROCESS_ENV) == EXPECTED_ENV
 
     def test_it_cannot_be_mutated_in_place(self):
@@ -114,7 +124,7 @@ class TestTheEnvironmentOverlay:
         with pytest.raises(TypeError):
             GIT_SUBPROCESS_ENV["GIT_TERMINAL_PROMPT"] = "1"  # type: ignore[index]
 
-    def test_run_git_hands_all_four_to_the_subprocess(self, tmp_path, shim):
+    def test_run_git_hands_every_one_to_the_subprocess(self, tmp_path, shim):
         run_git(tmp_path, "status")
 
         _, env = shim()
@@ -361,6 +371,158 @@ class TestTheHardeningOverrides:
         run_git(repo, "status", "--porcelain")
 
         assert (repo / ".git" / "index").stat().st_mtime_ns == before
+
+
+def _marker_script(tmp_path: Path, name: str, then: str = "") -> tuple[Path, Path]:
+    """A program that leaves a file behind when it runs, and then does `then`."""
+    marker = tmp_path / f"{name}-ran"
+    script = tmp_path / f"{name}.sh"
+    script.write_text(f"#!/bin/sh\ntouch '{marker}'\n{then}")
+    script.chmod(0o755)
+    return script, marker
+
+
+@pytest.fixture
+def partial_clone(repo, tmp_path):
+    """A `--filter=blob:none` clone whose promisor remote runs a program of the
+    repository's choosing (`remote.origin.uploadpack`) when anything fetches.
+
+    Both halves are model-writable under `developer.repos_dir`: the promisor
+    flag and the upload-pack program are plain repository config.
+    """
+    bare = tmp_path / "upstream.git"
+    _plain_git(tmp_path, "clone", "-q", "--bare", str(repo), str(bare))
+    _plain_git(bare, "config", "uploadpack.allowFilter", "true")
+    clone = tmp_path / "clone"
+    _plain_git(
+        tmp_path, "clone", "-q", "--no-checkout", "--filter=blob:none",
+        f"file://{bare}", str(clone),
+    )
+    script, marker = _marker_script(tmp_path, "upload-pack", 'exec git-upload-pack "$@"\n')
+    _plain_git(clone, "config", "remote.origin.uploadpack", str(script))
+    blob = _plain_git(clone, "rev-parse", "HEAD:README").strip()
+    return clone, blob, marker
+
+
+class TestNothingReachesOutOfTheRepository:
+    """ISSUE-615: the overrides above stop repository config running a program
+    through the commands the callers name. A fetch is a second route to the
+    same place, and two callers reach it: a lazy fetch, which any object read
+    in a partial clone performs on its own, and `worktree_reaper`'s explicit
+    `git fetch origin`. Either one runs the transport the repository config
+    describes, as the daemon user, outside the sandbox and its allowlist.
+    """
+
+    def test_the_probe_can_fail(self, partial_clone):
+        """The control: the same read with plain git does fetch, and runs the
+        program. Without it the tests below could pass on a clone that was
+        never partial."""
+        clone, blob, marker = partial_clone
+
+        assert _plain_git(clone, "cat-file", "-p", blob) == "base\n"
+        assert marker.exists()
+
+    def test_a_missing_object_is_not_lazily_fetched(self, partial_clone):
+        clone, blob, marker = partial_clone
+
+        status, out = run_git(clone, "cat-file", "-p", blob)
+
+        assert status != 0
+        assert out == ""
+        assert not marker.exists(), "a lazy fetch ran the repository's upload-pack"
+
+    def test_a_fetch_over_a_local_path_is_refused(self, partial_clone):
+        """`file://` and a bare path both run `remote.<name>.uploadpack`, so a
+        remote pointing at the machine itself is a run-a-command route."""
+        clone, _, marker = partial_clone
+
+        status, _ = run_git(clone, "fetch", "--quiet", "origin")
+
+        assert status != 0
+        assert not marker.exists(), "git fetch ran the repository's upload-pack"
+
+    def test_an_ext_transport_is_refused(self, repo, tmp_path):
+        """`ext::` is a command line, and `protocol.ext.allow` is repository
+        config, so the repository can switch it on for itself."""
+        marker = tmp_path / "ext-ran"
+        _plain_git(repo, "config", "protocol.ext.allow", "always")
+        _plain_git(repo, "config", "remote.evil.url", f"ext::sh -c touch% {marker}")
+
+        status, _ = run_git(repo, "fetch", "--quiet", "evil")
+
+        assert status != 0
+        assert not marker.exists(), "an ext:: remote ran its command"
+
+
+@pytest.fixture
+def needs_auth():
+    """A plain-HTTP server answering every request with a Basic challenge."""
+    import http.server
+    import threading
+
+    class Challenge(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="probe"')
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Challenge)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/r.git"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class TestNoCredentialProgramRuns:
+    """The half `GIT_ALLOW_PROTOCOL` does not cover: an `https` fetch that is
+    challenged asks `credential.helper` and then `core.askPass`, and both name
+    a program in repository config. `GIT_TERMINAL_PROMPT=0` stops neither.
+
+    Driven over plain HTTP with `GIT_ALLOW_PROTOCOL` widened to allow it, so the
+    `-c` overrides are what is measured; through `run_git` the protocol policy
+    would refuse first and these would pass for the wrong reason.
+    """
+
+    def _fetch(self, repo, *, hardened):
+        env = {**git_env(), "GIT_ALLOW_PROTOCOL": "http"}
+        prefix = list(GIT_HARDENING) if hardened else []
+        return subprocess.run(
+            ["git", *prefix, "-C", str(repo), "fetch", "--quiet", "web"],
+            capture_output=True, timeout=30, env=env,
+        ).returncode
+
+    @pytest.fixture
+    def programs(self, repo, tmp_path, needs_auth):
+        """Plain and URL-scoped helpers both: the URL-scoped spelling is the
+        one a reader of `http.*` urlmatch rules would expect to outrank `-c`."""
+        helper, helper_ran = _marker_script(tmp_path, "credential-helper")
+        scoped, scoped_ran = _marker_script(tmp_path, "scoped-helper")
+        askpass, askpass_ran = _marker_script(tmp_path, "askpass", "echo x\n")
+        origin = needs_auth.rsplit("/", 1)[0]
+        _plain_git(repo, "config", "remote.web.url", needs_auth)
+        _plain_git(repo, "config", "credential.helper", f"!{helper}")
+        _plain_git(repo, "config", f"credential.{origin}.helper", f"!{scoped}")
+        _plain_git(repo, "config", "core.askPass", str(askpass))
+        return {"credential.helper": helper_ran, "credential.<url>.helper": scoped_ran,
+                "core.askPass": askpass_ran}
+
+    def test_the_probe_can_fail(self, repo, programs):
+        self._fetch(repo, hardened=False)
+
+        assert all(marker.exists() for marker in programs.values())
+
+    def test_none_runs_under_the_overrides(self, repo, programs):
+        status = self._fetch(repo, hardened=True)
+
+        assert status != 0
+        ran = [name for name, marker in programs.items() if marker.exists()]
+        assert ran == [], f"{ran} ran"
 
 
 class TestTheOutputContract:
