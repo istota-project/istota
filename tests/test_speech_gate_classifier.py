@@ -349,3 +349,139 @@ def _now():
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc)
+
+
+def _set_room_mode(config, token, mode):
+    with db.get_db(config.db_path) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO room_policy (room_token, host_user_id, guest_reply) "
+            "VALUES (?, 'alice', 'direct')",
+            (token,),
+        )
+        conn.execute(
+            "UPDATE room_policy SET speech_mode = ? WHERE room_token = ?", (mode, token),
+        )
+
+
+class TestTheRoomOverridesTheDeployment:
+    """ISSUE-640: a room's own mode decides in both directions."""
+
+    def test_a_classifier_room_on_a_mention_deployment_is_classified(self, config):
+        config.speech_gate.mode = "mention"
+        _seed_room(config)
+        _set_room_mode(config, "grp", "classifier")
+        scripted = _Scripted(config.db_path, '{"speak": true, "reason": "asked"}')
+        with patch("istota.executor.build_speech_gate_completer",
+                   return_value=scripted):
+            classified = classify_ahead(
+                config, surface="talk", surface_ref="grp", user_id="alice",
+                text="yes please, 7pm", is_group_chat=True,
+                addressed_to_bot=False,
+            )
+        assert classified is not None
+        assert (classified.speak, classified.rung) == (True, "classifier")
+
+        task_id, row = _turn(config, "yes please, 7pm", classified=classified)
+        assert task_id is not None
+        assert row["rung"] == "classifier"
+
+    def test_a_mention_room_on_a_classifier_deployment_asks_nothing(self, config):
+        _seed_room(config)
+        _set_room_mode(config, "grp", "mention")
+        with patch("istota.executor.build_speech_gate_completer") as build:
+            assert classify_ahead(
+                config, surface="talk", surface_ref="grp", user_id="alice",
+                text="hm", is_group_chat=True, addressed_to_bot=False,
+            ) is None
+        build.assert_not_called()
+
+    def test_a_room_on_default_follows_a_changed_deployment(self, config):
+        _seed_room(config)
+        _set_room_mode(config, "grp", None)
+        config.speech_gate.mode = "mention"
+        with patch("istota.executor.build_speech_gate_completer") as build:
+            assert classify_ahead(
+                config, surface="talk", surface_ref="grp", user_id="alice",
+                text="hm", is_group_chat=True, addressed_to_bot=False,
+            ) is None
+        build.assert_not_called()
+        config.speech_gate.mode = "classifier"
+        scripted = _Scripted(config.db_path, '{"speak": false}')
+        with patch("istota.executor.build_speech_gate_completer",
+                   return_value=scripted):
+            classified = classify_ahead(
+                config, surface="talk", surface_ref="grp", user_id="alice",
+                text="hm", is_group_chat=True, addressed_to_bot=False,
+            )
+        assert classified is not None and classified.rung == "classifier"
+
+    def test_another_rooms_opt_in_does_not_classify_this_one(self, config):
+        config.speech_gate.mode = "mention"
+        _seed_room(config)
+        _seed_room(config, token="other")
+        _set_room_mode(config, "other", "classifier")
+        with patch("istota.executor.build_speech_gate_completer") as build:
+            assert classify_ahead(
+                config, surface="talk", surface_ref="grp", user_id="alice",
+                text="hm", is_group_chat=True, addressed_to_bot=False,
+            ) is None
+        build.assert_not_called()
+
+
+class TestTheTalkBatchPrePass:
+    """The Talk poll's pre-pass submits a turn in a room opted in on its own."""
+
+    def _batch(self, config, token="grp"):
+        import asyncio
+
+        from istota.config import UserConfig
+        from istota.transport.talk import inbound
+
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        msg = {"id": 901, "actorType": "users", "actorId": "alice",
+               "actorDisplayName": "Alice", "message": "yes please, 7pm",
+               "messageParameters": {}, "messageType": "comment"}
+        submitted = []
+
+        def fake_classify(cfg, **kwargs):
+            submitted.append(kwargs["surface_ref"])
+            return speech_gate.GateDecision(True, speech_gate.RUNG_CLASSIFIER)
+
+        async def participants(*_a, **_k):
+            return [{"actorType": "users", "actorId": "alice"},
+                    {"actorType": "users", "actorId": "bob"}]
+
+        loop = asyncio.new_event_loop()
+        try:
+            with patch.object(inbound, "classify_ahead", fake_classify), \
+                    patch.object(inbound, "_get_participants", participants):
+                out = loop.run_until_complete(inbound._classify_batch_ahead(
+                    config, object(), [(token, [msg])], {token: 2},
+                ))
+        finally:
+            loop.close()
+        return out, submitted
+
+    def test_an_opted_in_room_on_a_mention_deployment_is_submitted(self, config):
+        config.speech_gate.mode = "mention"
+        _seed_room(config)
+        _set_room_mode(config, "grp", "classifier")
+        out, submitted = self._batch(config)
+        assert submitted == ["grp"]
+        assert ("grp", 901) in out
+
+    def test_a_mention_deployment_with_no_opt_in_submits_nothing(self, config):
+        config.speech_gate.mode = "mention"
+        _seed_room(config)
+        out, submitted = self._batch(config)
+        assert (out, submitted) == ({}, [])
+
+    def test_an_opted_out_room_on_a_classifier_deployment_is_not_submitted(self, config):
+        _seed_room(config)
+        _set_room_mode(config, "grp", "mention")
+        out, submitted = self._batch(config)
+        assert (out, submitted) == ({}, [])
+
+    def test_an_unregistered_conversation_follows_a_classifier_deployment(self, config):
+        out, submitted = self._batch(config, token="unregistered")
+        assert submitted == ["unregistered"]

@@ -268,6 +268,55 @@ class TestGuestReplyThroughThePatch:
         assert resp.status_code == 400
 
 
+class TestSpeechModeThroughThePatch:
+    """ISSUE-640: the room's own speech mode, host only."""
+
+    async def _patch(self, client, cookies, room_id, body):
+        return await client.patch(f"/istota/api/chat/rooms/{room_id}", json=body,
+                                  cookies=cookies, headers=ORIGIN)
+
+    async def test_the_listing_says_the_room_follows_the_deployment(self, client, db_path):
+        room = _shared_room(db_path)
+        cookies = await _login(client, "alice")
+        policy = (await _listed(client, cookies, room.token))["policy"]
+        assert policy["speech_mode"] is None
+        assert policy["effective_speech_mode"] == "mention"
+        assert policy["deployment_speech_mode"] == "mention"
+
+    async def test_the_host_sets_it_and_clears_it(self, client, db_path):
+        room = _shared_room(db_path)
+        cookies = await _login(client, "alice")
+        room_id = (await _listed(client, cookies, room.token))["id"]
+        resp = await self._patch(client, cookies, room_id, {"speech_mode": "classifier"})
+        assert resp.status_code == 200
+        assert resp.json()["policy"]["speech_mode"] == "classifier"
+        assert resp.json()["policy"]["effective_speech_mode"] == "classifier"
+        with db.get_db(db_path) as conn:
+            assert room_policy.get_policy(conn, room.token).speech_mode == "classifier"
+
+        resp = await self._patch(client, cookies, room_id, {"speech_mode": None})
+        assert resp.status_code == 200
+        assert resp.json()["policy"]["speech_mode"] is None
+        with db.get_db(db_path) as conn:
+            assert room_policy.get_policy(conn, room.token).speech_mode is None
+
+    async def test_another_member_is_refused_and_nothing_changes(self, client, db_path):
+        room = _shared_room(db_path)
+        cookies = await _login(client, "bob")
+        room_id = (await _listed(client, cookies, room.token))["id"]
+        resp = await self._patch(client, cookies, room_id, {"speech_mode": "off"})
+        assert resp.status_code == 403
+        with db.get_db(db_path) as conn:
+            assert room_policy.get_policy(conn, room.token).speech_mode is None
+
+    async def test_an_unknown_value_is_refused(self, client, db_path):
+        room = _shared_room(db_path)
+        cookies = await _login(client, "alice")
+        room_id = (await _listed(client, cookies, room.token))["id"]
+        resp = await self._patch(client, cookies, room_id, {"speech_mode": "sometimes"})
+        assert resp.status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # Grants: the caller's own, read and replaced
 # ---------------------------------------------------------------------------

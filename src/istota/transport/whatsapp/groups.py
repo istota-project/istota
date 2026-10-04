@@ -398,8 +398,8 @@ def classify_group_event(config: "Config", event) -> "GateDecision | None":
 
     Call before `handle_whatsapp_batch` opens `BEGIN IMMEDIATE`, for the reason
     `ingest.classify_ahead` gives: the model call must not hold the write lock.
-    None for anything that is not a text turn in a registered group, and from
-    every mode but the classifier. Never raises.
+    None for anything that is not a text turn in a registered group, and for
+    a group whose effective mode is not the classifier. Never raises.
     """
     group = getattr(event, "group", None)
     if group is None or getattr(event, "message_type", None) not in _TEXT_TYPES:
@@ -407,16 +407,18 @@ def classify_group_event(config: "Config", event) -> "GateDecision | None":
     text = (getattr(event, "text", None) or "").strip()
     if not text or text.startswith("!"):
         return None
-    from istota.rooms import speech_gate
+    from istota.rooms import policy as room_policy
     from ..ingest import classify_ahead
 
-    if speech_gate.normalize_mode(config.speech_gate.mode) != "classifier":
-        return None
     try:
         group_jid = identity_rules.normalize_group_jid(group.group_jid)
         if not group_jid:
             return None
         with db.get_db(config.db_path) as conn:
+            # Not the deployment's mode alone: a group can opt in on its own
+            # (ISSUE-640); `classify_ahead` reads the room's own mode.
+            if not room_policy.classifier_in_use(conn, config.speech_gate.mode):
+                return None
             token = db.resolve_room_token(conn, SURFACE, group_jid)
             room = db.get_room(conn, token) if token else None
             if room is None or room.archived:
