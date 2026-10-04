@@ -7004,6 +7004,15 @@ def _room_talk_binding(username: str, room_id: int) -> str | None:
     return binding.surface_ref if binding else None
 
 
+def _record_talk_room_name(talk_token: str, name: str) -> None:
+    """Note the name a web rename pushed to Talk as Talk's (ISSUE-637)."""
+    from istota import db
+    with db.get_db(_config.db_path) as conn:
+        token = db.resolve_room_token(conn, "talk", talk_token)
+        if token:
+            db.record_external_room_name(conn, token, "talk", name)
+
+
 async def _talk_conversation_verdict(
     client, conversation_token: str, username: str,
 ) -> str:
@@ -9397,6 +9406,10 @@ async def chat_update_room(
                 await client.rename_conversation(talk_token, updated["name"])
             except Exception as e:  # best-effort; web rename already persisted
                 logger.warning("rename propagate to Talk failed: %s", e)
+            else:
+                await asyncio.to_thread(
+                    _record_talk_room_name, talk_token, updated["name"],
+                )
             finally:
                 await client.aclose()
     return updated

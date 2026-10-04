@@ -52,6 +52,7 @@ class TestRecordInboundTalk:
         with db.get_db(db_path) as conn:
             db.register_room(conn, "cpzpcfx2", "alice", origin="talk", name="#istota")
             db.add_room_binding(conn, "cpzpcfx2", "talk", "cpzpcfx2")
+            db.record_external_room_name(conn, "cpzpcfx2", "talk", "#istota")
         with db.get_db(db_path) as conn:
             record_inbound(
                 conn, config, surface="talk", surface_ref="cpzpcfx2",

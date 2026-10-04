@@ -679,10 +679,6 @@ def record_inbound(
         # rooms keep the first writer's origin and name.
         existing = db.get_room(conn, room_token)
         if surface == "talk" and existing.origin == "talk":
-            # Talk-side rename flows back to the registry on the next poll. Only
-            # for Talk-origin rooms — a web-origin room's user-set name wins.
-            if channel_name and channel_name != existing.name:
-                db.rename_room(conn, room_token, channel_name)
             if existing.archived:
                 # A fresh inbound means the bot is demonstrably back in this Talk
                 # room, so un-hide it for all members (archive_orphaned_talk_rooms
@@ -691,6 +687,11 @@ def record_inbound(
                 # though they're still members (ISSUE-134).
                 db.set_room_archived(conn, room_token, False)
         db.add_room_binding(conn, room_token, surface, surface_ref)
+        if surface == "talk" and existing.origin == "talk":
+            # Talk-side rename flows back to the registry. Only for Talk-origin
+            # rooms — a web-origin room's user-set name wins. After the bind,
+            # which is where the last-seen name is kept.
+            db.observe_external_room_name(conn, room_token, surface, channel_name)
         # Every istota sender is a member, so a shared Talk room surfaces in
         # each participant's web room list (ISSUE-134), and their own next
         # message un-hides a room they hid. A guest is neither: membership is

@@ -271,6 +271,7 @@ def _register(
     if room is None:
         return WhatsAppEventResult("group_bind_refused")
     token = room.token
+    db.observe_external_room_name(conn, token, SURFACE, roster.subject)
     # Founders, not joiners: the group existed before the bot saw it, and
     # everyone in it now is who its history was written for.
     for user_id in users:
@@ -330,8 +331,7 @@ def apply_roster(conn, config: "Config", roster: WhatsAppGroupRoster) -> "WhatsA
             return WhatsAppEventResult("host_left", leave_group_jid=group_jid)
         # Archived because the bot was removed, and it is back.
         db.set_room_archived(conn, room.token, False)
-    if roster.subject and roster.subject != room.name:
-        db.rename_room(conn, room.token, roster.subject)
+    db.observe_external_room_name(conn, room.token, SURFACE, roster.subject)
     before = _whatsapp_refs_by_user(conn, room.token)
     baseline = db.audience_baseline_pending(conn, room.token, SURFACE)
     _sync(conn, config, room.token, people, acknowledged=baseline)
