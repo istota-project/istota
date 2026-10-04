@@ -25,8 +25,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -223,20 +225,74 @@ SCHEMA_VERSION = "1"
 GLOBAL_PROFILE_ID = 0
 
 
+# Files this process has fully initialised, keyed by absolute path, holding
+# the (st_dev, st_ino) the init saw. Every accessor calls `init_db`, and the
+# schema script, migration and seed cost about 15ms a call (ISSUE-616).
+_INITIALISED: dict[str, tuple[int, int]] = {}
+
+
+def _file_identity(path: str) -> tuple[int, int] | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _ensure_wal(conn: sqlite3.Connection) -> None:
+    """Switch a file to WAL unless it already is, tolerating a rival doing it.
+
+    The switch needs an exclusive lock and can answer "database is locked"
+    straight away, past the busy handler, while another process is switching
+    the same fresh file. That rival leaves the file in WAL, so re-read the mode
+    and retry until it says WAL or the connection's own timeout runs out.
+    """
+    deadline = time.monotonic() + 5.0
+    while True:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        if str(mode).lower() == "wal":
+            return
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 def init_db(db_path: Path | str) -> None:
-    """Create config tables if missing. Idempotent."""
+    """Create config tables if missing. Idempotent; does the work once per file.
+
+    The memo is per process, so the web unit and the scheduler each run their
+    own first init and either may reach a fresh file first: the work takes the
+    write lock before it reads a sentinel, so a second init waits and then
+    finds everything done. An init whose migration or seed was swallowed is
+    not recorded, and the next call retries it. The memo is keyed on the file's
+    identity as well as its path, so a deleted or replaced file is initialised
+    again.
+    """
     db_path = Path(db_path)
+    key = os.path.abspath(db_path)
+    identity = _file_identity(key)
+    if identity is not None and _INITIALISED.get(key) == identity:
+        return
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with _connect(db_path) as conn:
         # config_store owns first-touch of money.db (ensure_initialised calls it
         # before money.db.init_db), so set WAL here so the DB is born WAL like
         # the other module DBs. It lives on local disk (Config.module_db_path),
         # so WAL's mmap'd -shm is safe — the SIGBUS that forced DELETE (ISSUE-157)
-        # was a FUSE-mount artifact. Set once at init (persists in the file
-        # header); not re-issued per _connect, since re-issuing takes a write
-        # lock that races sibling readers (the dispatch-stall cause).
-        conn.execute("PRAGMA journal_mode=WAL")
+        # was a FUSE-mount artifact. Read before set: setting takes a write lock
+        # that races sibling readers (the dispatch-stall cause), and the mode
+        # persists in the file header, so only a file not yet WAL needs it.
+        _ensure_wal(conn)
         conn.executescript(SCHEMA)
+        # Held to the commit, so two processes initialising one file at once
+        # serialise and the second reads the first one's sentinels. The old
+        # implicit BEGIN gave the same order only because its first statement
+        # happened to be a write; this keeps it if a read ever goes first.
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "INSERT OR IGNORE INTO schema_meta(key, value) VALUES (?, ?)",
             ("schema_version", SCHEMA_VERSION),
@@ -254,6 +310,14 @@ def init_db(db_path: Path | str) -> None:
         # between the config map and the shipped constant beneath it.
         _migrate_transaction_rules(conn)
         seed_transaction_rules(conn)
+        done = conn.execute(
+            "SELECT COUNT(*) FROM schema_meta WHERE key IN (?, ?)",
+            (_RULES_MIGRATION_SENTINEL, _RULES_SEED_SENTINEL),
+        ).fetchone()[0] == 2
+    if done:
+        identity = _file_identity(key)
+        if identity is not None:
+            _INITIALISED[key] = identity
 
 
 @contextmanager
