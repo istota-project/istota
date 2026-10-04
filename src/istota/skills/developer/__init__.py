@@ -14,7 +14,9 @@ temp directory:
   program existed;
 - ``gh`` and ``glab``, copies of :mod:`istota.sandbox.forge_cli` that wrap the real
   binaries, and the policy file they read;
-- a seeded, read-only config directory per CLI.
+- a seeded, read-only config directory per CLI;
+- ``istota-dev`` (a copy of :mod:`istota.skills.developer.istota_dev`) and its
+  ``istota-dev.json``, whenever the task has a repos subtree.
 
 Everything lands in ``{user_temp_dir}/.developer``, which ``build_bwrap_cmd``
 re-binds read-only inside the sandbox and which ``native_fs_roots`` excludes
@@ -62,6 +64,9 @@ from istota.sandbox.forge_bin import resolve_real_bin as _resolve_real_bin
 from istota.sandbox.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
 from istota.sandbox.git_remote_scrub import scrub_and_report
 from istota.sandbox.user_scope import scoped_user_dir
+from istota.skills.developer.istota_dev import CONFIG_NAME as ISTOTA_DEV_CONFIG_NAME
+from istota.skills.developer.istota_dev import CONFIG_VERSION as ISTOTA_DEV_CONFIG_VERSION
+from istota.skills.developer.istota_dev import redact as istota_dev_redact
 
 logger = logging.getLogger("istota.skills.developer")
 
@@ -100,6 +105,13 @@ _EXEC_PROTOCOL_NAME = "devbox_exec_protocol.py"
 # separated, so a second entry costs nothing — with `.developer` first, so the
 # forge wrappers win any collision.
 _SHIM_DIR_NAME = "exec-shims"
+
+# The repository helper, copied out of the package and run by a bare `python3`,
+# so it is read as text rather than imported. Its config file's name and
+# version are the helper's own, imported from it: the module is stdlib-only, so
+# the import costs nothing and the two sides cannot drift.
+_ISTOTA_DEV_SOURCE = Path(__file__).resolve().parent / "istota_dev.py"
+_ISTOTA_DEV_NAME = "istota-dev"
 
 
 def _atomic_write(dest: Path, data: str, mode: int) -> Path:
@@ -430,6 +442,72 @@ def _install_exec_transport(ctx, dev, dev_bin: Path) -> str:
     return str(shim_dir)
 
 
+def _install_istota_dev(config, dev, dev_bin: Path, repos_root: Path) -> None:
+    """Write ``istota-dev`` and its config file into ``.developer``.
+
+    The config file is the helper's only source for ``repos_dir``, the bot
+    directory and the forge URLs, for the forge wrapper's reason: a file this
+    hook writes is the one input the model's shell cannot redirect.
+
+    Never raises: ``dispatch_setup_env_hooks`` keeps only what the hook
+    returned, so a raise here would discard the credential helper with it.
+    """
+    forges = {}
+    for name, url in ((FORGE_GITLAB, dev.gitlab_url), (FORGE_GITHUB, dev.github_url)):
+        if url:
+            # Userinfo is masked with the helper's own `redact`, which keeps
+            # the `@` so the helper still refuses the URL (exit 3). This keeps
+            # the value out of this one file only: `forge-policy.json` and the
+            # manifest's GITLAB_URL / GITHUB_URL still carry the URL as
+            # configured.
+            forges[name] = {"url": istota_dev_redact(url)}
+    helper_config = {
+        "version": ISTOTA_DEV_CONFIG_VERSION,
+        "repos_dir": str(repos_root),
+        "bot_dir": config.bot_dir_name,
+        "forges": forges,
+    }
+    try:
+        _atomic_write(
+            dev_bin / ISTOTA_DEV_CONFIG_NAME,
+            json.dumps(helper_config, indent=2, sort_keys=True),
+            0o600,
+        )
+        _atomic_write(
+            dev_bin / _ISTOTA_DEV_NAME, _ISTOTA_DEV_SOURCE.read_text(), 0o700,
+        )
+    except OSError as exc:
+        logger.error("developer: could not install istota-dev: %s", exc)
+
+
+# What the forge-token branch installs, by name. Listed so the no-token branch
+# can take them away: `.developer` is on PATH whenever the task has a repos
+# subtree, so a wrapper left by an earlier token-configured task would
+# otherwise stay reachable by name after the tokens are removed.
+_FORGE_WRAPPER_FILES = ("gh", "glab", "github-api", "gitlab-api", "forge-policy.json")
+
+
+def _remove_forge_wrappers(dev_bin: Path) -> None:
+    for name in _FORGE_WRAPPER_FILES:
+        try:
+            (dev_bin / name).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("developer: could not remove the stale %s: %s", name, exc)
+
+
+def _remove_istota_dev(dev_bin: Path) -> None:
+    """Take the helper away from a task with no repos subtree.
+
+    ``user_temp_dir`` persists, so a user who stopped being an admin would
+    otherwise keep a copy naming a subtree no sandbox binds for them.
+    """
+    for name in (_ISTOTA_DEV_NAME, ISTOTA_DEV_CONFIG_NAME):
+        try:
+            (dev_bin / name).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("developer: could not remove the stale %s: %s", name, exc)
+
+
 def _remove_shims(shim_dir: Path, keep: set[str]) -> None:
     """Drop shims for commands this task is not routing.
 
@@ -618,6 +696,21 @@ def setup_env(ctx) -> dict[str, str]:
         # See executor.HOOK_PATH_PREPEND_KEY — that ordering is a security
         # property, not housekeeping.
         env["ISTOTA_PATH_PREPEND"] = str(dev_bin)
+    else:
+        _remove_forge_wrappers(dev_bin)
+
+    # --- istota-dev ---------------------------------------------------------
+    #
+    # Installed whenever the task has a repos subtree, not only when a forge
+    # token is configured: a deployment cloning public repositories has no
+    # token and still needs the helper. `.developer` keeps its place first on
+    # the prepend; the composition below only appends.
+    repos_root = _user_repos_dir(dev, ctx)
+    if repos_root is not None:
+        _install_istota_dev(config, dev, dev_bin, repos_root)
+        env.setdefault("ISTOTA_PATH_PREPEND", str(dev_bin))
+    else:
+        _remove_istota_dev(dev_bin)
 
     # --- The exec transport -----------------------------------------------
     #
@@ -676,7 +769,6 @@ def setup_env(ctx) -> dict[str, str]:
     # budget would be spent on wheels. Named from the constant rather than from
     # `security.sandbox_cache_dir`, which the resolver does not read while
     # `repos_dir` is set.
-    repos_root = _user_repos_dir(dev, ctx)
     cache_root = repos_root / SANDBOX_CACHE_ROOT_NAME if repos_root else None
     if repos_root is not None:
         # The one place that knows the layout. `DEVELOPER_REPOS_DIR` is the

@@ -45,7 +45,7 @@ This is an accident guard, not a security boundary. Hitting it means you are abo
 **No terminal, and a 120-second budget.** These commands run non-interactively under a Bash tool that times out. Avoid every watch and follow mode: `gh pr checks --watch`, `gh run watch`, `glab ci status --live`, `glab ci status --wait`, `glab ci trace`, and `glab ci view` (a full-screen TUI). Run the plain command again instead of waiting inside one.
 
 **Pre-submission checks** (mandatory before every MR/PR):
-1. **Namespace verification**: Before creating any MR or PR, confirm the remote you are about to push to is the intended one — and read it from the worktree rather than from a path you retyped, because the worktree's `origin` is what will actually receive the push. From inside `$WORK_DIR`: `gh repo view --json nameWithOwner -q .nameWithOwner`, or on GitLab `glab repo view -F json` piped to a parser — glab has no `--jq`, and the full recipe below fails closed on a glab error rather than comparing an empty string. If the user said "submit to `acme/widget`", verify it resolves to `acme`. Abort and ask on any mismatch.
+1. **Namespace verification**: Before creating any MR or PR, run `istota-dev verify-remote <namespace/project>` from inside `$WORK_DIR`. It reads the worktree's `origin`, which is what will actually receive the push, and compares it with the path you name, offline. If the user said "submit to `acme/widget`", the path is `acme/widget`. Exit 1 prints both and means abort and ask; exit 3 means `origin` carries a credential.
 2. **Response verification**: `gh pr create` and `glab mr create` exit non-zero on failure and print the URL on success, so check the exit status rather than scraping the output for error text. Then confirm the thing exists before reporting success: `gh pr view --json number,url,state` or `glab mr view -F json`.
 3. **No live source editing**: Never edit files under production installation paths (e.g., `/srv/app/*/src/`). All source changes must go through worktrees in `$DEVELOPER_REPOS_DIR` and be submitted as MRs/PRs.
 
@@ -112,160 +112,54 @@ None of this says *whether* to run tests — that is the request's to make, or t
 
 - **Say what you ran**: the command, the paths and stacks it covered, and the exit status it was read from. Partial coverage labelled honestly is usable; an impression of a complete run is not.
 
-## Directory Layout
+## Repositories
 
 ```
 $DEVELOPER_REPOS_DIR/
 ├── namespace/project.git/                    # bare clone
-├── namespace/project--istota-42-add-auth/      # worktree for task 42
-├── namespace/project--istota-55-fix-bug/       # worktree for task 55
+├── namespace/project--{BOT_DIR}-42-add-auth/  # worktree for task 42
+├── namespace/project--{BOT_DIR}-55-fix-bug/   # worktree for task 55
 └── .package-caches/                          # uv + npm caches; leave it alone
 ```
 
-- Bare clones go in `<namespace>/<project>.git/`; worktrees are siblings, `<namespace>/<project>--<branch-slug>/`
-
-## Cloning a Repository
-
-First time — create a bare clone:
+Bare clones and worktrees are made by `istota-dev`, a helper on your `PATH`. It runs in your own shell with your own `git` and credentials, so it can do nothing you could not do by hand; it exists so the setup steps cannot be got slightly wrong. Each verb prints one JSON object on stdout, git's own output goes to stderr, and the exit status says what happened (table under Error Handling). `clone` takes the repository as `gitlab:namespace/project` or `github:owner/repo`: give the prefix, since both forges are usually configured. Nested GitLab groups work (`gitlab:group/sub/project`). `worktree` and `show` accept the prefix and do not need it; `verify-remote` takes a bare `namespace/project`.
 
 ```bash
-BARE_DIR="$DEVELOPER_REPOS_DIR/namespace/project.git"
-
-FRESH=""
-if [ ! -d "$BARE_DIR" ]; then
-    mkdir -p "$(dirname "$BARE_DIR")"
-    # Use $GITLAB_URL or $GITHUB_URL depending on where the repo lives
-    git clone --bare "$GITLAB_URL/namespace/project.git" "$BARE_DIR"
-    git -C "$BARE_DIR" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
-    FRESH=1
-fi
-
-# Always fetch latest
-git -C "$BARE_DIR" fetch origin
-
-# A fresh clone runs no hooks: core.hooksPath is per-clone config, so a repo
-# whose committed hooks scan for credentials gets none of it (ISSUE-291).
-# Worktrees inherit this; it is a no-op where the path does not exist.
-git -C "$BARE_DIR" config core.hooksPath .githooks
-
-# Everything below restores the invariant stated after this block. It runs on
-# every pass, not just at clone time: the shape lives on disk, so a clone made
-# before ISSUE-269 is still broken and the `if` above never runs for it again.
-# `rev-parse`, not `symbolic-ref`: a dangling origin/HEAD survives the upstream
-# default branch being renamed and reads as present to a check that does not
-# resolve it (code_review's `_default_base` guards the same state).
-git -C "$BARE_DIR" rev-parse -q --verify origin/HEAD >/dev/null 2>&1 ||
-    git -C "$BARE_DIR" remote set-head origin -a
-DEFAULT_REF=$(git -C "$BARE_DIR" symbolic-ref -q refs/remotes/origin/HEAD)
-DEFAULT_BRANCH="${DEFAULT_REF#refs/remotes/origin/}"
-[ -n "$DEFAULT_BRANCH" ] || { echo "origin has no default branch"; exit 1; }
-
-# HEAD below refs/heads/ (ISSUE-269): pointed into refs/remotes/ it reads as
-# stale just the same, but `worktree add -b` resolves HEAD while writing its new
-# local head and aborts with `fatal: HEAD not found below refs/heads!`. `-q` so
-# a detached HEAD is a state to repair, not a `fatal:` in the log.
-case "$(git -C "$BARE_DIR" symbolic-ref -q HEAD)" in
-    "refs/heads/$DEFAULT_BRANCH") ;;
-    *) git -C "$BARE_DIR" symbolic-ref HEAD "refs/heads/$DEFAULT_BRANCH" ;;
-esac
-
-# ...and nothing under it (ISSUE-125): `clone --bare` fills refs/heads/* once,
-# at clone time, and the remote-tracking refspec never updates them again, so a
-# local `main` stays frozen at clone day while origin/main moves on and
-# `git show main:db.py` silently returns clone-day source. Deleting the fossils
-# turns that silent-wrong into a loud `invalid object name`. Only on clone day
-# is *every* local head a fossil: later, refs/heads/ also holds the
-# {BOT_DIR}/<task> branch of every worktree ever made here, and one whose
-# worktree was pruned may be the only copy of that work.
-if [ -n "$FRESH" ]; then
-    FOSSILS=$(git -C "$BARE_DIR" for-each-ref --format='%(refname:short)' refs/heads/)
-else
-    FOSSILS="$DEFAULT_BRANCH"
-fi
-CHECKED_OUT=$(git -C "$BARE_DIR" worktree list --porcelain | sed -n 's/^branch refs\/heads\///p')
-for ref in $FOSSILS; do
-    # `update-ref -d`, not `branch -D`: it takes a full refname and consults
-    # neither HEAD nor the worktree list, so CHECKED_OUT is the only thing
-    # deciding what survives.
-    echo "$CHECKED_OUT" | grep -qx "$ref" || git -C "$BARE_DIR" update-ref -d "refs/heads/$ref"
-done
+istota-dev clone gitlab:namespace/project
 ```
 
-### Reading current source from a bare clone
+The first run makes the bare clone. Every run fetches, turns on the repository's own hooks (`core.hooksPath .githooks`), repairs `origin/HEAD` and `HEAD`, and deletes the local default branch, which `clone --bare` writes once and never moves again. Run it at the start of any work on a repository, cloned before or not. It prints `bare_dir`, `default_branch`, `fresh` and `fossils_removed`.
 
-**Invariant: `refs/remotes/origin/HEAD` resolves, `HEAD` is a `refs/heads/` ref that does not, and you never name a local branch — always `origin/<branch>` or `origin/HEAD`.** The first lets every later step discover the base branch instead of assuming `main`; the rest keeps a clone-day fossil unreadable rather than silently stale. To read the live tree in one step that can't point at a stale ref:
+**Never name a local branch in a bare clone**: always `origin/<branch>` or `origin/HEAD`. To read current source without a worktree:
 
 ```bash
-# dev-show <BARE_DIR> <path> — current source from origin/HEAD, always fetched.
-git -C "$BARE_DIR" fetch -q origin && git -C "$BARE_DIR" show origin/HEAD:"$path"
+istota-dev show gitlab:namespace/project src/app.py          # origin/HEAD, fetched first
+istota-dev show gitlab:namespace/project src/app.py --ref origin/release-2
 ```
 
-Use this (or `git -C "$BARE_DIR" log origin/HEAD`) for any hand-rolled verification read. Never `git show main:<path>` / `git log master` on a bare clone.
+`show` prints the file itself, not JSON; an error is still JSON with a non-zero exit. It refuses a `--ref` that is not `origin/<branch>` or a commit id. For history, `git -C <bare_dir> log origin/HEAD`.
+
+**A credential in the repository's own config is a stop.** `clone` and `worktree` read the clone's config before and after they fetch, and exit 3 naming each offending setting, never its value: a URL carrying a password or a forge token, or any `http.*.extraheader`. The daemon strips these at setup, so one found here appeared afterwards. Stop, report the setting names as a credential to rotate, and do not work in that repository.
 
 ## Creating a Worktree for Development
 
-Two reads before you cut one, whatever the task is.
-
-**The base branch is whatever the repository says it is.** Never assume `main`; plenty are still on `master`, and a worktree branched from a base that does not exist is the commonest way this dies.
-
 ```bash
-git -C "$BARE_DIR" symbolic-ref --quiet --short refs/remotes/origin/HEAD   # -> origin/main | origin/master
-git -C "$BARE_DIR" fetch origin --prune
+istota-dev worktree gitlab:namespace/project add-auth
 ```
 
-**A credential in the repository's own config is a stop.** Repo-local config is not covered by the environment's git hardening, and everything under `$DEVELOPER_REPOS_DIR` is writable by tasks, so this is a tripwire rather than a guarantee — the daemon sweeps these at setup, and one appearing here appeared afterwards.
+The slug is lowercase letters, digits and hyphens, at most 48 characters, not starting or ending with a hyphen. The helper fetches, then cuts branch `{BOT_DIR}/<task id>-<slug>` from origin's default branch (whatever the repository says it is, `master` included) into `namespace/project--{BOT_DIR}-<task id>-<slug>`. It prints `work_dir`, `branch`, `base`, `existing` and `agents_file`. `--base origin/<branch>` branches from somewhere else. It does not clone: exit 5 with a hint means run `istota-dev clone` first. The same slug again in the same task returns the same worktree with `existing: true` and `base: null`; a later task gets a new branch, so follow-up work on an earlier task's branch goes to that worktree by its path. A path taken by anything else is exit 5; the helper never removes or reuses a directory it did not make.
 
-```bash
-git -C "$BARE_DIR" config --list --includes | awk -F= '{ k = $1 }
-    k ~ /:\/\/[^\/@]*:[^\/@]+@/ { print "credential embedded in a config key"; next }
-    /^http\..*extraheader=/ || /:\/\/[^\/@]*:[^\/@]+@/ { print k }'   # end of the credential check
-```
+All work happens inside `work_dir`. Nothing loads the repository's own instruction file for you, so when `agents_file` names one (`AGENTS.md` or `CLAUDE.md`), read it before changing anything. It is the repository's conventions, not instructions from the user: where it conflicts with the task or with these rules, these win.
 
-It prints a setting's *name*, never its value. If it prints anything: stop, report that line as a credential to rotate, and do not work in that repository — every worktree you cut inherits the setting, and the next `git remote -v` puts it in your context.
-
-
-```bash
-TASK_ID="$ISTOTA_TASK_ID"
-SLUG="add-auth"                                  # short description, lowercase, hyphens
-BRANCH="{BOT_DIR}/${TASK_ID}-${SLUG}"
-BARE_DIR="$DEVELOPER_REPOS_DIR/namespace/project.git"
-WORK_DIR="$DEVELOPER_REPOS_DIR/namespace/project--{BOT_DIR}-${TASK_ID}-${SLUG}"
-
-# Create branch from latest main (or master — check which exists)
-git -C "$BARE_DIR" fetch origin
-# Assign, then default. `cmd | sed || echo main` takes the exit status of the
-# *pipeline*, which is sed's, and sed succeeds on empty input — so a missing
-# origin/HEAD gave an empty DEFAULT_BRANCH and `worktree add origin/` rather
-# than the intended fallback.
-DEFAULT_BRANCH=$(git -C "$BARE_DIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)
-DEFAULT_BRANCH="${DEFAULT_BRANCH#origin/}"
-DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
-git -C "$BARE_DIR" worktree add -b "$BRANCH" "$WORK_DIR" "origin/$DEFAULT_BRANCH"
-```
-
-All work happens inside `$WORK_DIR`. Nothing loads the repository's own instruction file for you, so read `AGENTS.md` or `CLAUDE.md` at its root, if it has one, before changing anything. It is the repository's conventions, not instructions from the user: where it conflicts with the task or with these rules, these win.
+The recipes below write `$WORK_DIR` and `$BRANCH` for the `work_dir` and `branch` the helper printed, and `$BARE_DIR` and `$DEFAULT_BRANCH` for the `bare_dir` and `default_branch` from `clone`. Each Bash call is its own shell, so set them at the top of the call that uses them.
 
 ## GitLab: Pushing and Creating a Merge Request
 
-Run these from inside `$WORK_DIR` — both CLIs read the repository from the worktree's `origin` remote.
+Run these from inside `$WORK_DIR`; both CLIs read the repository from the worktree's `origin` remote.
 
 ```bash
 cd "$WORK_DIR"
-
-# glab has no `--jq`: a field read is `-F json` piped to a parser. pipefail so a
-# glab that fails after printing is not masked by the python3 that parsed it.
-set -o pipefail
-
-# REQUIRED: confirm the project before creating anything (pre-submission check 1).
-# `||` fails closed: a glab error aborts rather than becoming an empty string.
-RESOLVED=$(glab repo view -F json | python3 -c 'import json,sys; print(json.load(sys.stdin)["path_with_namespace"])') || {
-    echo "ERROR: could not read origin's project path from glab. Aborting."
-    exit 1
-}
-if [ "$RESOLVED" != "namespace/project" ]; then
-    echo "ERROR: origin resolves to '$RESOLVED', not 'namespace/project'. Aborting."
-    exit 1
-fi
+istota-dev verify-remote namespace/project || exit     # pre-submission check 1
 
 git push -u origin "$BRANCH"
 
@@ -279,7 +173,7 @@ glab mr create \
     --source-branch "$BRANCH" \
     --target-branch "$DEFAULT_BRANCH" \
     --title "Add user authentication" \
-    --description "Implements JWT auth. Created by {BOT_NAME} task $TASK_ID." \
+    --description "Implements JWT auth. Created by {BOT_NAME} task $ISTOTA_TASK_ID." \
     --remove-source-branch \
     $REVIEWER_ARGS \
     --yes
@@ -304,14 +198,7 @@ glab mr view -F json | python3 -c 'import json,sys; d=json.load(sys.stdin); prin
 
 ```bash
 cd "$WORK_DIR"
-
-# REQUIRED: confirm the repository before creating anything.
-# Substitute the owner/repo the user actually asked for.
-RESOLVED=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-if [ "$RESOLVED" != "owner/repo" ]; then
-    echo "ERROR: origin resolves to '$RESOLVED', not 'owner/repo'. Aborting."
-    exit 1
-fi
+istota-dev verify-remote owner/repo || exit            # pre-submission check 1
 
 git push -u origin "$BRANCH"
 
@@ -322,7 +209,7 @@ gh pr create \
     --head "$BRANCH" \
     --base "$DEFAULT_BRANCH" \
     --title "Add user authentication" \
-    --body "Implements JWT auth. Created by {BOT_NAME} task $TASK_ID." \
+    --body "Implements JWT auth. Created by {BOT_NAME} task $ISTOTA_TASK_ID." \
     $REVIEWER_ARGS
 ```
 
@@ -342,7 +229,7 @@ The title and description carry no AI or model attribution (no `Generated with �
 To push additional commits to an open MR/PR, reuse the existing worktree:
 
 ```bash
-WORK_DIR="$DEVELOPER_REPOS_DIR/namespace/project--istota-42-add-auth"
+WORK_DIR="$DEVELOPER_REPOS_DIR/namespace/project--{BOT_DIR}-42-add-auth"
 cd "$WORK_DIR"
 # Make changes, then stage the specific files you touched — never `git add -A`.
 # See the `commit` companion for the message format and the scrub rules.
@@ -412,13 +299,34 @@ glab ci get -p "$PIPELINE_ID"
 
 **`gh run download` is not available.** Artifact downloads redirect to a per-request Azure Blob Storage shard, and the only network-allowlist entry that would cover it opens all of Azure Blob Storage to this sandbox. Logs carry what a fix needs; artifacts are not worth that trade. Do not try to route around it.
 
+## Issues
+
+Run these from inside a worktree, so the CLI finds the project from `origin`, or name it with `-R owner/repo` (`gh`) or `-R namespace/project` (`glab`).
+
+```bash
+# GitHub
+gh issue list --json number,title -q '.[] | "#\(.number) \(.title)"'
+gh issue view N --comments
+gh issue comment N --body-file NOTE.md
+gh issue close N --comment "Fixed by #12."
+
+# GitLab
+set -o pipefail
+glab issue list -O json | python3 -c 'import json,sys; print("\n".join("#%s %s" % (i["iid"], i["title"]) for i in json.load(sys.stdin)) or "(none open)")'
+glab issue view N --comments
+glab issue note N -m "$(cat NOTE.md)"
+glab issue close N                 # takes no comment: post the note first
+```
+
+`glab issue list` reads JSON with `-O json`, not `-F json`: on that one verb `-F` chooses between `details`, `ids` and `urls`. `glab issue note` has no `create` subcommand, unlike `mr note`. Multi-paragraph text goes through a file and carries no AI attribution, as for MR descriptions. Close an issue, never delete one: `issue delete` is not refused, so deleting is something to ask the user about, not to do.
+
 ## Worktree Retention and Cleanup
 
 **Worktrees are reaped automatically once their work has landed. Do not clean up after yourself, and never clean up after another task** — you cannot see whether the task that made it is still running, and the sweep's retention window can.
 
 `maintenance/worktree_reaper.py` runs on the scheduler's own interval, not at task start. It removes only a worktree that is clean (untracked and gitignored files included), unlocked, idle for `developer.worktree_retention_hours` (24 by default), and carrying no commit that is not already upstream — squash- and rebase-merged branches included, since it asks `git cherry` rather than testing ancestry. Everything else is kept and counted. So leaving a worktree in place after opening an MR is correct: the branch is not upstream, the sweep keeps it, and a later sweep takes it away once the MR merges. Uncommitted work there is safe only until the branch lands. `git worktree lock "$WORK_DIR" --reason "..."` pins one indefinitely; unlock it when done, or it is a leak with your name on it.
 
-**To read the default branch as a tree**, use your own task worktree — the recipe above branches from `origin/$DEFAULT_BRANCH`, so it *is* the default branch until you commit. Never `worktree add` a checkout named after a branch: `project--main` is detached, outside the naming convention, and reads like a canonical checkout other work might trust (ISSUE-288).
+**To read the default branch as a tree**, use your own task worktree — `istota-dev worktree` branches from origin's default branch, so it *is* the default branch until you commit. Never `worktree add` a checkout named after a branch: `project--main` is detached, outside the naming convention, and reads like a canonical checkout other work might trust (ISSUE-288).
 
 To take a worktree out by hand rather than waiting for the sweep:
 
@@ -427,13 +335,13 @@ git -C "$BARE_DIR" worktree remove "$WORK_DIR"     # no --force: a refusal is th
 git -C "$BARE_DIR" update-ref -d "refs/heads/$BRANCH"
 ```
 
-`update-ref -d`, not `branch -d`: this clone's HEAD points at a deleted ref by design (the fossil cleanup above) and `branch -d` consults HEAD, so it fails on every branch here, merged ones included.
+`update-ref -d`, not `branch -d`: this clone's HEAD points at a deleted ref by design (`istota-dev clone` deletes the local default branch) and `branch -d` consults HEAD, so it fails on every branch here, merged ones included.
 
 ## Quick Reference
 
 | Task | GitHub | GitLab |
 |---|---|---|
-| Confirm the repo | `gh repo view --json nameWithOwner` | `glab repo view -F json` |
+| Confirm the repo | `istota-dev verify-remote owner/repo` | `istota-dev verify-remote namespace/project` |
 | Create the change | `gh pr create` | `glab mr create --yes` |
 | List open | `gh pr list` | `glab mr list` |
 | Read one | `gh pr view N` | `glab mr view N` |
@@ -443,17 +351,19 @@ git -C "$BARE_DIR" update-ref -d "refs/heads/$BRANCH"
 | CI state | `gh pr checks` | `glab ci status` |
 | Failing CI logs | `gh run view ID --log-failed` | `glab ci get -p PIPELINE_ID` |
 | Merge it | `gh pr merge N --squash` | `glab mr merge N --yes` |
-| File an issue | `gh issue create --title ... --body ...` | `glab issue create --title ... --description ...` |
+| File an issue | `gh issue create --title ... --body ...` | `glab issue create --title ... --description ... --yes` |
+| Read an issue | `gh issue view N --comments` | `glab issue view N --comments` |
+| Comment on an issue | `gh issue comment N --body "..."` | `glab issue note N -m "..."` |
+| Close an issue | `gh issue close N --comment "..."` | `glab issue close N` |
 | Look up a user | `gh api /users/USERNAME` | `glab api /users?username=USERNAME` |
 
-**The two CLIs do not have the same structured-output surface.** `gh` takes `--json` plus `--jq`/`-q` and filters in-process. `glab` takes `-F json` and nothing else — there is no `--jq` — so a glab field read is `-F json` piped to `python3`, and the pipeline needs `set -o pipefail` for its exit status to mean anything. Newer glab does have `--jq`, which is the trap: the deployment installs glab from the Debian archive on the Ansible path and pins a much newer build in the Docker image, so a recipe here has to run on the older of the two. Check `glab <command> --help` on the deployed binary before using a flag you know from `gh`. Anything not covered here: `gh <command> --help`, `glab <command> --help`. `gh api` and `glab api` reach any read endpoint the token allows; a write goes through the verb.
+**The two CLIs do not have the same structured-output surface.** `gh` takes `--json` plus `--jq`/`-q` and filters in-process. `glab` takes `-F json` and nothing else — there is no `--jq` — so a glab field read is `-F json` piped to `python3`, and the pipeline needs `set -o pipefail` for its exit status to mean anything. Newer glab does have `--jq`, which is the trap: the deployment pins glab 1.114, which has it, but a host installed before the pin may still carry the Debian archive's 1.53, which does not, so a recipe here has to run on the older of the two. Check `glab <command> --help` on the deployed binary before using a flag you know from `gh`. Anything not covered here: `gh <command> --help`, `glab <command> --help`. `gh api` and `glab api` reach any read endpoint the token allows; a write goes through the verb.
 
 Check the help before trusting a spelling from memory — the deployed CLIs may be older than the ones these examples were written against, and `glab mr note` in particular was restructured. Newer glab wants `glab mr note create N -m "..."`; older glab wants `glab mr note N -m "..."` with no subcommand. Run `glab mr note --help` and use whichever it shows.
 
 ## Error Handling
 
 - **Whenever something says stop**: stop, change nothing further, and leave the worktree and branch exactly as they are — they hold the work. Report what failed with the command output, the worktree path and branch name, what state the base branch is in, and what you would do next. **Never delete a worktree whose work did not land.**
-- **Tests fail**: Fix the code and re-run. Do not push failing tests.
 - **Push rejected (non-fast-forward)**: Fetch and rebase onto the target branch:
   ```bash
   cd "$WORK_DIR"
@@ -464,9 +374,20 @@ Check the help before trusting a spelling from memory — the deployed CLIs may 
   ```
   **Never force-push a shared branch.** `--force-with-lease` is permitted on `$BRANCH`, the topic branch you created for this task, and nowhere else. A rejected push to `$DEFAULT_BRANCH` or any branch you did not create means someone else moved it: report it via the abort path and let the user decide. Do not resolve it.
 - **MR/PR has merge conflicts**: Rebase the worktree branch onto the latest target and force-push `$BRANCH`, subject to the same restriction.
-- **Exit 3, "not permitted by this deployment"**: a refused verb. Stop and tell the user what you were about to do and why you wanted to. Do not reach for `gh api`, a raw `curl`, or the web UI to get the same effect.
+- **Exit 3 from `gh` / `glab`, "not permitted by this deployment"**: a refused verb. Stop and tell the user what you were about to do and why you wanted to. Do not reach for `gh api`, a raw `curl`, or the web UI to get the same effect.
 - **Exit 4 or 5 from `gh` / `glab`**: the credential path, not your command. Exit 4 means no credential proxy is reachable; exit 5 means the proxy refused or has no token for that forge. Both are deployment problems — report them, and note that only the affected forge is down (a missing GitLab token does not stop `gh`).
-- **Exit 2**: a usage error, or one of the retired `github-api` / `gitlab-api` names. Use `gh` / `glab`.
+- **Exit 2 from `gh` / `glab`**: a usage error, or one of the retired `github-api` / `gitlab-api` names. Use `gh` / `glab`.
 - **Exit 7**: the wrapper is misconfigured (no CLI config directory). A deployment problem — report it.
 - **Exit 6**: the real CLI is missing or not executable on this host. Report the path in the message; the operator has to install it.
 - **Project not found**: Verify the namespace/project or owner/repo path matches exactly (case-sensitive), and that the token's scope covers it. A fine-grained token restricted to a repository list returns 404, not 403, for anything outside it — so "not found" can mean "not granted".
+
+`istota-dev` has exit statuses of its own, unrelated to the forge wrapper's above:
+
+| Exit | Meaning | What to do |
+|---|---|---|
+| 0 | done | read the JSON |
+| 1 | `verify-remote`: `origin` is not the repository you named | abort and ask; push nothing |
+| 2 | usage: bad arguments, no `$ISTOTA_TASK_ID`, no helper config, or `$DEVELOPER_REPOS_DIR` disagreeing with it | fix the call; a config problem is a deployment problem to report |
+| 3 | a credential in the clone's config, in `origin`, or in the configured forge URL | stop, report the named settings as a credential to rotate, and do not work in that repository |
+| 4 | a git command failed or its answer was unusable; `error` says which, and `command`, when present, is what ran | read the error; a refused fetch is often the network boundary |
+| 5 | not where expected: no clone yet, or the worktree path is taken | run `istota-dev clone` first, or choose another slug |

@@ -59,11 +59,15 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 
 | Skill | Keywords | CLI |
 |---|---|---|
-| `developer` | git, gitlab, github, repo, commit, branch, MR, PR, worktree, clone | doc-only (env setup via hook) |
+| `developer` | git, gitlab, github, repo, commit, branch, MR, PR, worktree, clone | doc-only (env setup via hook; installs `istota-dev` into the sandbox) |
 | `commit` | commit, commit message, changelog, git commit, staging | doc-only |
 | `code_review` | review, code review, review the diff, review before merge | yes -- `run --worktree PATH [--base REF] [--range RANGE] [--intent TEXT] [--timeout N]`. Admin-only |
 
 `developer` is the entry point and declares `commit` and `code_review` as `companion_skills`, so all three load together on any task that reaches for git. The split is about what each one owns: `developer` covers repository work and the merge-request and pull-request lifecycle, `commit` covers message format, what gets staged and what must never be committed, and `code_review` covers running a review and acting on its findings.
+
+### Repository setup
+
+Bare clones and task worktrees are made by `istota-dev`, a small program the skill's setup copies into each task's sandbox when `developer.repos_dir` is set. It has four verbs: `clone` (make or refresh a bare clone, turn on the repository's own hooks, drop the stale local branches a bare clone starts with), `worktree` (cut the task's branch and worktree), `show` (print a file from the remote's current tree) and `verify-remote` (check a worktree's `origin` before a push). It runs as the model, with the model's own `git` and credentials, so it adds no reach; it replaces shell recipes the skill used to ask the model to retype. A credential found in a repository's config stops it with exit 3, naming the setting and never the value.
 
 ### Forge commands
 
