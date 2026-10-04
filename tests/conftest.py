@@ -256,6 +256,73 @@ def _no_subscription_usage_lookups(monkeypatch):
     monkeypatch.setattr(subscription_usage, "_urllib_transport", _refuse)
 
 
+def _init_db_inputs() -> dict:
+    """Everything `db.init_db` runs, by identity, so a patched one is visible."""
+    import sqlite3
+
+    inputs = {
+        name: value for name, value in vars(db).items()
+        if name.startswith("_migrate") or name in {"_run_migrations", "_resolve_schema_path"}
+    }
+    inputs["sqlite3"] = db.sqlite3
+    inputs["sqlite3.connect"] = sqlite3.connect
+    return inputs
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _init_db_from_a_template(tmp_path_factory):
+    """`db.init_db` on a fresh path copies a database the real `init_db` built.
+
+    `init_db` costs about 0.3s, almost all of it `schema.sql`, and it runs once
+    per test in hundreds of files. The template is built once per worker by the
+    real function and checkpointed, since without the TRUNCATE checkpoint the
+    schema sits in the WAL sidecar and a copy of the main file has no tables.
+    An existing file, a missing parent directory, or any patched migration,
+    schema path or sqlite3 entry point goes to the real `init_db`, so tests
+    of the migrations and of init_db's own failures still run the code.
+    """
+    import shutil
+    import sqlite3
+
+    real_init_db = db.init_db
+    unpatched = _init_db_inputs()
+    template: list[Path] = []
+
+    def init_db(db_path) -> None:
+        path = Path(db_path)
+        if path.exists() or not path.parent.is_dir() or _init_db_inputs() != unpatched:
+            return real_init_db(db_path)
+        if not template:
+            built = tmp_path_factory.mktemp("framework-db") / "template.db"
+            real_init_db(built)
+            with sqlite3.connect(built) as conn:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            template.append(built)
+        shutil.copyfile(template[0], path)
+
+    patcher = pytest.MonkeyPatch()
+    patcher.setattr(db, "init_db", init_db)
+    yield
+    patcher.undo()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _scrypt_once_per_key():
+    """The two credential stores derive their Fernet key with scrypt on every
+    encrypt and decrypt. The derivation is a pure function of the key, so each
+    worker pays it once per key."""
+    import functools
+
+    from istota.credentials import store as secrets_store
+    from istota.webui import tokens as web_tokens
+
+    patcher = pytest.MonkeyPatch()
+    for module in (secrets_store, web_tokens):
+        patcher.setattr(module, "_derive_fernet_key", functools.cache(module._derive_fernet_key))
+    yield
+    patcher.undo()
+
+
 @pytest.fixture
 def db_path(tmp_path):
     """Initialize a real SQLite database using schema.sql and return its path."""

@@ -12,13 +12,11 @@ runs don't share the module-global pending-auth cache.
 
 from __future__ import annotations
 
-import functools
 from typing import Any
 
 import pytest
 
 from istota import db as framework_db
-from istota.credentials import store as secrets_store
 from istota.health import garmin as gm
 from tests.support.monotonic_spy import monotonic_spy
 
@@ -28,16 +26,10 @@ from tests.support.monotonic_spy import monotonic_spy
 # ---------------------------------------------------------------------------
 
 
-_derive_once = functools.cache(secrets_store._derive_fernet_key)
-
-
 @pytest.fixture(autouse=True)
 def _secret_key(monkeypatch):
     """Every Garmin test needs a Fernet key for the secrets table."""
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key-test-key-test-key-test-key-test-key")
-    # The key is derived with scrypt on every encrypt and decrypt; it is
-    # pure, so derive it once per worker.
-    monkeypatch.setattr(secrets_store, "_derive_fernet_key", _derive_once)
 
 
 @pytest.fixture

@@ -1,6 +1,5 @@
 """Configuration loading for istota.executor module."""
 
-import functools
 import logging
 import os
 import sys
@@ -95,16 +94,6 @@ def _skills_config(tmp_path, *, files_skill=True, mount=False, **kw):
     return Config(
         db_path=db_path, skills_dir=skills_dir, temp_dir=tmp_path / "temp", **kw,
     )
-
-
-_derive_fernet_key_once = functools.cache(secrets_store._derive_fernet_key)
-
-
-@pytest.fixture(autouse=True)
-def _scrypt_once_per_key(monkeypatch):
-    """The store derives its key with scrypt on every encrypt and decrypt;
-    the derivation is pure, so each worker pays it once per key."""
-    monkeypatch.setattr(secrets_store, "_derive_fernet_key", _derive_fernet_key_once)
 
 
 @pytest.fixture
@@ -1062,7 +1051,6 @@ class TestKarakeepEnvVars:
     """
 
     def _make_config(self, tmp_path, monkeypatch, secrets):
-        from istota.credentials import store as secrets_store
 
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "x" * 64)
         config = _skills_config(

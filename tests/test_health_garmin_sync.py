@@ -7,14 +7,12 @@ rate-limit / missing-data shapes without touching the real SDK.
 
 from __future__ import annotations
 
-import functools
 from datetime import date, datetime
 from typing import Any
 
 import pytest
 
 from istota import db as framework_db
-from istota.credentials import store as secrets_store
 from istota.health import db as health_db
 from istota.health import garmin as gm
 from istota.health import garmin_sync
@@ -23,15 +21,9 @@ from istota.health.workspace import synthesize_health_context
 from tests.support.sleep_spy import sleep_spy
 
 
-_derive_once = functools.cache(secrets_store._derive_fernet_key)
-
-
 @pytest.fixture(autouse=True)
 def _secret_key(monkeypatch):
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key-test-key-test-key-test-key-test-key")
-    # The key is derived with scrypt on every encrypt and decrypt; it is
-    # pure, so derive it once per worker.
-    monkeypatch.setattr(secrets_store, "_derive_fernet_key", _derive_once)
 
 
 @pytest.fixture
