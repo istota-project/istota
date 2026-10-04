@@ -212,6 +212,36 @@ def _inside(spans: list[tuple[int, int]], starts: list[int], index: int) -> bool
     return at >= 0 and spans[at][0] <= index < spans[at][1]
 
 
+def chat_file_images(text: str) -> list[tuple[int, int, str, str]]:
+    """Every `/chat/files` image in ``text`` the web client would draw.
+
+    ``(start, end, label, path)`` per image, in order, with ``path`` the
+    decoded workspace path. The same reading `check_chat_file_links` makes:
+    nothing inside a fenced block or inline code, and no absolute URL. A
+    surface that cannot draw a markdown image (WhatsApp) reads the model's
+    embed through this rather than a second pattern. Never raises.
+    """
+    if not text or "/api/chat/files?" not in text:
+        return []
+    try:
+        spans = _code_spans(text)
+        starts = [start for start, _ in spans]
+        found = []
+        for match in _CHAT_FILE_LINK_RE.finditer(text):
+            if not match.group("bang") or _inside(spans, starts, match.start()):
+                continue
+            path = _chat_file_path(match.group("url"))
+            if path is None:
+                continue
+            found.append(
+                (match.start(), match.end(), match.group("label").strip(), path)
+            )
+        return found
+    except Exception:
+        logger.exception("chat file image scan failed")
+        return []
+
+
 def check_chat_file_links(
     config: "Config", user_id: str, text: str, *, task_id: int | None = None,
 ) -> str:

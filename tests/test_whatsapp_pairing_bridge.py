@@ -90,7 +90,7 @@ CREDS = '{"me":"the paired device"}'
 BAILEYS_CAPS = WhatsAppProviderCaps(
     metered=False, has_service_window=False,
     supports_templates=False, delivery_receipts=True,
-    address_field="jid", service_body_limit=4096, interactive_body_limit=4096,
+    address_field="jid", service_body_limit=4096, interactive_body_limit=4096, outbound_media=True,
 )
 
 

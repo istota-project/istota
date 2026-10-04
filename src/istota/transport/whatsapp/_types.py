@@ -337,6 +337,26 @@ class WhatsAppWebhookResult:
 
 
 @dataclass(frozen=True)
+class WhatsAppOutboundMedia:
+    """One staged file a send carries, named rather than embedded.
+
+    `name` is a single component under the media staging directory
+    (`media.is_staged_name`), never a path: the sidecar joins it under its own
+    staging root, so the wire cannot name a file anywhere else. The bytes are
+    a re-encoded copy with no metadata (`outbound_media.stage_image`), never
+    the workspace file itself.
+
+    `caption` is the text that goes with the image. The request's own `text`
+    stays the alt-text rendering, which is what a sidecar that cannot read the
+    file, or one that predates media, sends instead.
+    """
+    name: str
+    mimetype: str
+    kind: Literal["image"] = "image"
+    caption: str = ""
+
+
+@dataclass(frozen=True)
 class WhatsAppSendRequest:
     """One Cloud API call, described without a PyWa object in sight.
 
@@ -355,6 +375,7 @@ class WhatsAppSendRequest:
     template_name: str | None = None
     template_language: str | None = None
     buttons: tuple[tuple[str, str], ...] = ()
+    media: WhatsAppOutboundMedia | None = None
 
 
 @dataclass(frozen=True)

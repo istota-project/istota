@@ -70,6 +70,7 @@ CLOUD_CAPS = WhatsAppProviderCaps(
     address_field="send_id",
     service_body_limit=WHATSAPP_TEXT_LIMIT,
     interactive_body_limit=WHATSAPP_INTERACTIVE_BODY_LIMIT,
+    outbound_media=False,
 )
 """Every constraint `.claude/rules/whatsapp.md` records, declared as this
 provider's own.

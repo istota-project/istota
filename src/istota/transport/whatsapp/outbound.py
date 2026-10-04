@@ -1046,8 +1046,17 @@ async def deliver_whatsapp(
     request_id: str | None = None,
     relay_return_id: str | None = None,
     group_room: str | None = None,
+    attach_media: bool = False,
 ) -> WhatsAppDeliveryRecord:
     """Claim and perform one logical send. At most one Cloud API call.
+
+    `attach_media` lets the first `/chat/files` image embedded in the text go
+    out as a native image, staged from `user_id`'s workspace (ISSUE-639). Only
+    a caller that knows the text answers `user_id`'s own turn may pass it:
+    the transport for a task's result, the drain for a self-send. Without it,
+    and wherever the adapter cannot send media, every embed is replaced by its
+    alt text, since a relative URL is not a link on a phone. Either way it is
+    still one claim and one provider call.
 
     `group_room` sends into the WhatsApp group that room is bound to rather
     than to `user_id`'s own chat; `user_id` is then who the ledger row and any
@@ -1089,6 +1098,20 @@ async def deliver_whatsapp(
     if adapter is not None and client is not None:
         adapter = replace(adapter, send=client.send)
     caps = adapter.caps if adapter is not None else None
+    may_attach = bool(
+        attach_media and caps is not None and caps.outbound_media and not buttons
+    )
+    media_plan: tuple[str, str] | None = None
+    if request_id is None:
+        from .outbound_media import split_image  # noqa: PLC0415
+
+        split = split_image(text)
+        text = split.with_alt
+        if may_attach and split.path:
+            media_plan = (
+                split.path,
+                render_whatsapp(split.without, limit=_body_budget(caps, interactive=False)),
+            )
     # Both renderings, because only the claim's own transaction can read the
     # service window and therefore decide which one this send is. Both are
     # pure functions of `text`, so computing the unused one costs two regex
@@ -1119,10 +1142,22 @@ async def deliver_whatsapp(
         await asyncio.to_thread(_alert_failure, config, record, user_id, task_id)
         return record
 
+    body = bodies[record.send_kind]
+    if request_id is not None and attach_media:
+        # A self-send's body was rendered and hashed when it was queued, so
+        # the embed is read out of the admitted rendering rather than the text.
+        from .outbound_media import split_image  # noqa: PLC0415
+
+        split = split_image(body)
+        body = split.with_alt
+        if may_attach and split.path:
+            media_plan = (split.path, split.without)
+    if record.send_kind != "service":
+        media_plan = None
     try:
         return await _send_claimed(
             config, logical_key=logical_key, user_id=user_id,
-            body=bodies[record.send_kind], send_kind=record.send_kind,
+            body=body, send_kind=record.send_kind, media_plan=media_plan,
             task_id=task_id, buttons=buttons,
             reply_to_message_id=reply_to_message_id, adapter=adapter, request_id=request_id, relay_return_id=relay_return_id,
             group_room=group_room,
@@ -1160,6 +1195,7 @@ async def _send_claimed(
     request_id: str | None = None,
     relay_return_id: str | None = None,
     group_room: str | None = None,
+    media_plan: tuple[str, str] | None = None,
 ) -> WhatsAppDeliveryRecord:
     """The body of :func:`deliver_whatsapp` from a claimed row onwards.
 
@@ -1175,7 +1211,13 @@ async def _send_claimed(
     cannot be built is a message that never left, so the Cloud adapter returns a
     *definite* failure and this function settles `failed` exactly where its
     pre-send arm used to.
+
+    `media_plan` is ``(workspace path, caption)``. The image is staged in the
+    pre-send half, and a refusal there is not a failure: the claimed `body`
+    already carries the image's alt text and goes out alone. The staged copy
+    is removed once the send has an answer, whatever the answer.
     """
+    staged = None
     try:
         # Resolved *after* the claim and immediately before the call, so a
         # binding the operator changed while the task ran is honoured and the
@@ -1209,8 +1251,18 @@ async def _send_claimed(
             record = await _settle_async(config, logical_key, "unconfigured")
             await asyncio.to_thread(_alert_failure, config, record, user_id, task_id)
             return record
+        if media_plan is not None:
+            from .outbound_media import stage_image  # noqa: PLC0415
+
+            staged = await asyncio.to_thread(
+                stage_image, config, user_id, media_plan[0],
+            )
+            if staged is not None:
+                staged = replace(staged, caption=media_plan[1])
         request = _request(config, destination, body, send_kind, buttons,
                            reply_to_message_id)
+        if staged is not None:
+            request = replace(request, media=staged)
         await asyncio.to_thread(_stamp_attempt, config, logical_key)
     except Exception:
         # Nothing has reached the network: the binding read, the request build
@@ -1221,6 +1273,7 @@ async def _send_claimed(
         logger.warning(
             "whatsapp.outbound.failed reason=presend_error", exc_info=True,
         )
+        await asyncio.to_thread(_discard_media, config, staged)
         record = await _settle_async(config, logical_key, "failed")
         await asyncio.to_thread(_alert_failure, config, record, user_id, task_id)
         return record
@@ -1233,6 +1286,9 @@ async def _send_claimed(
         # handler missed. From here the request may have gone out.
         logger.warning("whatsapp.outbound.unknown reason=send_raised")
         result = None
+    finally:
+        if staged is not None:
+            await asyncio.to_thread(_discard_media, config, staged)
 
     if isinstance(result, WhatsAppSendResult):
         # The only branch that can drain: it is the one that writes the id the
@@ -1249,6 +1305,14 @@ async def _send_claimed(
     )
     await asyncio.to_thread(_alert_failure, config, record, user_id, task_id)
     return record
+
+
+def _discard_media(config: Config, staged) -> None:
+    if staged is None:
+        return
+    from .outbound_media import discard  # noqa: PLC0415
+
+    discard(config, staged)
 
 
 def _request(
