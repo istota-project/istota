@@ -499,18 +499,10 @@ class TestEveryoneElseKeepsTheMirror:
 
 
 class TestTheResidueKeyedOnConversationToken:
-    """The task still carries the origin room as its `conversation_token`, so
-    everything keyed on that column rather than on the transcript once saw this
-    exchange anyway.
-
-    **Closed by ISSUE-255**, which took the option this class's original note
-    called the narrower one: the decision is recorded on the task
-    (`tasks.withheld_from_room`) and each consumer reads it, rather than the
-    inheritance being dropped — which would have moved history, the per-channel
-    active-task gate, memory recall and the sleep cycle at once, and is a
-    different question from "does the room show this". The inheritance therefore
-    stays, and the assertions below now pin both halves as closed.
-    `tests/test_email_self_reply_residue.py` covers the other four consumers."""
+    """Everything keyed on `conversation_token` rather than on the transcript
+    once saw this exchange (ISSUE-255). Since the user's own mail became a turn
+    in their private email room the task no longer carries the origin room's
+    token, so neither the transcript nor the tasks fallback reader sees it."""
 
     def test_the_room_transcript_is_clean(self, db_path, config):
         """The half that *is* fixed, stated next to the half that is not: the
@@ -529,19 +521,9 @@ class TestTheResidueKeyedOnConversationToken:
     def test_and_the_tasks_fallback_reader_no_longer_sees_it_either(
         self, db_path, config,
     ):
-        """`get_conversation_history` serves from `messages` only when
-        `_messages_caught_up` says the store is complete for the room, which
-        needs a completed talk/web task still in `tasks`. A room with none — one
-        used only by mail, or one whose last chat turn aged past
-        `task_retention_days` — falls back to selecting straight from `tasks
-        WHERE conversation_token = ?`, where this task is still keyed.
-
-        That fallback used to serve the turn, which is why this assertion was
-        written as one rather than as a comment. ISSUE-255 closed it: the
-        fallback now excludes `withheld_from_room`, so the context cost is gone
-        on both paths. The room is still on the fallback — that half is
-        unchanged and asserted, because the fix must work *there*, not by moving
-        the room onto the `messages` path."""
+        """`get_conversation_history` falls back to `tasks WHERE
+        conversation_token = ?` for a room with no completed talk/web task, and
+        this task no longer carries the room's token."""
         with db.get_db(db_path) as conn:
             _origin_room(conn)
             _sent_from_the_room(conn, to_addr=USER_ADDR)
@@ -592,20 +574,8 @@ class TestApprovalDoesNotRestoreIt:
     def test_approving_a_self_addressed_first_contact_restores_nothing(
         self, db_path, config,
     ):
-        """The scope boundary, redrawn by ISSUE-275 and inverted here with it.
-
-        This case used to be the boundary: a first-contact self-addressed mail
-        carried no thread to suppress, so it kept the `room:<tok>,email` routing
-        ISSUE-247 gave it, and approving it published the question into the room.
-        The predicate is now the sender rather than the thread, so there is no
-        room leg to restore and approval writes nothing.
-
-        `_room_holds_no_copy_of_this_exchange` is not what makes that true here —
-        it reads `withheld_from_room`, which stays False because no room was ever
-        resolved. The restore runs and finds nothing to publish, which is the
-        same fail-safe direction: `transcript_room_for_task` resolves rooms that
-        exist in the plan, and this plan names none. Asserted end to end rather
-        than against either helper, because that agreement is the point."""
+        """Approval admits the held mail to the user's private email room, so
+        nothing is restored into the notification room."""
         from istota import confirmations
 
         config.email.confirm_sender_match = "gate"

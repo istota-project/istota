@@ -121,12 +121,6 @@ class Task:
     #: Canonical `messages.id` of the cited parent. A *different namespace*
     #: from `reply_to_talk_id` — never assign one to the other.
     reply_to_message_id: int | None = None
-    #: This exchange is deliberately not part of the room `conversation_token`
-    #: names (ISSUE-255) — a self-addressed thread reply, which keeps the room as
-    #: its token for context but is never written back into it. Read by the
-    #: history fallback, the channel memory namespace, the channel sleep cycle,
-    #: and the two failure paths that would otherwise have no channel at all.
-    withheld_from_room: bool = False
     #: The guest whose turn this task answers, as a `room_participants.id`
     #: (multiplayer D2). Set means emissary mode: the task runs as the room's
     #: host, at room-safe reach, with no outbound action beyond the reply.
@@ -1423,10 +1417,6 @@ def create_task(
     reply_to_talk_id: int | None = None,
     reply_to_content: str | None = None,
     reply_to_message_id: int | None = None,
-    # This exchange is deliberately not part of the room `conversation_token`
-    # names (ISSUE-255). Written by the one caller that knows — `record_inbound`,
-    # from the same answer that turned off the transcript mirror.
-    withheld_from_room: bool = False,
     # Multiplayer D2/D3: the guest this task answers (emissary mode), and who
     # reads the room. Written only by `record_inbound`.
     guest_participant_id: int | None = None,
@@ -1489,12 +1479,12 @@ def create_task(
             prompt, command, user_id, source_type, conversation_token,
             parent_task_id, is_group_chat, attachments, priority, scheduled_for,
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
-            reply_to_message_id, withheld_from_room, guest_participant_id, audience,
+            reply_to_message_id, guest_participant_id, audience,
             about_room_token, host_absent,
             heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
             queue, model, effort, brain, model_namespace,
             talk_delivery_token, skill, skill_args
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -1513,7 +1503,6 @@ def create_task(
             reply_to_talk_id,
             reply_to_content,
             reply_to_message_id,
-            1 if withheld_from_room else 0,
             guest_participant_id,
             audience,
             about_room_token or None,
@@ -1549,7 +1538,7 @@ _TASK_COLUMNS = (
     "result, actions_taken, execution_trace, error, confirmation_prompt, "
     "priority, attempt_count, max_attempts, created_at, scheduled_for, "
     "output_target, talk_message_id, talk_response_id, reply_to_talk_id, "
-    "reply_to_content, reply_to_message_id, withheld_from_room, "
+    "reply_to_content, reply_to_message_id, "
     "guest_participant_id, audience, about_room_token, host_absent, heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
     "brain, model_namespace, talk_delivery_token, skill, skill_args, whatsapp_confirmation_request_id"
@@ -1592,7 +1581,6 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         reply_to_talk_id=row["reply_to_talk_id"],
         reply_to_content=row["reply_to_content"],
         reply_to_message_id=row["reply_to_message_id"],
-        withheld_from_room=bool(row["withheld_from_room"]),
         guest_participant_id=row["guest_participant_id"],
         audience=row["audience"],
         about_room_token=row["about_room_token"],
@@ -2928,7 +2916,8 @@ def _conversation_history_from_tasks(
     """Legacy path: reconstruct history from completed `tasks` rows."""
     # `withheld_from_room` excludes an exchange that keeps this token for context
     # but is deliberately not part of the room (ISSUE-255): a self-addressed
-    # thread reply. The `messages` path needs no equivalent — a withheld turn was
+    # thread reply. Nothing sets the column since email on rooms gave such mail
+    # a room of its own; the filter keeps the rows written before that out. The `messages` path needs no equivalent — a withheld turn was
     # never written there, which is the half ISSUE-254 already closed. This
     # fallback is where the quoted chain was still being charged to every later
     # task in the room, and it is not a rare path: it serves any room with no

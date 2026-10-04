@@ -2801,39 +2801,23 @@ def _whatsapp_confirmation_body(config: Config, result: str, task_id: int) -> st
     return f"{question}{tail}"
 
 
-def _email_task_from_the_user(config: Config, task: db.Task) -> bool:
-    """Whether this email task's own sender is the user it was routed to.
+def _in_private_email_room(config: Config, task: db.Task) -> bool:
+    """Whether this email task is a turn in the user's private email room.
 
-    The fact the two ISSUE-255 failure paths need and that `withheld_from_room`
-    can only carry half of. Recovered from `processed_emails`, which the poller
-    writes for every message it ingests, and judged by
-    `email_support.sender_claims_to_be_user` so this cannot drift from the
-    poller's own answer.
-
-    A *claim*, exactly as at ingest: SMTP `From:` is unauthenticated. That is the
-    right strength here — the consequence is an error notice the user may not
-    have needed, not a trust decision.
-
-    Never raises and never blocks a delivery: a task whose ledger row has been
-    pruned, or a lookup that fails, answers False and leaves the pre-existing
-    behaviour in place.
+    That is the user mailing the bot, waiting for this answer with no room leg
+    to carry it (ISSUE-255, ISSUE-275): the two failure paths below tell them
+    when it fails. A thread room's answer is a reply-all to correspondents, who
+    are not the ones to tell. Never raises and never blocks a delivery.
     """
-    if task.source_type != "email":
+    if task.source_type != "email" or not task.conversation_token:
         return False
-    # Imported here, as every other `email_support` use in this module is: the
-    # module pulls in the email skill, which is an optional extra.
-    from istota.mail.support import sender_claims_to_be_user  # noqa: PLC0415
+    from .transport.routing import phone_transcript_surface
 
     try:
         with db.get_db(config.db_path) as conn:
-            record = db.get_email_for_task(conn, task.id)
-        if record is None:
-            return False
-        return sender_claims_to_be_user(config, task.user_id, record.sender_email)
+            return phone_transcript_surface(conn, task.conversation_token) == "email"
     except Exception as e:  # pragma: no cover - never fail a delivery over this
-        logger.warning(
-            "could not resolve the sender of email task %s: %s", task.id, e,
-        )
+        logger.warning("could not resolve the room of email task %s: %s", task.id, e)
         return False
 
 
@@ -3229,18 +3213,10 @@ def process_one_task(
         _talk_dest.channel if _talk_dest else _talk_target_for_delivery(config, task)
     )
     plan_talk = _talk_dest is not None
-    # The other half of "was the user themselves waiting for this answer"
-    # (ISSUE-275). `tasks.withheld_from_room` records it for a self-addressed
-    # thread reply and cannot record it for self-addressed first contact — the
-    # column means "there is a room and this exchange is deliberately not part of
-    # it", and first contact resolves no room — so this recovers it from the
-    # ledger row the poller already writes. Reconstruction rather than a new
-    # column, and the same reconstruction `confirmations._restore_transcript_
-    # mirror` makes: `sender_claims_to_be_user` is the single definition both
-    # spellings share, which is why it lives in `email_support` rather than in
-    # the poller. Read once here so the two failure paths below cannot answer
-    # differently about the same task.
-    email_from_the_user = _email_task_from_the_user(config, task)
+    # Whether the user themselves was waiting for this answer by mail
+    # (ISSUE-255, ISSUE-275). Read once here so the two failure paths below
+    # cannot answer differently about the same task.
+    email_from_the_user = _in_private_email_room(config, task)
     # A mirror Talk leg (room fan-out from a non-Talk origin, e.g. a web-origin
     # task mirrored to its bound Talk room) carries the confirmation prompt only
     # when the task's own origin is *not* a room surface — a web-origin
@@ -3822,14 +3798,7 @@ def process_one_task(
                             _index_conv(conn, task.user_id, task_id, task.prompt, result,
                                         speaker=_speaker)
                         # Also index under channel namespace if in a channel.
-                        # Skipped for an exchange deliberately kept out of that
-                        # room (ISSUE-255): `_recall_memories` serves this
-                        # namespace back to every later task there, so indexing
-                        # it would put the withheld turn in front of the model
-                        # even where the transcript is clean. The per-user index
-                        # above is untouched — the exchange is the user's own and
-                        # belongs in their own recall.
-                        if (task.conversation_token and not task.withheld_from_room
+                        if (task.conversation_token
                                 and task.guest_participant_id is None):
                             channel_uid = f"channel:{task.conversation_token}"
                             _index_conv(conn, channel_uid, task_id, task.prompt, result,
@@ -4159,33 +4128,21 @@ def process_one_task(
                         f"🐙 {friendly_error}", task,
                     )
                     is_failure_notify = True
-                elif task.withheld_from_room or email_from_the_user:
+                elif email_from_the_user:
                     # An email-only plan with no error channel at all (ISSUE-255,
-                    # second arm added by ISSUE-275). The rule beside this branch
-                    # — never email errors — assumes a room leg exists to carry
-                    # them, and here there is none: the user mails the bot, the
-                    # task fails, and nothing tells them anywhere they look.
-                    # Routed by `alert` purpose so it reaches whichever surface
-                    # the user actually reads (ISSUE-241), and buffered for
-                    # delivery after this transaction closes, since an alert
-                    # routed to `web` opens a second connection to this database.
+                    # ISSUE-275). The rule beside this branch — never email
+                    # errors — assumes a room leg exists to carry them, and here
+                    # there is none: the user mails the bot, the task fails, and
+                    # nothing tells them anywhere they look. Routed by `alert`
+                    # purpose so it reaches whichever surface the user actually
+                    # reads (ISSUE-241), and buffered for delivery after this
+                    # transaction closes, since an alert routed to `web` opens a
+                    # second connection to this database.
                     #
-                    # Two spellings of one question — "was the user themselves
-                    # waiting for this answer" — because the poller can only
-                    # record it on the task in one of the two cases.
-                    # `withheld_from_room` covers a self-addressed *thread*
-                    # reply. It reads False for self-addressed *first contact*,
-                    # correctly and by its own rule (no room was resolved, so
-                    # there is nothing for the exchange to be absent from), which
-                    # left the commonest case of all — the user mailing their own
-                    # bot — in exactly the silence this branch exists to end.
-                    #
-                    # Still scoped to that question rather than to "the plan is
-                    # email-only", which is the wider gate this deliberately does
-                    # not take: an external correspondent's reply under
-                    # `email_reply_routing = "thread"` has the identical plan and
-                    # the identical absent channel, and alerting on it is noise —
-                    # a stranger is waiting for that answer, not the user. See
+                    # Scoped to the user's private email room rather than to
+                    # "the plan is email-only": a thread room's correspondent
+                    # has the identical plan, and alerting on it is noise — a
+                    # stranger is waiting for that answer, not the user. See
                     # `tests/test_email_self_reply_residue.py::TestAPermanent
                     # FailureReachesTheUser`, which pins both directions.
                     failure_alert = _with_partial_work(
@@ -4610,30 +4567,13 @@ def process_one_task(
             with db.get_db(config.db_path) as conn:
                 db.update_task_status(conn, task_id, "failed", error="Email delivery failed", actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "error", "Task completed but email delivery failed")
-            if (task.withheld_from_room or email_from_the_user) \
-                    and not (plan_talk and talk_token and response_msg_id):
-                # The answer exists and nothing carries it (ISSUE-255, second arm
-                # added by ISSUE-275 — see the permanent-failure branch above for
-                # why `withheld_from_room` alone stopped covering it). With a
-                # room leg that *landed*, the assistant row is stored and the
-                # answer is in front of the user, so a failed send costs the mail
-                # copy alone; with an email-only plan `tasks.result` is the only
-                # copy left, and nothing puts it in front of the user. Carry the
-                # body itself rather than a pointer — the point is that the
-                # answer survives the failure, not that its loss is announced.
-                #
-                # The guard is three terms and each removes a different way of
-                # believing an answer landed when it did not. `plan_talk` alone
-                # is not enough — a plan can carry a Talk leg whose channel
-                # resolves to None, so `talk_token` is the pair the
-                # permanent-failure branch also keys on. And the pair alone is
-                # not enough either (ISSUE-404): `TalkTransport.deliver` returns
-                # None on a `ReadTimeout` exactly as it does on a room that
-                # resolved to nothing, so `response_msg_id` is what makes this a
-                # question about the post rather than about the plan. With both
-                # legs down the pair suppressed the last notice there was, and
-                # an emailed request whose answer reached neither surface was
-                # silent on both.
+            if email_from_the_user:
+                # The answer exists and nothing carries it (ISSUE-255,
+                # ISSUE-275): a private email room has no other leg, so
+                # `tasks.result` is the only copy left and nothing puts it in
+                # front of the user. Carry the body itself rather than a pointer
+                # — the point is that the answer survives the failure, not that
+                # its loss is announced.
                 # Unwrapped for the same reason the room transcript unwraps it
                 # (ISSUE-247): an email task's `result` may *be* the
                 # `{"subject","body","format"}` envelope the send path parses, and

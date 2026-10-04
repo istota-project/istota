@@ -593,31 +593,6 @@ def record_ack(
         return None
 
 
-def _room_holds_no_copy_of_this_exchange(conn, task: db.Task) -> bool:
-    """Whether this email turn is one the room deliberately never mirrored.
-
-    The gate's suppression means "not yet" and is undone below; ISSUE-254's
-    means "never", and approving must not hand back the copy that fix removed.
-    The two co-occur only under ``confirm_sender_match``, which stops the
-    own-address claim from counting as trust and so lets a self-addressed thread
-    reply reach the gate at all.
-
-    A column read since ISSUE-255. The poller computes the decision and now
-    records it on the task, so this asks the writer rather than reconstructing
-    the answer from two observable halves — the plan naming no room, and the
-    sender being the user — which needed a ``Config`` in scope and could only
-    ever be an inference about what some other code had already concluded.
-
-    A task created before that column existed reads False and is restored as it
-    would have been before, which is the same direction the reconstruction's own
-    fail-open branch chose: restoring wrongly costs one duplicated turn, while
-    suppressing wrongly hides an approved stranger's message from the room the
-    user is watching for it. The exposure is a single confirmation open across
-    the upgrade, against a two-hour timeout.
-    """
-    return task.source_type == "email" and task.withheld_from_room
-
-
 def _restore_transcript_mirror(conn, task: db.Task, config=None) -> None:
     """Publish the approved turn's question into its room, if it has one.
 
@@ -653,8 +628,6 @@ def _restore_transcript_mirror(conn, task: db.Task, config=None) -> None:
     if not room_token:
         return
     try:
-        if _room_holds_no_copy_of_this_exchange(conn, task):
-            return
         if db.get_room(conn, room_token) is None:
             return
         already = conn.execute(

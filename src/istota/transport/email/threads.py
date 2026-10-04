@@ -742,7 +742,7 @@ def _point_task_at(conn, task, room_token: str, message_id: int, *, host_absent:
     conn.execute("UPDATE messages SET task_id = ? WHERE id = ?", (task.id, message_id))
     conn.execute(
         "UPDATE tasks SET conversation_token = ?, output_target = ?, "
-        "talk_delivery_token = NULL, withheld_from_room = 0, host_absent = ?, "
+        "talk_delivery_token = NULL, host_absent = ?, "
         "is_group_chat = ?, audience = ? WHERE id = ?",
         (room_token, SURFACE, int(host_absent), int(multi),
          room_policy.audience_class(conn, room_token, is_group_chat=multi), task.id),

@@ -522,9 +522,6 @@ def record_inbound(
     external_id: str | None = None,
     client_msg_id: str | None = None,
     suppress_transcript_mirror: bool = False,
-    # Whether this turn belongs in the resolved room at all — see the flag above
-    # it, which is a hold rather than a refusal.
-    mirror_to_room: bool = True,
     # The message's own sender when it isn't `user_id` (email's envelope
     # sender). Raw and untrusted; sanitized here, never by a reader.
     sender_address: str | None = None,
@@ -638,9 +635,7 @@ def record_inbound(
     # facing an untrusted-sender gate: the row would otherwise be committed in
     # this same transaction, i.e. published to the room *before* the user is
     # asked, and `db.cancel_task` on a decline only touches `tasks` — so
-    # declining would leave the content there permanently. `mirror_to_room` is
-    # the other, permanent answer: the room is not part of this exchange, so
-    # there is nothing for an approval to publish later (ISSUE-254).
+    # declining would leave the content there permanently.
     # Which room the turn is *written* to. For a room surface it is the room
     # itself. For a non-room surface it is whatever the routing resolved, which
     # is the token only when the token already is a room — a first-contact email
@@ -663,39 +658,14 @@ def record_inbound(
     # rule, reached at ingest): an email reply threaded back into a room that
     # several people read would put a correspondent's mail, and the answer
     # `_room_turn_belongs_here` then stores under it, in front of all of them.
-    # It is the permanent kind of absence, so it is recorded on the task below.
     # Nor in a room somebody switched off (D12), which can read as private
     # once its vetoers have left.
-    if (not room_surface and mirror_to_room and transcript_token
-            and (db.room_is_shared(conn, transcript_token)
-                 or room_veto.is_vetoed(conn, transcript_token))):
-        mirror_to_room = False
     mirror_only = (
         not room_surface
-        and mirror_to_room
         and bool(transcript_token)
         and not suppress_transcript_mirror
-    )
-    # Record the permanent half of that decision on the task (ISSUE-255). The
-    # poller computed it and used it twice, and it was then thrown away — so
-    # every consumer keyed on `conversation_token` rather than on the transcript
-    # (the history fallback, the channel memory namespace, the channel sleep
-    # cycle, the two failure paths) went on treating the exchange as part of a
-    # room it is deliberately absent from. `suppress_transcript_mirror` is
-    # excluded on purpose: that one is a hold on a turn that *does* belong in the
-    # room, and `confirmations.approve` publishes it once answered.
-    #
-    # **`transcript_token` is required, and is the whole difference between this
-    # column and `not mirror_to_room`.** The column says "there is a room, and
-    # this exchange is deliberately not part of it" — so with no room resolved
-    # there is nothing to be absent from and the answer is False. The poller sets
-    # `mirror_to_room=False` for *every* self-addressed thread reply, including a
-    # genuine email-only thread whose `conversation_token` is a synthetic hash
-    # naming no room; flagging that one would make the readers below drop the
-    # thread's own prior turns from its own history, which is the only history
-    # such a thread has (there is no `messages` room to fall back to).
-    withheld_from_room = (
-        not room_surface and not mirror_to_room and bool(transcript_token)
+        and not db.room_is_shared(conn, transcript_token)
+        and not room_veto.is_vetoed(conn, transcript_token)
     )
 
     # The namespace `model` was resolved in, frozen onto the task beside it
@@ -971,7 +941,6 @@ def record_inbound(
         reply_to_talk_id=reply_to_message_id,
         reply_to_message_id=reply_to_canonical_id,
         reply_to_content=reply_to_content,
-        withheld_from_room=withheld_from_room,
         guest_participant_id=guest_participant_id,
         audience=audience,
         about_room_token=about_room_token,
@@ -1016,7 +985,7 @@ def record_phone_turn(
     result = record_inbound(
         conn, config, surface=surface, surface_ref=surface_ref, user_id=user_id,
         text=text, source_type=surface, channel_name=channel_name,
-        output_target=surface, mirror_to_room=False, queue=queue,
+        output_target=surface, queue=queue,
         external_id=external_id, reply_to_content=reply_to_content,
         reply_to_canonical_id=reply_to_canonical_id,
         attachments=attachments, is_command=text.startswith("!"), record_only=record_only,
@@ -1067,7 +1036,6 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         if msg.platform_message_id is not None
         else None,
         suppress_transcript_mirror=msg.suppress_transcript_mirror,
-        mirror_to_room=msg.mirror_to_room,
         sender_address=msg.sender_address,
         addressed_to_bot=msg.addressed_to_bot,
         classified=msg.classified,
