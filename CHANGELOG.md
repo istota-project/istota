@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Deleting a room from its settings no longer stacks the confirmation on top of the settings dialog in web chat. The settings dialog steps aside while the confirmation is up, and Cancel brings it back with any unsaved edits.
 - The package-cache sweep now reaches non-admin caches on a developer deployment (ISSUE-630). With `developer.enabled`, a `repos_dir` and an admins file, a non-admin's cache lives under `security.sandbox_cache_dir`, but the sweep walked `repos_dir` alone, so those caches grew past `sandbox_cache_max_gb` unchecked. Each user's layout is now decided by the resolver's own predicate, and both roots are swept when both are in use.
 - `istota-dev verify-remote` now checks every push URL of `origin`, not only its fetch URL (ISSUE-622). A worktree with `remote.origin.pushurl` or a `pushInsteadOf` rewrite pointing at another project passed the check, and the push then went there. A push URL to another project is exit 1 and names it as `push_remote`; a credential in one is exit 3.
 - `istota-dev clone` now repairs a bare clone that is missing its fetch refspec (ISSUE-623). A clone interrupted between `git clone --bare` and the refspec write left a directory that failed every later run with "origin has no default branch".
