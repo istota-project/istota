@@ -949,23 +949,19 @@ class TestResolveUserTimezone:
             assert cfg.resolve_user_timezone("alice", conn=conn) == "Europe/Lisbon"
 
 
-class TestEmailReplyRouting:
-    def test_default_when_unset(self):
-        cfg = Config(users={"carol": UserConfig()})
-        assert cfg.email_reply_routing_for("carol") == "origin+thread"
-
-    def test_default_for_unknown_user(self):
-        cfg = Config()
-        assert cfg.email_reply_routing_for("nobody") == "origin+thread"
-
-    def test_valid_values_pass_through(self):
-        for val in ("origin+thread", "origin", "thread"):
-            cfg = Config(users={"carol": UserConfig(email_reply_routing=val)})
-            assert cfg.email_reply_routing_for("carol") == val
-
-    def test_invalid_value_falls_back(self):
-        cfg = Config(users={"carol": UserConfig(email_reply_routing="bogus")})
-        assert cfg.email_reply_routing_for("carol") == "origin+thread"
+class TestEmailReplyRoutingIsRetired:
+    def test_a_toml_value_loads_with_a_warning(self, tmp_path, caplog):
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[users.carol]\n'
+            'email_addresses = ["carol@example.com"]\n'
+            'email_reply_routing = "thread"\n'
+        )
+        with caplog.at_level("WARNING", logger="istota.config"):
+            cfg = load_config(p)
+        assert cfg.users["carol"].email_addresses == ["carol@example.com"]
+        assert not hasattr(cfg.users["carol"], "email_reply_routing")
+        assert any("email_reply_routing" in r.getMessage() for r in caplog.records)
 
 
 class TestTrustedEmailSenders:

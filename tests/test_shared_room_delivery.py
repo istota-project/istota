@@ -299,12 +299,4 @@ class TestNotificationsRefuseASharedRoom:
         config.users["alice"].log_channel = shared
         assert notifications.effective_log_destinations(config, "alice") == []
 
-    def test_the_email_poller_never_routes_mail_into_a_shared_room(self, tmp_path):
-        from istota.transport.routing import routed_notification_room
-
-        with db.get_db(_config(tmp_path).db_path) as conn:
-            shared = _shared_web_room(conn)
-        config = _config(tmp_path, routing={"notification": f"web:{shared}"})
-        with db.get_db(config.db_path) as conn:
-            assert routed_notification_room(conn, config, "alice") is None
 

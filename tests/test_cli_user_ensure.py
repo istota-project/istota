@@ -41,7 +41,6 @@ class _FakeArgs:
             "default_destination": None,
             "default_room": None,
             "route": None,
-            "email_reply_routing": None,
             "outbound_approval": None,
             "external_turn_display": None,
             "default_briefings": None,

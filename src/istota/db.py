@@ -627,6 +627,13 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass  # Column already dropped or never existed.
 
+    # User profiles: drop the email-reply mirror policy. A reply to mail the
+    # bot sent is a turn in the thread's own room, so nothing routes on it.
+    try:
+        conn.execute("ALTER TABLE user_profiles DROP COLUMN email_reply_routing")
+    except sqlite3.OperationalError:
+        pass  # Column already dropped or never existed.
+
     # Every column below swallows OperationalError beyond the two `add_columns`
     # handles itself, which covers the third expected case: a *lock*. There the
     # degradation is asymmetric but safe — reads go through `_row_get` and fall
@@ -651,8 +658,6 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # answers instead. `_migrate_default_room` backfills existing rows with
         # whatever that heuristic answers today, so nothing moves on upgrade.
         "default_room": "TEXT NOT NULL DEFAULT ''",
-        # Email-reply mirror policy: origin+thread (default) | origin | thread.
-        "email_reply_routing": "TEXT NOT NULL DEFAULT 'origin+thread'",
         # Quiet email senders: fnmatch patterns whose mail is filed silently
         # (no task, no session). Mirrors trusted_email_senders. JSON array.
         "quiet_email_senders": "TEXT NOT NULL DEFAULT '[]'",

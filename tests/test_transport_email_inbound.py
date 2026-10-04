@@ -789,28 +789,18 @@ class TestPollEmailsThreadMatching:
         # Self-reply → plain template, not "an external contact has replied".
         assert "Emissary email reply" not in task.prompt
 
-    def test_self_reply_ignores_the_origin_policy(self, mail_config):
-        """The suppression is per-message, not per-user, so it overrides the
-        policy rather than being expressible through it (ISSUE-254). `origin`
-        names the room and nothing else, and an empty plan would lose the reply
-        — so it falls back to email, where the user wrote from."""
-        config = mail_config(_users("carol", email_reply_routing="origin"))
-        task = self._origin_sent_and_reply(
-            config, sender="carol@test.com", to=("bot@test.com",), sent_to="carol@test.com",
-        )
-        assert task.output_target == "email"
-
-    def test_plus_address_reply_recovers_origin(self, mail_config):
-        # Dormant second path: a reply addressed to the bot's plus-address is
-        # resolved at step 1, also pre-empting thread-match. The origin must
-        # still be recovered.
+    def test_a_held_plus_address_reply_names_no_room(self, mail_config):
+        # A stranger's reply to the bot's plus-address is held, and has no
+        # plan until approving it admits it to the thread's room; the origin
+        # descriptor routes nothing.
         config = mail_config(_users("carol"))
         task = self._origin_sent_and_reply(
             config, sender="ext@x.com", to=("bot+carol@test.com",),
         )
         assert task is not None
-        assert task.output_target == "web:rm_web123,email"
-        assert task.conversation_token == "rm_web123"
+        assert task.status == "pending_confirmation"
+        assert task.output_target is None
+        assert task.conversation_token != "rm_web123"
 
     def test_external_thread_reply_is_a_room_turn(self, mail_config):
         # An external contact (not a configured email, no plus-address) resolves
@@ -837,22 +827,6 @@ class TestPollEmailsThreadMatching:
         # email room (stage 3).
         assert task.output_target == "email"
         assert task.conversation_token != "rm_web123"
-
-    def test_known_sender_resolves_talk_delivery_token_from_alerts(self, mail_config):
-        """A plus-addressed mail outside any room (a held stranger's, since
-        stage 3 admits the rest to a room) resolves talk_delivery_token via
-        user config."""
-        config = mail_config(_users("alice", alerts_channel="alice_alerts"))
-
-        task = _single_task(config, _email(sender="stranger@random.com",
-                                           to=("bot+alice@test.com",)))
-        assert task.status == "pending_confirmation"
-
-        # conversation_token is the synthetic email-thread hash
-        assert task.conversation_token is not None
-        assert len(task.conversation_token) == 16
-        # talk_delivery_token resolves to the user's alerts channel
-        assert task.talk_delivery_token == "alice_alerts"
 
 
 # =============================================================================
@@ -1319,18 +1293,9 @@ class TestThreadReplyConfirmationGate:
         assert len(task_ids) == 1
         task = _task(config, task_ids[0])
         assert task.status == "pending_confirmation"
-        # Pinned because it is the one property of a gated thread reply that
-        # is inherited rather than chosen: the task keeps the origin room as
-        # its token (`inbound.py`, "Continue the originating conversation"),
-        # so unlike a gated plus-address message under a synthetic thread
-        # hash it parks that room's foreground queue and is cancellable by
-        # `cancel_pending_confirmations` on the room's next message. Not new
-        # — a gated `sender_match` reply that also matched a thread has
-        # always landed here, which is the case `web_app`'s cancel comment
-        # describes — but this route widens who reaches it, and a silent
-        # change to the token would move the blast radius without a test
-        # noticing.
-        assert task.conversation_token == "room1"
+        # A held reply no longer inherits the origin room: it names no room,
+        # so it parks no room's queue, until approval admits it to its own.
+        assert task.conversation_token != "room1"
 
         prompt = send.call_args.args[2]
         assert "attacker@evil.example" in prompt

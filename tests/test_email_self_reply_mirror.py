@@ -192,19 +192,6 @@ class TestSelfAddressedThreadReply:
 
         assert _room_rows(db_path) == []
 
-    def test_a_policy_of_origin_only_still_delivers_to_email(self, db_path, config):
-        """`origin` names the room and nothing else, so dropping the origin leg
-        would leave an empty plan. The reply must not be lost — the user asked
-        for it and it reaches them where they wrote from."""
-        config.users[USER].email_reply_routing = "origin"
-        with db.get_db(db_path) as conn:
-            _origin_room(conn)
-            _sent_from_the_room(conn, to_addr=USER_ADDR)
-
-        task = _poll_reply(config, sender=USER_ADDR)
-
-        assert task.output_target == "email"
-
     def test_a_legacy_null_origin_row_is_covered_too(self, db_path, config):
         """`origin_descriptor` returns None for a send with no deliverable
         origin, and that branch hardcodes `talk,email` — the same duplication on
@@ -415,17 +402,20 @@ class TestSelfAddressedFirstContact:
         assert task.conversation_token == _private_room(db_path)
         assert _room_rows(db_path) == []
 
-    def test_a_stranger_at_the_same_address_keeps_the_room(self, db_path, config):
-        """The regression guard, and the reason ISSUE-247 exists. A third party
-        writing to `bot+<user>@` is not the user, and the room copy is the only
-        way the user learns the mail arrived."""
+    def test_a_stranger_at_the_same_address_is_not_routed_to_the_room(
+        self, db_path, config,
+    ):
+        """A third party writing to `bot+<user>@` is held, and its approval
+        admits it to its own thread room, never the notification room."""
         config.users[USER].alerts_channel = ROOM
         with db.get_db(db_path) as conn:
             _origin_room(conn)
 
         task = self._poll_first_contact(config, sender=EXTERNAL_ADDR)
 
-        assert task.output_target == f"room:{ROOM},email"
+        assert task.status == "pending_confirmation"
+        assert task.output_target is None
+        assert _room_rows(db_path) == []
 
     def test_a_gated_self_claim_publishes_nothing_on_approval(
         self, db_path, config,
@@ -476,7 +466,8 @@ class TestEveryoneElseKeepsTheMirror:
             config, sender=EXTERNAL_ADDR, to=("bot+carol@test.com",),
         )
 
-        assert task.output_target == f"room:{ROOM},email"
+        # Held, with no plan until approval admits it to its own room.
+        assert task.output_target is None
         assert task.status == "pending_confirmation"
 
     def test_a_reply_to_another_user_is_judged_against_that_user(

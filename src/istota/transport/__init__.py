@@ -35,7 +35,6 @@ from .routing import (
     plan_has_surface,
     resolve_delivery_plan,
     room_target_descriptor,
-    routed_notification_room,
     transcript_room,
     transcript_room_for_task,
 )
@@ -62,7 +61,6 @@ __all__ = [
     "plan_has_surface",
     "resolve_delivery_plan",
     "room_target_descriptor",
-    "routed_notification_room",
     "transcript_room",
     "transcript_room_for_task",
     "TalkTransport",

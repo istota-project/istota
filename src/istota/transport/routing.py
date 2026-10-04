@@ -366,53 +366,6 @@ def origin_descriptor(task: "db.Task", conn=None) -> str | None:
     return None  # repl: no durable push target
 
 
-def upgrade_legacy_origin(conn, origin: str) -> str | None:
-    """``room:<canonical_token>`` for a stored descriptor that names one *view*
-    of a multi-surface room; None to keep the descriptor exactly as stored.
-
-    Back-compat only. `origin_descriptor` now stamps `room:<token>` itself, so
-    nothing new needs this — but `sent_emails` rows written before that keep the
-    surface-qualified form (`web:<token>`, `talk:<token>`) for the life of the
-    thread, and reading one literally delivers the reply to the leg the original
-    happened to go out on, leaving the other view of the same room blank. That
-    is the defect `6244348e` fixed; deleting the widening along with the
-    function that used to do it would reintroduce it for every thread already in
-    flight at deploy time.
-
-    **Not transitional, despite the name.** Legacy rows do age out — the next
-    send in a thread re-stamps `room:<token>` — but `origin_descriptor` can only
-    name a room it can find from the task, and a send whose room is reachable
-    from neither `conversation_token` nor `talk_delivery_token` still stamps the
-    surface form. Do not delete this on the assumption that it has become dead
-    code; check `_room_descriptor` actually covers every writer first.
-
-    It is deliberately expressed as an *upgrade to the new form* rather than as
-    the old bare ``"room"``, which relied on the task's own
-    `conversation_token` and so could not name a room the task was not already
-    sitting in.
-
-    Three cases keep the descriptor: a bare surface with no channel (nothing to
-    look up), a token naming no live room, and a room with only the descriptor's
-    own binding — where the room form would cost a lookup per delivery and
-    expand to exactly what the descriptor already says.
-    """
-    from .. import db
-
-    surface, _sep, channel = origin.partition(":")
-    if not channel:
-        return None
-    # A promoted room's per-surface ref is not its canonical token, so resolve
-    # the binding before asking whether the room exists.
-    token = db._canonical_room_token(conn, channel, surface=surface, cross_surface=False)
-    room = db.get_room(conn, token)
-    if room is None or getattr(room, "archived", 0):
-        return None
-    bound = {b.surface for b in db.list_room_bindings(conn, token)}
-    if not bound - {surface}:
-        return None
-    return f"room:{token}"
-
-
 def plan_has_surface(plan: list[Destination], surface: str) -> bool:
     """True if any destination in ``plan`` targets ``surface``. The replacement
     for the old ``target in ("talk", "both", "all")`` string checks."""
@@ -839,16 +792,8 @@ def transcript_room(
        room the plan delivers into, so the answer lands where it is being shown.
 
     What is deliberately **not** a rung is "the room this user's notifications
-    would go to". That is :func:`routed_notification_room`, and only the email
-    poller calls it, on the routes where the message names no conversation at
-    all. Consulting it here would put an ungated `thread_match` reply — the
-    correspondent's verbatim body, which `_conversation_history_from_messages`
-    re-pairs into that room's LLM context — into the user's alerts room whenever
-    their reply-routing policy is `thread`, which is a room the thread had no
-    relationship with. (Since ISSUE-234 "ungated" on that route means the reply
-    came from an address the bot wrote to, which narrows who can do this without
-    changing that they can.) The poller resolves it once and writes the
-    answer into ``output_target``, so every later reader sees rung 2.
+    would go to": that is a route for notices, and a mail's exchange belongs in
+    its own room (a thread room, or the user's private email room).
 
     Existence, never creation, at both rungs: an email task naming no registered
     room (a cron mailing an external address) stays task-only with no
@@ -881,38 +826,6 @@ def transcript_room(
     return None
 
 
-def routed_notification_room(
-    conn, config: "Config", user_id: str,
-) -> str | None:
-    """The registered room this user's ``notification`` route resolves to.
-
-    Where mail that names no conversation of its own surfaces. This routing
-    already decided that; it was just being consulted *inside*
-    ``send_notification``, i.e. after the content had been reduced to a system
-    note, which is why the room could never hold the exchange (ISSUE-247). The
-    email poller calls it before the task exists and writes the answer into
-    ``output_target``, so the room is a delivery destination rather than
-    something derived after the fact.
-
-    Existence, never creation: `None` when the route names no registered room,
-    and then the mail stays task-only exactly as it did.
-
-    A room more than one human reads is skipped, as `refuse_shared_rooms`
-    refuses it for the notification itself: the mail is the user's, and naming
-    the room here records it there before any delivery rule runs.
-    """
-    try:
-        from .. import db
-        from istota.notifications.delivery import resolve_destinations
-        for dest in resolve_destinations(config, user_id, "notification"):
-            room = _room_for_destination(conn, config, user_id, dest)
-            if room and not db.room_is_shared(conn, room):
-                return room
-    except Exception as e:  # pragma: no cover - never abort ingest
-        logger.warning("notification room resolution failed for %s: %s", user_id, e)
-    return None
-
-
 def _room_for_destination(
     conn, config: "Config", user_id: str, dest: Destination,
     *, talk_delivery_token: str | None = None,
@@ -930,8 +843,7 @@ def _room_for_destination(
     A bare ``talk`` leg reads ``talk_delivery_token`` first because
     `talk_channel_for_task` does: that column is rung 0 there, absolutely, and
     is the one thing that knows about a Talk room the registry may never have
-    heard of (the legacy thread-match branch in `transport/email/inbound.py`
-    copies one onto the task). Resolving the notification ladder here instead
+    heard of. Resolving the notification ladder here instead
     would name a different room from the one the Talk post lands in.
     """
     from .. import db

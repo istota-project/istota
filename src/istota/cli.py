@@ -1909,16 +1909,6 @@ def cmd_user_ensure(args):
             if descriptor:
                 routing[purpose] = descriptor
         updates["routing"] = routing
-    if args.email_reply_routing is not None:
-        valid = ("origin+thread", "origin", "thread")
-        if args.email_reply_routing not in valid:
-            print(
-                f"Error: --email-reply-routing must be one of {', '.join(valid)}, "
-                f"got {args.email_reply_routing!r}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        updates["email_reply_routing"] = args.email_reply_routing
     outbound_approval = getattr(args, "outbound_approval", None)
     if outbound_approval is not None:
         from istota.mail.outbound_policy import VALID_POLICIES
@@ -2143,8 +2133,6 @@ def cmd_user_ensure(args):
         print(f"  default_destination: {profile.default_destination}")
     if profile.default_room:
         print(f"  default_room: {profile.default_room}")
-    if profile.email_reply_routing and profile.email_reply_routing != "origin+thread":
-        print(f"  email_reply_routing: {profile.email_reply_routing}")
     if profile.outbound_approval:
         print(f"  outbound_approval: {profile.outbound_approval}")
     if profile.external_turn_display and profile.external_turn_display != "collapsed":
@@ -2209,7 +2197,6 @@ def cmd_user_show(args):
         "routing": profile.routing,
         "default_destination": profile.default_destination,
         "default_room": profile.default_room,
-        "email_reply_routing": profile.email_reply_routing,
         "outbound_approval": profile.outbound_approval,
         "external_turn_display": profile.external_turn_display,
         "default_briefings": profile.default_briefings,
@@ -5268,15 +5255,6 @@ def main():
             "when passed). PURPOSE is one of reply/alert/log/briefing/"
             "notification; DESCRIPTOR is an output_target like email or "
             "matrix:<room>. Empty descriptor clears that purpose."
-        ),
-    )
-    user_ensure_parser.add_argument(
-        "--email-reply-routing",
-        choices=["origin+thread", "origin", "thread"],
-        help=(
-            "Where a reply to an email this bot sent is delivered: 'origin+thread' "
-            "(default — origin surface and the email thread), 'origin' (origin "
-            "surface only), or 'thread' (email only)."
         ),
     )
     user_ensure_parser.add_argument(

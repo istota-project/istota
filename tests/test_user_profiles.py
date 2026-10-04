@@ -310,48 +310,37 @@ class TestRoutingFields:
         assert uc.default_destination == "both"
 
 
-class TestEmailReplyRouting:
-    """email_reply_routing scalar round-trip + merge (default origin+thread)."""
+class TestEmailReplyRoutingIsDropped:
+    """The column went with the origin reply routing it chose between."""
 
-    def test_default_on_fresh_row(self, db_path):
-        p = user_profiles.ensure_profile(db_path, "alice")
-        assert p.email_reply_routing == "origin+thread"
+    def test_an_upgraded_table_matches_a_fresh_one(self, tmp_path, db_path):
+        from pathlib import Path
 
-    def test_round_trip(self, db_path):
-        user_profiles.ensure_profile(db_path, "alice")
-        p = user_profiles.update_profile(
-            db_path, "alice", email_reply_routing="origin",
-        )
-        assert p.email_reply_routing == "origin"
-        again = user_profiles.get_profile(db_path, "alice")
-        assert again.email_reply_routing == "origin"
+        from istota import db
 
-    def test_empty_coerces_to_default(self, db_path):
-        user_profiles.ensure_profile(db_path, "alice")
-        p = user_profiles.update_profile(db_path, "alice", email_reply_routing="")
-        assert p.email_reply_routing == "origin+thread"
+        schema = (Path(__file__).parents[1] / "schema.sql").read_text()
+        anchor = "    default_room TEXT NOT NULL DEFAULT '',"
+        assert anchor in schema
+        old_schema = schema.replace(anchor, anchor + "\n    email_reply_routing "
+                                    "TEXT NOT NULL DEFAULT 'origin+thread',")
+        old = tmp_path / "old.db"
+        with sqlite3.connect(old) as conn:
+            conn.executescript(old_schema)
+            conn.execute(
+                "INSERT INTO user_profiles (user_id, display_name, email_reply_routing) "
+                "VALUES ('alice', 'Alice', 'thread')"
+            )
+        db.init_db(old)
+        db.init_db(old)
 
-    def test_noop_detection(self, db_path):
-        user_profiles.update_profile_with_status(
-            db_path, "alice", email_reply_routing="thread",
-        )
-        _, state = user_profiles.update_profile_with_status(
-            db_path, "alice", email_reply_routing="thread",
-        )
-        assert state == "noop"
+        def columns(path):
+            with db.get_db(path) as conn:
+                return {r[1]: tuple(r)[2:5] for r in conn.execute(
+                    "PRAGMA table_info(user_profiles)")}
 
-    def test_merge_db_owns_it(self):
-        uc = UserConfig()
-        profile = UserProfile(user_id="alice", email_reply_routing="origin")
-        user_profiles.merge_into_user_config(profile, uc)
-        assert uc.email_reply_routing == "origin"
-
-    def test_import_from_toml_seeds_value(self, db_path):
-        uc = UserConfig(email_reply_routing="thread")
-        n = user_profiles.import_from_user_configs(db_path, {"alice": uc})
-        assert n == 1
-        p = user_profiles.get_profile(db_path, "alice")
-        assert p.email_reply_routing == "thread"
+        assert "email_reply_routing" not in columns(old)
+        assert columns(old) == columns(db_path)
+        assert user_profiles.get_profile(old, "alice").display_name == "Alice"
 
 
 class TestBriefingEmailHtml:
