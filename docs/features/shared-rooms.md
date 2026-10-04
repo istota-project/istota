@@ -71,7 +71,7 @@ A guest's `!commands` are ignored, apart from switching the bot off. A guest can
 
 If the host leaves, the room goes quiet: turns are recorded and nobody is answered until a member runs `!room host` to take over. Nobody becomes host automatically. On WhatsApp the bot leaves the group instead.
 
-After three of its own replies in a row with no member speaking, the bot stops answering guests until a member writes again, so a guest's autoresponder cannot keep it talking. The cap applies to guests only and never holds back a member's turn. Another bot is never answered at all.
+After three of its own replies in a row with no member speaking, the bot stops answering guests until a member writes again, so a guest's autoresponder cannot keep it talking. The cap applies to guests only and never holds back a member's turn. An email thread has no cap: a correspondent's mail runs as the host, and the email volume limits bound a mail loop instead. Another bot is never answered at all.
 
 ## What a task can reach
 
