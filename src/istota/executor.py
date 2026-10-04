@@ -36,6 +36,7 @@ from istota.sandbox.claude_runtime_env import (
     # from here beside `build_clean_env`.
 )
 from .config import Config
+from istota.prompts import persona as operator_persona
 from istota.sandbox.plan import (
     Mount,
     SandboxProfile,  # noqa: F401  — re-exported; heartbeat, commands and doctor import it from here
@@ -60,7 +61,6 @@ from .storage import (
     read_dated_memories,
     read_group_memory,
     read_room_notes,
-    read_user_config_file,
     read_user_memory_v2,
 )
 from .brain import (
@@ -5664,32 +5664,43 @@ def load_emissaries(config: Config) -> str | None:
     return None
 
 
-def load_persona(config: Config, user_id: str | None = None) -> str | None:
-    """Load persona file, checking user workspace first, then global.
+def load_persona(config: Config) -> str | None:
+    """The installation's one persona, the same for every user and every turn.
 
-    User workspace PERSONA.md (in their Nextcloud config dir) takes precedence
-    over the global config/istota.md file.
+    Resolution: the operator's ``{root}/PERSONA.md``; then the last good copy
+    the sync recorded, while that file cannot be read (so a mount outage or a
+    restart during one does not change the character); then the shipped
+    ``config/persona.md``. A present but empty operator file is the operator
+    choosing the shipped persona and skips the last good copy. No user's
+    ``PERSONA.md`` is read.
 
-    The user's copy is read through ``read_user_config_file``, not a plain
-    ``read_text``: it sits in a directory bound read-write into that user's own
-    sandbox, this runs host-side with the daemon's filesystem view, and what it
-    returns becomes prompt text on the next task (ISSUE-339). A refused read
-    falls through to the global persona, which is the same outcome as having no
-    per-user file — and the global one lives in ``config/``, which is bound
-    into no sandbox at any path.
+    The root is bound into no sandbox, but the leaf read is still hardened
+    (no symlink, regular file, non-blocking, size cap): it is a FUSE mount and
+    a FIFO there would wedge every task. Reads only; never raises.
     """
-    # Try user workspace persona first
-    if user_id and config.has_workspace:
-        content = read_user_config_file(config, user_id, "PERSONA.md")
-        if content and content.strip():
-            return _apply_bot_name(content.strip(), config)
-
-    # Fall back to global persona
-    config_dir = config.skills_dir.parent
-    persona_path = config_dir / "persona.md"
-    if persona_path.exists():
-        return _apply_bot_name(persona_path.read_text().strip(), config)
-    return None
+    text = None
+    path = operator_persona.operator_persona_path(config)
+    if path is not None:
+        found, refusal, present = operator_persona.read_operator_file(path)
+        if found is not None and found.strip():
+            text = found
+        elif refusal is None and present:
+            text = ""  # empty on purpose: the shipped persona, not the last good
+        elif refusal is not None:
+            logger.warning("operator persona unreadable (%s); falling back", refusal)
+    if text is None:
+        try:
+            text = operator_persona.read_last_good(config)
+        except Exception as exc:  # noqa: BLE001 - a fallback, never fatal
+            logger.debug("operator persona last good unread: %s", type(exc).__name__)
+    if not text:
+        try:
+            text = operator_persona.shipped_persona_path(config).read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            text = None
+    if text is None or not text.strip():
+        return None
+    return _apply_bot_name(text.strip(), config)
 
 
 def load_channel_guidelines(
@@ -6348,7 +6359,7 @@ def _room_rule_line(guest_reply: str | None, *, registered: bool) -> str:
     group is not routed privately yet, so nothing is said about where a
     confirmation goes.
     """
-    member = "In this room each member's turn runs as that member, with their own persona and reach"
+    member = "In this room each member's turn runs as that member, with their own reach"
     member += (", and a confirmation goes to the asker's own private chat with the bot."
                if registered else ".")
     if guest_reply == "off":
@@ -6370,7 +6381,6 @@ def room_card(
     *,
     withheld_scopes: "frozenset[str] | set[str] | None",
     room_cli_available: bool,
-    persona_loaded: bool = True,
 ) -> str:
     """The room card (multiplayer D7): who reads this room and whom the bot serves.
 
@@ -6386,13 +6396,11 @@ def room_card(
     standing instruction — the reason `room_identity_line` leaves the room's
     name out. A guest's chosen name reaches the model in the request, fenced.
 
-    The persona in use is the principal's, and the card names whose (D13 as
-    amended): the host's on the host's own turns and on a guest's, which run
-    as the host, and each other member's own on theirs. A member's PERSONA.md
-    is writable from that member's own sandbox, so the host's in another
-    principal's system half would let one user steer a task that runs with
-    another's identity and credentials. ``withheld_scopes`` None means the caller did not compute
-    them, and the card then says nothing about scopes rather than guess.
+    The persona is the operator's, the same on every turn, so the card says
+    nothing about it (D13 as amended by #629): the voice no longer follows the
+    speaker, while reach still follows the principal. ``withheld_scopes`` None
+    means the caller did not compute them, and the card then says nothing
+    about scopes rather than guess.
 
     Opens its own connection when handed none, never on a database path that
     does not exist. Never raises: a card that cannot be built is no card, and
@@ -6462,8 +6470,6 @@ def room_card(
     else:
         # Not registered yet: there is no host to have lost (D14).
         lines.append(f"You are acting for '{principal}'.")
-    if persona_loaded:
-        lines.append(f"The persona in use is that of '{principal}'.")
 
     if withheld_scopes is not None:
         scopes = ", ".join(_header_scalar(s) for s in sorted(withheld_scopes))
@@ -6847,18 +6853,17 @@ def build_prompt(
     if emissaries and not skip_persona:
         emissaries_section = f"\n\n{emissaries}\n"
 
-    # The room card (multiplayer D7). The persona below is always the task
-    # principal's (D13 as amended), which the card names.
+    # The room card (multiplayer D7). The persona below is the operator's on
+    # every turn; reach, which the card describes, follows the principal.
     card = room_card(
         config, task, conn,
         withheld_scopes=withheld_scopes,
         room_cli_available=cli_skill_names is None or "room" in cli_skill_names,
-        persona_loaded=not skip_persona,
     )
 
     persona_section = ""
     if not skip_persona:
-        persona = load_persona(config, user_id=task.user_id)
+        persona = load_persona(config)
         if persona:
             persona_section = f"\n\n{persona}\n"
 

@@ -117,7 +117,7 @@ class SyncResult:
     detail: str = ""
 
 
-def _read_operator_file(path: Path) -> tuple[str | None, str | None, bool]:
+def read_operator_file(path: Path) -> tuple[str | None, str | None, bool]:
     """``(text, refusal, present)`` for the operator file.
 
     ``read_regular_file`` answers ``("", None)`` for a missing file and for an
@@ -242,7 +242,7 @@ def sync_operator_persona(config: "Config", *, dry_run: bool = False) -> SyncRes
     state = _read_state(config)
     recorded_shipped = (state or {}).get("shipped_digest")
 
-    text, reason, present = _read_operator_file(path)
+    text, reason, present = read_operator_file(path)
     if reason is not None:
         logger.warning("operator_persona_sync action=refused reason=%s", reason)
         return SyncResult(ACTION_REFUSED, f"{PERSONA_FILENAME} refused: {reason}")
@@ -278,7 +278,7 @@ def sync_operator_persona(config: "Config", *, dry_run: bool = False) -> SyncRes
     else:
         beside_present = os.path.lexists(beside)
         beside_text, _reason, _ = (
-            _read_operator_file(beside) if beside_present else (None, None, False)
+            read_operator_file(beside) if beside_present else (None, None, False)
         )
         moved = recorded_shipped is not None and recorded_shipped != shipped_digest
         # Only a row that was read and holds no digest is a first sync.
