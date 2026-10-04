@@ -3360,6 +3360,10 @@ def process_one_task(
     # The short label the same notice carries into the inbox row and into an
     # ntfy header. Set beside every `failure_alert` assignment.
     failure_alert_title = None
+    # What the same notice pushes on the alert route (#638). `failure_alert` is
+    # the record and can carry the answer; this never does, since the alert
+    # route can be a room and a room gets notices, not the conversation.
+    failure_alert_push = None
     # Inbox rows raised inside the transaction below and delivered after it, for
     # the same reason `failure_alert` is buffered: `deliver_pending` sends
     # through `send_notification`, which routes by purpose and can land on the
@@ -3720,18 +3724,23 @@ def process_one_task(
                 # stream, which reaches a client that happens to be watching and
                 # nobody else, so there this is the first push the user gets on
                 # any surface they are not currently looking at.
-                # A guest proposal's question is its preview, and a push
-                # carries the stored text: fixed words there, as a relay
-                # hold's are, and the preview only in the authenticated bell.
+                # A push carries the stored text, and it can land in a room, so
+                # the stored text is fixed words and never the answer (#638):
+                # the bell renders the question from the live task, and a guest
+                # proposal's preview only in the authenticated bell.
                 bell_only = private_park is not None and private_park.dest is None
+                if guest_route is not None:
+                    _park_title = confirmation_source.ROOM_POST_TITLE
+                    _park_body = (confirmation_source.ROOM_POST_BELL_BODY if bell_only
+                                  else confirmation_source.ROOM_POST_BODY)
+                else:
+                    _park_title = confirmation_source.park_title(task_id)
+                    _park_body = (confirmation_source.PARK_BELL_BODY if bell_only
+                                  else confirmation_source.PARK_BODY)
                 held_notification = confirmation_source.write(
                     conn, task.user_id, task_id=task_id,
-                    title=(confirmation_source.ROOM_POST_TITLE if guest_route is not None
-                           else confirmations.describe_prompt(result)),
-                    body=((confirmation_source.ROOM_POST_BELL_BODY if bell_only
-                           else confirmation_source.ROOM_POST_BODY)
-                          if guest_route is not None
-                          else confirmation_source.body_for(result)),
+                    title=_park_title,
+                    body=_park_body,
                     room_token=transcript_token,
                     # A private park with no private room shows the question
                     # in no room, so its push may not be confined to ntfy and
@@ -4213,13 +4222,20 @@ def process_one_task(
                     # stranger is waiting for that answer, not the user. See
                     # `tests/test_email_self_reply_residue.py::TestAPermanent
                     # FailureReachesTheUser`, which pins both directions.
+                    _failed_detail = (
+                        f"{_format_error_for_user(result)}\n\n"
+                        "Nothing was sent in reply. Resend the mail to try again."
+                    )
                     failure_alert = _with_partial_work(
                         f"⚠️ **Your emailed request failed** (task #{task.id})\n\n"
-                        f"{_format_error_for_user(result)}\n\n"
-                        "Nothing was sent in reply. Resend the mail to try again.",
+                        f"{_failed_detail}",
                         task,
                     )
                     failure_alert_title = f"Your emailed request failed — task #{task.id}"
+                    # The partial work is model prose, so it stays in the row.
+                    failure_alert_push = task_alert_source.undelivered_push(
+                        failure_alert_title, _failed_detail,
+                    )
                 # NOTE: We intentionally do NOT email errors to users.
                 # Failed tasks routed to email/ntfy only log the error.
                 # Receiving error emails is confusing; users can check Talk or retry.
@@ -4645,9 +4661,9 @@ def process_one_task(
                 # The answer exists and nothing carries it (ISSUE-255,
                 # ISSUE-275): a private email room has no other leg, so
                 # `tasks.result` is the only copy left and nothing puts it in
-                # front of the user. Carry the body itself rather than a pointer
-                # — the point is that the answer survives the failure, not that
-                # its loss is announced.
+                # front of the user. The bell row carries the body itself, so
+                # the answer survives the failure; the push points at that row
+                # and never carries the answer (#638).
                 # Unwrapped for the same reason the room transcript unwraps it
                 # (ISSUE-247): an email task's `result` may *be* the
                 # `{"subject","body","format"}` envelope the send path parses, and
@@ -4662,6 +4678,7 @@ def process_one_task(
                     f"{email_transcript_body(email_result)}"
                 )
                 failure_alert_title = f"Could not send the email reply — task #{task.id}"
+                failure_alert_push = task_alert_source.undelivered_push(failure_alert_title)
     sms_undelivered = False
     if post_sms_message:
         # `send_record` rather than `deliver`, because `Transport.deliver`
@@ -4804,7 +4821,7 @@ def process_one_task(
         talk_undelivered or sms_undelivered or whatsapp_undelivered
         or private_undelivered
     ):
-        deliver_pending(config, [held_notification])
+        deliver_pending(config, [confirmation_source.owed_push(held_notification)])
 
     # A Talk leg that carried the message and posted nothing (ISSUE-404). Last,
     # after every other leg, because there is one buffered `failure_alert` and
@@ -4835,9 +4852,9 @@ def process_one_task(
     # Two accepted trades, both stated rather than fixed. The alert can be
     # routed to the very room that just refused the post, in which case only the
     # row survives. And a long message is posted part by part, so a failure on
-    # part 3 of 5 returns None with parts 1 and 2 already in the room and this
-    # delivers the whole body again — a duplicate beats a silently truncated
-    # answer, and `deliver` reports no more than it knows.
+    # part 3 of 5 returns None with parts 1 and 2 already in the room; the row
+    # then keeps the whole body again, flattened and capped at
+    # `MAX_UNDELIVERED_BODY_CHARS`, and the push carries only a pointer (#638).
     #
     # It never touches the task's status, deliberately unlike the email arm.
     # This runs on three shapes with three different statuses — a completed
@@ -4857,6 +4874,7 @@ def process_one_task(
             f"{post_talk_message}"
         )
         failure_alert_title = f"Could not post to Talk — task #{task.id}"
+        failure_alert_push = task_alert_source.undelivered_push(failure_alert_title)
 
     if failure_alert:
         # Last, and after every DB transaction above has closed. Best-effort by
@@ -4868,16 +4886,19 @@ def process_one_task(
         # last channel a task with no room leg has, and `send_notification`
         # returns False when the user configured no destination for it — which is
         # how this notice used to disappear entirely, on the one path whose whole
-        # purpose is that the answer is not lost. The send itself is unchanged:
-        # it carries the full unflattened body, because the point of the second
-        # branch is to hand the user their answer, and the row carries the
-        # flattened, capped record of it (the full text stays in `tasks.result`).
+        # purpose is that the answer is not lost. The row is where the answer
+        # is kept; the send carries `failure_alert_push`, a notice pointing at
+        # the row, because the alert route can be a room (#638).
         notification_id = _write_undelivered_row(
             config, task, failure_alert_title, failure_alert,
         )
         try:
             delivered = send_notification(
-                config, task.user_id, failure_alert, purpose="alert",
+                config, task.user_id,
+                failure_alert_push or task_alert_source.undelivered_push(
+                    failure_alert_title or f"A task result could not be delivered — task #{task.id}",
+                ),
+                purpose="alert",
             )
         except Exception as e:
             delivered = False
@@ -7524,9 +7545,9 @@ def _write_undelivered_row(
     every write transaction the function held has closed — the same invariant
     the `send_notification` call beside it already depends on.
 
-    Fire-and-forget by construction. Nothing will ever change to close this row,
-    so `task_alert` closes it on being seen, and `sweep_expired_alerts` catches
-    the ones nobody looks at.
+    Nothing will ever change to close this row, and its push carries only a
+    pointer to it, so it is the user's copy: an `undelivered:` row is kept
+    until dismissed rather than closed on being seen (#638).
     """
     try:
         with db.get_db(config.db_path) as conn:

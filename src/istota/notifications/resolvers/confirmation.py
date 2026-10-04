@@ -55,6 +55,33 @@ ROOM_POST_BODY = "Open your private chat with the bot to review and approve it."
 # The same, for an owner with no private chat: the bell is the preview (#633).
 ROOM_POST_BELL_BODY = "Open this notification to review and approve it."
 
+# The stored body of a scheduler park, which is what its push carries (#638):
+# a push can land in a room, and a room gets a notice about the question, never
+# the question. The bell renders the question from the live task.
+PARK_BODY = (
+    "The question is in the conversation it was asked in. "
+    "Answer it there, or open this notification."
+)
+# The same, for a park whose question is in no room: the bell is the only
+# place it is.
+PARK_BELL_BODY = "Open this notification to read the question and answer it."
+# What the owed re-push says once the question's own delivery failed: the place
+# it was asked is where it did not arrive.
+PARK_UNDELIVERED_BODY = (
+    "The question could not be delivered where it was asked. "
+    "Open this notification to read it and answer."
+)
+
+
+def owed_push(result: "RaiseResult | None") -> "RaiseResult | None":
+    """A park's held result, re-pushed because the question's delivery failed."""
+    return _common.pushing_only(result, PARK_UNDELIVERED_BODY)
+
+
+def park_title(task_id: int) -> str:
+    """The stored title of a scheduler park."""
+    return f"Task #{int(task_id)} is waiting for your approval"
+
 
 def dedup_key(task_id: int | str) -> str:
     """``task:{id}``.
@@ -266,9 +293,13 @@ class ConfirmationResolver:
         )
         if phone is not None:
             label = "SMS" if phone == "sms" else "WhatsApp"
+            # The question too: when its text did not arrive, the bell is
+            # where the owed push sends the user to read it (#638).
+            question = body_for(task.confirmation_prompt)
+            reply = f"Reply by {label} to answer this question."
             return NotificationView(
                 title=confirmations.describe(conn, task),
-                body=f"Reply by {label} to answer this question.",
+                body=f"{question}\n\n{reply}" if question else reply,
                 severity=row.severity,
                 actions=(),
             )

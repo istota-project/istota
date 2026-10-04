@@ -589,6 +589,22 @@ class TestTheBellFallback:
         assert row["title"] == "Private note about Family"
         assert row["body"] == "Only for you."
         assert delivery.notice is not None
+        # The push can land in the alerts room, so it points at the bell and
+        # never carries the note (#638).
+        assert "Only for you" not in delivery.notice.text
+        assert delivery.notice.text.startswith("Private note about Family")
+
+    def test_a_late_bell_notes_push_carries_no_note(self, config, sent):
+        with db.get_db(config.db_path) as conn:
+            group = _whatsapp_group(conn)
+            _phone_room(conn)
+            conn.execute("DELETE FROM whatsapp_user_bindings WHERE user_id='alice'")
+        delivery = _deliver(config, group, kind="whisper", reference="room-whisper:r11",
+                            body="Only for you.")
+        with patch("istota.notifications.store.deliver_pending") as deliver:
+            asyncio.run(private_replies.send_private(config, delivery, body="Only for you."))
+        ((_config, (notice,)), _kw) = deliver.call_args
+        assert "Only for you" not in notice.text
 
     @pytest.mark.parametrize("kind", ["confirmation", "proposal", "answer_notice"])
     def test_other_kinds_add_nothing(self, config, kind):
