@@ -359,6 +359,10 @@ class Case:
     #: date, because a clock reading in a snapshot is a golden that rewrites
     #: itself on every run.
     history_recent: bool = False
+    #: Also writes the seeded turn's user and assistant rows into `messages`, as
+    #: a room surface does, so history is read from the store rather than from
+    #: `tasks` (ISSUE-645).
+    history_mirrored: bool = False
     #: Writes a `CHANGELOG.md` into the bundled skills dir, which — against a
     #: user with no stored fingerprint — is what makes the "What's New in
     #: Skills" section reachable. Off for every matrix case because turning it
@@ -796,6 +800,16 @@ def _seed_history(config: Config, case: Case) -> None:
                 ),
             ),
         )
+        if case.history_mirrored:
+            for role, body in (
+                ("user", "What did the release notes say about the migration?"),
+                ("assistant", "The migration runs on first boot and is idempotent."),
+            ):
+                db.add_message(
+                    conn, case.conversation_token, role=role, body=body,
+                    origin_surface=case.history_source_type, task_id=900,
+                    author_user_id=USER if role == "user" else None,
+                )
         conn.commit()
 
 
@@ -1621,21 +1635,23 @@ class TestThePushSurfacesAreInteractive:
             **kw,
         )
 
+    @pytest.mark.parametrize("mirrored", [True, False], ids=["store", "tasks"])
     @pytest.mark.parametrize("source_type", ["sms", "whatsapp"])
     def test_the_previous_turn_reaches_the_prompt(
-        self, source_type, tmp_path, monkeypatch
+        self, source_type, mirrored, tmp_path, monkeypatch
     ):
         """The symptom as filed: a follow-up answered with nothing in front of it.
 
         The seeded turn is that surface's own, so this also covers the path it
-        takes to get back: these surfaces write no `messages` row, so
-        `_messages_caught_up` finds no completed *conversational* turn for the
-        token and `get_conversation_history` falls through to the `tasks`
-        reconstruction — which is the "task history" both rule files name.
+        takes to get back. A phone room writes its turns to `messages`, and
+        since ISSUE-645 its history is read from there (`store`). A turn the
+        store lacks keeps the conversation on the `tasks` reconstruction
+        (`tasks`), the reader these surfaces used before.
         """
-        _system, user = split_halves(
-            assemble(self._case(source_type), tmp_path, monkeypatch)
-        )
+        case = self._case(source_type, history_mirrored=mirrored)
+        _system, user = split_halves(assemble(case, tmp_path, monkeypatch))
+        with db.get_db(tmp_path / "framework.db") as conn:
+            assert db._messages_caught_up(conn, case.conversation_token) is mirrored
 
         assert "What did the release notes say about the migration?" in user
         assert "The migration runs on first boot and is idempotent." in user
