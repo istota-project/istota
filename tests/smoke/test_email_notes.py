@@ -32,8 +32,6 @@ the attempt that succeeds writes one row and pushes once.
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from testbed.services import mail
@@ -148,15 +146,8 @@ def _assert_kept_private(stack, sent: flow.Sent, seen: flow.Outcome,
             carried = call.body.decode("utf-8", "replace") + " " + " ".join(
                 call.headers.values())
             assert remark not in carried, carried
-    if seen.reply is None:
-        # `assert_outcome` reads "no reply" once; a mail still on its way
-        # through the server would be missed, so watch for it a while.
-        deadline = time.monotonic() + flow.NEGATIVE_SETTLE
-        while time.monotonic() < deadline:
-            assert flow.reply_to(stack, sent) is None
-            time.sleep(flow.POLL_INTERVAL)
-        assert flow.reply_to(stack, sent) is None
-    else:
+    # "No reply" is watched for a settle inside `assert_outcome`.
+    if seen.reply is not None:
         assert mailed is not None
         assert mailed in seen.reply.body_text, seen.reply.body_text
         if remark:

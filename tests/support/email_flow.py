@@ -70,10 +70,11 @@ WORKER_DONE_RE = r"Worker [^/\s]+/[a-z]+: task {task_id} (completed|failed)\b"
 DEFAULT_TIMEOUT = 90.0
 POLL_INTERVAL = 2.0
 
-#: How long a "nothing was pushed" claim waits on a mail no worker ran (held at
-#: the gate): two of the lean profiles' five-second mail polls. A bounded
-#: settle, not an event, because nothing the probe can read follows the gate's
-#: prompt delivery.
+#: How long a "no reply" claim watches the mailbox, and a "nothing was pushed"
+#: claim waits on a mail no worker ran (held at the gate): two of the lean
+#: profiles' five-second mail polls. A bounded settle, not an event, because
+#: a reply may still be passing through the mail server after the worker's
+#: line, and nothing the probe can read follows the gate's prompt delivery.
 NEGATIVE_SETTLE = 10.0
 
 #: How long the exact push and alert-mail sets are watched past the expected
@@ -669,7 +670,8 @@ def assert_outcome(
     failing, so a broken run says everything that is wrong with it. Waits are
     bounded. A negative claim about something that happens after delivery (no
     reply, no note) is read after the worker's completion line for the task,
-    the one marker that follows the note step.
+    the one marker that follows the note step, and "no reply" is then watched
+    for `NEGATIVE_SETTLE`, since a sent mail reaches IMAP after the line.
 
     Rows, transcript and pushes are read above the test's watermark, or above
     `since` for a later step of a test that has already sent mail. Alert mails
@@ -793,8 +795,12 @@ def assert_outcome(
                      mail_state=card.get("state") if card else None))
 
     # 6. the wire
+    absence_watched = False
     if expected.reply is None:
-        reply = reply_to(stack, sent)
+        # A reply still passing through the mail server is not in IMAP yet,
+        # so one read would miss it: watch for a bounded settle instead.
+        reply = _wait(lambda: reply_to(stack, sent), timeout=NEGATIVE_SETTLE)
+        absence_watched = True
         check("reply", None, reply and reply.subject)
     else:
         reply = _wait(lambda: reply_to(stack, sent), timeout=timeout)
@@ -870,7 +876,8 @@ def assert_outcome(
               and len(read_alerts()) >= want_alerts, timeout=timeout)
         # The count is a floor: a push past it would otherwise go unseen.
         time.sleep(POST_COUNT_SETTLE)
-    elif not ran:
+    elif not ran and not absence_watched:
+        # The reply watch above has already waited out the same settle.
         time.sleep(NEGATIVE_SETTLE)
     pushes = read_pushes()
     seen.pushes = pushes
