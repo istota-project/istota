@@ -105,6 +105,19 @@ describe('availableTips', () => {
       expect(tip).not.toContain('{bot}');
     }
   });
+
+  it('spells the off switch the way the room veto parses it', () => {
+    const tips = availableTips(everything, 'Big Zorg');
+    expect(tips.some((t) => t.includes('!bigzorg off') && t.includes('!bigzorg on'))).toBe(true);
+    for (const tip of tips) expect(tip).not.toContain('{cmd}');
+    expect(availableTips({}, '').some((t) => t.includes('!bot off'))).toBe(true);
+  });
+
+  it('drops the email thread tip when no address is configured', () => {
+    const thread = (t: string) => t.startsWith('Copy me on an email thread');
+    expect(availableTips(everything, 'Istota').some(thread)).toBe(true);
+    expect(availableTips({ ...everything, email: null }, 'Istota').some(thread)).toBe(false);
+  });
 });
 
 describe('welcomeNotes', () => {
