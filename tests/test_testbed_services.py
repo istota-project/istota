@@ -496,6 +496,37 @@ class TestProfileConfigNamesOnlyShippedVariables:
                 )
 
 
+class TestTheEmailProfiles:
+    """The email suite's two lean profiles, which differ only in the floor."""
+
+    def test_both_are_registered(self):
+        assert profiles.by_name("email") is profiles.EMAIL
+        assert profiles.by_name("email-hold-all") is profiles.EMAIL_HOLD_ALL
+
+    def test_both_run_mail_and_ntfy_with_the_gate_in_verify(self):
+        for profile in (profiles.EMAIL, profiles.EMAIL_HOLD_ALL):
+            assert profile.shape == "lean"
+            assert set(profile.services) == {"model", "mail", "ntfy"}
+            assert profile.compose_overlays == (profiles.MAIL_OVERLAY,)
+            assert profile.config["ISTOTA_EMAIL_CONFIRM_SENDER_MATCH"] == "verify"
+
+    def test_only_hold_all_raises_the_outbound_floor(self):
+        assert "ISTOTA_EMAIL_OUTBOUND_APPROVAL_FLOOR" not in profiles.EMAIL.config
+        assert (profiles.EMAIL_HOLD_ALL.config["ISTOTA_EMAIL_OUTBOUND_APPROVAL_FLOOR"]
+                == "all")
+
+    def test_every_variable_they_set_is_wired_through_both_files(self):
+        """The two-file rule, named for these profiles: the sweep above covers
+        them only because they are in `profiles.ALL`."""
+        script = RENDER_CONFIG.read_text()
+        compose = FULL_COMPOSE.read_text()
+        for profile in (profiles.EMAIL, profiles.EMAIL_HOLD_ALL):
+            assert profile in profiles.ALL
+            for variable in profile.config:
+                assert _reads_variable(script, variable), variable
+                assert _passed_through(compose, variable), variable
+
+
 class TestTheForgeGuardsItsOwnListener:
     """`HttpStub.start` cannot see whether the subclass enforces the credential.
 

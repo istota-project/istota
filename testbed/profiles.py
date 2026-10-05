@@ -251,6 +251,36 @@ MAIL = Profile(
     compose_overlays=(MAIL_OVERLAY,),
 )
 
+#: The email suite's lean profiles: mail, the model and an ntfy stub, with the
+#: self-claim gate in `verify`.
+#:
+#: `verify` rather than `off`, because it is the mode in which a header decides
+#: between running and holding, and `off` is already `mail`'s. So mail the
+#: stack's own user sends from their own address must carry a passing
+#: `Authentication-Results` stamp (`tests/support/email_flow.py`), or it is
+#: held. ntfy because the suite asserts what every push carries, and a profile
+#: without the stub could only count them. Both variables pass the two-file
+#: rule: `render-config.sh` reads them and `docker-compose.yml` passes them.
+EMAIL_CONFIG = {
+    **MAIL_CONFIG,
+    "ISTOTA_EMAIL_CONFIRM_SENDER_MATCH": "verify",
+}
+EMAIL = Profile(
+    "email",
+    services=("model", "mail", "ntfy"),
+    config=EMAIL_CONFIG,
+    compose_overlays=(MAIL_OVERLAY,),
+)
+#: The same, with every outbound mail held for approval. A profile rather than
+#: a runtime flip, because a lean boot is seconds and a config change reaching
+#: a running daemon is not something a test can observe.
+EMAIL_HOLD_ALL = Profile(
+    "email-hold-all",
+    services=("model", "mail", "ntfy"),
+    config={**EMAIL_CONFIG, "ISTOTA_EMAIL_OUTBOUND_APPROVAL_FLOOR": "all"},
+    compose_overlays=(MAIL_OVERLAY,),
+)
+
 #: Every profile this package defines, for the guard that checks each one names
 #: services that exist. A profile absent from here is invisible to that check,
 #: so add to it when adding a profile.
@@ -261,6 +291,8 @@ ALL: tuple[Profile, ...] = (
     NOTIFY,
     FEEDS,
     MAIL,
+    EMAIL,
+    EMAIL_HOLD_ALL,
     SIGNALING,
     FULL,
 )
