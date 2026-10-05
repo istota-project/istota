@@ -832,3 +832,114 @@ class TestRoomSpeakCommand:
             assert "email thread" in out
             policy = room_policy.get_policy(conn, "thr")
             assert policy is None or policy.speech_mode is None
+
+
+# ---------------------------------------------------------------------------
+# The room's own disposition (ISSUE-654)
+# ---------------------------------------------------------------------------
+
+
+def _disposition(config, conn, args, user_id="alice", token="grp"):
+    ctx = commands.CommandContext(
+        config=config, conn=conn, user_id=user_id,
+        conversation_token=token, args=f"disposition {args}".strip(), surface="talk",
+    )
+    return asyncio.run(commands.cmd_room(ctx))
+
+
+class TestEffectiveDisposition:
+    def test_an_unset_room_follows_the_deployment(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            for value in ("reserved", "friendly"):
+                assert room_policy.disposition_source(conn, "grp", value) == (value, False)
+
+    def test_a_set_room_overrides_it_in_both_directions(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            room_policy.set_disposition(conn, "grp", "friendly")
+            assert room_policy.disposition_source(conn, "grp", "reserved") == (
+                "friendly", True)
+            room_policy.set_disposition(conn, "grp", "reserved")
+            assert room_policy.effective_disposition(conn, "grp", "friendly") == "reserved"
+            room_policy.set_disposition(conn, "grp", "default")
+            assert room_policy.get_policy(conn, "grp").disposition is None
+            assert room_policy.effective_disposition(conn, "grp", "friendly") == "friendly"
+
+    def test_an_unknown_stored_value_is_reserved(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            room_policy.ensure_policy(conn, "grp")
+            conn.execute(
+                "UPDATE room_policy SET disposition = 'chatty' WHERE room_token = 'grp'"
+            )
+            assert room_policy.disposition_source(conn, "grp", "friendly") == (
+                "reserved", True)
+
+    def test_an_unknown_value_raises(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            with pytest.raises(ValueError):
+                room_policy.set_disposition(conn, "grp", "chatty")
+
+    def test_no_room_follows_the_deployment(self, config):
+        with db.get_db(config.db_path) as conn:
+            assert room_policy.effective_disposition(conn, None, "friendly") == "friendly"
+
+
+class TestRoomDispositionCommand:
+    def test_no_argument_reports_the_deployment_and_that_it_is_inert(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            out = _disposition(config, conn, "")
+        assert "`reserved` (deployment default)" in out
+        assert "does nothing" in out and "`mention`" in out
+
+    def test_an_unnormalized_classifier_mode_is_not_called_inert(self, config):
+        config.speech_gate.mode = " Classifier "
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            assert "does nothing" not in _disposition(config, conn, "")
+
+    def test_a_value_sets_it_and_reading_reports_the_room(self, config):
+        config.speech_gate.mode = "classifier"
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            out = _disposition(config, conn, "friendly")
+            assert "`friendly`" in out and "does nothing" not in out
+            assert room_policy.get_policy(conn, "grp").disposition == "friendly"
+            assert "`friendly` (this room)" in _disposition(config, conn, "", user_id="bob")
+
+    def test_default_clears_it(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            _disposition(config, conn, "friendly")
+            out = _disposition(config, conn, "default")
+            assert "follows the deployment" in out
+            assert room_policy.get_policy(conn, "grp").disposition is None
+
+    def test_a_non_host_is_refused(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            out = _disposition(config, conn, "friendly", user_id="bob")
+            assert "host" in out
+            assert room_policy.get_policy(conn, "grp").disposition is None
+
+    def test_a_guest_is_refused(self, config):
+        """A guest's turn carries no user id, so the host check refuses it."""
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            assert room_policy.speech_mode_refusal(conn, "grp", "") is not None
+
+    def test_an_unknown_value_shows_the_usage(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            assert "Usage" in _disposition(config, conn, "chatty")
+
+    def test_refused_in_an_email_thread_room(self, config):
+        with db.get_db(config.db_path) as conn:
+            _email_thread_room(conn)
+            out = _disposition(config, conn, "friendly", token="thr")
+            assert "email thread" in out
+            policy = room_policy.get_policy(conn, "thr")
+            assert policy is None or policy.disposition is None

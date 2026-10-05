@@ -1608,7 +1608,8 @@ CREATE TABLE IF NOT EXISTS room_policy (
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     vetoed_at    TEXT,
     veto_on_by   TEXT,
-    announced_at TEXT
+    announced_at TEXT,
+    disposition  TEXT
 );
 
 -- Everyone who switched the bot off in a room (Stage 20, D12), one row per

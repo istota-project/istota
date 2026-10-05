@@ -16,6 +16,9 @@ rule below is a no-op for it.
 - **`speech_mode`** overrides ``[speech_gate] mode`` for this room's
   unaddressed turns, in either direction; NULL follows the deployment
   (ISSUE-640). Host only, and never set on an email thread room.
+- **`disposition`** overrides ``[speech_gate] disposition`` for this room,
+  under the same rule as ``speech_mode``; NULL follows the deployment
+  (ISSUE-654). Read only while the room is on the classifier.
 - **The loop cap** (D9): at most `max_bot_turns_without_human` bot turns since
   a principal last spoke, after which a guest's turn is recorded only.
 - **The audience class** (D3): `private` for one human, `principals` when
@@ -32,8 +35,9 @@ import sqlite3
 from dataclasses import dataclass
 
 from istota import db
+from .speech_gate import DISPOSITIONS as _DISPOSITIONS
 from .speech_gate import MODES as _SPEECH_MODES
-from .speech_gate import normalize_mode
+from .speech_gate import normalize_disposition, normalize_mode
 
 GUEST_REPLY_VALUES = ("off", "held", "direct")
 OFF, HELD, DIRECT = GUEST_REPLY_VALUES
@@ -42,6 +46,11 @@ OFF, HELD, DIRECT = GUEST_REPLY_VALUES
 #: deployment's ``[speech_gate] mode`` again.
 DEFAULT_SPEECH_MODE = "default"
 SPEECH_MODE_VALUES = (*_SPEECH_MODES, DEFAULT_SPEECH_MODE)
+
+#: What `set_disposition` takes: a disposition, or ``default`` to follow the
+#: deployment's ``[speech_gate] disposition`` again.
+DEFAULT_DISPOSITION = "default"
+DISPOSITION_VALUES = (*_DISPOSITIONS, DEFAULT_DISPOSITION)
 
 PRIVATE = "private"
 PRINCIPALS = "principals"
@@ -63,6 +72,7 @@ class RoomPolicy:
     vetoed_at: str | None = None
     veto_on_by: str | None = None
     announced_at: str | None = None
+    disposition: str | None = None
 
 
 def default_guest_reply(surface: object) -> str:
@@ -102,6 +112,38 @@ def speech_mode_source(
     return effective_speech_mode(conn, room_token, deployment_mode), own is not None
 
 
+def own_disposition(policy: RoomPolicy | None) -> str | None:
+    """The room's stored disposition, or None when it follows the deployment.
+
+    An unrecognised stored value is ``reserved``, the narrower one, as an
+    unrecognised deployment value is.
+    """
+    if policy is None or policy.disposition is None:
+        return None
+    if not str(policy.disposition).strip():
+        return None
+    return normalize_disposition(policy.disposition)
+
+
+def effective_disposition(
+    conn: sqlite3.Connection, room_token: str | None, deployment_value: object,
+) -> str:
+    """The disposition the classifier uses for this room (ISSUE-654): the
+    room's own when set, else ``[speech_gate] disposition``."""
+    return disposition_source(conn, room_token, deployment_value)[0]
+
+
+def disposition_source(
+    conn: sqlite3.Connection, room_token: str | None, deployment_value: object,
+) -> tuple[str, bool]:
+    """``effective_disposition`` plus whether the room's own value chose it."""
+    policy = get_policy(conn, room_token) if room_token else None
+    own = own_disposition(policy)
+    if own is not None:
+        return own, True
+    return normalize_disposition(deployment_value), False
+
+
 def classifier_in_use(conn: sqlite3.Connection, deployment_mode: str) -> bool:
     """Whether any room could be on the classifier: the deployment is, or a
     room opted in on its own (ISSUE-640).
@@ -131,6 +173,7 @@ def _row_to_policy(row) -> RoomPolicy:
         vetoed_at=row["vetoed_at"],
         veto_on_by=row["veto_on_by"],
         announced_at=row["announced_at"],
+        disposition=row["disposition"],
     )
 
 
@@ -328,7 +371,8 @@ def speech_mode_refusal(conn: sqlite3.Connection, room_token: str, user_id: str)
 
     Host only, like `guest_reply_refusal`. Refused outright in an email thread
     room, where speaking is a reply-all to everyone on the thread, so only the
-    bot in To makes it speak. `!room speak` and the web PATCH both ask this.
+    bot in To makes it speak. `!room speak`, `!room disposition` and the web
+    PATCH all ask this, since the disposition is part of the same decision.
     """
     from .scopes import is_email_thread_room
 
@@ -358,6 +402,22 @@ def set_speech_mode(conn: sqlite3.Connection, room_token: str, value: str) -> Ro
     conn.execute(
         "UPDATE room_policy SET speech_mode = ? WHERE room_token = ?",
         (None if value == DEFAULT_SPEECH_MODE else value, room_token),
+    )
+    return get_policy(conn, room_token)
+
+
+def set_disposition(conn: sqlite3.Connection, room_token: str, value: str) -> RoomPolicy:
+    """Set the room's own disposition; ``default`` clears it (NULL), so the
+    room follows ``[speech_gate] disposition`` again."""
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
+    if value not in DISPOSITION_VALUES:
+        raise ValueError(f"disposition must be one of {DISPOSITION_VALUES}")
+    policy = ensure_policy(conn, room_token)
+    if policy is None:
+        raise ValueError("no such room")
+    conn.execute(
+        "UPDATE room_policy SET disposition = ? WHERE room_token = ?",
+        (None if value == DEFAULT_DISPOSITION else value, room_token),
     )
     return get_policy(conn, room_token)
 

@@ -1444,6 +1444,8 @@ const mockRoomHosts = new Map<number, string | null>([
 const mockRoomGuestReply = new Map<number, 'off' | 'held' | 'direct'>();
 const mockRoomSpeechMode = new Map<number, 'mention' | 'classifier' | 'off'>();
 const MOCK_DEPLOYMENT_SPEECH_MODE = 'mention';
+const mockRoomDisposition = new Map<number, 'reserved' | 'friendly'>();
+const MOCK_DEPLOYMENT_DISPOSITION = 'reserved';
 const mockRoomGroups = new Map<number, string | null>();
 const mockRoomsWithGuests = new Set<number>([2]);
 const mockRoomsOff = new Set<number>([2]);
@@ -1491,6 +1493,9 @@ function mockRoomSharing(room: MockChatRoom) {
       speech_mode: mockRoomSpeechMode.get(room.id) ?? null,
       effective_speech_mode: mockRoomSpeechMode.get(room.id) ?? MOCK_DEPLOYMENT_SPEECH_MODE,
       deployment_speech_mode: MOCK_DEPLOYMENT_SPEECH_MODE,
+      disposition: mockRoomDisposition.get(room.id) ?? null,
+      effective_disposition: mockRoomDisposition.get(room.id) ?? MOCK_DEPLOYMENT_DISPOSITION,
+      deployment_disposition: MOCK_DEPLOYMENT_DISPOSITION,
       settings_refusal: mockSettingsRefusal(room.id),
     },
   };
@@ -1881,7 +1886,9 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
     const refusal = mockSettingsRefusal(room.id);
     if (
       refusal &&
-      ['name', 'model', 'effort', 'guest_reply', 'speech_mode'].some((k) => k in (body ?? {}))
+      ['name', 'model', 'effort', 'guest_reply', 'speech_mode', 'disposition'].some(
+        (k) => k in (body ?? {}),
+      )
     )
       return { __status: 403, error: refusal };
     if ('speech_mode' in (body ?? {})) {
@@ -1890,6 +1897,13 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
         return { __status: 400, error: 'invalid speech_mode' };
       if (mode === 'default') mockRoomSpeechMode.delete(room.id);
       else mockRoomSpeechMode.set(room.id, mode as 'mention' | 'classifier' | 'off');
+    }
+    if ('disposition' in (body ?? {})) {
+      const value = String(body.disposition || '').toLowerCase() || 'default';
+      if (!['reserved', 'friendly', 'default'].includes(value))
+        return { __status: 400, error: 'invalid disposition' };
+      if (value === 'default') mockRoomDisposition.delete(room.id);
+      else mockRoomDisposition.set(room.id, value as 'reserved' | 'friendly');
     }
     if (body?.guest_reply != null) {
       if (!['off', 'held', 'direct'].includes(body.guest_reply))

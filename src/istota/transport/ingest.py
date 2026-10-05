@@ -15,6 +15,7 @@ transport's `poll()`; this performs the resolve + store + decide + create step.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 from dataclasses import dataclass
@@ -280,7 +281,13 @@ def _ask_gate(
     speech_gate.record_decision(
         conn, room_token=room_token, surface=surface, user_id=user_id,
         message_id=message_id, decision=decision,
-        disposition=config.speech_gate.disposition,
+        disposition=(
+            classified.disposition
+            if classified is not None and classified.disposition
+            else room_policy.effective_disposition(
+                conn, room_token, config.speech_gate.disposition,
+            )
+        ),
     )
     return decision
 
@@ -424,14 +431,12 @@ def classify_ahead(
     ``replied_to_bot`` is a reply to one of the bot's own messages: addressed,
     so it speaks whatever the model says, but in a ``friendly`` room the model
     is still asked whether it is only a reaction (ISSUE-653). Under
-    ``reserved`` nothing is asked, since the answer could change nothing.
+    ``reserved`` nothing is asked, since the answer could change nothing. The
+    disposition is the room's effective one
+    (`room_policy.effective_disposition`, ISSUE-654).
     """
     gate = config.speech_gate
     if addressed_to_bot or not is_room_member_for(surface, room_container=room_container):
-        return None
-    if replied_to_bot and speech_gate.normalize_disposition(
-        gate.disposition, warn=False,
-    ) != speech_gate.FRIENDLY:
         return None
     source_type = source_type or surface
     try:
@@ -445,6 +450,12 @@ def classify_ahead(
             room_token = (
                 db.resolve_room_token(conn, surface, surface_ref) or surface_ref
             )
+            # The room's own disposition, not the deployment's (ISSUE-654).
+            disposition = room_policy.effective_disposition(
+                conn, room_token, gate.disposition,
+            )
+            if replied_to_bot and disposition != speech_gate.FRIENDLY:
+                return None
             if room_veto.is_vetoed(conn, room_token):
                 return None
             if not participants.is_multi_human(
@@ -476,12 +487,14 @@ def classify_ahead(
             config, user_id=user_id, source_type=source_type,
             brain_kind=room.brain if room is not None else None,
         )
-        disposition = speech_gate.normalize_disposition(gate.disposition)
-        return speech_gate.classify(
-            speech_gate.build_window(
-                turns, bot_name=config.bot_name, disposition=disposition,
+        return dataclasses.replace(
+            speech_gate.classify(
+                speech_gate.build_window(
+                    turns, bot_name=config.bot_name, disposition=disposition,
+                ),
+                completer, gate.model, disposition=disposition,
             ),
-            completer, gate.model, disposition=disposition,
+            disposition=disposition,
         )
     except Exception as e:  # noqa: BLE001 — a classifier failure never costs the turn
         logger.warning("speech gate: classifying ahead failed: %s", type(e).__name__)

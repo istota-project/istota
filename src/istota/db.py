@@ -8456,7 +8456,8 @@ CREATE TABLE IF NOT EXISTS room_policy (
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     vetoed_at    TEXT,
     veto_on_by   TEXT,
-    announced_at TEXT
+    announced_at TEXT,
+    disposition  TEXT
 )
 """
 
@@ -8515,6 +8516,9 @@ def _migrate_room_veto(conn: sqlite3.Connection) -> None:
     _add_columns(conn, "room_policy", {
         "vetoed_at": "TEXT", "veto_on_by": "TEXT", "announced_at": "TEXT",
     })
+    # ISSUE-654: the room's own speech gate disposition. NULL follows
+    # `[speech_gate] disposition`, so nothing is backfilled.
+    _add_columns(conn, "room_policy", {"disposition": "TEXT"})
     conn.execute(_ROOM_VETOES_DDL)
     conn.execute(_ROOM_NOTICES_DDL)
     try:

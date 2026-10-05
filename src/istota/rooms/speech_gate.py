@@ -125,6 +125,10 @@ class GateDecision:
     latency_ms: int | None = None
     #: ``ack`` or ``reply``; meaningful only when ``speak`` is true.
     kind: str = KIND_REPLY
+    #: The disposition the classifier was asked under, set by
+    #: `ingest.classify_ahead` so the audit row records that one and not a
+    #: value re-read after a host changed it mid-call (ISSUE-654).
+    disposition: str | None = None
 
 
 @dataclass(frozen=True)

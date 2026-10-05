@@ -2998,6 +2998,9 @@ export type GuestReply = 'off' | 'held' | 'direct';
 /** When the bot answers an unaddressed turn in a shared room (ISSUE-640). */
 export type SpeechMode = 'mention' | 'classifier' | 'off';
 
+/** How wide the classifier reads "for the bot" in a room (ISSUE-654). */
+export type SpeechDisposition = 'reserved' | 'friendly';
+
 export interface RoomPolicyView {
   /** The host's user id, or null once the room has lost its host. */
   host: string | null;
@@ -3009,6 +3012,12 @@ export interface RoomPolicyView {
   effective_speech_mode?: string;
   /** The deployment's `[speech_gate] mode`, which "Follow deployment" means. */
   deployment_speech_mode?: string;
+  /** The room's own disposition, or null when it follows the deployment. */
+  disposition?: SpeechDisposition | null;
+  /** What the classifier uses here now, by the room's value or the deployment's. */
+  effective_disposition?: string;
+  /** The deployment's `[speech_gate] disposition`. */
+  deployment_disposition?: string;
   /** An email thread room: no guest mode, so the guest reply setting is
    * not shown. */
   email_thread?: boolean;
@@ -3464,6 +3473,8 @@ export interface RoomPatch {
   listed?: boolean;
   /** Host only. Null follows the deployment's mode again. */
   speech_mode?: SpeechMode | null;
+  /** Host only, like `speech_mode`. Null follows the deployment again. */
+  disposition?: SpeechDisposition | null;
 }
 
 /** The PATCH response is the room, plus one field that is not room state:
